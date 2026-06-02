@@ -20,6 +20,8 @@ use crate::commands::{SelectionManager, TransformManager};
 
 // Slint UI with software renderer
 pub mod slint_ui;
+/// Data-driven Insert-menu catalog (ClassRegistry → grouped descriptors).
+pub mod insert_classes;
 pub mod slint_native;
 pub mod slint_bridge;
 pub mod viewport_context_menu;

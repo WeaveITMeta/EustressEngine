@@ -13,6 +13,19 @@ export struct SavedIdentityData {
     active: bool,
 }
 
+// One insertable class in the data-driven Insert dropdown. Fed from the
+// Rust side (`insert_classes::build_catalog`) off the live ClassRegistry,
+// filtered to classes that have a creatable template. `class-name` is the
+// canonical ClassName string the click routes through
+// `on-menu-action("insert:" + class-name)`; `show-header` marks the first
+// row of each category so the loop can draw a heading above it.
+export struct InsertClassData {
+    class-name: string,
+    category: string,
+    display: string,
+    show-header: bool,
+}
+
 // Floating brush settings modal that appears beneath toolbar buttons
 component BrushSettingsModal inherits PopupWindow {
     in property <string> brush-name: "";
@@ -293,6 +306,10 @@ component DropdownSeparator inherits Rectangle {
 export component Ribbon inherits Rectangle {
     // Properties
     in property <string> current-tool: "select";
+    /// Data-driven Insert-menu catalog — every creatable registered class,
+    /// grouped by category, fed from Rust (`set_insert_classes`). Drives
+    /// the dynamic section of the Insert dropdown below the pinned items.
+    in property <[InsertClassData]> insert-classes: [];
     /// Stable ID of the currently-active modal tool (Smart Edit / Pattern /
     /// Mirror). Empty when no modal tool is running. Drives the per-button
     /// `selected:` highlight on the CAD tab so users can see which tool is
@@ -658,60 +675,40 @@ export component Ribbon inherits Rectangle {
                                     padding-top: 4px;
                                     padding-bottom: 4px;
                                     width: 240px;
-                                    
-                                    DropdownHeader { label: "PRIMITIVES"; }
+
+                                    // ── Pinned common inserts ──
+                                    // Kept hardcoded for ergonomics + the
+                                    // fast primitive-mesh path (`insert:part`
+                                    // etc. spawn with a real block/sphere
+                                    // mesh, not a blank Part template).
+                                    DropdownHeader { label: "COMMON"; }
                                     DropdownItem { icon: @image-url("../../assets/icons/part.svg"); label: "Part (Block)"; clicked => { root.on-menu-action("insert:part"); } }
                                     DropdownItem { icon: @image-url("../../assets/icons/part.svg"); label: "Sphere"; clicked => { root.on-menu-action("insert:sphere"); } }
                                     DropdownItem { icon: @image-url("../../assets/icons/part.svg"); label: "Cylinder"; clicked => { root.on-menu-action("insert:cylinder"); } }
                                     DropdownItem { icon: @image-url("../../assets/icons/part.svg"); label: "Wedge"; clicked => { root.on-menu-action("insert:wedge"); } }
-                                    DropdownSeparator {}
-                                    DropdownHeader { label: "STRUCTURE"; }
                                     DropdownItem { icon: @image-url("../../assets/icons/model.svg"); label: "Model"; clicked => { root.on-menu-action("insert:model"); } }
                                     DropdownItem { icon: @image-url("../../assets/icons/folder.svg"); label: "Folder"; clicked => { root.on-menu-action("insert:folder"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/spawnlocation.svg"); label: "SpawnLocation"; clicked => { root.on-menu-action("insert:spawnlocation"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/spawnlocation.svg"); label: "Seat"; clicked => { root.on-menu-action("insert:seat"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/spawnlocation.svg"); label: "VehicleSeat"; clicked => { root.on-menu-action("insert:vehicleseat"); } }
                                     DropdownSeparator {}
-                                    DropdownHeader { label: "SCRIPTING"; }
-                                    DropdownItem { icon: @image-url("../../assets/icons/script.svg"); label: "Script"; clicked => { root.on-menu-action("insert:script"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/localscript.svg"); label: "LocalScript"; clicked => { root.on-menu-action("insert:localscript"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/modulescript.svg"); label: "ModuleScript"; clicked => { root.on-menu-action("insert:modulescript"); } }
-                                    DropdownSeparator {}
-                                    DropdownHeader { label: "CONSTRAINTS"; }
-                                    DropdownItem { icon: @image-url("../../assets/icons/attachment.svg"); label: "Attachment"; clicked => { root.on-menu-action("insert:attachment"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/weldconstraint.svg"); label: "WeldConstraint"; clicked => { root.on-menu-action("insert:weldconstraint"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/motor6d.svg"); label: "Motor6D"; clicked => { root.on-menu-action("insert:motor6d"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/beam.svg"); label: "Beam"; clicked => { root.on-menu-action("insert:beam"); } }
-                                    DropdownSeparator {}
-                                    DropdownHeader { label: "EFFECTS"; }
-                                    DropdownItem { icon: @image-url("../../assets/icons/particleemitter.svg"); label: "ParticleEmitter"; clicked => { root.on-menu-action("insert:particleemitter"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/decal.svg"); label: "Decal"; clicked => { root.on-menu-action("insert:decal"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/sound.svg"); label: "Sound"; clicked => { root.on-menu-action("insert:sound"); } }
-                                    DropdownSeparator {}
-                                    DropdownHeader { label: "LIGHTING"; }
-                                    DropdownItem { icon: @image-url("../../assets/icons/pointlight.svg"); label: "PointLight"; clicked => { root.on-menu-action("insert:pointlight"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/spotlight.svg"); label: "SpotLight"; clicked => { root.on-menu-action("insert:spotlight"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/surfacelight.svg"); label: "SurfaceLight"; clicked => { root.on-menu-action("insert:surfacelight"); } }
-                                    DropdownSeparator {}
-                                    DropdownHeader { label: "UI - CONTAINERS"; }
-                                    DropdownItem { icon: @image-url("../../assets/icons/screengui.svg"); label: "ScreenGui"; clicked => { root.on-menu-action("insert:screengui"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/billboardgui.svg"); label: "BillboardGui"; clicked => { root.on-menu-action("insert:billboardgui"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/surfacegui.svg"); label: "SurfaceGui"; clicked => { root.on-menu-action("insert:surfacegui"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/frame.svg"); label: "Frame"; clicked => { root.on-menu-action("insert:frame"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/scrollingframe.svg"); label: "ScrollingFrame"; clicked => { root.on-menu-action("insert:scrollingframe"); } }
-                                    DropdownSeparator {}
-                                    DropdownHeader { label: "UI - DISPLAY"; }
-                                    DropdownItem { icon: @image-url("../../assets/icons/textlabel.svg"); label: "TextLabel"; clicked => { root.on-menu-action("insert:textlabel"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/imagelabel.svg"); label: "ImageLabel"; clicked => { root.on-menu-action("insert:imagelabel"); } }
-                                    DropdownSeparator {}
-                                    DropdownHeader { label: "UI - INTERACTIVE"; }
-                                    DropdownItem { icon: @image-url("../../assets/icons/textbutton.svg"); label: "TextButton"; clicked => { root.on-menu-action("insert:textbutton"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/imagebutton.svg"); label: "ImageButton"; clicked => { root.on-menu-action("insert:imagebutton"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/textbox.svg"); label: "TextBox"; clicked => { root.on-menu-action("insert:textbox"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/viewportframe.svg"); label: "ViewportFrame"; clicked => { root.on-menu-action("insert:viewportframe"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/instance.svg"); label: "VideoFrame"; clicked => { root.on-menu-action("insert:videoframe"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/instance.svg"); label: "DocumentFrame"; clicked => { root.on-menu-action("insert:documentframe"); } }
-                                    DropdownItem { icon: @image-url("../../assets/icons/instance.svg"); label: "WebFrame"; clicked => { root.on-menu-action("insert:webframe"); } }
+
+                                    // ── All creatable registered classes ──
+                                    // Data-driven from the ClassRegistry
+                                    // (`set_insert_classes`), grouped by
+                                    // category. Each row emits the canonical
+                                    // PascalCase `insert:<ClassName>` action,
+                                    // routed through `create_instance` on the
+                                    // Rust side. `show-header` (precomputed in
+                                    // Rust) draws the category heading above
+                                    // the first row of each group.
+                                    for item in root.insert-classes: VerticalLayout {
+                                        if item.show-header: DropdownHeader {
+                                            label: item.category;
+                                        }
+                                        DropdownItem {
+                                            icon: @image-url("../../assets/icons/instance.svg");
+                                            label: item.display;
+                                            clicked => { root.on-menu-action("insert:" + item.class-name); }
+                                        }
+                                    }
                                 }
                             }
                         }

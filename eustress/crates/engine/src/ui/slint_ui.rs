@@ -1262,6 +1262,9 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<ApiFilterState>()
             // Services Browser: one-shot init pushed to Slint on first frame
             .init_resource::<ServicesBrowserInitialized>()
+            // Insert menu: one-shot push of the data-driven class catalog
+            // (ClassRegistry → grouped descriptors) to Slint.
+            .init_resource::<InsertClassesInitialized>()
             // Events
             .add_message::<FileEvent>()
             .add_message::<MenuActionEvent>()
@@ -1349,6 +1352,10 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_api_reference_to_slint.after(SlintSystems::Drain))
             // Services Browser: one-shot push of static catalog to Slint
             .add_systems(Update, init_services_browser_to_slint.after(SlintSystems::Drain))
+            // Insert menu: one-shot push of the data-driven class catalog.
+            // Runs after Drain (like the other one-shot Slint feeds) and
+            // self-gates until the ClassRegistry is populated.
+            .add_systems(Update, init_insert_classes_to_slint.after(SlintSystems::Drain))
             // Center tab sync: drain_slint_actions → CenterTabManager → StudioState → Slint
             .add_systems(Update, sync_tab_manager_to_studio_state
                 .after(SlintSystems::Drain)
@@ -10039,9 +10046,67 @@ fn drain_slint_actions(
                                     }
                                 }
                             }
-                        } else if action.starts_with("insert:") {
-                            if let Some(ref mut out) = res.output {
-                                out.info(format!("TODO: insert {}", &action["insert:".len()..]));
+                        } else if let Some(class_name) = action.strip_prefix("insert:") {
+                            // Generic data-driven Insert path. The
+                            // dynamic dropdown (fed from the ClassRegistry,
+                            // see `init_insert_classes_to_slint`) emits the
+                            // canonical PascalCase `insert:<ClassName>` for
+                            // every creatable class that isn't handled by a
+                            // bespoke arm above. We route it straight
+                            // through `create_instance`, which copies the
+                            // class's `class_schema/<Class>/` template and
+                            // lets the file-watcher spawn it. Because the
+                            // menu only lists template-having classes, this
+                            // resolves for every emitted action; an
+                            // unexpected/typo'd class still fails gracefully
+                            // with a logged TemplateMissing.
+                            //
+                            // Default placement mirrors the Roblox/Eustress
+                            // service convention (Lighting/* → Lighting,
+                            // GUI/* → StarterGui, …); a selected Folder/Model
+                            // overrides it so the new instance lands inside
+                            // the user's chosen container.
+                            let category = eustress_common::classes::ClassName::from_str(class_name)
+                                .map(super::insert_classes::category_for)
+                                .unwrap_or("Other");
+                            let service_name = super::insert_classes::default_service_for(category);
+
+                            let space_root = crate::space::default_space_root();
+                            let selected_entity: Option<Entity> = res.explorer_state
+                                .as_ref()
+                                .and_then(|es| match &es.selected {
+                                    SelectedItem::Entity(e) => Some(*e),
+                                    _ => None,
+                                });
+                            let fallback_dir = space_root.join(service_name);
+                            let write_dir = selected_entity
+                                .and_then(|pe| queries.loaded_from_file.get(pe).ok())
+                                .map(|(_, lff)| {
+                                    if lff.path.is_dir() { lff.path.clone() }
+                                    else { lff.path.parent().unwrap_or(&fallback_dir).to_path_buf() }
+                                })
+                                .unwrap_or_else(|| fallback_dir.clone());
+
+                            match crate::space::instance_create::create_instance(
+                                &write_dir,
+                                class_name,
+                                None,
+                                crate::space::instance_create::InstanceOverrides::default(),
+                            ) {
+                                Ok(created) => {
+                                    if let Some(ref mut out) = res.output {
+                                        out.info(format!(
+                                            "Inserted {} '{}' in {}",
+                                            class_name, created.folder_name, write_dir.display(),
+                                        ));
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Insert {} failed: {}", class_name, e);
+                                    if let Some(ref mut out) = res.output {
+                                        out.error(format!("Insert {} failed: {}", class_name, e));
+                                    }
+                                }
                             }
                         }
                     }
@@ -11693,6 +11758,74 @@ fn init_services_browser_to_slint(
 
     let model = std::rc::Rc::new(slint::VecModel::from(services));
     ctx.window.set_services_browser_entries(slint::ModelRc::from(model));
+}
+
+// ============================================================================
+// Insert menu — data-driven catalog from the ClassRegistry
+// ============================================================================
+
+/// Whether the Insert-menu class catalog has been pushed to Slint yet.
+/// The registry is fully populated by spawner-plugin build (all
+/// `register_class` calls run before the first frame), and the set of
+/// creatable templates is static for a session, so a one-shot push is
+/// enough — mirrors `ServicesBrowserInitialized`.
+#[derive(Resource, Default)]
+struct InsertClassesInitialized(bool);
+
+/// One-shot system: enumerate every registered `ClassName` that also has a
+/// creatable `class_schema/<Class>/_instance.toml` template, group it by
+/// category, and push the list to Slint as the Insert dropdown's model.
+///
+/// Filtering to template-having classes is deliberate (CLASS_REGISTRY.md +
+/// task spec): every row, when clicked, routes through `create_instance`
+/// and succeeds. Registered-but-template-less classes (most Wave 7
+/// data/audio/character structs, created as children or via script) are
+/// omitted so the menu never offers a click that errors.
+///
+/// Logs the registry size, the template-having count, and the final
+/// listed count so the enumerate-vs-registry sanity check is visible at
+/// startup.
+fn init_insert_classes_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    registry: Option<Res<eustress_common::class_registry::ClassRegistry>>,
+    mut initialized: ResMut<InsertClassesInitialized>,
+) {
+    if initialized.0 {
+        return;
+    }
+    let Some(ref ctx) = slint_context else { return };
+    let Some(registry) = registry else { return };
+    // Wait until spawner plugins have registered (registry boots empty).
+    if registry.is_empty() {
+        return;
+    }
+    initialized.0 = true;
+
+    let registry_count = registry.len();
+    let descriptors = super::insert_classes::build_catalog(
+        registry.registered_classes(),
+        super::insert_classes::template_exists,
+    );
+
+    let listed_count = descriptors.len();
+    let slint_rows: Vec<InsertClassData> = descriptors
+        .into_iter()
+        .map(|d| InsertClassData {
+            class_name: d.class_name.into(),
+            category: d.category.into(),
+            display: d.display.into(),
+            show_header: d.show_header,
+        })
+        .collect();
+
+    let model = std::rc::Rc::new(slint::VecModel::from(slint_rows));
+    ctx.window.set_insert_classes(slint::ModelRc::from(model));
+
+    info!(
+        "Insert menu: {} classes listed (of {} registered spawners; \
+         filtered to those with a creatable class_schema template)",
+        listed_count, registry_count,
+    );
 }
 
 /// Tracks last known window size to detect resize (Changed<Window> is unreliable)

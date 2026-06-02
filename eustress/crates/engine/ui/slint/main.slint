@@ -4,7 +4,7 @@
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, TabWidget, Button, ComboBox, LineEdit, ScrollView, StandardListView, CheckBox, Slider, GridBox, GroupBox, SpinBox, TextEdit } from "std-widgets.slint";
-import { Ribbon, SavedIdentityData } from "ribbon.slint";
+import { Ribbon, SavedIdentityData, InsertClassData } from "ribbon.slint";
 import { ExplorerPanel, TreeNode } from "explorer.slint";
 import { PropertiesPanel, PropertyData } from "properties.slint";
 import { TagChip, TagSuggestion } from "tags_editor.slint";
@@ -316,6 +316,11 @@ export component StudioWindow inherits Window {
     in property <int> problem-error-count: 0;
     in property <int> problem-warning-count: 0;
     in property <bool> problems-can-fix-with-workshop: false;
+
+    // Data-driven Insert menu — every creatable registered class, grouped
+    // by category. Fed from Rust via `set_insert_classes` off the live
+    // ClassRegistry; bound down into the Ribbon's Insert dropdown.
+    in property <[InsertClassData]> insert-classes: [];
 
     // API Reference Panel (browsable scripting API catalog — opens as center tab)
     in property <[ApiEntryData]> api-entries: [];
@@ -984,6 +989,8 @@ export component StudioWindow inherits Window {
         // ====================================================================
         Ribbon {
             current-tool: root.current-tool;
+            // Data-driven Insert-menu catalog (ClassRegistry → grouped list).
+            insert-classes: root.insert-classes;
             // Active modal tool (Smart Edit / Pattern / Mirror) — empty
             // when only a primary tool (Select/Move/etc) is active.
             // Drives the ribbon's per-button highlight on the CAD tab.
