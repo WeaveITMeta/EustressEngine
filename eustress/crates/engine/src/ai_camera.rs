@@ -66,21 +66,22 @@ impl Plugin for AiCameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AiCameraState>()
             .add_systems(Startup, spawn_ai_camera)
-            // R1: the manual `attach_skybox_to_ai_camera` system was removed — the
-            // AI camera now flows through SharedLightingPlugin's shared
-            // attach_skybox_to_cameras (Skybox + EnvironmentMapLight) +
-            // apply_atmosphere_to_cameras, identical to the editor camera.
+            // The manual `attach_skybox_to_ai_camera` system is gone; the AI
+            // camera carries `NoAtmosphere` (set in spawn_ai_camera), so it opts
+            // OUT of SharedLightingPlugin's atmosphere + skybox attach — required
+            // to avoid the multi-camera atmosphere prepare-race (a hard wgpu
+            // panic; see the marker comment in spawn_ai_camera).
             .add_systems(Update, process_ai_capture);
     }
 }
 
 /// Create the off-screen image and spawn the AI camera. Built from the SAME
 /// `studio_camera_bundle` as the editor camera (identical projection, tonemap,
-/// `Msaa::Off`, and the full R1 photoreal post-stack) and now routed through the
-/// SAME shared lighting attach systems — so it renders identically. It differs
-/// ONLY in: render target (an off-screen Image, not the window), the `AiCamera`
-/// marker, and `Camera { order: -1 }` (so editor tools' `order == 0` lookups
-/// never grab it).
+/// depth prepass). It differs in: render target (an off-screen Image, not the
+/// window), the `AiCamera` marker, `Camera { order: -1 }` (so editor tools'
+/// `order == 0` lookups never grab it), and — critically — `NoAtmosphere`, so it
+/// is NOT a second atmosphere camera (see the marker comment below for the wgpu
+/// prepare-race that forces this).
 fn spawn_ai_camera(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -129,23 +130,23 @@ fn spawn_ai_camera(
         // `studio_camera_bundle`, required by TAA); the image is single-sampled
         // and TAA does the anti-aliasing.
         RenderTarget::Image(handle.into()),
-        // ── R1: AI-camera lighting parity (renders IDENTICALLY to the editor) ──
-        // Deliberately NO `NoAtmosphere` and NO flat `AmbientLight` here. With
-        // those gone, the AI camera flows through SharedLightingPlugin's
-        // `attach_skybox_to_cameras` + `apply_atmosphere_to_cameras` exactly like
-        // the editor camera, so it receives the SAME `Skybox` +
-        // `EnvironmentMapLight` (image-based ambient + reflections) + Bevy
-        // `Atmosphere` (sky). Combined with the shared photoreal post-stack baked
-        // into `studio_camera_bundle`, its captures look the same as the editor
-        // viewport — the point of the AI's "eyes" (it can judge color/material
-        // against real lighting, not a flat fill).
-        //
-        // The old `NoAtmosphere` marker sidestepped a Bevy-0.17-era multi-camera
-        // atmosphere prepare-race ("layout expects 23 bindings, transient 20 →
-        // wgpu panic"). On Bevy 0.18 this is expected to be resolved; if it
-        // resurfaces it shows as a boot-time "N != M bindings" panic. Fallback
-        // (race-free, near-identical look): give the AI camera `Skybox` +
-        // static `EnvironmentMapLight` but keep it off `Atmosphere`.
+        // ── AI-camera atmosphere opt-out (REQUIRED — fixes a hard wgpu panic) ──
+        // The AI camera MUST stay off Bevy `Atmosphere`. Two `Camera3d`s both
+        // carrying `Atmosphere` (the editor camera + this one) hit a multi-camera
+        // atmosphere prepare-race: the atmosphere LUT bind group isn't ready for
+        // one view when `prepare_mesh_view_bind_groups` builds it, so the
+        // transient bind group is short by exactly the atmosphere bindings and
+        // wgpu aborts ("bind group descriptor (21) != layout (24)"). An R1 attempt
+        // to drop this marker for an "identical look" reintroduced that exact
+        // panic on Bevy 0.18 (it did NOT auto-resolve, as had been hoped).
+        // `NoAtmosphere` keeps the EDITOR as the single atmosphere camera → no
+        // race. It also makes SharedLightingPlugin skip skybox attach for this
+        // camera, so captures render the scene lit by the Sun / scene lights on a
+        // plain background (no dynamic sky). Race-free capture parity (an explicit
+        // `Skybox` + static `EnvironmentMapLight` + flat `AmbientLight` attached
+        // directly here) is a clean follow-up — none of those three cause the
+        // multi-camera race; only Bevy's dynamic `Atmosphere` does.
+        eustress_common::plugins::lighting_plugin::NoAtmosphere,
     ));
     info!(
         "📷 AI Camera spawned (off-screen {AI_CAM_WIDTH}x{AI_CAM_HEIGHT}, via studio_camera_bundle) — \
