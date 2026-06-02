@@ -47,7 +47,8 @@
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
-use eustress_common::classes::{BasePart, Instance};
+use eustress_common::class_registry::{ClassRegistry, ClassSpawner};
+use eustress_common::classes::{BasePart, ClassName, Instance};
 use eustress_common::Tags;
 use eustress_worlddb::{decode_instance_core, encode_instance_core, ArchInstanceCore};
 
@@ -93,7 +94,7 @@ pub struct BinaryEcsInstance {
 impl BinaryEcsInstance {
     /// Build a marker from a core's transform fields (the load/create
     /// baseline) so the first mirror frame after spawn is a no-op.
-    fn from_core(stored_id: u64, core: &ArchInstanceCore) -> Self {
+    pub(crate) fn from_core(stored_id: u64, core: &ArchInstanceCore) -> Self {
         Self {
             stored_id,
             morton_pos: core.t,
@@ -109,18 +110,47 @@ impl BinaryEcsInstance {
 #[derive(Resource, Default)]
 pub struct BinaryEcsLoadLatch(pub Option<PathBuf>);
 
-/// Build an `InstanceDefinition` from an entity's live components, then
-/// bake it to an `ArchInstanceCore` via the tested
-/// [`arch_instance::instance_to_arch`]. Used by the save mirror so the
-/// bytes match what the load path produced — and by the bridge
-/// `entity.read` handler to project a RESIDENT entity's live state.
-pub(crate) fn core_from_components(
+/// Marks a binary-ECS entity whose typed config component(s) were edited
+/// in place (NOT via `Transform`/`BasePart`/`Tags`/`Instance`, which the
+/// mirror already change-detects). Inserting this is the seam that makes
+/// the save mirror re-bake + persist an edit to e.g. `UICorner` or
+/// `AudioReverb` — `Added<BinaryDirty>` is part of the mirror's filter.
+///
+/// Insert it via [`mark_binary_dirty`] from any surface that mutates a
+/// class-specific component (the future Properties-panel `apply_edit`
+/// dispatch, MCP `ecs.update` of a typed field, a script write-back). The
+/// mirror removes it after persisting so the next edit re-triggers.
+///
+/// ## Why a marker (not 106 `Changed<T>` filter terms)
+///
+/// There are ~106 typed config component types (`UICorner`, `AudioReverb`,
+/// `VectorForce`, `Tool`, …); enumerating them in the mirror's `Or<>`
+/// filter is neither expressible (tuple arity) nor maintainable. One
+/// marker the mirror watches generalises to every present and future
+/// class for the cost of one `commands.insert` at the edit site.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct BinaryDirty;
+
+/// Flag a binary-ECS entity's typed config component(s) as edited so the
+/// save mirror re-bakes its core next frame. No-op-safe to call on any
+/// entity (the mirror simply ignores it on non-binary entities). Call
+/// this AFTER mutating a class-specific component in place.
+pub fn mark_binary_dirty(commands: &mut Commands, entity: Entity) {
+    commands.entity(entity).insert(BinaryDirty);
+}
+
+/// Build an `InstanceDefinition` from an entity's live cross-cutting
+/// components (the fields EVERY class shares: identity, transform,
+/// part-render props, tags). This is the class-AGNOSTIC half; the typed
+/// config fields (`UICorner.corner_radius`, …) are folded in separately
+/// by [`fold_spawner_properties`] on the `&World` path.
+fn def_from_components(
     instance: &Instance,
     transform: &Transform,
     base: Option<&BasePart>,
     tags: Option<&Tags>,
     mesh: &str,
-) -> ArchInstanceCore {
+) -> InstanceDefinition {
     let now = chrono::Utc::now().to_rfc3339();
     let props = base
         .map(|b| {
@@ -138,7 +168,7 @@ pub(crate) fn core_from_components(
         })
         .unwrap_or_default();
 
-    let def = InstanceDefinition {
+    InstanceDefinition {
         asset: if mesh.is_empty() {
             None
         } else {
@@ -181,7 +211,94 @@ pub(crate) fn core_from_components(
         tags: tags.map(|t| t.0.clone()).filter(|v| !v.is_empty()),
         parameters: None,
         extra: std::collections::HashMap::new(),
+    }
+}
+
+/// Build an `InstanceDefinition` from an entity's live components, then
+/// bake it to an `ArchInstanceCore` via the tested
+/// [`arch_instance::instance_to_arch`]. Used by the save mirror so the
+/// bytes match what the load path produced — and by the bridge
+/// `entity.read` handler to project a RESIDENT entity's live state.
+///
+/// NOTE: this is the class-AGNOSTIC baker — it sees only the cross-cutting
+/// components, so an entity's typed config fields are NOT included. Callers
+/// that have `&World` should prefer [`core_from_entity`], which additionally
+/// folds in the per-class properties (so the round-trip is lossless for the
+/// Wave 6/7 config classes). This thin wrapper stays for the callers that
+/// hold plain component refs (the bridge `entity.read`, `promote`) where the
+/// entities are bare primitives carrying no typed config component.
+pub(crate) fn core_from_components(
+    instance: &Instance,
+    transform: &Transform,
+    base: Option<&BasePart>,
+    tags: Option<&Tags>,
+    mesh: &str,
+) -> ArchInstanceCore {
+    let def = def_from_components(instance, transform, base, tags, mesh);
+    arch_instance::instance_to_arch(&def)
+}
+
+/// Fold an entity's class-specific config fields into `def.extra` so
+/// [`arch_instance::instance_to_arch`] bakes them into the core's cold
+/// tail (under the reserved `__extra` key) and
+/// [`arch_instance::arch_to_instance`] restores them — the SAME working
+/// round-trip the TOML save path relies on, reused for binary save.
+///
+/// For the entity's [`ClassName`], if a [`ClassSpawner`] is registered, we
+/// call its `export_to_toml(world, entity)` (the inverse of
+/// `import_from_toml`, which emits a `[properties]` sub-table of the
+/// class's fields) and copy that `[properties]` table verbatim into
+/// `def.extra["properties"]`. We deliberately take ONLY `[properties]`:
+/// the spawner's `[metadata]` is already captured by the typed
+/// `Instance`-derived fields, so re-folding it would duplicate (and risk
+/// drifting) the identity/name. Anything outside `[properties]` a spawner
+/// might emit (rare) is ignored here — `[properties]` is the universal
+/// home for class payload across every Wave 3–7 spawner.
+///
+/// No-op (leaves `def.extra` untouched) when no spawner is registered for
+/// the class, the class name is unparsable, or the export carries no
+/// `[properties]` table — i.e. bare primitives stay byte-identical to the
+/// pre-fold baker.
+fn fold_spawner_properties(
+    def: &mut InstanceDefinition,
+    world: &World,
+    entity: Entity,
+    registry: &ClassRegistry,
+) {
+    let Ok(class) = ClassName::from_str(&def.metadata.class_name) else {
+        return;
     };
+    let Some(spawner) = registry.get(class) else {
+        return;
+    };
+    let exported = spawner.export_to_toml(world, entity);
+    if let Some(toml::Value::Table(props)) = exported.get("properties") {
+        if !props.is_empty() {
+            def.extra
+                .insert("properties".to_string(), toml::Value::Table(props.clone()));
+        }
+    }
+}
+
+/// `&World` baker — like [`core_from_components`] but ALSO folds the
+/// entity's typed config-component fields into the core via the registered
+/// spawner's `export_to_toml` (see [`fold_spawner_properties`]). This is
+/// the lossless save path for the Wave 6/7 config classes: their
+/// class-specific fields now survive a binary save instead of being
+/// dropped. The save mirror uses this; on decode,
+/// [`arch_instance::arch_to_instance`] restores `def.extra["properties"]`.
+pub(crate) fn core_from_entity(
+    world: &World,
+    entity: Entity,
+    registry: &ClassRegistry,
+    instance: &Instance,
+    transform: &Transform,
+    base: Option<&BasePart>,
+    tags: Option<&Tags>,
+    mesh: &str,
+) -> ArchInstanceCore {
+    let mut def = def_from_components(instance, transform, base, tags, mesh);
+    fold_spawner_properties(&mut def, world, entity, registry);
     arch_instance::instance_to_arch(&def)
 }
 
@@ -675,44 +792,102 @@ fn load_binary_ecs_instances(
     );
 }
 
+/// The mirror's change-detection filter. `Changed<Instance>` catches
+/// renames (the display name lives on `Instance.name`, which the baker
+/// persists). `Added<BinaryDirty>` catches typed config-component edits
+/// (UICorner, AudioReverb, …) that touch none of the cross-cutting
+/// components — see [`mark_binary_dirty`]. `Without<SpawnedDuringPlayMode>`
+/// drops ephemeral play-spawned parts (never persisted, nothing to clean
+/// up on Stop). Hoisted to a named alias so the cached `SystemState` type
+/// in [`mirror_binary_ecs_changes`] stays legible.
+type MirrorChangeFilter = (
+    Or<(
+        Changed<Transform>,
+        Changed<BasePart>,
+        Changed<Tags>,
+        Changed<Instance>,
+        Added<BinaryDirty>,
+    )>,
+    Without<crate::play_mode::SpawnedDuringPlayMode>,
+);
+
+/// One gate-passing entity the mirror decided to persist this frame:
+/// its `Entity` plus the recomputed transform baseline to write back into
+/// its [`BinaryEcsInstance`] once the core is persisted. Collected under an
+/// immutable world borrow so the subsequent `&World` bake (which reads
+/// arbitrary typed components via the spawner) does not conflict.
+struct PendingMirror {
+    entity: Entity,
+    stored_id: u64,
+    old_pos: [f32; 3],
+    new_pos: [f32; 3],
+    new_rot: [f32; 4],
+    new_scale: [f32; 3],
+    uuid: String,
+    mesh: String,
+}
+
 /// Persist live edits to binary-ECS entities back into the `entities`
 /// partition. Value-gated so the Avian same-value `Changed<Transform>`
 /// storm does zero work on idle anchored parts.
+///
+/// ## Why this is an exclusive `&World` system
+///
+/// Persisting the Wave 6/7 config classes losslessly means re-baking each
+/// changed entity through its spawner's `export_to_toml(world, entity)`
+/// (see [`core_from_entity`] / [`fold_spawner_properties`]), which needs
+/// `&World` — a plain `Query` cannot also borrow `&World`. So the mirror
+/// runs exclusively and drives change-detection through a cached
+/// [`QueryState`] instead of a system-param `Query`. The work is the same
+/// value-gated set as before; at scale the residency manager bounds the
+/// resident (hence query-visited) set, so the exclusive single-threaded
+/// cost stays proportional to *edited* entities, not world size.
+///
+/// The pass is three sequential borrows (no aliasing): (1) immutable —
+/// walk the change-filtered query, value-gate, and collect
+/// [`PendingMirror`]s; (2) immutable — bake each via `core_from_entity`
+/// (reads the typed config component through the registry) + encode +
+/// write to the DB; (3) mutable — advance the surviving entities'
+/// [`BinaryEcsInstance`] baselines and clear their [`BinaryDirty`] markers.
 #[allow(clippy::type_complexity)]
 fn mirror_binary_ecs_changes(
-    load_in_progress: Res<LoadInProgress>,
+    world: &mut World,
+    // Cached across runs so the change-detection ticks persist (an
+    // exclusive system cannot take a system-param `Query`; `Local` is the
+    // supported way to hold a `SystemState` between exclusive invocations).
+    mut query_state: Local<
+        bevy::ecs::system::SystemState<
+            Query<
+                'static,
+                'static,
+                (
+                    Entity,
+                    Ref<'static, Instance>,
+                    Ref<'static, Transform>,
+                    Option<Ref<'static, BasePart>>,
+                    Option<Ref<'static, Tags>>,
+                    Option<&'static crate::spawn::MeshSource>,
+                    &'static BinaryEcsInstance,
+                    Has<BinaryDirty>,
+                ),
+                MirrorChangeFilter,
+            >,
+        >,
+    >,
+) {
+    // Cheap resource gates first (read straight off the world — an
+    // exclusive system has no system-param injection).
+    if world
+        .get_resource::<LoadInProgress>()
+        .map(|l| l.active)
+        .unwrap_or(false)
+    {
+        return;
+    }
     // Play mode is ephemeral: physics moves bodies and scripts spawn parts
     // that must NOT persist. Bail entirely while playing so a `Stop` always
     // restores the pre-play Fjall state (no leaked / mutated cores).
-    play_mode_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
-    mut q: Query<
-        (
-            Ref<Instance>,
-            Ref<Transform>,
-            Option<Ref<BasePart>>,
-            Option<Ref<Tags>>,
-            Option<&crate::spawn::MeshSource>,
-            &mut BinaryEcsInstance,
-        ),
-        (
-            // `Changed<Instance>` catches renames (the display name lives on
-            // `Instance.name`, which `core_from_components` persists).
-            Or<(
-                Changed<Transform>,
-                Changed<BasePart>,
-                Changed<Tags>,
-                Changed<Instance>,
-            )>,
-            // Parts spawned during play are ephemeral — never persisted, so
-            // there is nothing to clean up on Stop.
-            Without<crate::play_mode::SpawnedDuringPlayMode>,
-        ),
-    >,
-) {
-    if load_in_progress.active {
-        return;
-    }
-    if let Some(state) = play_mode_state {
+    if let Some(state) = world.get_resource::<State<crate::play_mode::PlayModeState>>() {
         if *state.get() != crate::play_mode::PlayModeState::Editing {
             return;
         }
@@ -721,58 +896,107 @@ fn mirror_binary_ecs_changes(
         return;
     }
 
-    for (instance, transform, base, tags, mesh_src, mut bin) in q.iter_mut() {
-        let new_pos = transform.translation.to_array();
-        let new_rot = [
-            transform.rotation.x,
-            transform.rotation.y,
-            transform.rotation.z,
-            transform.rotation.w,
-        ];
-        let new_scale = transform.scale.to_array();
+    // ── Borrow 1 (immutable): change-detect + value-gate + collect. ──
+    let mut pending: Vec<PendingMirror> = Vec::new();
+    {
+        let q = query_state.get(world);
+        for (entity, instance, transform, base, tags, mesh_src, bin, dirty) in q.iter() {
+            let new_pos = transform.translation.to_array();
+            let new_rot = [
+                transform.rotation.x,
+                transform.rotation.y,
+                transform.rotation.z,
+                transform.rotation.w,
+            ];
+            let new_scale = transform.scale.to_array();
 
-        // Cheap value-gate FIRST (no alloc). The Avian transform-sync
-        // re-writes anchored bodies to the SAME value every frame, tripping
-        // `Changed<Transform>`; skip when nothing actually moved AND no part
-        // property changed. `Ref::is_changed` on BasePart/Tags is false
-        // during that storm (Avian touches Transform, not BasePart).
-        let tf_changed =
-            new_pos != bin.morton_pos || new_rot != bin.last_rot || new_scale != bin.last_scale;
-        // `!is_added()` skips the spawn frame: a just-loaded entity's
-        // BasePart/Tags read as "changed" the frame after spawn, but the
-        // data already lives in the DB (we loaded it FROM there), so
-        // persisting again would be a redundant write spike across the
-        // whole grid. A genuine later edit has is_changed && !is_added.
-        // A rename (or any other Instance edit) is a genuine change; the
-        // `!is_added()` guard skips the post-spawn frame like BasePart/Tags.
-        let inst_changed = instance.is_changed() && !instance.is_added();
-        let props_changed = inst_changed
-            || base
-                .as_ref()
-                .map(|b| b.is_changed() && !b.is_added())
-                .unwrap_or(false)
-            || tags
-                .as_ref()
-                .map(|t| t.is_changed() && !t.is_added())
-                .unwrap_or(false);
-        if !tf_changed && !props_changed {
-            continue;
+            // Cheap value-gate FIRST (no alloc). The Avian transform-sync
+            // re-writes anchored bodies to the SAME value every frame,
+            // tripping `Changed<Transform>`; skip when nothing actually
+            // moved AND no part property changed. `Ref::is_changed` on
+            // BasePart/Tags is false during that storm (Avian touches
+            // Transform, not BasePart).
+            let tf_changed = new_pos != bin.morton_pos
+                || new_rot != bin.last_rot
+                || new_scale != bin.last_scale;
+            // `!is_added()` skips the spawn frame: a just-loaded entity's
+            // BasePart/Tags read as "changed" the frame after spawn, but
+            // the data already lives in the DB (we loaded it FROM there), so
+            // persisting again would be a redundant write spike across the
+            // whole grid. A genuine later edit has is_changed && !is_added.
+            // A rename (or any other Instance edit) is a genuine change; the
+            // `!is_added()` guard skips the post-spawn frame like
+            // BasePart/Tags.
+            let inst_changed = instance.is_changed() && !instance.is_added();
+            // `dirty` (a `BinaryDirty` marker present this frame) forces a
+            // re-bake regardless of the transform/part gates: it's the
+            // explicit "a typed config field was edited" signal, and the
+            // changed field lives on a component the value-gate never reads.
+            let props_changed = inst_changed
+                || dirty
+                || base
+                    .as_ref()
+                    .map(|b| b.is_changed() && !b.is_added())
+                    .unwrap_or(false)
+                || tags
+                    .as_ref()
+                    .map(|t| t.is_changed() && !t.is_added())
+                    .unwrap_or(false);
+            if !tf_changed && !props_changed {
+                continue;
+            }
+
+            pending.push(PendingMirror {
+                entity,
+                stored_id: bin.stored_id,
+                old_pos: bin.morton_pos,
+                new_pos,
+                new_rot,
+                new_scale,
+                uuid: instance.uuid.clone(),
+                mesh: mesh_src
+                    .map(|m| m.path.clone())
+                    .unwrap_or_else(|| FALLBACK_MESH.to_string()),
+            });
         }
+    }
+    if pending.is_empty() {
+        return;
+    }
 
-        let mesh = mesh_src.map(|m| m.path.as_str()).unwrap_or(FALLBACK_MESH);
-        let core = core_from_components(
-            &*instance,
-            &*transform,
-            base.as_deref(),
-            tags.as_deref(),
-            mesh,
-        );
+    // ── Borrow 2 (immutable): bake (incl. typed config fields via the
+    // spawner) + encode + persist. Collect the entities whose write
+    // succeeded so borrow 3 advances only their baselines. ──
+    // The registry is normally present (the engine mounts `ClassRegistryPlugin`
+    // alongside `WorldDbPlugin`). If a stripped-down/headless config runs the
+    // mirror without it, fall back to the class-agnostic baker so we still
+    // persist transforms instead of panicking — the typed-field fold is simply
+    // skipped there.
+    let registry = world.get_resource::<ClassRegistry>();
+    let mut persisted: Vec<usize> = Vec::with_capacity(pending.len());
+    for (idx, p) in pending.iter().enumerate() {
+        let entity_ref = world.entity(p.entity);
+        let Some(instance) = entity_ref.get::<Instance>() else {
+            continue;
+        };
+        let Some(transform) = entity_ref.get::<Transform>() else {
+            continue;
+        };
+        let base = entity_ref.get::<BasePart>();
+        let tags = entity_ref.get::<Tags>();
+
+        let core = match registry {
+            Some(reg) => core_from_entity(
+                world, p.entity, reg, instance, transform, base, tags, &p.mesh,
+            ),
+            None => core_from_components(instance, transform, base, tags, &p.mesh),
+        };
         let encoded = match encode_instance_core(&core) {
             Ok(b) => b,
             Err(e) => {
                 warn!(
                     target: "eustress_engine::world_db",
-                    error = %e, stored_id = bin.stored_id,
+                    error = %e, stored_id = p.stored_id,
                     "binary-ECS mirror: encode failed; skipping this change"
                 );
                 continue;
@@ -785,17 +1009,30 @@ fn mirror_binary_ecs_changes(
         // derived, so a move deletes the old key before writing the new one
         // (handled inside mirror_binary_core); the uuid key is position-
         // independent (plain overwrite).
-        let uuid_bytes = eustress_common::instance_create::uuid_hex_to_bytes(&instance.uuid);
+        let uuid_bytes = eustress_common::instance_create::uuid_hex_to_bytes(&p.uuid);
         if active_db::mirror_binary_core(
-            bin.stored_id,
+            p.stored_id,
             uuid_bytes.as_ref(),
-            bin.morton_pos,
-            new_pos,
+            p.old_pos,
+            p.new_pos,
             &encoded,
         ) {
-            bin.morton_pos = new_pos;
-            bin.last_rot = new_rot;
-            bin.last_scale = new_scale;
+            persisted.push(idx);
+        }
+    }
+
+    // ── Borrow 3 (mutable): advance value-gate baselines + clear the
+    // per-edit dirty markers for everything we persisted. ──
+    for &idx in &persisted {
+        let p = &pending[idx];
+        if let Ok(mut em) = world.get_entity_mut(p.entity) {
+            if let Some(mut bin) = em.get_mut::<BinaryEcsInstance>() {
+                bin.morton_pos = p.new_pos;
+                bin.last_rot = p.new_rot;
+                bin.last_scale = p.new_scale;
+            }
+            // Drop the one-shot edit marker so a later typed edit re-fires.
+            em.remove::<BinaryDirty>();
         }
     }
 }
@@ -939,4 +1176,144 @@ pub fn find_entities_by_class(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eustress_common::class_registry::ClassRegistry;
+    use eustress_common::classes::{ClassName, Instance, UICorner};
+    use eustress_common::ui_types::UDim;
+
+    /// THE binary-persistence-gap regression gate (IMPORT_STORAGE_AND_
+    /// PORTABILITY.md §"BINARY-PERSISTENCE GAP"): a typed config-component
+    /// field (`UICorner.corner_radius`) must SURVIVE a binary save. We bake
+    /// the live entity via [`core_from_entity`] (the `&World` baker the save
+    /// mirror uses), round-trip the bytes through rkyv, then `arch_to_instance`
+    /// and assert the field is present in `def.extra` — exactly the cold-tail
+    /// path the load side reads. Before the fix the baker dropped it
+    /// (`extra: HashMap::new()`), so this asserted `[0.0, 8.0]` was lost.
+    #[test]
+    fn typed_config_field_survives_binary_save_roundtrip() {
+        // Minimal world: spawn a UICorner-classed entity carrying a non-default
+        // corner_radius, with the cross-cutting Instance the export reads.
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                Instance {
+                    name: "Round".to_string(),
+                    class_name: ClassName::UICorner,
+                    archivable: true,
+                    id: 0,
+                    uuid: String::new(),
+                    ai: false,
+                },
+                Transform::default(),
+                UICorner {
+                    corner_radius: UDim::new(0.0, 8.0),
+                },
+            ))
+            .id();
+
+        // Registry holding the real UICorner spawner — `core_from_entity`
+        // dispatches to its `export_to_toml` to harvest the [properties] table.
+        let mut registry = ClassRegistry::default();
+        registry.register(crate::spawners::ui_layout::UICornerSpawner);
+
+        // Re-read the cross-cutting refs (immutable borrows; `core_from_entity`
+        // also borrows &world immutably — no conflict).
+        let instance = world.get::<Instance>(entity).unwrap().clone();
+        let transform = *world.get::<Transform>(entity).unwrap();
+
+        // Bake via the &World save path (folds the spawner's typed properties).
+        let core = core_from_entity(
+            &world,
+            entity,
+            &registry,
+            &instance,
+            &transform,
+            None,
+            None,
+            "", // UICorner is non-visual: no mesh
+        );
+
+        // Full binary round-trip: encode → decode (proves it survives the
+        // rkyv archive the Fjall `entities` partition actually stores).
+        let bytes = encode_instance_core(&core).expect("encode core");
+        let core2 = decode_instance_core(&bytes).expect("decode core");
+        assert_eq!(core, core2, "rkyv round-trip must be byte-stable");
+
+        // Decode side: arch_to_instance restores def.extra (EXTRA_KEY tail).
+        let def = arch_instance::arch_to_instance(&core2);
+
+        // The class-specific field must be present under
+        // def.extra["properties"]["corner_radius"] = [scale, offset].
+        let props = def
+            .extra
+            .get("properties")
+            .expect("def.extra must carry the spawner [properties] table");
+        let corner = props
+            .get("corner_radius")
+            .and_then(|v| v.as_array())
+            .expect("corner_radius must survive in [properties]");
+        let scale = corner.first().and_then(|v| v.as_float()).unwrap();
+        let offset = corner.get(1).and_then(|v| v.as_float()).unwrap();
+        assert_eq!(scale, 0.0, "corner_radius.scale must survive binary save");
+        assert_eq!(offset, 8.0, "corner_radius.offset must survive binary save");
+    }
+
+    /// A bare primitive (no registered typed config component) must come out
+    /// of the new `&World` path with NO folded `[properties]` — i.e. the fold
+    /// is a strict no-op when no spawner is registered, preserving the
+    /// pre-fold byte shape (and create==load parity) for the 10M-part case.
+    ///
+    /// (We assert the structural invariant — `def.extra` has no `properties`
+    /// key — rather than `assert_eq!` against `core_from_components`: both
+    /// bakers stamp an independent `chrono::Utc::now()` into the metadata
+    /// tail, so a whole-core equality could flake on a clock tick between the
+    /// two calls. The hot typed fields ARE compared for equality below.)
+    #[test]
+    fn bare_primitive_unchanged_by_fold() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                Instance {
+                    name: "Brick".to_string(),
+                    class_name: ClassName::Part,
+                    archivable: true,
+                    id: 0,
+                    uuid: String::new(),
+                    ai: false,
+                },
+                Transform::from_xyz(1.0, 2.0, 3.0),
+            ))
+            .id();
+        // Empty registry: no spawner for Part here → fold must do nothing.
+        let registry = ClassRegistry::default();
+        let instance = world.get::<Instance>(entity).unwrap().clone();
+        let transform = *world.get::<Transform>(entity).unwrap();
+
+        let core = core_from_entity(
+            &world,
+            entity,
+            &registry,
+            &instance,
+            &transform,
+            None,
+            None,
+            "parts/block.glb",
+        );
+        // Hot typed fields are exactly what the class-agnostic baker produces.
+        let baseline = core_from_components(&instance, &transform, None, None, "parts/block.glb");
+        assert_eq!(core.class_name, baseline.class_name);
+        assert_eq!(core.mesh, baseline.mesh);
+        assert_eq!(core.t, baseline.t);
+
+        // And no `[properties]` snuck into the cold tail.
+        let def = arch_instance::arch_to_instance(&core);
+        assert!(
+            !def.extra.contains_key("properties"),
+            "fold must be a no-op when no typed config spawner is registered"
+        );
+    }
 }
