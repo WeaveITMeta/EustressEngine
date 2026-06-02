@@ -17,6 +17,8 @@
 //! Add [`movers::MoversPlugin`] to the app (alongside the spawner
 //! plugins). It gates all its systems to `PlayModeState::Playing`.
 
+pub mod joint_resolver;
 pub mod movers;
 
+pub use joint_resolver::JointResolverPlugin;
 pub use movers::MoversPlugin;

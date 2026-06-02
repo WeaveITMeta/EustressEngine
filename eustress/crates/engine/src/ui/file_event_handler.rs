@@ -1176,15 +1176,35 @@ fn do_import_roblox_place(world: &mut World, source: PathBuf) {
         }
     };
 
-    // 3. Materialise the DOM into the Space root. Defaults route every
-    //    standard service, derive a per-Space deterministic UUID salt,
-    //    and stamp `metadata.unit = "m"` (Roblox studs map 1:1 to
-    //    Eustress meters).
-    let report = match eustress_roblox_import::import_into_space(
-        &dom,
-        &space_root,
-        eustress_roblox_import::ImportOptions::default(),
-    ) {
+    // 3. Build import options. With the `world-db` feature (default), hand the
+    //    importer THIS Space's open WorldDb handle so bare, scalable parts bake
+    //    straight into the binary-ECS `entities` partition (BinaryDirect is the
+    //    default storage mode); file-natured nodes (scripts/GUI/custom meshes)
+    //    still land as `_instance.toml` folders — the sink decides per node.
+    //    With no open handle (or the feature off) BinaryDirect degrades to TOML.
+    //    Defaults also route every standard service, derive a per-Space
+    //    deterministic UUID salt, and stamp `metadata.unit = "m"` (Roblox studs
+    //    map 1:1 to Eustress meters).
+    #[cfg(feature = "world-db")]
+    let opts = {
+        let world_db = world
+            .get_resource::<crate::space::world_db_plugin::WorldDbHandle>()
+            .and_then(|h| h.0.clone());
+        if world_db.is_none() {
+            warn!(
+                "Roblox import: no open WorldDb for this Space — binary import \
+                 degrades to TOML folders"
+            );
+        }
+        eustress_roblox_import::ImportOptions {
+            world_db,
+            ..Default::default()
+        }
+    };
+    #[cfg(not(feature = "world-db"))]
+    let opts = eustress_roblox_import::ImportOptions::default();
+
+    let report = match eustress_roblox_import::import_into_space(&dom, &space_root, opts) {
         Ok(r) => r,
         Err(e) => {
             notify_err(

@@ -105,6 +105,7 @@ impl NewPartDescriptor {
                 reflectance: 0.0,
                 material: self.material.clone().unwrap_or_else(|| "Plastic".to_string()),
                 locked: false,
+                physics: None,
             },
             metadata: InstanceMetadata {
                 class_name: self.class_name.clone(),
@@ -476,6 +477,7 @@ fn build_fallback_def(position: Vec3, rotation: Quat, size: Vec3) -> InstanceDef
             reflectance: 0.0,
             material: "Plastic".to_string(),
             locked: false,
+            physics: None,
         },
         metadata: InstanceMetadata {
             class_name: "Part".to_string(),

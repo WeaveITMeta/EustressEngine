@@ -776,6 +776,10 @@ fn terrain_material_label(m: TerrainMaterials) -> &'static str {
         TerrainMaterials::Salt => "Salt",
         TerrainMaterials::Limestone => "Limestone",
         TerrainMaterials::Pavement => "Pavement",
+        // rbx_types 3.x marks `TerrainMaterials` non-exhaustive (and Roblox
+        // keeps adding materials); map anything unrecognized to the generic
+        // Ground splat bucket so import never panics on a future material.
+        _ => "Ground",
     }
 }
 

@@ -160,6 +160,15 @@ pub struct InstanceOverrides {
     pub anchored: Option<bool>,
     /// Optional can_collide flag. Sets `[properties].can_collide`.
     pub can_collide: Option<bool>,
+    /// Optional reflectance (0.0–1.0). Sets `[properties].reflectance`.
+    /// The runtime loader reads `properties.reflectance` into `BasePart`
+    /// and `material_sync` applies it, so this slot makes the importer's
+    /// Roblox `Reflectance` functional instead of inert extras.
+    pub reflectance: Option<f32>,
+    /// Optional cast_shadow flag. Sets `[properties].cast_shadow`.
+    /// Consumed by the runtime loader's `BasePart` build + `material_sync`
+    /// just like `reflectance`.
+    pub cast_shadow: Option<bool>,
     /// Optional mesh asset reference (relative path like `parts/block.glb`).
     /// When present, ensures the root TOML has an `[asset]` section with
     /// this mesh + `scene = "Scene0"`. Used by the MCP `create_entity`
@@ -249,12 +258,7 @@ pub fn create_instance(
 ) -> Result<CreatedInstance, CreateError> {
     let template_root = crate::class_schema_dir().join(class_name);
     let template_toml = template_root.join("_instance.toml");
-    if !template_toml.is_file() {
-        return Err(CreateError::TemplateMissing {
-            class_name: class_name.to_string(),
-            looked_at: template_toml,
-        });
-    }
+    let has_template = template_toml.is_file();
 
     let preferred = requested_name.unwrap_or(class_name);
     std::fs::create_dir_all(dest_dir).map_err(|e| CreateError::Io {
@@ -264,10 +268,40 @@ pub fn create_instance(
     let folder_name = unique_entity_name(dest_dir, preferred);
     let folder_path = dest_dir.join(&folder_name);
 
-    copy_template_recursive(&template_root, &folder_path).map_err(|e| CreateError::Io {
-        what: format!("copy template {} → {}", template_root.display(), folder_path.display()),
-        error: e,
-    })?;
+    if has_template {
+        copy_template_recursive(&template_root, &folder_path).map_err(|e| CreateError::Io {
+            what: format!("copy template {} → {}", template_root.display(), folder_path.display()),
+            error: e,
+        })?;
+    } else {
+        // No authored `class_schema/<Class>/_instance.toml`. Rather than fail
+        // — which drops the node and, for a Roblox import, aborts the whole
+        // place — SYNTHESIZE a minimal generic instance. This makes instance
+        // creation TOTAL over `ClassName`: every mapped class materializes
+        // losslessly. The class identity is preserved in `metadata.class_name`;
+        // `apply_overrides` (below) + any caller second-pass layer the real
+        // transform / material / properties on top, and a registered
+        // `ClassSpawner` (if one exists for this class) still drives behaviour.
+        std::fs::create_dir_all(&folder_path).map_err(|e| CreateError::Io {
+            what: format!("create synthesized instance folder {}", folder_path.display()),
+            error: e,
+        })?;
+        let skeleton = format!(
+            "# Auto-synthesized instance — no class_schema template for this class.\n\
+             # Instance creation is total over ClassName: the class identity and\n\
+             # all mapped properties are preserved so nothing is dropped on import.\n\n\
+             [metadata]\nclass_name = \"{class_name}\"\narchivable = true\n"
+        );
+        std::fs::write(folder_path.join("_instance.toml"), skeleton).map_err(|e| {
+            CreateError::Io {
+                what: format!(
+                    "write synthesized _instance.toml in {}",
+                    folder_path.display()
+                ),
+                error: e,
+            }
+        })?;
+    }
 
     let toml_path = folder_path.join("_instance.toml");
     apply_overrides(&toml_path, &folder_name, class_name, &overrides)?;
@@ -460,6 +494,8 @@ fn apply_overrides(
         || overrides.material.is_some()
         || overrides.anchored.is_some()
         || overrides.can_collide.is_some()
+        || overrides.reflectance.is_some()
+        || overrides.cast_shadow.is_some()
     {
         let props = root
             .entry("properties".to_string())
@@ -487,6 +523,12 @@ fn apply_overrides(
             }
             if let Some(cc) = overrides.can_collide {
                 p.insert("can_collide".to_string(), toml::Value::Boolean(cc));
+            }
+            if let Some(refl) = overrides.reflectance {
+                p.insert("reflectance".to_string(), toml::Value::Float(refl as f64));
+            }
+            if let Some(cs) = overrides.cast_shadow {
+                p.insert("cast_shadow".to_string(), toml::Value::Boolean(cs));
             }
         }
     }

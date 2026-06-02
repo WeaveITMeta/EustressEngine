@@ -315,7 +315,10 @@ units_v1 = ["eustress-common/units_v1"]
 # the engine is ECS+DB-authoritative by default. The plugin opens
 # `<space>/world.fjalldb/`, seeds it from TOML on first open, then
 # cold-loads from Fjall and persists runtime edits to Fjall.
-world-db = ["dep:eustress-worlddb"]
+# Enabling world-db also turns on the importer's BinarySink so File→Import
+# (do_import_roblox_place) can bake bare parts straight into this Space's
+# `entities` partition; file-natured nodes still land as _instance.toml.
+world-db = ["dep:eustress-worlddb", "eustress-roblox-import/binary-sink"]
 # Legacy TOML write-back authoring path. OPT-IN since 2026-05-15 —
 # the default build no longer writes `_instance.toml` on edit;
 # persistence goes to `world.fjalldb/`. Turn this on to restore the

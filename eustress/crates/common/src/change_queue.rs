@@ -32,7 +32,7 @@ use crate::scene_delta::{
     AgentCommand, AgentObservation, DeltaKind, PartPayload, SceneDelta, TransformPayload,
     TOPIC_AGENT_COMMANDS, TOPIC_AGENT_OBSERVATIONS, TOPIC_SCENE_DELTAS,
 };
-use crate::classes::BasePart;
+use crate::classes::{BasePart, Instance};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ChangeQueueConfig
@@ -271,9 +271,21 @@ pub struct IncomingAgentCommand(pub AgentCommand);
 fn emit_lifecycle_deltas(
     queue: Option<Res<ChangeQueue>>,
     added: Query<Entity, Added<bevy::prelude::Name>>,
+    added_instances: Query<(), Added<Instance>>,
     mut removed: RemovedComponents<bevy::prelude::Name>,
     mut dirty: ResMut<PanelDirtyFlags>,
 ) {
+    // Newly spawned/imported `Instance`s must rebuild the Explorer tree even
+    // when no `Name` was added/removed this frame. A bulk in-memory import
+    // (Roblox place, binary-ECS spawn) inserts `Instance` components without
+    // necessarily tripping `Changed<Name>`/`Changed<ChildOf>`, so without this
+    // the throttled `sync_unified_explorer_to_slint` never rebuilds at low FPS
+    // and the imported entities stay invisible in the Explorer. Coalesced:
+    // set the flag once if any `Instance` was added this frame.
+    if !added_instances.is_empty() {
+        dirty.explorer = true;
+    }
+
     let added_list: Vec<Entity> = added.iter().collect();
     let removed_list: Vec<Entity> = removed.read().collect();
 

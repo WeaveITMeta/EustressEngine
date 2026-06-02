@@ -368,6 +368,7 @@ fn build_binary_part_def(
             reflectance: base.reflectance,
             material: base.material.as_str().to_string(),
             locked: base.locked,
+            physics: None,
         },
         metadata: InstanceMetadata {
             class_name: "Part".to_string(),

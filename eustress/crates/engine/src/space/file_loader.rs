@@ -1665,6 +1665,157 @@ pub fn spawn_directory_entry(
                 )).id()
             }
         }
+    } else if matches!(class_name,
+        eustress_common::classes::ClassName::PointLight
+        | eustress_common::classes::ClassName::SpotLight
+        | eustress_common::classes::ClassName::SurfaceLight,
+    ) {
+        // Light folder — make imported / template lights actually emit.
+        //
+        // The `_instance.toml` carries a `[Light]` section (from the class
+        // template, possibly hand-edited) plus, for Roblox imports,
+        // `[properties.extras]` `light_*` keys written by
+        // `roblox-import::property_map`. We build the Eustress light
+        // component from the template/section defaults, then let the
+        // importer's `light_*` extras override (the extras are the *actual*
+        // imported values; the template only seeds sane defaults).
+        //
+        // Brightness is already in lumens on disk — `property_map` applied
+        // the ×800 Roblox→lumens scale before writing `light_brightness`,
+        // and the `[Light]` template section is authored in lumens too.
+        let instance_toml = dir_meta.path.join("_instance.toml");
+        let toml_value: Option<toml::Value> =
+            src_read_string(source, space_path, &instance_toml)
+                .ok()
+                .and_then(|s| toml::from_str(&s).ok());
+
+        // `[light]` / `[Light]` section (case-insensitive).
+        let light_section = toml_value
+            .as_ref()
+            .and_then(|v| v.get("light").or_else(|| v.get("Light")));
+        // `[properties.extras]` — importer's `light_*` overrides.
+        let extras = toml_value
+            .as_ref()
+            .and_then(|v| v.get("properties"))
+            .and_then(|p| p.get("extras"));
+
+        // Field readers: prefer the extras `light_*` value (real import
+        // data), then the `[Light]` section (PascalCase template key),
+        // else `None` (component default stands).
+        let read_f32 = |sec_key: &str, extra_key: &str| -> Option<f32> {
+            extras
+                .and_then(|e| e.get(extra_key))
+                .and_then(|v| v.as_float().map(|f| f as f32))
+                .or_else(|| {
+                    light_section
+                        .and_then(|l| l.get(sec_key))
+                        .and_then(|v| v.as_float().map(|f| f as f32))
+                })
+        };
+        let read_bool = |sec_key: &str, extra_key: &str| -> Option<bool> {
+            extras
+                .and_then(|e| e.get(extra_key))
+                .and_then(|v| v.as_bool())
+                .or_else(|| {
+                    light_section
+                        .and_then(|l| l.get(sec_key))
+                        .and_then(|v| v.as_bool())
+                })
+        };
+        // Color: extras `light_color` = [r,g,b] floats (0..1); section
+        // `Color` = same shape.
+        let read_color = || -> Option<Color> {
+            let arr = extras
+                .and_then(|e| e.get("light_color"))
+                .and_then(|v| v.as_array())
+                .or_else(|| {
+                    light_section
+                        .and_then(|l| l.get("Color"))
+                        .and_then(|v| v.as_array())
+                })?;
+            let r = arr.first()?.as_float()? as f32;
+            let g = arr.get(1)?.as_float()? as f32;
+            let b = arr.get(2)?.as_float()? as f32;
+            Some(Color::srgb(r, g, b))
+        };
+
+        // Transform position from `[transform]` (lights are point sources;
+        // rotation only matters for SpotLight, handled by the spawner's
+        // default-forward emission — Roblox spotlights orient via the part
+        // they parent, which our ChildOf link preserves).
+        let position = toml_value
+            .as_ref()
+            .and_then(|v| v.get("transform"))
+            .and_then(|t| t.get("position"))
+            .and_then(|p| p.as_array())
+            .and_then(|arr| {
+                Some(Vec3::new(
+                    arr.first()?.as_float()? as f32,
+                    arr.get(1)?.as_float()? as f32,
+                    arr.get(2)?.as_float()? as f32,
+                ))
+            })
+            .unwrap_or(Vec3::ZERO);
+        let transform = Transform::from_translation(position);
+
+        let instance = eustress_common::classes::Instance {
+            name: dir_meta.name.clone(),
+            class_name,
+            archivable: true,
+            id: 0,
+            ai: false,
+            uuid: String::new(),
+        };
+
+        let spawned = match class_name {
+            eustress_common::classes::ClassName::PointLight => {
+                let mut light = eustress_common::classes::EustressPointLight::default();
+                if let Some(b) = read_f32("Brightness", "light_brightness") { light.brightness = b; }
+                if let Some(r) = read_f32("Range", "light_range") { light.range = r; }
+                if let Some(rad) = read_f32("Radius", "light_radius") { light.radius = rad; }
+                if let Some(c) = read_color() { light.color = c; }
+                if let Some(s) = read_bool("Shadows", "light_shadows") { light.shadows = s; }
+                crate::spawn::spawn_point_light(commands, instance, light, transform)
+            }
+            eustress_common::classes::ClassName::SpotLight => {
+                let mut light = eustress_common::classes::EustressSpotLight::default();
+                if let Some(b) = read_f32("Brightness", "light_brightness") { light.brightness = b; }
+                if let Some(r) = read_f32("Range", "light_range") { light.range = r; }
+                if let Some(a) = read_f32("Angle", "light_angle") { light.angle = a; }
+                if let Some(c) = read_color() { light.color = c; }
+                if let Some(s) = read_bool("Shadows", "light_shadows") { light.shadows = s; }
+                crate::spawn::spawn_spot_light(commands, instance, light, transform)
+            }
+            _ => {
+                // SurfaceLight
+                let mut light = eustress_common::classes::SurfaceLight::default();
+                if let Some(b) = read_f32("Brightness", "light_brightness") { light.brightness = b; }
+                if let Some(r) = read_f32("Range", "light_range") { light.range = r; }
+                if let Some(c) = read_color() { light.color = c; }
+                if let Some(s) = read_bool("Shadows", "light_shadows") { light.shadows = s; }
+                // `_parent` arg is unused by the spawner today; pass the
+                // resolved parent when present, else PLACEHOLDER.
+                let p = parent_entity.unwrap_or(Entity::PLACEHOLDER);
+                crate::spawn::spawn_surface_light(commands, instance, light, p)
+            }
+        };
+
+        // Make the light Properties-panel + Explorer manageable, matching
+        // the sibling arms: `InstanceFile` (canonical on-disk marker the
+        // panel keys its rich-class editor off) + `LoadedFromFile`.
+        commands.entity(spawned).insert((
+            super::instance_loader::InstanceFile {
+                toml_path: instance_toml,
+                mesh_path: std::path::PathBuf::new(),
+                name: dir_meta.name.clone(),
+            },
+            LoadedFromFile {
+                path: dir_meta.path.clone(),
+                file_type: FileType::Directory,
+                service: dir_meta.service.clone(),
+            },
+        ));
+        spawned
     } else {
         // Regular Folder / Model — 3D entity
         let display_name = {

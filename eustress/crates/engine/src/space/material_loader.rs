@@ -59,7 +59,10 @@ pub struct PbrProperties {
     pub double_sided: bool,
     #[serde(default)]
     pub unlit: bool,
-    pub emissive: Option<[f32; 4]>,
+    // Tolerant: a `Vec<f32>` deserializes from a 3-float RGB or 4-float RGBA
+    // array. A fixed `[f32; 4]` rejected the 3-component emissive that imported
+    // materials (e.g. Neon = [2,2,2]) write, failing the WHOLE material parse.
+    pub emissive: Option<Vec<f32>>,
     pub ior: Option<f32>,
     pub specular_transmission: Option<f32>,
     pub diffuse_transmission: Option<f32>,
@@ -485,7 +488,12 @@ pub fn build_standard_material(
     };
 
     // Optional PBR fields
-    if let Some([er, eg, eb, ea]) = pbr.emissive {
+    if let Some(e) = pbr.emissive.as_ref() {
+        // Accept 3-float RGB (pad alpha = 1.0) or 4-float RGBA.
+        let er = e.first().copied().unwrap_or(0.0);
+        let eg = e.get(1).copied().unwrap_or(0.0);
+        let eb = e.get(2).copied().unwrap_or(0.0);
+        let ea = e.get(3).copied().unwrap_or(1.0);
         mat.emissive = LinearRgba::new(er, eg, eb, ea) * 1.0;
     }
     if let Some(ior) = pbr.ior {

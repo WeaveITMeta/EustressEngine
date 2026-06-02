@@ -54,6 +54,7 @@ impl From<InstanceOverrides> for eustress_common::instance_create::InstanceOverr
             asset_path: value.asset_path,
             unit_symbol: value.unit_symbol,
             uuid: value.uuid,
+            ..Default::default()
         }
     }
 }

@@ -164,6 +164,7 @@ fn def_from_components(
                 reflectance: b.reflectance,
                 material: b.material_name.clone(),
                 locked: b.locked,
+                physics: None,
             }
         })
         .unwrap_or_default();

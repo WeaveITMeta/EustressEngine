@@ -233,6 +233,20 @@ struct TomlPatch {
     script_class: Option<ClassName>,
 }
 
+/// Project rbx_dom_weak 4.x's interned-`Ustr`-keyed `properties` map into a
+/// plain `HashMap<String, Variant>` — the shape the property mapper and the
+/// terrain/CSG decoders consume. Import-time only; the per-node clone is fine
+/// for a one-shot import and keeps the whole mapper engine-string-keyed
+/// (no `Ustr` plumbing through `property_map`/`terrain`).
+fn props_to_string_map(
+    inst: &rbx_dom_weak::Instance,
+) -> HashMap<String, rbx_dom_weak::types::Variant> {
+    inst.properties
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.clone()))
+        .collect()
+}
+
 impl<'dom> Materializer<'dom> {
     /// Construct a materializer for a `RobloxDom` + target Space.
     pub fn new(
@@ -442,12 +456,15 @@ impl<'dom> Materializer<'dom> {
             }
         };
 
-        // Map properties.
-        let bag = map_properties(&inst.properties, eustress_class);
+        // Map properties. rbx_dom_weak 4.x keys `properties` by interned
+        // `Ustr`; project to the `HashMap<String, Variant>` the mapper expects.
+        let string_props = props_to_string_map(inst);
+        let bag = map_properties(&string_props, eustress_class);
 
-        // Choose the on-disk folder name.
+        // Choose the on-disk folder name. `inst.class` is a `Ustr` in
+        // rbx_dom_weak 4.x; project to String to match `inst.name`.
         let requested_name = if inst.name.is_empty() {
-            inst.class.clone()
+            inst.class.as_str().to_string()
         } else {
             inst.name.clone()
         };
@@ -496,7 +513,21 @@ impl<'dom> Materializer<'dom> {
                 attributes: &bag.attributes,
                 tags: &bag.tags,
             };
-            self.write_node(parent_dir, take_binary, &spec)?
+            match self.write_node(parent_dir, take_binary, &spec) {
+                Ok(w) => w,
+                Err(e) => {
+                    // Never abort the whole import for one node. Record + skip
+                    // it (and its subtree — its folder was never created, so
+                    // its children have nowhere to land) and continue the walk.
+                    report.record_approximation(
+                        parent_relpath,
+                        inst.class.as_str(),
+                        class_template_name,
+                        &format!("node skipped — materialize failed: {e}"),
+                    );
+                    return Ok(());
+                }
+            }
         };
 
         if written.wrote_binary_core {
@@ -676,10 +707,10 @@ impl<'dom> Materializer<'dom> {
         created: &TomlWrite,
         report: &mut ImportReport,
     ) -> Result<(), ImportError> {
-        let props = &inst.properties;
-        let smooth_grid = crate::terrain::binary_string_bytes(props, "SmoothGrid");
-        let material_colors = crate::terrain::material_colors(props);
-        let globals = crate::terrain::collect_globals(props);
+        let props = props_to_string_map(inst);
+        let smooth_grid = crate::terrain::binary_string_bytes(&props, "SmoothGrid");
+        let material_colors = crate::terrain::material_colors(&props);
+        let globals = crate::terrain::collect_globals(&props);
 
         // Empty terrain (no SmoothGrid) → nothing to decode. Still patch
         // the TOML so the material_colors + globals survive.
@@ -706,7 +737,7 @@ impl<'dom> Materializer<'dom> {
     ) -> Result<(), ImportError> {
         let props = &inst.properties;
         // MeshData may be a BinaryString or a (deduplicated) SharedString.
-        let mesh_data: Option<Vec<u8>> = match props.get("MeshData") {
+        let mesh_data: Option<Vec<u8>> = match props.get(&rbx_dom_weak::ustr("MeshData")) {
             Some(rbx_dom_weak::types::Variant::BinaryString(bs)) => {
                 Some(AsRef::<[u8]>::as_ref(bs).to_vec())
             }
@@ -715,7 +746,7 @@ impl<'dom> Materializer<'dom> {
         };
 
         // AABB fallback size from the source Part.Size (Vector3), else 4³.
-        let size = match props.get("Size") {
+        let size = match props.get(&rbx_dom_weak::ustr("Size")) {
             Some(rbx_dom_weak::types::Variant::Vector3(v)) => [v.x, v.y, v.z],
             _ => [4.0, 4.0, 4.0],
         };

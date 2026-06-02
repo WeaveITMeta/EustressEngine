@@ -326,6 +326,7 @@ pub mod handlers {
                     reflectance: 0.0,
                     material,
                     locked: false,
+                    physics: None,
                 },
                 metadata: InstanceMetadata {
                     class_name: "Part".to_string(),

@@ -50,11 +50,16 @@ toml        = "0.8"
 # Roblox file-format parsers — all MIT, all pure Rust, all rojo-rbx.
 # Enabled in Wave 4 (Phase 1) along with adding this crate to workspace.members.
 # =============================================================================
-rbx_dom_weak           = "2"
-rbx_binary             = "0.7"
-rbx_xml                = "0.13"
-rbx_reflection_database = "0.2"
-rbx_reflection         = "4"   # ClassDescriptor / ClassTag — for the class-coverage audit + future property-schema validation
+# Upgraded 2026-06 from the 0.7/2.x set: the old rbx_binary 0.7 deserializer
+# does not know value type 0x22 (the modern `Content` datatype, e.g.
+# MaterialVariant.EmissiveMaskContent), so it desyncs on places saved by recent
+# Roblox Studio (→ "stream did not contain valid UTF-8"). rbx_binary 1.0.0+
+# added Content; this is the matching latest ecosystem set.
+rbx_dom_weak           = "4"
+rbx_binary             = "2"
+rbx_xml                = "2"
+rbx_reflection_database = "2"
+rbx_reflection         = "6"   # ClassDescriptor / ClassTag — for the class-coverage audit + future property-schema validation
 
 # Wave 8.A "BinaryDirect" backend (BinarySink). Optional so the default
 # engine-free build never links worlddb; gated behind the `binary-sink`

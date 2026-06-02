@@ -535,6 +535,7 @@ pub fn save_space(world: &mut World) {
                         cast_shadow: base_part.cast_shadow,
                         reflectance: base_part.reflectance,
                         locked: base_part.locked,
+                        physics: None,
                     },
                     metadata: InstanceMetadata {
                         class_name,

@@ -1224,6 +1224,10 @@ impl Plugin for SlintUiPlugin {
         // / Dialog UI / appearance).
         app.add_plugins((
             crate::physics::MoversPlugin,
+            // Wave F1d — resolves imported constraint joints' placeholder
+            // bodies (Weld/Hinge/Motor6D/… ) to real part entities each
+            // frame in play mode, so welds/motors/hinges actually bind.
+            crate::physics::JointResolverPlugin,
             crate::interaction::InteractionPlugin,
         ));
 
@@ -2736,6 +2740,11 @@ pub fn update_slint_ui_focus(
                 || w.get_show_attribute_dialog()
                 || w.get_show_rename_tag_dialog()
                 || w.get_show_edit_label_dialog()
+                // New Universe / New Space two-step creation modals. Without
+                // these, typing the universe/space name leaked WASD + shortcut
+                // keys to the 3D camera ("it moves me around" — 2026-06-02).
+                || w.get_show_new_universe_dialog()
+                || w.get_show_new_space_dialog()
         })
         .unwrap_or(false);
     ui_focus.text_input_focused = any_focus;
@@ -12381,12 +12390,19 @@ fn sync_unified_explorer_to_slint(
             if service_components.get(*entity).is_ok() {
                 continue;
             }
-            
+
             // Skip if already added (has ChildOf to a service)
             if child_of_query.get(*entity).is_ok() {
                 continue;
             }
-            
+
+            // Skip adornment/meta classes (internal entities hidden from
+            // Explorer) — mirrors the same filter used in the service-children
+            // loop above and in `build_entity_nodes`.
+            if instance.class_name.is_adornment() {
+                continue;
+            }
+
             // Primary classification: use LoadedFromFile.service field
             if let Ok(loaded) = loaded_from_file.get(*entity) {
                 match loaded.service.as_str() {
@@ -12399,10 +12415,16 @@ fn sync_unified_explorer_to_slint(
                     other if !hardcoded_services.contains(other) => {
                         dynamic_service_roots.entry(other.to_string()).or_default().push(*entity);
                     }
-                    _ => {}
+                    // Any remaining live root (e.g. an imported entity whose
+                    // service is a hardcoded-but-unsurfaced bucket, or an empty
+                    // service string) defaults into Workspace instead of being
+                    // dropped — coverage is "every live Instance by hierarchy,"
+                    // not "only services with a dedicated bucket."
+                    _ => workspace_roots.push(*entity),
                 }
             } else {
-                // Fallback: classify by ClassName
+                // Fallback: classify by ClassName, defaulting unrecognized
+                // classes into Workspace so any imported root still surfaces.
                 if is_lighting_child(&instance.class_name) {
                     lighting_roots.push(*entity);
                 } else if is_ui_child(&instance.class_name) {

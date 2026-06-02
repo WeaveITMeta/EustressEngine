@@ -233,6 +233,7 @@ pub fn arch_to_instance(core: &ArchInstanceCore) -> InstanceDefinition {
             reflectance: core.reflectance,
             material: core.material.clone(),
             locked: core.locked,
+            physics: None,
         },
         metadata,
         material,
@@ -286,6 +287,7 @@ mod tests {
                 reflectance: 0.1,
                 material: "Plastic".into(),
                 locked: false,
+                physics: None,
             },
             metadata: InstanceMetadata {
                 class_name: "Part".into(),

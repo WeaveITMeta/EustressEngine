@@ -11,7 +11,7 @@ use bevy::camera::visibility::VisibilityRange;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use avian3d::prelude::{Collider, RigidBody};
+use avian3d::prelude::{Collider, ColliderDensity, Friction, Restitution, RigidBody};
 use crate::rendering::PartEntity;
 use eustress_common::{Attributes, Tags};
 
@@ -172,6 +172,42 @@ fn safe_collider_from(
         }
         _ => Collider::cuboid(hx, hy, hz),
     })
+}
+
+/// Attach the Avian physics-material components (`Friction`,
+/// `Restitution`, `ColliderDensity`) to a just-spawned part when the
+/// importer wrote a `[properties.physics]` section. Each component is
+/// inserted only when its source value is present and finite — a part
+/// with no physics section keeps Avian's defaults (no extra components),
+/// preserving the existing decorative-part fast path.
+///
+/// Roblox supplies a single `friction()` scalar; the importer seeds both
+/// `friction_static` and `friction_kinetic` from it, and Avian's
+/// `Friction::new(static).with_dynamic_coefficient(kinetic)` carries the
+/// pair. `restitution` ← Roblox `elasticity()`. `density` → `ColliderDensity`.
+fn apply_physics_material(
+    ec: &mut bevy::ecs::system::EntityCommands,
+    physics: Option<&PhysicsProperties>,
+) {
+    let Some(p) = physics else { return };
+    // Friction — insert when either coefficient is present. A missing
+    // side falls back to the present one so a single Roblox value still
+    // produces matched static/dynamic coefficients.
+    let fs = p.friction_static.filter(|v| v.is_finite());
+    let fk = p.friction_kinetic.filter(|v| v.is_finite());
+    if fs.is_some() || fk.is_some() {
+        let static_c = fs.or(fk).unwrap();
+        let dynamic_c = fk.or(fs).unwrap();
+        ec.insert(Friction::new(static_c).with_dynamic_coefficient(dynamic_c));
+    }
+    if let Some(r) = p.restitution.filter(|v| v.is_finite()) {
+        ec.insert(Restitution::new(r));
+    }
+    // Density must be strictly positive — Avian derives mass from it and
+    // a zero/negative density would yield a degenerate rigid body.
+    if let Some(d) = p.density.filter(|v| v.is_finite() && *v > 0.0) {
+        ec.insert(ColliderDensity(d));
+    }
 }
 
 /// Transform data (position, rotation, scale).
@@ -442,6 +478,42 @@ pub struct InstanceProperties {
     /// When true, the entity cannot be selected via 3D click (e.g. Baseplate)
     #[serde(default)]
     pub locked: bool,
+    /// Roblox `PhysicalProperties` decomposition written by the importer
+    /// under `[properties.physics]`. Optional — absent for hand-authored
+    /// parts. When present, the collider-insert path attaches the
+    /// matching Avian `Friction` / `Restitution` / `ColliderDensity`
+    /// components so imported parts bounce / slide / weigh correctly.
+    #[serde(default)]
+    pub physics: Option<PhysicsProperties>,
+}
+
+/// Typed view of the importer's `[properties.physics]` table (Roblox
+/// `PhysicalProperties::Custom` decomposition). Every field is optional
+/// so the section round-trips even when only a subset is present. The
+/// key names mirror what `roblox-import::property_map` emits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PhysicsProperties {
+    /// Mass density (Avian `ColliderDensity`).
+    #[serde(default)]
+    pub density: Option<f32>,
+    /// Static friction coefficient (Avian `Friction::static_coefficient`).
+    #[serde(default)]
+    pub friction_static: Option<f32>,
+    /// Kinetic/dynamic friction coefficient (Avian `Friction::dynamic_coefficient`).
+    #[serde(default)]
+    pub friction_kinetic: Option<f32>,
+    /// Bounciness (Avian `Restitution`).
+    #[serde(default)]
+    pub restitution: Option<f32>,
+    /// Roblox friction/elasticity blend weights — preserved for round-trip,
+    /// no Avian cognate today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friction_weight: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elasticity_weight: Option<f32>,
+    /// Importer preset marker (e.g. "Default") — round-trip only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 }
 
 fn default_material_name_plastic() -> String {
@@ -542,6 +614,7 @@ impl Default for InstanceProperties {
             reflectance: 0.0,
             material: default_material_name_plastic(),
             locked: false,
+            physics: None,
         }
     }
 }
@@ -1775,6 +1848,9 @@ pub fn spawn_instance(
         if instance.properties.can_collide {
             if let Some(collider) = safe_collider_from(part_shape, scale, &transform) {
                 ec.insert((collider, RigidBody::Static));
+                // Imported PhysicalProperties → Avian physics material.
+                // Additive: no-op when `[properties.physics]` is absent.
+                apply_physics_material(&mut ec, instance.properties.physics.as_ref());
             } else {
                 warn!("Skipping collider for '{}' — non-finite transform/scale (scale={:?} pos={:?} rot={:?})",
                     name, scale, transform.translation, transform.rotation);
@@ -1867,6 +1943,9 @@ pub fn spawn_instance(
     if instance.properties.can_collide {
         if let Some(collider) = safe_collider_from(part_shape, scale, &transform) {
             ec.insert((collider, RigidBody::Static));
+            // Imported PhysicalProperties → Avian physics material.
+            // Additive: no-op when `[properties.physics]` is absent.
+            apply_physics_material(&mut ec, instance.properties.physics.as_ref());
         } else {
             warn!("Skipping collider for '{}' — non-finite transform/scale (scale={:?} pos={:?} rot={:?})",
                 name, scale, transform.translation, transform.rotation);

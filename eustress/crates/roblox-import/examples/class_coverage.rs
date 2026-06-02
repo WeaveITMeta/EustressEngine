@@ -18,7 +18,8 @@ use eustress_roblox_import::class_map::roblox_to_eustress_class;
 use rbx_reflection::ClassTag;
 
 fn main() {
-    let db = rbx_reflection_database::get();
+    // rbx_reflection_database 2.x: `get()` now returns a `Result`.
+    let db = rbx_reflection_database::get().expect("bundled rbx_reflection_database");
 
     // Buckets.
     let mut mapped: Vec<(String, String)> = Vec::new(); // (roblox, eustress)

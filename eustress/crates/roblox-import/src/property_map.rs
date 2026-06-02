@@ -190,7 +190,7 @@ fn apply_variant(bag: &mut PropertyBag, target_class: ClassName, key: &str, vari
     if is_asset_property_name(key) {
         if let Variant::Content(c) = variant {
             bag.asset_refs
-                .insert(key.to_string(), AsRef::<str>::as_ref(c).to_string());
+                .insert(key.to_string(), c.as_uri().unwrap_or_default().to_string());
             return;
         }
         if let Variant::String(s) = variant {
@@ -220,6 +220,19 @@ fn apply_variant(bag: &mut PropertyBag, target_class: ClassName, key: &str, vari
             bag.script_source = Some(s.clone());
             return;
         }
+    }
+
+    // ── Light properties (PointLight / SpotLight / SurfaceLight) ───
+    //
+    // Routed BEFORE `try_well_known` so a light's `Color`/`Brightness`/…
+    // land in the light bucket instead of being captured as a part color
+    // (`try_well_known` would otherwise grab `Color`). These keys flow
+    // into `[properties.extras]` (the only patchable bucket the
+    // materializer exposes); the engine's light-load arm reads them back
+    // over the class template's `[Light]` defaults. See
+    // `engine::space::file_loader::spawn_directory_entry`.
+    if try_light_property(bag, target_class, key, variant) {
+        return;
     }
 
     // ── Well-known overrides (Position, Size, Color, Material, …) ──
@@ -255,23 +268,36 @@ fn apply_variant(bag: &mut PropertyBag, target_class: ClassName, key: &str, vari
                     .insert("preset".to_string(), toml::Value::String("Default".into()));
             }
             PhysicalProperties::Custom(c) => {
+                // Emit keys matching the engine loader's physics vocabulary
+                // (`engine::space::instance_loader` reads these at the Avian
+                // collider-insert sites). Roblox has a single scalar
+                // `friction()`; Avian distinguishes static vs kinetic, so we
+                // seed both from the one Roblox value. `elasticity()` maps to
+                // Avian's `restitution`.
                 bag.physics_extras
-                    .insert("density".to_string(), toml::Value::Float(c.density as f64));
+                    .insert("density".to_string(), toml::Value::Float(c.density() as f64));
                 bag.physics_extras.insert(
-                    "friction".to_string(),
-                    toml::Value::Float(c.friction as f64),
+                    "friction_static".to_string(),
+                    toml::Value::Float(c.friction() as f64),
                 );
                 bag.physics_extras.insert(
-                    "elasticity".to_string(),
-                    toml::Value::Float(c.elasticity as f64),
+                    "friction_kinetic".to_string(),
+                    toml::Value::Float(c.friction() as f64),
                 );
+                bag.physics_extras.insert(
+                    "restitution".to_string(),
+                    toml::Value::Float(c.elasticity() as f64),
+                );
+                // Round-trip Roblox's weight knobs too — no Avian cognate
+                // today, but preserved under `[properties.physics]` so a
+                // re-export keeps them.
                 bag.physics_extras.insert(
                     "friction_weight".to_string(),
-                    toml::Value::Float(c.friction_weight as f64),
+                    toml::Value::Float(c.friction_weight() as f64),
                 );
                 bag.physics_extras.insert(
                     "elasticity_weight".to_string(),
-                    toml::Value::Float(c.elasticity_weight as f64),
+                    toml::Value::Float(c.elasticity_weight() as f64),
                 );
             }
         }
@@ -404,6 +430,138 @@ fn try_well_known(
             }
         }
 
+        // ─── Reflectance / CastShadow ──────────────────────────────
+        // The runtime loader builds `BasePart.reflectance` / `cast_shadow`
+        // from `[properties].reflectance` / `cast_shadow` and
+        // `material_sync` applies them — so route these to first-class
+        // override slots instead of letting them fall to inert extras.
+        "Reflectance" => {
+            if let Variant::Float32(r) = variant {
+                bag.overrides.reflectance = Some(*r);
+                return true;
+            }
+        }
+        "CastShadow" => {
+            if let Variant::Bool(b) = variant {
+                bag.overrides.cast_shadow = Some(*b);
+                return true;
+            }
+        }
+
+        _ => {}
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Light properties (PointLight / SpotLight / SurfaceLight → extras)
+// ---------------------------------------------------------------------------
+
+/// Route a Roblox light property into the PropertyBag's `properties_extras`
+/// bucket under a stable `light_*` key. Returns `true` when the
+/// `(class, key)` pair is a recognised light property (and was consumed).
+///
+/// The engine's light-load arm (`file_loader::spawn_directory_entry`)
+/// reads these `light_*` extras back over the class template's `[Light]`
+/// section defaults, building `EustressPointLight` / `EustressSpotLight` /
+/// `SurfaceLight` and calling `spawn::spawn_*`.
+///
+/// `Brightness` is scaled ×800 to convert Roblox's unitless multiplier to
+/// physically-based lumens — matching the convention in
+/// `engine::spawners::lights::point_light::import_from_roblox`.
+fn try_light_property(
+    bag: &mut PropertyBag,
+    target_class: ClassName,
+    key: &str,
+    variant: &Variant,
+) -> bool {
+    if !matches!(
+        target_class,
+        ClassName::PointLight | ClassName::SpotLight | ClassName::SurfaceLight
+    ) {
+        return false;
+    }
+    match key {
+        "Brightness" => {
+            if let Variant::Float32(b) = variant {
+                // Roblox unitless multiplier → lumens (×800).
+                bag.properties_extras.insert(
+                    "light_brightness".to_string(),
+                    toml::Value::Float((*b * 800.0) as f64),
+                );
+                return true;
+            }
+        }
+        "Range" => {
+            if let Variant::Float32(r) = variant {
+                bag.properties_extras
+                    .insert("light_range".to_string(), toml::Value::Float(*r as f64));
+                return true;
+            }
+        }
+        "Color" => match variant {
+            Variant::Color3(c) => {
+                bag.properties_extras.insert(
+                    "light_color".to_string(),
+                    toml::Value::Array(vec![
+                        toml::Value::Float(c.r as f64),
+                        toml::Value::Float(c.g as f64),
+                        toml::Value::Float(c.b as f64),
+                    ]),
+                );
+                return true;
+            }
+            Variant::Color3uint8(c) => {
+                bag.properties_extras.insert(
+                    "light_color".to_string(),
+                    toml::Value::Array(vec![
+                        toml::Value::Float(c.r as f64 / 255.0),
+                        toml::Value::Float(c.g as f64 / 255.0),
+                        toml::Value::Float(c.b as f64 / 255.0),
+                    ]),
+                );
+                return true;
+            }
+            _ => {}
+        },
+        // Spotlight cone half-angle (degrees).
+        "Angle" => {
+            if let Variant::Float32(a) = variant {
+                bag.properties_extras
+                    .insert("light_angle".to_string(), toml::Value::Float(*a as f64));
+                return true;
+            }
+        }
+        "Shadows" => {
+            if let Variant::Bool(s) = variant {
+                bag.properties_extras
+                    .insert("light_shadows".to_string(), toml::Value::Boolean(*s));
+                return true;
+            }
+        }
+        "Enabled" => {
+            if let Variant::Bool(e) = variant {
+                bag.properties_extras
+                    .insert("light_enabled".to_string(), toml::Value::Boolean(*e));
+                return true;
+            }
+        }
+        // SurfaceLight face — string or enum; store the raw label.
+        "Face" => match variant {
+            Variant::String(s) => {
+                bag.properties_extras
+                    .insert("light_face".to_string(), toml::Value::String(s.clone()));
+                return true;
+            }
+            Variant::Enum(e) => {
+                bag.properties_extras.insert(
+                    "light_face".to_string(),
+                    toml::Value::Integer(e.to_u32() as i64),
+                );
+                return true;
+            }
+            _ => {}
+        },
         _ => {}
     }
     false
@@ -541,7 +699,7 @@ fn variant_to_toml(variant: &Variant, bag: &mut PropertyBag) -> toml::Value {
         Variant::UDim2(u) => udim2_to_toml(u),
         Variant::Rect(r) => rect_to_toml(r),
         Variant::Enum(e) => toml::Value::Integer(e.to_u32() as i64),
-        Variant::Content(c) => toml::Value::String(AsRef::<str>::as_ref(c).to_string()),
+        Variant::Content(c) => toml::Value::String(c.as_uri().unwrap_or_default().to_string()),
         Variant::BinaryString(bs) => binary_string_to_toml(bs),
         Variant::SharedString(ss) => shared_string_to_toml(ss),
         Variant::NumberSequence(ns) => number_sequence_to_toml(ns),
@@ -1051,13 +1209,12 @@ mod tests {
     #[test]
     fn physical_properties_decomposes() {
         use rbx_dom_weak::types::CustomPhysicalProperties;
-        let pp = PhysicalProperties::Custom(CustomPhysicalProperties {
-            density: 1.5,
-            friction: 0.3,
-            elasticity: 0.0,
-            friction_weight: 1.0,
-            elasticity_weight: 1.0,
-        });
+        // rbx_types 3.x: CustomPhysicalProperties is non-exhaustive — build it
+        // via the constructor (density, friction, elasticity, friction_weight,
+        // elasticity_weight, acoustic_absorption).
+        let pp = PhysicalProperties::Custom(CustomPhysicalProperties::new(
+            1.5, 0.3, 0.0, 1.0, 1.0, 0.0,
+        ));
         let bag = map_properties(
             &props_with(vec![(
                 "CustomPhysicalProperties",
@@ -1066,7 +1223,9 @@ mod tests {
             ClassName::Part,
         );
         assert!(bag.physics_extras.contains_key("density"));
-        assert!(bag.physics_extras.contains_key("friction"));
+        assert!(bag.physics_extras.contains_key("friction_static"));
+        assert!(bag.physics_extras.contains_key("friction_kinetic"));
+        assert!(bag.physics_extras.contains_key("restitution"));
     }
 
     #[test]

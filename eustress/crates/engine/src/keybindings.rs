@@ -1182,6 +1182,60 @@ fn handle_menu_action_events(
                             // entities (scripts, etc.) so they don't resurrect.
                             crate::space::active_db::delete_path(&source_path);
                         }
+                        // Fall-through: entities with NEITHER InstanceFile NOR
+                        // LoadedFromFile. A bulk in-memory import writes binary
+                        // cores for `node_is_binary_eligible` classes (Folder /
+                        // Model) straight into the worlddb `entities` partition +
+                        // identity indices — the live entity carries no disk path,
+                        // so neither source branch above fires. Without purging the
+                        // core here, the bare despawn below removes only the ECS
+                        // entity and the core resurrects on the next Space open
+                        // (the reported "delete doesn't stick" bug). Derive the
+                        // persistence `stored_id` from the entity's identity UUID
+                        // exactly as the importer does (roblox-import/src/sink.rs
+                        // and world_db_binary.rs: first 8 bytes of the UUID,
+                        // big-endian) and purge the binary core + identity indices
+                        // via the same synthetic path shape the importer mints. A
+                        // harmless no-op if no such core exists (delete of a missing
+                        // key is best-effort). ECS descendants are removed by the
+                        // recursive `despawn()` below (Bevy 0.18 recursive despawn).
+                        else {
+                            if let Ok(inst) = instance_query.get(entity) {
+                                if let Some(uuid_bytes) =
+                                    eustress_common::instance_create::uuid_hex_to_bytes(&inst.uuid)
+                                {
+                                    let stored_id = u64::from_be_bytes(
+                                        uuid_bytes[0..8]
+                                            .try_into()
+                                            .expect("uuid_bytes is 16 long; [0..8] is 8"),
+                                    );
+                                    let class_name = inst.class_name.as_str().to_string();
+                                    let pos = gtransform
+                                        .map(|g| {
+                                            let t = g.translation();
+                                            [t.x, t.y, t.z]
+                                        })
+                                        .unwrap_or([0.0, 0.0, 0.0]);
+                                    let synthetic_rel = format!(
+                                        "Workspace/__bin_{}_{:016x}/_instance.toml",
+                                        class_name, stored_id
+                                    );
+                                    let purged = crate::space::active_db::delete_binary_instance(
+                                        stored_id,
+                                        &uuid_bytes,
+                                        &class_name,
+                                        pos,
+                                        &synthetic_rel,
+                                    );
+                                    if purged {
+                                        info!(
+                                            "🗑️ Purged source-less binary core stored_id={:016x} ({}) on delete",
+                                            stored_id, class_name
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         commands.entity(entity).despawn();
                         info!("🗑️ Deleted entity {:?} ({})", entity, id);
                     }
