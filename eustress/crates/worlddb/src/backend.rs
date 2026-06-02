@@ -349,6 +349,60 @@ pub trait WorldDb: Send + Sync + 'static {
         Ok(0)
     }
 
+    // ── Voxel-chunk store — Wave 9.A (terrain in Fjall) ──────────────
+    //
+    // Terrain lives in the same one-handle streaming DB as entities, in a
+    // dedicated `voxels` partition keyed by chunk Morton
+    // ([`crate::keys::encode_voxel_chunk_key`]). A voxel chunk is the LZ4
+    // material+occupancy volume the Roblox terrain importer already
+    // produces; the storage layer treats the bytes as opaque. Keying by
+    // chunk-coord Morton makes a region scan == a chunk-window request,
+    // 1:1 with the entity `INSTANCE_CORE` streaming model. See
+    // `docs/architecture/TERRAIN_FJALL_MIGRATION.md` §9.A.
+    //
+    // The default impls let non-Fjall test backends compile; the
+    // production `FjallWorldDb` overrides all four.
+
+    /// Store one voxel chunk's opaque bytes at signed chunk coords
+    /// `(cx, cy, cz)`. Overwrites any chunk already at that coordinate.
+    fn put_voxel_chunk(&self, cx: i32, cy: i32, cz: i32, bytes: &[u8]) -> Result<()> {
+        let _ = (cx, cy, cz, bytes);
+        Err(crate::error::Error::Other(
+            "put_voxel_chunk not supported by this backend".into(),
+        ))
+    }
+
+    /// Read one voxel chunk by its signed chunk coords. `Ok(None)` when
+    /// no chunk has been written at that coordinate.
+    fn get_voxel_chunk(&self, cx: i32, cy: i32, cz: i32) -> Result<Option<Vec<u8>>> {
+        let _ = (cx, cy, cz);
+        Ok(None)
+    }
+
+    /// Collect every voxel chunk whose chunk-coordinate cell lies inside
+    /// the world-space box `[min..max]`. The world corners are divided by
+    /// [`crate::keys::VOXEL_CHUNK_EDGE_STUDS`] into a chunk-coord box, then
+    /// a bounded Morton range scan over that box's corners returns a
+    /// SUPERSET of the chunks (Z-order stitches outside the box); each
+    /// decoded coord is filtered against the box so only in-box chunks are
+    /// returned. Returns `((cx, cy, cz), bytes)` per surviving chunk.
+    fn iter_voxel_chunks_in_region(
+        &self,
+        min: (f32, f32, f32),
+        max: (f32, f32, f32),
+    ) -> Result<Vec<((i32, i32, i32), Vec<u8>)>> {
+        let _ = (min, max);
+        Ok(Vec::new())
+    }
+
+    /// Eagerly collect every stored voxel chunk as `((cx, cy, cz), bytes)`
+    /// — the whole-terrain load / verify path. Eager (not a borrowed
+    /// iterator) so the engine terrain loader can consume it across a Bevy
+    /// system boundary.
+    fn iter_all_voxel_chunks(&self) -> Result<Vec<((i32, i32, i32), Vec<u8>)>> {
+        Ok(Vec::new())
+    }
+
     // ── UUID-keyed primary store — IDENTITY.md Wave 2.1 ──────────────
     //
     // The `entities_uuid` partition keys each entity's `ArchInstanceCore`

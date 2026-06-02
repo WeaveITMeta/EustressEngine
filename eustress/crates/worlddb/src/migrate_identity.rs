@@ -368,6 +368,8 @@ mod tests {
         uuid_to_path: RwLock<HashMap<[u8; 16], String>>,
         class_index: RwLock<HashMap<(String, [u8; 16]), ()>>,
         meta: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
+        /// Wave 9.A voxel-chunk store, keyed by signed chunk coords.
+        voxels: RwLock<HashMap<(i32, i32, i32), Vec<u8>>>,
         change_stream: ChangeStream,
     }
 
@@ -573,6 +575,54 @@ mod tests {
         fn put_meta(&self, key: &[u8], value: &[u8]) -> Result<()> {
             self.meta.write().insert(key.to_vec(), value.to_vec());
             Ok(())
+        }
+
+        // Wave 9.A voxel-chunk store — real in-memory storage so the
+        // round-trip / region / iter_all behaviour is exercised without a
+        // Fjall keyspace.
+        fn put_voxel_chunk(&self, cx: i32, cy: i32, cz: i32, bytes: &[u8]) -> Result<()> {
+            self.voxels
+                .write()
+                .insert((cx, cy, cz), bytes.to_vec());
+            Ok(())
+        }
+        fn get_voxel_chunk(&self, cx: i32, cy: i32, cz: i32) -> Result<Option<Vec<u8>>> {
+            Ok(self.voxels.read().get(&(cx, cy, cz)).cloned())
+        }
+        fn iter_voxel_chunks_in_region(
+            &self,
+            min: (f32, f32, f32),
+            max: (f32, f32, f32),
+        ) -> Result<Vec<((i32, i32, i32), Vec<u8>)>> {
+            let edge = crate::keys::VOXEL_CHUNK_EDGE_STUDS;
+            let ax = crate::keys::world_to_chunk_coord(min.0, edge);
+            let bx = crate::keys::world_to_chunk_coord(max.0, edge);
+            let ay = crate::keys::world_to_chunk_coord(min.1, edge);
+            let by = crate::keys::world_to_chunk_coord(max.1, edge);
+            let az = crate::keys::world_to_chunk_coord(min.2, edge);
+            let bz = crate::keys::world_to_chunk_coord(max.2, edge);
+            let (min_cx, max_cx) = (ax.min(bx), ax.max(bx));
+            let (min_cy, max_cy) = (ay.min(by), ay.max(by));
+            let (min_cz, max_cz) = (az.min(bz), az.max(bz));
+            Ok(self
+                .voxels
+                .read()
+                .iter()
+                .filter(|((cx, cy, cz), _)| {
+                    (min_cx..=max_cx).contains(cx)
+                        && (min_cy..=max_cy).contains(cy)
+                        && (min_cz..=max_cz).contains(cz)
+                })
+                .map(|(coord, bytes)| (*coord, bytes.clone()))
+                .collect())
+        }
+        fn iter_all_voxel_chunks(&self) -> Result<Vec<((i32, i32, i32), Vec<u8>)>> {
+            Ok(self
+                .voxels
+                .read()
+                .iter()
+                .map(|(coord, bytes)| (*coord, bytes.clone()))
+                .collect())
         }
     }
 
@@ -868,5 +918,37 @@ mod tests {
         // Empty DB → empty rollup.
         let empty = MemDb::new();
         assert!(empty.iter_all_classes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn memdb_voxel_put_get_iter_all_and_region() {
+        let db = MemDb::new();
+        // Round-trip incl. negatives + overwrite.
+        db.put_voxel_chunk(1, 2, 3, b"a").unwrap();
+        db.put_voxel_chunk(-4, 0, -8, b"neg").unwrap();
+        db.put_voxel_chunk(1, 2, 3, b"a2").unwrap(); // overwrite
+        assert_eq!(db.get_voxel_chunk(1, 2, 3).unwrap().as_deref(), Some(&b"a2"[..]));
+        assert_eq!(db.get_voxel_chunk(-4, 0, -8).unwrap().as_deref(), Some(&b"neg"[..]));
+        assert_eq!(db.get_voxel_chunk(9, 9, 9).unwrap(), None);
+
+        // iter_all returns exactly the two distinct coords.
+        let mut all: Vec<(i32, i32, i32)> =
+            db.iter_all_voxel_chunks().unwrap().into_iter().map(|(c, _)| c).collect();
+        all.sort();
+        assert_eq!(all, vec![(-4, 0, -8), (1, 2, 3)]);
+
+        // Region [0..=1]³ (in studs, via chunk-edge) returns only (1,2,3)? no —
+        // (1,2,3) has cy=2,cz=3 outside [0..=1]; put an in-box chunk to check.
+        db.put_voxel_chunk(0, 0, 0, b"origin").unwrap();
+        let e = crate::keys::VOXEL_CHUNK_EDGE_STUDS;
+        let lo = (0.25 * e, 0.25 * e, 0.25 * e); // inside chunk (0,0,0)
+        let hi = (1.75 * e, 1.75 * e, 1.75 * e); // inside chunk (1,1,1) → box [0..=1]³
+        let got: Vec<(i32, i32, i32)> = db
+            .iter_voxel_chunks_in_region(lo, hi)
+            .unwrap()
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+        assert_eq!(got, vec![(0, 0, 0)], "only the in-box origin chunk; (1,2,3) is outside");
     }
 }

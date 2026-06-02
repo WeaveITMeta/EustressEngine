@@ -127,6 +127,8 @@ pub struct FjallWorldDb {
     s_path_to_uuid: eustress_fjall::StoreHandle,
     s_uuid_to_path: eustress_fjall::StoreHandle,
     s_class_index: eustress_fjall::StoreHandle,
+    /// Multiplexer store for the Wave 9.A voxel-chunk terrain partition.
+    s_voxels: eustress_fjall::StoreHandle,
     keyspace: fjall::Keyspace,
     entities: fjall::PartitionHandle,
     meta: fjall::PartitionHandle,
@@ -159,6 +161,14 @@ pub struct FjallWorldDb {
     /// Prefix-scan over `<class_name>\x1f` returns every uuid registered
     /// under that class — IDENTITY.md §5.3.
     class_index: fjall::PartitionHandle,
+
+    // ── Wave 9.A — terrain voxel partition ────────────────────────────
+    /// Voxel-chunk store. Keys are `V | ver | morton63(biased cx,cy,cz)`
+    /// (see [`crate::keys::encode_voxel_chunk_key`]); values are the opaque
+    /// LZ4 material+occupancy chunk bytes the Roblox terrain importer
+    /// produces. Morton chunk-coord keys make a region scan a spatial
+    /// chunk-window request, 1:1 with the entity streaming model.
+    voxels: fjall::PartitionHandle,
 
     /// Key layout. Boxed `dyn` so the engine plugin can swap encoders
     /// at open time (flat today, Morton in Phase 2).
@@ -224,6 +234,10 @@ impl FjallWorldDb {
         let s_path_to_uuid = store("path_to_uuid")?;
         let s_uuid_to_path = store("uuid_to_path")?;
         let s_class_index = store("class_index")?;
+        // Wave 9.A voxel-chunk terrain partition. Additive — a pre-Wave-9
+        // world with no voxel rows stays loadable; it only fills when the
+        // terrain importer redirects chunk writes here.
+        let s_voxels = store("voxels")?;
 
         let keyspace = s_entities.raw_keyspace();
         let entities = s_entities.raw_partition();
@@ -235,6 +249,7 @@ impl FjallWorldDb {
         let path_to_uuid = s_path_to_uuid.raw_partition();
         let uuid_to_path = s_uuid_to_path.raw_partition();
         let class_index = s_class_index.raw_partition();
+        let voxels = s_voxels.raw_partition();
 
         // Load the persisted tx counter; fall back to GENESIS for a
         // fresh world.
@@ -286,6 +301,7 @@ impl FjallWorldDb {
             s_path_to_uuid,
             s_uuid_to_path,
             s_class_index,
+            s_voxels,
             keyspace,
             entities,
             meta,
@@ -296,6 +312,7 @@ impl FjallWorldDb {
             path_to_uuid,
             uuid_to_path,
             class_index,
+            voxels,
             encoder,
             tx_counter: AtomicU64::new(tx_counter),
             commit_lock: Mutex::new(()),
@@ -601,6 +618,81 @@ impl WorldDb for FjallWorldDb {
             }
         }
         Ok(n)
+    }
+
+    // ── Wave 9.A — voxel-chunk terrain partition ──────────────────────
+
+    fn put_voxel_chunk(&self, cx: i32, cy: i32, cz: i32, bytes: &[u8]) -> Result<()> {
+        let key = crate::keys::encode_voxel_chunk_key(cx, cy, cz);
+        self.voxels.insert(key, bytes)?;
+        // DataModel/terrain mutation → replication feed (mirrors put_file /
+        // put_instance_core): emit AFTER the durable insert so replicas only
+        // ever see persisted state. Preview-cap the value like other paths.
+        self.s_voxels.publish_external(
+            eustress_fjall::ReplOp::Put,
+            &key,
+            &bytes[..bytes.len().min(64)],
+        );
+        Ok(())
+    }
+
+    fn get_voxel_chunk(&self, cx: i32, cy: i32, cz: i32) -> Result<Option<Vec<u8>>> {
+        let key = crate::keys::encode_voxel_chunk_key(cx, cy, cz);
+        Ok(self.voxels.get(key)?.map(|s| s.to_vec()))
+    }
+
+    fn iter_voxel_chunks_in_region(
+        &self,
+        min: (f32, f32, f32),
+        max: (f32, f32, f32),
+    ) -> Result<Vec<((i32, i32, i32), Vec<u8>)>> {
+        let edge = crate::keys::VOXEL_CHUNK_EDGE_STUDS;
+        // World box → inclusive chunk-coord box. Floor both corners (the
+        // chunk that CONTAINS each corner); take per-axis min/max so an
+        // inverted box (max < min) still yields a well-formed range rather
+        // than an empty/negative one.
+        let ax = crate::keys::world_to_chunk_coord(min.0, edge);
+        let bx = crate::keys::world_to_chunk_coord(max.0, edge);
+        let ay = crate::keys::world_to_chunk_coord(min.1, edge);
+        let by = crate::keys::world_to_chunk_coord(max.1, edge);
+        let az = crate::keys::world_to_chunk_coord(min.2, edge);
+        let bz = crate::keys::world_to_chunk_coord(max.2, edge);
+        let (min_cx, max_cx) = (ax.min(bx), ax.max(bx));
+        let (min_cy, max_cy) = (ay.min(by), ay.max(by));
+        let (min_cz, max_cz) = (az.min(bz), az.max(bz));
+
+        // Morton bit-interleave is per-axis monotone, so every in-box key
+        // satisfies encode(min_corner) <= key <= encode(max_corner). The
+        // inclusive range [lo..=hi] is therefore a SUPERSET of the box
+        // (Z-order stitches through coords outside it); the per-key filter
+        // below is MANDATORY (litmax/bigmin property).
+        let lo = crate::keys::encode_voxel_chunk_key(min_cx, min_cy, min_cz);
+        let hi = crate::keys::encode_voxel_chunk_key(max_cx, max_cy, max_cz);
+        let mut out = Vec::new();
+        for res in self.voxels.range(lo..=hi) {
+            let (key, value) = res?;
+            let (cx, cy, cz) = crate::keys::decode_voxel_chunk_key(&key)?;
+            if (min_cx..=max_cx).contains(&cx)
+                && (min_cy..=max_cy).contains(&cy)
+                && (min_cz..=max_cz).contains(&cz)
+            {
+                out.push(((cx, cy, cz), value.to_vec()));
+            }
+        }
+        Ok(out)
+    }
+
+    fn iter_all_voxel_chunks(&self) -> Result<Vec<((i32, i32, i32), Vec<u8>)>> {
+        // Every voxel key starts `V | ver`; that 2-byte prefix bounds the
+        // scan to this partition's voxel rows.
+        let prefix = crate::keys::voxel_key_prefix();
+        let mut out = Vec::new();
+        for res in self.voxels.prefix(prefix) {
+            let (key, value) = res?;
+            let (cx, cy, cz) = crate::keys::decode_voxel_chunk_key(&key)?;
+            out.push(((cx, cy, cz), value.to_vec()));
+        }
+        Ok(out)
     }
 
     // ── IDENTITY.md Wave 2.1 ─────────────────────────────────────────
@@ -1085,5 +1177,219 @@ impl Drop for FjallWorldDb {
                 "final persist on drop failed",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod voxel_tests {
+    use super::*;
+    use crate::keys::{encode_voxel_chunk_key, VOXEL_CHUNK_EDGE_STUDS};
+
+    /// Fresh on-disk Fjall world in a unique temp dir (mirrors the temp-dir
+    /// pattern the migration tests use). Returned `PathBuf` is cleaned up by
+    /// the caller.
+    fn fresh_db() -> (FjallWorldDb, std::path::PathBuf) {
+        let tmp = std::env::temp_dir().join(format!(
+            "eustress_voxel_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db = FjallWorldDb::open(&tmp).unwrap();
+        (db, tmp)
+    }
+
+    /// Centre world position (studs) of chunk `(cx, cy, cz)` — used to build
+    /// a region box that lands squarely on the intended chunks.
+    fn chunk_centre(cx: i32, cy: i32, cz: i32) -> (f32, f32, f32) {
+        let e = VOXEL_CHUNK_EDGE_STUDS;
+        (
+            (cx as f32 + 0.5) * e,
+            (cy as f32 + 0.5) * e,
+            (cz as f32 + 0.5) * e,
+        )
+    }
+
+    #[test]
+    fn put_get_roundtrip_negatives_overwrite_and_large_value() {
+        let (db, tmp) = fresh_db();
+
+        // Basic positive round-trip.
+        db.put_voxel_chunk(1, 2, 3, b"hello-voxels").unwrap();
+        assert_eq!(
+            db.get_voxel_chunk(1, 2, 3).unwrap().as_deref(),
+            Some(&b"hello-voxels"[..])
+        );
+
+        // Negative coords round-trip (the biased-Morton path).
+        db.put_voxel_chunk(-5, 9, -2, b"neg").unwrap();
+        assert_eq!(
+            db.get_voxel_chunk(-5, 9, -2).unwrap().as_deref(),
+            Some(&b"neg"[..])
+        );
+
+        // Missing chunk → None.
+        assert_eq!(db.get_voxel_chunk(100, 100, 100).unwrap(), None);
+
+        // Overwrite replaces, doesn't append.
+        db.put_voxel_chunk(1, 2, 3, b"replaced").unwrap();
+        assert_eq!(
+            db.get_voxel_chunk(1, 2, 3).unwrap().as_deref(),
+            Some(&b"replaced"[..])
+        );
+
+        // ~10 KB value (realistic LZ4 chunk payload size).
+        let big = vec![0xABu8; 10 * 1024];
+        db.put_voxel_chunk(7, -7, 7, &big).unwrap();
+        assert_eq!(db.get_voxel_chunk(7, -7, 7).unwrap(), Some(big));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn iter_all_returns_exactly_what_was_put() {
+        let (db, tmp) = fresh_db();
+        let put: Vec<(i32, i32, i32)> =
+            vec![(0, 0, 0), (1, 0, 0), (-3, 4, -5), (12, 12, 12), (0, 0, -1)];
+        for &(cx, cy, cz) in &put {
+            db.put_voxel_chunk(cx, cy, cz, format!("{cx},{cy},{cz}").as_bytes())
+                .unwrap();
+        }
+        let mut got: Vec<(i32, i32, i32)> = db
+            .iter_all_voxel_chunks()
+            .unwrap()
+            .into_iter()
+            .map(|(coord, bytes)| {
+                // value integrity: bytes match the coord they were stored under
+                assert_eq!(bytes, format!("{},{},{}", coord.0, coord.1, coord.2).as_bytes());
+                coord
+            })
+            .collect();
+        got.sort();
+        let mut want = put.clone();
+        want.sort();
+        assert_eq!(got, want);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn iter_in_region_returns_only_in_box_chunks() {
+        let (db, tmp) = fresh_db();
+        // In-box chunks: the 2×2×2 block [0..=1]³.
+        let inside: Vec<(i32, i32, i32)> = vec![
+            (0, 0, 0),
+            (1, 0, 0),
+            (0, 1, 0),
+            (0, 0, 1),
+            (1, 1, 1),
+        ];
+        // Out-of-box chunks scattered around (incl. negatives + far away).
+        let outside: Vec<(i32, i32, i32)> = vec![
+            (-1, 0, 0),
+            (2, 0, 0),
+            (0, -1, 0),
+            (0, 0, 2),
+            (50, 50, 50),
+            (-9, -9, -9),
+        ];
+        for &(cx, cy, cz) in inside.iter().chain(outside.iter()) {
+            db.put_voxel_chunk(cx, cy, cz, b"x").unwrap();
+        }
+
+        // Region box from the centre of chunk (0,0,0) to the centre of
+        // chunk (1,1,1) → chunk-coord box [0..=1]³.
+        let lo = chunk_centre(0, 0, 0);
+        let hi = chunk_centre(1, 1, 1);
+        let mut got: Vec<(i32, i32, i32)> = db
+            .iter_voxel_chunks_in_region(lo, hi)
+            .unwrap()
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+        got.sort();
+        let mut want = inside.clone();
+        want.sort();
+        assert_eq!(got, want, "region must return exactly the in-box chunks");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// litmax/bigmin guard: a thin box whose Morton key range provably
+    /// CONTAINS an out-of-box chunk. We first prove such a chunk exists
+    /// (the range is a strict superset of the box), then assert the region
+    /// query's filter excludes it.
+    #[test]
+    fn region_filter_excludes_morton_range_intruder() {
+        // A deliberately thin/asymmetric chunk-coord box. With Z-order,
+        // the linear key range between the box corners sweeps through
+        // coords that are spatially outside the box.
+        let (min_cx, min_cy, min_cz) = (0i32, 0i32, 0i32);
+        let (max_cx, max_cy, max_cz) = (1i32, 0i32, 3i32);
+        let lo = encode_voxel_chunk_key(min_cx, min_cy, min_cz);
+        let hi = encode_voxel_chunk_key(max_cx, max_cy, max_cz);
+        let lo_u = u64::from_be_bytes(lo[2..10].try_into().unwrap());
+        let hi_u = u64::from_be_bytes(hi[2..10].try_into().unwrap());
+        assert!(lo_u <= hi_u);
+
+        // Search a small neighbourhood for an out-of-box chunk whose Morton
+        // key lands inside [lo..=hi] — proving the range is a SUPERSET.
+        let in_box = |cx: i32, cy: i32, cz: i32| {
+            (min_cx..=max_cx).contains(&cx)
+                && (min_cy..=max_cy).contains(&cy)
+                && (min_cz..=max_cz).contains(&cz)
+        };
+        let mut intruder: Option<(i32, i32, i32)> = None;
+        'search: for cx in -2..=3 {
+            for cy in -2..=3 {
+                for cz in -2..=5 {
+                    if in_box(cx, cy, cz) {
+                        continue;
+                    }
+                    let k = encode_voxel_chunk_key(cx, cy, cz);
+                    let ku = u64::from_be_bytes(k[2..10].try_into().unwrap());
+                    if lo_u <= ku && ku <= hi_u {
+                        intruder = Some((cx, cy, cz));
+                        break 'search;
+                    }
+                }
+            }
+        }
+        let intruder = intruder.expect(
+            "Z-order range over a thin box must contain an out-of-box chunk \
+             (litmax/bigmin) — otherwise the filter test proves nothing",
+        );
+
+        // Now store the intruder (and one genuinely in-box chunk) and run a
+        // region query whose chunk box is exactly [min..=max]. The intruder
+        // is inside the Morton SCAN range but outside the box → the filter
+        // must drop it.
+        let (db, tmp) = fresh_db();
+        db.put_voxel_chunk(intruder.0, intruder.1, intruder.2, b"intruder")
+            .unwrap();
+        db.put_voxel_chunk(min_cx, min_cy, min_cz, b"in-box").unwrap();
+
+        let region_min = chunk_centre(min_cx, min_cy, min_cz);
+        let region_max = chunk_centre(max_cx, max_cy, max_cz);
+        let got: Vec<(i32, i32, i32)> = db
+            .iter_voxel_chunks_in_region(region_min, region_max)
+            .unwrap()
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+
+        assert!(
+            !got.contains(&intruder),
+            "filter must exclude the in-range, out-of-box chunk {intruder:?}; got {got:?}"
+        );
+        assert!(
+            got.contains(&(min_cx, min_cy, min_cz)),
+            "in-box chunk must be present; got {got:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
