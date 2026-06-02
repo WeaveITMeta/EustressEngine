@@ -53,6 +53,14 @@ impl Plugin for EngineTerrainPlugin {
                 update_brush_preview,
                 // terrain_paint_system is registered in common::terrain::TerrainPlugin
             ).run_if(resource_equals(TerrainMode::Editor)));
+
+        // Wave 9.C — imported-terrain voxel loader (migrated Spaces read
+        // Fjall voxels → runtime heightfield, gated on `space_is_migrated`).
+        // Feature-gated: only present when the Fjall WorldDb is compiled in.
+        // It spawns a `TerrainRoot` the `chunk_spawn_system` above already
+        // meshes, so no extra render wiring is needed.
+        #[cfg(feature = "world-db")]
+        crate::terrain_voxel_load::register(app);
     }
 }
 

@@ -704,7 +704,7 @@ pub fn encode_glb(mesh: &CsgMesh) -> Result<Vec<u8>, CsgError> {
     out.extend_from_slice(b"glTF"); // magic
     out.extend_from_slice(&2u32.to_le_bytes()); // version
     out.extend_from_slice(&(total as u32).to_le_bytes()); // total length
-                                                           // JSON chunk
+                                                          // JSON chunk
     out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(b"JSON");
     out.extend_from_slice(&json_bytes);
@@ -947,9 +947,21 @@ fn write_aabb_fallback(
 ) -> std::io::Result<CsgOutcome> {
     // Guard against a degenerate size — fall back to a 4×4×4 stud block.
     let size = [
-        if aabb_size[0].abs() < 1e-3 { 4.0 } else { aabb_size[0] },
-        if aabb_size[1].abs() < 1e-3 { 4.0 } else { aabb_size[1] },
-        if aabb_size[2].abs() < 1e-3 { 4.0 } else { aabb_size[2] },
+        if aabb_size[0].abs() < 1e-3 {
+            4.0
+        } else {
+            aabb_size[0]
+        },
+        if aabb_size[1].abs() < 1e-3 {
+            4.0
+        } else {
+            aabb_size[1]
+        },
+        if aabb_size[2].abs() < 1e-3 {
+            4.0
+        } else {
+            aabb_size[2]
+        },
     ];
     let mesh = aabb_box_mesh(size);
     let bytes = encode_glb(&mesh)
@@ -1126,7 +1138,10 @@ mod tests {
         let blob = make_csgmdl2_triangle();
         let outcome = import_csg(&dir, Some(&blob), [2.0, 2.0, 2.0]).expect("import_csg");
         match outcome {
-            CsgOutcome::Baked { mesh_file, triangles } => {
+            CsgOutcome::Baked {
+                mesh_file,
+                triangles,
+            } => {
                 assert_eq!(mesh_file, "csg.glb");
                 assert_eq!(triangles, 1);
             }

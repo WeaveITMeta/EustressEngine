@@ -40,6 +40,12 @@ pub mod brushes;
 pub mod compute;
 pub mod toml_loader;
 pub mod water;
+/// Wave 9.C — imported-terrain voxel decode + multi-span column extractor +
+/// `TerrainData` cache fill. Engine-free (no worlddb dep); the engine-side
+/// loader reads Fjall voxels and calls into this. Referenced via the
+/// explicit `voxel_extract::` path (NOT glob-re-exported) so its names
+/// (`CHUNK_EDGE`, `Span`, …) don't collide with the other terrain modules'.
+pub mod voxel_extract;
 
 pub use config::*;
 pub use chunk::*;

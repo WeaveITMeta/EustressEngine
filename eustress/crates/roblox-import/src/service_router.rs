@@ -48,11 +48,7 @@ pub enum RouteOutcome {
 
 /// The Eustress-only folder names that the importer must never touch.
 /// Hardcoded — these are the project's invariant.
-const DENY_LIST: &[&str] = &[
-    "SoulService",
-    "AdornmentService",
-    "_retired_layers",
-];
+const DENY_LIST: &[&str] = &["SoulService", "AdornmentService", "_retired_layers"];
 
 /// Roblox service → Eustress destination folder router.
 ///
@@ -230,7 +226,9 @@ mod tests {
     #[test]
     fn lighting_routes_directly() {
         let out = r().route("Lighting").unwrap();
-        assert!(matches!(out, RouteOutcome::Routed { ref dest, cognate: true } if dest == &PathBuf::from("Lighting")));
+        assert!(
+            matches!(out, RouteOutcome::Routed { ref dest, cognate: true } if dest == &PathBuf::from("Lighting"))
+        );
     }
 
     #[test]
@@ -267,7 +265,10 @@ mod tests {
     fn starter_player_routes_to_scripts() {
         let out = r().route("StarterPlayer").unwrap();
         match out {
-            RouteOutcome::Routed { dest, cognate: true } => {
+            RouteOutcome::Routed {
+                dest,
+                cognate: true,
+            } => {
                 assert_eq!(dest, PathBuf::from("StarterPlayerScripts"));
             }
             _ => panic!("expected Routed cognate"),
@@ -278,11 +279,11 @@ mod tests {
     fn replicated_first_collapses() {
         let out = r().route("ReplicatedFirst").unwrap();
         match out {
-            RouteOutcome::Routed { dest, cognate: true } => {
-                assert_eq!(
-                    dest,
-                    PathBuf::from("ReplicatedStorage/_replicated_first")
-                );
+            RouteOutcome::Routed {
+                dest,
+                cognate: true,
+            } => {
+                assert_eq!(dest, PathBuf::from("ReplicatedStorage/_replicated_first"));
             }
             _ => panic!("expected Routed cognate"),
         }
@@ -322,7 +323,10 @@ mod tests {
         for s in services {
             let out = router.route(s).unwrap();
             match out {
-                RouteOutcome::Routed { dest, cognate: false } => {
+                RouteOutcome::Routed {
+                    dest,
+                    cognate: false,
+                } => {
                     assert_eq!(dest, PathBuf::from(format!("_imported/{}", s)));
                 }
                 _ => panic!("{} should route to _imported", s),
@@ -334,7 +338,10 @@ mod tests {
     fn unknown_service_routes_to_imported() {
         let out = r().route("MadeUpService").unwrap();
         match out {
-            RouteOutcome::Routed { dest, cognate: false } => {
+            RouteOutcome::Routed {
+                dest,
+                cognate: false,
+            } => {
                 assert_eq!(dest, PathBuf::from("_imported/MadeUpService"));
             }
             _ => panic!("expected Routed (non-cognate)"),

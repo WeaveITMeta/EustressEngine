@@ -127,17 +127,14 @@ pub fn resolve(raw_uri: &str) -> ResolvedAsset {
             "rbxasset://{} not resolved — Studio install lookup deferred",
             p
         )),
-        AssetReference::HttpUrl(u) => Some(format!(
-            "{} not fetched — no AssetFetcher configured",
-            u
-        )),
+        AssetReference::HttpUrl(u) => {
+            Some(format!("{} not fetched — no AssetFetcher configured", u))
+        }
         AssetReference::RbxHttp(u) => Some(format!(
             "rbxhttp://{} not fetched — no AssetFetcher configured",
             u
         )),
-        AssetReference::Other(u) => {
-            Some(format!("unknown asset URI scheme: {}", u))
-        }
+        AssetReference::Other(u) => Some(format!("unknown asset URI scheme: {}", u)),
         AssetReference::Plain(p) => {
             // Plain strings might be authored local paths. We still
             // route them to the placeholder so the TOML has something
@@ -187,7 +184,10 @@ mod tests {
     #[test]
     fn parses_rbxasset_uri() {
         let r = AssetReference::parse("rbxasset://textures/grass.png");
-        assert_eq!(r, AssetReference::BundledPath("textures/grass.png".to_string()));
+        assert_eq!(
+            r,
+            AssetReference::BundledPath("textures/grass.png".to_string())
+        );
     }
 
     #[test]

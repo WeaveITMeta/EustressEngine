@@ -21,8 +21,7 @@ fn main() {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("examples/fixtures/demo_place.rbxlx")
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/fixtures/demo_place.rbxlx")
         });
 
     println!("════════════════════════════════════════════════════════════");
@@ -41,10 +40,8 @@ fn main() {
     println!(" Format: {:?}", dom.format);
 
     // 2. Fresh temp Space root to import into.
-    let space_root = std::env::temp_dir().join(format!(
-        "eustress_rbx_import_demo_{}",
-        std::process::id()
-    ));
+    let space_root =
+        std::env::temp_dir().join(format!("eustress_rbx_import_demo_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&space_root);
     std::fs::create_dir_all(&space_root).expect("create temp space root");
     println!(" Space : {}", space_root.display());
@@ -76,7 +73,10 @@ fn main() {
     if !report.unmapped_classes.is_empty() {
         println!("   unmapped classes:");
         for u in &report.unmapped_classes {
-            println!("     {:<18} × {} (e.g. {})", u.roblox_class, u.count, u.sample_name);
+            println!(
+                "     {:<18} × {} (e.g. {})",
+                u.roblox_class, u.count, u.sample_name
+            );
         }
     }
     if !report.skipped_services.is_empty() {
@@ -86,12 +86,18 @@ fn main() {
         }
     }
     if !report.asset_warnings.is_empty() {
-        println!("   asset warnings: {} (rbxassetid:// — no CDN access)", report.asset_warnings.len());
+        println!(
+            "   asset warnings: {} (rbxassetid:// — no CDN access)",
+            report.asset_warnings.len()
+        );
     }
     if !report.approximations.is_empty() {
         println!("   approximations:");
         for a in &report.approximations {
-            println!("     {} ({}→{}): {}", a.entity_path, a.original_class, a.eustress_class, a.reason);
+            println!(
+                "     {} ({}→{}): {}",
+                a.entity_path, a.original_class, a.eustress_class, a.reason
+            );
         }
     }
 
@@ -121,7 +127,9 @@ fn main() {
 
 /// Recursively print the directory tree, marking _instance.toml files.
 fn walk(root: &Path, dir: &Path, depth: usize) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut items: Vec<_> = entries.filter_map(|e| e.ok()).collect();
     items.sort_by_key(|e| e.file_name());
     for entry in items {
@@ -132,7 +140,11 @@ fn walk(root: &Path, dir: &Path, depth: usize) {
             println!("{indent}{}/", name);
             walk(root, &path, depth + 1);
         } else {
-            let marker = if name == "_instance.toml" { "  ← entity" } else { "" };
+            let marker = if name == "_instance.toml" {
+                "  ← entity"
+            } else {
+                ""
+            };
             println!("{indent}{}{}", name, marker);
         }
     }
@@ -144,7 +156,11 @@ fn find_first_instance(dir: &Path, needle: &str) -> Option<PathBuf> {
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().map(|n| n.to_string_lossy().contains(needle)).unwrap_or(false) {
+            if path
+                .file_name()
+                .map(|n| n.to_string_lossy().contains(needle))
+                .unwrap_or(false)
+            {
                 let candidate = path.join("_instance.toml");
                 if candidate.exists() {
                     return Some(candidate);

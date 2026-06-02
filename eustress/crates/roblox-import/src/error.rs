@@ -57,4 +57,17 @@ pub enum ImportError {
         /// Human-readable reason.
         reason: String,
     },
+
+    /// A `BinarySink` write into the worlddb `entities` partition failed
+    /// (rkyv encode, Fjall commit, or an index-store put). Carried as a
+    /// string so the public API doesn't pull in `eustress_worlddb::Error`
+    /// on the non-feature build. Only constructed behind
+    /// `#[cfg(feature = "binary-sink")]`.
+    #[error("binary sink failed for {class}: {source_msg}")]
+    BinarySink {
+        /// Eustress class (e.g. `"Part"`) being written at the time.
+        class: String,
+        /// Stringified inner error.
+        source_msg: String,
+    },
 }

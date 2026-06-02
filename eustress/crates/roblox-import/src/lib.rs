@@ -61,10 +61,15 @@ pub mod materializer;
 pub mod parser;
 pub mod property_map;
 pub mod service_router;
+pub mod sink;
 pub mod terrain;
 
 // ── Re-exports — the only stable public surface. ───────────────────────────
 pub use crate::asset_resolver::{AssetReference, ResolvedAsset};
+pub use crate::csg::{
+    aabb_box_mesh, decode_mesh_data, encode_glb, import_csg, write_glb, CsgError, CsgMesh,
+    CsgOutcome,
+};
 pub use crate::error::ImportError;
 pub use crate::identity::entity_uuid;
 pub use crate::import_report::{
@@ -72,14 +77,16 @@ pub use crate::import_report::{
     SkippedService, TerrainDecodeError, TerrainMaterialApproximation, UnmappedClass,
     UnmappedProperty, UnresolvedRef,
 };
-pub use crate::csg::{
-    aabb_box_mesh, decode_mesh_data, encode_glb, import_csg, write_glb, CsgError, CsgMesh,
-    CsgOutcome,
-};
 pub use crate::materializer::{import_into_space, ImportOptions, Materializer};
 pub use crate::parser::{parse, RobloxDom, RobloxFormat};
 pub use crate::property_map::{map_properties, PropertyBag, UnmappedRecord};
 pub use crate::service_router::{RouteOutcome, ServiceRouter};
+#[cfg(feature = "binary-sink")]
+pub use crate::sink::BinarySink;
+pub use crate::sink::{
+    is_file_natured_node, node_is_binary_eligible, ImportSink, ImportStorage, NodeSpec, TomlSink,
+    WrittenRef,
+};
 pub use crate::terrain::{
     decode_smooth_grid, import_terrain, DecodeResult, TerrainGlobals, VoxelChunk,
 };

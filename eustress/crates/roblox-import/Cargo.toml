@@ -56,6 +56,17 @@ rbx_xml                = "0.13"
 rbx_reflection_database = "0.2"
 rbx_reflection         = "4"   # ClassDescriptor / ClassTag — for the class-coverage audit + future property-schema validation
 
+# Wave 8.A "BinaryDirect" backend (BinarySink). Optional so the default
+# engine-free build never links worlddb; gated behind the `binary-sink`
+# feature. When off, only TomlSink exists and the importer stays engine-free.
+eustress-worlddb = { path = "../worlddb", optional = true }
+
+[features]
+default = []
+# Spec §8.A: the direct-binary import backend. Pulls in eustress-worlddb so
+# BinarySink can write ArchInstanceCore rows straight into the Fjall store.
+binary-sink = ["dep:eustress-worlddb"]
+
 [dev-dependencies]
 # Fixture diffing for golden tests
 pretty_assertions = "1.4"

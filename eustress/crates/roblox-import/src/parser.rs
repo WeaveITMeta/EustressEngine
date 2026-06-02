@@ -94,8 +94,7 @@ impl RobloxDom {
 /// 3. Dispatch to `rbx_binary::from_reader` or `rbx_xml::from_reader_default`.
 /// 4. Wrap in `RobloxDom`.
 pub fn parse(path: &Path) -> Result<RobloxDom, ImportError> {
-    let mut file =
-        File::open(path).map_err(|e| ImportError::Io(path.to_path_buf(), e))?;
+    let mut file = File::open(path).map_err(|e| ImportError::Io(path.to_path_buf(), e))?;
 
     // Peek up to 8 bytes for the magic sniff.
     let mut magic = [0u8; 8];
@@ -148,16 +147,13 @@ pub fn parse(path: &Path) -> Result<RobloxDom, ImportError> {
 
     // Re-open the file for the actual decode (we already consumed the
     // magic bytes from the first handle).
-    let file =
-        File::open(path).map_err(|e| ImportError::Io(path.to_path_buf(), e))?;
+    let file = File::open(path).map_err(|e| ImportError::Io(path.to_path_buf(), e))?;
     let reader = BufReader::new(file);
 
     let dom = if format.is_binary() {
-        rbx_binary::from_reader(reader)
-            .map_err(|e| ImportError::BinaryParse(e.to_string()))?
+        rbx_binary::from_reader(reader).map_err(|e| ImportError::BinaryParse(e.to_string()))?
     } else {
-        rbx_xml::from_reader_default(reader)
-            .map_err(|e| ImportError::XmlParse(e.to_string()))?
+        rbx_xml::from_reader_default(reader).map_err(|e| ImportError::XmlParse(e.to_string()))?
     };
 
     Ok(RobloxDom {
@@ -196,11 +192,8 @@ mod tests {
     #[test]
     fn from_dom_round_trip() {
         let dom = WeakDom::new(InstanceBuilder::new("DataModel"));
-        let wrapped = RobloxDom::from_dom(
-            dom,
-            RobloxFormat::BinaryPlace,
-            PathBuf::from("test.rbxl"),
-        );
+        let wrapped =
+            RobloxDom::from_dom(dom, RobloxFormat::BinaryPlace, PathBuf::from("test.rbxl"));
         assert_eq!(wrapped.format, RobloxFormat::BinaryPlace);
         assert_eq!(wrapped.dom().root().class, "DataModel");
     }

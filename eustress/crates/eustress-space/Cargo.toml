@@ -1,0 +1,30 @@
+[package]
+name = "eustress-space"
+version = "0.1.0"
+edition = "2021"
+description = "Headless open/inspect/verify/export tool for a .eustress space — opens world.fjalldb WITHOUT the engine (portability + serialization-correctness)."
+authors = ["EustressEngine Contributors"]
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "eustress-space"
+path = "src/main.rs"
+
+[dependencies]
+# The read API: FjallWorldDb::open + iter_instance_cores + the rkyv
+# ArchInstanceCore archive model (decode = rkyv::access = CheckBytes
+# validation). This is the ONLY non-trivial dep — the tool deliberately
+# does NOT link the engine so it stays small + fast + portable.
+eustress-worlddb = { path = "../worlddb" }
+
+# `export` reconstructs a readable TOML tree from each core. worlddb's
+# EusValue ↔ toml::Value bridge hands back `toml::Value`; we serialize it.
+# Same major worlddb itself depends on, so no version skew.
+toml = "0.8"
+
+# Args are hand-rolled in main.rs (3 subcommands, 1 flag) to keep the
+# dependency surface — and the build — minimal, per the Wave 8.B spec.
+
+[dev-dependencies]
+# Tests create a throwaway world.fjalldb in a unique temp dir.
+tempfile = "3"

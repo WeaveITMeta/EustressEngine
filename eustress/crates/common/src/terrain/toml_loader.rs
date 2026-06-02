@@ -414,8 +414,16 @@ pub fn load_chunks_from_disk(
     loaded_chunks
 }
 
-/// Write a chunk's height values into the global `TerrainData.height_cache`
-fn write_chunk_to_cache(
+/// Write a chunk's height values into the global `TerrainData.height_cache`.
+///
+/// Public so the Wave 9.C voxel loader (engine-side) and the voxel
+/// extractor (`super::voxel_extract`) reuse the EXACT offset math the
+/// `.r16` disk path uses — a chunk at grid `(chunk_x, chunk_z)` lands at
+/// cache offset `((chunk_pos + half) * resolution)`, the same centering
+/// `generate_chunk_mesh` reads back via its `world_u`/`world_v`. Heights
+/// are whatever unit the renderer expects (`sample_height * height_scale`);
+/// the voxel path stores raw studs and sets `height_scale = 1.0`.
+pub fn write_chunk_to_cache(
     data: &mut super::TerrainData,
     config: &super::TerrainConfig,
     chunk_pos: bevy::math::IVec2,

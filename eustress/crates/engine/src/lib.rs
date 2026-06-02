@@ -100,6 +100,12 @@ pub mod transform_space;
 pub mod default_scene;
 pub mod startup;
 pub mod terrain_plugin;
+// Wave 9.C — imported-terrain voxel loader. `terrain_plugin` (compiled into
+// BOTH this lib and the bin) calls `crate::terrain_voxel_load::register`, so
+// the module must exist in the lib crate root too, not just `main.rs`.
+// Whole module is `#![cfg(feature = "world-db")]`.
+#[cfg(feature = "world-db")]
+pub mod terrain_voxel_load;
 pub mod clipboard;
 pub mod grouping;
 pub mod embedded_client;

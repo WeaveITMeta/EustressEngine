@@ -21,9 +21,9 @@ fn main() {
     let db = rbx_reflection_database::get();
 
     // Buckets.
-    let mut mapped: Vec<(String, String)> = Vec::new();   // (roblox, eustress)
-    let mut gap: Vec<String> = Vec::new();                // creatable instance, NOT mapped — real coverage gap
-    let mut services: Vec<(String, bool)> = Vec::new();   // (name, mapped?) — handled as folders
+    let mut mapped: Vec<(String, String)> = Vec::new(); // (roblox, eustress)
+    let mut gap: Vec<String> = Vec::new(); // creatable instance, NOT mapped — real coverage gap
+    let mut services: Vec<(String, bool)> = Vec::new(); // (name, mapped?) — handled as folders
     let mut not_creatable: Vec<(String, bool)> = Vec::new();
     let mut deprecated: Vec<(String, bool)> = Vec::new();
     let mut settings: Vec<String> = Vec::new();
@@ -54,9 +54,7 @@ fn main() {
         let is_mapped = mapped_to.is_some();
 
         let tags = &desc.tags;
-        if tags.contains(&ClassTag::Settings)
-            || tags.contains(&ClassTag::UserSettings)
-        {
+        if tags.contains(&ClassTag::Settings) || tags.contains(&ClassTag::UserSettings) {
             settings.push(name);
             continue;
         }
@@ -110,18 +108,42 @@ fn main() {
     println!("──────────────────────────────────────────────────────────────");
     println!(" CREATABLE INSTANCE CLASSES (what a place file contains):");
     println!("   mapped   : {:>4}", mapped.len());
-    println!("   gap      : {:>4}  (creatable, browsable, NOT yet mapped)", gap.len());
+    println!(
+        "   gap      : {:>4}  (creatable, browsable, NOT yet mapped)",
+        gap.len()
+    );
     println!("   ───────────────");
-    println!("   COVERAGE : {:.1}%  ({}/{})", pct, mapped.len(), creatable_pop);
+    println!(
+        "   COVERAGE : {:.1}%  ({}/{})",
+        pct,
+        mapped.len(),
+        creatable_pop
+    );
     println!("──────────────────────────────────────────────────────────────");
     println!(" CORRECTLY-NOT-INSTANCE (handled differently / skipped):");
     let svc_mapped = services.iter().filter(|(_, m)| *m).count();
-    println!("   services       : {:>4}  (become folders; {} also class-mapped)", services.len(), svc_mapped);
-    println!("   not-creatable  : {:>4}  (abstract bases / internal — never in a place)", not_creatable.len());
-    println!("   deprecated     : {:>4}  (legacy — importer may still map some)", deprecated.len());
-    println!("   settings       : {:>4}  (Studio config — not world content)", settings.len());
+    println!(
+        "   services       : {:>4}  (become folders; {} also class-mapped)",
+        services.len(),
+        svc_mapped
+    );
+    println!(
+        "   not-creatable  : {:>4}  (abstract bases / internal — never in a place)",
+        not_creatable.len()
+    );
+    println!(
+        "   deprecated     : {:>4}  (legacy — importer may still map some)",
+        deprecated.len()
+    );
+    println!(
+        "   settings       : {:>4}  (Studio config — not world content)",
+        settings.len()
+    );
     println!("──────────────────────────────────────────────────────────────");
-    println!(" MAPPED — by Eustress target ({} distinct targets):", by_family.len());
+    println!(
+        " MAPPED — by Eustress target ({} distinct targets):",
+        by_family.len()
+    );
     for (eustress, count) in &by_family {
         println!("   {:<22} ← {} Roblox class(es)", eustress, count);
     }
@@ -129,7 +151,10 @@ fn main() {
     if gap.is_empty() {
         println!(" GAP LIST: none — every creatable instance class maps. ✅");
     } else {
-        println!(" GAP LIST ({} creatable classes not yet mapped):", gap.len());
+        println!(
+            " GAP LIST ({} creatable classes not yet mapped):",
+            gap.len()
+        );
         println!(" (each is a real place could contain it but import would skip it)");
         // Annotate each gap with whether it descends from a family we DO
         // handle — those are the highest-value gaps to close next.
@@ -149,8 +174,18 @@ fn main() {
         }
     }
     println!("══════════════════════════════════════════════════════════════");
-    println!(" VERDICT: {:.1}% of creatable Roblox instance classes import.", pct);
-    println!(" The {} services route to folders; the {} not-creatable +", services.len(), not_creatable.len());
-    println!(" {} settings are correctly excluded from world import.", settings.len());
+    println!(
+        " VERDICT: {:.1}% of creatable Roblox instance classes import.",
+        pct
+    );
+    println!(
+        " The {} services route to folders; the {} not-creatable +",
+        services.len(),
+        not_creatable.len()
+    );
+    println!(
+        " {} settings are correctly excluded from world import.",
+        settings.len()
+    );
     println!("══════════════════════════════════════════════════════════════");
 }

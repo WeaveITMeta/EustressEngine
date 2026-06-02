@@ -242,10 +242,8 @@ fn apply_variant(bag: &mut PropertyBag, target_class: ClassName, key: &str, vari
         // the round-trip without losing data. Wave-3 first-class
         // promotion will deserialise these into per-key TOML values.
         let dbg = format!("{:?}", attrs);
-        bag.attributes.insert(
-            "_raw_debug".to_string(),
-            toml::Value::String(dbg),
-        );
+        bag.attributes
+            .insert("_raw_debug".to_string(), toml::Value::String(dbg));
         return;
     }
 
@@ -257,10 +255,8 @@ fn apply_variant(bag: &mut PropertyBag, target_class: ClassName, key: &str, vari
                     .insert("preset".to_string(), toml::Value::String("Default".into()));
             }
             PhysicalProperties::Custom(c) => {
-                bag.physics_extras.insert(
-                    "density".to_string(),
-                    toml::Value::Float(c.density as f64),
-                );
+                bag.physics_extras
+                    .insert("density".to_string(), toml::Value::Float(c.density as f64));
                 bag.physics_extras.insert(
                     "friction".to_string(),
                     toml::Value::Float(c.friction as f64),
@@ -346,8 +342,12 @@ fn try_well_known(
                 return true;
             }
             Variant::Color3uint8(c) => {
-                bag.overrides.color_rgba =
-                    Some([c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0, 1.0]);
+                bag.overrides.color_rgba = Some([
+                    c.r as f32 / 255.0,
+                    c.g as f32 / 255.0,
+                    c.b as f32 / 255.0,
+                    1.0,
+                ]);
                 return true;
             }
             _ => {}
@@ -355,8 +355,12 @@ fn try_well_known(
         "BrickColor" => {
             if let Variant::BrickColor(bc) = variant {
                 let c = bc.to_color3uint8();
-                bag.overrides.color_rgba =
-                    Some([c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0, 1.0]);
+                bag.overrides.color_rgba = Some([
+                    c.r as f32 / 255.0,
+                    c.g as f32 / 255.0,
+                    c.b as f32 / 255.0,
+                    1.0,
+                ]);
                 bag.approximation_notes
                     .push(format!("BrickColor '{}' → Color3", bc));
                 return true;
@@ -423,11 +427,7 @@ fn cframe_to_translation_quat(cf: &CFrame) -> ([f32; 3], [f32; 4]) {
     // vector points into +Z in Roblox; glam's convention follows the
     // right-up-back convention as columns, so this is a transpose of
     // the row-stored layout.
-    let m = [
-        [r.x, r.y, r.z],
-        [u.x, u.y, u.z],
-        [b.x, b.y, b.z],
-    ];
+    let m = [[r.x, r.y, r.z], [u.x, u.y, u.z], [b.x, b.y, b.z]];
     let q = mat3_to_quat(m);
     (translation, q)
 }
@@ -481,11 +481,7 @@ fn mat3_to_quat(m: [[f32; 3]; 3]) -> [f32; 4] {
 /// Roblox Euler-angles → quaternion. Roblox `Orientation` is stored as
 /// `(x, y, z)` rotations in degrees applied in YXZ order.
 fn euler_yxz_degrees_to_quat(x_deg: f32, y_deg: f32, z_deg: f32) -> [f32; 4] {
-    let (x, y, z) = (
-        x_deg.to_radians(),
-        y_deg.to_radians(),
-        z_deg.to_radians(),
-    );
+    let (x, y, z) = (x_deg.to_radians(), y_deg.to_radians(), z_deg.to_radians());
     // Half-angles
     let (sx, cx) = (x * 0.5).sin_cos();
     let (sy, cy) = (y * 0.5).sin_cos();
@@ -564,7 +560,10 @@ fn variant_to_toml(variant: &Variant, bag: &mut PropertyBag) -> toml::Value {
         // catch-all arms for the `#[non_exhaustive]` future-proofing
         // (rbx_types may add variants in a minor release).
         Variant::Tags(t) => {
-            let arr: Vec<toml::Value> = t.iter().map(|s| toml::Value::String(s.to_string())).collect();
+            let arr: Vec<toml::Value> = t
+                .iter()
+                .map(|s| toml::Value::String(s.to_string()))
+                .collect();
             toml::Value::Array(arr)
         }
         Variant::Attributes(_) => toml::Value::String("<attributes>".to_string()),
@@ -793,10 +792,7 @@ fn material_colors_to_toml(mc: &MaterialColors) -> toml::Value {
 
 fn font_to_toml(f: &Font) -> toml::Value {
     let mut t = toml::value::Table::new();
-    t.insert(
-        "family".to_string(),
-        toml::Value::String(f.family.clone()),
-    );
+    t.insert("family".to_string(), toml::Value::String(f.family.clone()));
     t.insert(
         "weight".to_string(),
         toml::Value::String(format!("{:?}", f.weight)),
@@ -806,7 +802,10 @@ fn font_to_toml(f: &Font) -> toml::Value {
         toml::Value::String(format!("{:?}", f.style)),
     );
     if let Some(cf) = &f.cached_face_id {
-        t.insert("cached_face_id".to_string(), toml::Value::String(cf.clone()));
+        t.insert(
+            "cached_face_id".to_string(),
+            toml::Value::String(cf.clone()),
+        );
     }
     toml::Value::Table(t)
 }
@@ -901,9 +900,7 @@ fn roblox_material_enum_to_name(value: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rbx_dom_weak::types::{
-        Color3, Color3uint8, Matrix3, Variant, Vector3,
-    };
+    use rbx_dom_weak::types::{Color3, Color3uint8, Matrix3, Variant, Vector3};
 
     fn props_with(pairs: Vec<(&str, Variant)>) -> HashMap<String, Variant> {
         pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
@@ -931,7 +928,10 @@ mod tests {
     #[test]
     fn vector3_position_lands_on_overrides() {
         let bag = map_properties(
-            &props_with(vec![("Position", Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)))]),
+            &props_with(vec![(
+                "Position",
+                Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)),
+            )]),
             ClassName::Part,
         );
         assert_eq!(bag.overrides.position, Some([1.0, 2.0, 3.0]));
@@ -940,7 +940,10 @@ mod tests {
     #[test]
     fn size_lands_on_scale() {
         let bag = map_properties(
-            &props_with(vec![("Size", Variant::Vector3(Vector3::new(4.0, 1.0, 4.0)))]),
+            &props_with(vec![(
+                "Size",
+                Variant::Vector3(Vector3::new(4.0, 1.0, 4.0)),
+            )]),
             ClassName::Part,
         );
         assert_eq!(bag.overrides.scale, Some([4.0, 1.0, 4.0]));
@@ -949,7 +952,10 @@ mod tests {
     #[test]
     fn color3_lands_on_color_rgba() {
         let bag = map_properties(
-            &props_with(vec![("Color", Variant::Color3(Color3::new(0.5, 0.25, 0.75)))]),
+            &props_with(vec![(
+                "Color",
+                Variant::Color3(Color3::new(0.5, 0.25, 0.75)),
+            )]),
             ClassName::Part,
         );
         let rgba = bag.overrides.color_rgba.unwrap();
@@ -1005,7 +1011,10 @@ mod tests {
     #[test]
     fn sound_id_routes_to_asset_refs() {
         let bag = map_properties(
-            &props_with(vec![("SoundId", Variant::Content(Content::from("rbxassetid://12345")))]),
+            &props_with(vec![(
+                "SoundId",
+                Variant::Content(Content::from("rbxassetid://12345")),
+            )]),
             ClassName::Sound,
         );
         assert_eq!(
@@ -1050,7 +1059,10 @@ mod tests {
             elasticity_weight: 1.0,
         });
         let bag = map_properties(
-            &props_with(vec![("CustomPhysicalProperties", Variant::PhysicalProperties(pp))]),
+            &props_with(vec![(
+                "CustomPhysicalProperties",
+                Variant::PhysicalProperties(pp),
+            )]),
             ClassName::Part,
         );
         assert!(bag.physics_extras.contains_key("density"));
@@ -1096,7 +1108,10 @@ mod tests {
     #[test]
     fn brick_color_to_color3_logs_approximation() {
         let bag = map_properties(
-            &props_with(vec![("BrickColor", Variant::BrickColor(BrickColor::ReallyRed))]),
+            &props_with(vec![(
+                "BrickColor",
+                Variant::BrickColor(BrickColor::ReallyRed),
+            )]),
             ClassName::Part,
         );
         assert!(bag.overrides.color_rgba.is_some());
@@ -1142,7 +1157,10 @@ mod tests {
     #[test]
     fn vector2_lands_in_extras() {
         let bag = map_properties(
-            &props_with(vec![("WindForce", Variant::Vector2(Vector2::new(2.0, -1.0)))]),
+            &props_with(vec![(
+                "WindForce",
+                Variant::Vector2(Vector2::new(2.0, -1.0)),
+            )]),
             ClassName::Part,
         );
         assert!(bag.properties_extras.contains_key("WindForce"));

@@ -85,6 +85,17 @@ pub struct ImportReport {
     #[serde(default)]
     pub events_imported: usize,
 
+    /// Wave 8.A: instance cores written directly to the worlddb binary
+    /// store via `BinarySink` (bypassing the TOML intermediary). 0 in
+    /// TomlFolders mode.
+    #[serde(default)]
+    pub binary_cores_written: usize,
+
+    /// Wave 9.B: terrain voxel chunks written to the Fjall voxel store
+    /// (vs. loose `voxel_chunks/*.bin` files). 0 in TomlFolders mode.
+    #[serde(default)]
+    pub terrain_chunks_to_db: usize,
+
     /// Wall-clock duration of the import call.
     pub elapsed: Duration,
 }
@@ -120,12 +131,7 @@ impl ImportReport {
     }
 
     /// Record a per-property mapping miss.
-    pub fn record_unmapped_property(
-        &mut self,
-        class: &str,
-        property: &str,
-        variant_type: &str,
-    ) {
+    pub fn record_unmapped_property(&mut self, class: &str, property: &str, variant_type: &str) {
         self.unmapped_properties.push(UnmappedProperty {
             class: class.to_string(),
             property: property.to_string(),

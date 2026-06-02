@@ -20,6 +20,11 @@ use eustress_common::sim_stream::SimStreamWriter;
 mod auth;
 mod forge;
 mod terrain_plugin;
+// Wave 9.C — imported-terrain voxel loader (reads Fjall voxels, fills the
+// runtime heightfield). Engine-side because `eustress-common` must not dep
+// `eustress-worlddb`. Whole module is `#![cfg(feature = "world-db")]`.
+#[cfg(feature = "world-db")]
+mod terrain_voxel_load;
 mod ui;
 mod parts;
 mod classes;        // Roblox-style class system

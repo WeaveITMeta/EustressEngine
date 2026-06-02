@@ -162,29 +162,29 @@ struct MaterialMap {
 const MATERIAL_TABLE: &[(&str, u8, bool)] = {
     use eustress_material::*;
     &[
-        ("Air", AIR_MARKER, true),         // 0
-        ("Water", WATER_MARKER, true),     // 1
-        ("Grass", GRASS, true),            // 2
-        ("Slate", ROCK, false),            // 3
-        ("Concrete", CONCRETE, true),      // 4
-        ("Brick", CONCRETE, false),        // 5
-        ("Sand", SAND, true),              // 6
-        ("WoodPlanks", DIRT, false),       // 7
-        ("Rock", ROCK, true),              // 8
-        ("Glacier", SNOW, false),          // 9
-        ("Snow", SNOW, true),              // 10
-        ("Sandstone", ROCK, false),        // 11
-        ("Mud", MUD, true),                // 12
-        ("Basalt", ROCK, false),           // 13
-        ("Ground", DIRT, true),            // 14
-        ("CrackedLava", ROCK, false),      // 15 (color override carries the lava tint)
-        ("Asphalt", ASPHALT, true),        // 16
-        ("Cobblestone", ROCK, false),      // 17
-        ("Ice", SNOW, false),              // 18
-        ("LeafyGrass", GRASS, false),      // 19
-        ("Salt", SNOW, false),             // 20
-        ("Limestone", ROCK, false),        // 21
-        ("Pavement", CONCRETE, false),     // 22
+        ("Air", AIR_MARKER, true),     // 0
+        ("Water", WATER_MARKER, true), // 1
+        ("Grass", GRASS, true),        // 2
+        ("Slate", ROCK, false),        // 3
+        ("Concrete", CONCRETE, true),  // 4
+        ("Brick", CONCRETE, false),    // 5
+        ("Sand", SAND, true),          // 6
+        ("WoodPlanks", DIRT, false),   // 7
+        ("Rock", ROCK, true),          // 8
+        ("Glacier", SNOW, false),      // 9
+        ("Snow", SNOW, true),          // 10
+        ("Sandstone", ROCK, false),    // 11
+        ("Mud", MUD, true),            // 12
+        ("Basalt", ROCK, false),       // 13
+        ("Ground", DIRT, true),        // 14
+        ("CrackedLava", ROCK, false),  // 15 (color override carries the lava tint)
+        ("Asphalt", ASPHALT, true),    // 16
+        ("Cobblestone", ROCK, false),  // 17
+        ("Ice", SNOW, false),          // 18
+        ("LeafyGrass", GRASS, false),  // 19
+        ("Salt", SNOW, false),         // 20
+        ("Limestone", ROCK, false),    // 21
+        ("Pavement", CONCRETE, false), // 22
     ]
 };
 
@@ -406,12 +406,9 @@ pub fn decode_smooth_grid(buf: &[u8]) -> DecodeResult {
                 }
             }
             Err(reason) => {
-                result.errors.push(TerrainDecodeError {
-                    cx,
-                    cy,
-                    cz,
-                    reason,
-                });
+                result
+                    .errors
+                    .push(TerrainDecodeError { cx, cy, cz, reason });
                 // Framing is lost once a chunk overruns; stop rather than
                 // emit garbage from misaligned reads.
                 break;
@@ -705,7 +702,10 @@ fn patch_terrain_toml(
             );
         }
         if let Some(v) = globals.water_transparency {
-            t.insert("water_transparency".to_string(), toml::Value::Float(v as f64));
+            t.insert(
+                "water_transparency".to_string(),
+                toml::Value::Float(v as f64),
+            );
         }
         if let Some(v) = globals.water_wave_size {
             t.insert("water_wave_size".to_string(), toml::Value::Float(v as f64));
@@ -714,7 +714,10 @@ fn patch_terrain_toml(
             t.insert("water_wave_speed".to_string(), toml::Value::Float(v as f64));
         }
         if let Some(v) = globals.water_reflectance {
-            t.insert("water_reflectance".to_string(), toml::Value::Float(v as f64));
+            t.insert(
+                "water_reflectance".to_string(),
+                toml::Value::Float(v as f64),
+            );
         }
     }
 
@@ -863,7 +866,11 @@ mod tests {
         let buf = [0x01u8, 0x05u8];
         let res = decode_smooth_grid(&buf);
         assert!(res.chunks.is_empty());
-        assert!(res.errors.is_empty(), "empty grid must not error: {:?}", res.errors);
+        assert!(
+            res.errors.is_empty(),
+            "empty grid must not error: {:?}",
+            res.errors
+        );
     }
 
     #[test]
@@ -925,7 +932,7 @@ mod tests {
         assert_eq!(chunk.occupancy[VoxelChunk::index(0, 0, 1)], 128);
         assert_eq!(chunk.material[VoxelChunk::index(0, 0, 2)], 1); // Water (cell 2)
         assert_eq!(chunk.occupancy[VoxelChunk::index(0, 0, 2)], 255); // default solid
-        // A later cell is Air.
+                                                                      // A later cell is Air.
         assert_eq!(chunk.material[VoxelChunk::index(0, 0, 5)], 0);
     }
 
@@ -939,7 +946,7 @@ mod tests {
         // Only encode 10 cells then cut off.
         buf.push(2 | 0b1000_0000); // Grass, run present
         buf.push(9); // run = 10
-        // (no more bytes — chunk wants 32768 cells)
+                     // (no more bytes — chunk wants 32768 cells)
         let res = decode_smooth_grid(&buf);
         assert!(res.chunks.is_empty());
         assert_eq!(res.errors.len(), 1);
@@ -1088,8 +1095,14 @@ mod tests {
         // One chunk of Slate(3) → Rock approximation.
         let buf = single_run_chunk(0, 0, 0, 3, 255);
         let mut report = ImportReport::default();
-        import_terrain(&terrain_dir, &buf, None, &TerrainGlobals::default(), &mut report)
-            .expect("import");
+        import_terrain(
+            &terrain_dir,
+            &buf,
+            None,
+            &TerrainGlobals::default(),
+            &mut report,
+        )
+        .expect("import");
         assert_eq!(report.terrain_material_approximations.len(), 1);
         let approx = &report.terrain_material_approximations[0];
         assert_eq!(approx.roblox_material, "Slate"); // id 3 = Slate

@@ -35,9 +35,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use eustress_common::classes::ClassName;
-use eustress_common::instance_create::{
-    create_instance, fresh_uuid_for_create, is_valid_uuid, uuid_bytes_to_hex,
-};
+use eustress_common::instance_create::{fresh_uuid_for_create, is_valid_uuid, uuid_bytes_to_hex};
 use eustress_common::luau::compat::{ScriptTransformer, WarningSeverity};
 use rbx_dom_weak::types::Ref;
 use rbx_dom_weak::WeakDom;
@@ -51,6 +49,7 @@ use crate::import_report::ImportReport;
 use crate::parser::RobloxDom;
 use crate::property_map::{map_properties, PropertyBag};
 use crate::service_router::{RouteOutcome, ServiceRouter};
+use crate::sink::{ImportSink, ImportStorage, NodeSpec, TomlSink, TomlWrite, WrittenRef};
 
 // ---------------------------------------------------------------------------
 // Special-class classification (Terrain / CSG dispatch)
@@ -118,6 +117,22 @@ pub struct ImportOptions {
     /// Authoring unit symbol stamped into `metadata.unit`. Defaults to
     /// `"m"` — Eustress is meter-native and Roblox studs map 1:1.
     pub unit_symbol: Option<String>,
+
+    /// §8.A: where each node's authoritative state lands. Default
+    /// [`ImportStorage::BinaryDirect`] — bare, scalable leaf parts bake
+    /// straight to the worlddb `entities` partition; everything else stays
+    /// a `_instance.toml` folder. Degrades to `TomlFolders` when the
+    /// `binary-sink` feature is off or no [`world_db`](Self::world_db)
+    /// handle is supplied.
+    pub storage: ImportStorage,
+
+    /// Pre-opened worlddb handle the binary sink writes cores into.
+    /// Supplied by the caller (the engine / `eustress-space`) so this
+    /// engine-free crate never hard-codes a Fjall path. `None` (the
+    /// default) makes `BinaryDirect`/`Hybrid` degrade to TOML folders.
+    /// Only present under the `binary-sink` feature.
+    #[cfg(feature = "binary-sink")]
+    pub world_db: Option<std::sync::Arc<dyn eustress_worlddb::WorldDb>>,
 }
 
 impl Default for ImportOptions {
@@ -130,21 +145,30 @@ impl Default for ImportOptions {
             transform_scripts: true,
             space_salt: None,
             unit_symbol: Some("m".to_string()),
+            storage: ImportStorage::default(),
+            #[cfg(feature = "binary-sink")]
+            world_db: None,
         }
     }
 }
 
 impl std::fmt::Debug for ImportOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ImportOptions")
-            .field("service_router", &self.service_router.is_some())
+        let mut s = f.debug_struct("ImportOptions");
+        s.field("service_router", &self.service_router.is_some())
             .field("import_terrain", &self.import_terrain)
             .field("extract_csg_baked", &self.extract_csg_baked)
-            .field("recompute_csg_when_missing", &self.recompute_csg_when_missing)
+            .field(
+                "recompute_csg_when_missing",
+                &self.recompute_csg_when_missing,
+            )
             .field("transform_scripts", &self.transform_scripts)
             .field("space_salt", &self.space_salt.as_ref().map(|v| v.len()))
             .field("unit_symbol", &self.unit_symbol)
-            .finish()
+            .field("storage", &self.storage);
+        #[cfg(feature = "binary-sink")]
+        s.field("world_db", &self.world_db.is_some());
+        s.finish()
     }
 }
 
@@ -178,6 +202,20 @@ pub struct Materializer<'dom> {
     /// keyed by absolute TOML path. Applied at the end of the walk so we
     /// only touch each file once.
     pending_patches: HashMap<PathBuf, TomlPatch>,
+
+    /// §8.A storage mode for this import.
+    storage: ImportStorage,
+
+    /// The always-available TOML sink. File-natured nodes, ref hosts,
+    /// parents with children, Terrain/CSG — and the entire import when not
+    /// in a binary storage mode — all go through this.
+    toml_sink: TomlSink,
+
+    /// The binary-ECS sink. Present only under the `binary-sink` feature
+    /// AND when a `world_db` handle was supplied in a binary storage mode
+    /// (`BinaryDirect`/`Hybrid`); otherwise binary modes degrade to TOML.
+    #[cfg(feature = "binary-sink")]
+    binary_sink: Option<crate::sink::BinarySink>,
 }
 
 #[derive(Default)]
@@ -203,9 +241,8 @@ impl<'dom> Materializer<'dom> {
         opts: ImportOptions,
     ) -> Result<Self, ImportError> {
         if !space_root.exists() {
-            std::fs::create_dir_all(space_root).map_err(|e| {
-                ImportError::Io(space_root.to_path_buf(), e)
-            })?;
+            std::fs::create_dir_all(space_root)
+                .map_err(|e| ImportError::Io(space_root.to_path_buf(), e))?;
         }
         let router = opts
             .service_router
@@ -215,6 +252,33 @@ impl<'dom> Materializer<'dom> {
             .space_salt
             .clone()
             .unwrap_or_else(|| derive_space_salt(space_root));
+
+        // Select the per-node sinks from the storage mode. The TOML sink is
+        // always available; the binary sink only materialises under the
+        // `binary-sink` feature when a worlddb handle was supplied in a
+        // binary mode (otherwise BinaryDirect/Hybrid degrade to TOML).
+        let storage = opts.storage;
+        let toml_sink = TomlSink::new();
+        #[cfg(feature = "binary-sink")]
+        let binary_sink = if storage.writes_binary() {
+            match opts.world_db.clone() {
+                Some(db) => Some(crate::sink::BinarySink::new(
+                    db,
+                    storage == ImportStorage::Hybrid,
+                )),
+                None => {
+                    tracing::warn!(
+                        "import storage {:?} requested but no world_db handle supplied — \
+                         degrading to TOML folders",
+                        storage
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             dom,
             space_root: space_root.to_path_buf(),
@@ -225,6 +289,10 @@ impl<'dom> Materializer<'dom> {
             referent_to_path: HashMap::new(),
             pending_refs: Vec::new(),
             pending_patches: HashMap::new(),
+            storage,
+            toml_sink,
+            #[cfg(feature = "binary-sink")]
+            binary_sink,
         })
     }
 
@@ -279,13 +347,15 @@ impl<'dom> Materializer<'dom> {
                 if !cognate {
                     report.record_skipped_service(
                         &service.class,
-                        &format!("no Eustress cognate — children routed to {}", dest.display()),
+                        &format!(
+                            "no Eustress cognate — children routed to {}",
+                            dest.display()
+                        ),
                     );
                 }
                 let absolute_dest = self.router.absolute(&dest);
-                std::fs::create_dir_all(&absolute_dest).map_err(|e| {
-                    ImportError::Io(absolute_dest.clone(), e)
-                })?;
+                std::fs::create_dir_all(&absolute_dest)
+                    .map_err(|e| ImportError::Io(absolute_dest.clone(), e))?;
                 let dest_str = dest.to_string_lossy().to_string();
                 for child_ref in service.children().iter() {
                     self.walk_subtree(*child_ref, &absolute_dest, &dest_str, report)?;
@@ -320,9 +390,7 @@ impl<'dom> Materializer<'dom> {
                 }
             };
             let dest = self.router.absolute(Path::new(dest_rel));
-            std::fs::create_dir_all(&dest).map_err(|e| {
-                ImportError::Io(dest.clone(), e)
-            })?;
+            std::fs::create_dir_all(&dest).map_err(|e| ImportError::Io(dest.clone(), e))?;
             for gc_ref in child.children().iter() {
                 self.walk_subtree(*gc_ref, &dest, dest_rel, report)?;
             }
@@ -384,7 +452,12 @@ impl<'dom> Materializer<'dom> {
             inst.name.clone()
         };
 
-        // Create the instance via the canonical pipeline.
+        // Build the per-node spec + route it through the selected sink.
+        // Bare, scalable leaf parts bake straight to a binary-ECS core
+        // (BinaryDirect / Hybrid); everything else — file-natured nodes,
+        // ref hosts, parents with children, Terrain / CSG — lands as a
+        // `_instance.toml` folder so the existing second-pass machinery
+        // (patches, recursion, decoders) applies unchanged.
         let class_template_name = eustress_class.as_str();
         let mut overrides = bag.overrides.clone();
         overrides.display_name = Some(requested_name.clone());
@@ -392,16 +465,63 @@ impl<'dom> Materializer<'dom> {
             overrides.unit_symbol = Some(unit.clone());
         }
 
-        let created = create_instance(
-            parent_dir,
-            class_template_name,
-            Some(&requested_name),
-            overrides,
-        )
-        .map_err(|e| ImportError::InstanceCreate {
-            class: class_template_name.to_string(),
-            source_msg: e.to_string(),
-        })?;
+        // Deterministic uuid (overrides the random one the canonical
+        // pipeline would mint) so re-imports are idempotent. Computed up
+        // front so a binary sink can key its records on it.
+        let referent = inst.referent();
+        let uuid = entity_uuid(&self.salt, &referent.to_string());
+        let uuid_hex = uuid_bytes_to_hex(uuid.as_bytes());
+        self.referent_to_uuid.insert(referent, uuid);
+
+        // A node may take the binary fast-path only if it is a bare leaf:
+        // no dedicated decoder (Terrain / CSG), no children to recurse
+        // into, no `Ref` host-patching, and no script body. The sink itself
+        // re-applies the representation predicate (file-natured /
+        // custom-mesh parts fall back to TOML internally), so this gate is
+        // only the structural part the sink cannot see.
+        let take_binary = special == SpecialKind::None
+            && inst.children().is_empty()
+            && bag.refs.is_empty()
+            && bag.script_source.is_none();
+
+        let written = {
+            let spec = NodeSpec {
+                class: eustress_class,
+                class_template: class_template_name,
+                requested_name: &requested_name,
+                overrides: &overrides,
+                uuid_hex: &uuid_hex,
+                extras: &bag.properties_extras,
+                physics: &bag.physics_extras,
+                attributes: &bag.attributes,
+                tags: &bag.tags,
+            };
+            self.write_node(parent_dir, take_binary, &spec)?
+        };
+
+        if written.wrote_binary_core {
+            report.binary_cores_written += 1;
+        }
+
+        // No TOML folder ⇒ a pure binary-ECS core: the sink absorbed the
+        // whole node (hot fields + attributes / extras / physics / tags +
+        // the UUID index), there is nothing on disk to patch, and (by the
+        // `take_binary` gate) no children to recurse into.
+        let created = match written.toml {
+            Some(toml_write) => toml_write,
+            None => {
+                report.record_imported(class_template_name);
+                // Mirror BinarySink's synthetic binary-ECS path shape so a
+                // later `find_entity --path` agrees with the loader.
+                let stored_id = u64::from_be_bytes(uuid.as_bytes()[..8].try_into().unwrap());
+                let synthetic = format!(
+                    "Workspace/__bin_{}_{:016x}/_instance.toml",
+                    class_template_name, stored_id
+                );
+                self.referent_to_path.insert(referent, synthetic);
+                return Ok(());
+            }
+        };
 
         let entity_relpath = format!("{}/{}", parent_relpath, created.folder_name);
         report.record_imported(class_template_name);
@@ -410,16 +530,14 @@ impl<'dom> Materializer<'dom> {
             report.record_name_collision(parent_relpath, &requested_name, &created.folder_name);
         }
 
-        // Stamp a deterministic uuid (overrides the random one the
-        // canonical pipeline minted) so re-imports are idempotent.
-        let referent = inst.referent();
-        let uuid = entity_uuid(&self.salt, &referent.to_string());
-        let uuid_hex = uuid_bytes_to_hex(uuid.as_bytes());
-        let patch = self.pending_patches.entry(created.toml_path.clone()).or_default();
+        // Stamp the deterministic uuid onto this TOML's pending patch.
+        let patch = self
+            .pending_patches
+            .entry(created.toml_path.clone())
+            .or_default();
         patch.uuid_stamp = Some(uuid_hex.clone());
 
-        // Save the referent ↔ uuid + path mapping so refs resolve.
-        self.referent_to_uuid.insert(referent, uuid);
+        // Save the referent → path mapping so refs resolve / report.
         self.referent_to_path
             .insert(referent, entity_relpath.clone());
 
@@ -446,12 +564,7 @@ impl<'dom> Materializer<'dom> {
             let resolved = asset_resolver::resolve(&uri);
             if !resolved.resolved {
                 if let Some(reason) = &resolved.reason {
-                    report.record_asset_warning(
-                        &uri,
-                        class_template_name,
-                        &prop,
-                        reason,
-                    );
+                    report.record_asset_warning(&uri, class_template_name, &prop, reason);
                 }
             }
             // Mesh-class properties point at mesh assets; everything
@@ -474,13 +587,13 @@ impl<'dom> Materializer<'dom> {
                         WarningSeverity::Warning => "warning",
                         WarningSeverity::Error => "error",
                     };
-                    report.script_warnings.push(
-                        crate::import_report::ScriptWarning {
+                    report
+                        .script_warnings
+                        .push(crate::import_report::ScriptWarning {
                             entity_path: entity_relpath.clone(),
                             message: warning.message.clone(),
                             severity: severity.to_string(),
-                        },
-                    );
+                        });
                 }
                 result.source
             } else {
@@ -529,13 +642,38 @@ impl<'dom> Materializer<'dom> {
         Ok(())
     }
 
+    /// Route one node to the selected sink: the binary-ECS sink when the
+    /// node took the structural fast-path AND a binary storage mode + a
+    /// worlddb handle are active, else the always-available TOML sink.
+    /// Returns the sink's [`WrittenRef`] (the caller branches on `toml`).
+    fn write_node(
+        &mut self,
+        dest_dir: &Path,
+        take_binary: bool,
+        spec: &NodeSpec<'_>,
+    ) -> Result<WrittenRef, ImportError> {
+        #[cfg(feature = "binary-sink")]
+        {
+            if take_binary && self.storage.writes_binary() {
+                if let Some(bs) = self.binary_sink.as_mut() {
+                    return bs.write(dest_dir, spec);
+                }
+            }
+        }
+        #[cfg(not(feature = "binary-sink"))]
+        {
+            let _ = take_binary;
+        }
+        self.toml_sink.write(dest_dir, spec)
+    }
+
     /// Decode a `Terrain` instance's `SmoothGrid` into voxel chunk files
     /// + patch the Terrain TOML with `[material_colors]` and globals.
     /// Spec §6.
     fn import_terrain_instance(
         &mut self,
         inst: &rbx_dom_weak::Instance,
-        created: &eustress_common::instance_create::CreatedInstance,
+        created: &TomlWrite,
         report: &mut ImportReport,
     ) -> Result<(), ImportError> {
         let props = &inst.properties;
@@ -562,7 +700,7 @@ impl<'dom> Materializer<'dom> {
     fn import_csg_instance(
         &mut self,
         inst: &rbx_dom_weak::Instance,
-        created: &eustress_common::instance_create::CreatedInstance,
+        created: &TomlWrite,
         entity_relpath: &str,
         report: &mut ImportReport,
     ) -> Result<(), ImportError> {
@@ -597,11 +735,15 @@ impl<'dom> Materializer<'dom> {
             .entry(created.toml_path.clone())
             .or_default();
         match &outcome {
-            crate::csg::CsgOutcome::Baked { mesh_file, triangles } => {
+            crate::csg::CsgOutcome::Baked {
+                mesh_file,
+                triangles,
+            } => {
                 patch.asset_mesh = Some(mesh_file.clone());
-                patch
-                    .extras
-                    .insert("csg_op".to_string(), toml::Value::String(csg_op.to_string()));
+                patch.extras.insert(
+                    "csg_op".to_string(),
+                    toml::Value::String(csg_op.to_string()),
+                );
                 patch.extras.insert(
                     "csg_triangles".to_string(),
                     toml::Value::Integer(*triangles as i64),
@@ -610,9 +752,10 @@ impl<'dom> Materializer<'dom> {
             }
             crate::csg::CsgOutcome::Aabb { mesh_file, reason } => {
                 patch.asset_mesh = Some(mesh_file.clone());
-                patch
-                    .extras
-                    .insert("csg_op".to_string(), toml::Value::String(csg_op.to_string()));
+                patch.extras.insert(
+                    "csg_op".to_string(),
+                    toml::Value::String(csg_op.to_string()),
+                );
                 report.csg_fallback_aabb += 1;
                 report.record_approximation(
                     entity_relpath,
@@ -676,12 +819,12 @@ impl<'dom> Materializer<'dom> {
 fn apply_toml_patch(toml_path: &Path, patch: &TomlPatch) -> Result<(), ImportError> {
     let raw = std::fs::read_to_string(toml_path)
         .map_err(|e| ImportError::Io(toml_path.to_path_buf(), e))?;
-    let mut doc: toml::Value = raw.parse().map_err(|e: toml::de::Error| {
-        ImportError::InstanceCreate {
-            class: toml_path.to_string_lossy().to_string(),
-            source_msg: format!("toml parse: {e}"),
-        }
-    })?;
+    let mut doc: toml::Value =
+        raw.parse()
+            .map_err(|e: toml::de::Error| ImportError::InstanceCreate {
+                class: toml_path.to_string_lossy().to_string(),
+                source_msg: format!("toml parse: {e}"),
+            })?;
 
     let root = match doc.as_table_mut() {
         Some(t) => t,
@@ -729,10 +872,7 @@ fn apply_toml_patch(toml_path: &Path, patch: &TomlPatch) -> Result<(), ImportErr
     }
 
     // ── Properties extras / physics / attributes ──
-    if !patch.extras.is_empty()
-        || !patch.physics.is_empty()
-        || !patch.attributes.is_empty()
-    {
+    if !patch.extras.is_empty() || !patch.physics.is_empty() || !patch.attributes.is_empty() {
         let props = root
             .entry("properties".to_string())
             .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
@@ -810,8 +950,7 @@ fn apply_toml_patch(toml_path: &Path, patch: &TomlPatch) -> Result<(), ImportErr
     }
 
     let new_raw = toml::to_string_pretty(&doc).unwrap_or(raw);
-    std::fs::write(toml_path, new_raw)
-        .map_err(|e| ImportError::Io(toml_path.to_path_buf(), e))?;
+    std::fs::write(toml_path, new_raw).map_err(|e| ImportError::Io(toml_path.to_path_buf(), e))?;
 
     // ── Script source — written as a sibling file. ──
     if let (Some(body), Some(class)) = (&patch.script_body, &patch.script_class) {
@@ -826,8 +965,7 @@ fn apply_toml_patch(toml_path: &Path, patch: &TomlPatch) -> Result<(), ImportErr
             .parent()
             .expect("toml path always has a parent dir");
         let script_path = parent.join(script_name);
-        std::fs::write(&script_path, body)
-            .map_err(|e| ImportError::Io(script_path, e))?;
+        std::fs::write(&script_path, body).map_err(|e| ImportError::Io(script_path, e))?;
     }
 
     Ok(())
@@ -840,8 +978,7 @@ fn apply_toml_patch(toml_path: &Path, patch: &TomlPatch) -> Result<(), ImportErr
 /// Derive a per-Space salt from the Space root path. Stable across
 /// runs against the same Space, different across Spaces.
 pub(crate) fn derive_space_salt(space_root: &Path) -> Vec<u8> {
-    let canonical = std::fs::canonicalize(space_root)
-        .unwrap_or_else(|_| space_root.to_path_buf());
+    let canonical = std::fs::canonicalize(space_root).unwrap_or_else(|_| space_root.to_path_buf());
     let s = canonical.to_string_lossy().to_string();
     s.into_bytes()
 }
@@ -921,14 +1058,17 @@ mod tests {
                         .with_property("Anchored", true),
                 ),
         );
-        let lighting = InstanceBuilder::new("Lighting").with_child(
-            InstanceBuilder::new("Atmosphere").with_name("Sky"),
-        );
+        let lighting = InstanceBuilder::new("Lighting")
+            .with_child(InstanceBuilder::new("Atmosphere").with_name("Sky"));
         let data_model = InstanceBuilder::new("DataModel")
             .with_child(workspace)
             .with_child(lighting);
         let dom = WeakDom::new(data_model);
-        RobloxDom::from_dom(dom, crate::parser::RobloxFormat::BinaryPlace, PathBuf::new())
+        RobloxDom::from_dom(
+            dom,
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        )
     }
 
     #[test]
@@ -950,7 +1090,11 @@ mod tests {
             .join("Group")
             .join("Cube")
             .join("_instance.toml");
-        assert!(cube_path.is_file(), "Cube TOML should exist: {}", cube_path.display());
+        assert!(
+            cube_path.is_file(),
+            "Cube TOML should exist: {}",
+            cube_path.display()
+        );
 
         // The folder name uniqueness should not have triggered for this fixture.
         assert!(report.name_collisions.is_empty());
@@ -967,7 +1111,11 @@ mod tests {
             .join("Lighting")
             .join("Sky")
             .join("_instance.toml");
-        assert!(sky.is_file(), "Atmosphere should land under Lighting: {}", sky.display());
+        assert!(
+            sky.is_file(),
+            "Atmosphere should land under Lighting: {}",
+            sky.display()
+        );
         let _ = std::fs::remove_dir_all(&space_root);
     }
 
@@ -1057,8 +1205,8 @@ mod tests {
         );
 
         let space_root = make_temp_root("unmapped");
-        let report = import_into_space(&rbx, &space_root, ImportOptions::default())
-            .expect("import");
+        let report =
+            import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
         assert!(
             report
                 .unmapped_classes
@@ -1095,11 +1243,14 @@ mod tests {
         );
 
         let space_root = make_temp_root("terrain_empty");
-        let report = import_into_space(&rbx, &space_root, ImportOptions::default())
-            .expect("import");
+        let report =
+            import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
         assert_eq!(report.terrain_chunks_imported, 0);
         assert!(
-            !report.approximations.iter().any(|a| a.reason.contains("deferred")),
+            !report
+                .approximations
+                .iter()
+                .any(|a| a.reason.contains("deferred")),
             "no deferral note expected now that terrain decode is live: {:?}",
             report.approximations
         );
@@ -1134,8 +1285,8 @@ mod tests {
         );
 
         let space_root = make_temp_root("terrain_voxels");
-        let report = import_into_space(&rbx, &space_root, ImportOptions::default())
-            .expect("import");
+        let report =
+            import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
         assert_eq!(
             report.terrain_chunks_imported, 1,
             "expected exactly one decoded chunk"
@@ -1145,7 +1296,11 @@ mod tests {
             .join("Terrain")
             .join("voxel_chunks")
             .join("chunk_0_0_0.bin");
-        assert!(chunk.is_file(), "voxel chunk file should exist: {}", chunk.display());
+        assert!(
+            chunk.is_file(),
+            "voxel chunk file should exist: {}",
+            chunk.display()
+        );
         let _ = std::fs::remove_dir_all(&space_root);
     }
 
@@ -1171,8 +1326,8 @@ mod tests {
         );
 
         let space_root = make_temp_root("csg_baked");
-        let report = import_into_space(&rbx, &space_root, ImportOptions::default())
-            .expect("import");
+        let report =
+            import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
         assert_eq!(report.csg_baked_extracted, 1, "one CSG mesh should bake");
         assert_eq!(report.csg_fallback_aabb, 0);
 
@@ -1180,8 +1335,14 @@ mod tests {
         assert!(csg_dir.join("csg.glb").is_file(), "csg.glb should exist");
         // The Part TOML should point its asset mesh at csg.glb.
         let toml = std::fs::read_to_string(csg_dir.join("_instance.toml")).unwrap();
-        assert!(toml.contains("csg.glb"), "TOML should reference csg.glb: {toml}");
-        assert!(toml.contains("csg_op"), "TOML should record the csg_op: {toml}");
+        assert!(
+            toml.contains("csg.glb"),
+            "TOML should reference csg.glb: {toml}"
+        );
+        assert!(
+            toml.contains("csg_op"),
+            "TOML should record the csg_op: {toml}"
+        );
         let _ = std::fs::remove_dir_all(&space_root);
     }
 
@@ -1200,12 +1361,15 @@ mod tests {
         );
 
         let space_root = make_temp_root("csg_aabb");
-        let report = import_into_space(&rbx, &space_root, ImportOptions::default())
-            .expect("import");
+        let report =
+            import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
         assert_eq!(report.csg_baked_extracted, 0);
         assert_eq!(report.csg_fallback_aabb, 1, "should fall back to AABB");
         assert!(
-            report.approximations.iter().any(|a| a.reason.contains("AABB fallback")),
+            report
+                .approximations
+                .iter()
+                .any(|a| a.reason.contains("AABB fallback")),
             "AABB fallback should be logged: {:?}",
             report.approximations
         );
@@ -1256,8 +1420,8 @@ mod tests {
             PathBuf::new(),
         );
         let space_root = make_temp_root("assetid");
-        let report = import_into_space(&rbx, &space_root, ImportOptions::default())
-            .expect("import");
+        let report =
+            import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
         assert!(
             !report.asset_warnings.is_empty(),
             "rbxassetid:// reference should emit an AssetWarning"
@@ -1278,8 +1442,8 @@ mod tests {
             PathBuf::new(),
         );
         let space_root = make_temp_root("skipped_service");
-        let report = import_into_space(&rbx, &space_root, ImportOptions::default())
-            .expect("import");
+        let report =
+            import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
         assert!(
             report
                 .skipped_services
