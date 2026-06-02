@@ -592,7 +592,10 @@ mod tests {
     // ── LRU cap enforcement ─────────────────────────────────────────────────
 
     fn ent(i: u32) -> Entity {
-        Entity::from_raw(i)
+        // bevy 0.18 renamed the infallible `Entity::from_raw(u32)` to the
+        // validating `from_raw_u32(u32) -> Option<Entity>`; unwrap is fine
+        // in this test helper (indices are small and always valid).
+        Entity::from_raw_u32(i).expect("valid test entity index")
     }
 
     #[test]
