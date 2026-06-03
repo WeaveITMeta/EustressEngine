@@ -277,6 +277,21 @@ fn main() {
         // type" on any imported mesh / CSG glb unless we register it here.
         // (This was crashing the engine on Vehicle Simulator's CSG glbs.)
         .register_type::<bevy::transform::components::TransformTreeChanged>()
+        // glb scene graphs also carry hierarchy/transform/visibility/name
+        // components, and `SceneSpawner` reflects EVERY one — so register the
+        // full set up front (idempotent for any already registered by a plugin)
+        // to end the one-panic-per-missing-type whack-a-mole on import.
+        .register_type::<bevy::prelude::Children>()
+        .register_type::<bevy::prelude::ChildOf>()
+        .register_type::<bevy::prelude::Transform>()
+        .register_type::<bevy::prelude::GlobalTransform>()
+        .register_type::<bevy::prelude::Visibility>()
+        .register_type::<bevy::prelude::InheritedVisibility>()
+        .register_type::<bevy::prelude::ViewVisibility>()
+        .register_type::<bevy::prelude::Name>()
+        // Render components carried by glb mesh entities in the scene graph.
+        .register_type::<bevy::prelude::Mesh3d>()
+        .register_type::<bevy::prelude::MeshMaterial3d<bevy::pbr::StandardMaterial>>()
         // PlayerService for play mode character spawning
         .init_resource::<PlayerService>()
         // DisplayUnit — user-selected display unit for the Properties
