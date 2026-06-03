@@ -35,7 +35,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use eustress_common::classes::ClassName;
-use eustress_common::instance_create::{fresh_uuid_for_create, is_valid_uuid, uuid_bytes_to_hex};
+use eustress_common::instance_create::{
+    create_instance, fresh_uuid_for_create, is_valid_uuid, uuid_bytes_to_hex, InstanceOverrides,
+};
 use eustress_common::luau::compat::{ScriptTransformer, WarningSeverity};
 use rbx_dom_weak::types::Ref;
 use rbx_dom_weak::WeakDom;
@@ -407,7 +409,8 @@ impl<'dom> Materializer<'dom> {
             return self.handle_starter_player(service_ref, report);
         }
 
-        let outcome = self.router.route(service.class.as_str())?;
+        let service_class = service.class.as_str().to_string();
+        let outcome = self.router.route(&service_class)?;
         match outcome {
             RouteOutcome::Routed { dest, cognate } => {
                 if !cognate {
@@ -423,8 +426,42 @@ impl<'dom> Materializer<'dom> {
                 std::fs::create_dir_all(&absolute_dest)
                     .map_err(|e| ImportError::Io(absolute_dest.clone(), e))?;
                 let dest_str = dest.to_string_lossy().to_string();
+
+                // ── Workspace container folder (place-scoped subtree) ──
+                //
+                // The whole imported place should live under ONE removable
+                // subtree in-Workspace: `Workspace/<PlaceName>/...` rather than
+                // ~25 loose top-level Workspace folders. We synthesise a plain
+                // TOML `Folder` named after the place directly under the
+                // `Workspace` service and re-root the Workspace children beneath
+                // it. This applies ONLY to `Workspace` — every other service
+                // (Lighting / Players / ReplicatedStorage / …) keeps walking at
+                // its normal cognate root.
+                //
+                // The container is a fully canonical `create_instance` folder
+                // (its own random uuid, valid `_instance.toml`); it carries no
+                // Roblox referent, so it never participates in
+                // `referent_to_uuid` / `[references]` and cannot collide with
+                // any imported node's identity. Its children keep their existing
+                // storage routing (`take_binary` / `node_is_binary_eligible`)
+                // and ref/asset post-passes unchanged — they merely sit one
+                // directory deeper on disk, which every downstream path is
+                // computed relative to (`create_instance(dest_dir, …)` →
+                // `folder_path`), so terrain/CSG dispatch and ref resolution are
+                // unaffected.
+                let (child_dir, child_relpath) = if cognate && service_class == "Workspace" {
+                    match self.workspace_container(&absolute_dest, &dest_str, report)? {
+                        Some(container) => container,
+                        // No derivable place name (e.g. an empty/`..` space root
+                        // in a unit test) — fall back to the legacy flat layout.
+                        None => (absolute_dest.clone(), dest_str.clone()),
+                    }
+                } else {
+                    (absolute_dest.clone(), dest_str.clone())
+                };
+
                 for child_ref in service.children().iter() {
-                    self.walk_subtree(*child_ref, &absolute_dest, &dest_str, report)?;
+                    self.walk_subtree(*child_ref, &child_dir, &child_relpath, report)?;
                 }
             }
             RouteOutcome::SkipSilent => {
@@ -432,6 +469,66 @@ impl<'dom> Materializer<'dom> {
             }
         }
         Ok(())
+    }
+
+    /// Materialise the synthetic `Workspace/<PlaceName>/` container Folder and
+    /// return `(absolute_folder_path, space_relative_path)` for the Workspace
+    /// children to be walked into. `<PlaceName>` is derived from the target
+    /// Space root's directory name (the import targets a fresh Space named
+    /// after the source file, so its dir name IS the place name).
+    ///
+    /// Returns `Ok(None)` when no place name can be derived from the space root
+    /// (an empty or non-final-component path) so the caller can fall back to
+    /// the flat `Workspace/...` layout. A failed container write is recorded as
+    /// an approximation and also falls back to flat — never aborts the import.
+    fn workspace_container(
+        &mut self,
+        workspace_dir: &Path,
+        workspace_relpath: &str,
+        report: &mut ImportReport,
+    ) -> Result<Option<(PathBuf, String)>, ImportError> {
+        let Some(place_name) = place_name_from_root(&self.space_root) else {
+            return Ok(None);
+        };
+
+        // A plain Folder via the canonical pipeline: real `_instance.toml`,
+        // unique-safed folder name, its own (random) uuid. No overrides beyond
+        // the display name + the import's unit symbol so it reads identically to
+        // any other imported Folder.
+        let mut overrides = InstanceOverrides {
+            display_name: Some(place_name.clone()),
+            ..Default::default()
+        };
+        if let Some(unit) = &self.opts.unit_symbol {
+            overrides.unit_symbol = Some(unit.clone());
+        }
+
+        match create_instance(
+            workspace_dir,
+            ClassName::Folder.as_str(),
+            Some(&place_name),
+            overrides,
+        ) {
+            Ok(created) => {
+                let rel = format!("{}/{}", workspace_relpath, created.folder_name);
+                Ok(Some((created.folder_path, rel)))
+            }
+            Err(e) => {
+                // Container creation failed — record it and fall back to the
+                // flat Workspace layout so the place still imports.
+                report.record_approximation(
+                    workspace_relpath,
+                    "Folder",
+                    "Folder",
+                    &format!(
+                        "Workspace container '{}' could not be created ({e}); \
+                         children placed directly under Workspace",
+                        place_name
+                    ),
+                );
+                Ok(None)
+            }
+        }
     }
 
     fn handle_starter_player(
@@ -1188,6 +1285,22 @@ pub(crate) fn derive_space_salt(space_root: &Path) -> Vec<u8> {
     s.into_bytes()
 }
 
+/// The `<PlaceName>` for the in-Workspace container folder, derived from the
+/// target Space root's final path component. The import targets a fresh Space
+/// named after the source file, so the Space directory name IS the place name
+/// — we deliberately do NOT add a field to [`ImportOptions`] for it.
+///
+/// Returns `None` when the root has no final component (an empty path, or a
+/// path ending in `..`/`/`); the caller then keeps the legacy flat
+/// `Workspace/...` layout.
+pub(crate) fn place_name_from_root(space_root: &Path) -> Option<String> {
+    space_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// True when the Roblox property maps to a mesh asset (vs. a single
 /// `[asset].path`). Used to pick between `asset_mesh` and `asset_path`.
 fn is_mesh_property(roblox_prop: &str, class: ClassName) -> bool {
@@ -1312,8 +1425,12 @@ mod tests {
             "Part should have been created: {:?}",
             report.class_counts
         );
+        // Workspace content now lands under a single place-named container
+        // folder: `Workspace/<PlaceName>/...` (PlaceName = the Space dir name).
+        let place = place_name_from_root(&space_root).expect("temp root has a name");
         let cube_path = space_root
             .join("Workspace")
+            .join(&place)
             .join("Group")
             .join("Cube")
             .join("_instance.toml");
@@ -1347,6 +1464,79 @@ mod tests {
     }
 
     #[test]
+    fn workspace_children_land_under_place_container() {
+        // Workspace content lands under a single `Workspace/<PlaceName>/`
+        // container Folder (PlaceName = the Space dir name); Lighting and the
+        // other services keep their flat cognate roots.
+        let dom = make_minimal_place();
+        let space_root = make_temp_root("container");
+        import_into_space(&dom, &space_root, ImportOptions::default()).expect("import");
+
+        let place = place_name_from_root(&space_root).expect("temp root has a name");
+
+        // 1. The container folder itself is a real, valid Folder TOML.
+        let container_toml = space_root
+            .join("Workspace")
+            .join(&place)
+            .join("_instance.toml");
+        assert!(
+            container_toml.is_file(),
+            "container TOML should exist: {}",
+            container_toml.display()
+        );
+        let doc: toml::Value = std::fs::read_to_string(&container_toml)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            doc.get("metadata")
+                .and_then(|m| m.get("class_name"))
+                .and_then(|v| v.as_str()),
+            Some("Folder"),
+            "container should be a Folder: {doc:?}"
+        );
+        // Its display name is the place name (the Space dir name).
+        assert_eq!(
+            doc.get("metadata")
+                .and_then(|m| m.get("name"))
+                .and_then(|v| v.as_str()),
+            Some(place.as_str()),
+            "container display name should be the place name: {doc:?}"
+        );
+
+        // 2. The Workspace subtree sits BENEATH the container, not at the
+        //    Workspace root.
+        assert!(space_root
+            .join("Workspace")
+            .join(&place)
+            .join("Group")
+            .join("Cube")
+            .join("_instance.toml")
+            .is_file());
+        assert!(
+            !space_root.join("Workspace").join("Group").exists(),
+            "Workspace children must NOT remain at the flat Workspace root"
+        );
+
+        // 3. Lighting is NOT wrapped in a place container — services other
+        //    than Workspace keep their normal cognate root.
+        assert!(
+            space_root
+                .join("Lighting")
+                .join("Sky")
+                .join("_instance.toml")
+                .is_file(),
+            "Lighting children must stay directly under Lighting/"
+        );
+        assert!(
+            !space_root.join("Lighting").join(&place).exists(),
+            "Lighting must NOT get a place container"
+        );
+
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    #[test]
     fn idempotent_uuids_on_reimport() {
         let dom = make_minimal_place();
         let space_root = make_temp_root("idempotent");
@@ -1357,9 +1547,11 @@ mod tests {
             ..ImportOptions::default()
         };
         import_into_space(&dom, &space_root, opts()).expect("first import");
+        let place1 = place_name_from_root(&space_root).expect("temp root has a name");
         let first = std::fs::read_to_string(
             space_root
                 .join("Workspace")
+                .join(&place1)
                 .join("Group")
                 .join("Cube")
                 .join("_instance.toml"),
@@ -1373,9 +1565,11 @@ mod tests {
         // so we use a parallel Space + identical salt.
         let space_root2 = make_temp_root("idempotent2");
         import_into_space(&dom, &space_root2, opts()).expect("second import");
+        let place2 = place_name_from_root(&space_root2).expect("temp root has a name");
         let second = std::fs::read_to_string(
             space_root2
                 .join("Workspace")
+                .join(&place2)
                 .join("Group")
                 .join("Cube")
                 .join("_instance.toml"),
@@ -1443,9 +1637,12 @@ mod tests {
             report.unmapped_classes
         );
         // The "Bury" Part under FloofPart should NOT exist on disk
-        // because we stop the walk at unmapped nodes.
+        // because we stop the walk at unmapped nodes. (Workspace content now
+        // sits under the place-named container folder.)
+        let place = place_name_from_root(&space_root).expect("temp root has a name");
         assert!(!space_root
             .join("Workspace")
+            .join(&place)
             .join("WeirdChild")
             .join("Bury")
             .exists());
@@ -1481,9 +1678,11 @@ mod tests {
             "no deferral note expected now that terrain decode is live: {:?}",
             report.approximations
         );
-        // The Terrain folder + TOML should exist.
+        // The Terrain folder + TOML should exist (under the place container).
+        let place = place_name_from_root(&space_root).expect("temp root has a name");
         let terrain_toml = space_root
             .join("Workspace")
+            .join(&place)
             .join("Terrain")
             .join("_instance.toml");
         assert!(terrain_toml.is_file());
@@ -1518,8 +1717,10 @@ mod tests {
             report.terrain_chunks_imported, 1,
             "expected exactly one decoded chunk"
         );
+        let place = place_name_from_root(&space_root).expect("temp root has a name");
         let chunk = space_root
             .join("Workspace")
+            .join(&place)
             .join("Terrain")
             .join("voxel_chunks")
             .join("chunk_0_0_0.bin");
@@ -1558,7 +1759,8 @@ mod tests {
         assert_eq!(report.csg_baked_extracted, 1, "one CSG mesh should bake");
         assert_eq!(report.csg_fallback_aabb, 0);
 
-        let csg_dir = space_root.join("Workspace").join("Carved");
+        let place = place_name_from_root(&space_root).expect("temp root has a name");
+        let csg_dir = space_root.join("Workspace").join(&place).join("Carved");
         assert!(csg_dir.join("csg.glb").is_file(), "csg.glb should exist");
         // The Part TOML should point its asset mesh at csg.glb.
         let toml = std::fs::read_to_string(csg_dir.join("_instance.toml")).unwrap();
@@ -1600,8 +1802,10 @@ mod tests {
             "AABB fallback should be logged: {:?}",
             report.approximations
         );
+        let place = place_name_from_root(&space_root).expect("temp root has a name");
         assert!(space_root
             .join("Workspace")
+            .join(&place)
             .join("Hollow")
             .join("csg.glb")
             .is_file());

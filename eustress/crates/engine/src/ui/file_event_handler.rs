@@ -1133,13 +1133,38 @@ fn do_import_asset(world: &mut World, source: PathBuf) {
 // ============================================================================
 
 /// Parse a user-picked Roblox place / model file and materialise every
-/// instance into the active Space root via the `eustress-roblox-import`
-/// crate. Mirrors [`do_import_asset`]: it resolves the active
-/// `SpaceRoot`, reports failures through [`notify_err`], and surfaces the
-/// outcome via the `NotificationManager` toast stack. The importer writes
-/// one `_instance.toml` per Roblox instance, so the file watcher spawns
-/// the entities — no manual respawn here (same contract as the
-/// `create_instance` path in `do_import_asset`).
+/// instance into a **FRESH, DEDICATED Space** via the
+/// `eustress-roblox-import` crate. An import NEVER pours into the active
+/// Space — that historically dumped a foreign place (e.g. 161,459 Vehicle
+/// Simulator instances) on top of the user's existing content. Instead we
+/// scaffold a brand-new empty Space named after the source file under the
+/// current Universe, materialise into it, then switch `SpaceRoot` to it so
+/// the engine opens the imported place. The user's active Space is left
+/// byte-for-byte untouched.
+///
+/// Control flow:
+///   1. resolve the active `SpaceRoot` ONLY to locate the current Universe
+///      (via [`universe_root_for_path`](crate::space::universe_root_for_path)) —
+///      it is *not* the import target;
+///   2. parse the file (fail fast before any disk scaffolding);
+///   3. derive + sanitize a Space name from the file stem, de-duped under
+///      `<Universe>/Spaces/` so we never reuse an existing populated Space;
+///   4. scaffold a fresh empty Space with [`space_ops::scaffold_new_space`]
+///      (standard service folders + `.eustress` project files);
+///   5. GUARD: refuse to materialise into a non-empty `Workspace`
+///      ([`workspace_is_empty`]); a fresh scaffold is always empty, so this
+///      is defense-in-depth against any future caller;
+///   6. point `import_into_space` at the FRESH space root (with `world_db`
+///      unset so binary parts degrade to `_instance.toml` ON THE FRESH
+///      SPACE'S DISK — never into the active Space's open WorldDb);
+///   7. on success, switch to the fresh Space with [`space_ops::open_space`]
+///      (the reactive `open_world_db_on_space_change` system then opens +
+///      auto-converts the fresh Space's own DB from its disk content).
+///
+/// Mirrors [`do_import_asset`] for failure reporting ([`notify_err`]) and
+/// the `NotificationManager` toast stack. The importer writes one
+/// `_instance.toml` per Roblox instance into the fresh Space; the file
+/// watcher (re-bound by `open_space`) spawns the entities.
 ///
 /// The full [`ImportReport`](eustress_roblox_import::ImportReport) is
 /// logged at `info!`; the toast carries the headline counts (entities
@@ -1148,9 +1173,12 @@ fn do_import_asset(world: &mut World, source: PathBuf) {
 /// `docs/architecture/ROBLOX_IMPORT_SPEC.md` §14 are a follow-up — this
 /// uses `ImportOptions::default()` and a single summary toast.
 fn do_import_roblox_place(world: &mut World, source: PathBuf) {
-    // 1. Resolve the active Space root — the import destination. Same
-    //    resolution as `do_import_asset`.
-    let space_root = match world.get_resource::<crate::space::SpaceRoot>() {
+    // 1. Resolve the active Space root ONLY so we can locate the current
+    //    Universe — it is NOT the import destination. Imports always
+    //    target a fresh, dedicated Space (see step 4); pouring into the
+    //    active Space additively is the contamination bug this guards
+    //    against.
+    let active_space_root = match world.get_resource::<crate::space::SpaceRoot>() {
         Some(sr) => sr.0.clone(),
         None => {
             notify_err(world, "Cannot import Roblox place: no Space loaded".to_string());
@@ -1164,7 +1192,9 @@ fn do_import_roblox_place(world: &mut World, source: PathBuf) {
         .unwrap_or("place")
         .to_string();
 
-    // 2. Parse the file (auto-detects binary vs XML by magic bytes).
+    // 2. Parse the file (auto-detects binary vs XML by magic bytes). Done
+    //    BEFORE any scaffolding so a bad file leaves zero empty Spaces on
+    //    disk.
     let dom = match eustress_roblox_import::parse(&source) {
         Ok(d) => d,
         Err(e) => {
@@ -1175,6 +1205,68 @@ fn do_import_roblox_place(world: &mut World, source: PathBuf) {
             return;
         }
     };
+
+    // 3. Locate the current Universe root. `universe_root_for_path` walks
+    //    up from the active Space root to the Universe directory (handles
+    //    both the `<Universe>/Spaces/<Space>` and legacy `<Universe>/<Space>`
+    //    layouts). Fall back to the active Space root's grandparent, then
+    //    the active Space root itself, so the fresh Space never lands
+    //    outside the project tree.
+    let universe_root = crate::space::universe_root_for_path(&active_space_root)
+        .or_else(|| active_space_root.ancestors().nth(2).map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| active_space_root.clone());
+
+    // 4. Derive + sanitize a Space name from the source file stem and
+    //    de-dupe it under `<Universe>/Spaces/` so we never reuse an
+    //    existing (possibly populated) Space, then scaffold a brand-new
+    //    empty Space there. Reuses the exact scaffolding the New-Space
+    //    path uses (`space_ops::scaffold_new_space` — service folders +
+    //    `.eustress` project files), so the fresh Space is a fully-formed
+    //    EEP Space.
+    let spaces_dir = universe_root.join("Spaces");
+    let space_name = unique_space_name(&spaces_dir, &source);
+    let author = world
+        .get_resource::<crate::auth::AuthState>()
+        .and_then(|a| a.user.as_ref())
+        .map(|u| u.username.clone())
+        .unwrap_or_else(|| "Eustress User".to_string());
+    if let Err(e) = std::fs::create_dir_all(&spaces_dir) {
+        notify_err(
+            world,
+            format!("Roblox import: could not create Spaces dir {:?}: {}", spaces_dir, e),
+        );
+        return;
+    }
+    let fresh_space_root = match space_ops::scaffold_new_space(&spaces_dir, &space_name, &author) {
+        Ok(result) => result.space_root,
+        Err(e) => {
+            notify_err(
+                world,
+                format!("Roblox import: could not scaffold fresh Space '{}': {}", space_name, e),
+            );
+            return;
+        }
+    };
+    info!(
+        "📦 Roblox import: created fresh Space '{}' at {} (active Space left untouched)",
+        space_name,
+        fresh_space_root.display(),
+    );
+
+    // 5. GUARD (defense-in-depth): refuse to materialise into a Space whose
+    //    `Workspace` already holds user entities. A freshly-scaffolded
+    //    Space is always empty, so this never fires on the happy path — it
+    //    exists so no future caller can re-point the import at a populated
+    //    Space (the original contamination bug). `allow_merge = false`:
+    //    imports always create a fresh Space.
+    if let Err(msg) = guard_import_target(&fresh_space_root, false) {
+        notify_err(world, msg);
+        return;
+    }
+    // From here on, `space_root` is the FRESH space — every downstream
+    // path (asset fetcher cache, import target) uses it, never the active
+    // Space.
+    let space_root = fresh_space_root.clone();
 
     // 3a. Build the asset fetcher (Wave F2 — MESHES). The importer resolves
     //     `rbxassetid://` MeshPart/SpecialMesh refs into real `.glb` geometry
@@ -1231,31 +1323,27 @@ fn do_import_roblox_place(world: &mut World, source: PathBuf) {
         }
     };
 
-    // 3b. Build import options. With the `world-db` feature (default), hand the
-    //    importer THIS Space's open WorldDb handle so bare, scalable parts bake
-    //    straight into the binary-ECS `entities` partition (BinaryDirect is the
-    //    default storage mode); file-natured nodes (scripts/GUI/custom meshes)
-    //    still land as `_instance.toml` folders — the sink decides per node.
-    //    With no open handle (or the feature off) BinaryDirect degrades to TOML.
-    //    Defaults also route every standard service, derive a per-Space
-    //    deterministic UUID salt, and stamp `metadata.unit = "m"` (Roblox studs
-    //    map 1:1 to Eustress meters).
+    // 3b. Build import options. We deliberately leave `world_db` UNSET even
+    //    under the `world-db` feature: the only open WorldDb handle in the
+    //    World belongs to the *active* Space, and handing it to the importer
+    //    would bake the foreign place straight into the active Space's
+    //    `entities` partition — the very contamination this rewrite removes,
+    //    just through the binary path instead of the TOML path. With no
+    //    handle, BinaryDirect cleanly degrades to `_instance.toml` folders
+    //    written onto the FRESH Space's disk. The fresh Space's own WorldDb
+    //    is opened + auto-converted from those TOMLs by
+    //    `open_world_db_on_space_change` the moment `open_space` (step 7)
+    //    switches `SpaceRoot` — so binary-ECS storage is still achieved, on
+    //    the correct (fresh) DB. Defaults route every standard service,
+    //    derive a per-Space deterministic UUID salt, and stamp
+    //    `metadata.unit = "m"` (Roblox studs map 1:1 to Eustress meters).
     #[cfg(feature = "world-db")]
-    let opts = {
-        let world_db = world
-            .get_resource::<crate::space::world_db_plugin::WorldDbHandle>()
-            .and_then(|h| h.0.clone());
-        if world_db.is_none() {
-            warn!(
-                "Roblox import: no open WorldDb for this Space — binary import \
-                 degrades to TOML folders"
-            );
-        }
-        eustress_roblox_import::ImportOptions {
-            world_db,
-            asset_fetcher,
-            ..Default::default()
-        }
+    let opts = eustress_roblox_import::ImportOptions {
+        // NOTE: intentionally None — see the comment above. Never reuse the
+        // active Space's handle here.
+        world_db: None,
+        asset_fetcher,
+        ..Default::default()
     };
     #[cfg(not(feature = "world-db"))]
     let opts = eustress_roblox_import::ImportOptions {
@@ -1263,6 +1351,7 @@ fn do_import_roblox_place(world: &mut World, source: PathBuf) {
         ..Default::default()
     };
 
+    // Materialise into the FRESH space root (NOT the active SpaceRoot).
     let report = match eustress_roblox_import::import_into_space(&dom, &space_root, opts) {
         Ok(r) => r,
         Err(e) => {
@@ -1317,21 +1406,175 @@ fn do_import_roblox_place(world: &mut World, source: PathBuf) {
         info!("    name collisions: {:?}", report.name_collisions);
     }
 
-    // 6. Surface the headline outcome as a toast.
+    // 6. Surface the headline outcome as a toast (naming the fresh Space so
+    //    the user knows the import landed somewhere new, not in their open
+    //    Space).
     if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
         let msg = if warnings > 0 {
             format!(
-                "Imported {} entities from {} — {} warnings (see log)",
-                report.total_nodes_imported, file_name, warnings,
+                "Imported {} entities from {} into new Space '{}' — {} warnings (see log)",
+                report.total_nodes_imported, file_name, space_name, warnings,
             )
         } else {
             format!(
-                "Imported {} entities from {}",
-                report.total_nodes_imported, file_name,
+                "Imported {} entities from {} into new Space '{}'",
+                report.total_nodes_imported, file_name, space_name,
             )
         };
         n.success(msg);
     }
+
+    // 7. Switch to the fresh Space so the engine opens the imported place.
+    //    `open_space` is the same routine `do_open_space_path` /
+    //    `do_new_space_confirmed` drive through: it sets `SpaceRoot`,
+    //    despawns the outgoing Space's entities, re-binds the file watcher
+    //    onto the fresh root, and triggers the loaders. Switching SpaceRoot
+    //    also re-arms `open_world_db_on_space_change`, which opens +
+    //    auto-converts the fresh Space's own `world.fjalldb/` from the
+    //    `_instance.toml` files we just wrote — so the imported place gets
+    //    its binary-ECS DB on the correct (fresh) Space, never the active
+    //    one. Force a Universe-registry rescan first so the new Space shows
+    //    up immediately in the Universes panel (mirrors `new_space`).
+    if let Some(mut registry) = world.get_resource_mut::<crate::space::UniverseRegistry>() {
+        registry.rescan_requested = true;
+    }
+    space_ops::open_space(world, &fresh_space_root);
+}
+
+/// Derive a unique, sanitized Space folder name from a Roblox source file
+/// and de-dupe it against existing Spaces under `spaces_dir`.
+///
+/// The base name is the file stem (`Vehicle Simulator.rbxl` → `Vehicle
+/// Simulator`), run through [`space_ops::sanitize_filename`] — the same
+/// sanitizer the New-Space path uses. If that folder already exists we
+/// append `" 2"`, `" 3"`, … until we find a free name, so an import NEVER
+/// reuses (and therefore never contaminates) an existing populated Space.
+/// After a bounded number of numeric attempts we fall back to a timestamp
+/// suffix, which is effectively collision-proof.
+fn unique_space_name(spaces_dir: &Path, source: &Path) -> String {
+    let stem = source
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Imported Place");
+    let mut base = space_ops::sanitize_filename(stem);
+    if base.is_empty() {
+        base = "Imported Place".to_string();
+    }
+
+    // First choice: the bare base name.
+    if !spaces_dir.join(&base).exists() {
+        return base;
+    }
+    // Then " 2", " 3", … up to a sane cap.
+    for n in 2..=999u32 {
+        let candidate = format!("{} {}", base, n);
+        if !spaces_dir.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    // Pathological fallback: timestamp suffix (collision-proof).
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("{} {:x}", base, ts)
+}
+
+/// Defense-in-depth guard: refuse to let any import materialise into a
+/// Space whose `Workspace` already contains user entities.
+///
+/// Returns `Ok(())` when the target is safe (empty `Workspace`, or
+/// `allow_merge == true`), and `Err(message)` — routed through
+/// [`notify_err`] by the caller — when materialising would contaminate a
+/// populated Space.
+///
+/// "Contains user entities" is judged by scanning the on-disk `Workspace/`
+/// folder for any `_instance.toml` (a materialised part/model) anywhere in
+/// its subtree. A freshly-scaffolded Space only has `Workspace/_service.toml`
+/// plus the default `Baseplate` (which lives in its own `Baseplate/` folder
+/// as `_instance.toml`) — so we must distinguish "just the scaffold default"
+/// from "real user content". We treat a single top-level default child as
+/// empty and anything beyond that as populated. Imports always pass
+/// `allow_merge = false`; the override exists only so a deliberate future
+/// "merge into this Space" feature can opt in explicitly.
+fn guard_import_target(space_root: &Path, allow_merge: bool) -> Result<(), String> {
+    if allow_merge {
+        return Ok(());
+    }
+    if workspace_is_empty(space_root) {
+        return Ok(());
+    }
+    Err(format!(
+        "Import would contaminate a non-empty Space ('{}'); imports always create a fresh Space",
+        space_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("<unknown>"),
+    ))
+}
+
+/// True if the Space's `Workspace` holds no user entities beyond the
+/// standard fresh-scaffold default.
+///
+/// A just-scaffolded Space has `Workspace/_service.toml` and a single
+/// default `Baseplate` child (`Workspace/Baseplate/_instance.toml`). We
+/// count materialised-instance markers (`_instance.toml`) under
+/// `Workspace/` and treat ≤ 1 as empty (the lone Baseplate) and > 1 as
+/// populated. A migrated `.eustress` world keeps its tree in the DB with no
+/// loose `Workspace/` on disk; for such a Space the on-disk scan finds
+/// nothing and we conservatively treat it as NON-empty (return false) so
+/// the guard refuses — an import must never target a pre-existing migrated
+/// Space, only the fresh one this module just scaffolded (which always has
+/// a loose `Workspace/`).
+fn workspace_is_empty(space_root: &Path) -> bool {
+    // A migrated world has no loose Workspace/ — refuse to treat it as
+    // empty (its real content lives in world.fjalldb/).
+    if space_ops::space_is_migrated(space_root) {
+        return false;
+    }
+    let workspace = space_root.join("Workspace");
+    if !workspace.is_dir() {
+        // No Workspace on disk at all and not migrated: nothing to
+        // contaminate.
+        return true;
+    }
+    let instance_markers = count_instance_markers(&workspace, 0);
+    instance_markers <= 1
+}
+
+/// Recursively count `_instance.toml` files under `dir` (bounded depth so a
+/// pathological tree can't stall the import). Each marks one materialised
+/// entity folder.
+fn count_instance_markers(dir: &Path, depth: usize) -> usize {
+    // Guard against runaway recursion / symlink loops on a foreign tree.
+    if depth > 64 {
+        return usize::MAX;
+    }
+    let mut count = 0;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return count;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(ty) = entry.file_type() else { continue };
+        if ty.is_dir() {
+            count = count.saturating_add(count_instance_markers(&path, depth + 1));
+        } else if ty.is_file()
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.eq_ignore_ascii_case("_instance.toml"))
+                .unwrap_or(false)
+        {
+            count = count.saturating_add(1);
+        }
+        // Short-circuit: once we know there is more than the lone default,
+        // stop walking — the guard only needs "≤ 1 vs > 1".
+        if count > 1 {
+            return count;
+        }
+    }
+    count
 }
 
 #[derive(Copy, Clone, Debug)]

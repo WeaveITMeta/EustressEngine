@@ -213,21 +213,183 @@ impl FileType {
     }
 }
 
+/// Process-wide cache of file *content* (Space-relative key → UTF-8
+/// text), populated by [`prewarm_read_cache`] on a rayon thread-pool
+/// pass BEFORE the main-thread spawn walk. `src_read_string` consults
+/// it first; a hit returns the already-read text and skips the disk /
+/// Fjall round-trip entirely.
+///
+/// Why a `static` + `Mutex`: the read sites are reached through
+/// `spawn_directory_entry`/`spawn_file_entry`, which are plain
+/// functions (not Bevy systems) called from deep inside the recursion —
+/// threading a `&Cache` parameter through every one of their ~18 read
+/// call sites and recursive hops would be a large, error-prone diff and
+/// would risk perturbing spawn order. A module-private `static` lets the
+/// seam consult the cache with a one-line change and keeps every spawn
+/// call site byte-for-byte identical. The lock is only ever held for a
+/// hash lookup + `String` clone (no I/O under the lock), so it is not a
+/// contention point; the parallel work happens in `prewarm_read_cache`
+/// where the closures own their results and only the final inserts touch
+/// the map.
+///
+/// Lifecycle: `load_space_files_system` calls `prewarm_read_cache` right
+/// after the scan, then clears the cache once the synchronous priority
+/// spawn returns (see `clear_read_cache`). Deferred-service frames and
+/// hot-reloads run with an empty cache and therefore read live — the
+/// cache only ever accelerates the one cold bulk-load it was filled for,
+/// and a miss is always a correct live read.
+static READ_CACHE: std::sync::Mutex<Option<HashMap<String, String>>> =
+    std::sync::Mutex::new(None);
+
+/// Look up `rel` in the pre-warmed [`READ_CACHE`]. Returns the cached
+/// text on a hit, `None` on a miss (cache empty/cleared or path not
+/// pre-read — both fall through to a live read in `src_read_string`).
+fn read_cache_get(rel: &str) -> Option<String> {
+    let guard = READ_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().and_then(|m| m.get(rel).cloned())
+}
+
 /// Read a file's text through the active [`SpaceSource`], deriving the
 /// Space-relative key from the absolute `abs_path` the loader still
 /// carries for identity. Falls back to a direct `std::fs` read if the
 /// path can't be made relative (defensive — should not happen for
 /// in-Space content). This is the single seam every loader read site
 /// goes through so Disk vs Fjall is one decision, not 18.
+///
+/// Before touching the source it consults [`READ_CACHE`]: on a cold
+/// bulk-load the rayon pre-warm pass has already read+decoded every
+/// `_instance.toml` (and other text) across all cores, so this returns
+/// the cached `String` and the spawn walk never blocks on serial
+/// small-file I/O. A miss (cache cleared, or this path wasn't
+/// pre-warmed) reads live exactly as before — the cache is a pure
+/// accelerator and changes nothing about *what* text a call site parses.
 fn src_read_string(
     source: &dyn super::space_source::SpaceSource,
     space_root: &Path,
     abs_path: &Path,
 ) -> std::io::Result<String> {
     match super::space_source::rel_from_root(space_root, abs_path) {
-        Some(rel) => source.read_to_string(&rel),
+        Some(rel) => {
+            if let Some(cached) = read_cache_get(&rel) {
+                return Ok(cached);
+            }
+            source.read_to_string(&rel)
+        }
         None => std::fs::read_to_string(abs_path),
     }
+}
+
+/// Collect every text-readable node's Space-relative path from an
+/// already-scanned [`FileMetadata`] forest into `out`.
+///
+/// This mirrors exactly which paths the spawn walk will hand to
+/// `src_read_string`:
+/// - For each FILE node, the file itself (scripts, `.mat.toml`,
+///   `.glb.toml`, GUI element TOMLs, flat instance TOMLs …).
+/// - For each DIRECTORY node, its `_instance.toml` marker — the
+///   directory branches all read `dir_meta.path.join("_instance.toml")`.
+///
+/// Binary assets (`.glb`, images, audio) are *not* pre-read here: they
+/// are never fetched through `src_read_string` (GLTF goes via the
+/// `space://` asset source, etc.), so reading them would waste I/O and
+/// memory. Over-collecting is harmless for correctness (an unused cache
+/// entry is just ignored) but pointless, so we collect precisely the set
+/// the text read seam will ask for.
+fn collect_readable_rel_paths(
+    space_root: &Path,
+    nodes: &[FileMetadata],
+    out: &mut Vec<String>,
+) {
+    for node in nodes {
+        match node.file_type {
+            FileType::Directory => {
+                let marker = node.path.join("_instance.toml");
+                if let Some(rel) = super::space_source::rel_from_root(space_root, &marker) {
+                    out.push(rel);
+                }
+                collect_readable_rel_paths(space_root, &node.children, out);
+            }
+            _ => {
+                if let Some(rel) = super::space_source::rel_from_root(space_root, &node.path) {
+                    out.push(rel);
+                }
+            }
+        }
+    }
+}
+
+/// Parallel pre-read + UTF-8 decode of every text node in the scanned
+/// `entries` forest, filling [`READ_CACHE`] so the subsequent
+/// main-thread spawn walk reads from memory instead of hitting disk /
+/// Fjall serially.
+///
+/// This is the single optimisation of this change: the file read + text
+/// decode (the dominant cost when opening a 161K-file Space — thousands
+/// of tiny `_instance.toml` reads done one at a time) is moved EARLIER
+/// and spread across all CPU cores via `rayon`. Spawning, parenting, the
+/// `file_to_entity` map, component composition and ordering are all
+/// downstream of this and completely untouched — they just find the text
+/// already in hand.
+///
+/// Safety w.r.t. Bevy + rayon: the parallel closure does **no** Bevy
+/// `World` / `Commands` / resource access whatsoever. It borrows only
+/// `source` (a `&dyn SpaceSource`, which is `Send + Sync`) and a `&str`
+/// key, and returns owned `(String, String)` data. All ECS mutation
+/// stays on the main thread after this returns. Reads are independent
+/// per path, so there is no ordering dependence inside the pool.
+///
+/// Misses are benign: a path that fails to read or isn't valid UTF-8 is
+/// simply omitted from the cache, and `src_read_string` falls through to
+/// the original live read (and original error handling) for it. So this
+/// can only ever speed loading up, never change its result.
+fn prewarm_read_cache(
+    source: &dyn super::space_source::SpaceSource,
+    space_root: &Path,
+    entries: &[FileMetadata],
+) {
+    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+
+    let mut rel_paths: Vec<String> = Vec::new();
+    collect_readable_rel_paths(space_root, entries, &mut rel_paths);
+    if rel_paths.is_empty() {
+        return;
+    }
+    let total = rel_paths.len();
+
+    let t0 = std::time::Instant::now();
+    // CPU/I-O-bound, no Bevy access: read + UTF-8 decode each path in
+    // parallel, keep only the hits. `read_to_string` already maps a
+    // non-UTF-8 body to an Err, which `.ok()` drops → live re-read later.
+    let pairs: Vec<(String, String)> = rel_paths
+        .par_iter()
+        .filter_map(|rel| {
+            source
+                .read_to_string(rel)
+                .ok()
+                .map(|content| (rel.clone(), content))
+        })
+        .collect();
+
+    let hits = pairs.len();
+    let map: HashMap<String, String> = pairs.into_iter().collect();
+    {
+        let mut guard = READ_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(map);
+    }
+    info!(
+        target: "eustress_engine::world_db",
+        "⚡ Pre-read {}/{} text files across rayon pool in {:?} (parallel read+decode → spawn walk reads from memory)",
+        hits, total, t0.elapsed()
+    );
+}
+
+/// Drop the pre-warmed [`READ_CACHE`]. Called once the synchronous
+/// priority spawn completes so deferred-service frames and hot-reloads
+/// run against live content (and the cache's memory is freed). A no-op
+/// if the cache was never filled.
+fn clear_read_cache() {
+    let mut guard = READ_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = None;
 }
 
 /// Metadata extracted from a file or directory
@@ -2306,6 +2468,16 @@ pub fn load_space_files_system(
         scan_t0.elapsed()
     );
 
+    // Parallel pre-read+parse pass: read + UTF-8-decode every text node
+    // the spawn walk will consume, across the whole rayon pool, into
+    // READ_CACHE BEFORE the (still sequential, still main-thread) spawn
+    // begins. This collapses the serial small-file I/O that dominated
+    // opening huge Spaces (e.g. the 161K-file Vehicle Simulator place)
+    // onto all cores. Spawn/parenting/registry/ordering logic below is
+    // unchanged — it now just finds the text already in memory. Cleared
+    // after the priority spawn returns (`clear_read_cache`).
+    prewarm_read_cache(source, space_path, &entries);
+
     let cd_ref = class_defaults.as_deref();
     let mut deferred_entries = Vec::new();
 
@@ -2369,6 +2541,12 @@ pub fn load_space_files_system(
     // Stamp the generation so load_deferred_services can detect a
     // mid-load Space switch and discard this queue.
     deferred.generation = gen.0;
+
+    // Priority spawn is done; release the pre-warmed read cache. The
+    // deferred-service frames + frame-budget spill + all hot-reloads run
+    // against live content from here on (a cache miss is a correct live
+    // read, so this is purely about not holding stale text or memory).
+    clear_read_cache();
 }
 
 /// Queue of freshly-pasted folder ROOTS (absolute paths, normally under

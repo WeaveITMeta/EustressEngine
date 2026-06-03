@@ -272,6 +272,11 @@ fn main() {
         .register_type::<GltfSceneExtras>()
         .register_type::<GltfMeshExtras>()
         .register_type::<GltfMaterialExtras>()
+        // Bevy 0.18 added this transform-propagation marker; it lands inside
+        // every glb's scene graph, so `SceneSpawner` panics with "unregistered
+        // type" on any imported mesh / CSG glb unless we register it here.
+        // (This was crashing the engine on Vehicle Simulator's CSG glbs.)
+        .register_type::<bevy::transform::components::TransformTreeChanged>()
         // PlayerService for play mode character spawning
         .init_resource::<PlayerService>()
         // DisplayUnit — user-selected display unit for the Properties
