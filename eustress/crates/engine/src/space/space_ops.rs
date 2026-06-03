@@ -521,6 +521,7 @@ pub fn save_space(world: &mut World) {
                     .trim_start_matches("ClassName::")
                     .to_string();
                 InstanceDefinition {
+                    nuclear: None,
                     asset: Some(AssetReference {
                         mesh,
                         scene: "Scene0".to_string(),

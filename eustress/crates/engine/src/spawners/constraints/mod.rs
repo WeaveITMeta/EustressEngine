@@ -258,6 +258,63 @@ pub(crate) fn instance_from_bag(
     instance
 }
 
+/// Build the [`ConstraintRefs`] carrier from the property bag's resolved
+/// reference UUIDs, so the joint resolver can bind this constraint's Avian
+/// joint by stable identity once the referenced parts/attachments exist.
+///
+/// The Roblox importer writes resolved part/attachment references as UUID
+/// strings under `[references]`, keyed by the raw Roblox property name
+/// (`Part0`/`Part1` or `Attachment0`/`Attachment1`). Each constraint
+/// spawner's `import_from_toml` mirrors those into the bag under
+/// `references.<Name>`; this helper reads whichever pair the class uses.
+///
+/// `key0` / `key1` are the bag keys for the two ends, e.g.
+/// `("references.Part0", "references.Part1")` for a weld or
+/// `("references.Attachment0", "references.Attachment1")` for a rod.
+///
+/// [`ConstraintRefs`]: crate::physics::joint_resolver::ConstraintRefs
+pub(crate) fn constraint_refs_from_bag(
+    bag: &crate::class_registry::PropertyBag,
+    key0: &str,
+    key1: &str,
+) -> crate::physics::joint_resolver::ConstraintRefs {
+    crate::physics::joint_resolver::ConstraintRefs::new(
+        bag.get_string(key0).map(|s| s.to_string()),
+        bag.get_string(key1).map(|s| s.to_string()),
+    )
+}
+
+/// Read the `[references]` table from a `_instance.toml` body into the bag
+/// under `references.<Key>` for the given pair of Roblox ref property
+/// names. Called by each constraint spawner's `import_from_toml` so the
+/// resolved UUIDs survive into [`constraint_refs_from_bag`].
+pub(crate) fn read_references_into_bag(
+    toml_value: &toml::Value,
+    bag: &mut crate::class_registry::PropertyBag,
+    name0: &str,
+    name1: &str,
+) {
+    use eustress_common::classes::PropertyValue;
+    let Some(refs) = toml_value.get("references").and_then(|v| v.as_table()) else {
+        return;
+    };
+    // Accept the importer's PascalCase key and a lowercase hand-authored
+    // fallback.
+    let read = |name: &str| -> Option<String> {
+        refs.get(name)
+            .or_else(|| refs.get(&name.to_ascii_lowercase()))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+    };
+    if let Some(u) = read(name0) {
+        bag.set(format!("references.{name0}"), PropertyValue::String(u));
+    }
+    if let Some(u) = read(name1) {
+        bag.set(format!("references.{name1}"), PropertyValue::String(u));
+    }
+}
+
 // ── Mover helpers: `ForceRelativeTo` ⇄ on-disk string ─────────────────
 
 /// Parse the on-disk / property-bag `relative_to` string into the
@@ -310,9 +367,7 @@ mod tests {
         app.add_plugins(ClassRegistryPlugin);
         app.add_plugins(ConstraintsSpawnerPlugin);
 
-        let registry = app
-            .world()
-            .resource::<ClassRegistry>();
+        let registry = app.world().resource::<ClassRegistry>();
         assert_eq!(
             registry.len(),
             26,

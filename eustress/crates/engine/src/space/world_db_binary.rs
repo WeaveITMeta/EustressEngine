@@ -170,6 +170,7 @@ fn def_from_components(
         .unwrap_or_default();
 
     InstanceDefinition {
+        nuclear: None,
         asset: if mesh.is_empty() {
             None
         } else {

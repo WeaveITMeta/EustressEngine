@@ -7936,6 +7936,9 @@ fn drain_slint_actions(
 
                         let now = chrono::Utc::now().to_rfc3339();
                         let instance_def = crate::space::instance_loader::InstanceDefinition {
+                            // Parallel nuclear session added this field; generic
+                            // builders carry no reactor state.
+                            nuclear: None,
                             asset: Some(crate::space::instance_loader::AssetReference {
                                 mesh: mesh_path.to_string(),
                                 scene: "Scene0".to_string(),
@@ -14073,6 +14076,7 @@ fn sync_properties_to_slint(
             // know from the Instance component.
             if !is_ui_class_outer { return None; }
             Some(crate::space::instance_loader::InstanceDefinition {
+                nuclear: None,
                 asset: None,
                 transform: crate::space::instance_loader::TransformData::default(),
                 properties: crate::space::instance_loader::InstanceProperties::default(),

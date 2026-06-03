@@ -107,6 +107,7 @@ mod transform_space;
 mod clipboard;
 mod grouping;
 mod material_sync;
+mod light_cull;        // Perf QW1/QW2 — nearest-N shadow + intensity light cull
 mod lock_tool;
 mod video;
 mod play_mode;          // Play mode with character spawning
@@ -256,8 +257,16 @@ fn main() {
         // Diagnostic plugins for FPS and performance profiling
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(EntityCountDiagnosticsPlugin::default())
-        // LogDiagnosticsPlugin disabled — FPS/frame_time shown in Slint overlay instead
-        // .add_plugins(LogDiagnosticsPlugin { wait_duration: std::time::Duration::from_secs(5), ..default() })
+        // Periodic console FPS / frame-time / entity-count readout (~2s
+        // interval) so the perf "quick wins" below can be validated with
+        // real numbers in the log. Lightweight — does NOT enable the heavy
+        // `bevy/trace` feature; just prints the already-collected
+        // FrameTimeDiagnostics + EntityCountDiagnostics. The Slint overlay
+        // still shows live FPS too; this adds a loggable trail.
+        .add_plugins(LogDiagnosticsPlugin {
+            wait_duration: std::time::Duration::from_secs(2),
+            ..default()
+        })
         // Register GLTF types for scene spawning (prevents panic on unregistered types)
         .register_type::<GltfExtras>()
         .register_type::<GltfSceneExtras>()

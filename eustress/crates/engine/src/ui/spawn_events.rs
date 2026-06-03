@@ -350,6 +350,7 @@ fn build_binary_part_def(
     let c = base.color.to_srgba();
     let now = chrono::Utc::now().to_rfc3339();
     InstanceDefinition {
+        nuclear: None,
         asset: Some(AssetReference {
             mesh: mesh.to_string(),
             scene: "Scene0".to_string(),

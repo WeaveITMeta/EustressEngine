@@ -1056,6 +1056,26 @@ pub fn spawn_directory_entry(
         eustress_common::classes::ClassName::Folder
     };
 
+    // Stable UUID from `[metadata].uuid` — carried onto the spawned
+    // `Instance` so cross-references resolve by identity (constraints bind
+    // their `Part0`/`Attachment0` joint bodies by UUID; Attachment +
+    // Folder/Model entities spawned via the fall-through arm need it too).
+    let instance_uuid: String = if source.exists(&instance_toml_rel) {
+        src_read_string(source, space_path, &instance_toml_path)
+            .ok()
+            .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+            .and_then(|v| {
+                let meta = v.get("metadata").or_else(|| v.get("Metadata"))?;
+                meta.get("uuid")
+                    .or_else(|| meta.get("Uuid"))
+                    .and_then(|u| u.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
     // Spawn the Folder / ScreenGui / Frame / Model entity
     let is_screen_gui = matches!(class_name, eustress_common::classes::ClassName::ScreenGui);
     let is_gui_container = matches!(class_name,
@@ -1832,7 +1852,10 @@ pub fn spawn_directory_entry(
                 archivable: true,
                 id: 0,
                 ai: false,
-                uuid: String::new(),
+                // Carry the UUID so a constraint loaded here can be resolved
+                // by identity, and so attachments loaded here are findable
+                // as constraint joint endpoints.
+                uuid: instance_uuid.clone(),
             },
             LoadedFromFile {
                 path: dir_meta.path.clone(),

@@ -38,7 +38,7 @@ use eustress_common::class_registry::{
 use eustress_common::classes::{ClassName, PropertyValue, WeldConstraint};
 
 use super::attachment::{read_vec3_array, vec3_to_toml};
-use super::instance_from_bag;
+use super::{constraint_refs_from_bag, instance_from_bag, read_references_into_bag};
 
 /// [`ClassSpawner`] for `ClassName::WeldConstraint`.
 #[derive(Default)]
@@ -74,12 +74,18 @@ impl ClassSpawner for WeldConstraintSpawner {
             .with_local_anchor1(c0.translation)
             .with_local_anchor2(c1.translation);
 
+        // Surface the resolved part-reference UUIDs so the joint resolver
+        // can bind `body1`/`body2` by stable identity (the spawner has no
+        // `World`, so it can't resolve them here).
+        let refs = constraint_refs_from_bag(props, "references.Part0", "references.Part1");
+
         let mut ec = ctx.commands.spawn((
             Transform::default(),
             Visibility::default(),
             instance,
             weld,
             joint,
+            refs,
             Name::new(name),
         ));
         if !enabled {
@@ -112,7 +118,10 @@ impl ClassSpawner for WeldConstraintSpawner {
 
     fn import_from_roblox(&self, rbx: &dyn RobloxInstance) -> PropertyBag {
         let mut bag = PropertyBag::new();
-        bag.set("metadata.name", PropertyValue::String(rbx.name().to_string()));
+        bag.set(
+            "metadata.name",
+            PropertyValue::String(rbx.name().to_string()),
+        );
         if let Some(p) = rbx.property("Enabled").and_then(|v| v.as_bool()) {
             bag.set("enabled", PropertyValue::Bool(p));
         }
@@ -136,6 +145,10 @@ impl ClassSpawner for WeldConstraintSpawner {
         {
             bag.set("metadata.uuid", PropertyValue::String(uuid.to_string()));
         }
+
+        // Resolved part references (`[references] Part0/Part1` = UUID hex,
+        // written by the Roblox importer) → bag for the joint resolver.
+        read_references_into_bag(toml_value, &mut bag, "Part0", "Part1");
 
         if let Some(props) = toml_value.get("properties") {
             if let Some(p) = props.get("part0").and_then(|v| v.as_integer()) {
@@ -198,13 +211,8 @@ impl ClassSpawner for WeldConstraintSpawner {
 /// bag. Bag stores it as `PropertyValue::Int`; `None` means "unresolved
 /// at spawn time" (the joint will be patched later).
 pub(super) fn read_optional_part_ref(bag: &PropertyBag, key: &str) -> Option<u32> {
-    bag.get_i32(key).and_then(|i| {
-        if i < 0 {
-            None
-        } else {
-            Some(i as u32)
-        }
-    })
+    bag.get_i32(key)
+        .and_then(|i| if i < 0 { None } else { Some(i as u32) })
 }
 
 /// Read a `c0`/`c1` Transform from the bag. The bag stores these as

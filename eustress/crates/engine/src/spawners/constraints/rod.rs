@@ -34,8 +34,8 @@ use eustress_common::class_registry::{
 };
 use eustress_common::classes::{ClassName, PropertyValue, RodConstraint};
 
-use super::instance_from_bag;
 use super::weld::read_optional_part_ref;
+use super::{constraint_refs_from_bag, instance_from_bag, read_references_into_bag};
 
 /// [`ClassSpawner`] for `ClassName::RodConstraint`.
 #[derive(Default)]
@@ -70,6 +70,11 @@ impl ClassSpawner for RodConstraintSpawner {
         let joint = DistanceJoint::new(Entity::PLACEHOLDER, Entity::PLACEHOLDER)
             .with_limits(length, length);
 
+        // Surface the resolved attachment-reference UUIDs so the joint
+        // resolver can walk each attachment → owning body and bind.
+        let refs =
+            constraint_refs_from_bag(props, "references.Attachment0", "references.Attachment1");
+
         ctx.commands
             .spawn((
                 Transform::default(),
@@ -77,6 +82,7 @@ impl ClassSpawner for RodConstraintSpawner {
                 instance,
                 rod,
                 joint,
+                refs,
                 Name::new(name),
             ))
             .id()
@@ -101,7 +107,10 @@ impl ClassSpawner for RodConstraintSpawner {
 
     fn import_from_roblox(&self, rbx: &dyn RobloxInstance) -> PropertyBag {
         let mut bag = PropertyBag::new();
-        bag.set("metadata.name", PropertyValue::String(rbx.name().to_string()));
+        bag.set(
+            "metadata.name",
+            PropertyValue::String(rbx.name().to_string()),
+        );
         if let Some(l) = rbx.property("Length").and_then(|v| v.as_f32()) {
             bag.set("length", PropertyValue::Float(l));
         }
@@ -120,6 +129,9 @@ impl ClassSpawner for RodConstraintSpawner {
     fn import_from_toml(&self, toml_value: &toml::Value) -> PropertyBag {
         let mut bag = PropertyBag::with_capacity(10);
         read_meta(toml_value, &mut bag);
+        // Resolved attachment references (`[references] Attachment0/1` =
+        // UUID hex) → bag for the joint resolver.
+        read_references_into_bag(toml_value, &mut bag, "Attachment0", "Attachment1");
 
         if let Some(props) = toml_value.get("properties") {
             if let Some(p) = props.get("attachment0").and_then(|v| v.as_integer()) {

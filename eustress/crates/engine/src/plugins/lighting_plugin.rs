@@ -68,7 +68,13 @@ impl Plugin for LightingPlugin {
             // Sync Atmosphere entity with SceneAtmosphere resource for rendering
             .add_systems(Update, sync_atmosphere_to_rendering)
             // Sync Lighting ServiceComponent property edits → LightingService resource
-            .add_systems(Update, sync_service_properties_to_lighting);
+            .add_systems(Update, sync_service_properties_to_lighting)
+            // Perf QW1/QW2 — cap active + shadow-casting PointLight/SpotLight
+            // to the nearest-N around the order-0 camera (collapses thousands
+            // of shadow maps + clustered-forward cost on huge imports). Self-
+            // gated to a movement/cadence trigger, so it is a cheap no-op for
+            // a stationary camera and for small scenes. See `light_cull`.
+            .add_systems(Update, crate::light_cull::cull_lights_to_nearest);
     }
 }
 

@@ -438,6 +438,11 @@ impl ClassId {
             ClassName::PVInstance => ClassId::PVInstance,
             ClassName::BasePart => ClassId::BasePart,
             ClassName::Part => ClassId::Part,
+            // ArcReactorCore (parallel nuclear session's custom BasePart
+            // subclass) — mapped to Part for the legacy binary/RON scene tag
+            // until that session assigns a dedicated ClassId. Primary
+            // persistence is the Fjall entities partition + TOML, not this path.
+            ClassName::ArcReactorCore => ClassId::Part,
             ClassName::Model => ClassId::Model,
             ClassName::Folder => ClassId::Folder,
             ClassName::Humanoid => ClassId::Humanoid,

@@ -218,6 +218,7 @@ pub fn arch_to_instance(core: &ArchInstanceCore) -> InstanceDefinition {
     };
 
     InstanceDefinition {
+        nuclear: None,
         asset,
         transform: TransformData {
             position: core.t,

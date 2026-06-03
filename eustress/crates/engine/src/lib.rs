@@ -106,6 +106,11 @@ pub mod terrain_plugin;
 // Whole module is `#![cfg(feature = "world-db")]`.
 #[cfg(feature = "world-db")]
 pub mod terrain_voxel_load;
+// Perf QW1/QW2 — nearest-N shadow + intensity light cull. `lighting_plugin`
+// (compiled into BOTH this lib and the bin) registers
+// `crate::light_cull::cull_lights_to_nearest`, so the module must exist in the
+// lib crate root too, not just `main.rs`.
+pub mod light_cull;
 pub mod clipboard;
 pub mod grouping;
 pub mod embedded_client;
