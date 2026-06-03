@@ -147,6 +147,12 @@ rand = "0.8"
 rayon = "1.10"
 crossbeam = "0.8"
 tracing = "0.1"
+# Flamegraph renderer for the opt-in per-system profiler (feature
+# `profiling`). Optional + workspace-pinned (0.11) so the default build never
+# pulls it; only `--features profiling` links it. `tracing-subscriber` is NOT
+# a direct dep — the profiler reaches it via `bevy::log::tracing_subscriber`
+# (bevy's own re-export) so the `Layer<Registry>` types match `BoxedLayer`.
+inferno = { workspace = true, optional = true }
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 eustress-forge-sdk = { path = "../forge-sdk" }
 # WorldDb — Fjall-backed authoritative ECS persistence. Optional today;
@@ -340,5 +346,16 @@ toml = []
 dev = ["bevy/dynamic_linking"]
 hotpatch = ["bevy/hotpatching"]
 debug = ["bevy/bevy_debug_stepping"]
+# Opt-in per-system frame micro-profiler (src/profiler.rs). REQUIRES
+# `bevy/trace`: in Bevy 0.18 the per-system `tracing` spans ("system" /
+# "system_commands", carrying a `name` field) only exist when bevy_ecs is
+# built with its `trace` feature — without it there is nothing to observe.
+# Also pulls the `inferno` flamegraph renderer. OFF by default, so the normal
+# build pays nothing; even when on, capture is dormant until the
+# `EUSTRESS_PROFILE` env var is set at runtime.
+# Build:   cargo run -p eustress-engine --features profiling
+# Capture: set EUSTRESS_PROFILE=1 (and optionally EUSTRESS_PROFILE_FRAMES=N)
+# Output:  eustress_profile.txt + eustress_profile.svg in the working dir.
+profiling = ["bevy/trace", "dep:inferno"]
 # CEF webview support (macOS only currently)
 cef = ["bevy_cef"]

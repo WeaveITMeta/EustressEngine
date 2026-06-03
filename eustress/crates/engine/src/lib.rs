@@ -162,6 +162,14 @@ pub mod stream_node_plugin;
 pub mod updater;
 pub mod simulation;
 pub mod frame_diagnostics;
+/// Opt-in per-system frame micro-profiler (feature `profiling`).
+///
+/// Compiles to an empty plugin unless the `profiling` feature is on (which
+/// also turns on `bevy/trace` so Bevy emits the per-system `tracing` spans
+/// this reads). Even when built in, capture stays dormant until the
+/// `EUSTRESS_PROFILE` env var is set. See the module docs for the full
+/// gating + output-file contract.
+pub mod profiler;
 pub mod io_manager;
 pub mod window_focus;
 

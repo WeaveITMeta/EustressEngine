@@ -132,6 +132,7 @@ mod txt_to_toml_watcher; // Automatic .txt to .toml converter
 mod workshop;           // Workshop Panel (System 0: Ideation)
 mod manufacturing;      // Manufacturing Program: investor + manufacturer registry + AI allocation
 mod frame_diagnostics;  // Frame time tracking to identify stutters
+mod profiler;           // Opt-in per-system frame micro-profiler (feature `profiling`)
 mod network_benchmark;  // Stress test with sysinfo hardware detection
 mod updater;            // In-app self-update system
 
@@ -251,6 +252,17 @@ fn main() {
             })
             .set(AssetPlugin {
                 file_path: "assets".to_string(),
+                ..default()
+            })
+            // Per-system frame micro-profiler hook (feature `profiling`).
+            // `profiler::custom_layer` adds a tracing Layer to THIS subscriber
+            // that times each Bevy `"system"` span. With the feature off it is
+            // `|_| None`, so this `.set` is a no-op clone of the default
+            // LogPlugin and changes nothing about logging. With the feature on
+            // it still does nothing until `EUSTRESS_PROFILE` is set. All other
+            // LogPlugin fields stay at their defaults (filter/level/fmt_layer).
+            .set(bevy::log::LogPlugin {
+                custom_layer: profiler::custom_layer,
                 ..default()
             })
         )
@@ -603,7 +615,13 @@ fn main() {
         // Studio plugins
         .add_plugins(studio_plugins::StudioPluginSystem)
         // Frame diagnostics to identify stutters
-        .add_plugins(frame_diagnostics::FrameDiagnosticsPlugin);
+        .add_plugins(frame_diagnostics::FrameDiagnosticsPlugin)
+        // Opt-in per-system frame micro-profiler. Empty plugin unless the
+        // `profiling` feature is on; even then it only captures when the
+        // `EUSTRESS_PROFILE` env var is set. Complements the stutter detector
+        // above by attributing the frame budget to individual systems and
+        // writing eustress_profile.{txt,svg}.
+        .add_plugins(profiler::ProfilerPlugin);
 
     // WorldDb — Fjall-backed authoritative ECS store (2026-05-15 binary
     // pivot; memory project_eustress_binary_pivot). Gated by the
