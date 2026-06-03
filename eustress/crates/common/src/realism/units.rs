@@ -459,6 +459,168 @@ pub fn density(mass: Kilograms, volume: CubicMeters) -> KilogramsPerCubicMeter {
     KilogramsPerCubicMeter(mass.0 / volume.0)
 }
 
+// ============================================================================
+// Electromagnetic Units (STEM Stack — Phase B)
+// ============================================================================
+
+/// Electric charge in Coulombs (C)
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default, Reflect, Serialize, Deserialize)]
+pub struct Coulombs(pub f32);
+
+impl Coulombs {
+    pub fn from_microcoulombs(uc: f32) -> Self { Self(uc * 1e-6) }
+    pub fn to_microcoulombs(self) -> f32 { self.0 * 1e6 }
+    pub fn from_nanocoulombs(nc: f32) -> Self { Self(nc * 1e-9) }
+    pub fn to_nanocoulombs(self) -> f32 { self.0 * 1e9 }
+}
+
+/// Electric potential in Volts (V = J/C)
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default, Reflect, Serialize, Deserialize)]
+pub struct Volts(pub f32);
+
+impl Volts {
+    pub fn from_millivolts(mv: f32) -> Self { Self(mv * 1e-3) }
+    pub fn to_millivolts(self) -> f32 { self.0 * 1e3 }
+    pub fn from_kilovolts(kv: f32) -> Self { Self(kv * 1e3) }
+    pub fn to_kilovolts(self) -> f32 { self.0 * 1e-3 }
+}
+
+/// Electric resistance in Ohms (Ω = V/A)
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default, Reflect, Serialize, Deserialize)]
+pub struct Ohms(pub f32);
+
+impl Ohms {
+    pub fn from_kilohms(kΩ: f32) -> Self { Self(kΩ * 1e3) }
+    pub fn to_kilohms(self) -> f32 { self.0 * 1e-3 }
+    pub fn from_megaohms(mΩ: f32) -> Self { Self(mΩ * 1e6) }
+    pub fn to_megaohms(self) -> f32 { self.0 * 1e-6 }
+    pub fn from_milliohms(mΩ: f32) -> Self { Self(mΩ * 1e-3) }
+    pub fn to_milliohms(self) -> f32 { self.0 * 1e3 }
+}
+
+/// Electric conductance in Siemens (S = 1/Ω)
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default, Reflect, Serialize, Deserialize)]
+pub struct Siemens(pub f32);
+
+/// Electrical capacitance in Farads (F = C/V)
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default, Reflect, Serialize, Deserialize)]
+pub struct Farads(pub f32);
+
+impl Farads {
+    pub fn from_microfarads(uf: f32) -> Self { Self(uf * 1e-6) }
+    pub fn to_microfarads(self) -> f32 { self.0 * 1e6 }
+    pub fn from_nanofarads(nf: f32) -> Self { Self(nf * 1e-9) }
+    pub fn to_nanofarads(self) -> f32 { self.0 * 1e9 }
+    pub fn from_picofarads(pf: f32) -> Self { Self(pf * 1e-12) }
+    pub fn to_picofarads(self) -> f32 { self.0 * 1e12 }
+}
+
+/// Electrical inductance in Henries (H = V·s/A)
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default, Reflect, Serialize, Deserialize)]
+pub struct Henries(pub f32);
+
+impl Henries {
+    pub fn from_millihenries(mh: f32) -> Self { Self(mh * 1e-3) }
+    pub fn to_millihenries(self) -> f32 { self.0 * 1e3 }
+    pub fn from_microhenries(uh: f32) -> Self { Self(uh * 1e-6) }
+    pub fn to_microhenries(self) -> f32 { self.0 * 1e6 }
+}
+
+/// Magnetic flux density in Tesla (T = Wb/m² = V·s/m²)
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default, Reflect, Serialize, Deserialize)]
+pub struct Tesla(pub f32);
+
+impl Tesla {
+    pub fn from_millitesla(mt: f32) -> Self { Self(mt * 1e-3) }
+    pub fn to_millitesla(self) -> f32 { self.0 * 1e3 }
+    pub fn from_microtesla(ut: f32) -> Self { Self(ut * 1e-6) }
+    pub fn to_microtesla(self) -> f32 { self.0 * 1e6 }
+    pub fn from_gauss(g: f32) -> Self { Self(g * 1e-4) }
+    pub fn to_gauss(self) -> f32 { self.0 * 1e4 }
+}
+
+/// Magnetic flux in Webers (Wb = V·s)
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default, Reflect, Serialize, Deserialize)]
+pub struct Webers(pub f32);
+
+// ============================================================================
+// Radiation / Nuclear Units (STEM Stack — Phase J)
+// ============================================================================
+
+/// Absorbed radiation dose in Gray (Gy = J/kg)
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default, Reflect, Serialize, Deserialize)]
+pub struct Gray(pub f32);
+
+impl Gray {
+    pub fn from_milligray(mgy: f32) -> Self { Self(mgy * 1e-3) }
+    pub fn to_milligray(self) -> f32 { self.0 * 1e3 }
+    pub fn from_rad(rad: f32) -> Self { Self(rad * 0.01) }   // 1 rad = 0.01 Gy
+    pub fn to_rad(self) -> f32 { self.0 / 0.01 }
+}
+
+/// Dose equivalent in Sievert (Sv = J/kg, weighted for biological effect)
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default, Reflect, Serialize, Deserialize)]
+pub struct Sievert(pub f32);
+
+impl Sievert {
+    pub fn from_millisievert(msv: f32) -> Self { Self(msv * 1e-3) }
+    pub fn to_millisievert(self) -> f32 { self.0 * 1e3 }
+    pub fn from_microsievert(usv: f32) -> Self { Self(usv * 1e-6) }
+    pub fn to_microsievert(self) -> f32 { self.0 * 1e6 }
+    pub fn from_rem(rem: f32) -> Self { Self(rem * 0.01) }   // 1 rem = 0.01 Sv
+    pub fn to_rem(self) -> f32 { self.0 / 0.01 }
+}
+
+/// Radioactivity in Becquerel (Bq = decays/s)
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default, Reflect, Serialize, Deserialize)]
+pub struct Becquerel(pub f32);
+
+impl Becquerel {
+    pub fn from_megabecquerel(mbq: f32) -> Self { Self(mbq * 1e6) }
+    pub fn to_megabecquerel(self) -> f32 { self.0 * 1e-6 }
+    pub fn from_curie(ci: f32) -> Self { Self(ci * 3.7e10) }  // 1 Ci = 3.7e10 Bq
+    pub fn to_curie(self) -> f32 { self.0 / 3.7e10 }
+}
+
+// ============================================================================
+// Photometric / Optical Units (STEM Stack — Phase H)
+// ============================================================================
+
+/// Luminous flux in Lumen (lm = cd·sr)
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default, Reflect, Serialize, Deserialize)]
+pub struct Lumen(pub f32);
+
+/// Illuminance in Lux (lx = lm/m²)
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default, Reflect, Serialize, Deserialize)]
+pub struct Lux(pub f32);
+
+impl Lux {
+    pub fn from_foot_candles(fc: f32) -> Self { Self(fc * 10.764) }
+    pub fn to_foot_candles(self) -> f32 { self.0 / 10.764 }
+}
+
+/// Radiation frequency / wavenumber helper (dimensionless ratio)
+/// Wavelength in nanometers for optical work
+pub fn wavelength_nm_to_m(nm: f32) -> f32 { nm * 1e-9 }
+pub fn wavelength_m_to_nm(m: f32) -> f32 { m * 1e9 }
+pub fn freq_to_wavelength_m(freq_hz: f32) -> f32 { 299_792_458.0 / freq_hz }
+pub fn wavelength_m_to_freq(wl_m: f32) -> f32 { 299_792_458.0 / wl_m }
+
+// ============================================================================
+// Chemical / Molar Units (STEM Stack — Phase C)
+// ============================================================================
+
+/// Amount of substance in moles (mol) — already have Moles but extend it
+pub fn molarity_to_mass_conc(molarity_mol_l: f32, molar_mass_g_mol: f32) -> f32 {
+    molarity_mol_l * molar_mass_g_mol  // g/L
+}
+pub fn mass_conc_to_molarity(mass_conc_g_l: f32, molar_mass_g_mol: f32) -> f32 {
+    mass_conc_g_l / molar_mass_g_mol   // mol/L
+}
+pub fn ppm_to_molarity(ppm: f32, molar_mass_g_mol: f32) -> f32 {
+    ppm / molar_mass_g_mol / 1000.0    // assumes water density = 1 kg/L
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

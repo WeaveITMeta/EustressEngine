@@ -462,6 +462,147 @@ pub fn pascals_to_bar(pascals: f32) -> f32 {
     pascals / 100_000.0
 }
 
+// ============================================================================
+// STEM Stack Extensions — Electromagnetism (Phase B)
+// ============================================================================
+
+/// Coulomb constant k = 1/(4πε₀) [N·m²/C²]
+pub const COULOMB_K: f32 = 8.987_551_8e9;
+
+/// Coulomb constant (f64)
+pub const COULOMB_K_F64: f64 = 8.987_551_787_368_176e9;
+
+/// Speed of light in vacuum [m/s] (already have C but alias for clarity)
+pub const SPEED_OF_LIGHT: f32 = 299_792_458.0;
+
+/// Electron volt [J] = energy gained by one electron through 1 V potential
+pub const ELECTRON_VOLT: f32 = 1.602_176_634e-19;
+
+/// Classical electron radius [m]
+pub const ELECTRON_RADIUS: f32 = 2.817_940_3e-15;
+
+// ============================================================================
+// STEM Stack Extensions — Nuclear / Radiation (Phase J)
+// ============================================================================
+
+/// Atomic mass unit (Dalton) [kg]
+pub const ATOMIC_MASS_UNIT: f64 = 1.660_539_066_6e-27;
+pub const ATOMIC_MASS_UNIT_F32: f32 = 1.660_539e-27;
+
+/// Proton mass [kg] (already defined as PROTON_MASS, alias for clarity)
+pub const PROTON_MASS_KG: f32 = 1.672_621_9e-27;
+
+/// Neutron mass [kg]
+pub const NEUTRON_MASS_KG: f32 = 1.674_927_5e-27;
+
+/// Alpha particle mass [kg]
+pub const ALPHA_MASS_KG: f32 = 6.644_657_3e-27;
+
+/// Rydberg constant [m⁻¹]
+pub const RYDBERG_CONSTANT: f32 = 1.097_373_157e7;
+
+/// Fine structure constant (dimensionless) α ≈ 1/137
+pub const FINE_STRUCTURE: f32 = 7.297_352_569e-3;
+
+/// Bohr radius [m]
+pub const BOHR_RADIUS: f32 = 5.291_772_1e-11;
+
+// ============================================================================
+// STEM Stack Extensions — Chemistry / Thermochemistry (Phase C)
+// ============================================================================
+
+/// Standard enthalpies of formation at 298 K [J/mol]
+/// Negative = exothermic (energy released on formation from elements)
+pub mod delta_h_formation {
+    /// H₂O(l) standard enthalpy of formation [J/mol]
+    pub const WATER_LIQUID: f32 = -285_830.0;
+    /// H₂O(g) standard enthalpy of formation [J/mol]
+    pub const WATER_GAS: f32 = -241_826.0;
+    /// CO₂(g) standard enthalpy of formation [J/mol]
+    pub const CO2: f32 = -393_509.0;
+    /// CO(g) standard enthalpy of formation [J/mol]
+    pub const CO: f32 = -110_527.0;
+    /// CH₄(g) methane standard enthalpy of formation [J/mol]
+    pub const METHANE: f32 = -74_873.0;
+    /// C₂H₅OH(l) ethanol standard enthalpy of formation [J/mol]
+    pub const ETHANOL: f32 = -277_700.0;
+    /// C₆H₁₂O₆(s) glucose standard enthalpy of formation [J/mol]
+    pub const GLUCOSE: f32 = -1_273_100.0;
+    /// NH₃(g) ammonia standard enthalpy of formation [J/mol]
+    pub const AMMONIA: f32 = -46_110.0;
+    /// HCl(g) hydrochloric acid gas enthalpy of formation [J/mol]
+    pub const HCL_GAS: f32 = -92_307.0;
+    /// NaOH(s) sodium hydroxide standard enthalpy of formation [J/mol]
+    pub const NAOH: f32 = -425_931.0;
+    /// H₂SO₄(l) sulfuric acid standard enthalpy of formation [J/mol]
+    pub const H2SO4: f32 = -813_989.0;
+    /// Fe₂O₃(s) hematite standard enthalpy of formation [J/mol]
+    pub const FE2O3: f32 = -824_200.0;
+    /// CaCO₃(s) limestone standard enthalpy of formation [J/mol]
+    pub const CACO3: f32 = -1_207_600.0;
+}
+
+/// Standard Gibbs free energies of formation at 298 K [J/mol]
+pub mod delta_g_formation {
+    pub const WATER_LIQUID: f32 = -237_129.0;
+    pub const WATER_GAS: f32 = -228_582.0;
+    pub const CO2: f32 = -394_359.0;
+    pub const CO: f32 = -137_168.0;
+    pub const METHANE: f32 = -50_768.0;
+    pub const AMMONIA: f32 = -16_480.0;
+}
+
+/// Standard acid dissociation constants Ka (dimensionless, 25°C)
+pub mod ka_values {
+    /// Acetic acid (CH₃COOH) Ka
+    pub const ACETIC_ACID: f32 = 1.8e-5;
+    /// Carbonic acid H₂CO₃ (first dissociation) Ka₁
+    pub const CARBONIC_ACID_1: f32 = 4.3e-7;
+    /// Carbonic acid (second dissociation) Ka₂
+    pub const CARBONIC_ACID_2: f32 = 4.7e-11;
+    /// Phosphoric acid H₃PO₄ Ka₁
+    pub const PHOSPHORIC_1: f32 = 7.5e-3;
+    /// Ammonium NH₄⁺ Ka
+    pub const AMMONIUM: f32 = 5.6e-10;
+    /// Water autoionization Kw at 25°C
+    pub const WATER_KW: f32 = 1.0e-14;
+    /// Hydrofluoric acid HF Ka
+    pub const HF: f32 = 6.8e-4;
+    /// Formic acid HCOOH Ka
+    pub const FORMIC_ACID: f32 = 1.77e-4;
+}
+
+/// Water-specific physical constants
+pub mod water_constants {
+    /// Ebullioscopic constant (boiling point elevation) Kb [K·kg/mol]
+    pub const KB_EBULLIOSCOPIC: f32 = 0.512;
+    /// Cryoscopic constant (freezing point depression) Kf [K·kg/mol]
+    pub const KF_CRYOSCOPIC: f32 = 1.853;
+    /// Henry's constant for O₂ in water at 25°C [mol/(L·atm)]
+    pub const HENRY_O2: f32 = 1.3e-3;
+    /// Henry's constant for CO₂ in water at 25°C [mol/(L·atm)]
+    pub const HENRY_CO2: f32 = 3.4e-2;
+}
+
+// ============================================================================
+// STEM Stack Extensions — Acoustics / Optics (Phases H & I)
+// ============================================================================
+
+/// Reference sound pressure (threshold of hearing) [Pa]
+pub const SOUND_PRESSURE_REFERENCE: f32 = 20e-6;
+
+/// Reference sound intensity [W/m²]
+pub const SOUND_INTENSITY_REFERENCE: f32 = 1e-12;
+
+/// Planck's constant times speed of light hc [eV·nm] (useful for photon energy)
+pub const HC_EV_NM: f32 = 1239.84;
+
+/// Wien's displacement law constant b [m·K]
+pub const WIEN_CONSTANT: f32 = 2.897_771_9e-3;
+
+/// Solar constant (irradiance at 1 AU) [W/m²]
+pub const SOLAR_CONSTANT: f32 = 1361.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -58,6 +58,11 @@ pub mod visualizers;
 pub mod deformation;
 pub mod thermal_conduction;
 pub mod nuclear;
+// STEM Stack — Phases A-D
+pub mod numerics;
+pub mod electrical;
+pub mod chemistry;
+pub mod control;
 
 #[cfg(feature = "realism-gpu")]
 pub mod gpu;
@@ -84,6 +89,10 @@ pub mod prelude {
     pub use super::visualizers::prelude::*;
     pub use super::deformation::prelude::*;
     pub use super::nuclear::prelude::*;
+    pub use super::numerics::prelude::*;
+    pub use super::electrical::prelude::*;
+    pub use super::chemistry::prelude::*;
+    pub use super::control::prelude::*;
     pub use super::{RealismPlugin, RealismConfig};
     
     #[cfg(feature = "realism-symbolic")]
@@ -118,6 +127,11 @@ impl Plugin for RealismPlugin {
                 deformation::DeformationPlugin,
                 thermal_conduction::ThermalConductionPlugin,
                 nuclear::NuclearPlugin,
+                // STEM Stack — Phases A-D
+                numerics::NumericsPlugin,
+                electrical::ElectricalPlugin,
+                chemistry::ChemistryPlugin,
+                control::ControlPlugin,
             ));
         
         #[cfg(feature = "realism-symbolic")]
