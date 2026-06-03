@@ -46,6 +46,9 @@ pub struct InstanceDefinition {
     /// Optional electrochemical state (dynamic on any class)
     #[serde(default)]
     pub electrochemical: Option<TomlElectrochemicalState>,
+    /// Optional nuclear reactor state (ArcReactorCore class)
+    #[serde(default)]
+    pub nuclear: Option<TomlNuclearState>,
     /// Optional UI class properties (TextLabel, TextButton, Frame, ImageLabel, etc.)
     #[serde(default)]
     pub ui: Option<UiInstanceProperties>,
@@ -1063,6 +1066,70 @@ impl TomlElectrochemicalState {
     }
 }
 
+/// Nuclear reactor state as it appears in the [nuclear] TOML section.
+///
+/// All fields default to nominal ARC-1 operating conditions so a minimal
+/// `[nuclear]` section (or no section at all) still produces a valid reactor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TomlNuclearState {
+    /// Initial neutron population (normalised; 1.0 = steady-state critical).
+    #[serde(default = "default_one")]
+    pub neutron_population: f32,
+    /// Initial core temperature [°C].
+    #[serde(default = "default_core_temp")]
+    pub core_temp_celsius: f32,
+    /// Initial coolant flow rate [%].
+    #[serde(default = "default_coolant_flow")]
+    pub coolant_flow_pct: f32,
+    /// Initial V-Cell state of charge [%].
+    #[serde(default = "default_soc")]
+    pub battery_soc_pct: f32,
+    /// Initial electrical load demand [W].
+    #[serde(default = "default_load_demand")]
+    pub load_demand_watts: f32,
+    /// Rod bank A insertion [0–100 %].
+    #[serde(default = "default_rod_insertion")]
+    pub rod_bank_a_pct: f32,
+    /// Rod bank B insertion [0–100 %].
+    #[serde(default = "default_rod_insertion")]
+    pub rod_bank_b_pct: f32,
+    /// Thermoelectric efficiency [fraction].
+    #[serde(default = "default_te_eff")]
+    pub te_efficiency: f32,
+    /// Stirling engine efficiency [fraction].
+    #[serde(default = "default_stirling_eff")]
+    pub stirling_efficiency: f32,
+    /// Whether the AI PID controller starts in Regulation mode.
+    #[serde(default = "default_true_val")]
+    pub ai_regulation_enabled: bool,
+}
+
+fn default_core_temp()     -> f32 { 847.0  }
+fn default_coolant_flow()  -> f32 { 70.0   }
+fn default_soc()           -> f32 { 82.0   }
+fn default_load_demand()   -> f32 { 280.0  }
+fn default_rod_insertion() -> f32 { 50.0   }
+fn default_te_eff()        -> f32 { 0.14   }
+fn default_stirling_eff()  -> f32 { 0.28   }
+fn default_true_val()      -> bool { true  }
+
+impl Default for TomlNuclearState {
+    fn default() -> Self {
+        Self {
+            neutron_population: 1.0,
+            core_temp_celsius: default_core_temp(),
+            coolant_flow_pct: default_coolant_flow(),
+            battery_soc_pct: default_soc(),
+            load_demand_watts: default_load_demand(),
+            rod_bank_a_pct: default_rod_insertion(),
+            rod_bank_b_pct: default_rod_insertion(),
+            te_efficiency: default_te_eff(),
+            stirling_efficiency: default_stirling_eff(),
+            ai_regulation_enabled: true,
+        }
+    }
+}
+
 /// Component marking an entity as loaded from an instance file.
 /// For folder-based instances: toml_path = folder/_instance.toml
 /// For legacy flat files: toml_path = folder/Name.glb.toml
@@ -1426,13 +1493,15 @@ impl PrimitiveMeshCache {
 /// property** (`WorkspaceComponent.render_distance`, exposed via
 /// `PropertyAccess`). Metres; integer precision is ample for a cull
 /// radius and sidesteps any const-fn float-bits concern. Seeded to
-/// `WorkspaceComponent::default().render_distance` (5000). The
+/// `WorkspaceComponent::default().render_distance` (300 — perf QW4b
+/// lowered it from 5000 so large imports cull most parts for a local
+/// camera; the user can raise it in the Properties panel). The
 /// Workspace-property apply path calls [`set_workspace_render_distance`]
 /// so editing the property in the Properties panel drives every part's
 /// `VisibilityRange`. NOT a hardcoded constant — it is the Workspace
 /// property's value at runtime.
 static WORKSPACE_RENDER_DISTANCE_M: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(5000);
+    std::sync::atomic::AtomicU32::new(300);
 
 /// Push the Workspace `RenderDistance` property value into the live
 /// mirror. Call this wherever `WorkspaceComponent` is applied / when
@@ -1653,7 +1722,9 @@ pub fn spawn_instance(
                 archivable: instance.metadata.archivable,
                 id: 0,
                 ai: false,
-                uuid: String::new(),
+                // Carry the stable UUID through so cross-references (joint
+                // part/attachment refs, etc.) can resolve by identity.
+                uuid: instance.metadata.uuid.clone().unwrap_or_default(),
             },
             Transform::from(instance.transform),
             Visibility::default(),
@@ -1806,7 +1877,9 @@ pub fn spawn_instance(
                 archivable: instance.metadata.archivable,
                 id: 0,
                 ai: false,
-                uuid: String::new(),
+                // Carry the stable UUID so constraints can resolve this
+                // part as a joint body by identity.
+                uuid: instance.metadata.uuid.clone().unwrap_or_default(),
             },
             base_part,
             eustress_common::classes::Part { shape: part_shape },
@@ -1845,7 +1918,14 @@ pub fn spawn_instance(
         // overhead for thousands of static decorative parts.
         // GLB meshes are unit meshes ([-0.5, 0.5]), so Transform.scale = part size in studs.
         // Avian3D colliders take HALF-extents for cuboid and HALF-height for cylinder.
-        if instance.properties.can_collide {
+        //
+        // Perf QW5 — same huge-scene gate as the primitive branch below: on a
+        // "huge" Space (`streaming_active()` true) skip the Static body +
+        // Collider for these anchored decorative custom-mesh parts so a 387K+
+        // import doesn't flood Avian's broadphase. Reversible + scoped:
+        // no-op (gate is false) for normal scenes and when `world-db` is off.
+        let huge_scene = crate::space::active_db::streaming_active();
+        if instance.properties.can_collide && !huge_scene {
             if let Some(collider) = safe_collider_from(part_shape, scale, &transform) {
                 ec.insert((collider, RigidBody::Static));
                 // Imported PhysicalProperties → Avian physics material.
@@ -1910,7 +1990,9 @@ pub fn spawn_instance(
             archivable: instance.metadata.archivable,
             id: 0,
             ai: false,
-                uuid: String::new(),
+            // Carry the stable UUID so constraints can resolve this part
+            // as a joint body by identity.
+            uuid: instance.metadata.uuid.clone().unwrap_or_default(),
         },
         base_part,
         eustress_common::classes::Part { shape: part_shape },
@@ -1940,7 +2022,20 @@ pub fn spawn_instance(
     // Only add physics collider when can_collide is true — avoids broadphase
     // overhead for thousands of static decorative parts.
     // Avian3D colliders take HALF-extents for cuboid and HALF-height for cylinder.
-    if instance.properties.can_collide {
+    //
+    // Perf QW5 — huge-scene gate. Every part spawned here is anchored
+    // (`RigidBody::Static`), i.e. decorative collision geometry. On a "huge"
+    // Space (the residency boot-load flipped `streaming_active()` true for a
+    // large binary-ECS / streamed place — e.g. a 387K-part Roblox import),
+    // attaching a Static body + Collider to hundreds of thousands of parts
+    // floods Avian's broadphase and the per-frame rigid-body transform walk
+    // for no gameplay benefit, so we SKIP it. The gate is reversible and
+    // scoped: `streaming_active()` is `false` for normal-sized scenes and
+    // whenever the `world-db` feature is off, so non-huge worlds attach
+    // colliders exactly as before (zero behavior change). Authored
+    // PhysicalProperties are skipped along with the body they'd attach to.
+    let huge_scene = crate::space::active_db::streaming_active();
+    if instance.properties.can_collide && !huge_scene {
         if let Some(collider) = safe_collider_from(part_shape, scale, &transform) {
             ec.insert((collider, RigidBody::Static));
             // Imported PhysicalProperties → Avian physics material.

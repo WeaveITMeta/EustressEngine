@@ -1,0 +1,119 @@
+/// ARC-1 Arc Reactor Core — Rune monitoring and advisory controller
+///
+/// This script runs alongside the Rust PID systems.  It acts as the
+/// high-level "policy layer" — it can:
+///
+///   • Log reactor telemetry to the Event Log every N seconds
+///   • Issue advisory overrides (change setpoints, adjust loads)
+///   • Detect edge cases the Rust systems don't cover
+///   • React to operator commands published to watchpoints
+///
+/// Watchpoint names written by publish_nuclear_watchpoints_system:
+///   arc1.neutron_population   arc1.reactivity           arc1.is_scrammed
+///   arc1.core_temp_celsius    arc1.coolant_temp_celsius arc1.thermal_power_watts
+///   arc1.coolant_flow_pct     arc1.rod_bank_a_pct       arc1.rod_bank_b_pct
+///   arc1.electrical_output_w  arc1.battery_soc_pct      arc1.load_demand_watts
+///   arc1.power_balance_watts  arc1.total_efficiency     arc1.decay_heat_watts
+///
+/// Operator command watchpoints (write from external tools / MCP):
+///   arc1.cmd.set_load_watts   — change load demand
+///   arc1.cmd.set_neutron_sp   — change neutron-population setpoint
+///   arc1.cmd.set_temp_sp      — change core-temperature setpoint
+
+// ── Configuration ────────────────────────────────────────────────────────────
+
+let LOG_INTERVAL_S = 5.0;   // seconds between telemetry log entries
+let WARN_TEMP      = 1200.0; // °C — advisory warning before Rust SCRAM at 1600
+let WARN_SOC       = 20.0;   // % — battery low-battery advisory
+let WARN_NEUTRON   = 2.5;    // normalised — high-power advisory
+
+// ── State ─────────────────────────────────────────────────────────────────────
+
+let time_since_log = 0.0;
+let last_scrammed  = false;
+
+// ── Lifecycle: on_init ────────────────────────────────────────────────────────
+
+pub fn on_init() {
+    log_info("[ARC-1] Rune controller initialised");
+    log_info("[ARC-1] Monitoring: temp, neutrons, SoC, power balance");
+    log_info("[ARC-1] PID regulation mode: active");
+}
+
+// ── Lifecycle: on_update ──────────────────────────────────────────────────────
+
+pub fn on_update(dt) {
+    time_since_log += dt;
+
+    let n        = get_sim_value("arc1.neutron_population");
+    let rho      = get_sim_value("arc1.reactivity");
+    let t_core   = get_sim_value("arc1.core_temp_celsius");
+    let p_th     = get_sim_value("arc1.thermal_power_watts");
+    let p_elec   = get_sim_value("arc1.electrical_output_w");
+    let load     = get_sim_value("arc1.load_demand_watts");
+    let soc      = get_sim_value("arc1.battery_soc_pct");
+    let scrammed = get_sim_value("arc1.is_scrammed");
+    let balance  = get_sim_value("arc1.power_balance_watts");
+    let flow     = get_sim_value("arc1.coolant_flow_pct");
+
+    // ── Operator command intake ──────────────────────────────────────────────
+    let cmd_load = get_sim_value("arc1.cmd.set_load_watts");
+    if cmd_load > 0.0 {
+        set_sim_value("arc1.load_demand_watts", cmd_load);
+        set_sim_value("arc1.cmd.set_load_watts", 0.0);
+        log_info("[ARC-1] Load demand updated to " + cmd_load + " W");
+    }
+
+    // ── SCRAM detection ──────────────────────────────────────────────────────
+    if scrammed > 0.5 && !last_scrammed {
+        log_warn("[ARC-1] ⚠ SCRAM DETECTED — decay heat monitoring active");
+        last_scrammed = true;
+    }
+    if scrammed < 0.5 && last_scrammed {
+        log_info("[ARC-1] Reactor restarted — resuming regulation");
+        last_scrammed = false;
+    }
+
+    // ── Advisory limits ─────────────────────────────────────────────────────
+    if t_core > WARN_TEMP && scrammed < 0.5 {
+        log_warn("[ARC-1] ⚠ Core temp " + round(t_core) + " °C — approaching SCRAM limit");
+    }
+    if soc < WARN_SOC {
+        log_warn("[ARC-1] ⚠ Battery SoC " + round(soc) + " % — low charge");
+    }
+    if n > WARN_NEUTRON && scrammed < 0.5 {
+        log_warn("[ARC-1] ⚠ Neutron excursion n=" + round2(n) + " — check rod insertion");
+    }
+
+    // ── Periodic telemetry log ────────────────────────────────────────────────
+    if time_since_log >= LOG_INTERVAL_S {
+        time_since_log = 0.0;
+        let eta = get_sim_value("arc1.total_efficiency");
+        log_info(
+            "[ARC-1] n=" + round2(n) +
+            " ρ=" + round4(rho) +
+            " T=" + round(t_core) + "°C" +
+            " Pth=" + round(p_th) + "W" +
+            " Pelec=" + round(p_elec) + "W" +
+            " load=" + round(load) + "W" +
+            " SoC=" + round(soc) + "%" +
+            " flow=" + round(flow) + "%" +
+            " η=" + round2(eta * 100.0) + "%"
+        );
+    }
+
+    // ── Power-balance advisory ────────────────────────────────────────────────
+    // Publish a normalised balance signal for external dashboards to read
+    let balance_norm = clamp(balance / 500.0, -1.0, 1.0);
+    set_sim_value("arc1.power_balance_norm", balance_norm);
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn clamp(v, lo, hi) {
+    if v < lo { lo } else if v > hi { hi } else { v }
+}
+
+fn round(v)  { (v * 1.0).floor()        }
+fn round2(v) { ((v * 100.0).floor() / 100.0) }
+fn round4(v) { ((v * 10000.0).floor() / 10000.0) }

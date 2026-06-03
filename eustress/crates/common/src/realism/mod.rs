@@ -57,6 +57,7 @@ pub mod fluids;
 pub mod visualizers;
 pub mod deformation;
 pub mod thermal_conduction;
+pub mod nuclear;
 
 #[cfg(feature = "realism-gpu")]
 pub mod gpu;
@@ -82,6 +83,7 @@ pub mod prelude {
     pub use super::fluids::prelude::*;
     pub use super::visualizers::prelude::*;
     pub use super::deformation::prelude::*;
+    pub use super::nuclear::prelude::*;
     pub use super::{RealismPlugin, RealismConfig};
     
     #[cfg(feature = "realism-symbolic")]
@@ -115,6 +117,7 @@ impl Plugin for RealismPlugin {
                 visualizers::VisualizersPlugin,
                 deformation::DeformationPlugin,
                 thermal_conduction::ThermalConductionPlugin,
+                nuclear::NuclearPlugin,
             ));
         
         #[cfg(feature = "realism-symbolic")]

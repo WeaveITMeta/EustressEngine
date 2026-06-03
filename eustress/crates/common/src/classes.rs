@@ -496,6 +496,8 @@ pub enum ClassName {
     ColorGradingEffect,      // Post-FX color grade + tonemapper (distinct from ColorCorrectionEffect)
     TerrainDetail,           // Per-material terrain detail config (child of Terrain)
     TerrainRegion,           // Saved voxel region serialized out of Terrain
+    // ── Fission branch: nuclear simulation ──
+    ArcReactorCore,          // ARC-1 compact fission reactor — carries nuclear kinetics + thermal-hydraulics components
 }
 
 impl ClassName {
@@ -766,6 +768,7 @@ impl ClassName {
             ClassName::ColorGradingEffect => "ColorGradingEffect",
             ClassName::TerrainDetail => "TerrainDetail",
             ClassName::TerrainRegion => "TerrainRegion",
+            ClassName::ArcReactorCore => "ArcReactorCore",
         }
     }
 
@@ -1050,6 +1053,7 @@ impl ClassName {
             "ColorGradingEffect" => Ok(ClassName::ColorGradingEffect),
             "TerrainDetail" => Ok(ClassName::TerrainDetail),
             "TerrainRegion" => Ok(ClassName::TerrainRegion),
+            "ArcReactorCore" => Ok(ClassName::ArcReactorCore),
             _ => Err(format!("Unknown class name: {}", s)),
         }
     }
@@ -8093,7 +8097,15 @@ impl Default for WorkspaceComponent {
             replication_lag: 0.0,
             
             // Rendering
-            render_distance: 5000.0,
+            // Perf QW4b: default lowered 5000 → 300 m so a freshly-imported
+            // large place culls the vast majority of its parts from the
+            // render + visibility passes for any local camera. This is the
+            // customizable Workspace `RenderDistance` property's DEFAULT —
+            // the user can raise it in the Properties panel (the apply path
+            // calls `set_workspace_render_distance`, which re-stamps every
+            // part's `VisibilityRange`). `small()`/`large()` presets keep
+            // their own explicit values below.
+            render_distance: 300.0,
             distance_lod_enabled: true,
             lod_bias: 0.0,
         }
