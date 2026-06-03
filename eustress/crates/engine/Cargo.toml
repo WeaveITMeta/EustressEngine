@@ -158,6 +158,12 @@ eustress-worlddb = { path = "../worlddb", optional = true }
 # Roblox place importer (Wave 4/6) — File→Import→Roblox Place + drag-drop
 # call eustress_roblox_import::import_into_space.
 eustress-roblox-import = { path = "../roblox-import" }
+# Roblox CDN / local-mirror asset fetcher (Wave F2 — MESHES). The engine
+# constructs a ChainFetcher (optional local folder + network) and hands it
+# to the importer so rbxassetid:// MeshPart/SpecialMesh refs resolve into
+# real .glb geometry. Network dep is quarantined here, out of the
+# engine-free importer crate.
+eustress-roblox-assets = { path = "../roblox-assets" }
 notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
 notify-debouncer-full = "0.3"
 

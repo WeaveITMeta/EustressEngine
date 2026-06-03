@@ -50,6 +50,9 @@ use crate::parser::RobloxDom;
 use crate::property_map::{map_properties, PropertyBag};
 use crate::service_router::{RouteOutcome, ServiceRouter};
 use crate::sink::{ImportSink, ImportStorage, NodeSpec, TomlSink, TomlWrite, WrittenRef};
+use crate::value_objects::{
+    encode_value_object, is_convertible_value_object, is_value_object_class,
+};
 
 // ---------------------------------------------------------------------------
 // Special-class classification (Terrain / CSG dispatch)
@@ -118,6 +121,16 @@ pub struct ImportOptions {
     /// `"m"` — Eustress is meter-native and Roblox studs map 1:1.
     pub unit_symbol: Option<String>,
 
+    /// Optional asset fetcher (spec §11 / §19.3). `None` (the default)
+    /// keeps the no-network behaviour: `rbxassetid://` references land on
+    /// the placeholder path. When supplied (e.g. the engine wires a
+    /// `ChainFetcher` from `eustress-roblox-assets`), MESH properties
+    /// (`MeshId` / `SpecialMesh.Content`) are fetched + decoded into real
+    /// `.glb` geometry (Wave F2). Textures / sounds still take the
+    /// placeholder path this wave. `Arc<dyn ...>` is `Clone`, so
+    /// `ImportOptions` keeps deriving `Clone`.
+    pub asset_fetcher: Option<Arc<dyn crate::asset_resolver::AssetFetcher>>,
+
     /// §8.A: where each node's authoritative state lands. Default
     /// [`ImportStorage::BinaryDirect`] — bare, scalable leaf parts bake
     /// straight to the worlddb `entities` partition; everything else stays
@@ -145,6 +158,7 @@ impl Default for ImportOptions {
             transform_scripts: true,
             space_salt: None,
             unit_symbol: Some("m".to_string()),
+            asset_fetcher: None,
             storage: ImportStorage::default(),
             #[cfg(feature = "binary-sink")]
             world_db: None,
@@ -165,6 +179,7 @@ impl std::fmt::Debug for ImportOptions {
             .field("transform_scripts", &self.transform_scripts)
             .field("space_salt", &self.space_salt.as_ref().map(|v| v.len()))
             .field("unit_symbol", &self.unit_symbol)
+            .field("asset_fetcher", &self.asset_fetcher.is_some())
             .field("storage", &self.storage);
         #[cfg(feature = "binary-sink")]
         s.field("world_db", &self.world_db.is_some());
@@ -184,6 +199,16 @@ pub struct Materializer<'dom> {
     router: Arc<ServiceRouter>,
     opts: ImportOptions,
     salt: Vec<u8>,
+
+    /// Global ValueObject context for the script rewrite. Built by a
+    /// DOM pre-pass in [`Materializer::run`] BEFORE any script body is
+    /// transformed: `names` is every converted value-object Name and
+    /// `ref_names` is the `ObjectValue` subset. Handed to
+    /// `compat::ScriptTransformer::transform_value_objects` so a script
+    /// that read `foo.Value` on a now-folded ValueObject is rewritten to
+    /// the attribute accessor. (Populated for the whole DOM, not per node,
+    /// because a script anywhere may reference a ValueObject anywhere.)
+    vo_ctx: eustress_common::luau::compat::ValueObjectContext,
 
     /// Roblox referent → Eustress uuid map, built during the walk and
     /// used for the second-pass `Ref` resolution.
@@ -299,6 +324,7 @@ impl<'dom> Materializer<'dom> {
             router: Arc::new(router),
             opts,
             salt,
+            vo_ctx: eustress_common::luau::compat::ValueObjectContext::default(),
             referent_to_uuid: HashMap::new(),
             referent_to_path: HashMap::new(),
             pending_refs: Vec::new(),
@@ -313,6 +339,32 @@ impl<'dom> Materializer<'dom> {
     /// Walk the entire DOM, populating `report` as we go.
     pub fn run(mut self, report: &mut ImportReport) -> Result<(), ImportError> {
         let start = std::time::Instant::now();
+
+        // ── ValueObject script-rewrite pre-pass ──
+        //
+        // Build the global ValueObject context BEFORE any script body is
+        // transformed (script transformation happens inside the walk
+        // below). A script anywhere in the DOM may reference a ValueObject
+        // anywhere, so the context is whole-DOM, not per-subtree. `names`
+        // holds every CONVERTED value-object Name (dropped classes are not
+        // converted, so they are excluded); `ref_names` is the `ObjectValue`
+        // subset (those fold to a UUID string the script side resolves via
+        // import context).
+        for inst in self.dom.descendants() {
+            let class = inst.class.as_str();
+            if !is_convertible_value_object(class) {
+                continue;
+            }
+            let name = if inst.name.is_empty() {
+                class.to_string()
+            } else {
+                inst.name.clone()
+            };
+            if class == "ObjectValue" {
+                self.vo_ctx.ref_names.insert(name.clone());
+            }
+            self.vo_ctx.names.insert(name);
+        }
 
         let root_ref = self.dom.root_ref();
         let root = self
@@ -459,7 +511,7 @@ impl<'dom> Materializer<'dom> {
         // Map properties. rbx_dom_weak 4.x keys `properties` by interned
         // `Ustr`; project to the `HashMap<String, Variant>` the mapper expects.
         let string_props = props_to_string_map(inst);
-        let bag = map_properties(&string_props, eustress_class);
+        let mut bag = map_properties(&string_props, eustress_class);
 
         // Choose the on-disk folder name. `inst.class` is a `Ustr` in
         // rbx_dom_weak 4.x; project to String to match `inst.name`.
@@ -468,6 +520,84 @@ impl<'dom> Materializer<'dom> {
         } else {
             inst.name.clone()
         };
+
+        // ── ValueObject → parent attribute folding (deprecation Phase 1) ──
+        //
+        // Roblox stores loose scalars/vectors/refs as dedicated
+        // *ValueObject* children (`IntValue`, `BoolValue`, `ObjectValue`, …).
+        // Eustress has no such class — the idiomatic shape is a typed
+        // attribute on THIS node. For every child whose class
+        // `is_value_object_class`, encode it (Contract A) into
+        // `bag.attributes` keyed by the child's Name, then record the child
+        // ref so the recursion below SKIPS it (it must not materialise as
+        // its own instance). Dropped classes (`RayValue` /
+        // `*ConstrainedValue`) are still folded out of the tree but record
+        // an approximation instead of converting.
+        let mut folded_children: std::collections::HashSet<Ref> = std::collections::HashSet::new();
+        for child_ref in inst.children().iter() {
+            let Some(child) = self.dom.get_by_ref(*child_ref) else {
+                continue;
+            };
+            if !is_value_object_class(child.class.as_str()) {
+                continue;
+            }
+            // From here on the child is folded out of the instance tree
+            // regardless of whether it converts.
+            folded_children.insert(*child_ref);
+            report.total_nodes_seen += 1;
+
+            let salt = &self.salt;
+            let encoded = encode_value_object(child.class.as_str(), &child.properties, |target| {
+                if target.is_none() {
+                    return None;
+                }
+                Some(uuid_bytes_to_hex(
+                    entity_uuid(salt, &target.to_string()).as_bytes(),
+                ))
+            });
+
+            let attr_name = if child.name.is_empty() {
+                child.class.as_str().to_string()
+            } else {
+                child.name.clone()
+            };
+
+            match encoded {
+                Some(value) => {
+                    // Duplicate attribute key under one parent → suffix
+                    // `_2`/`_3`/… and note it. (Roblox allows sibling
+                    // ValueObjects with identical names; attributes cannot.)
+                    let key = unique_attribute_key(&bag.attributes, &attr_name);
+                    if key != attr_name {
+                        report.record_approximation(
+                            parent_relpath,
+                            child.class.as_str(),
+                            "attribute",
+                            &format!(
+                                "duplicate folded attribute '{}' on '{}' renamed to '{}'",
+                                attr_name, requested_name, key
+                            ),
+                        );
+                    }
+                    bag.attributes.insert(key, value);
+                }
+                None => {
+                    // Dropped ValueObject (RayValue / *ConstrainedValue):
+                    // folded out of the tree, but not representable as an
+                    // attribute — record the drop per the product decision.
+                    report.record_approximation(
+                        parent_relpath,
+                        child.class.as_str(),
+                        "attribute",
+                        &format!(
+                            "ValueObject class dropped (not convertible) — \
+                             '{}' under '{}' not imported",
+                            attr_name, requested_name
+                        ),
+                    );
+                }
+            }
+        }
 
         // Build the per-node spec + route it through the selected sink.
         // Bare, scalable leaf parts bake straight to a binary-ECS core
@@ -496,10 +626,32 @@ impl<'dom> Materializer<'dom> {
         // re-applies the representation predicate (file-natured /
         // custom-mesh parts fall back to TOML internally), so this gate is
         // only the structural part the sink cannot see.
+        //
+        // Wave F2: a node that carries a MESH asset ref (`MeshId` /
+        // `SpecialMesh.Content`) must ALSO stay a `_instance.toml` folder.
+        // The resolved `[asset].mesh` (a real `../assets/meshes/rbx-*.glb`
+        // or the `assets/_unresolved/...` placeholder) is layered on AFTER
+        // the node write, so it has to be a TOML the post-pass can patch —
+        // and a custom/relative mesh is never binary-eligible anyway
+        // (`mesh_requires_filesystem`). Without this, a bare `MeshPart`
+        // would bake to a binary core and its mesh ref would be dropped on
+        // the floor (the binary core has no TOML to patch).
+        let has_mesh_asset_ref = bag
+            .asset_refs
+            .keys()
+            .any(|prop| is_mesh_property(prop, eustress_class));
+        // A parent that RECEIVED folded ValueObject attributes must stay a
+        // `_instance.toml` folder: the attributes are layered onto the TOML
+        // by the second-pass patch (`bag.attributes` → `[attributes]`), and
+        // a bare binary-ECS core has no TOML to patch. Mirrors the
+        // `has_mesh_asset_ref` term above.
+        let has_folded_value_object_children = !folded_children.is_empty();
         let take_binary = special == SpecialKind::None
             && inst.children().is_empty()
             && bag.refs.is_empty()
-            && bag.script_source.is_none();
+            && bag.script_source.is_none()
+            && !has_mesh_asset_ref
+            && !has_folded_value_object_children;
 
         let written = {
             let spec = NodeSpec {
@@ -590,9 +742,21 @@ impl<'dom> Materializer<'dom> {
             self.pending_refs
                 .push((created.toml_path.clone(), prop, target_ref));
         }
-        // Asset refs → resolver → placeholder path + warning.
+        // Asset refs → resolver. For MESH properties with a fetcher
+        // (Wave F2) the resolver fetches + decodes the Roblox `.mesh` into
+        // a real `.glb` under `<space>/assets/meshes/` and returns a path
+        // relative to this instance's folder; everything else (textures /
+        // sounds, or any fetch/decode failure) stays on the placeholder
+        // path with a warning.
         for (prop, uri) in bag.asset_refs {
-            let resolved = asset_resolver::resolve(&uri);
+            let prop_is_mesh = is_mesh_property(&prop, eustress_class);
+            let resolved = asset_resolver::resolve(
+                &uri,
+                self.opts.asset_fetcher.as_deref(),
+                &self.space_root,
+                prop_is_mesh,
+                &created.folder_path,
+            );
             if !resolved.resolved {
                 if let Some(reason) = &resolved.reason {
                     report.record_asset_warning(&uri, class_template_name, &prop, reason);
@@ -601,7 +765,7 @@ impl<'dom> Materializer<'dom> {
             // Mesh-class properties point at mesh assets; everything
             // else lands as a single-path asset reference.
             let asset_path_str = resolved.asset_path.to_string_lossy().to_string();
-            if is_mesh_property(&prop, eustress_class) {
+            if prop_is_mesh {
                 patch.asset_mesh = Some(asset_path_str);
             } else {
                 patch.asset_path = Some(asset_path_str);
@@ -611,7 +775,12 @@ impl<'dom> Materializer<'dom> {
         // Script-source post-processing.
         if let Some(body) = bag.script_source {
             let final_body = if self.opts.transform_scripts {
-                let result = ScriptTransformer::transform(&body);
+                // Phase 1: route through the ValueObject-aware transform so a
+                // script that read `someValue.Value` (on a now-folded
+                // ValueObject) is rewritten to the attribute accessor. The
+                // global `vo_ctx` was built by the DOM pre-pass in `run`.
+                let result =
+                    ScriptTransformer::transform_value_objects(&body, &self.vo_ctx);
                 for warning in &result.warnings {
                     let severity = match warning.severity {
                         WarningSeverity::Info => "info",
@@ -665,8 +834,13 @@ impl<'dom> Materializer<'dom> {
             report.events_imported += 1;
         }
 
-        // Recurse into children.
+        // Recurse into children — but SKIP any child folded into this
+        // node's `[attributes]` above (a folded ValueObject must not also
+        // materialise as its own instance).
         for child_ref in inst.children().iter() {
+            if folded_children.contains(child_ref) {
+                continue;
+            }
             self.walk_subtree(*child_ref, &created.folder_path, &entity_relpath, report)?;
         }
 
@@ -1019,6 +1193,28 @@ pub(crate) fn derive_space_salt(space_root: &Path) -> Vec<u8> {
 fn is_mesh_property(roblox_prop: &str, class: ClassName) -> bool {
     matches!(roblox_prop, "MeshId" | "CollisionMeshId")
         || (roblox_prop == "Content" && matches!(class, ClassName::SpecialMesh))
+}
+
+/// Pick a unique key for a folded ValueObject attribute. Roblox permits
+/// sibling ValueObjects with identical names, but a parent's `[attributes]`
+/// table is a map — collisions would overwrite. When `desired` is already
+/// present we suffix `_2`, `_3`, … until free, matching the disk-folder
+/// `unique_entity_name` convention.
+fn unique_attribute_key(
+    existing: &HashMap<String, toml::Value>,
+    desired: &str,
+) -> String {
+    if !existing.contains_key(desired) {
+        return desired.to_string();
+    }
+    let mut n = 2u32;
+    loop {
+        let candidate = format!("{}_{}", desired, n);
+        if !existing.contains_key(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -41,6 +41,17 @@
 //!
 //! Wave 4.A.3 lands the Studio modal + drop-target.
 //!
+//! Wave F2 (MESHES) resolves `rbxassetid://` custom meshes
+//! (`MeshPart`/`SpecialMesh`) into real `.glb` geometry. When an
+//! [`AssetFetcher`] is supplied on [`ImportOptions`], a mesh property's
+//! bytes are fetched, decoded via [`roblox_mesh`] (Roblox `.mesh`
+//! v1–v7), and written under `<space_root>/assets/meshes/rbx-<id>.glb`;
+//! the instance's `[asset].mesh` then points at it relative to the
+//! instance folder. With no fetcher (the engine-free default) mesh refs
+//! keep the placeholder. The network fetcher itself lives in the
+//! separate `eustress-roblox-assets` crate (spec §19.3) so this crate
+//! stays network-free.
+//!
 //! ## Public surface
 //!
 //! ```ignore
@@ -60,12 +71,15 @@ pub mod import_report;
 pub mod materializer;
 pub mod parser;
 pub mod property_map;
+pub mod roblox_mesh;
 pub mod service_router;
 pub mod sink;
 pub mod terrain;
+pub mod value_objects;
 
 // ── Re-exports — the only stable public surface. ───────────────────────────
-pub use crate::asset_resolver::{AssetReference, ResolvedAsset};
+pub use crate::asset_resolver::{AssetFetcher, AssetReference, ResolvedAsset};
+pub use crate::roblox_mesh::{decode_mesh, looks_like_roblox_mesh, MeshError};
 pub use crate::csg::{
     aabb_box_mesh, decode_mesh_data, encode_glb, import_csg, write_glb, CsgError, CsgMesh,
     CsgOutcome,
@@ -89,4 +103,8 @@ pub use crate::sink::{
 };
 pub use crate::terrain::{
     decode_smooth_grid, import_terrain, DecodeResult, TerrainGlobals, VoxelChunk,
+};
+pub use crate::value_objects::{
+    encode_value_object, is_convertible_value_object, is_dropped_value_object,
+    is_value_object_class,
 };

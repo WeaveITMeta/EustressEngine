@@ -1,0 +1,32 @@
+# =============================================================================
+# eustress-roblox-assets — Roblox CDN / local-mirror asset fetcher
+# =============================================================================
+# Quarantines the blocking-HTTP dependency OUT of the engine-free
+# `eustress-roblox-import` crate. Implements the `AssetFetcher` contract that
+# the importer declares (asset_resolver::AssetFetcher) so an integrator (the
+# engine) can plug in network + local-folder fetching for `rbxassetid://`
+# references. No Bevy, no tokio — blocking I/O only, runs on a worker thread.
+#
+# Spec: docs/architecture/ROBLOX_IMPORT_SPEC.md §11 / §19.3.
+# Wave: F2 (MESHES) — meshes only; textures/sounds resolve later.
+# =============================================================================
+
+[package]
+name = "eustress-roblox-assets"
+version = "0.1.0"
+edition = "2021"
+description = "Roblox asset (rbxassetid://) fetchers — network + local mirror + on-disk cache"
+
+[dependencies]
+# The importer crate declares the `AssetFetcher` trait + `FetchError` we
+# implement. No `binary-sink`/engine features — pure trait surface.
+eustress-roblox-import = { path = "../roblox-import" }
+
+# Blocking HTTP client for the Roblox asset-delivery CDN. `ureq 2` is the
+# version the engine already links (engine/Cargo.toml: `ureq = "2"`), so the
+# resolver converges on one copy. `tls` (rustls) is on by default in ureq 2 —
+# assetdelivery.roblox.com is https-only and 30x-redirects to an R2/CDN host.
+ureq = "2"
+
+# Logging — workspace standard. Never logs the .ROBLOSECURITY cookie.
+tracing = "0.1"

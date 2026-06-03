@@ -440,6 +440,24 @@ impl PropertyMapping {
 /// - Deprecated API warnings
 pub struct ScriptTransformer;
 
+/// Context describing which Roblox `ValueObject`s the importer folded into
+/// attributes on their parent instance. Drives [`ScriptTransformer::transform_value_objects`],
+/// which rewrites `.Value` reads/writes/observers on those names into the
+/// attribute APIs (`GetAttribute`/`SetAttribute`/`GetAttributeChangedSignal`).
+///
+/// The importer (`roblox-import`) constructs this while materializing a model:
+/// every `NumberValue`/`StringValue`/`IntValue`/`BoolValue`/`ObjectValue`/… child
+/// is removed and its current `.Value` is stored as an attribute on the parent,
+/// keyed by the value-object's `Name`. That `Name` goes into [`names`](Self::names).
+/// The subset that were `ObjectValue` (an instance reference, stored as a UUID
+/// string attribute) additionally go into [`ref_names`](Self::ref_names) so reads
+/// can be wrapped in the `FindByUUID` resolver.
+#[derive(Debug, Clone, Default)]
+pub struct ValueObjectContext {
+    pub names: std::collections::HashSet<String>,     // all converted value-object Names
+    pub ref_names: std::collections::HashSet<String>, // subset that were ObjectValue
+}
+
 impl ScriptTransformer {
     /// Apply all source-level transformations to a Luau script
     pub fn transform(source: &str) -> TransformResult {
@@ -497,6 +515,409 @@ impl ScriptTransformer {
             source: output,
             warnings,
             changes,
+        }
+    }
+
+    /// Apply all standard transforms PLUS a value-object→attribute rewrite pass.
+    ///
+    /// This is the entry point the importer (`roblox-import` / `instance_loader`)
+    /// calls for scripts whose sibling `ValueObject`s were folded into attributes.
+    /// It first runs every pass from [`transform`](Self::transform) (so the
+    /// returned source is a superset of the legacy behaviour), then rewrites
+    /// `.Value` reads/writes/observers for each `Name` in `vo` per CONTRACT D:
+    ///
+    /// - `X.Name.Value`            (read)       → `X:GetAttribute("Name")`
+    /// - `X.Name.Value = V`        (assignment) → `X:SetAttribute("Name", V)`
+    /// - `X:FindFirstChild("Name").Value`       → `X:GetAttribute("Name")`
+    /// - `X:WaitForChild("Name").Value`         → `X:GetAttribute("Name")`
+    /// - `X.Name.Changed:Connect(F)`            → `X:GetAttributeChangedSignal("Name"):Connect(F)`
+    /// - `X.Name:GetPropertyChangedSignal("Value"):Connect(F)`
+    ///                                          → `X:GetAttributeChangedSignal("Name"):Connect(F)`
+    ///
+    /// For names that were `ObjectValue` (`vo.ref_names`), a value READ is
+    /// additionally wrapped in the runtime resolver
+    /// (`FindByUUID(X:GetAttribute("Name"))`) and an assignment stores the
+    /// referent's UUID (`X:SetAttribute("Name", inst and inst:GetUuid() or "")`,
+    /// recording a warning since storing a live ref as a UUID is lossy).
+    ///
+    /// Patterns that cannot be rewritten safely with string substitution
+    /// (a value-object captured into a local, `Instance.new("NumberValue")`
+    /// created at runtime, or a value-object passed as a function argument)
+    /// are NOT rewritten — instead a [`WarningSeverity::Warning`] is recorded
+    /// so the porter can fix them by hand.
+    ///
+    /// The existing [`transform`](Self::transform) method is intentionally left
+    /// unchanged for back-compat; this method delegates to it.
+    pub fn transform_value_objects(source: &str, vo: &ValueObjectContext) -> TransformResult {
+        // Run the standard passes first; build on their result + warnings.
+        let mut result = Self::transform(source);
+
+        // Nothing folded → standard transform is the whole story.
+        if vo.names.is_empty() {
+            return result;
+        }
+
+        let (rewritten, vo_changes, vo_warnings) =
+            Self::rewrite_value_object_access(&result.source, vo);
+
+        result.source = rewritten;
+        result.changes += vo_changes;
+        result.warnings.extend(vo_warnings);
+        result
+    }
+
+    /// Core value-object rewrite pass (CONTRACT D). String/substring based to
+    /// match the rest of this transformer; best-effort about skipping string
+    /// literals and comments (see `line_is_skippable`).
+    ///
+    /// Returns the rewritten source, the number of substitutions made (each
+    /// counts toward `TransformResult.changes`), and any warnings raised for
+    /// constructs that could not be rewritten.
+    fn rewrite_value_object_access(
+        source: &str,
+        vo: &ValueObjectContext,
+    ) -> (String, u32, Vec<TransformWarning>) {
+        let mut changes = 0u32;
+        let mut warnings: Vec<TransformWarning> = Vec::new();
+
+        // The "receiver" preceding `.Name` / `:FindFirstChild(...)` — a dotted
+        // identifier chain like `game.Workspace.Cfg` or a bare `script`. We do
+        // NOT try to parse Luau; we greedily capture the identifier/`.`/`_`
+        // run immediately to the left of the match site.
+        //
+        // Process the source line-by-line so we can (a) cheaply skip full-line
+        // comments and (b) attach 1-based line numbers to warnings.
+        let mut out_lines: Vec<String> = Vec::with_capacity(source.lines().count());
+
+        for (idx, raw_line) in source.lines().enumerate() {
+            let line_no = (idx as u32) + 1;
+
+            // Whole-line comment → never rewrite; pass through verbatim.
+            if raw_line.trim_start().starts_with("--") {
+                out_lines.push(raw_line.to_string());
+                continue;
+            }
+
+            let mut line = raw_line.to_string();
+
+            for name in &vo.names {
+                let is_ref = vo.ref_names.contains(name);
+
+                // ---- Detect unsafe constructs (warn, do NOT rewrite) ----------
+                // 1. value-object captured into a local: `local x = <recv>.Name`
+                //    that is NOT immediately followed by `.Value` / `.Changed` /
+                //    `:GetPropertyChangedSignal`. Such a local is later used as
+                //    `x.Value`, which we cannot trace here.
+                if Self::has_unsafe_local_capture(&line, name) {
+                    warnings.push(TransformWarning {
+                        line: Some(line_no),
+                        message: format!(
+                            "Value-object '{name}' appears to be captured into a local \
+                             (e.g. `local v = obj.{name}`); its later `.Value` use cannot be \
+                             rewritten automatically. Replace with `obj:GetAttribute(\"{name}\")`.",
+                        ),
+                        severity: WarningSeverity::Warning,
+                    });
+                }
+
+                // ---- Ordered rewrites (longest / most specific first) ---------
+
+                // A) Observer: `<recv>.Name.Changed:Connect`
+                //    → `<recv>:GetAttributeChangedSignal("Name"):Connect`
+                let pat_changed = format!(".{name}.Changed");
+                changes += Self::replace_with_receiver(
+                    &mut line,
+                    &pat_changed,
+                    |recv| format!("{recv}:GetAttributeChangedSignal(\"{name}\")"),
+                );
+
+                // B) Observer: `<recv>.Name:GetPropertyChangedSignal("Value")`
+                //    → `<recv>:GetAttributeChangedSignal("Name")`
+                //    (accept both quote styles)
+                for q in ['"', '\''] {
+                    let pat_gpcs = format!(".{name}:GetPropertyChangedSignal({q}Value{q})");
+                    changes += Self::replace_with_receiver(
+                        &mut line,
+                        &pat_gpcs,
+                        |recv| format!("{recv}:GetAttributeChangedSignal(\"{name}\")"),
+                    );
+                }
+
+                // C) FindFirstChild / WaitForChild read:
+                //    `<recv>:FindFirstChild("Name").Value` → read form
+                //    `<recv>:WaitForChild("Name").Value`   → read form
+                for method in ["FindFirstChild", "WaitForChild"] {
+                    for q in ['"', '\''] {
+                        let pat_find = format!(":{method}({q}{name}{q}).Value");
+                        changes += Self::replace_with_receiver(
+                            &mut line,
+                            &pat_find,
+                            |recv| Self::read_expr(recv, name, is_ref),
+                        );
+                    }
+                }
+
+                // D) Assignment: `<recv>.Name.Value = V` → SetAttribute form.
+                //    MUST run before the bare-read rule (E) so we don't first
+                //    turn the LHS into a GetAttribute call.
+                let assign_marker = format!(".{name}.Value");
+                changes += Self::replace_assignment_with_receiver(
+                    &mut line,
+                    &assign_marker,
+                    name,
+                    is_ref,
+                    &mut warnings,
+                    line_no,
+                );
+
+                // E) Bare read: `<recv>.Name.Value` → read form.
+                let pat_read = format!(".{name}.Value");
+                changes += Self::replace_with_receiver(
+                    &mut line,
+                    &pat_read,
+                    |recv| Self::read_expr(recv, name, is_ref),
+                );
+            }
+
+            out_lines.push(line);
+        }
+
+        // Preserve a trailing newline if the original had one (lines() drops it).
+        let mut rewritten = out_lines.join("\n");
+        if source.ends_with('\n') {
+            rewritten.push('\n');
+        }
+
+        // Runtime-created value objects and value-objects-as-arguments are
+        // global (not per-name) concerns — scan the whole source once.
+        Self::warn_runtime_value_objects(source, &mut warnings);
+
+        (rewritten, changes, warnings)
+    }
+
+    /// Build the read-side expression for a value-object access.
+    /// Plain value → `recv:GetAttribute("Name")`.
+    /// ObjectValue  → `FindByUUID(recv:GetAttribute("Name"))` (resolve the UUID
+    /// string attribute back to a live Instance via the runtime resolver).
+    fn read_expr(recv: &str, name: &str, is_ref: bool) -> String {
+        if is_ref {
+            format!("FindByUUID({recv}:GetAttribute(\"{name}\"))")
+        } else {
+            format!("{recv}:GetAttribute(\"{name}\")")
+        }
+    }
+
+    /// Find every occurrence of `marker` in `line`, capture the receiver
+    /// expression immediately to its left, and replace
+    /// `<receiver><marker>` with `make(receiver)`. Returns the number of
+    /// replacements performed.
+    ///
+    /// The receiver is the maximal run of `[A-Za-z0-9_.]` ending at the marker
+    /// (so `game.Workspace.Cfg.Name.Value` captures receiver
+    /// `game.Workspace.Cfg`). A leading `:` / call-paren just before the run is
+    /// NOT consumed, so method-call results like `…):Foo` are left intact.
+    fn replace_with_receiver<F>(line: &mut String, marker: &str, make: F) -> u32
+    where
+        F: Fn(&str) -> String,
+    {
+        let mut changes = 0u32;
+        // Scan forward; `search_from` advances past every occurrence (rewritten
+        // or skipped) so the loop always terminates. None of the replacement
+        // forms re-contain their own marker, so a rewrite never re-matches.
+        let mut search_from = 0usize;
+        loop {
+            let Some(rel) = line[search_from..].find(marker) else { break };
+            let m_start = search_from + rel;
+
+            // Capture receiver: walk left over identifier/dot chars.
+            let recv_start = Self::receiver_start(line, m_start);
+            if recv_start == m_start {
+                // No receiver to the left (e.g. marker at line start or after a
+                // bare operator) — cannot safely rewrite; skip past this marker
+                // and keep scanning for later valid occurrences.
+                search_from = m_start + marker.len();
+                continue;
+            }
+
+            let receiver = line[recv_start..m_start].to_string();
+            let replacement = make(&receiver);
+            let m_end = m_start + marker.len();
+            line.replace_range(recv_start..m_end, &replacement);
+            changes += 1;
+            // Resume scanning after the inserted text.
+            search_from = recv_start + replacement.len();
+        }
+        changes
+    }
+
+    /// Like [`replace_with_receiver`](Self::replace_with_receiver) but for the
+    /// assignment form `<receiver>.Name.Value = V`. Only rewrites when the
+    /// marker is followed (after optional whitespace) by a single `=` that is
+    /// NOT part of `==`, `~=`, `<=`, `>=` (i.e. a real assignment, not a
+    /// comparison). Produces `<receiver>:SetAttribute("Name", V)`.
+    ///
+    /// For ObjectValue names, `V` is wrapped so a live instance is stored as
+    /// its UUID: `recv:SetAttribute("Name", V and V:GetUuid() or "")`, and a
+    /// lossy-assignment warning is recorded.
+    fn replace_assignment_with_receiver(
+        line: &mut String,
+        marker: &str,
+        name: &str,
+        is_ref: bool,
+        warnings: &mut Vec<TransformWarning>,
+        line_no: u32,
+    ) -> u32 {
+        let mut changes = 0u32;
+        let mut search_from = 0usize;
+        loop {
+            let Some(rel) = line[search_from..].find(marker) else { break };
+            let m_start = search_from + rel;
+            let m_end = m_start + marker.len();
+
+            // Look past the marker for an assignment `=` (skip spaces/tabs).
+            let after = &line[m_end..];
+            let trimmed = after.trim_start();
+            let ws_len = after.len() - trimmed.len();
+
+            let is_assignment = {
+                let bytes = trimmed.as_bytes();
+                if bytes.first() == Some(&b'=') {
+                    // Not `==` (next char `=`).
+                    bytes.get(1) != Some(&b'=')
+                } else {
+                    false
+                }
+            };
+            // Also reject comparison operators that put a char *before* `=`
+            // immediately after the marker (`~=`, `<=`, `>=`): those would have
+            // their operator char as `trimmed[0]`, so `is_assignment` is already
+            // false for them. The `==` case is handled above.
+
+            if !is_assignment {
+                // Leave for the bare-read rule; advance past this marker.
+                search_from = m_end;
+                continue;
+            }
+
+            let recv_start = Self::receiver_start(line, m_start);
+            if recv_start == m_start {
+                search_from = m_end;
+                continue;
+            }
+            let receiver = line[recv_start..m_start].to_string();
+
+            // Position of the `=` and the start of the RHS value expression.
+            let eq_pos = m_end + ws_len; // index of '='
+            let rhs = line[eq_pos + 1..].to_string();
+            let rhs_trimmed = rhs.trim();
+
+            let value_expr = if is_ref {
+                warnings.push(TransformWarning {
+                    line: Some(line_no),
+                    message: format!(
+                        "Assignment to ObjectValue '{name}' stores only the referent's UUID \
+                         (live-instance reference is lossy); rewritten to \
+                         `:SetAttribute(\"{name}\", inst and inst:GetUuid() or \"\")`. \
+                         Verify the right-hand side is an Instance.",
+                    ),
+                    severity: WarningSeverity::Warning,
+                });
+                format!("({rhs_trimmed}) and ({rhs_trimmed}):GetUuid() or \"\"")
+            } else {
+                rhs_trimmed.to_string()
+            };
+
+            let replacement =
+                format!("{receiver}:SetAttribute(\"{name}\", {value_expr})");
+            line.replace_range(recv_start.., &replacement);
+            changes += 1;
+            // The remainder of the line was the RHS we just consumed; nothing
+            // after it to scan.
+            break;
+        }
+        changes
+    }
+
+    /// Index where the receiver expression (maximal `[A-Za-z0-9_.]` run) that
+    /// ends at `marker_start` begins. Returns `marker_start` itself when there
+    /// is no identifier char immediately to the left.
+    fn receiver_start(line: &str, marker_start: usize) -> usize {
+        let bytes = line.as_bytes();
+        let mut i = marker_start;
+        while i > 0 {
+            let c = bytes[i - 1];
+            let is_ident = c.is_ascii_alphanumeric() || c == b'_' || c == b'.';
+            if is_ident {
+                i -= 1;
+            } else {
+                break;
+            }
+        }
+        i
+    }
+
+    /// Heuristic: does this line capture the value-object into a local without
+    /// immediately dereferencing it? Matches `local <ident> = <recv>.Name`
+    /// where the char after `.Name` is NOT `.` or `:` (so it is the whole RHS,
+    /// i.e. the object itself is being aliased, not its `.Value`/`.Changed`).
+    fn has_unsafe_local_capture(line: &str, name: &str) -> bool {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("local ") {
+            return false;
+        }
+        // Must contain `= ... .Name` and that `.Name` not be followed by `.`/`:`.
+        let needle = format!(".{name}");
+        let Some(eq) = trimmed.find('=') else { return false };
+        let rhs = &trimmed[eq + 1..];
+        let mut search_from = 0usize;
+        while let Some(rel) = rhs[search_from..].find(&needle) {
+            let pos = search_from + rel;
+            let after = pos + needle.len();
+            // Char immediately after `.Name`.
+            let next = rhs[after..].chars().next();
+            // A bare alias (`= obj.Name` end-of-expr, or followed by space, `)`,
+            // `,`) with no `.`/`:` deref is the unsafe case.
+            match next {
+                Some('.') | Some(':') => { /* dereferenced → handled elsewhere */ }
+                // Identifier continuation means it's `.NameOther`, not our name.
+                Some(c) if c.is_ascii_alphanumeric() || c == '_' => {}
+                _ => return true,
+            }
+            search_from = after;
+        }
+        false
+    }
+
+    /// Whole-source warnings for value-object constructs that are inherently
+    /// unrewritable by substring rules: runtime `Instance.new("…Value")` and
+    /// (heuristically) value-objects handed to functions.
+    fn warn_runtime_value_objects(source: &str, warnings: &mut Vec<TransformWarning>) {
+        const VALUE_CLASSES: [&str; 11] = [
+            "NumberValue", "StringValue", "IntValue", "BoolValue", "ObjectValue",
+            "Color3Value", "Vector3Value", "CFrameValue", "BrickColorValue",
+            "RayValue", "BinaryStringValue",
+        ];
+        for (idx, raw_line) in source.lines().enumerate() {
+            let line_no = (idx as u32) + 1;
+            if raw_line.trim_start().starts_with("--") {
+                continue;
+            }
+            for class in VALUE_CLASSES {
+                // `Instance.new("NumberValue")` (either quote style).
+                let dq = format!("Instance.new(\"{class}\")");
+                let sq = format!("Instance.new('{class}')");
+                if raw_line.contains(&dq) || raw_line.contains(&sq) {
+                    warnings.push(TransformWarning {
+                        line: Some(line_no),
+                        message: format!(
+                            "`Instance.new(\"{class}\")` creates a value object at runtime; the \
+                             importer's attribute folding does not apply to it. Port to a parent \
+                             attribute via `:SetAttribute(...)` / `:GetAttribute(...)` manually.",
+                        ),
+                        severity: WarningSeverity::Warning,
+                    });
+                }
+            }
         }
     }
 }

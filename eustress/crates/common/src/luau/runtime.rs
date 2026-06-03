@@ -1248,9 +1248,30 @@ Enum = setmetatable({}, {
                     Ok(mlua::Value::Function(get_attr_fn))
                 }
                 "SetAttribute" => {
-                    let set_attr_fn = lua.create_function(|_, (this, name, value): (mlua::Table, String, mlua::Value)| {
+                    let set_attr_fn = lua.create_function(|lua, (this, name, value): (mlua::Table, String, mlua::Value)| {
                         let attrs_key = format!("_attr_{}", name);
+                        // Detect a real change so the signal only fires on change
+                        // (matching Roblox AttributeChanged semantics).
+                        let prev: mlua::Value = this.raw_get(attrs_key.clone())?;
+                        let changed = prev != value;
                         this.raw_set(attrs_key, value)?;
+                        // Fire the per-attribute changed signal for in-runtime
+                        // (script-driven) attribute writes. This is the firing
+                        // path for GetAttributeChangedSignal when the change
+                        // originates from Luau. Engine-driven attribute changes
+                        // (the Changed<Attributes> observer in instance_loader.rs,
+                        // which this layer must NOT edit) still need the
+                        // engine-side hook documented at GetAttributeChangedSignal.
+                        if changed {
+                            let entity_id: i64 = this.raw_get("_entityId").unwrap_or(0);
+                            if entity_id != 0 {
+                                let globals = lua.globals();
+                                if let Ok(fire_fn) = globals.get::<mlua::Function>("__fire_event__") {
+                                    let event_name = format!("AttributeChanged:{}", name);
+                                    let _ = fire_fn.call::<()>((entity_id, event_name, name.clone()));
+                                }
+                            }
+                        }
                         Ok(())
                     })?;
                     Ok(mlua::Value::Function(set_attr_fn))
@@ -1267,6 +1288,57 @@ Enum = setmetatable({}, {
                         Ok(result)
                     })?;
                     Ok(mlua::Value::Function(get_attrs_fn))
+                }
+                // GetAttributeChangedSignal(name) -> RBXScriptSignal
+                //
+                // Mirrors instance.Changed / GetPropertyChangedSignal: returns a
+                // signal from the shared event registry keyed by this entity and
+                // the per-attribute event name "AttributeChanged:<name>". The
+                // returned table exposes :Connect / :Once / :Wait exactly like
+                // the other instance signals, so user code can connect today.
+                //
+                // FIRING — two paths:
+                //  (1) Script-driven: the "SetAttribute" arm above fires this
+                //      signal via `__fire_event__(entity_id, "AttributeChanged:<name>", name)`
+                //      whenever a Luau script changes the attribute value. This
+                //      path works NOW (covers the importer's folded ValueObject
+                //      writes that the compat rewrite turns into :SetAttribute).
+                //  (2) Engine-driven: when the attribute is mutated from the ECS
+                //      side (the `Changed<Attributes>` observer in
+                //      `engine/instance_loader.rs`, which THIS layer must not
+                //      edit), nothing in the Luau VM observes it. To make engine
+                //      mutations fire too, that observer must call the same Luau
+                //      global: `__fire_event__(entity_id, "AttributeChanged:" .. name, name)`
+                //      after writing the `_attr_<name>` field on the instance
+                //      table (or via a small Rust helper that does so). Until that
+                //      hook is added, only path (1) fires. See report.
+                "GetAttributeChangedSignal" => {
+                    let get_attr_sig_fn = lua.create_function(|lua, (this, attr_name): (mlua::Table, String)| {
+                        let entity_id: i64 = this.raw_get("_entityId").unwrap_or(0);
+                        let globals = lua.globals();
+                        let get_or_create: mlua::Function = globals.get("__get_or_create_event__")?;
+                        // Namespaced event key so each attribute gets its own signal.
+                        let event_name = format!("AttributeChanged:{}", attr_name);
+                        let signal: mlua::Table = get_or_create.call((entity_id, event_name))?;
+                        Ok(signal)
+                    })?;
+                    Ok(mlua::Value::Function(get_attr_sig_fn))
+                }
+                // GetUuid() -> string
+                //
+                // Returns the stable per-instance UUID string stored at the raw
+                // `_uuid` field, or "" if this instance has no UUID (e.g. a
+                // script-created `Instance.new` that was never persisted). The
+                // ObjectValue assignment rewrite emits `inst:GetUuid()` so a live
+                // instance reference can be stored back into a UUID-string
+                // attribute. The importer / instance loader is responsible for
+                // stamping `_uuid` on instance tables it seeds (see report).
+                "GetUuid" => {
+                    let get_uuid_fn = lua.create_function(|_, this: mlua::Table| {
+                        let uuid: String = this.raw_get("_uuid").unwrap_or_default();
+                        Ok(uuid)
+                    })?;
+                    Ok(mlua::Value::Function(get_uuid_fn))
                 }
                 "GetDescendants" => {
                     let get_desc_fn = lua.create_function(|lua, this: mlua::Table| {
@@ -1511,6 +1583,75 @@ Enum = setmetatable({}, {
         // Store metatable for use by Instance.new
         globals.set("__INSTANCE_MT__", instance_mt)
             .map_err(|e| format!("Failed to set instance metatable: {}", e))?;
+
+        // ====================================================================
+        // FindByUUID(uuid) -> Instance? — ObjectValue resolver
+        // ====================================================================
+        //
+        // The importer folds Roblox `ObjectValue`s into a UUID-string attribute
+        // on the parent. The value-object rewrite (compat.rs CONTRACT D) turns a
+        // read of such a `.Value` into `FindByUUID(parent:GetAttribute("Name"))`.
+        // This resolves that UUID string back to the live instance table.
+        //
+        // RESOLUTION STRATEGY (in-runtime, no engine World access from here):
+        // scan `__INSTANCE_REGISTRY__` for the table whose raw `_uuid` field
+        // equals `uuid`; return it, or `nil`. The registry is the runtime's
+        // authoritative entity↔table map (keyed by `_entityId`); a UUID index is
+        // not maintained, so this is a linear scan. For the import use case the
+        // registry holds the loaded scene, which is the correct lookup domain.
+        //
+        // LIMITATION: instance tables only carry `_uuid` if something stamped it
+        // (the importer / instance_loader when seeding pre-existing instances).
+        // A bare `Instance.new` does not get a `_uuid`, so it is unresolvable by
+        // UUID until persisted — acceptable, since only persisted ObjectValue
+        // targets have UUIDs to begin with. An empty/`nil` uuid returns `nil`.
+        let find_by_uuid = lua.create_function(|lua, uuid: Option<String>| {
+            let uuid = match uuid {
+                Some(u) if !u.is_empty() => u,
+                _ => return Ok(mlua::Value::Nil),
+            };
+            let globals = lua.globals();
+            let registry: mlua::Table = globals.get("__INSTANCE_REGISTRY__")?;
+            for pair in registry.pairs::<i64, mlua::Table>() {
+                if let Ok((_, inst)) = pair {
+                    let inst_uuid: String = inst.raw_get("_uuid").unwrap_or_default();
+                    if inst_uuid == uuid {
+                        return Ok(mlua::Value::Table(inst));
+                    }
+                }
+            }
+            Ok(mlua::Value::Nil)
+        }).map_err(|e| format!("Failed to create FindByUUID: {}", e))?;
+
+        // Expose as the bare global the rewrite emits. This is the canonical
+        // surface (the value-object rewrite only ever emits the bare global).
+        globals.set("FindByUUID", find_by_uuid.clone())
+            .map_err(|e| format!("Failed to set FindByUUID global: {}", e))?;
+
+        // Also expose as a convenience method on `game` and `workspace` (both
+        // exist from inject_core_globals). A dedicated variadic wrapper accepts
+        // BOTH `game.FindByUUID(uuid)` (dot: one string arg) and
+        // `game:FindByUUID(uuid)` (colon: implicit self table + string) by
+        // resolving the LAST string argument and delegating to the global.
+        let find_by_uuid_method = lua.create_function(|lua, args: mlua::MultiValue| {
+            // Resolve the LAST string argument (so the dot form's sole arg and
+            // the colon form's trailing arg both land on the uuid).
+            let mut uuid: Option<String> = None;
+            for v in args.into_iter() {
+                if let mlua::Value::String(s) = v {
+                    uuid = Some(s.to_string_lossy().to_string());
+                }
+            }
+            let globals = lua.globals();
+            let global_fn: mlua::Function = globals.get("FindByUUID")?;
+            global_fn.call::<mlua::Value>(uuid)
+        }).map_err(|e| format!("Failed to create FindByUUID method: {}", e))?;
+        if let Ok(game_tbl) = globals.get::<mlua::Table>("game") {
+            let _ = game_tbl.set("FindByUUID", find_by_uuid_method.clone());
+        }
+        if let Ok(ws_tbl) = globals.get::<mlua::Table>("workspace") {
+            let _ = ws_tbl.set("FindByUUID", find_by_uuid_method.clone());
+        }
 
         Ok(())
     }

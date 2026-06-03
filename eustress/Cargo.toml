@@ -31,6 +31,7 @@ members = [
     "crates/eustress-fjall",
     "crates/worlddb",
     "crates/roblox-import",
+    "crates/roblox-assets",
     "crates/eustress-space",
     "benches/instance-capacity"
 ]

@@ -1386,6 +1386,66 @@ fn rich_toml_value_to_attribute(v: &toml::Value) -> Option<eustress_common::Attr
                 _ => None,
             }
         }
+        // Tagged inline tables produced by the Roblox-import ValueObject fold
+        // (Contract A). Each holds exactly one key naming the source type:
+        //   { Color3 = [r,g,b] }                          → Color3
+        //   { CFrame = [px,py,pz, qx,qy,qz,qw] }          → CFrame
+        //   { BrickColor = N }                            → BrickColor
+        // (Bare scalars / strings / [3]-arrays decode in the arms above;
+        // ObjectValue folds to a bare UUID string → AttributeValue::String,
+        // also handled above — GetAttribute returns that uuid for the
+        // resolver.)
+        toml::Value::Table(tbl) => {
+            // Helper: pull an N-float array out of a tagged-table value.
+            let floats_of = |val: &toml::Value| -> Vec<f64> {
+                match val {
+                    toml::Value::Array(a) => a
+                        .iter()
+                        .filter_map(|item| match item {
+                            toml::Value::Float(f) => Some(*f),
+                            toml::Value::Integer(i) => Some(*i as f64),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            };
+
+            if let Some(c) = tbl.get("Color3") {
+                let f = floats_of(c);
+                if f.len() == 3 {
+                    return Some(eustress_common::AttributeValue::Color3(Color::srgb(
+                        f[0] as f32,
+                        f[1] as f32,
+                        f[2] as f32,
+                    )));
+                }
+                return None;
+            }
+            if let Some(cf) = tbl.get("CFrame") {
+                let f = floats_of(cf);
+                if f.len() == 7 {
+                    return Some(eustress_common::AttributeValue::CFrame(Transform {
+                        translation: Vec3::new(f[0] as f32, f[1] as f32, f[2] as f32),
+                        rotation: Quat::from_xyzw(
+                            f[3] as f32,
+                            f[4] as f32,
+                            f[5] as f32,
+                            f[6] as f32,
+                        ),
+                        ..Default::default()
+                    }));
+                }
+                return None;
+            }
+            if let Some(bc) = tbl.get("BrickColor") {
+                if let toml::Value::Integer(n) = bc {
+                    return Some(eustress_common::AttributeValue::BrickColor(*n as u32));
+                }
+                return None;
+            }
+            None
+        }
         _ => None,
     }
 }

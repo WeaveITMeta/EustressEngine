@@ -1176,7 +1176,62 @@ fn do_import_roblox_place(world: &mut World, source: PathBuf) {
         }
     };
 
-    // 3. Build import options. With the `world-db` feature (default), hand the
+    // 3a. Build the asset fetcher (Wave F2 — MESHES). The importer resolves
+    //     `rbxassetid://` MeshPart/SpecialMesh refs into real `.glb` geometry
+    //     when a fetcher is present. We construct a ChainFetcher:
+    //       - optional LOCAL mirror folder from `EUSTRESS_ROBLOX_ASSET_DIR`
+    //         (offline / community-mirror), tried first;
+    //       - NETWORK fetcher (Roblox asset-delivery CDN), tried next.
+    //     The network is ON by default — this is the user importing THEIR OWN
+    //     GDPR-portable place data — and can be disabled by setting
+    //     `EUSTRESS_ROBLOX_NO_NETWORK=1`. The whole chain is wrapped in a
+    //     CachingFetcher under `<Universe>/assets/.rbx_cache/` so re-imports
+    //     don't re-fetch. A `.ROBLOSECURITY` cookie can be supplied via
+    //     `EUSTRESS_ROBLOSECURITY` for auth-gated assets (never logged).
+    let asset_fetcher: Option<std::sync::Arc<dyn eustress_roblox_import::AssetFetcher>> = {
+        use eustress_roblox_assets::{ChainFetcher, LocalFolderFetcher, NetworkFetcher};
+        let mut chain = ChainFetcher::new();
+        if let Ok(dir) = std::env::var("EUSTRESS_ROBLOX_ASSET_DIR") {
+            if !dir.trim().is_empty() {
+                info!("📦 Roblox import: local asset mirror at {}", dir);
+                chain.push(std::sync::Arc::new(LocalFolderFetcher::new(dir)));
+            }
+        }
+        let network_on = std::env::var("EUSTRESS_ROBLOX_NO_NETWORK")
+            .map(|v| v.trim().is_empty() || v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+        if network_on {
+            match std::env::var("EUSTRESS_ROBLOSECURITY") {
+                Ok(tok) if !tok.trim().is_empty() => {
+                    chain.push(std::sync::Arc::new(NetworkFetcher::with_cookie(tok)));
+                }
+                _ => {
+                    chain.push(std::sync::Arc::new(NetworkFetcher::new()));
+                }
+            }
+        }
+        if chain.is_empty() {
+            // No sources at all (network disabled + no local dir) — keep the
+            // placeholder path by leaving the fetcher unset.
+            None
+        } else {
+            // Universe root = Space root's grandparent (`<Universe>/Spaces/<Space>`),
+            // falling back to the Space root. Cache lives beside the Universe's
+            // shared assets so it's reused across Spaces.
+            let universe_root = space_root
+                .ancestors()
+                .nth(2)
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| space_root.clone());
+            let cache_dir = universe_root.join("assets").join(".rbx_cache");
+            Some(std::sync::Arc::new(eustress_roblox_assets::CachingFetcher::new(
+                cache_dir,
+                std::sync::Arc::new(chain),
+            )))
+        }
+    };
+
+    // 3b. Build import options. With the `world-db` feature (default), hand the
     //    importer THIS Space's open WorldDb handle so bare, scalable parts bake
     //    straight into the binary-ECS `entities` partition (BinaryDirect is the
     //    default storage mode); file-natured nodes (scripts/GUI/custom meshes)
@@ -1198,11 +1253,15 @@ fn do_import_roblox_place(world: &mut World, source: PathBuf) {
         }
         eustress_roblox_import::ImportOptions {
             world_db,
+            asset_fetcher,
             ..Default::default()
         }
     };
     #[cfg(not(feature = "world-db"))]
-    let opts = eustress_roblox_import::ImportOptions::default();
+    let opts = eustress_roblox_import::ImportOptions {
+        asset_fetcher,
+        ..Default::default()
+    };
 
     let report = match eustress_roblox_import::import_into_space(&dom, &space_root, opts) {
         Ok(r) => r,
