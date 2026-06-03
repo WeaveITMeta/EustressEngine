@@ -461,8 +461,10 @@ mod tests {
         let studs_per_meter = 1.0 / Unit::Stud.to_meters();
         // 196.8 / 9.815 = 20.0509424...
         assert!((studs_per_meter - 196.8_f64 / 9.815_f64).abs() < FUZZ);
-        // 1 stud ≈ 0.04987 m
-        assert!((Unit::Stud.to_meters() - 0.049_872_975_609_756_1).abs() < FUZZ);
+        // 1 stud = 9.815 / 196.8 m ≈ 0.0498730 m. Compare against the exact
+        // defining expression — a hand-typed decimal literal does not match to
+        // within FUZZ (1e-10) because 1/(196.8/9.815) ≠ 9.815/196.8 once rounded.
+        assert!((Unit::Stud.to_meters() - 9.815_f64 / 196.8_f64).abs() < FUZZ);
     }
 
     #[test]

@@ -117,7 +117,43 @@ pub struct SceneMirror {
     pub version: u32,
     pub session_id: String,
     pub max_seq: u64,
+    // TOML keys must be strings, so a HashMap<u64, _> serialises with stringified
+    // keys (otherwise toml::ser fails with KeyNotString). The in-memory key type
+    // stays u64 for the rest of the code.
+    #[serde(with = "u64_key_map")]
     pub entities: HashMap<u64, MirrorEntity>,
+}
+
+/// Serde adapter: serialize a `HashMap<u64, MirrorEntity>` with string keys
+/// (TOML requirement) and parse them back to `u64` on the way in. A `BTreeMap`
+/// is used for serialization so the key order is deterministic.
+mod u64_key_map {
+    use super::MirrorEntity;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::{BTreeMap, HashMap};
+
+    pub fn serialize<S: Serializer>(
+        map: &HashMap<u64, MirrorEntity>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let stringed: BTreeMap<String, &MirrorEntity> =
+            map.iter().map(|(k, v)| (k.to_string(), v)).collect();
+        stringed.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<u64, MirrorEntity>, D::Error> {
+        let stringed = HashMap::<String, MirrorEntity>::deserialize(deserializer)?;
+        stringed
+            .into_iter()
+            .map(|(k, v)| {
+                k.parse::<u64>()
+                    .map(|key| (key, v))
+                    .map_err(serde::de::Error::custom)
+            })
+            .collect()
+    }
 }
 
 impl SceneMirror {

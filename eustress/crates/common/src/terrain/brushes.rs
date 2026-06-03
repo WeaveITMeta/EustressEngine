@@ -804,9 +804,16 @@ mod tests {
         };
         
         sim.simulate(&mut heights, &config);
-        
-        // Hill should be somewhat eroded
-        let center = heights[16 * 32 + 16];
-        assert!(center < 1.0, "Hill center should be eroded");
+
+        // The flat plateau interior has no local slope, so the exact centre
+        // barely moves — erosion acts at the sloped edges, carrying material
+        // downhill out of the plateau. Verify the hill as a whole lost mass.
+        let mut hill_sum = 0.0f32;
+        for z in 12..20 {
+            for x in 12..20 {
+                hill_sum += heights[z * 32 + x];
+            }
+        }
+        assert!(hill_sum < 64.0, "hill should erode (plateau sum {hill_sum} < 64.0)");
     }
 }

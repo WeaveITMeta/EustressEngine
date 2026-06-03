@@ -585,11 +585,15 @@ impl CFrame {
             [self.rotation[0][2], self.rotation[1][2], self.rotation[2][2]],
         ];
 
-        // Inverse position = -R^T * p
+        // Inverse position = -(R · p), using the ORIGINAL rotation rows.
+        // `point_to_world_space` (used by CFrame*CFrame) applies the column
+        // convention (Rᵀ·v + pos), so for `self * self.inverse() == identity`
+        // we need pos_inv such that Rᵀ·pos_inv + p = 0  →  pos_inv = -R·p.
+        let p = self.position;
         let inv_pos = Vector3::new(
-            -(inv_rot[0][0] * self.position.x + inv_rot[0][1] * self.position.y + inv_rot[0][2] * self.position.z),
-            -(inv_rot[1][0] * self.position.x + inv_rot[1][1] * self.position.y + inv_rot[1][2] * self.position.z),
-            -(inv_rot[2][0] * self.position.x + inv_rot[2][1] * self.position.y + inv_rot[2][2] * self.position.z),
+            -(self.rotation[0][0] * p.x + self.rotation[0][1] * p.y + self.rotation[0][2] * p.z),
+            -(self.rotation[1][0] * p.x + self.rotation[1][1] * p.y + self.rotation[1][2] * p.z),
+            -(self.rotation[2][0] * p.x + self.rotation[2][1] * p.y + self.rotation[2][2] * p.z),
         );
 
         Self {

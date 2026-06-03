@@ -71,25 +71,36 @@ impl SimulationClock {
         }
     }
     
-    /// Advance clock by wall time delta, returns number of ticks to execute
+    /// Advance clock by wall time delta, returns number of ticks to execute.
+    ///
+    /// The simulation **clock** advances by the full compressed delta
+    /// (`wall_delta · time_scale`) so that `simulation_time_s` and
+    /// `effective_compression()` reflect the intended time scale even under
+    /// extreme compression (see the `BATTERY_CYCLE_TEST` preset). The returned
+    /// **tick count** — used to drive discrete fixed-timestep physics — is
+    /// capped at `max_ticks_per_frame` to prevent a spiral of death. Clock time
+    /// is therefore decoupled from the number of physics steps executed.
     pub fn advance(&mut self, wall_delta_s: f64) -> u32 {
         self.wall_time_s += wall_delta_s;
-        
+
         let sim_delta = wall_delta_s * self.time_scale;
+        // Clock tracks the full compressed simulation time.
+        self.simulation_time_s += sim_delta;
         self.accumulator_s += sim_delta;
-        
+
+        // Drain the accumulator into discrete fixed-timestep physics ticks,
+        // capped per frame to avoid unbounded work at high compression.
         let mut ticks = 0u32;
         while self.accumulator_s >= self.fixed_timestep_s && ticks < self.max_ticks_per_frame {
             self.accumulator_s -= self.fixed_timestep_s;
-            self.simulation_time_s += self.fixed_timestep_s;
             self.tick_count += 1;
             ticks += 1;
         }
-        
+
         if ticks >= self.max_ticks_per_frame {
             self.accumulator_s = 0.0;
         }
-        
+
         ticks
     }
     

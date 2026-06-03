@@ -413,11 +413,15 @@ mod tests {
     
     #[test]
     fn test_client_vs_engine() {
+        // Format unified: ".eustress" is the single extension for both Client and
+        // Studio (see module docs + deprecated EXTENSION_CLIENT/EXTENSION_ENGINE).
+        // ".eustressengine" is deprecated but still recognised as an engine scene
+        // for backward compatibility.
         assert!(is_client_scene("game.eustress"));
         assert!(!is_client_scene("game.eustressengine"));
-        
-        assert!(is_engine_scene("game.eustressengine"));
-        assert!(!is_engine_scene("game.eustress"));
+
+        assert!(is_engine_scene("game.eustressengine")); // legacy, still recognised
+        assert!(is_engine_scene("game.eustress")); // unified extension also opens in engine
     }
     
     #[test]
@@ -431,19 +435,21 @@ mod tests {
     }
     
     #[test]
+    #[allow(deprecated)] // to_engine_path/to_client_path are deprecated aliases of to_eustress_path
     fn test_path_conversions() {
+        // All conversions now produce the unified ".eustress" extension; the
+        // client/engine distinction was removed.
         assert_eq!(
             to_engine_path("game.json"),
-            std::path::PathBuf::from("game.eustressengine")
+            std::path::PathBuf::from("game.eustress")
         );
         assert_eq!(
             to_client_path("game.json"),
             std::path::PathBuf::from("game.eustress")
         );
-        // Legacy alias
         assert_eq!(
             to_eustress_path("game.json"),
-            std::path::PathBuf::from("game.eustressengine")
+            std::path::PathBuf::from("game.eustress")
         );
     }
 }
