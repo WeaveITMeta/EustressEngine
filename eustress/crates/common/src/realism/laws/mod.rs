@@ -18,6 +18,9 @@ pub mod conservation;
 pub mod electrochemistry;
 pub mod electromagnetism;
 pub mod kinetics;
+pub mod optics;
+pub mod acoustics;
+pub mod biology;
 
 pub mod prelude {
     pub use super::thermodynamics::*;
@@ -26,4 +29,7 @@ pub mod prelude {
     pub use super::electrochemistry::*;
     pub use super::electromagnetism::prelude::*;
     pub use super::kinetics::prelude::*;
+    pub use super::optics::prelude::*;
+    pub use super::acoustics::prelude::*;
+    pub use super::biology::prelude::*;
 }

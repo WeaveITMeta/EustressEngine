@@ -360,9 +360,11 @@ mod tests {
     // ── helpers ──────────────────────────────────────────────────────────────
 
     fn assert_close(a: f64, b: f64, tol: f64, label: &str) {
+        // `<=` so an exact match (diff == 0) passes even when tol == 0.0,
+        // which is the case for exact integer factorials.
         assert!(
-            (a - b).abs() < tol,
-            "{label}: |{a} - {b}| = {} >= {tol}",
+            (a - b).abs() <= tol,
+            "{label}: |{a} - {b}| = {} > {tol}",
             (a - b).abs()
         );
     }

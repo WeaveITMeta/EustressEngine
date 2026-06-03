@@ -38,6 +38,10 @@ pub mod constants;
 pub mod components;
 pub mod systems;
 pub mod control_law;
+// Phase J extensions — pure-function libraries
+pub mod decay;
+pub mod shielding;
+pub mod criticality;
 
 pub mod prelude {
     pub use super::components::*;
@@ -46,6 +50,8 @@ pub mod prelude {
         feedforward_rod_pct, feedforward_flow_pct, compute_control_output,
     };
     pub use super::constants;
+    // Phase J: namespaced (not globbed) to avoid name collisions with kinetics
+    pub use super::{decay, shielding, criticality};
 }
 
 use bevy::prelude::*;

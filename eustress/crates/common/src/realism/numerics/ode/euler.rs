@@ -195,13 +195,16 @@ mod tests {
 
     #[test]
     fn backward_euler_scalar_linear() {
-        // dy/dt = -10 * y  (stiff decay), y(0) = 1
-        // Exact: y(dt) = exp(-10 * dt)
-        // Backward Euler: y_{n+1} = y_n / (1 + 10*dt)
-        let dt = 0.5_f32;
+        // dy/dt = -k*y, solved by FIXED-POINT backward Euler.
+        // Fixed-point iteration converges only when |dt * df/dy| < 1, so we
+        // pick a non-stiff regime here: k=10, dt=0.05 => |dt*df/dy| = 0.5 < 1.
+        // (Stiff cases must use the Newton-based bdf1_newton in implicit.rs.)
+        // Backward Euler discrete solution: y_{n+1} = y_n / (1 + k*dt).
+        let dt = 0.05_f32;
+        let k = 10.0_f32;
         let y0 = 1.0_f32;
-        let result = backward_euler_step(y0, dt, |y| -10.0 * y, 64, 1e-8);
-        let expected = y0 / (1.0 + 10.0 * dt);
+        let result = backward_euler_step(y0, dt, |y| -k * y, 64, 1e-8);
+        let expected = y0 / (1.0 + k * dt);
         assert!(
             (result - expected).abs() < 1e-4,
             "result={result}, expected={expected}"
@@ -210,10 +213,11 @@ mod tests {
 
     #[test]
     fn backward_euler_slice_linear() {
-        // Two independent decays: dy_i/dt = -k_i * y_i
+        // Two independent decays: dy_i/dt = -k_i * y_i.
+        // Non-stiff regime so fixed-point converges: max |dt*k| = 0.5 < 1.
         let k = [2.0_f32, 5.0_f32];
         let y0 = [1.0_f32, 1.0_f32];
-        let dt = 0.2_f32;
+        let dt = 0.1_f32;
         let result = backward_euler_step_slice(
             &y0,
             dt,

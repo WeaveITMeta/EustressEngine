@@ -163,38 +163,71 @@ pub fn phase_margin(num: &[f32], den: &[f32], omega_gc: f32) -> f32 {
 }
 
 /// Phase crossover frequency: ω_pc where ∠H(jω) = -180°.
+///
+/// Returns `None` if the phase never reaches -180° in `[omega_lo, omega_hi]`
+/// (e.g. a 1st- or 2nd-order low-pass, which only approaches -180° asymptotically).
+///
+/// Implementation note: the phase reaches -180° exactly where `H(jω)` is real
+/// and negative — i.e. `Im(N(jω)·conj(D(jω))) = 0` with `Re(N·conj(D)) < 0`.
+/// Searching this bilinear quantity avoids the `atan2` branch-cut wrapping at
+/// ±180° that makes a naive phase-zero search fail at precisely the crossing.
 pub fn phase_crossover_frequency(
     num: &[f32],
     den: &[f32],
     omega_lo: f32,
     omega_hi: f32,
 ) -> Option<f32> {
-    // f(ω) = ∠H(jω) + π; find zero crossing (phase = -180° = -π rad)
-    let f = |w: f32| tf_phase(num, den, w) + PI;
+    // N(jω)·conj(D(jω)) = (re, im); phase of H = phase of this product.
+    let g = |w: f32| -> (f32, f32) {
+        let (nr, ni) = eval_poly_jw(num, w);
+        let (dr, di) = eval_poly_jw(den, w);
+        let re = nr * dr + ni * di;
+        let im = ni * dr - nr * di;
+        (re, im)
+    };
 
-    let mut lo = omega_lo;
-    let mut hi = omega_hi;
-    let f_lo = f(lo);
-    let f_hi = f(hi);
+    // Logarithmic scan for a sign change of the imaginary part. The -180°
+    // crossing is the one where the real part is also negative.
+    let steps = 600usize;
+    let ratio = (omega_hi / omega_lo).powf(1.0 / steps as f32);
+    let mut w_prev = omega_lo;
+    let (_, mut im_prev) = g(w_prev);
 
-    if f_lo * f_hi > 0.0 {
-        return None;
+    for i in 1..=steps {
+        let w = omega_lo * ratio.powi(i as i32);
+        let (_, im) = g(w);
+
+        if im_prev * im < 0.0 {
+            // Bracket [w_prev, w]; bisect on the imaginary part.
+            let s_lo = im_prev.signum();
+            let mut lo = w_prev;
+            let mut hi = w;
+            for _ in 0..100 {
+                let mid = 0.5 * (lo + hi);
+                let (_, im_mid) = g(mid);
+                if im_mid.abs() < 1e-9 {
+                    lo = mid;
+                    hi = mid;
+                    break;
+                }
+                if s_lo * im_mid < 0.0 {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            let wpc = 0.5 * (lo + hi);
+            // Confirm this is -180° (real negative), not 0°/±360° (real positive).
+            if g(wpc).0 < 0.0 {
+                return Some(wpc);
+            }
+        }
+
+        w_prev = w;
+        im_prev = im;
     }
 
-    for _ in 0..100 {
-        let mid = 0.5 * (lo + hi);
-        let f_mid = f(mid);
-        if f_mid.abs() < 1e-7 {
-            return Some(mid);
-        }
-        if f_lo * f_mid <= 0.0 {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
-    }
-
-    Some(0.5 * (lo + hi))
+    None
 }
 
 /// Gain margin: GM = -20·log₁₀(|H(jω_pc)|)  [dB]
@@ -444,27 +477,32 @@ mod tests {
 
     #[test]
     fn test_second_order_phase_crossover() {
-        // H(s) = ωn²/(s² + 2ζωn·s + ωn²) with ωn=1, ζ=0.1
-        // num = [1], den = [1, 0.2, 1]
-        // Phase = -180° at ω = ωn = 1 (approximately)
+        // A 2nd-order low-pass only reaches -90 deg at wn and approaches -180 deg
+        // asymptotically (never crosses at a finite frequency). To have a real
+        // -180 deg crossover we need 3rd order: H(s) = 1/(s+1)^3.
+        // den (ascending) = (s+1)^3 = 1 + 3s + 3s^2 + s^3 -> [1, 3, 3, 1].
+        // Phase = -3*atan(w); crosses -180 deg when atan(w)=60 deg -> w = sqrt(3).
         let num = vec![1.0];
-        let den = vec![1.0, 0.2, 1.0];
+        let den = vec![1.0, 3.0, 3.0, 1.0];
         let wpc = phase_crossover_frequency(&num, &den, 0.01, 100.0);
         assert!(wpc.is_some(), "Should find phase crossover");
         let w = wpc.unwrap();
-        // For this system phase crosses -180 at ω=1
-        assert!(approx_eq(w, 1.0, 1e-2), "Phase crossover near ω=1, got {}", w);
+        assert!(
+            approx_eq(w, 3.0_f32.sqrt(), 2e-2),
+            "Phase crossover near sqrt(3), got {}",
+            w
+        );
     }
 
     #[test]
     fn test_gain_margin_db_positive() {
-        // At phase crossover, gain should be < 1 for a stable system → GM > 0
+        // 1/(s+1)^3 at the -180 deg crossover w=sqrt(3): |H| = 1/|j*sqrt(3)+1|^3
+        // = 1/(2^3) = 0.125, so GM = -20*log10(0.125) ~ +18 dB (stable loop).
         let num = vec![1.0];
-        let den = vec![1.0, 0.2, 1.0];
+        let den = vec![1.0, 3.0, 3.0, 1.0];
         let wpc = phase_crossover_frequency(&num, &den, 0.01, 100.0).unwrap();
         let gm = gain_margin_db(&num, &den, wpc);
-        // At ω=1, |H(j1)| = 1/(2ζ) = 1/0.2 = 5 → GM = -20·log10(5) ≈ -14 dB (unstable loop)
-        // This is a unity-feedback analysis so the loop gain matters more; just verify sign
         assert!(gm.is_finite());
+        assert!(gm > 0.0, "stable loop should have positive gain margin, got {gm}");
     }
 }

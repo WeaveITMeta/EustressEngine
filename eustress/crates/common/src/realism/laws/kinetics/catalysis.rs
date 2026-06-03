@@ -11,9 +11,13 @@ pub fn michaelis_menten(v_max: f32, km: f32, substrate: f32) -> f32 {
     v_max * substrate / (km + substrate)
 }
 
-/// Km from lineweaver-burk intercepts: Km = -x_intercept in 1/v vs 1/[S] plot
+/// Km from Lineweaver-Burk x-intercept. In the 1/v vs 1/[S] plot the line
+/// crosses the x-axis at -1/Km, so Km = -1/x_intercept.
 pub fn km_from_lineweaver(x_intercept: f32) -> f32 {
-    -x_intercept
+    if x_intercept == 0.0 {
+        return f32::INFINITY;
+    }
+    -1.0 / x_intercept
 }
 
 /// Vmax from y-intercept: Vmax = 1 / y_intercept

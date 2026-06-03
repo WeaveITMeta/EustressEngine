@@ -222,11 +222,13 @@ mod tests {
     fn bdf1_newton_exponential_decay() {
         let y0 = 1.0_f32;
         let k = 100.0_f32; // stiff: decay time constant 0.01 s
-        let dt = 0.01_f32;
-        // f(y_new) = -k * y_new,  df(y_new) = -k
-        let y_new = bdf1_newton(y0, dt, |y| -k * y, |_| -k, 20, 1e-6);
+        // BDF-1 is FIRST-ORDER: single-step error is O((k*dt)^2/2). At k*dt=1
+        // the error is ~36 %, so accuracy needs k*dt << 1. Use k*dt = 0.01.
+        let dt = 0.0001_f32;
+        // f(y_new) = -k * y_new,  df(y_new) = -k. Newton stays stable for any dt
+        // (A-stable) — this test checks ACCURACY in the small-step regime.
+        let y_new = bdf1_newton(y0, dt, |y| -k * y, |_| -k, 20, 1e-7);
         let exact = y0 * (-k * dt).exp();
-        // BDF-1 first-order error should be within 1 % for k*dt = 1.
         assert!(
             (y_new - exact).abs() / exact < 0.02,
             "bdf1_newton: y_new={y_new}, exact={exact}"
@@ -250,10 +252,12 @@ mod tests {
     fn bdf2_newton_exponential_decay() {
         let y0 = 1.0_f32;
         let k = 50.0_f32;
-        let dt = 0.01_f32;
-        // Bootstrap: y_{-1} using exact solution at -dt (or BDF-1 from -dt to 0)
+        // BDF-2 is second-order, but a single step still needs k*dt modest for
+        // the 2 % accuracy check. Use k*dt = 0.05.
+        let dt = 0.001_f32;
+        // Bootstrap: y_{-1} using exact solution at -dt
         let y_nm1 = y0 * (k * dt).exp(); // y at t = -dt
-        let y_new = bdf2_newton(y0, y_nm1, dt, |y| -k * y, |_| -k, 20, 1e-6);
+        let y_new = bdf2_newton(y0, y_nm1, dt, |y| -k * y, |_| -k, 20, 1e-7);
         let exact = y0 * (-k * dt).exp();
         assert!(
             (y_new - exact).abs() / exact < 0.02,

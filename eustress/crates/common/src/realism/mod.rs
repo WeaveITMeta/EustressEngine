@@ -63,6 +63,11 @@ pub mod numerics;
 pub mod electrical;
 pub mod chemistry;
 pub mod control;
+// STEM Stack — Phases E-L
+pub mod structures;
+pub mod thermocycles;
+pub mod propulsion;
+pub mod plasma;
 
 #[cfg(feature = "realism-gpu")]
 pub mod gpu;
@@ -93,6 +98,10 @@ pub mod prelude {
     pub use super::electrical::prelude::*;
     pub use super::chemistry::prelude::*;
     pub use super::control::prelude::*;
+    pub use super::structures::prelude::*;
+    pub use super::thermocycles::prelude::*;
+    pub use super::propulsion::prelude::*;
+    pub use super::plasma::prelude::*;
     pub use super::{RealismPlugin, RealismConfig};
     
     #[cfg(feature = "realism-symbolic")]
@@ -133,6 +142,15 @@ impl Plugin for RealismPlugin {
                 chemistry::ChemistryPlugin,
                 control::ControlPlugin,
             ));
+
+        // STEM Stack — Phases E-L (separate add_plugins call to stay under
+        // Bevy's 15-element plugin-tuple arity limit)
+        app.add_plugins((
+            structures::StructuresPlugin,
+            thermocycles::ThermoCyclesPlugin,
+            propulsion::PropulsionPlugin,
+            plasma::PlasmaPlugin,
+        ));
         
         #[cfg(feature = "realism-symbolic")]
         app.add_plugins(symbolic::SymbolicPlugin);

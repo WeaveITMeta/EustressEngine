@@ -143,19 +143,22 @@ pub fn spline_build(xs: &[f32], ys: &[f32]) -> Vec<f32> {
         upper[i] = h[orig]; // upper diagonal = h[orig] = h between interior[i] and interior[i+1]
     }
 
-    // Forward sweep.
-    let mut c_prime = vec![0.0f32; m - 1];
+    // Forward sweep (Thomas algorithm).
+    // For m == 1 there is a single interior unknown and no off-diagonals:
+    // the system reduces to diag[0]*sol[0] = rhs[0], so c_prime stays empty.
+    let mut c_prime = vec![0.0f32; m.saturating_sub(1)];
     let mut d_prime = vec![0.0f32; m];
 
-    c_prime[0] = upper[0] / diag[0];
     d_prime[0] = rhs_w[0] / diag[0];
-
-    for i in 1..m {
-        let lower_i = h[i]; // h[i] is the sub-diagonal connecting interior[i] to interior[i-1]
-        let denom = diag[i] - lower_i * if i > 0 { c_prime[i - 1] } else { 0.0 };
-        d_prime[i] = (rhs_w[i] - lower_i * d_prime[i - 1]) / denom;
-        if i < m - 1 {
-            c_prime[i] = upper[i] / denom;
+    if m > 1 {
+        c_prime[0] = upper[0] / diag[0];
+        for i in 1..m {
+            let lower_i = h[i]; // sub-diagonal connecting interior[i] to interior[i-1]
+            let denom = diag[i] - lower_i * c_prime[i - 1];
+            d_prime[i] = (rhs_w[i] - lower_i * d_prime[i - 1]) / denom;
+            if i < m - 1 {
+                c_prime[i] = upper[i] / denom;
+            }
         }
     }
 
