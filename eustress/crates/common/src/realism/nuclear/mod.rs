@@ -77,6 +77,7 @@ impl Plugin for NuclearPlugin {
         // Register types for Reflect / serialization
         app
             .register_type::<ArcReactorCore>()
+            .register_type::<NuclearInit>()
             .register_type::<NuclearKineticsComponent>()
             .register_type::<ControlRodBankComponent>()
             .register_type::<ThermalHydraulicsComponent>()

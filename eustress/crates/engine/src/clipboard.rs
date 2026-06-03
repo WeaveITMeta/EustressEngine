@@ -1591,6 +1591,7 @@ fn spawn_pasted_entity(
             // Build InstanceDefinition (same structure as toolbox insert)
             let instance_def = crate::space::instance_loader::InstanceDefinition {
                 nuclear: None,
+                plasma: None,
                 asset: Some(crate::space::instance_loader::AssetReference {
                     mesh: mesh_path.to_string(),
                     scene: "Scene0".to_string(),

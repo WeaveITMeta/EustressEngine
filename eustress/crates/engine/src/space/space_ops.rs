@@ -522,6 +522,7 @@ pub fn save_space(world: &mut World) {
                     .to_string();
                 InstanceDefinition {
                     nuclear: None,
+                    plasma: None,
                     asset: Some(AssetReference {
                         mesh,
                         scene: "Scene0".to_string(),

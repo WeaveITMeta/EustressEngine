@@ -7939,6 +7939,7 @@ fn drain_slint_actions(
                             // Parallel nuclear session added this field; generic
                             // builders carry no reactor state.
                             nuclear: None,
+                            plasma: None,
                             asset: Some(crate::space::instance_loader::AssetReference {
                                 mesh: mesh_path.to_string(),
                                 scene: "Scene0".to_string(),
@@ -14077,6 +14078,7 @@ fn sync_properties_to_slint(
             if !is_ui_class_outer { return None; }
             Some(crate::space::instance_loader::InstanceDefinition {
                 nuclear: None,
+                plasma: None,
                 asset: None,
                 transform: crate::space::instance_loader::TransformData::default(),
                 properties: crate::space::instance_loader::InstanceProperties::default(),

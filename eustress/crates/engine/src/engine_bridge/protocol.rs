@@ -311,6 +311,8 @@ pub mod handlers {
             let now = chrono::Utc::now().to_rfc3339();
 
             let def = InstanceDefinition {
+                nuclear: None,
+                plasma: None,
                 asset: Some(AssetReference { mesh: mesh.to_string(), scene: "Scene0".to_string() }),
                 transform: TransformData {
                     position,

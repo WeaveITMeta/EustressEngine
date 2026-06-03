@@ -10,6 +10,25 @@ use super::constants::*;
 #[reflect(Component)]
 pub struct ArcReactorCore;
 
+/// Carrier component written from the `[nuclear]` TOML section at spawn.
+/// `FissionPlugin` reads it during hydration to override the default component
+/// values, then removes it. This is what makes the `[nuclear]` section actually
+/// drive initial conditions rather than being a template-only stub.
+#[derive(Component, Reflect, Clone, Debug, Serialize, Deserialize)]
+#[reflect(Component)]
+pub struct NuclearInit {
+    pub neutron_population: f32,
+    pub core_temp_celsius: f32,
+    pub coolant_flow_pct: f32,
+    pub battery_soc_pct: f32,
+    pub load_demand_watts: f32,
+    pub rod_bank_a_pct: f32,
+    pub rod_bank_b_pct: f32,
+    pub te_efficiency: f32,
+    pub stirling_efficiency: f32,
+    pub ai_regulation_enabled: bool,
+}
+
 // ── Point kinetics ────────────────────────────────────────────────────────────
 
 /// One-group point kinetics state for the ARC-1 fission core.

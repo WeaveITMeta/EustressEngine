@@ -49,6 +49,9 @@ pub struct InstanceDefinition {
     /// Optional nuclear reactor state (ArcReactorCore class)
     #[serde(default)]
     pub nuclear: Option<TomlNuclearState>,
+    /// Optional plasma state (dynamic on any class)
+    #[serde(default)]
+    pub plasma: Option<TomlPlasmaState>,
     /// Optional UI class properties (TextLabel, TextButton, Frame, ImageLabel, etc.)
     #[serde(default)]
     pub ui: Option<UiInstanceProperties>,
@@ -1130,6 +1133,73 @@ impl Default for TomlNuclearState {
     }
 }
 
+/// Plasma state as it appears in the [plasma] TOML section. Attaches a
+/// `PlasmaState` component to any class — same model as [thermodynamic].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TomlPlasmaState {
+    #[serde(default = "default_plasma_density")]
+    pub electron_density: f32,
+    #[serde(default = "default_plasma_density")]
+    pub ion_density: f32,
+    #[serde(default = "default_plasma_temp")]
+    pub electron_temperature_k: f32,
+    #[serde(default = "default_plasma_temp")]
+    pub ion_temperature_k: f32,
+    #[serde(default = "default_one")]
+    pub ionization_degree: f32,
+    #[serde(default = "default_one")]
+    pub magnetic_field: f32,
+}
+
+fn default_plasma_density() -> f32 { 1.0e19 }
+fn default_plasma_temp()    -> f32 { 1.0e7 }
+
+impl Default for TomlPlasmaState {
+    fn default() -> Self {
+        Self {
+            electron_density: default_plasma_density(),
+            ion_density: default_plasma_density(),
+            electron_temperature_k: default_plasma_temp(),
+            ion_temperature_k: default_plasma_temp(),
+            ionization_degree: 1.0,
+            magnetic_field: 1.0,
+        }
+    }
+}
+
+impl TomlPlasmaState {
+    /// Convert to the realism `PlasmaState` ECS component.
+    pub fn to_component(&self) -> eustress_common::realism::plasma::components::PlasmaState {
+        eustress_common::realism::plasma::components::PlasmaState {
+            electron_density: self.electron_density,
+            ion_density: self.ion_density,
+            electron_temperature_k: self.electron_temperature_k,
+            ion_temperature_k: self.ion_temperature_k,
+            ionization_degree: self.ionization_degree,
+            magnetic_field: self.magnetic_field,
+        }
+    }
+}
+
+impl TomlNuclearState {
+    /// Convert to the `NuclearInit` carrier component that `FissionPlugin`
+    /// applies over the ArcReactorCore default components during hydration.
+    pub fn to_init(&self) -> eustress_common::realism::nuclear::components::NuclearInit {
+        eustress_common::realism::nuclear::components::NuclearInit {
+            neutron_population: self.neutron_population,
+            core_temp_celsius: self.core_temp_celsius,
+            coolant_flow_pct: self.coolant_flow_pct,
+            battery_soc_pct: self.battery_soc_pct,
+            load_demand_watts: self.load_demand_watts,
+            rod_bank_a_pct: self.rod_bank_a_pct,
+            rod_bank_b_pct: self.rod_bank_b_pct,
+            te_efficiency: self.te_efficiency,
+            stirling_efficiency: self.stirling_efficiency,
+            ai_regulation_enabled: self.ai_regulation_enabled,
+        }
+    }
+}
+
 /// Component marking an entity as loaded from an instance file.
 /// For folder-based instances: toml_path = folder/_instance.toml
 /// For legacy flat files: toml_path = folder/Name.glb.toml
@@ -2010,6 +2080,14 @@ pub fn spawn_instance(
             ec.insert(echem.to_component());
             debug!("  + ElectrochemicalState: V={:.2}V SOC={:.1}%", echem.voltage, echem.soc * 100.0);
         }
+        if let Some(ref nuc) = instance.nuclear {
+            ec.insert(nuc.to_init());
+            debug!("  + NuclearInit: T={:.0}°C load={:.0}W", nuc.core_temp_celsius, nuc.load_demand_watts);
+        }
+        if let Some(ref plasma) = instance.plasma {
+            ec.insert(plasma.to_component());
+            debug!("  + PlasmaState: ne={:.1e} Te={:.1e}K", plasma.electron_density, plasma.electron_temperature_k);
+        }
         // Attach UI ECS component if this is a UI class
         attach_ui_component(&mut ec, class_name, instance.ui.as_ref());
         // Extra sections — anything present in the TOML that
@@ -2137,6 +2215,14 @@ pub fn spawn_instance(
     if let Some(ref echem) = instance.electrochemical {
         ec.insert(echem.to_component());
         debug!("  + ElectrochemicalState: V={:.2}V SOC={:.1}%", echem.voltage, echem.soc * 100.0);
+    }
+    if let Some(ref nuc) = instance.nuclear {
+        ec.insert(nuc.to_init());
+        debug!("  + NuclearInit: T={:.0}°C load={:.0}W", nuc.core_temp_celsius, nuc.load_demand_watts);
+    }
+    if let Some(ref plasma) = instance.plasma {
+        ec.insert(plasma.to_component());
+        debug!("  + PlasmaState: ne={:.1e} Te={:.1e}K", plasma.electron_density, plasma.electron_temperature_k);
     }
     // Attach UI ECS component if this is a UI class
     attach_ui_component(&mut ec, class_name, instance.ui.as_ref());

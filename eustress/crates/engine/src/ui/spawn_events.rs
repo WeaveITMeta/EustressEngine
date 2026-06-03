@@ -351,6 +351,7 @@ fn build_binary_part_def(
     let now = chrono::Utc::now().to_rfc3339();
     InstanceDefinition {
         nuclear: None,
+        plasma: None,
         asset: Some(AssetReference {
             mesh: mesh.to_string(),
             scene: "Scene0".to_string(),

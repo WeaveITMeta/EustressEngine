@@ -83,6 +83,7 @@ impl NewPartDescriptor {
         let color = self.color_rgba.unwrap_or([163.0/255.0, 162.0/255.0, 165.0/255.0, 1.0]);
         InstanceDefinition {
             nuclear: None,
+            plasma: None,
             asset: Some(AssetReference {
                 mesh: self.mesh.clone(),
                 scene: "Scene0".to_string(),
@@ -461,6 +462,7 @@ pub fn persist_transform_to_toml(world: &mut World, entity: Entity) {
 fn build_fallback_def(position: Vec3, rotation: Quat, size: Vec3) -> InstanceDefinition {
     InstanceDefinition {
         nuclear: None,
+        plasma: None,
         asset: Some(AssetReference {
             mesh: "parts/block.glb".to_string(),
             scene: "Scene0".to_string(),

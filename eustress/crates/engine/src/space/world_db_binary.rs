@@ -171,6 +171,7 @@ fn def_from_components(
 
     InstanceDefinition {
         nuclear: None,
+        plasma: None,
         asset: if mesh.is_empty() {
             None
         } else {

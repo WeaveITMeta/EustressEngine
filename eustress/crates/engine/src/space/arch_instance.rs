@@ -219,6 +219,7 @@ pub fn arch_to_instance(core: &ArchInstanceCore) -> InstanceDefinition {
 
     InstanceDefinition {
         nuclear: None,
+        plasma: None,
         asset,
         transform: TransformData {
             position: core.t,
@@ -304,6 +305,8 @@ mod tests {
             material: None,
             thermodynamic: None,
             electrochemical: None,
+            nuclear: None,
+            plasma: None,
             ui: None,
             attributes: Some(attributes),
             tags: Some(vec!["bench".into(), "static".into()]),
@@ -359,6 +362,8 @@ mod tests {
             material: None,
             thermodynamic: None,
             electrochemical: None,
+            nuclear: None,
+            plasma: None,
             ui: None,
             attributes: None,
             tags: None,
