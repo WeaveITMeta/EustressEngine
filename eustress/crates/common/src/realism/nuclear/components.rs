@@ -267,6 +267,9 @@ pub enum ReactorControlMode {
     PowerFollow,
     Regulation,
     EmergencyShutdown,
+    /// Phase-3 output: pure feedforward + proportional trim, no integrators.
+    /// Requires `FeedforwardCoefficients` resource (populated from Workshop data).
+    DeterministicLaw,
 }
 
 impl Default for ArcReactorAIController {

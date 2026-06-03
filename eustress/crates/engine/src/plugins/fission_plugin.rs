@@ -15,6 +15,7 @@ use eustress_common::realism::nuclear::components::{
     VCellBatteryComponent,
     ArcReactorAIController,
 };
+use eustress_common::realism::nuclear::control_law::DeterministicControlState;
 
 pub struct FissionPlugin;
 
@@ -44,6 +45,7 @@ fn hydrate_arc_reactor_core_system(
             PowerConversionComponent::default(),
             VCellBatteryComponent::default(),
             ArcReactorAIController::default(),
+            DeterministicControlState::default(),
         ));
 
         info!("ArcReactorCore hydrated on entity {:?} ('{}')", entity, instance.name);

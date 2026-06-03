@@ -37,9 +37,14 @@
 pub mod constants;
 pub mod components;
 pub mod systems;
+pub mod control_law;
 
 pub mod prelude {
     pub use super::components::*;
+    pub use super::control_law::{
+        FeedforwardCoefficients, DeterministicControlState,
+        feedforward_rod_pct, feedforward_flow_pct, compute_control_output,
+    };
     pub use super::constants;
 }
 
@@ -47,6 +52,7 @@ use bevy::prelude::*;
 use tracing::info;
 use components::*;
 use systems::*;
+use control_law::{FeedforwardCoefficients, DeterministicControlState, deterministic_control_law_system};
 use crate::simulation::{SimulationClock, WatchPointRegistry};
 
 /// Bevy plugin that registers all ARC-1 nuclear simulation ECS types and systems.
@@ -58,6 +64,10 @@ impl Plugin for NuclearPlugin {
         app.init_resource::<SimulationClock>();
         app.init_resource::<WatchPointRegistry>();
 
+        // Deterministic control law resource (falls back to analytical defaults
+        // until docs/arc1/feedforward_coefficients.toml is written by the Workshop)
+        app.init_resource::<FeedforwardCoefficients>();
+
         // Register types for Reflect / serialization
         app
             .register_type::<ArcReactorCore>()
@@ -68,7 +78,9 @@ impl Plugin for NuclearPlugin {
             .register_type::<VCellBatteryComponent>()
             .register_type::<ArcReactorAIController>()
             .register_type::<PidState>()
-            .register_type::<ReactorControlMode>();
+            .register_type::<ReactorControlMode>()
+            .register_type::<FeedforwardCoefficients>()
+            .register_type::<DeterministicControlState>();
 
         // Register the SCRAM message (Bevy 0.18 Messages API)
         app.add_message::<ReactorScramMessage>();
@@ -86,6 +98,7 @@ impl Plugin for NuclearPlugin {
         // Set B: control + safety + telemetry (runs after Set A each frame)
         app.add_systems(Update, (
             update_ai_controller_system,
+            deterministic_control_law_system,  // runs alongside PID; only one is active per mode
             nuclear_safety_monitor_system,
             execute_scram_system,
             publish_nuclear_watchpoints_system,

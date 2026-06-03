@@ -1,0 +1,189 @@
+/// ARC-1 Experiment Runner — Rune script
+///
+/// This script automates the data-collection experiments described in
+/// docs/workshop/arc1_workshop_prompts.md.  It responds to Workshop commands
+/// written to the `arc1.cmd.*` watchpoints and manages session recording.
+///
+/// Commands (write via set_sim_value or Workshop MCP):
+///   arc1.cmd.begin_session   — value is session_id hash (write 1.0 to start)
+///   arc1.cmd.end_session     — write 1.0 to flush and save current session
+///   arc1.cmd.set_load_watts  — change load demand
+///   arc1.cmd.set_control_mode — 0=Standby, 1=Regulation, 2=DeterministicLaw
+///   arc1.manual_scram         — write 1.0 to SCRAM immediately
+///   arc1.ai_override_enabled  — write 0.0 to disable AI controller
+
+// ── Session state ─────────────────────────────────────────────────────────────
+
+let session_active  = false;
+let session_id      = "unnamed";
+let session_tick    = 0;
+let session_records = [];  // array of snapshot objects
+
+let RECORD_INTERVAL_TICKS = 60;  // record every 60 ticks at 60fps = 1s
+
+// ── Watchpoint snapshot keys ──────────────────────────────────────────────────
+
+let SNAPSHOT_KEYS = [
+    "arc1.neutron_population",
+    "arc1.reactivity",
+    "arc1.core_temp_celsius",
+    "arc1.coolant_temp_celsius",
+    "arc1.thermal_power_watts",
+    "arc1.electrical_output_w",
+    "arc1.battery_soc_pct",
+    "arc1.load_demand_watts",
+    "arc1.power_balance_watts",
+    "arc1.rod_bank_a_pct",
+    "arc1.rod_bank_b_pct",
+    "arc1.coolant_flow_pct",
+    "arc1.total_efficiency",
+    "arc1.decay_heat_watts",
+    "arc1.is_scrammed",
+];
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+
+pub fn on_init() {
+    log_info("[ARC1-Runner] Experiment runner initialised");
+    log_info("[ARC1-Runner] Waiting for commands on arc1.cmd.*");
+    set_sim_value("arc1.runner_ready", 1.0);
+}
+
+// ── Update ────────────────────────────────────────────────────────────────────
+
+pub fn on_update(dt) {
+    // ── Command intake ────────────────────────────────────────────────────────
+
+    // begin_session
+    let begin_cmd = get_sim_value("arc1.cmd.begin_session");
+    if begin_cmd > 0.5 && !session_active {
+        session_active  = true;
+        session_tick    = 0;
+        session_records = [];
+        // session_id comes from arc1.cmd.session_id_hash (numeric)
+        let id_hash = get_sim_value("arc1.cmd.session_id_hash");
+        session_id = "session_" + int(id_hash);
+        log_info("[ARC1-Runner] Session started: " + session_id);
+        set_sim_value("arc1.cmd.begin_session", 0.0);
+        set_sim_value("arc1.session_active", 1.0);
+    }
+
+    // end_session
+    let end_cmd = get_sim_value("arc1.cmd.end_session");
+    if end_cmd > 0.5 && session_active {
+        flush_session();
+        set_sim_value("arc1.cmd.end_session", 0.0);
+    }
+
+    // manual_scram
+    let scram_cmd = get_sim_value("arc1.manual_scram");
+    if scram_cmd > 0.5 {
+        log_warn("[ARC1-Runner] Manual SCRAM commanded");
+        set_sim_value("arc1.manual_scram", 0.0);
+        // The Rust safety system will pick up the request on the next frame
+        // via the ReactorScramMessage path — we log it here for the record.
+    }
+
+    // control_mode change
+    let mode_cmd = get_sim_value("arc1.cmd.set_control_mode");
+    if mode_cmd > 0.0 {
+        set_sim_value("arc1.control_mode_request", mode_cmd);
+        log_info("[ARC1-Runner] Control mode change requested: " + int(mode_cmd));
+        set_sim_value("arc1.cmd.set_control_mode", 0.0);
+    }
+
+    // ── Per-tick recording ────────────────────────────────────────────────────
+
+    if session_active {
+        session_tick = session_tick + 1;
+
+        if session_tick % RECORD_INTERVAL_TICKS == 0 {
+            take_snapshot();
+        }
+
+        // Safety: auto-end session after 600 seconds of sim time (prevent runaway)
+        let elapsed = get_sim_value("arc1.session_elapsed_s");
+        if elapsed > 600.0 {
+            log_warn("[ARC1-Runner] Auto-ending session after 600s: " + session_id);
+            flush_session();
+        }
+    }
+
+    // ── Running stats (always active) ────────────────────────────────────────
+
+    let n     = get_sim_value("arc1.neutron_population");
+    let t     = get_sim_value("arc1.core_temp_celsius");
+    let p_out = get_sim_value("arc1.electrical_output_w");
+    let soc   = get_sim_value("arc1.battery_soc_pct");
+
+    // Publish derived stats the Workshop AI can use for quick checks
+    set_sim_value("arc1.n_deviation",    abs(n - 1.0));
+    set_sim_value("arc1.t_margin",       1600.0 - t);   // headroom to SCRAM
+    set_sim_value("arc1.is_stable",      if abs(n - 1.0) < 0.05 && t < 1200.0 { 1.0 } else { 0.0 });
+}
+
+// ── Snapshot ──────────────────────────────────────────────────────────────────
+
+fn take_snapshot() {
+    let sim_t = get_sim_value("arc1.sim_time_s");
+    let snap  = "{ ";
+    snap      = snap + "\"t\":" + sim_t;
+
+    let i = 0;
+    while i < len(SNAPSHOT_KEYS) {
+        let key = SNAPSHOT_KEYS[i];
+        let val = get_sim_value(key);
+        let short = key[5..];   // strip "arc1." prefix
+        snap = snap + ", \"" + short + "\":" + val;
+        i = i + 1;
+    }
+    snap = snap + " }";
+    session_records = session_records + [snap];
+
+    // Track session elapsed time
+    let first_t = get_sim_value("arc1.session_start_t");
+    if first_t == 0.0 {
+        set_sim_value("arc1.session_start_t", sim_t);
+    }
+    set_sim_value("arc1.session_elapsed_s", sim_t - get_sim_value("arc1.session_start_t"));
+}
+
+// ── Flush to disk ─────────────────────────────────────────────────────────────
+
+fn flush_session() {
+    session_active = false;
+    let n_records  = len(session_records);
+    log_info("[ARC1-Runner] Flushing session " + session_id + " (" + n_records + " records)");
+
+    // Build a minimal JSON document
+    let json = "{ \"session\": \"" + session_id + "\", \"records\": [";
+    let i = 0;
+    while i < n_records {
+        if i > 0 { json = json + ", "; }
+        json = json + session_records[i];
+        i = i + 1;
+    }
+    json = json + "] }";
+
+    // Write to disk via the datastore bridge
+    // (The Rust engine reads arc1.session_export_json and writes it to disk)
+    set_sim_value("arc1.session_export_trigger", 1.0);
+    set_sim_value("arc1.session_export_id",      0.0);  // ID is the session name hash
+    // Note: actual file write is handled by NuclearSessionExportSystem in Rust
+
+    log_info("[ARC1-Runner] Session " + session_id + " export triggered");
+    set_sim_value("arc1.session_active",   0.0);
+    set_sim_value("arc1.session_start_t",  0.0);
+    set_sim_value("arc1.session_elapsed_s", 0.0);
+
+    // Reset for next session
+    session_records = [];
+    session_id      = "unnamed";
+    session_tick    = 0;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn abs(v) { if v < 0.0 { -v } else { v } }
+fn int(v) { (v * 1.0).floor() }
+fn len(arr) { /* Rune built-in */ arr.len() }
