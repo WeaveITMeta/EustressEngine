@@ -4,7 +4,7 @@
 use bevy::prelude::*;
 #[allow(unused_imports)]
 use bevy::render::RenderPlugin;
-use bevy::gltf::{GltfExtras, GltfSceneExtras, GltfMeshExtras, GltfMaterialExtras};
+use bevy::gltf::{GltfExtras, GltfSceneExtras, GltfMeshExtras, GltfMaterialExtras, GltfMeshName, GltfMaterialName};
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin, EntityCountDiagnosticsPlugin};
 // Window icon: embedded in exe via winres (build.rs), runtime set in setup_slint_overlay
 use crate::plugins::lighting_plugin::LightingPlugin;
@@ -295,6 +295,10 @@ fn main() {
         // Aabb (frustum-culling bounds; moved to `bevy_camera` in Bevy 0.18) —
         // glb mesh entities carry it in the scene graph.
         .register_type::<bevy::camera::primitives::Aabb>()
+        // gltf naming components the loader stamps on mesh/material scene
+        // entities — the last category a static glb scene carries.
+        .register_type::<GltfMeshName>()
+        .register_type::<GltfMaterialName>()
         // PlayerService for play mode character spawning
         .init_resource::<PlayerService>()
         // DisplayUnit — user-selected display unit for the Properties
