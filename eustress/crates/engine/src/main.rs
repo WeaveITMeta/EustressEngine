@@ -292,6 +292,9 @@ fn main() {
         // Render components carried by glb mesh entities in the scene graph.
         .register_type::<bevy::prelude::Mesh3d>()
         .register_type::<bevy::prelude::MeshMaterial3d<bevy::pbr::StandardMaterial>>()
+        // Aabb (frustum-culling bounds; moved to `bevy_camera` in Bevy 0.18) —
+        // glb mesh entities carry it in the scene graph.
+        .register_type::<bevy::camera::primitives::Aabb>()
         // PlayerService for play mode character spawning
         .init_resource::<PlayerService>()
         // DisplayUnit — user-selected display unit for the Properties
