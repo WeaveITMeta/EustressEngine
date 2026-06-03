@@ -420,14 +420,31 @@ impl MaterialProperties {
         (self.young_modulus / self.density).sqrt()
     }
     
-    /// Check if material is ductile (yield before fracture)
-    pub fn is_ductile(&self) -> bool {
-        self.yield_strength < self.ultimate_strength * 0.9
-    }
-    
-    /// Check if material is brittle
+    /// Brittleness threshold on fracture toughness [Pa·√m].
+    /// Ceramics and glass sit well below this (K_IC ~ 0.5–5 MPa·√m); structural
+    /// metals sit well above it (K_IC ~ 20–100 MPa·√m). The 8 MPa·√m line falls
+    /// in the natural gap between the two material classes.
+    const BRITTLE_TOUGHNESS_LIMIT: f32 = 8.0e6;
+
+    /// Check if material is brittle — i.e. it fractures with little plastic
+    /// deformation. Two independent indicators, either of which implies brittle:
+    ///  * **Low fracture toughness** (`K_IC < BRITTLE_TOUGHNESS_LIMIT`) — the
+    ///    primary physical discriminant; captures ceramics and glass even when
+    ///    they have a nominal yield/ultimate margin.
+    ///  * **Narrow plastic range** (`yield >= 0.9 * ultimate`) — little strain
+    ///    hardening before failure.
+    ///
+    /// Using fracture toughness fixes the misclassification of stiff ceramics
+    /// (Sc-NASICON, AlN) whose yield is a fraction of ultimate yet which shatter
+    /// rather than yield.
     pub fn is_brittle(&self) -> bool {
-        !self.is_ductile()
+        self.fracture_toughness < Self::BRITTLE_TOUGHNESS_LIMIT
+            || self.yield_strength >= self.ultimate_strength * 0.9
+    }
+
+    /// Check if material is ductile (yields and plastically deforms before fracture).
+    pub fn is_ductile(&self) -> bool {
+        !self.is_brittle()
     }
 }
 

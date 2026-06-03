@@ -313,10 +313,11 @@ mod tests {
     fn test_insert_and_query() {
         let mut hash = SpatialHash::new(1.0);
         
-        // Use placeholder entities for testing - in real usage these come from Commands::spawn()
-        let e1 = Entity::PLACEHOLDER;
-        let e2 = Entity::PLACEHOLDER;
-        let e3 = Entity::PLACEHOLDER;
+        // Distinct test entities. Entity::PLACEHOLDER is a single shared value,
+        // so it cannot represent three different entities — use from_raw_u32.
+        let e1 = Entity::from_raw_u32(1).unwrap();
+        let e2 = Entity::from_raw_u32(2).unwrap();
+        let e3 = Entity::from_raw_u32(3).unwrap();
         
         hash.insert(e1, Vec3::new(0.0, 0.0, 0.0));
         hash.insert(e2, Vec3::new(0.5, 0.0, 0.0));

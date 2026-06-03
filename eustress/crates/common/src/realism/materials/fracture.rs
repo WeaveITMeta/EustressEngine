@@ -225,25 +225,25 @@ pub fn paris_law(delta_k: f32, c: f32, m: f32) -> f32 {
 /// 
 /// These values are for ΔK in **Pa·√m** (SI units)
 pub mod paris_parameters {
-    /// Steel (C in m/cycle / (Pa·√m)^m, m dimensionless)
-    /// Typical range: C = 1e-11 to 1e-13 for ΔK in MPa·√m
-    /// Converted to SI (Pa·√m): C = 1e-11 / (1e6)^3 = 1e-29 for m=3
-    /// Using practical SI value that gives ~1e-8 m/cycle at ΔK=20 MPa·√m
-    pub const STEEL: (f32, f32) = (3e-12, 3.0);
-    
+    /// Steel — C in m/cycle / (Pa·√m)^m, ΔK in **Pa·√m** (SI).
+    /// Literature value is C ≈ 3e-12 for ΔK in MPa·√m; the SI form is
+    /// C_SI = C_MPa / (1e6)^m = 3e-12 / (1e6)^3 = 3e-30.
+    /// Gives da/dN ≈ 2.4e-8 m/cycle at ΔK = 20 MPa·√m (= 20e6 Pa·√m).
+    pub const STEEL: (f32, f32) = (3e-30, 3.0);
+
     /// Steel with ΔK in MPa·√m (more common in literature)
     /// C ≈ 3e-12 m/cycle / (MPa·√m)^3
     pub const STEEL_MPA: (f32, f32) = (3e-12, 3.0);
-    
-    /// Aluminum (ΔK in Pa·√m)
-    pub const ALUMINUM: (f32, f32) = (5e-11, 3.5);
-    
+
+    /// Aluminum (ΔK in Pa·√m, SI). C_SI = 5e-11 / (1e6)^3.5 = 5e-32.
+    pub const ALUMINUM: (f32, f32) = (5e-32, 3.5);
+
     /// Aluminum with ΔK in MPa·√m
     pub const ALUMINUM_MPA: (f32, f32) = (5e-11, 3.5);
-    
-    /// Titanium (ΔK in Pa·√m)
-    pub const TITANIUM: (f32, f32) = (1e-11, 3.2);
-    
+
+    /// Titanium (ΔK in Pa·√m, SI). C_SI = 1e-11 / (1e6)^3.2 ≈ 6.31e-31.
+    pub const TITANIUM: (f32, f32) = (6.31e-31, 3.2);
+
     /// Titanium with ΔK in MPa·√m
     pub const TITANIUM_MPA: (f32, f32) = (1e-11, 3.2);
     

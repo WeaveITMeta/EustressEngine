@@ -306,13 +306,14 @@ mod tests {
     #[test]
     fn test_rate_sensitivity() {
         let (d, p) = rate_parameters::MILD_STEEL;
-        
-        // At reference rate, factor should be ~1
-        let factor_low = cowper_symonds_rate_factor(1.0, d, p);
-        assert!((factor_low - 1.0).abs() < 0.1);
-        
-        // At high rate, factor should be > 1
+
+        // Cowper-Symonds DIF = 1 + (ε̇/D)^(1/p) → 1 only in the quasi-static
+        // limit (ε̇ → 0). At a quasi-static test rate (1e-5 /s) it is ≈ 1.05.
+        let factor_low = cowper_symonds_rate_factor(1e-5, d, p);
+        assert!((factor_low - 1.0).abs() < 0.1, "quasi-static factor {factor_low}");
+
+        // At high strain rate the dynamic factor rises well above 1.
         let factor_high = cowper_symonds_rate_factor(1000.0, d, p);
-        assert!(factor_high > 1.5);
+        assert!(factor_high > 1.5, "high-rate factor {factor_high}");
     }
 }

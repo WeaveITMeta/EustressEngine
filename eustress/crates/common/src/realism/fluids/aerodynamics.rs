@@ -439,8 +439,8 @@ mod tests {
     fn test_terminal_velocity() {
         // Skydiver: 80kg, Cd=1.0, A=0.7m²
         let vt = terminal_velocity(80.0, 9.81, 1.225, 1.0, 0.7);
-        // v_t ≈ 48 m/s
-        assert!((vt - 48.0).abs() < 5.0);
+        // v_t = sqrt(2*m*g / (rho*Cd*A)) = sqrt(2*80*9.81/(1.225*0.7)) ≈ 42.8 m/s
+        assert!((vt - 42.8).abs() < 1.0, "terminal velocity {vt}");
     }
     
     #[test]
