@@ -52,35 +52,40 @@ heat, exchange charge, exchange force — and never contradict each other.
 | Simulation infra | `simulation/` | Clock (10⁹× compression), WatchPoints, Breakpoints, Recorder, LOD |
 | Visualizers | `visualizers/` | Property overlays, vector fields, heat maps, stress indicators |
 
-### Strength assessment — updated
+### Strength assessment — Phases A–L SHIPPED (commits 3df9bf58 + 98fe9ff4)
 
-Phases A–D close the four biggest gaps from the original assessment:
-- **Electromagnetism** is now solid (fields, circuits, induction, waves, ECS motors)
-- **Chemical kinetics** is now solid (Arrhenius, equilibrium, catalysis, combustion, reactor ECS)
-- **Numerical integration** is now solid (RK4/RK45/Verlet/BDF replacing implicit Euler everywhere)
-- **Control systems** are now solid (generalised PID, state-space, Bode, digital filters)
+The four biggest gaps closed by A–D, plus the full breadth from E–L:
+- **Electromagnetism / circuits / control** — solid (A–D)
+- **Chemical kinetics / combustion / equilibrium** — solid (A–D)
+- **Numerical integration** — RK4/RK45/Verlet/BDF available everywhere (A)
+- **Structures, thermodynamic cycles, propulsion** — solid (E–G)
+- **Optics, acoustics** — solid (H–I)
+- **Nuclear decay/shielding/criticality** — solid (J)
+- **Biology** (population, enzyme, membrane) — solid (K)
+- **Plasma / fusion** — solid (L)
 
-Remaining gaps: optics, acoustics, structures/FEA, thermodynamic cycles, propulsion,
-plasma/MHD, biology, special relativity — covered in Phases E–L.
+Verified: `eustress-common` compiles clean; 425 realism unit tests pass.
+Remaining for a future pass: Navier-Stokes fluid solver, Schrödinger quantum,
+FFT, Monte Carlo, optimisation, graph/network, special relativity, full phase diagrams.
 
 ---
 
 ## 2 — Gap Map: Every STEM Domain
 
-Legend: ✅ SOLID  ⚠️ PARTIAL  ❌ MISSING  🆕 shipped in Phases A–D
+Legend: ✅ SOLID  ⚠️ PARTIAL  ❌ MISSING  🆕 A–D  ✨ E–L
 
 ```
 PHYSICS
   Classical mechanics     ████████████████ ✅ SOLID
   Thermodynamics          ████████████████ ✅ SOLID
   Electromagnetism        ████████████████ ✅ SOLID 🆕 (fields, circuits, induction, waves, ECS motors)
-  Optics                  ░░░░░░░░░░░░░░░░ ❌ MISSING                      ← Phase H
-  Acoustics / waves       ░░░░░░░░░░░░░░░░ ❌ MISSING                      ← Phase I
+  Optics                  ████████████████ ✅ SOLID ✨ (Snell, lenses, Fresnel, Planck, Beer-Lambert)
+  Acoustics / waves       ████████████████ ✅ SOLID ✨ (speed/impedance, Doppler, Sabine RT60, modes)
   Fluid dynamics          ████████░░░░░░░░ ⚠️  PARTIAL (SPH + drag, no NS solver)
   Statistical mechanics   ████████░░░░░░░░ ⚠️  PARTIAL (particles + quantum stats)
   Quantum mechanics       ████░░░░░░░░░░░░ ⚠️  PARTIAL (statistics only, no Schrödinger)
-  Plasma physics          ░░░░░░░░░░░░░░░░ ❌ MISSING                      ← Phase L
-  Nuclear physics         ████████████░░░░ ✅ SOLID (fission kinetics + PID; decay chains ← Phase J)
+  Plasma physics          ████████████████ ✅ SOLID ✨ (Debye, MHD, Lawson, fusion gain, ECS state)
+  Nuclear physics         ████████████████ ✅ SOLID ✨ (fission + PID + decay chains + shielding + criticality)
   Special relativity      ░░░░░░░░░░░░░░░░ ❌ MISSING
   Condensed matter        ████░░░░░░░░░░░░ ⚠️  PARTIAL (material properties, no band theory)
 
@@ -90,24 +95,24 @@ CHEMISTRY
   Thermochemistry         ████████████████ ✅ SOLID 🆕 (ΔH_f tables, reaction enthalpy, combustion)
   Stoichiometry           ████████████░░░░ ✅ SOLID 🆕 (AFR, emission factors, species balance)
   Acid-base / pH          ████████████████ ✅ SOLID 🆕 (pH, Henderson-Hasselbalch, buffers, Ka values)
-  Phase equilibrium       ████████░░░░░░░░ ⚠️  PARTIAL (Clausius-Clapeyron, boiling/freezing point — no full phase diagrams)
+  Phase equilibrium       ████████████░░░░ ✅ SOLID ✨ (Clausius-Clapeyron, colligative, Henry, Raoult)
   Materials chemistry     ████████░░░░░░░░ ⚠️  PARTIAL (properties; no Pilling-Bedworth, no corrosion kinetics)
 
 ENGINEERING
   Electrical circuits     ████████████████ ✅ SOLID 🆕 (Kirchhoff, Ohm, R/L/C, AC power, ECS components)
   Control systems         ████████████████ ✅ SOLID 🆕 (PID + anti-windup, state-space, Bode, digital filters)
-  Structural / FEA        ████░░░░░░░░░░░░ ⚠️  PARTIAL (stress/strain; no beams, trusses, buckling) ← Phase E
-  Heat exchangers / HVAC  ░░░░░░░░░░░░░░░░ ❌ MISSING (LMTD, NTU, effectiveness)                  ← Phase F
-  Thermodynamic cycles    ░░░░░░░░░░░░░░░░ ❌ MISSING (Rankine, Brayton, Otto, refrigeration)       ← Phase F
-  Rocket propulsion       ░░░░░░░░░░░░░░░░ ❌ MISSING (Tsiolkovsky, nozzle, Isp)                   ← Phase G
-  Compressible flow       ░░░░░░░░░░░░░░░░ ❌ MISSING (Mach, normal shock, isentropic)
-  Power systems           ████░░░░░░░░░░░░ ⚠️  PARTIAL (DC/AC motors, converters shipped — no grid)
+  Structural / FEA        ████████████████ ✅ SOLID ✨ (beams, columns/buckling, fatigue, composites)
+  Heat exchangers / HVAC  ████████████████ ✅ SOLID ✨ (LMTD, NTU-effectiveness)
+  Thermodynamic cycles    ████████████████ ✅ SOLID ✨ (Rankine, Brayton, Otto/Diesel, refrigeration)
+  Rocket propulsion       ████████████████ ✅ SOLID ✨ (Tsiolkovsky, de Laval, Isp, multistage, electric)
+  Compressible flow       ████░░░░░░░░░░░░ ⚠️  PARTIAL (nozzle/Mach in propulsion; no shock tables)
+  Power systems           ████████░░░░░░░░ ⚠️  PARTIAL (DC/AC motors, converters — no grid)
 
 BIOLOGY / LIFE SCIENCE
-  Population dynamics     ░░░░░░░░░░░░░░░░ ❌ MISSING (Lotka-Volterra, SIR, logistic)              ← Phase K
-  Enzyme kinetics         ████████████████ ✅ SOLID 🆕 (Michaelis-Menten, Hill, inhibition models)
-  Membrane biophysics     ░░░░░░░░░░░░░░░░ ❌ MISSING (Hodgkin-Huxley, Goldman equation)            ← Phase K
-  Ecology                 ░░░░░░░░░░░░░░░░ ❌ MISSING
+  Population dynamics     ████████████████ ✅ SOLID ✨ (logistic, Lotka-Volterra, SIR, R0, herd immunity)
+  Enzyme kinetics         ████████████████ ✅ SOLID 🆕✨ (Michaelis-Menten, Hill, Monod, inhibition)
+  Membrane biophysics     ████████████████ ✅ SOLID ✨ (Nernst, Goldman, Hodgkin-Huxley, cable)
+  Ecology                 ████░░░░░░░░░░░░ ⚠️  PARTIAL (trophic via population dynamics; no food-web graph)
 
 APPLIED MATHEMATICS
   Numerical ODE solvers   ████████████████ ✅ SOLID 🆕 (RK4, RK45 adaptive, Verlet, BDF-1/2)
