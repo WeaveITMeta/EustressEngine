@@ -24,6 +24,8 @@ pub mod bindings;
 pub mod hot_reload;
 #[cfg(feature = "realism-scripting")]
 pub mod viga_api;
+#[cfg(feature = "realism-scripting")]
+pub mod laws;
 
 pub mod prelude {
     #[cfg(feature = "realism-scripting")]

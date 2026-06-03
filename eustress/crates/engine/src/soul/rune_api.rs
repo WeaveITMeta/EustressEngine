@@ -87,6 +87,11 @@ pub fn register_engine_rune_modules(
                 error!("Failed to create engine ECS module: {}", e);
             }
         }
+
+        // Realism law sub-namespaces: eustress::realism::<domain>::<fn>
+        for module in eustress_common::realism::scripting::laws::realism_law_modules() {
+            module_registry.add_module(module);
+        }
     }
 }
 
