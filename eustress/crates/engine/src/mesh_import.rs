@@ -167,54 +167,90 @@ impl Plugin for MeshImportWatcherPlugin {
 fn scan_for_new_sources(
     time: Res<Time>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
+    // Skip entirely while a Space is still streaming in: the tree is churning
+    // and, on a 161K-file import (Vehicle Simulator), a full recursive walk cost
+    // ~11.7 s PER FRAME — 56.8% of the frame, the single largest cost.
+    load: Option<Res<crate::space::file_loader::LoadInProgress>>,
     mut request_events: MessageWriter<MeshImportRequestEvent>,
     mut scanned: Local<std::collections::HashSet<PathBuf>>,
+    // Persistent walk frontier: the recursive walk is spread across many frames
+    // under a per-frame TIME BUDGET instead of one multi-second hitch, so the
+    // cost is bounded regardless of how large the Space tree is.
+    mut frontier: Local<Vec<PathBuf>>,
     mut since_last_scan: Local<f32>,
 ) {
+    if load.map_or(false, |l| l.active) {
+        return;
+    }
+
     *since_last_scan += time.delta_secs();
-    if *since_last_scan < 1.0 { return; }
-    *since_last_scan = 0.0;
 
-    let Some(space) = space_root else { return };
-    let root = space.0.clone();
-    if !root.is_dir() { return; }
+    // Re-seed the walk from the Space root only when the previous pass has fully
+    // drained AND the throttle has elapsed. While the frontier still has work,
+    // keep draining it (budgeted) every frame.
+    if frontier.is_empty() {
+        if *since_last_scan < 2.0 {
+            return;
+        }
+        *since_last_scan = 0.0;
+        let Some(space) = space_root else { return };
+        let root = space.0.clone();
+        if !root.is_dir() {
+            return;
+        }
+        frontier.push(root);
+    }
 
-    // Recursive walk. `walkdir` isn't a workspace dep today; using
-    // a manual stack to avoid adding one.
-    let mut stack: Vec<PathBuf> = vec![root];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            // Skip hidden / .eustress directories — don't scan the
-            // trash + cache for source meshes.
-            if path.file_name()
-                .and_then(|s| s.to_str())
-                .map(|s| s.starts_with('.'))
-                .unwrap_or(false)
-            { continue; }
+    // Time-budget the walk: process at most ~2 ms this frame, then yield and
+    // resume from the saved frontier next frame.
+    let start = std::time::Instant::now();
+    let budget = std::time::Duration::from_millis(2);
+    while let Some(dir) = frontier.pop() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                // Skip hidden / .eustress directories — don't scan the
+                // trash + cache for source meshes.
+                if path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.starts_with('.'))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
 
-            let Ok(ft) = entry.file_type() else { continue };
-            if ft.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if scanned.contains(&path) { continue; }
-            let Some(ext) = path.extension().and_then(|s| s.to_str()) else { continue; };
-            let Some(format) = MeshSourceFormat::from_extension(ext) else { continue; };
+                let Ok(ft) = entry.file_type() else { continue };
+                if ft.is_dir() {
+                    frontier.push(path);
+                    continue;
+                }
+                if scanned.contains(&path) {
+                    continue;
+                }
+                let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let Some(format) = MeshSourceFormat::from_extension(ext) else {
+                    continue;
+                };
 
-            let target = path.with_extension("glb");
-            if target.exists() {
+                let target = path.with_extension("glb");
+                if target.exists() {
+                    scanned.insert(path);
+                    continue;
+                }
+
+                request_events.write(MeshImportRequestEvent {
+                    source_path: path.clone(),
+                    format,
+                    target_path: target,
+                });
                 scanned.insert(path);
-                continue;
             }
-
-            request_events.write(MeshImportRequestEvent {
-                source_path: path.clone(),
-                format,
-                target_path: target,
-            });
-            scanned.insert(path);
+        }
+        if start.elapsed() >= budget {
+            break; // yield; resume next frame from the saved frontier
         }
     }
 }

@@ -59,17 +59,25 @@ const SHADOW_LIGHT_BUDGET: usize = 32;
 
 /// Nearest-N lights that keep their authored intensity. Beyond this rank (or
 /// beyond the hysteresis radius) a light is dimmed to 0.
-const ACTIVE_LIGHT_BUDGET: usize = 256;
+///
+/// PERF: cut from 256 → 64. Every active (intensity>0) clusterable light feeds
+/// `assign_objects_to_clusters`, `prepare/extract_clusters`, `queue_shadows`
+/// and `specialize_shadows`. 64 nearest-by-camera lights keep local lighting
+/// looking authored (the camera's immediate surroundings are fully lit) while
+/// roughly quartering the clustered-forward + shadow-queue cost. Distant lights
+/// are dimmed, not despawned, and snap back to authored intensity on approach
+/// via the hysteresis band below.
+const ACTIVE_LIGHT_BUDGET: usize = 64;
 
 /// A light beyond this distance from the camera is dimmed (turned off). Used
 /// as the ON edge of the hysteresis band: a dimmed light only relights once
 /// it is back inside this radius AND within the nearest-`ACTIVE_LIGHT_BUDGET`.
-const ACTIVE_ON_RADIUS_M: f32 = 350.0;
+const ACTIVE_ON_RADIUS_M: f32 = 250.0;
 
 /// The OFF edge of the hysteresis band: a lit light is only dimmed once it
 /// passes beyond this radius (or drops out of the nearest set). `>` the ON
 /// radius so there is a dead-zone and lights do not flicker at the boundary.
-const ACTIVE_OFF_RADIUS_M: f32 = 450.0;
+const ACTIVE_OFF_RADIUS_M: f32 = 350.0;
 
 /// The camera must move at least this far (squared, m²) from the last
 /// evaluated position to force a re-cull on movement. Avoids re-running every
@@ -198,6 +206,52 @@ pub fn cull_lights_to_nearest(
                         off_radius_sq,
                     );
                 }
+            }
+        }
+    }
+}
+
+/// Hard backstop: cap shadow-casting point + spot lights to
+/// [`SHADOW_LIGHT_BUDGET`] BEFORE the render world prepares shadow maps.
+///
+/// A large import (Vehicle Simulator has thousands of shadow-casting
+/// spotlights — light poles, headlights) otherwise makes `prepare_lights`
+/// allocate one shadow map per caster and OOMs the GPU **during load**, before
+/// the gated [`cull_lights_to_nearest`] cadence can react (it panicked
+/// `wgpu error: Out of Memory` in `bevy_pbr::render::light::prepare_lights`).
+///
+/// Runs in `PostUpdate` (after every spawn, before render extract) and ONLY
+/// while a Space is still streaming in (`LoadInProgress.active`); once loaded,
+/// `cull_lights_to_nearest` maintains the nearest-N set, so this is a no-op with
+/// zero steady-state cost. It does not distance-rank (it keeps the first
+/// `budget` casters it visits) — the proper nearest-N ranking is applied by
+/// `cull_lights_to_nearest` on its cadence; this only guarantees the COUNT can
+/// never exceed the budget on any single frame.
+pub fn enforce_shadow_budget(
+    load: Option<Res<crate::space::file_loader::LoadInProgress>>,
+    mut point_lights: Query<&mut PointLight>,
+    mut spot_lights: Query<&mut SpotLight>,
+) {
+    // Only needed while lights are still streaming in.
+    if !load.map_or(false, |l| l.active) {
+        return;
+    }
+    let mut kept = 0usize;
+    for mut light in point_lights.iter_mut() {
+        if light.shadows_enabled {
+            if kept < SHADOW_LIGHT_BUDGET {
+                kept += 1;
+            } else {
+                light.shadows_enabled = false;
+            }
+        }
+    }
+    for mut light in spot_lights.iter_mut() {
+        if light.shadows_enabled {
+            if kept < SHADOW_LIGHT_BUDGET {
+                kept += 1;
+            } else {
+                light.shadows_enabled = false;
             }
         }
     }

@@ -115,7 +115,19 @@ fn reapply_materials_on_registry_change(
     mut tracker: ResMut<MaterialRegistryTracker>,
     mut patched: ResMut<PatchedTextureTracker>,
     mut base_parts: Query<&mut BasePart>,
+    // Gate: while a Space load is still streaming, the MaterialRegistry grows on
+    // EVERY spawn batch, so touching ALL parts on each incremental change was
+    // O(N²) across the load (re-resolving every already-spawned part, per
+    // batch). On Vehicle Simulator (387K parts) that dominated the frame and
+    // made frame time GROW as parts accumulated (29s → 39s and climbing).
+    // Freshly-spawned parts already resolve their material via Changed<BasePart>
+    // at spawn, so the catch-all reapply only needs to run ONCE — after the load
+    // settles (`LoadInProgress.active` flips false). Collapses O(N²) → O(N).
+    load: Option<Res<crate::space::file_loader::LoadInProgress>>,
 ) {
+    if load.map_or(false, |l| l.active) {
+        return;
+    }
     let Some(ref registry) = material_registry else { return };
     let current_count = registry.len();
     if current_count != tracker.last_count {

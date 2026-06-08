@@ -53,6 +53,14 @@ pub struct BevyWindowAdapter {
     slint_window: slint::Window,
     /// Software renderer that renders UI into a pixel buffer
     software_renderer: slint::platform::software_renderer::SoftwareRenderer,
+    /// Dirty flag. Slint calls `request_redraw` on property changes, input, and
+    /// active animations; `render_slint_to_texture` skips the software repaint
+    /// (~2.6 s in debug on a 301K-entity Space) when this is false, so flying
+    /// the 3D camera with a static chrome stays smooth (Bevy renders the 3D
+    /// directly; the last UI texture persists). `Cell` gives interior
+    /// mutability for the `&self` `request_redraw`; the adapter is NonSend /
+    /// single-threaded, so `Cell` is sound.
+    needs_redraw: Cell<bool>,
 }
 
 impl slint::platform::WindowAdapter for BevyWindowAdapter {
@@ -72,7 +80,9 @@ impl slint::platform::WindowAdapter for BevyWindowAdapter {
         Ok(())
     }
 
-    fn request_redraw(&self) {}
+    fn request_redraw(&self) {
+        self.needs_redraw.set(true);
+    }
 }
 
 impl BevyWindowAdapter {
@@ -85,6 +95,8 @@ impl BevyWindowAdapter {
             software_renderer: slint::platform::software_renderer::SoftwareRenderer::new_with_repaint_buffer_type(
                 slint::platform::software_renderer::RepaintBufferType::ReusedBuffer,
             ),
+            // Render once on startup; thereafter only when Slint requests it.
+            needs_redraw: Cell::new(true),
         })
     }
 
@@ -2507,7 +2519,20 @@ fn render_slint_to_texture(
     slint::platform::update_timers_and_animations();
     
     let adapter = &slint_context.adapter;
-    
+
+    // Skip the expensive UI repaint when nothing requested a redraw. Slint's
+    // `request_redraw` (captured into `needs_redraw`) fires on property changes,
+    // input, and active animations — and `update_timers_and_animations()` above
+    // sets it for any live animation — so when the chrome is static (e.g. flying
+    // the 3D camera) we skip the ~2.6 s software render entirely. The 3D is
+    // rendered by Bevy directly, so it stays smooth; the last UI texture
+    // persists on the overlay. The first few frames always paint so the chrome
+    // appears even if an early redraw request is missed.
+    if frame >= 8 && !adapter.needs_redraw.get() {
+        return;
+    }
+    adapter.needs_redraw.set(false);
+
     let Some(scene) = slint_scenes.iter().next() else {
         if frame < 5 { warn!("render_slint_to_texture: no SlintScene entity"); }
         return;
@@ -12225,30 +12250,55 @@ fn sync_unified_explorer_to_slint(
     mut panel_dirty: Option<ResMut<eustress_common::change_queue::PanelDirtyFlags>>,
     // Selection manager for multi-select highlighting in tree
     selection_sync: Option<Res<crate::selection_sync::SelectionSyncManager>>,
+    // Coalescing state (system-local, no struct change). rebuild_requested: a
+    // streaming/change signal asked for a rebuild but it can wait for the
+    // coalesce window. last_rebuild_frame: app-frame of the last actual rebuild.
+    // NOTE: these two Local params MUST remain LAST in declaration order — Bevy
+    // resolves Local by type position, so a future param addition must go above.
+    mut rebuild_requested: Local<bool>,
+    mut last_rebuild_frame: Local<u64>,
 ) {
     let Some(mut explorer_state) = explorer_state else { return };
 
-    // EustressStream change-detection: if any entity was added/removed/renamed/reparented,
-    // bypass throttling and rebuild the tree immediately.
+    // EustressStream change-detection. In the Vehicle-Simulator steady state the
+    // camera-locality residency system spawns/despawns Workspace cores EVERY
+    // tick, so this flag is hot almost every frame. Treat it as a latch
+    // (rebuild_requested) honoured on the next coalesce window, NOT an instant
+    // bypass. Only genuine user interactions (expand/collapse/select, which set
+    // needs_immediate_sync in the action handlers) bypass the window.
     if let Some(ref mut d) = panel_dirty {
         if d.explorer {
             d.explorer = false;
-            explorer_state.needs_immediate_sync = true;
-            // An entity was added/removed/renamed/reparented — the DB class
-            // counts + cached pages may be stale (Phase 4). Force a rebuild.
+            *rebuild_requested = true;
+            // DB class counts + cached pages may be stale (Phase 4).
             explorer_state.db_cache_valid = false;
         }
     }
 
-    // Bypass throttle when a user interaction (select/expand/collapse) demands
-    // an immediate refresh; otherwise throttle to every 30 frames.
-    // Always sync on the first 5 frames to pick up deferred ChildOf relationships
-    // from the initial space load (commands are deferred, ChildOf isn't applied immediately).
+    // Minimum frames between churn-driven rebuilds. At 60fps x2 fixed steps the
+    // tree rebuilds at most about 4 Hz under continuous streaming instead of
+    // every step; parts still appear/disappear within ~250ms, and any USER
+    // action stays instant (needs_immediate_sync below).
+    const COALESCE_FRAMES: u64 = 15;
+    let frame = perf.as_ref().map(|p| p.frame_counter).unwrap_or(0);
+
+    // Rebuild decision, priority order: 1) user interaction -> instant; 2) first
+    // 5 frames -> rebuild (deferred ChildOf from initial load); 3) pending churn
+    // latch AND coalesce window elapsed -> rebuild; 4) periodic 30-frame safety
+    // tick -> rebuild. Otherwise return without touching the tree.
     if explorer_state.needs_immediate_sync {
         explorer_state.needs_immediate_sync = false;
-    } else if let Some(ref perf) = perf {
-        if perf.frame_counter > 5 && perf.should_throttle(30) { return; }
+        *rebuild_requested = false;
+    } else if frame <= 5 {
+        // initial-load grace window: always rebuild
+    } else if *rebuild_requested && frame.saturating_sub(*last_rebuild_frame) >= COALESCE_FRAMES {
+        *rebuild_requested = false;
+    } else if perf.as_ref().map(|p| !p.should_throttle(30)).unwrap_or(false) {
+        // periodic safety tick: keeps the tree fresh if a signal was missed
+    } else {
+        return;
     }
+    *last_rebuild_frame = frame;
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
     
@@ -12272,23 +12322,30 @@ fn sync_unified_explorer_to_slint(
     explorer_state.entity_id_cache.clear();
     explorer_state.next_entity_node_id = 1;
     
-    // Build set of all entities that have Instance components
-    let instance_entities: std::collections::HashSet<Entity> = 
-        instances.iter().map(|(e, _)| e).collect();
-    
-    // Build a parent -> children lookup map from ChildOf components
-    // This is more reliable than querying Children, which may not be populated yet
-    let mut children_of_parent: std::collections::HashMap<Entity, Vec<Entity>> = std::collections::HashMap::new();
+    // SINGLE-PASS preamble. Previously this iterated the full ~110K instance
+    // set three times (instance_entities, children_of_parent, roots) plus a 4th
+    // pass below for service-children. Fold into two tight passes and pre-collect
+    // service_entities so that loop no longer needs its own instances.iter().
+    let mut instance_entities: std::collections::HashSet<Entity> =
+        std::collections::HashSet::new();
+    let mut children_of_parent: std::collections::HashMap<Entity, Vec<Entity>> =
+        std::collections::HashMap::new();
+    let mut roots: Vec<Entity> = Vec::new();
+    let mut service_entities: Vec<Entity> = Vec::new();
+
+    // Pass 1a: membership + child map. Membership must be complete before roots
+    // are decided (a ChildOf may point to an entity not yet visited).
     for (entity, _) in instances.iter() {
+        instance_entities.insert(entity);
         if let Ok(child_of) = child_of_query.get(entity) {
             children_of_parent.entry(child_of.0).or_default().push(entity);
         }
     }
-    
-    // Find root entities (no ChildOf, or ChildOf points to non-Instance entity)
-    // Filter out adornment entities (meta = true) - they are hidden from Explorer
-    let mut roots: Vec<Entity> = Vec::new();
+    // Pass 1b: roots + service entities (membership set now complete).
     for (entity, instance) in instances.iter() {
+        if service_components.get(entity).is_ok() {
+            service_entities.push(entity);
+        }
         // Skip adornment classes (meta entities hidden from Explorer)
         if instance.class_name.is_adornment() {
             continue;
@@ -12359,7 +12416,9 @@ fn sync_unified_explorer_to_slint(
     // Find service entities and populate their children buckets directly
     // This is more reliable than using roots, since children of services have ChildOf
     // pointing to the service entity, so they're not in roots.
-    for (entity, _) in instances.iter() {
+    // Reuses service_entities collected in the single-pass preamble above
+    // instead of re-iterating all ~110K instances.
+    for entity in service_entities.iter().copied() {
         if let Ok(service) = service_components.get(entity) {
             // Get children of this service entity from the children_of_parent map
             if let Some(children) = children_of_parent.get(&entity) {
@@ -12446,6 +12505,15 @@ fn sync_unified_explorer_to_slint(
     let expanded_entities = explorer_state.expanded_entities.clone();
     let selected_item = explorer_state.selected.clone();
 
+    // Per-container node budget. A service with a huge FLAT child list (Vehicle
+    // Simulator: ~110K Workspace parts) must not make this rebuild take seconds
+    // — building a TreeNode per part (name clone + format! + icon + SharedStrings)
+    // is the dominant cost. Beyond this many nodes we stop building and the
+    // Workspace caller appends a "N more" sentinel. Normal Spaces (< budget) are
+    // unaffected. (A fully virtualized Explorer — only the rows in the scroll
+    // viewport — is the proper future fix; this bounds the cost to stay at frame.)
+    const MAX_NODES_PER_CONTAINER: usize = 500;
+
     // DFS helper — builds TreeNodes for a list of root entities.
     // Takes entity_id_cache and next_id by mutable reference so it can register IDs
     // without a ResMut borrow conflict with the immutable borrows above.
@@ -12458,6 +12526,12 @@ fn sync_unified_explorer_to_slint(
         let mut stack: Vec<(Entity, i32)> = root_list.iter().rev().map(|e| (*e, base_depth)).collect();
 
         while let Some((entity, depth)) = stack.pop() {
+            // Stop once this container hits its node budget — bounds a huge flat
+            // child list (Vehicle Simulator ~110K Workspace parts) so a rebuild
+            // never costs seconds. Remaining siblings are summarized by the caller.
+            if nodes.len() >= MAX_NODES_PER_CONTAINER {
+                break;
+            }
             let Ok((_, instance)) = instances.get(entity) else { continue };
             
             // Skip adornment classes (meta entities hidden from Explorer)
@@ -12567,6 +12641,15 @@ fn sync_unified_explorer_to_slint(
     // Service: Workspace (depth 0) + children (depth 1+)
     let has_terrain = !terrain_roots.is_empty();
     let ws_has = !workspace_roots.is_empty() || has_terrain;
+    // Bound the Workspace bucket BEFORE sorting/building: a flat list of ~110K
+    // parts (Vehicle Simulator) would otherwise spend seconds sorting + building
+    // TreeNodes every rebuild. Truncate to the node budget; the sentinel below
+    // reports how many were filtered. (Truncation happens pre-sort so the sort
+    // itself is also bounded.)
+    let workspace_total = workspace_roots.len();
+    if workspace_total > MAX_NODES_PER_CONTAINER {
+        workspace_roots.truncate(MAX_NODES_PER_CONTAINER);
+    }
     // Sort workspace children: Camera first, then alphabetical
     workspace_roots.sort_by(|a, b| {
         let a_class = instances.get(*a).map(|(_, i)| i.class_name).unwrap_or(eustress_common::classes::ClassName::Part);
@@ -12584,6 +12667,30 @@ fn sync_unified_explorer_to_slint(
     tree_nodes.push(make_service_node("Workspace", "workspace", 0, ws_has, svc_expanded("Workspace"), &explorer_state, &selected_entity_ids));
     if svc_expanded("Workspace") {
         tree_nodes.extend(build_entity_nodes(&workspace_roots, 1, &mut entity_id_cache, &mut next_id));
+        // Sentinel row when the Workspace bucket was filtered for performance.
+        if workspace_total > MAX_NODES_PER_CONTAINER {
+            tree_nodes.push(TreeNode {
+                id: 0,
+                name: format!(
+                    "… {} more parts (filtered — large Space)",
+                    workspace_total - MAX_NODES_PER_CONTAINER
+                )
+                .into(),
+                icon: slint::Image::default(),
+                depth: 1,
+                expandable: false,
+                expanded: false,
+                selected: false,
+                visible: true,
+                node_type: "entity".into(),
+                class_name: slint::SharedString::default(),
+                path: slint::SharedString::default(),
+                is_directory: false,
+                extension: slint::SharedString::default(),
+                size: slint::SharedString::default(),
+                modified: false,
+            });
+        }
         
         // Inject Terrain entities (TerrainRoot + Chunks) into Workspace
         for (terrain_entity, terrain_config) in terrain_roots.iter() {
@@ -13727,7 +13834,16 @@ fn sync_tags_to_slint(
     explorer_state: Option<Res<UnifiedExplorerState>>,
     studio_state: Option<Res<StudioState>>,
     all_tags: Query<(Entity, &eustress_common::attributes::Tags)>,
-    changed_tags: Query<(), Changed<eustress_common::attributes::Tags>>,
+    // P2 two-tier: the `changed_tags` DRIVER is the hot per-frame cost here —
+    // Bevy O(N)-visits every `Tags`-bearing archetype to read change-ticks,
+    // which on a 120K cold-part Space dominated this system. Cold streamed
+    // parts cannot have their tags edited without first being SELECTED (which
+    // promotes them by removing `ColdStreamed`), so `Without<ColdStreamed>`
+    // never hides a real tag edit. `all_tags` (the project-wide tag registry
+    // count) stays UNFILTERED so streamed parts' tags still count toward the
+    // registry totals — but it only iterates on the slow path (a selection
+    // change or a real, non-cold tag mutation).
+    changed_tags: Query<(), (Changed<eustress_common::attributes::Tags>, Without<eustress_common::classes::ColdStreamed>)>,
     mut last_sel: Local<u64>,
 ) {
     let Some(slint_context) = slint_context else { return };

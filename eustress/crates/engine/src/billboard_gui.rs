@@ -418,6 +418,10 @@ fn spawn_billboard_render_state(
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut atlas: NonSendMut<BillboardAtlas>,
+    // Camera for the near-camera allocation gate (mirrors the render cull in
+    // `update_and_render_billboards`). Atlas slots are scarce (512 max), so
+    // we only allocate them to billboards the user can actually see/repaint.
+    cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
     mut billboards: Query<
         (Entity, &BillboardGuiMarker, Option<&GlobalTransform>, &mut Transform),
         Without<BillboardRenderHandle>,
@@ -433,8 +437,56 @@ fn spawn_billboard_render_state(
         ),
         With<BillboardRenderHandle>,
     >,
+    // One-shot latch so a full atlas warns ONCE, not ~16.5K times/frame.
+    // (Local params placed last by convention.)
+    mut atlas_full_warned: Local<bool>,
 ) {
+    // Near-camera gate. A billboard outside this radius is never repainted by
+    // `update_and_render_billboards` (same BILLBOARD_CULL_RADIUS_SQ = 300^2),
+    // so spending a scarce atlas slot + a full quad/UV/mesh build on it is
+    // wasted work. Skipping far billboards here (a) bounds this system's
+    // per-frame cost to the handful of billboards actually near the camera
+    // even when ~16.5K can never get a slot, and (b) reserves the 512 atlas
+    // slots for the billboards the user can see. Far billboards remain in the
+    // `Without<BillboardRenderHandle>` query and will allocate the instant the
+    // camera comes within range. With no camera yet (startup), fall through
+    // and allocate ungated so the first billboards still appear.
+    const SPAWN_ALLOC_RADIUS_SQ: f32 = 300.0 * 300.0;
+    let cam_pos = cameras
+        .iter()
+        .find(|(_, c)| c.order == 0)
+        .map(|(gt, _)| gt.translation());
+
     for (entity, marker, global_tf, mut transform) in &mut billboards {
+        // Distance gate (skip far billboards — they cost a slot we can't spare
+        // and would never be repainted anyway).
+        if let Some(cp) = cam_pos {
+            let bb_pos = global_tf
+                .map(|g: &GlobalTransform| g.translation())
+                .unwrap_or_else(|| transform.translation);
+            if bb_pos.distance_squared(cp) > SPAWN_ALLOC_RADIUS_SQ {
+                continue;
+            }
+        }
+        // Atlas exhausted? Stop scanning the rest of the (potentially huge)
+        // orphan set this frame and warn exactly once. Without this, a scene
+        // with more billboards than slots (Vehicle Sim: ~17K vs 512) emits one
+        // `error!` per orphan per frame — ~16.5K log lines/frame, the bulk of
+        // this system's 34 ms in a DEBUG build. A freed slot (despawn /
+        // distance churn) re-arms allocation next frame.
+        if atlas.free_slots.is_empty() && atlas.rows >= MAX_ATLAS_DIM / TILE_H {
+            if !*atlas_full_warned {
+                warn!(
+                    "\u{1FAA7} billboard atlas full ({} slots, {} px max) \u{2014} \
+                     near-camera billboards beyond capacity won't render until \
+                     a slot frees; far billboards are deferred until in range",
+                    atlas.total_slots(), MAX_ATLAS_DIM,
+                );
+                *atlas_full_warned = true;
+            }
+            break;
+        }
+
         let raw_w = marker.size[0].max(1.0) as u32;
         let raw_h = marker.size[1].max(1.0) as u32;
         // Clamp to tile size — oversized content gets cropped, but the
@@ -483,11 +535,20 @@ fn spawn_billboard_render_state(
                             .expect("free_slots populated by try_grow")
                     }
                     None => {
-                        error!(
-                            "🪧 billboard {:?}: atlas at MAX_ATLAS_DIM ({} px), {} slots used — not rendering",
-                            entity, MAX_ATLAS_DIM, atlas.total_slots(),
-                        );
-                        continue;
+                        // Atlas is at MAX_ATLAS_DIM and has no free slot. The
+                        // top-of-loop guard normally `break`s before we reach
+                        // here; this arm only fires on the exact frame the
+                        // last slot is consumed. Warn once (latched) and break
+                        // so we don't fall through ~16.5K more orphans emitting
+                        // a log line each.
+                        if !*atlas_full_warned {
+                            warn!(
+                                "\u{1FAA7} billboard {:?}: atlas at MAX_ATLAS_DIM ({} px), {} slots used \u{2014} not rendering",
+                                entity, MAX_ATLAS_DIM, atlas.total_slots(),
+                            );
+                            *atlas_full_warned = true;
+                        }
+                        break;
                     }
                 }
             }
@@ -869,7 +930,8 @@ fn collect_subtree(
 fn update_and_render_billboards(
     mut text_state: NonSendMut<BillboardTextState>,
     mut atlas: NonSendMut<BillboardAtlas>,
-    mut billboards: Query<(Entity, &mut BillboardRenderHandle, &BillboardAtlasTile)>,
+    mut billboards: Query<(Entity, &mut BillboardRenderHandle, &BillboardAtlasTile, &GlobalTransform)>,
+    cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
     gui_elements: Query<(Entity, &GuiElementDisplay, &ChildOf)>,
     // Billboards typically host children (TextLabel, Frame, …) that
     // carry the visible content. Some callers attach a
@@ -878,7 +940,22 @@ fn update_and_render_billboards(
     // the subtree so a billboard with no children still paints.
     billboard_self_display: Query<&GuiElementDisplay>,
 ) {
-    for (entity, mut handle, tile) in &mut billboards {
+    // Cull billboard rebuilds to the near-camera vicinity. VS imports ~17K
+    // billboards; collecting + hashing every one each frame cost ~208 ms (31%
+    // of the frame). Only billboards within this radius of the order-0 camera
+    // are (re)built; the rest keep their last atlas tile (still drawn).
+    const BILLBOARD_CULL_RADIUS_SQ: f32 = 300.0 * 300.0;
+    let cam_pos = cameras
+        .iter()
+        .find(|(_, c)| c.order == 0)
+        .map(|(gt, _)| gt.translation());
+
+    for (entity, mut handle, tile, bb_tf) in &mut billboards {
+        if let Some(cp) = cam_pos {
+            if bb_tf.translation().distance_squared(cp) > BILLBOARD_CULL_RADIUS_SQ {
+                continue;
+            }
+        }
         let mut flat: Vec<FlatElem> = Vec::new();
         // Root parent rect = the billboard's resolved canvas, so a
         // child with `Size = UDim2(1, 0, 1, 0)` fills the billboard's

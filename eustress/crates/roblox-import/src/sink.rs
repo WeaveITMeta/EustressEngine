@@ -122,6 +122,15 @@ pub struct NodeSpec<'a> {
     /// [`crate::identity::entity_uuid`]) — the persistent identity used for
     /// both the TOML `metadata.uuid` stamp and the binary UUID index keys.
     pub uuid_hex: &'a str,
+    /// Deterministic 32-char-hex UUID of this node's PARENT instance (same
+    /// `entity_uuid` derivation as [`Self::uuid_hex`]), or `None` when the
+    /// parent is a synthetic non-instance container (a service-cognate
+    /// folder, the `Workspace/<PlaceName>` container, …) that carries no
+    /// Roblox referent. `BinarySink::bake_core` stores it in the cold tail
+    /// under `__parent_uuid` so a later Explorer-nesting step can rebuild
+    /// the hierarchy of binary cores (which are Morton-keyed and otherwise
+    /// parentless). Defect-2 data-preservation fix — no rkyv schema bump.
+    pub parent_uuid_hex: Option<&'a str>,
     /// `[properties.extras]` entries (round-trip storage for properties
     /// without a first-class slot).
     pub extras: &'a std::collections::HashMap<String, toml::Value>,
@@ -323,16 +332,25 @@ mod binary {
     use crate::error::ImportError;
 
     // Reserved cold-tail keys — MUST match
-    // `engine::space::arch_instance::{ATTRS_KEY, EXTRA_KEY}` so an engine
-    // save-back (`arch_to_instance`) reconstructs the attributes/extras
-    // sections losslessly. (The importer has no `InstanceMetadata` /
-    // material / thermo / UI structs to fold here — those engine-side
-    // sections are simply absent on an imported bare part.) Physics is
-    // imported-only enrichment with no engine cold-tail slot, so it is
-    // folded under a clearly importer-scoped `__physics` key.
+    // `engine::space::arch_instance::{META_KEY, ATTRS_KEY, EXTRA_KEY}` so an
+    // engine save-back (`arch_to_instance`) reconstructs the metadata /
+    // attributes / extras sections losslessly. The importer cannot import
+    // the engine-side `InstanceMetadata` struct (engine depends on this
+    // crate, not vice versa), so `__meta` is hand-built as a
+    // `toml::Value::Table` whose keys match `InstanceMetadata`'s serde
+    // field names — `eus_to_struct::<InstanceMetadata>` then restores the
+    // real Roblox name on spawn (Defect-1 fix). Physics is imported-only
+    // enrichment with no engine cold-tail slot, so it is folded under a
+    // clearly importer-scoped `__physics` key. `__parent_uuid` is the
+    // imported parent's 32-hex UUID, preserved for a later Explorer-nesting
+    // pass (Defect-2 data-preservation fix); the engine's `arch_to_instance`
+    // simply ignores tail keys it doesn't recognise, so it is harmless on
+    // save-back.
+    const META_KEY: &str = "__meta";
     const ATTRS_KEY: &str = "__attributes";
     const EXTRA_KEY: &str = "__extra";
     const PHYSICS_KEY: &str = "__physics";
+    const PARENT_UUID_KEY: &str = "__parent_uuid";
 
     /// The §8.A "BinaryDirect" sink: bare parts bake straight to a rkyv
     /// `ArchInstanceCore` in the worlddb `entities` partition; file-natured
@@ -374,6 +392,17 @@ mod binary {
 
             // Build the cold tail under the engine-compatible reserved keys.
             let mut extra: Vec<(String, EusValue)> = Vec::new();
+            // `__meta` — the IDENTITY block the engine reads back via
+            // `eus_to_struct::<InstanceMetadata>` (engine
+            // `arch_instance::arch_to_instance`). Without it the spawned
+            // entity falls back to the synthetic `__bin_<Class>_<hex>` name
+            // (Defect-1). Built as a `toml::Value::Table` whose keys are
+            // `InstanceMetadata`'s serde field names; every field that
+            // struct exposes is `#[serde(default)]`, so a missing key never
+            // fails the deserialize — but we stamp the load-bearing ones so
+            // the round-trip is faithful (name + class + the import unit +
+            // the deterministic uuid).
+            extra.push((META_KEY.to_string(), build_meta(spec)));
             if !spec.attributes.is_empty() {
                 extra.push((ATTRS_KEY.to_string(), map_to_eus(spec.attributes)));
             }
@@ -382,6 +411,16 @@ mod binary {
             }
             if !spec.physics.is_empty() {
                 extra.push((PHYSICS_KEY.to_string(), map_to_eus(spec.physics)));
+            }
+            // `__parent_uuid` — the imported parent's 32-hex UUID, so a
+            // later Explorer-nesting pass can rebuild the hierarchy of these
+            // Morton-keyed (otherwise parentless) cores (Defect-2). Absent
+            // when the parent is a synthetic non-instance container.
+            if let Some(parent) = spec.parent_uuid_hex {
+                extra.push((
+                    PARENT_UUID_KEY.to_string(),
+                    EusValue::String(parent.to_string()),
+                ));
             }
             // Deterministic archive bytes (same discipline as the engine bake).
             extra.sort_by(|a, b| a.0.cmp(&b.0));
@@ -511,6 +550,61 @@ mod binary {
         }
         EusValue::from(toml::Value::Table(t))
     }
+
+    /// Build the `__meta` cold-tail value (the IDENTITY block) for a node.
+    ///
+    /// The engine reads this back with
+    /// `eus_to_struct::<engine::space::instance_loader::InstanceMetadata>`
+    /// (see `engine::space::arch_instance::arch_to_instance`). We cannot
+    /// import that struct (engine → this-crate dependency direction), so the
+    /// table is hand-built with keys that match its serde field names. Every
+    /// field on `InstanceMetadata` is `#[serde(default)]`/`Option`, so a
+    /// missing key never breaks the deserialize; we stamp the load-bearing
+    /// ones (`name`, `class_name`, `unit`, `uuid`) plus `archivable` /
+    /// timestamps so the round-trip matches a TOML-imported sibling.
+    ///
+    /// Output is a `toml::Value::Table` converted via `EusValue::from`,
+    /// mirroring [`map_to_eus`]; it round-trips losslessly through the
+    /// worlddb `toml::Value ↔ EusValue` bridge (String→String, Table→Table).
+    fn build_meta(spec: &NodeSpec<'_>) -> EusValue {
+        let mut t = toml::value::Table::new();
+        // Display name — THE Defect-1 payload. Maps to
+        // `InstanceMetadata::name: Option<String>`.
+        t.insert(
+            "name".to_string(),
+            toml::Value::String(spec.requested_name.to_string()),
+        );
+        // Mirrors the typed `class_name` hot field so a save-back round-trips
+        // even if the hot field were ever cleared.
+        t.insert(
+            "class_name".to_string(),
+            toml::Value::String(spec.class.as_str().to_string()),
+        );
+        // Imported instances are archivable like any authored part.
+        t.insert("archivable".to_string(), toml::Value::Boolean(true));
+        // Timestamps — empty strings (the `String` default) keep the field
+        // present without inventing a fake authoring time; the import has no
+        // per-node timestamp source.
+        t.insert("created".to_string(), toml::Value::String(String::new()));
+        t.insert(
+            "last_modified".to_string(),
+            toml::Value::String(String::new()),
+        );
+        // Authoring unit — stamped from the import's `unit_symbol` (meter by
+        // default) carried on the overrides (the materializer sets
+        // `overrides.unit_symbol` from `ImportOptions::unit_symbol`), so
+        // dimensional values read back in the right unit.
+        if let Some(unit) = spec.overrides.unit_symbol.as_deref() {
+            t.insert("unit".to_string(), toml::Value::String(unit.to_string()));
+        }
+        // Stable identity — the same deterministic UUID the Morton + UUID
+        // index records key on, so the metadata block agrees with the index.
+        t.insert(
+            "uuid".to_string(),
+            toml::Value::String(spec.uuid_hex.to_string()),
+        );
+        EusValue::from(toml::Value::Table(t))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -597,8 +691,34 @@ mod tests {
         use super::*;
         use eustress_common::instance_create::{uuid_bytes_to_hex, uuid_hex_to_bytes};
         use eustress_worlddb::backend::open;
-        use eustress_worlddb::decode_instance_core;
+        use eustress_worlddb::{decode_instance_core, EusValue};
         use std::collections::HashMap;
+
+        /// Look up a reserved cold-tail section by key (mirrors the engine's
+        /// `arch_instance::tail_get`).
+        fn tail_get<'a>(tail: &'a [(String, EusValue)], key: &str) -> Option<&'a EusValue> {
+            tail.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+        }
+
+        /// Cold-tail section that must be an `EusValue::Table` (the `__meta`
+        /// block), returned as its kv slice for field lookup.
+        fn tail_table<'a>(
+            tail: &'a [(String, EusValue)],
+            key: &str,
+        ) -> Option<&'a [(String, EusValue)]> {
+            match tail_get(tail, key) {
+                Some(EusValue::Table(kvs)) => Some(kvs.as_slice()),
+                _ => None,
+            }
+        }
+
+        /// String field inside a table's kv slice (e.g. `__meta.name`).
+        fn tail_str(table: &[(String, EusValue)], key: &str) -> Option<String> {
+            table.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+                EusValue::String(s) => Some(s.clone()),
+                _ => None,
+            })
+        }
 
         fn temp_db_dir(tag: &str) -> std::path::PathBuf {
             let p = std::env::temp_dir().join(format!(
@@ -647,6 +767,7 @@ mod tests {
                 requested_name: "Cube",
                 overrides: &overrides,
                 uuid_hex: &uuid_hex,
+                parent_uuid_hex: None,
                 extras: &extras,
                 physics: &physics,
                 attributes: &attributes,
@@ -676,6 +797,29 @@ mod tests {
             assert_eq!(core.material, "Neon");
             assert!(core.anchored);
             assert_eq!(core.tags, vec!["bench".to_string()]);
+
+            // Defect-1: the real Roblox name + identity survive in the
+            // `__meta` cold-tail block so the engine's
+            // `eus_to_struct::<InstanceMetadata>` restores them on spawn
+            // (instead of falling back to the synthetic `__bin_*` name).
+            let meta = tail_table(&core.extra, "__meta")
+                .expect("__meta block must be present in the cold tail");
+            assert_eq!(tail_str(meta, "name").as_deref(), Some("Cube"));
+            assert_eq!(tail_str(meta, "class_name").as_deref(), Some("Part"));
+            assert_eq!(tail_str(meta, "uuid").as_deref(), Some(uuid_hex.as_str()));
+            // The import default unit symbol is stamped (meter) — present here
+            // because the override carries it.
+            // (overrides.unit_symbol is None in this test, so `unit` is omitted
+            // — that is fine: InstanceMetadata::unit is Option + serde default.)
+            assert!(
+                tail_str(meta, "unit").is_none(),
+                "unit omitted when the override carries none",
+            );
+            // Defect-2: with no parent UUID supplied, no `__parent_uuid` key.
+            assert!(
+                tail_get(&core.extra, "__parent_uuid").is_none(),
+                "no __parent_uuid when parent_uuid_hex is None",
+            );
 
             // The IDENTITY.md UUID index stores resolve it too.
             let uuid_bytes = uuid_hex_to_bytes(&uuid_hex).unwrap();
@@ -714,6 +858,7 @@ mod tests {
                 requested_name: "VCell",
                 overrides: &overrides,
                 uuid_hex: &uuid_hex,
+                parent_uuid_hex: None,
                 extras: &empty,
                 physics: &empty,
                 attributes: &empty,
@@ -748,6 +893,7 @@ mod tests {
             let mut sink = BinarySink::new(db.clone(), false);
 
             let uuid_hex = det_uuid(0xEF);
+            let parent_hex = det_uuid(0x11);
             let overrides = InstanceOverrides {
                 position: Some([5.0, 5.0, 5.0]),
                 ..Default::default()
@@ -760,6 +906,7 @@ mod tests {
                 requested_name: "Cube",
                 overrides: &overrides,
                 uuid_hex: &uuid_hex,
+                parent_uuid_hex: Some(parent_hex.as_str()),
                 extras: &empty,
                 physics: &empty,
                 attributes: &empty,
@@ -772,6 +919,16 @@ mod tests {
 
             let cores = db.iter_instance_cores().expect("iter cores");
             assert_eq!(cores.len(), 1, "re-import must overwrite, not duplicate");
+
+            // Defect-2: the parent edge survives in the cold tail (and a
+            // re-import overwrites it in place rather than duplicating).
+            let (_id, bytes) = &cores[0];
+            let core = decode_instance_core(bytes).expect("decode core");
+            assert_eq!(
+                tail_get(&core.extra, "__parent_uuid"),
+                Some(&EusValue::String(parent_hex.clone())),
+                "__parent_uuid must be preserved in the binary core's cold tail",
+            );
             let _ = std::fs::remove_dir_all(&dir);
         }
     }

@@ -96,7 +96,11 @@ fn diagnose_scene_once(
             entity, transform.translation, camera.order, camera.viewport);
     }
     info!("Mesh3d entities: {}", meshes.iter().count());
-    for (entity, transform, name) in meshes.iter() {
+    // Cap the per-mesh dump: on a 387K-mesh import this loop emitted one log
+    // line PER MESH in a single frame — a multi-minute stall (225 s observed).
+    // A sample of 20 is plenty for diagnostics; the count above is the real
+    // signal.
+    for (entity, transform, name) in meshes.iter().take(20) {
         info!("  Mesh {:?} '{}': pos={}",
             entity, name.map(|n| n.as_str()).unwrap_or("unnamed"), transform.translation);
     }

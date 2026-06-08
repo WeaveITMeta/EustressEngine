@@ -23,6 +23,11 @@ use crate::realism::materials::fracture::FractureState;
 #[derive(Resource, Reflect, Clone, Debug)]
 #[reflect(Resource)]
 pub struct OverlaySettings {
+    /// Master toggle: when false the overlay system does no work at all.
+    /// Default off because overlays are an opt-in inspection feature; turning
+    /// it on is a deliberate user action and avoids scanning every entity each
+    /// frame in large scenes.
+    pub enabled: bool,
     /// Show temperature
     pub show_temperature: bool,
     /// Show pressure
@@ -50,6 +55,7 @@ pub struct OverlaySettings {
 impl Default for OverlaySettings {
     fn default() -> Self {
         Self {
+            enabled: false,
             show_temperature: true,
             show_pressure: true,
             show_velocity: false,
@@ -189,29 +195,44 @@ impl PropertyData {
 // Systems
 // ============================================================================
 
-/// Update property overlays (placeholder - actual rendering depends on UI system)
+/// Run-condition: only run the overlay system when the master toggle is on.
+pub fn overlays_enabled(settings: Res<OverlaySettings>) -> bool {
+    settings.enabled
+}
+
+/// Update property overlays (placeholder - actual rendering depends on UI system).
+///
+/// Gated by the `overlays_enabled` run-condition (master toggle) AND a relevance
+/// filter so it only iterates entities that actually carry overlay-relevant data,
+/// not every entity with a Transform.
 pub fn update_property_overlays(
-    query: Query<(
-        Entity,
-        &Transform,
-        Option<&PropertyOverlay>,
-        Option<&ThermodynamicState>,
-        Option<&KineticState>,
-        Option<&StressTensor>,
-        Option<&FractureState>,
-    )>,
+    query: Query<
+        (
+            Entity,
+            &Transform,
+            Option<&PropertyOverlay>,
+            Option<&ThermodynamicState>,
+            Option<&KineticState>,
+            Option<&StressTensor>,
+            Option<&FractureState>,
+        ),
+        Or<(
+            With<PropertyOverlay>,
+            With<ThermodynamicState>,
+            With<StressTensor>,
+            With<FractureState>,
+        )>,
+    >,
     settings: Res<OverlaySettings>,
     camera_query: Query<&Transform, With<Camera>>,
 ) {
     // Get camera position for distance culling
     let camera_pos = camera_query.iter().next().map(|t| t.translation).unwrap_or(Vec3::ZERO);
-    
+
     for (entity, transform, overlay, thermo, kinetic, stress, fracture) in query.iter() {
-        // Skip if no overlay component and no relevant data
-        if overlay.is_none() && thermo.is_none() && stress.is_none() {
-            continue;
-        }
-        
+        // Relevance is guaranteed by the Or<With<...>> query filter above,
+        // so no per-entity is_none early-out is needed here.
+
         // Distance check
         let distance = (transform.translation - camera_pos).length();
         let always_visible = overlay.map(|o| o.always_visible).unwrap_or(false);

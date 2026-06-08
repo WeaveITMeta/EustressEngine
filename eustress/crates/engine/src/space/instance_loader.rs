@@ -352,6 +352,11 @@ pub fn sanitize_part_transforms_safety_net(
         Query<(Entity, Ref<Transform>), With<avian3d::prelude::RigidBody>>,
         Query<&mut Transform>,
     )>,
+    // Throttle handle for the AGGREGATE summary log. We must NEVER log per
+    // part: on a large import (Vehicle Simulator has tens of thousands of
+    // out-of-range parts) the per-part `warn!` Vec3-Debug formatting alone cost
+    // ~18 s/frame — 96.7% of the entire frame — while the clamp math is ~10 ms.
+    mut warn_occurrences: Local<u64>,
 ) {
     struct Fix {
         entity: Entity,
@@ -361,6 +366,10 @@ pub fn sanitize_part_transforms_safety_net(
     }
 
     let mut fixes: Vec<Fix> = Vec::new();
+    // Aggregate counters — replace the old per-part WARN spam. One sample is
+    // kept for the summary so a degenerate value is still diagnosable.
+    let (mut pos_fixes, mut rot_fixes, mut scale_fixes) = (0usize, 0usize, 0usize);
+    let mut sample: Option<(Vec3, Vec3)> = None;
 
     {
         let reader = params.p0();
@@ -384,10 +393,10 @@ pub fn sanitize_part_transforms_safety_net(
                 || pos.z.abs() > MAX_WORLD_EXTENT;
             let new_translation = if pos_bad {
                 let clamped = safe_translation(pos, Vec3::ZERO);
-                tracing::warn!(
-                    "🛡️ Sanitized part Transform.translation: {:?} → {:?}",
-                    pos, clamped
-                );
+                if sample.is_none() {
+                    sample = Some((pos, clamped));
+                }
+                pos_fixes += 1;
                 Some(clamped)
             } else {
                 None
@@ -400,7 +409,7 @@ pub fn sanitize_part_transforms_safety_net(
                 && rot.w.is_finite())
                 || rot.length_squared() < 1e-8;
             let new_rotation = if rot_bad {
-                tracing::warn!("🛡️ Sanitized part Transform.rotation (was {:?})", rot);
+                rot_fixes += 1;
                 Some(Quat::IDENTITY)
             } else {
                 None
@@ -408,7 +417,7 @@ pub fn sanitize_part_transforms_safety_net(
 
             let scale = t.scale;
             let new_scale = if !scale.is_finite() {
-                tracing::warn!("🛡️ Sanitized part Transform.scale (was {:?})", scale);
+                scale_fixes += 1;
                 Some(Vec3::ONE)
             } else {
                 None
@@ -441,6 +450,25 @@ pub fn sanitize_part_transforms_safety_net(
             if let Some(v) = fix.scale {
                 t.scale = v;
             }
+        }
+    }
+
+    // ONE aggregated, throttled summary — never per part. Log the first few
+    // occurrences, then a heartbeat every 600th, so a persistent out-of-range
+    // source (e.g. a huge imported coordinate that keeps getting re-clamped)
+    // still leaves a trail without ever costing more than a single line.
+    let total = pos_fixes + rot_fixes + scale_fixes;
+    if total > 0 {
+        *warn_occurrences += 1;
+        let n = *warn_occurrences;
+        if n <= 3 || n % 600 == 0 {
+            let eg = sample
+                .map(|(was, now)| format!("; e.g. {:?} → {:?}", was, now))
+                .unwrap_or_default();
+            tracing::warn!(
+                "🛡️ Sanitized {} part transform(s) ({} translation, {} rotation, {} scale){} [occurrence #{}]",
+                total, pos_fixes, rot_fixes, scale_fixes, eg, n
+            );
         }
     }
 }
@@ -1596,6 +1624,10 @@ pub fn update_base_part_size_from_mesh(
 pub struct PrimitiveMeshCache {
     /// GLB asset path → loaded mesh handle
     cache: HashMap<String, Handle<Mesh>>,
+    /// Custom-mesh asset URL (full space://...#Mesh0/Primitive0) -> handle.
+    /// Holds a STRONG handle so streaming evict never drops the last ref and
+    /// the GPU slab is never freed/reallocated. Bounded by distinct-mesh count.
+    custom_cache: HashMap<String, Handle<Mesh>>,
 }
 
 impl PrimitiveMeshCache {
@@ -1608,6 +1640,21 @@ impl PrimitiveMeshCache {
         self.cache.entry(glb_path.to_string()).or_insert_with(|| {
             asset_server.load(format!("{}#Mesh0/Primitive0", glb_path))
         }).clone()
+    }
+
+    /// Get or load a CUSTOM mesh handle by its full asset URL, keeping a
+    /// resident strong handle so streaming despawn never drops the last
+    /// reference (which would free + force a reload/reallocate of the GPU slab
+    /// on cell re-entry).
+    pub fn get_or_load_custom(
+        &mut self,
+        asset_server: &AssetServer,
+        asset_url: &str,
+    ) -> Handle<Mesh> {
+        self.custom_cache
+            .entry(asset_url.to_string())
+            .or_insert_with(|| asset_server.load(asset_url.to_string()))
+            .clone()
     }
 }
 
@@ -1631,7 +1678,7 @@ impl PrimitiveMeshCache {
 /// `VisibilityRange`. NOT a hardcoded constant — it is the Workspace
 /// property's value at runtime.
 static WORKSPACE_RENDER_DISTANCE_M: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(300);
+    std::sync::atomic::AtomicU32::new(500);
 
 /// Push the Workspace `RenderDistance` property value into the live
 /// mirror. Call this wherever `WorkspaceComponent` is applied / when
@@ -1980,9 +2027,14 @@ pub fn spawn_instance(
             // Fall through to primitive mesh rendering as fallback
         } else {
             // ── Custom GLB mesh: load the mesh directly (bypasses scene spawner) ──
-            // Use the "space://" asset source which is registered to the Space root directory
-            // Convert the absolute mesh path to a path relative to the Space root
-            let space_root = super::default_space_root();
+            // Use the "space://" asset source which resolves against the LIVE
+            // Space root. Strip the absolute mesh path against the SAME live
+            // root the dynamic reader joins (`space_asset_root()`), so the
+            // resulting `space://{relative}` URL is always consistent with what
+            // the reader resolves. (Was `default_space_root()`, which re-reads
+            // the on-disk last-space setting and goes stale on a runtime Space
+            // switch → wrong folder → missing meshes / black screen.)
+            let space_root = super::space_asset_source::space_asset_root();
         let relative_mesh_path = absolute_mesh_path
             .strip_prefix(&space_root)
             .map(|p| p.to_string_lossy().replace('\\', "/"))
@@ -1992,7 +2044,10 @@ pub fn spawn_instance(
         let mesh_path = format!("space://{}#Mesh0/Primitive0", relative_mesh_path);
         let material_path = format!("space://{}#Material0", relative_mesh_path);
         debug!("🔧 Loading mesh from: {} (absolute: {:?}, space_root: {:?})", mesh_path, absolute_mesh_path, space_root);
-        let mesh_handle: Handle<Mesh> = asset_server.load(mesh_path);
+        // PERF: pin the custom mesh handle in the resident cache so streaming
+        // evict never drops the last strong ref (which would free the GPU slab
+        // and force a reload/reallocate on cell re-entry). Same URL + rendering.
+        let mesh_handle: Handle<Mesh> = mesh_cache.get_or_load_custom(asset_server, &mesh_path);
         let material_handle: Handle<StandardMaterial> = asset_server.load(material_path);
         
         // Spawn the core visual entity first (no physics — added conditionally below)

@@ -32,6 +32,30 @@ pub use eustress_common::plugins::lighting_plugin::{
 #[reflect(Component)]
 pub struct LightingServiceOwner;
 
+/// P2 two-tier (Update-bound lag fix): exclude residency-streamed binary-ECS
+/// parts from `hydrate_lighting_entities`' four `Added<Instance>` queries.
+///
+/// On Vehicle Simulator ~120K cold `BinaryEcsInstance` parts are streamed in.
+/// Bevy's `Added<Instance>` query still O(N)-visits the whole matching
+/// archetype every frame to read change-ticks; with the residency churn that
+/// visit was the measured top Update cost (~the lighting half of the spike).
+/// A binary streamed part is ALWAYS an authored Part — it can NEVER be a
+/// Star/Moon/Sky/Atmosphere (those come from `Lighting/*.instance.toml` via
+/// the file loader, never from the binary `entities` partition), so excluding
+/// every `BinaryEcsInstance` (cold OR promoted) from these queries can never
+/// drop a real lighting hydration. We use `BinaryEcsInstance` rather than
+/// `ColdStreamed` deliberately: a promoted (selected) binary part is still not
+/// a celestial class, so it never needs lighting hydration either — excluding
+/// the whole binary population is both safe and maximal.
+///
+/// Resolves to `Without<BinaryEcsInstance>` when `world-db` is compiled, and
+/// to the empty filter `()` otherwise (no binary path exists in that build),
+/// so the queries are unchanged on a `--no-default-features` lighting build.
+#[cfg(feature = "world-db")]
+type NotBinaryStreamed = Without<crate::space::world_db_binary::BinaryEcsInstance>;
+#[cfg(not(feature = "world-db"))]
+type NotBinaryStreamed = ();
+
 pub struct LightingPlugin;
 
 impl Plugin for LightingPlugin {
@@ -74,7 +98,12 @@ impl Plugin for LightingPlugin {
             // of shadow maps + clustered-forward cost on huge imports). Self-
             // gated to a movement/cadence trigger, so it is a cheap no-op for
             // a stationary camera and for small scenes. See `light_cull`.
-            .add_systems(Update, crate::light_cull::cull_lights_to_nearest);
+            .add_systems(Update, crate::light_cull::cull_lights_to_nearest)
+            // Hard shadow-caster cap in PostUpdate (after spawns, before render
+            // extract) so a huge import can't OOM the GPU shadow atlas during
+            // load before the gated cull above reacts. Gated to load-active →
+            // zero steady-state cost. See `light_cull::enforce_shadow_budget`.
+            .add_systems(PostUpdate, crate::light_cull::enforce_shadow_budget);
     }
 }
 
@@ -95,14 +124,23 @@ impl Plugin for LightingPlugin {
 fn hydrate_lighting_entities(
     mut commands: Commands,
     lighting: Res<LightingService>,
-    // Star entities that have Instance but lack SunMarker (not yet hydrated)
-    unhydrated_sun: Query<(Entity, &Instance), (Without<SunMarker>, Without<MoonMarker>)>,
+    // PERF: gate on `Added<Instance>` so this only inspects entities the frame
+    // they are spawned by the file loader (which inserts `Instance` exactly once
+    // per entity). Without the `Added` gate these `Without<marker>` queries match
+    // ~every one of the ~110K live entities (Instance is universal), so the
+    // system re-scanned the whole scene every step (~880K rows/frame, ~44ms x2).
+    // The `Without<marker>` filters are kept for idempotency: a celestial entity
+    // is only hydrated while it still lacks its marker, so re-spawns are safe.
+    // Star entities that have Instance but lack SunMarker (not yet hydrated).
+    // `NotBinaryStreamed` (P2) drops the ~120K streamed binary parts that can
+    // never be a lighting class — see the type alias above.
+    unhydrated_sun: Query<(Entity, &Instance), (Added<Instance>, Without<SunMarker>, Without<MoonMarker>, NotBinaryStreamed)>,
     // Moon entities that have Instance but lack MoonMarker
-    unhydrated_moon: Query<(Entity, &Instance), (Without<MoonMarker>, Without<SunMarker>)>,
+    unhydrated_moon: Query<(Entity, &Instance), (Added<Instance>, Without<MoonMarker>, Without<SunMarker>, NotBinaryStreamed)>,
     // Sky entities that lack Sky component
-    unhydrated_sky: Query<(Entity, &Instance), Without<Sky>>,
+    unhydrated_sky: Query<(Entity, &Instance), (Added<Instance>, Without<Sky>, NotBinaryStreamed)>,
     // Atmosphere entities that lack EustressAtmosphere component
-    unhydrated_atmo: Query<(Entity, &Instance), Without<EustressAtmosphere>>,
+    unhydrated_atmo: Query<(Entity, &Instance), (Added<Instance>, Without<EustressAtmosphere>, NotBinaryStreamed)>,
 ) {
     // ── Star → Sun (DirectionalLight + SunMarker + SunClass) ──────────
     for (entity, instance) in unhydrated_sun.iter() {

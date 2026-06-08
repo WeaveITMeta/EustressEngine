@@ -383,7 +383,9 @@ impl<'dom> Materializer<'dom> {
             }
         } else {
             let dest = self.space_root.join("Workspace");
-            self.walk_subtree(root_ref, &dest, "Workspace", report)?;
+            // Model-file root: its parent is the synthetic `Workspace`
+            // service dir (no Roblox referent) → no parent UUID.
+            self.walk_subtree(root_ref, &dest, "Workspace", None, report)?;
         }
 
         self.finalise_pending_patches()?;
@@ -461,7 +463,10 @@ impl<'dom> Materializer<'dom> {
                 };
 
                 for child_ref in service.children().iter() {
-                    self.walk_subtree(*child_ref, &child_dir, &child_relpath, report)?;
+                    // A service child's parent is the service-cognate folder
+                    // (or the synthetic `Workspace/<PlaceName>` container) —
+                    // neither carries a Roblox referent → no parent UUID.
+                    self.walk_subtree(*child_ref, &child_dir, &child_relpath, None, report)?;
                 }
             }
             RouteOutcome::SkipSilent => {
@@ -555,7 +560,10 @@ impl<'dom> Materializer<'dom> {
             let dest = self.router.absolute(Path::new(dest_rel));
             std::fs::create_dir_all(&dest).map_err(|e| ImportError::Io(dest.clone(), e))?;
             for gc_ref in child.children().iter() {
-                self.walk_subtree(*gc_ref, &dest, dest_rel, report)?;
+                // Parent is the synthetic StarterPlayerScripts /
+                // StarterCharacterScripts folder (no Roblox referent) → no
+                // parent UUID.
+                self.walk_subtree(*gc_ref, &dest, dest_rel, None, report)?;
             }
         }
         Ok(())
@@ -566,6 +574,13 @@ impl<'dom> Materializer<'dom> {
         node_ref: Ref,
         parent_dir: &Path,
         parent_relpath: &str,
+        // Deterministic 32-hex UUID of this node's PARENT instance, threaded
+        // down the recursion so a binary core can store `__parent_uuid` in
+        // its cold tail (Defect-2 hierarchy preservation). `None` at the
+        // top of each service subtree, where the parent is a synthetic
+        // non-instance container (service-cognate folder / Workspace
+        // container / StarterPlayerScripts) that carries no Roblox referent.
+        parent_uuid: Option<&str>,
         report: &mut ImportReport,
     ) -> Result<(), ImportError> {
         let Some(inst) = self.dom.get_by_ref(node_ref) else {
@@ -757,6 +772,7 @@ impl<'dom> Materializer<'dom> {
                 requested_name: &requested_name,
                 overrides: &overrides,
                 uuid_hex: &uuid_hex,
+                parent_uuid_hex: parent_uuid,
                 extras: &bag.properties_extras,
                 physics: &bag.physics_extras,
                 attributes: &bag.attributes,
@@ -938,7 +954,17 @@ impl<'dom> Materializer<'dom> {
             if folded_children.contains(child_ref) {
                 continue;
             }
-            self.walk_subtree(*child_ref, &created.folder_path, &entity_relpath, report)?;
+            // This node is the children's parent — pass its deterministic
+            // UUID down so a child that bakes to a binary core records the
+            // hierarchy edge (`__parent_uuid`). (TOML children ignore it;
+            // their parent is already implied by their on-disk folder.)
+            self.walk_subtree(
+                *child_ref,
+                &created.folder_path,
+                &entity_relpath,
+                Some(&uuid_hex),
+                report,
+            )?;
         }
 
         Ok(())

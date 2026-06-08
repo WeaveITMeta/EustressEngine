@@ -182,7 +182,27 @@ impl Plugin for WindowFocusPlugin {
             .register_type::<IdleSettings>()
             // Initialize resources
             .init_resource::<WindowFocusState>()
-            .init_resource::<IdleSettings>()
+            .init_resource::<IdleSettings>();
+
+        // PROFILING OVERRIDE — pin the engine to full speed regardless of window
+        // focus. Measuring perf requires defocusing the engine (to read results
+        // / chat with the operator), but the background/idle throttle otherwise
+        // drops it to 2–4 FPS, and the deep-idle/minimized path parks the space
+        // load AND the TCP bridge entirely (≈0% CPU). When EUSTRESS_PROFILE is
+        // armed we set BOTH focus states to Continuous and SKIP the throttle
+        // systems so nothing overrides it; WindowFocusState stays at its
+        // focused/Active default for any other reader. Normal (non-profiling)
+        // runs keep the full power-saving behavior below.
+        if std::env::var_os("EUSTRESS_PROFILE").is_some() {
+            app.insert_resource(WinitSettings {
+                focused_mode: UpdateMode::Continuous,
+                unfocused_mode: UpdateMode::Continuous,
+            });
+            info!("⚡ EUSTRESS_PROFILE armed — window-focus throttle DISABLED (full speed regardless of focus)");
+            return;
+        }
+
+        app
             // Set initial WinitSettings - start in active mode
             .insert_resource(WinitSettings {
                 focused_mode: UpdateMode::Continuous,

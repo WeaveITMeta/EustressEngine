@@ -85,8 +85,16 @@ pub fn sync_rune_gravity(
 
 /// Bevy system: snapshot Avian3d physics state into Rune thread-locals.
 pub fn snapshot_physics_state(
+    // Only snapshot while PLAYING. This builds a HashMap with a freshly
+    // allocated String key per entity EVERY frame purely so Rune scripts can
+    // read physics state. In the editor (not playing, scripts idle) it was
+    // ~253 ms/frame of pure waste on Vehicle Simulator (301K entities).
+    play: Res<State<crate::play_mode::PlayModeState>>,
     query: Query<(&Name, Option<&LinearVelocity>, Option<&AngularVelocity>, Option<&Mass>)>,
 ) {
+    if *play.get() != crate::play_mode::PlayModeState::Playing {
+        return;
+    }
     let mut states = std::collections::HashMap::new();
     for (name, lin_vel, ang_vel, mass) in &query {
         let snapshot = rune_ecs_module::PhysicsSnapshot {

@@ -1800,21 +1800,50 @@ impl Plugin for WorkshopPlugin {
             // Mention index systems — see workshop/mention.rs and
             // workshop/mention_scanner.rs for architecture notes.
             //
+            // GATING: the live-mirror, rescan-trigger, and autosave systems
+            // carry the `mention::mention_indexing_enabled` run-condition. It is
+            // `false` only for a LARGE / streaming binary-ECS Space
+            // (`active_db::streaming_active()` — the same "huge scene" gate
+            // `instance_loader` and the Explorer use). There the chat
+            // @-autocomplete is non-essential and the live mirror's per-change
+            // O(N) upsert + the multi-second universe walk + periodic
+            // full-catalogue JSON autosave dominate the frame, so the scheduler
+            // skips them entirely. For every normal-sized Space the condition is
+            // `true` and the @-mention system runs unchanged.
+            //
+            // `poll_universe_scan` is intentionally LEFT UNGATED: if a universe
+            // scan was spawned on an early frame before `streaming_active()`
+            // flipped true, the in-flight task must still be drained/merged
+            // rather than left un-polled. It early-returns when the task is None,
+            // so leaving it ungated costs effectively nothing per frame.
+            //
             // Live ECS mirror: reactive enumeration of the currently-loaded
             // Space's entities/services/scripts. Runs every frame but only
             // touches `Added`/`Changed`/`Removed` entities.
-            .add_systems(Update, mention::update_mention_index_live)
+            .add_systems(
+                Update,
+                mention::update_mention_index_live
+                    .run_if(mention::mention_indexing_enabled),
+            )
             // Pull AuthState → MentionIndex.active_user so MRU persists
             // under the correct bucket across sessions.
-            .add_systems(Update, mention::sync_mention_active_user)
+            .add_systems(
+                Update,
+                mention::sync_mention_active_user
+                    .run_if(mention::mention_indexing_enabled),
+            )
             // Static scanner: walks the entire Universe for TOMLs + media
             // on Universe switch. Runs on IoTaskPool so large scans don't
-            // stall the main thread.
-            .add_systems(Update, (
-                mention_scanner::trigger_rescan_on_universe_change,
-                mention_scanner::poll_universe_scan,
-                mention_persistence::autosave_index,
-            ));
+            // stall the main thread. (poll left ungated — see note above.)
+            .add_systems(
+                Update,
+                (
+                    mention_scanner::trigger_rescan_on_universe_change,
+                    mention_persistence::autosave_index,
+                )
+                    .run_if(mention::mention_indexing_enabled),
+            )
+            .add_systems(Update, mention_scanner::poll_universe_scan);
 
         // Feature-gated: swap in the Vortex semantic searcher once the
         // Universe root is known. Runs at most once per Universe load;

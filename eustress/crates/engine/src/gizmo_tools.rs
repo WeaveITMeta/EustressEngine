@@ -86,7 +86,14 @@ fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
         config.enabled = true;
         config.depth_bias = -1.0; // Always visible
         config.line.width = 1.5;
-        light_config.draw_all = true;
+        // PERF: do NOT draw a gizmo for every light. Bevy's `draw_all_lights`
+        // rebuilds a wireframe (sphere/cone/rect) per light EVERY frame; on a
+        // large Roblox import (thousands of PointLight/SpotLight) that is ~17ms
+        // of editor-overlay cost (plus its update_gizmo_meshes pass) for lights
+        // the user is not selecting. `config.enabled`, width, depth_bias and
+        // color are kept so a future "Show Lights" toggle re-enables it by simply
+        // flipping `light_config.draw_all = true` at runtime.
+        light_config.draw_all = false;
         light_config.color = bevy::gizmos::light::LightGizmoColor::MatchLightColor;
     }
 }

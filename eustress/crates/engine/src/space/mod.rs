@@ -14,6 +14,10 @@ pub mod active_db;
 pub mod class_defaults;
 pub mod launch;
 pub mod file_loader;
+/// Lightweight, always-compiled load-phase instrumentation (env-gated on
+/// `EUSTRESS_PROFILE`). Records wall-clock at each open→interactive
+/// milestone so the ~50s a huge import spends loading can be attributed.
+pub mod load_phase;
 pub mod file_watcher;
 pub mod gui_loader;
 pub mod instance_create;
@@ -23,6 +27,10 @@ pub mod service_loader;
 pub mod draco_decoder;
 pub mod space_ops;
 pub mod space_source;
+/// Runtime-swappable `space://` Bevy asset source (custom `AssetReader` that
+/// re-resolves the Space root on every read, so switching Space at runtime
+/// stops resolving mesh paths against the stale launch root).
+pub mod space_asset_source;
 pub mod universe_registry;
 pub mod representation;
 #[cfg(feature = "world-db")]
@@ -35,6 +43,11 @@ pub mod world_db_binary;
 pub mod promote;
 #[cfg(feature = "world-db")]
 pub mod residency;
+/// Merged-cell HLOD: far Morton cells render as ONE merged proxy mesh
+/// instead of thousands of individual entities, so the whole map draws
+/// cheaply while residency keeps only the near ring as live parts.
+#[cfg(feature = "world-db")]
+pub mod hlod;
 #[cfg(feature = "world-db")]
 pub mod world_db_plugin;
 

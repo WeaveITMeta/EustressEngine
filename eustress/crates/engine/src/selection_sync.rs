@@ -194,7 +194,24 @@ fn sync_selection_components(
         }
         if let Some(part_id) = get_part_id(entity, part_entity, instance) {
             if selected_set.contains(&part_id) {
-                commands.entity(entity).insert(Selected);
+                // PROMOTION (P2 two-tier): selecting a cold streamed binary
+                // part makes it interactive/editable, so it must rejoin the
+                // hot edit-reactive Update systems. Removing `ColdStreamed`
+                // here (alongside `Selected`) is the single promotion seam for
+                // EVERY selection path — viewport raycast, Explorer click, MCP
+                // select, and the select-to-stream-in flow all route through
+                // this authoritative driver. `remove::<ColdStreamed>()` is a
+                // no-op on a hot/non-streamed part that never carried it. The
+                // `Selected` pin also keeps residency from evicting it, so its
+                // change-tracking (scene deltas + binary mirror persist) works
+                // for as long as it stays selected; on deselect it keeps
+                // `Selected` removed but stays hot until it evicts and reloads
+                // cold — correct, because a recently-edited part being briefly
+                // hot is harmless.
+                commands
+                    .entity(entity)
+                    .insert(Selected)
+                    .remove::<eustress_common::classes::ColdStreamed>();
             }
         }
     }

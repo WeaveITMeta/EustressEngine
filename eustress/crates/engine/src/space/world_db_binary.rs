@@ -512,6 +512,18 @@ fn drain_pending_binary_recreate(
 /// entity is byte-identical to a boot-loaded / created one, and the mirror
 /// persists either's edits unchanged. Returns the spawned `Entity`, or
 /// `None` if the core failed to decode.
+///
+/// ## M0 spawn-cost breakdown (env-gated)
+///
+/// When `EUSTRESS_PROFILE` is armed, the three sub-steps —
+/// `decode_instance_core` (rkyv deserialize), `arch_to_instance` (the
+/// InstanceDefinition reconstruction), and `spawn_instance` (the
+/// asset/material/mesh + Bevy-command work) — are wall-timed and folded
+/// into process-global atomics by [`spawn_cost`]. A one-line summary is
+/// emitted at the load-settle point (see [`spawn_cost::log_summary`]),
+/// telling M5 whether load is decode-bound (→ parallel rkyv) or
+/// spawn_instance-bound (→ defer/budget, not parallelize). Off by default:
+/// one relaxed `OnceLock` read per call when unarmed.
 pub(crate) fn spawn_binary_core(
     commands: &mut Commands,
     asset_server: &AssetServer,
@@ -523,6 +535,10 @@ pub(crate) fn spawn_binary_core(
     stored_id: u64,
     bytes: &[u8],
 ) -> Option<Entity> {
+    // M0: only pay the clock cost when the profiler env knob is armed.
+    let timing = spawn_cost::armed();
+
+    let t0 = timing.then(std::time::Instant::now);
     let arch = match decode_instance_core(bytes) {
         Ok(a) => a,
         Err(e) => {
@@ -534,9 +550,13 @@ pub(crate) fn spawn_binary_core(
             return None;
         }
     };
+    let t1 = timing.then(std::time::Instant::now);
+
     let marker = BinaryEcsInstance::from_core(stored_id, &arch);
     let synthetic = synthetic_path(space_root, &arch.class_name, stored_id);
     let def = arch_instance::arch_to_instance(&arch);
+    let t2 = timing.then(std::time::Instant::now);
+
     let entity = spawn_instance(
         commands,
         asset_server,
@@ -546,8 +566,113 @@ pub(crate) fn spawn_binary_core(
         synthetic,
         def,
     );
-    commands.entity(entity).insert((marker, ChildOf(workspace)));
+    let t3 = timing.then(std::time::Instant::now);
+
+    // P2 two-tier: every binary part spawned through this shared path
+    // (boot-load + residency streaming + select-to-stream-in) is COLD by
+    // default — it must render/be-selectable, but it is not user-edited, so it
+    // is excluded from the hot edit-reactive Update systems via
+    // `Without<ColdStreamed>`. `Instance` (from `spawn_instance`) and this
+    // marker land in the SAME command flush, so the entity already carries
+    // `ColdStreamed` the frame its `Added<Instance>` first fires — change-queue
+    // and lighting hydration skip it from frame one. Promotion removes the
+    // marker so an edited part rejoins those systems. NOTE: the authoritative
+    // promotion seam (`sync_selection_components`) only removes `ColdStreamed`
+    // inside its `Without<Selected>` query, so a caller that DIRECT-inserts
+    // `Selected` (like `sys_stream_in_on_select`) bypasses it and MUST remove
+    // `ColdStreamed` itself — that caller does so at both of its insert sites.
+    commands
+        .entity(entity)
+        .insert((marker, ChildOf(workspace), eustress_common::classes::ColdStreamed));
+
+    // Fold the three sub-step durations into the process-global accumulators.
+    if let (Some(t0), Some(t1), Some(t2), Some(t3)) = (t0, t1, t2, t3) {
+        spawn_cost::record(
+            t1.duration_since(t0), // decode_instance_core
+            t2.duration_since(t1), // arch_to_instance (+ marker/path build)
+            t3.duration_since(t2), // spawn_instance
+        );
+    }
     Some(entity)
+}
+
+/// M0 (diagnostics) — process-global spawn-cost accumulators for
+/// [`spawn_binary_core`]'s three sub-steps. Mirrors the arming pattern in
+/// `crate::profiler` / `space::load_phase`: dormant until `EUSTRESS_PROFILE`
+/// is set, one relaxed `OnceLock` read per call when off, never reads the
+/// clock or formats a string unless armed.
+///
+/// The summary is emitted by [`log_summary`], hooked at the load-settle
+/// point alongside the existing LOAD-PHASE `eager-spawn-complete` mark, so
+/// it reports exactly the boot-load / first-fill spawn population. It is
+/// idempotent per load: the totals are reset whenever a fresh load is
+/// stamped via [`reset`].
+pub(crate) mod spawn_cost {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+    use std::time::Duration;
+
+    /// Read `EUSTRESS_PROFILE` once — same knob the phase profiler + the
+    /// load-phase milestones read, so a single env var arms all three.
+    pub(crate) fn armed() -> bool {
+        static ARMED: OnceLock<bool> = OnceLock::new();
+        *ARMED.get_or_init(|| {
+            std::env::var_os("EUSTRESS_PROFILE")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+        })
+    }
+
+    // Nanosecond accumulators (saturating into u64 ns ≈ 584 years of headroom)
+    // plus a spawn count. Relaxed ordering: these are pure counters, never a
+    // happens-before edge for other state.
+    static DECODE_NS: AtomicU64 = AtomicU64::new(0);
+    static ARCH_NS: AtomicU64 = AtomicU64::new(0);
+    static SPAWN_NS: AtomicU64 = AtomicU64::new(0);
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+
+    /// Fold one spawn's three sub-step durations into the accumulators.
+    /// Caller already gated on [`armed`]; this just adds.
+    pub(crate) fn record(decode: Duration, arch: Duration, spawn: Duration) {
+        DECODE_NS.fetch_add(decode.as_nanos() as u64, Ordering::Relaxed);
+        ARCH_NS.fetch_add(arch.as_nanos() as u64, Ordering::Relaxed);
+        SPAWN_NS.fetch_add(spawn.as_nanos() as u64, Ordering::Relaxed);
+        COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Reset all accumulators (a fresh Space load is starting). Cheap; safe
+    /// to call unconditionally — no-op effect when nothing has accumulated.
+    pub(crate) fn reset() {
+        DECODE_NS.store(0, Ordering::Relaxed);
+        ARCH_NS.store(0, Ordering::Relaxed);
+        SPAWN_NS.store(0, Ordering::Relaxed);
+        COUNT.store(0, Ordering::Relaxed);
+    }
+
+    /// Emit the one-line `SPAWN-COST: decode=… arch=… spawn=… n=…` summary
+    /// (total ms per sub-step + spawn count) when armed and at least one
+    /// core was spawned. Silent (one `OnceLock` read) when unarmed.
+    ///
+    /// Hooked at the load-settle point so it reflects the boot-load /
+    /// first-fill spawn population; M5 reads the dominant sub-step to decide
+    /// parallel-decode vs defer/budget.
+    pub(crate) fn log_summary() {
+        if !armed() {
+            return;
+        }
+        let n = COUNT.load(Ordering::Relaxed);
+        if n == 0 {
+            return; // no spawns this load — don't emit a bogus all-zero line
+        }
+        let to_ms = |ns: u64| ns as f64 / 1.0e6;
+        let decode = to_ms(DECODE_NS.load(Ordering::Relaxed));
+        let arch = to_ms(ARCH_NS.load(Ordering::Relaxed));
+        let spawn = to_ms(SPAWN_NS.load(Ordering::Relaxed));
+        bevy::log::info!(
+            target: "eustress_engine::world_db",
+            "SPAWN-COST: decode={decode:.1}ms arch={arch:.1}ms spawn={spawn:.1}ms n={n}"
+        );
+    }
 }
 
 /// Phase 4 — stream a DB-only entity into the live ECS when the user selects
@@ -600,7 +725,13 @@ pub fn sys_stream_in_on_select(
 
     // Already resident? (residency may have streamed it in.) Just select it.
     if let Some((entity, _)) = existing.iter().find(|(_, i)| i.uuid == uuid_hex) {
-        commands.entity(entity).insert(crate::selection_box::Selected);
+        // Direct-insert bypasses the selection driver's promotion seam, so
+        // remove `ColdStreamed` here — otherwise this selected-to-edit part
+        // stays cold and its edits emit no deltas / never refresh the panels.
+        commands
+            .entity(entity)
+            .insert(crate::selection_box::Selected)
+            .remove::<eustress_common::classes::ColdStreamed>();
         select_in_manager(entity);
         es.selected = SelectedItem::Entity(entity);
         es.needs_immediate_sync = true;
@@ -664,10 +795,16 @@ pub fn sys_stream_in_on_select(
     ) {
         Some(entity) => {
             // Immediate pin (covers a same-frame evict) + authoritative
-            // manager selection (keeps it pinned until deselect).
+            // manager selection (keeps it pinned until deselect). Remove
+            // `ColdStreamed` here too: spawn_binary_core inserted it, and this
+            // direct `Selected` insert bypasses the selection driver's promotion
+            // seam (which only fires inside its `Without<Selected>` query), so
+            // without this the just-selected part would stay cold and its edits
+            // would emit no deltas / never refresh the panels.
             commands
                 .entity(entity)
-                .insert(crate::selection_box::Selected);
+                .insert(crate::selection_box::Selected)
+                .remove::<eustress_common::classes::ColdStreamed>();
             select_in_manager(entity);
             es.selected = SelectedItem::Entity(entity);
             es.needs_immediate_sync = true;
@@ -702,6 +839,9 @@ fn load_binary_ecs_instances(
     // Phase 2: decide boot-load-all (small Space) vs camera streaming (large).
     mut residency: ResMut<super::residency::ResidencyState>,
     residency_cfg: Res<super::residency::ResidencyConfig>,
+    // HLOD shares the streaming gate: merged-cell proxies only run for a
+    // large Space (the same condition that turns residency streaming on).
+    mut hlod: ResMut<super::hlod::HlodState>,
 ) {
     // Already loaded for this Space.
     if latch.0.as_deref() == Some(space_root.0.as_path()) {
@@ -741,6 +881,13 @@ fn load_binary_ecs_instances(
     if active_db::count_instance_cores_capped(cap) > residency_cfg.big_space_threshold {
         residency.enabled = true;
         residency.last_camera_cell = None; // first residency tick loads the camera box
+        // HLOD on for the large Space: every non-empty cell renders as ONE
+        // persistent merged proxy so the WHOLE map draws, while residency
+        // keeps only the near ring live (HLOD hides the proxies it owns). The
+        // one-time non-empty-cell enumeration is armed/re-armed by HLOD's own
+        // SpaceRoot-change reset (`sys_hlod_reset_on_space_change`), so just
+        // flipping `enabled` here is enough to start it for this Space.
+        hlod.enabled = true;
         // Mirror into the non-gated flag the Explorer reads to show the
         // virtual "Database (streamed)" section (Phase 4).
         active_db::set_streaming_active(true);
@@ -754,6 +901,7 @@ fn load_binary_ecs_instances(
         return;
     }
     residency.enabled = false; // small Space: boot-load all; residency idle
+    hlod.enabled = false; // small Space: everything boot-loaded → no proxies
     active_db::set_streaming_active(false); // no DB section for small Spaces
 
     let cores = active_db::iter_instance_cores();
@@ -1047,20 +1195,44 @@ pub fn register(app: &mut App) {
         .init_resource::<PendingBinaryRecreate>()
         .init_resource::<super::residency::ResidencyState>()
         .init_resource::<super::residency::ResidencyConfig>()
+        // HLOD (merged-cell proxies) — the whole-map render. Shares the
+        // streaming gate with residency (enabled together for a large Space).
+        .init_resource::<super::hlod::HlodState>()
+        .init_resource::<super::hlod::HlodConfig>()
         // Order is load-bearing (Phase 2 risk R1): boot-load decides the
-        // streaming mode → residency loads camera-local cells → the mirror
-        // PERSISTS edits → residency evicts far cells. Eviction must come
-        // AFTER the mirror so an edited entity's core is written before it
-        // is despawned.
+        // streaming mode → residency loads camera-local cells → HLOD plans
+        // (one-time enumeration + build-queue drain; camera-independent now)
+        // → the mirror PERSISTS edits → residency evicts far cells → HLOD
+        // toggles proxy VISIBILITY (hide the cells residency owns, show the
+        // rest). The mirror MUST precede residency eviction so an edited
+        // entity's core is written before it is despawned. HLOD's visibility
+        // pass is last so its keep-box is resolved against the freshest camera
+        // box (and after residency has (re)spawned a now-near cell's
+        // individuals, so the proxy hides in lockstep — no double-render, and
+        // never a gap since the proxy is only HIDDEN, never despawned).
         .add_systems(
             Update,
             (
                 load_binary_ecs_instances,
                 super::residency::sys_residency_load,
+                super::hlod::sys_hlod_plan,
                 mirror_binary_ecs_changes,
                 super::residency::sys_residency_evict,
+                super::hlod::sys_hlod_visibility,
             )
                 .chain(),
+        )
+        // HLOD merge-collect (polls finished worker builds + spawns proxies)
+        // and the Space-switch teardown run outside the ordered chain — they
+        // have no ordering constraint with the load/evict lifecycle (a proxy
+        // spawned this frame can't be evicted before next frame's plan, and
+        // the reset only fires on a genuine SpaceRoot change).
+        .add_systems(
+            Update,
+            (
+                super::hlod::sys_hlod_collect,
+                super::hlod::sys_hlod_reset_on_space_change,
+            ),
         )
         .add_systems(Update, drain_pending_binary_recreate)
         // Phase 4 — select-to-stream-in for the virtual DB Explorer. Runs
@@ -1070,7 +1242,11 @@ pub fn register(app: &mut App) {
         .add_systems(
             Update,
             sys_stream_in_on_select.before(super::residency::sys_residency_evict),
-        );
+        )
+        // M0 (diagnostics): periodic live entity-count-by-type log
+        // (binary vs streaming vs total). Env-gated on EUSTRESS_PROFILE;
+        // returns immediately (one OnceLock read) in a normal run.
+        .add_systems(Update, super::residency::sys_entity_count_diag);
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -110,6 +110,21 @@ bevy = { workspace = true, default-features = false, features = [
     "zstd_rust",
     "debug",
 ] }
+# bevy_ecs as a direct, NON-OPTIONAL dep. Two reasons it must NOT be optional:
+#   1. Merely naming `bevy_ecs` in this manifest makes Bevy's derive macros
+#      (Component/Resource/SystemParam/…) emit `bevy_ecs::` paths instead of
+#      `bevy::ecs::`. If the dep is optional, those paths only resolve when the
+#      enabling feature is on, so a plain `cargo build` breaks with E0433 across
+#      every derive. Non-optional keeps the crate always linked → paths resolve.
+#   2. We turn on its `trace` feature HERE (always), so Bevy's per-system
+#      `tracing` spans ("system"/"system_commands", carrying a `name` field) are
+#      always emitted. That lets the per-system profiler attach with NO rebuild,
+#      and — crucially — the feature never flips, so it never thrashes the whole
+#      Bevy stack (the cause of the "1-hour build"). We deliberately avoid the
+#      broader `bevy/trace`, which turns on the `profiling` CRATE's tracing
+#      backend workspace-wide and fails to compile rbx_binary
+#      (Ustr: !tracing::Value) + rav1e. Unifies with the bevy_ecs `bevy` pulls.
+bevy_ecs = { version = "0.18", default-features = false, features = ["trace"] }
 # Slint UI (software renderer + FemtoVG OpenGL GPU renderer)
 slint = { workspace = true }
 # CEF webview for browser tabs (macOS only currently)
@@ -222,6 +237,11 @@ dashmap = "6"
 bytes = "1"
 # Async channels for Slint+Bevy integration
 smol = "2"
+# Non-blocking filesystem for the runtime-swappable `space://` asset reader
+# (src/space/space_asset_source.rs). Same crate Bevy's own FileAssetReader
+# uses; already in Cargo.lock transitively via bevy_asset, so this direct
+# dep adds no new download — it just lets us name `async_fs` here.
+async-fs = "2"
 # LSP server (feature-gated — pulled in only by the `eustress-lsp` bin).
 # Deliberately optional so the main engine binary doesn't link tower-lsp.
 tower-lsp = { version = "0.20", optional = true }
@@ -346,16 +366,16 @@ toml = []
 dev = ["bevy/dynamic_linking"]
 hotpatch = ["bevy/hotpatching"]
 debug = ["bevy/bevy_debug_stepping"]
-# Opt-in per-system frame micro-profiler (src/profiler.rs). REQUIRES
-# `bevy/trace`: in Bevy 0.18 the per-system `tracing` spans ("system" /
-# "system_commands", carrying a `name` field) only exist when bevy_ecs is
-# built with its `trace` feature — without it there is nothing to observe.
-# Also pulls the `inferno` flamegraph renderer. OFF by default, so the normal
-# build pays nothing; even when on, capture is dormant until the
-# `EUSTRESS_PROFILE` env var is set at runtime.
-# Build:   cargo run -p eustress-engine --features profiling
-# Capture: set EUSTRESS_PROFILE=1 (and optionally EUSTRESS_PROFILE_FRAMES=N)
-# Output:  eustress_profile.txt + eustress_profile.svg in the working dir.
-profiling = ["bevy/trace", "dep:inferno"]
+# Opt-in per-system flamegraph (src/profiler.rs `mod enabled`). `bevy_ecs/trace`
+# is now ALWAYS on (see the bevy_ecs dep above), so the per-system spans exist in
+# every build and this feature only adds `inferno` to render the SVG + installs
+# the capturing tracing Layer. Because no Bevy feature flips, this build is
+# incremental (engine-only), NOT a full Bevy rebuild.
+#   Everyday phase profiler (no feature):
+#     EUSTRESS_PROFILE=1 cargo run -p eustress-engine   → eustress_profile_phases.txt
+#   Per-system deep dive (this feature):
+#     EUSTRESS_PROFILE=1 cargo run --features profiling -p eustress-engine
+#     → eustress_profile.txt + eustress_profile.svg (per-system, inferno)
+profiling = ["dep:inferno"]
 # CEF webview support (macOS only currently)
 cef = ["bevy_cef"]

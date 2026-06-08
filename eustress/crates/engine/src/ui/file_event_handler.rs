@@ -408,6 +408,10 @@ fn do_save_space_as(world: &mut World) {
             if let Some(mut sr) = world.get_resource_mut::<crate::space::SpaceRoot>() {
                 sr.0 = dst_root.clone();
             }
+            // Keep the `space://` asset root in step with the Save-As switch.
+            // (The `Changed<SpaceRoot>` system also covers this, but stamp now
+            // so any rescan in this command resolves meshes under the new root.)
+            crate::space::space_asset_source::set_space_asset_root(dst_root.clone());
             if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
                 n.success(format!("Saved Space as '{}'", dst_root.display()));
             }

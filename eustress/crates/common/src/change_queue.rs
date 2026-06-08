@@ -213,15 +213,23 @@ pub struct StreamingPlugin;
 impl Plugin for StreamingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PanelDirtyFlags>()
+           .init_resource::<EvictedRecently>()
            .add_systems(Startup, setup_change_queue)
+           // P2 two-tier: shift the eviction double-buffer once per frame, after
+           // every Update reader (emit_scene_change_deltas) has had its pass.
+           .add_systems(Last, rotate_evicted_recently)
            .add_systems(Update, (
                poll_agent_commands,
-               emit_lifecycle_deltas,
+               // PERF (Vehicle Simulator, ~110K live, DEBUG): the five former
+               // change-delta emitters were each `Changed<>`/`Added<>`-gated and
+               // genuinely EMPTY at idle, but each still walked its full matched
+               // table set every frame to run table-level change-tick checks. On a
+               // Roblox import the archetype graph is heavily fragmented, so that
+               // walk (×5 systems, ×5 schedule slots, un-inlined in debug) cost
+               // ~50 ms/frame at idle. They are now one system that does a SINGLE
+               // combined driver walk and early-returns when nothing changed.
+               emit_scene_change_deltas,
                emit_transform_deltas,
-               emit_part_property_deltas,
-               emit_tag_attr_dirty,
-               emit_name_deltas,
-               emit_parent_deltas,
            ));
     }
 }
@@ -268,45 +276,240 @@ pub struct IncomingAgentCommand(pub AgentCommand);
 // Lifecycle delta emission
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn emit_lifecycle_deltas(
+/// Combined change filter for the idle short-circuit driver. A table is
+/// visited ONCE and all of these tick-columns are checked in that single
+/// pass, replacing the five separate full-table walks the former systems
+/// each performed every frame. Removals are detected separately via
+/// `RemovedComponents` (change-tick filters cannot see a despawn/remove).
+type SceneChangeFilter = bevy::prelude::Or<(
+    bevy::prelude::Changed<BasePart>,
+    bevy::prelude::Changed<crate::attributes::Tags>,
+    bevy::prelude::Changed<crate::attributes::Attributes>,
+    bevy::prelude::Changed<bevy::prelude::Name>,
+    bevy::prelude::Changed<bevy::prelude::ChildOf>,
+    bevy::prelude::Added<Instance>,
+)>;
+
+/// Single merged change-delta emitter (replaces `emit_lifecycle_deltas`,
+/// `emit_part_property_deltas`, `emit_tag_attr_dirty`, `emit_name_deltas`,
+/// and `emit_parent_deltas`).
+///
+/// ## Idle fast-path
+/// The first thing it does is a SINGLE combined driver scan
+/// (`driver` + `removed.is_empty()`). At steady-state nothing mutates any of
+/// BasePart/Tags/Attributes/Name/ChildOf/Instance (the Avian same-value
+/// transform storm only trips `Changed<Transform>`, which `emit_transform_deltas`
+/// owns), so the driver is empty and the system returns immediately — one
+/// table-walk instead of five, and zero allocations.
+///
+/// ## Slow path (an edit/spawn/despawn happened this frame)
+/// Falls through to the five per-type detail queries, emitting byte-identical
+/// deltas and setting the exact same `PanelDirtyFlags` as the former systems.
+#[allow(clippy::too_many_arguments)]
+fn emit_scene_change_deltas(
     queue: Option<Res<ChangeQueue>>,
-    added: Query<Entity, Added<bevy::prelude::Name>>,
-    added_instances: Query<(), Added<Instance>>,
+    // ── Idle driver: one combined walk over the union of changed tables. ──
+    //
+    // PERF (P2 two-tier — Vehicle Simulator, 120K residency-streamed COLD
+    // parts): `Without<ColdStreamed>` excludes the streamed cold parts from
+    // EVERY query here. Cold parts are never user-edited via the change
+    // queue (the user can only edit a SELECTED part, and selection promotes
+    // it by removing `ColdStreamed` — see `sync_selection_components`), and
+    // the Explorer surfaces streamed parts from its own `instances` query +
+    // the live-ECS tree rebuild, NOT from these deltas. So skipping them is
+    // safe AND removes the ~36 ms/frame archetype-visit Bevy's change-tick
+    // walk paid over all 120K, AND stops residency spawn/evict churn from
+    // spamming Explorer rebuilds. A promoted (selected) part has had
+    // `ColdStreamed` removed, so its edits emit deltas normally.
+    driver: Query<(), (SceneChangeFilter, Without<crate::classes::ColdStreamed>)>,
+    // ── Per-type detail queries (only iterated on the slow path). ──
+    added_names: Query<Entity, (Added<bevy::prelude::Name>, Without<crate::classes::ColdStreamed>)>,
+    added_instances: Query<(), (Added<Instance>, Without<crate::classes::ColdStreamed>)>,
     mut removed: RemovedComponents<bevy::prelude::Name>,
+    // P2: a residency EVICTION despawns a streamed part, removing its `Name`
+    // (so it shows up in `removed` above) — but an evict is NOT a real delete:
+    // the part still lives in the Fjall DB and re-streams on demand, so it must
+    // emit NO `PartRemoved` delta. An evict-despawn is indistinguishable from a
+    // genuine delete-despawn by component-removal alone (both remove `Name`), so
+    // `sys_residency_evict` records every entity it unloads in `EvictedRecently`
+    // and we subtract that set from the Name-removal set below. This is robust
+    // where the former `RemovedComponents<ColdStreamed>` correlation was not:
+    //   (a) a genuine MCP/user delete of a still-COLD part is NOT in the
+    //       eviction set, so its delete delta is emitted correctly; and
+    //   (b) the double-buffered set spans exactly the 2-frame window over which
+    //       a `Name`-removal is readable, so a promotion-then-delete cannot leak
+    //       a stale suppression across frames.
+    evicted: Res<EvictedRecently>,
+    changed_parts: Query<(Entity, &BasePart), (bevy::prelude::Changed<BasePart>, Without<crate::classes::ColdStreamed>)>,
+    changed_names: Query<(Entity, &bevy::prelude::Name), (bevy::prelude::Changed<bevy::prelude::Name>, Without<crate::classes::ColdStreamed>)>,
+    changed_parents: Query<(Entity, &bevy::prelude::ChildOf), (bevy::prelude::Changed<bevy::prelude::ChildOf>, Without<crate::classes::ColdStreamed>)>,
+    changed_tags: Query<(), (bevy::prelude::Changed<crate::attributes::Tags>, Without<crate::classes::ColdStreamed>)>,
+    changed_attrs: Query<(), (bevy::prelude::Changed<crate::attributes::Attributes>, Without<crate::classes::ColdStreamed>)>,
     mut dirty: ResMut<PanelDirtyFlags>,
 ) {
-    // Newly spawned/imported `Instance`s must rebuild the Explorer tree even
-    // when no `Name` was added/removed this frame. A bulk in-memory import
-    // (Roblox place, binary-ECS spawn) inserts `Instance` components without
-    // necessarily tripping `Changed<Name>`/`Changed<ChildOf>`, so without this
-    // the throttled `sync_unified_explorer_to_slint` never rebuilds at low FPS
-    // and the imported entities stay invisible in the Explorer. Coalesced:
-    // set the flag once if any `Instance` was added this frame.
+    // ── Idle short-circuit. `removed.is_empty()` peeks the unread-events
+    //    cursor without consuming, so skipping it here cannot leak events:
+    //    if it is empty there is nothing to drain. The driver walks the
+    //    matched tables ONCE; on a settled scene it is empty and we are done.
+    //    `evicted` is a plain `Res` (no per-reader cursor to leak), so it
+    //    plays no part in this gate — it is only consulted on the slow path
+    //    below, which runs whenever `removed` is non-empty. ──
+    if driver.is_empty() && removed.is_empty() {
+        return;
+    }
+
+    // ── Slow path: at least one of the watched components changed, an
+    //    Instance was added, or a Name was removed this frame. ──
+
+    // (1) emit_lifecycle_deltas: Instance spawn flags Explorer rebuild even
+    //     when no Name was added/removed (bulk in-memory imports insert
+    //     `Instance` without tripping Changed<Name>/Changed<ChildOf>).
     if !added_instances.is_empty() {
         dirty.explorer = true;
     }
 
-    let added_list: Vec<Entity> = added.iter().collect();
-    let removed_list: Vec<Entity> = removed.read().collect();
+    let added_list: Vec<Entity> = added_names.iter().collect();
+    // Real Name-removals MINUS residency evictions: an evict despawn removed
+    // `Name` (so the entity is in `removed`) but is not a real delete, so drop
+    // it here — streaming churn emits no lifecycle delta and no Explorer
+    // rebuild. `EvictedRecently::contains` covers entities residency unloaded
+    // THIS frame or LAST frame (double-buffered to bridge the despawn-flush
+    // latency: residency records the entity the frame it despawns, but the
+    // `Name`-removal only becomes readable here after the end-of-`Update`
+    // flush, i.e. the next frame). A genuine delete (MCP/user) is never in this
+    // set, so its `PartRemoved` delta is emitted normally.
+    let removed_list: Vec<Entity> = removed
+        .read()
+        .filter(|e| !evicted.contains(*e))
+        .collect();
+    if !added_list.is_empty() || !removed_list.is_empty() {
+        dirty.explorer = true;
+        if let Some(ref queue) = queue {
+            for entity in added_list {
+                let seq = queue.next_seq();
+                let ts  = ChangeQueue::unix_ms();
+                queue.send_delta(SceneDelta::lifecycle(entity.to_bits(), DeltaKind::PartAdded, seq, ts));
+            }
+            for entity in removed_list {
+                let seq = queue.next_seq();
+                let ts  = ChangeQueue::unix_ms();
+                queue.send_delta(SceneDelta::lifecycle(entity.to_bits(), DeltaKind::PartRemoved, seq, ts));
+            }
+        }
+    }
 
-    if added_list.is_empty() && removed_list.is_empty() {
+    // (2) emit_tag_attr_dirty: any Tags/Attributes change refreshes the
+    //     Properties panel (single selected entity rebuild — cheap).
+    if !changed_tags.is_empty() || !changed_attrs.is_empty() {
+        dirty.properties = true;
+    }
+
+    // (3) emit_part_property_deltas.
+    if !changed_parts.is_empty() {
+        dirty.properties = true;
+        if let Some(ref queue) = queue {
+            for (entity, bp) in changed_parts.iter() {
+                let seq = queue.next_seq();
+                let ts  = ChangeQueue::unix_ms();
+                queue.send_delta(SceneDelta::part_props(
+                    entity.to_bits(), seq, ts,
+                    PartPayload {
+                        color:        Some(bp.color.to_linear().to_f32_array()),
+                        material:     Some(bp.material as u16),
+                        size:         Some(bp.size.to_array()),
+                        name:         None,
+                        anchored:     Some(bp.anchored),
+                        can_collide:  Some(bp.can_collide),
+                        transparency: Some(bp.transparency),
+                        reflectance:  Some(bp.reflectance),
+                    },
+                ));
+            }
+        }
+    }
+
+    // (4) emit_name_deltas.
+    if !changed_names.is_empty() {
+        dirty.explorer = true;
+        if let Some(ref queue) = queue {
+            for (entity, name) in changed_names.iter() {
+                let seq = queue.next_seq();
+                let ts  = ChangeQueue::unix_ms();
+                queue.send_delta(SceneDelta::rename(entity.to_bits(), seq, ts, name.to_string()));
+            }
+        }
+    }
+
+    // (5) emit_parent_deltas.
+    if !changed_parents.is_empty() {
+        dirty.explorer = true;
+        if let Some(ref queue) = queue {
+            for (entity, child_of) in changed_parents.iter() {
+                let seq = queue.next_seq();
+                let ts  = ChangeQueue::unix_ms();
+                queue.send_delta(SceneDelta {
+                    entity:       entity.to_bits(),
+                    kind:         DeltaKind::Reparented,
+                    seq,
+                    timestamp_ms: ts,
+                    transform:    None,
+                    part:         None,
+                    name:         None,
+                    new_parent:   Some(child_of.0.to_bits()),
+                });
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EvictedRecently — distinguishes a residency *evict* from a genuine *delete*
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Entities that `sys_residency_evict` unloaded recently (this frame + last
+/// frame). A residency eviction despawns a streamed part — firing
+/// `RemovedComponents<Name>` exactly like a real delete — but it is NOT a
+/// delete: the part still lives in the Fjall DB and re-streams on demand, so it
+/// must emit no `PartRemoved` delta. The two are indistinguishable by
+/// component-removal alone, so residency records each evicted entity here and
+/// `emit_scene_change_deltas` subtracts this set from the `Name`-removal set.
+///
+/// Double-buffered to match Bevy's own 2-frame `RemovedComponents` visibility
+/// window. Residency adds to `current` the frame it despawns, but that despawn's
+/// `Name`-removal only becomes readable to `emit_*` after the end-of-`Update`
+/// command flush (i.e. the NEXT frame). `rotate_evicted_recently` (in `Last`)
+/// shifts `current → previous` once per frame, so an entity evicted in frame N
+/// stays in `current ∪ previous` across frames N and N+1 — exactly the span over
+/// which its `Name`-removal is readable. A genuine delete (MCP/user) is never
+/// recorded here, so its `PartRemoved` delta is always emitted.
+#[derive(Resource, Default)]
+pub struct EvictedRecently {
+    current: std::collections::HashSet<bevy::prelude::Entity>,
+    previous: std::collections::HashSet<bevy::prelude::Entity>,
+}
+
+impl EvictedRecently {
+    /// Record an entity that residency unloaded this frame.
+    #[inline]
+    pub fn record(&mut self, entity: bevy::prelude::Entity) {
+        self.current.insert(entity);
+    }
+
+    /// True if `entity` was evicted this frame or last frame.
+    #[inline]
+    pub fn contains(&self, entity: bevy::prelude::Entity) -> bool {
+        self.current.contains(&entity) || self.previous.contains(&entity)
+    }
+}
+
+/// Shift the eviction double-buffer once per frame (`Last`, after every
+/// `Update` reader has had this frame's pass). Cheap no-op when idle.
+fn rotate_evicted_recently(mut evicted: ResMut<EvictedRecently>) {
+    if evicted.current.is_empty() && evicted.previous.is_empty() {
         return;
     }
-
-    dirty.explorer = true;
-
-    let Some(queue) = queue else { return };
-
-    for entity in added_list {
-        let seq = queue.next_seq();
-        let ts  = ChangeQueue::unix_ms();
-        queue.send_delta(SceneDelta::lifecycle(entity.to_bits(), DeltaKind::PartAdded, seq, ts));
-    }
-    for entity in removed_list {
-        let seq = queue.next_seq();
-        let ts  = ChangeQueue::unix_ms();
-        queue.send_delta(SceneDelta::lifecycle(entity.to_bits(), DeltaKind::PartRemoved, seq, ts));
-    }
+    let current = std::mem::take(&mut evicted.current);
+    evicted.previous = current;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,9 +535,23 @@ pub struct PanelDirtyFlags {
 
 fn emit_transform_deltas(
     queue: Option<Res<ChangeQueue>>,
+    // PERF (P2 two-tier — Vehicle Simulator, 120K residency-streamed COLD
+    // parts): `Without<ColdStreamed>` excludes the streamed cold parts from
+    // this `Changed<Transform>` driver. Bevy O(N)-visits every matching
+    // archetype each frame to read change-ticks, and the Avian same-value
+    // transform sync trips `Changed<Transform>` on every anchored body, so
+    // over 120K cold parts this was a per-frame O(N) visit (+ a delta-emit
+    // storm). A cold streamed part is static scenery that is NEVER user-moved
+    // (editing requires SELECTION, which promotes the part by removing
+    // `ColdStreamed` — see `selection_sync::sync_selection_components`), so it
+    // can never have a `Changed<Transform>` that matters for the delta stream.
+    // A promoted (selected) part has had `ColdStreamed` removed, so its moves
+    // still emit deltas normally. Mirrors the `Without<ColdStreamed>` filter
+    // already on `emit_scene_change_deltas`' queries above.
     changed: Query<(Entity, &bevy::prelude::Transform), (
         bevy::prelude::Changed<bevy::prelude::Transform>,
         bevy::prelude::With<BasePart>,
+        bevy::prelude::Without<crate::classes::ColdStreamed>,
     )>,
     mut dirty: ResMut<PanelDirtyFlags>,
 ) {
@@ -355,83 +572,9 @@ fn emit_transform_deltas(
     }
 }
 
-/// Mark the Properties panel dirty when an entity's `Tags` or `Attributes`
-/// change, so panel edits — and runtime changes from scripts / the MCP
-/// `add_tag` tool / CollectionService — reflect in the panel immediately
-/// instead of waiting for the ~5 s periodic resync. The panel sync only
-/// rebuilds the single selected entity, so flagging on any change is cheap.
-fn emit_tag_attr_dirty(
-    changed_tags: Query<(), bevy::prelude::Changed<crate::attributes::Tags>>,
-    changed_attrs: Query<(), bevy::prelude::Changed<crate::attributes::Attributes>>,
-    mut dirty: ResMut<PanelDirtyFlags>,
-) {
-    if !changed_tags.is_empty() || !changed_attrs.is_empty() {
-        dirty.properties = true;
-    }
-}
-
-fn emit_part_property_deltas(
-    queue: Option<Res<ChangeQueue>>,
-    changed: Query<(Entity, &BasePart), bevy::prelude::Changed<BasePart>>,
-    mut dirty: ResMut<PanelDirtyFlags>,
-) {
-    if changed.is_empty() { return; }
-    dirty.properties = true;
-    let Some(queue) = queue else { return };
-    for (entity, bp) in changed.iter() {
-        let seq = queue.next_seq();
-        let ts  = ChangeQueue::unix_ms();
-        queue.send_delta(SceneDelta::part_props(
-            entity.to_bits(), seq, ts,
-            PartPayload {
-                color:        Some(bp.color.to_linear().to_f32_array()),
-                material:     Some(bp.material as u16),
-                size:         Some(bp.size.to_array()),
-                name:         None,
-                anchored:     Some(bp.anchored),
-                can_collide:  Some(bp.can_collide),
-                transparency: Some(bp.transparency),
-                reflectance:  Some(bp.reflectance),
-            },
-        ));
-    }
-}
-
-fn emit_name_deltas(
-    queue: Option<Res<ChangeQueue>>,
-    changed: Query<(Entity, &bevy::prelude::Name), bevy::prelude::Changed<bevy::prelude::Name>>,
-    mut dirty: ResMut<PanelDirtyFlags>,
-) {
-    if changed.is_empty() { return; }
-    dirty.explorer = true;
-    let Some(queue) = queue else { return };
-    for (entity, name) in changed.iter() {
-        let seq = queue.next_seq();
-        let ts  = ChangeQueue::unix_ms();
-        queue.send_delta(SceneDelta::rename(entity.to_bits(), seq, ts, name.to_string()));
-    }
-}
-
-fn emit_parent_deltas(
-    queue: Option<Res<ChangeQueue>>,
-    changed: Query<(Entity, &bevy::prelude::ChildOf), bevy::prelude::Changed<bevy::prelude::ChildOf>>,
-    mut dirty: ResMut<PanelDirtyFlags>,
-) {
-    if changed.is_empty() { return; }
-    dirty.explorer = true;
-    let Some(queue) = queue else { return };
-    for (entity, child_of) in changed.iter() {
-        let seq = queue.next_seq();
-        let ts  = ChangeQueue::unix_ms();
-        queue.send_delta(SceneDelta {
-            entity:       entity.to_bits(),
-            kind:         DeltaKind::Reparented,
-            seq,
-            timestamp_ms: ts,
-            transform:    None,
-            part:         None,
-            name:         None,
-            new_parent:   Some(child_of.0.to_bits()),
-        });
-    }
-}
+// NOTE: `emit_lifecycle_deltas`, `emit_tag_attr_dirty`,
+// `emit_part_property_deltas`, `emit_name_deltas`, and `emit_parent_deltas`
+// were merged into the single `emit_scene_change_deltas` system above (one
+// combined Or<> driver walk + an idle short-circuit). `emit_transform_deltas`
+// is kept separate because its Avian same-value transform value-gate is
+// load-bearing.

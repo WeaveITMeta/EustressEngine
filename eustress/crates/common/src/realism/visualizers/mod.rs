@@ -36,7 +36,8 @@ impl Plugin for VisualizersPlugin {
             .init_resource::<heat_map::HeatMapSettings>()
             .register_type::<property_overlay::PropertyOverlay>()
             .add_systems(Update, (
-                property_overlay::update_property_overlays,
+                property_overlay::update_property_overlays
+                    .run_if(property_overlay::overlays_enabled),
                 vector_field::draw_vector_field,
                 stress_viz::draw_stress_indicators,
             ));

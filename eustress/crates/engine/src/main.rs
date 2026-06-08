@@ -203,12 +203,37 @@ fn main() {
     app.set_error_handler(rate_limited_error_handler);
     
     // Register the Space asset source BEFORE DefaultPlugins
-    // This must happen before AssetPlugin is initialized
+    // This must happen before AssetPlugin is initialized.
+    //
+    // Use a RUNTIME-SWAPPABLE reader (`DynamicSpaceReader`) instead of
+    // `platform_default(&launch_root)`. `platform_default` bakes the launch
+    // Space root into a FileAssetReader once; after a Space/Universe switch the
+    // reader keeps resolving `space://` paths against the OLD root → "Path not
+    // found: ...\<old space>\...\*.glb" → no meshes → black screen. The dynamic
+    // reader resolves the live root (`space_asset_source::space_asset_root()`)
+    // on every read, and `sync_space_asset_root_on_change` keeps that global in
+    // step with `SpaceRoot` on every switch. The `space://` source is
+    // read-only (all call sites only `asset_server.load(...)`), and the Bevy
+    // asset watcher is gated on the `file_watcher` cargo feature (not enabled
+    // here — hot-reload uses the engine's own `notify` watcher), so no
+    // writer/watcher is needed.
     let space_root = space::default_space_root();
     info!("📁 Registering Space asset source at: {:?}", space_root);
+    // Seed the swappable global to the launch root before AssetPlugin runs.
+    space::space_asset_source::set_space_asset_root(space_root.clone());
     app.register_asset_source(
         "space",
-        bevy::asset::io::AssetSourceBuilder::platform_default(&space_root.to_string_lossy(), None),
+        // `AssetSourceBuilder::new(reader_factory)` — reader-only source.
+        // The factory is `FnMut() -> Box<dyn ErasedAssetReader>`; any
+        // `T: AssetReader` auto-implements `ErasedAssetReader`. The explicit
+        // return annotation forces the `Box<DynamicSpaceReader>` → trait-object
+        // unsize coercion in the closure body (closures can otherwise pin the
+        // concrete return type before coercion).
+        bevy::asset::io::AssetSourceBuilder::new(
+            || -> Box<dyn bevy::asset::io::ErasedAssetReader> {
+                Box::new(space::space_asset_source::DynamicSpaceReader)
+            },
+        ),
     );
 
     // Register bundled common assets (material textures, fonts, etc.)
@@ -359,6 +384,15 @@ fn main() {
         // = last-opened/default space; `--space`/`--universe` and runtime
         // switches override it (init_resource is a no-op if already set).
         .init_resource::<space::SpaceRoot>()
+        // Keep the swappable `space://` asset root in lock-step with
+        // `SpaceRoot`. This `Changed<SpaceRoot>` chokepoint is the
+        // authoritative coverage: every Space-switch site (runtime
+        // `open_space`, `--space`/`--universe` overrides, "Save As") mutates
+        // the resource, so the asset reader can never be left resolving mesh
+        // paths against a stale launch root. Without this, switching Space at
+        // runtime black-screens because `space://*.glb` resolves under the
+        // OLD Space folder.
+        .add_systems(Update, space::space_asset_source::sync_space_asset_root_on_change)
         // Independent off-screen AI camera — the AI's own eyes (renders to an
         // image, never the window, so it can't displace the editor camera).
         .add_plugins(ai_camera::AiCameraPlugin)
@@ -566,6 +600,19 @@ fn main() {
         // Physics (avian3d from git main - supports Bevy 0.18)
         .add_plugins(avian3d::PhysicsPlugins::default())
         .insert_resource(avian3d::prelude::Gravity(bevy::math::Vec3::NEG_Y * 9.80665))
+        // Cap virtual-time max-delta to break the fixed-timestep DEATH SPIRAL.
+        // Bevy's default (250 ms) lets `FixedUpdate` run ~16× per render frame at
+        // low FPS to "catch up" — and the profiler showed EVERY Fixed-schedule
+        // system (transform + collider propagation, mark_dirty_trees, …) running
+        // ~16×/frame over the 301K-entity import, the dominant editor cost.
+        // Clamping to ~2 fixed steps collapses that 16× → 2× (graceful slow-mo
+        // instead of meltdown) and is harmless in the editor, where physics is
+        // already paused.
+        .insert_resource({
+            let mut vt = Time::<bevy::time::Virtual>::default();
+            vt.set_max_delta(std::time::Duration::from_millis(33));
+            vt
+        })
         // Realism Physics System (materials, thermodynamics, fluids, deformation, visualizers)
         .add_plugins(eustress_common::realism::RealismPlugin)
         // Tick-based simulation with time compression (integrates with PlayModeState)

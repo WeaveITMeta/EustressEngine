@@ -575,6 +575,31 @@ pub fn update_mention_index_live(
 #[derive(Component)]
 pub struct SkipMentionIndex;
 
+/// Run-condition gating the entire live @-mention subsystem (live ECS
+/// mirror, universe scan trigger, and autosave).
+///
+/// Returns `false` for a LARGE / streaming binary-ECS Space — the same
+/// canonical "huge scene" signal `instance_loader` (collider skipping)
+/// and the Explorer's virtual DB section already gate on. In that mode the
+/// editor is exploring an import with hundreds of thousands of live
+/// entities; the chat `@`-autocomplete index is non-essential and the live
+/// mirror's per-`Changed<Instance>` O(N) `SubstringSearcher::upsert` plus a
+/// multi-second universe walk dominate the frame. Skipping these systems
+/// entirely (the scheduler does not even run them) is pure CPU savings with
+/// no visual / render-distance impact.
+///
+/// For every normal-sized Space `streaming_active()` is `false` (also false
+/// for legacy disk Spaces and whenever the `world-db` feature is off), so
+/// this returns `true` and the @-mention system behaves exactly as before.
+///
+/// Send-time `@`-resolution is independent of these systems: typed tokens
+/// still travel to Claude verbatim, and the resolver already treats an
+/// unresolved `@foo` as plain text — so @-mention keeps working for huge
+/// Spaces too, just without proactive live indexing / autocomplete.
+pub fn mention_indexing_enabled() -> bool {
+    !crate::space::active_db::streaming_active()
+}
+
 /// Map a `ClassName` to the icon key `load_class_icon` / `load_service_icon`
 /// recognise. Falls back to "instance" for anything unknown.
 fn class_icon_hint(class: &ClassName) -> String {

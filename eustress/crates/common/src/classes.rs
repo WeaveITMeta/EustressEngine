@@ -1087,6 +1087,35 @@ impl ClassName {
 // 2. Instance (Base Class: All Entities)
 // ============================================================================
 
+/// Two-tier streaming cold marker (P2 — Update-bound lag fix).
+///
+/// Inserted on every residency-streamed / boot-loaded binary-ECS part the
+/// frame it is spawned (see `world_db_binary::spawn_binary_core`). These are
+/// the cold parts of a large Space (e.g. 120K on Vehicle Simulator) that the
+/// camera-locality residency manager pulled in: they must fully **render**,
+/// be **selectable**, and be **promotable**, but they are NOT being
+/// user-edited, so the hot per-frame Update systems that exist only to react
+/// to *edits* can safely skip them with a `Without<ColdStreamed>` filter.
+///
+/// Bevy's `Added<>`/`Changed<>` queries still iterate the whole matching
+/// archetype every frame to read change-ticks; on a 120K-cold-part Space that
+/// O(N) visit (×several Update systems) was the measured ~87 ms Update spike.
+/// Excluding cold parts collapses that visit to the small hot/promoted set.
+///
+/// ## Lifecycle
+/// - **Insert**: `spawn_binary_core` adds it to every streamed binary part.
+/// - **Remove (promotion)**: when a cold part is selected, the authoritative
+///   selection driver (`selection_sync::sync_selection_components`) removes it
+///   alongside inserting `Selected`, so an edited part rejoins the hot
+///   systems and its change-tracking (mirror persist, scene deltas) works.
+///
+/// Lives in `common` (not the engine) because a `common`-side system
+/// (`change_queue::emit_scene_change_deltas`) also filters on it, so the type
+/// must be reachable from both crates.
+#[derive(Component, Debug, Clone, Copy, Default, Reflect)]
+#[reflect(Component)]
+pub struct ColdStreamed;
+
 /// Core hierarchy/identity component (base for all ~200 Eustress classes)
 /// Bevy equivalent: Name + Parent + Entity metadata
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
@@ -8105,7 +8134,10 @@ impl Default for WorkspaceComponent {
             // calls `set_workspace_render_distance`, which re-stamps every
             // part's `VisibilityRange`). `small()`/`large()` presets keep
             // their own explicit values below.
-            render_distance: 300.0,
+            // Raised 300 → 500 to pair with the larger residency load_radius
+            // (lazy non-Workspace load freed the budget): streamed + eager parts
+            // now draw to ~500 m. Live-tunable via the Workspace property.
+            render_distance: 500.0,
             distance_lod_enabled: true,
             lod_bias: 0.0,
         }

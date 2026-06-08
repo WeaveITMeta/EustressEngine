@@ -31,11 +31,25 @@
 //! * `eustress_profile.svg` — an `inferno` flamegraph built from one folded
 //!   stack line per system (`system_name total_micros`), for a human to open.
 //!
+//! ## Two tools, two build costs
+//!
+//! * **Phase profiler (always compiled, the default):** needs no `tracing`
+//!   spans, so it is in every build (debug / release / `run-studio`) and adds
+//!   only a handful of cheap systems per frame. Dormant until `EUSTRESS_PROFILE`
+//!   is set. Run the ordinary binary with that env var — no feature flag, no
+//!   Bevy rebuild, no build thrash. Attributes the frame to its six top-level
+//!   phases; the dominant phase is the bottleneck's location.
+//! * **Per-system trace layer (feature `profiling`, opt-in deep dive):** the
+//!   `mod enabled` block below. This is the ONLY path that enables
+//!   `bevy_ecs/trace`, which recompiles the whole Bevy stack — use it
+//!   deliberately, ideally with its own `--target-dir`.
+//!
 //! ## Cost when off
 //!
-//! * Feature `profiling` **off** (default): this module is an empty plugin.
-//!   `bevy/trace` is not enabled, so Bevy never even constructs the system
-//!   spans — there is nothing to observe and zero overhead.
+//! * Feature `profiling` **off** (default): the per-system layer is absent and
+//!   `bevy_ecs/trace` is not enabled, so Bevy never constructs the system
+//!   spans. The phase profiler is present but dormant — one `OnceLock` read per
+//!   marker system per frame when `EUSTRESS_PROFILE` is unset.
 //! * Feature **on** but env `EUSTRESS_PROFILE` **unset**: the layer is
 //!   installed but every callback early-returns on an atomic load, and the
 //!   per-layer filter rejects all callsites, so the practical cost is a single
@@ -46,11 +60,13 @@
 //! * `EUSTRESS_PROFILE` — set to any non-empty value to arm capture.
 //! * `EUSTRESS_PROFILE_FRAMES` — window length in frames (default 120).
 
-// `App`/`Plugin` are used at this scope only by the feature-off stubs below;
-// the feature-on path imports the prelude inside `mod enabled`. Scoping the
-// import to the off path keeps both configurations warning-free.
-#[cfg(not(feature = "profiling"))]
+// The always-on phase profiler below uses the Bevy prelude and std timing in
+// every build, so these imports are unconditional. The per-system trace layer
+// keeps its own imports inside `mod enabled` (feature-gated).
 use bevy::prelude::*;
+use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// Bevy plugin that arms the per-system profiler.
 ///
@@ -59,13 +75,214 @@ use bevy::prelude::*;
 /// never needs its own `#[cfg]`.
 pub struct ProfilerPlugin;
 
-// ───────────────────────────── feature OFF ──────────────────────────────
-// Empty implementation. No layer, no resources, no systems. The
-// `custom_layer` hook in `main.rs` is also `#[cfg]`-gated to `|_| None` so the
-// LogPlugin wiring compiles identically with the feature off.
-#[cfg(not(feature = "profiling"))]
+// ───────────────────────── always-on phase profiler ─────────────────────
+// Coarse, zero-rebuild companion to the per-system trace layer. It needs NO
+// `tracing` spans and therefore NO `bevy_ecs/trace`, so it compiles into EVERY
+// build and adds only a few cheap systems per frame. Capture stays dormant
+// until `EUSTRESS_PROFILE` is set (guarded by a single `OnceLock<bool>` read).
+//
+// It attributes wall-clock to the six top-level frame phases by stamping an
+// `Instant` as each main-world schedule begins (First → PreUpdate → Update →
+// PostUpdate → Last) plus the residual gap between one frame's `Last` and the
+// next frame's `First`, which captures the render sub-app (extract / prepare /
+// queue / draw) and present + vsync wait. The six phases sum to the full frame
+// period, so the largest share *is* the bottleneck's location:
+//   * 06_render+present dominates → GPU / draw-call / present bound
+//   * 04_PostUpdate dominates     → transform propagation + visibility (O(N))
+//   * 03_Update dominates         → game / physics / UI systems
+// Output: `eustress_profile_phases.txt` (ranked) in the working directory,
+// also echoed to the log.
+
+/// Read `EUSTRESS_PROFILE` exactly once; capture is armed iff it is non-empty.
+fn phase_armed() -> bool {
+    static ARMED: OnceLock<bool> = OnceLock::new();
+    *ARMED.get_or_init(|| {
+        std::env::var_os("EUSTRESS_PROFILE")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
+/// Phase-profiler window length in frames (env `EUSTRESS_PROFILE_FRAMES`,
+/// default 1 — dump every frame, ideal when a single frame already costs
+/// seconds).
+fn phase_window() -> u64 {
+    static W: OnceLock<u64> = OnceLock::new();
+    *W.get_or_init(|| {
+        std::env::var("EUSTRESS_PROFILE_FRAMES")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(1)
+    })
+}
+
+/// Accumulates per-phase wall-clock across a rolling window of frames.
+#[derive(Resource)]
+struct PhaseClock {
+    /// The phase currently open: its label and the `Instant` it began.
+    pending: Option<(&'static str, Instant)>,
+    /// When the current frame's `First` ran (start of the frame period).
+    frame_start: Option<Instant>,
+    /// When the previous frame's `Last` finished — start of the render gap.
+    prev_frame_end: Option<Instant>,
+    /// `phase label -> (summed duration, sample count)` over the window.
+    acc: HashMap<&'static str, (Duration, u64)>,
+    /// Frames completed in the current window.
+    frames: u64,
+    /// Window length (frames) before a dump.
+    window: u64,
+}
+
+impl PhaseClock {
+    fn new(window: u64) -> Self {
+        Self {
+            pending: None,
+            frame_start: None,
+            prev_frame_end: None,
+            acc: HashMap::new(),
+            frames: 0,
+            window,
+        }
+    }
+
+    /// Close the open phase (attributing its elapsed time) and open `label`.
+    fn mark(&mut self, label: &'static str, now: Instant) {
+        if let Some((prev, started)) = self.pending.take() {
+            let e = self.acc.entry(prev).or_insert((Duration::ZERO, 0));
+            e.0 += now.saturating_duration_since(started);
+            e.1 += 1;
+        }
+        self.pending = Some((label, now));
+    }
+}
+
+fn phase_first(mut clock: ResMut<PhaseClock>) {
+    if !phase_armed() {
+        return;
+    }
+    let now = Instant::now();
+    // Gap since the previous frame's Last = render sub-app + present + vsync.
+    if let Some(end) = clock.prev_frame_end.take() {
+        let e = clock
+            .acc
+            .entry("06_render+present+wait")
+            .or_insert((Duration::ZERO, 0));
+        e.0 += now.saturating_duration_since(end);
+        e.1 += 1;
+    }
+    clock.frame_start = Some(now);
+    clock.pending = Some(("01_First", now));
+}
+
+fn phase_preupdate(mut clock: ResMut<PhaseClock>) {
+    if phase_armed() {
+        let now = Instant::now();
+        clock.mark("02_PreUpdate", now);
+    }
+}
+
+fn phase_update(mut clock: ResMut<PhaseClock>) {
+    if phase_armed() {
+        let now = Instant::now();
+        clock.mark("03_Update", now);
+    }
+}
+
+fn phase_postupdate(mut clock: ResMut<PhaseClock>) {
+    if phase_armed() {
+        let now = Instant::now();
+        clock.mark("04_PostUpdate", now);
+    }
+}
+
+fn phase_last(mut clock: ResMut<PhaseClock>) {
+    if phase_armed() {
+        let now = Instant::now();
+        clock.mark("05_Last", now);
+    }
+}
+
+/// Runs after `phase_last`: close the `Last` phase, record the frame period,
+/// and dump on a window boundary.
+fn phase_frame_end(mut clock: ResMut<PhaseClock>) {
+    if !phase_armed() {
+        return;
+    }
+    let now = Instant::now();
+    if let Some((prev, started)) = clock.pending.take() {
+        let e = clock.acc.entry(prev).or_insert((Duration::ZERO, 0));
+        e.0 += now.saturating_duration_since(started);
+        e.1 += 1;
+    }
+    clock.prev_frame_end = Some(now);
+    clock.frames += 1;
+    if clock.frames >= clock.window {
+        dump_phases(&mut clock);
+    }
+}
+
+/// Write `eustress_profile_phases.txt` (ranked phases) + echo to the log,
+/// then reset the window.
+fn dump_phases(clock: &mut PhaseClock) {
+    let frames = clock.frames.max(1);
+    let mut rows: Vec<(&'static str, Duration)> =
+        clock.acc.iter().map(|(k, v)| (*k, v.0)).collect();
+    let total: Duration = rows.iter().map(|(_, d)| *d).sum();
+    let frame_ms = (total.as_secs_f64() * 1000.0) / frames as f64;
+    let fps = if frame_ms > 0.0 { 1000.0 / frame_ms } else { 0.0 };
+    let denom = if frame_ms > 0.0 { frame_ms } else { 1.0 };
+    // Largest share first; label breaks ties for a stable ordering.
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+
+    let mut text = String::new();
+    text.push_str(&format!(
+        "Eustress phase profile — window = {frames} frame(s), mean frame = {frame_ms:.1} ms ({fps:.2} FPS)\n"
+    ));
+    text.push_str("phase                       ms/frame    %frame\n");
+    text.push_str("-----                       --------    ------\n");
+    for (label, dur) in &rows {
+        let ms = (dur.as_secs_f64() * 1000.0) / frames as f64;
+        let pct = (ms / denom) * 100.0;
+        text.push_str(&format!("{label:<25}  {ms:>9.1}  {pct:>6.1}%\n"));
+    }
+    match std::fs::write("eustress_profile_phases.txt", &text) {
+        Ok(()) => info!("profiler(phase): wrote eustress_profile_phases.txt — {frame_ms:.1} ms/frame ({fps:.2} FPS)"),
+        Err(e) => warn!("profiler(phase): failed writing eustress_profile_phases.txt: {e}"),
+    }
+    warn!("profiler(phase): frame {frame_ms:.1} ms ({fps:.2} FPS) — phase breakdown:");
+    for (label, dur) in &rows {
+        let ms = (dur.as_secs_f64() * 1000.0) / frames as f64;
+        info!("  {label:<25} {ms:>9.1} ms  {:>5.1}%", (ms / denom) * 100.0);
+    }
+
+    clock.acc.clear();
+    clock.frames = 0;
+}
+
+// ───────────────────────────── Bevy plugin ──────────────────────────────
 impl Plugin for ProfilerPlugin {
-    fn build(&self, _app: &mut App) {}
+    fn build(&self, app: &mut App) {
+        // Always-on, env-gated phase profiler: one marker system at the head of
+        // each main-world schedule, plus a frame-end closer in `Last` ordered
+        // right after the `Last` marker.
+        app.insert_resource(PhaseClock::new(phase_window()))
+            .add_systems(First, phase_first)
+            .add_systems(PreUpdate, phase_preupdate)
+            .add_systems(Update, phase_update)
+            .add_systems(PostUpdate, phase_postupdate)
+            .add_systems(Last, (phase_last, phase_frame_end).chain());
+
+        // LOAD-PHASE milestone 7: one-shot first-rendered-frame marker.
+        // Always-added, env-gated on EUSTRESS_PROFILE like the phase
+        // profiler; self-latches so it logs once per load.
+        app.add_systems(Update, crate::space::load_phase::sys_mark_first_render);
+
+        // Opt-in per-system trace layer (feature `profiling` only) — the single
+        // path that enables `bevy_ecs/trace` and therefore costs a Bevy rebuild.
+        #[cfg(feature = "profiling")]
+        enabled::install_trace(app);
+    }
 }
 
 /// The `LogPlugin::custom_layer` hook value.
@@ -107,8 +324,6 @@ mod enabled {
     // version-unified source that matches the span field types Bevy emits.
     use tracing::field::{Field, Visit};
     use tracing::span;
-
-    use super::ProfilerPlugin;
 
     /// Output file names, written to the process CWD.
     const REPORT_TXT: &str = "eustress_profile.txt";
@@ -308,18 +523,15 @@ mod enabled {
         Some(Box::new(layer))
     }
 
-    // ─────────────────────────── Bevy plugin ────────────────────────────
-    impl Plugin for ProfilerPlugin {
-        fn build(&self, app: &mut App) {
-            // Touch the global state so the env vars are read and the
-            // arm/window decision is logged in a single, predictable place
-            // even if `custom_layer` ran first (idempotent via OnceLock).
-            let _ = state();
-            // The window-tick + dump runs in `Last`, after every other
-            // schedule for the frame has executed, so a window boundary
-            // observes a complete frame of system timings.
-            app.add_systems(Last, tick_and_maybe_dump);
-        }
+    // ─────────────────── per-system trace installer ────────────────────
+    // Invoked from the unified `ProfilerPlugin::build` (top-level) ONLY under
+    // the `profiling` feature. Touches the global state so env vars are read +
+    // logged once (idempotent via OnceLock) and adds the window-tick + dump to
+    // `Last`. This is the path — and the only path — that pulls
+    // `bevy_ecs/trace` and therefore triggers a full Bevy rebuild.
+    pub(super) fn install_trace(app: &mut App) {
+        let _ = state();
+        app.add_systems(Last, tick_and_maybe_dump);
     }
 
     /// Bevy system: advance the window counter and, on a window boundary,
@@ -417,8 +629,14 @@ mod enabled {
             );
         }
 
-        // ---- inferno flamegraph ----
-        render_flamegraph(&rows);
+        // ---- inferno flamegraph (opt-in) ----
+        // The SVG render walks every folded stack and is multi-second in a debug
+        // build with ~900 systems — which contaminates the very frame budget we
+        // are trying to measure. Only render it when explicitly requested; the
+        // ranked text report (above) is the primary artifact.
+        if std::env::var_os("EUSTRESS_PROFILE_SVG").is_some() {
+            render_flamegraph(&rows);
+        }
     }
 
     /// Build folded-stack lines (`system_name total_micros`) and render them

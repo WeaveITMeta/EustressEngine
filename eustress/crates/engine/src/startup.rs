@@ -683,10 +683,14 @@ impl Plugin for StartupPlugin {
         if let Some(ref space_dir) = args.space_dir {
             info!("📁 --space override: {:?}", space_dir);
             app.insert_resource(crate::space::SpaceRoot(space_dir.clone()));
+            // Keep the `space://` asset root in step with the override so the
+            // first load resolves meshes against the right Space.
+            crate::space::space_asset_source::set_space_asset_root(space_dir.clone());
         } else if let Some(ref universe_dir) = args.universe_dir {
             if let Some(space) = crate::space::first_space_root_in_universe(universe_dir) {
                 info!("📁 --universe override → space: {:?}", space);
-                app.insert_resource(crate::space::SpaceRoot(space));
+                app.insert_resource(crate::space::SpaceRoot(space.clone()));
+                crate::space::space_asset_source::set_space_asset_root(space);
             } else {
                 warn!("--universe {:?}: no Space found inside", universe_dir);
             }

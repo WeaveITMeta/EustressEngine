@@ -97,11 +97,11 @@ pub struct GuiTomlProperties {
     pub size: eustress_common::ui_types::UDim2,
     #[serde(default)]
     pub anchor_point: [f32; 2],
-    #[serde(default = "default_bg_color")]
+    #[serde(default = "default_bg_color", deserialize_with = "de_color_rgb_or_rgba")]
     pub background_color: [f32; 4],
     #[serde(default)]
     pub border_size: f32,
-    #[serde(default = "default_border_color")]
+    #[serde(default = "default_border_color", deserialize_with = "de_color_rgb_or_rgba")]
     pub border_color: [f32; 4],
     #[serde(default)]
     pub corner_radius: f32,
@@ -173,7 +173,7 @@ pub struct GuiTomlProperties {
 pub struct GuiTomlText {
     #[serde(default)]
     pub text: String,
-    #[serde(default = "default_text_color")]
+    #[serde(default = "default_text_color", deserialize_with = "de_color_rgb_or_rgba")]
     pub text_color: [f32; 4],
     #[serde(default = "default_font_size")]
     pub font_size: f32,
@@ -237,6 +237,70 @@ where
         // Legacy 4-tuple → reset to default. See doc above.
         _ => None,
     }))
+}
+
+/// Lenient RGBA color deserialize for the `[gui]` / `[text]` color
+/// fields. Accepts BOTH a 3-element `[r, g, b]` (Roblox `Color3`, alpha
+/// padded to opaque) AND a 4-element `[r, g, b, a]`, in EITHER the
+/// 0-255 integer encoding the GUI schema templates author or the
+/// 0.0-1.0 float encoding the runtime panel writes. Always yields a
+/// normalised 0.0-1.0 `[f32; 4]` RGBA.
+///
+/// **Why this exists.** Roblox GUI color properties (`BackgroundColor3`,
+/// `BorderColor3`, `TextColor3`) are 3-float `Color3` values with no
+/// alpha channel, and the class-schema GUI templates
+/// (`class_schema/{Frame,TextLabel,…}/_instance.toml`) likewise author
+/// `background_color` / `border_color` / `text_color` as 3-element
+/// 0-255 integer arrays (e.g. `[255, 255, 255]`). The strict `[f32; 4]`
+/// field previously rejected every one of these with *"invalid length
+/// 3, expected an array of length 4"* — ~8038 such failures when
+/// loading an imported Vehicle Simulator place (StarterGui / SurfaceGui
+/// leaves: ColorOption-N, Hitbox, ColorText, race-checkpoint arrows…).
+///
+/// This is the same logic the Part `color` field uses
+/// (`instance_loader::deserialize_color_flexible`) and matches the
+/// runtime edit path (`slint_ui::route_property` → `color_255_to_01` /
+/// `color_01`), so GUI colors round-trip consistently no matter which
+/// surface authored them. Existing 0.0-1.0 *float* RGBA data (the only
+/// 4-element form the loader's own 0-1 defaults and runtime path ever
+/// produced) deserialises identically — floats are passed through
+/// unchanged; only integer arrays are divided by 255.
+fn de_color_rgb_or_rgba<'de, D>(de: D) -> Result<[f32; 4], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values: Vec<toml::Value> = serde::Deserialize::deserialize(de)?;
+    if values.len() != 3 && values.len() != 4 {
+        return Err(serde::de::Error::invalid_length(
+            values.len(),
+            &"a color array of length 3 ([r, g, b]) or 4 ([r, g, b, a])",
+        ));
+    }
+
+    // 0-255 integer encoding (schema templates) vs 0.0-1.0 float
+    // encoding (runtime panel / loader defaults). All-integer ⇒ divide
+    // by 255; otherwise read as floats (coercing any stray integer).
+    let all_integers = values.iter().all(|v| v.is_integer());
+    let channel = |v: &toml::Value, fallback: f32| -> f32 {
+        if all_integers {
+            v.as_integer().map(|i| i as f32 / 255.0).unwrap_or(fallback)
+        } else {
+            v.as_float()
+                .or_else(|| v.as_integer().map(|i| i as f64))
+                .map(|f| f as f32)
+                .unwrap_or(fallback)
+        }
+    };
+
+    let r = channel(&values[0], 0.0);
+    let g = channel(&values[1], 0.0);
+    let b = channel(&values[2], 0.0);
+    let a = if values.len() == 4 {
+        channel(&values[3], 1.0)
+    } else {
+        1.0
+    };
+    Ok([r, g, b, a])
 }
 
 // ============================================================================
@@ -1099,5 +1163,101 @@ fn resolve_text_props(text_props: Option<&GuiTomlText>) -> (String, Color, f32, 
             JustifyContent::FlexStart,
             AlignItems::Center,
         ),
+    }
+}
+
+// ============================================================================
+// Tests — GUI color length-leniency (Roblox Color3 RGB → Eustress RGBA)
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact regression: an imported GUI leaf whose `[gui]` /
+    /// `[text]` colors are 3-element 0-255 integer arrays (Roblox
+    /// `Color3`, the form the class-schema templates author). Before the
+    /// lenient deserialize this failed with *"invalid length 3, expected
+    /// an array of length 4"* — the 8038 Vehicle Simulator warnings.
+    #[test]
+    fn loads_three_element_integer_colors() {
+        let toml = r#"
+            [metadata]
+            class_name = "TextLabel"
+
+            [gui]
+            background_color = [255, 255, 255]
+            border_color = [27, 27, 27]
+
+            [text]
+            text = "Label"
+            text_color = [0, 0, 0]
+        "#;
+        let def = load_gui_definition_from_str(toml).expect("3-element RGB must load");
+        // 0-255 integers normalise to 0.0-1.0; alpha padded opaque.
+        assert_eq!(def.gui.background_color, [1.0, 1.0, 1.0, 1.0]);
+        let bc = def.gui.border_color;
+        assert!((bc[0] - 27.0_f32 / 255.0).abs() < 1e-6 && bc[3] == 1.0);
+        assert_eq!(def.text.unwrap().text_color, [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    /// 3-element 0.0-1.0 float colors also pad alpha and stay verbatim.
+    #[test]
+    fn loads_three_element_float_colors() {
+        let toml = r#"
+            [gui]
+            background_color = [0.5, 0.25, 0.75]
+        "#;
+        let def = load_gui_definition_from_str(toml).unwrap();
+        assert_eq!(def.gui.background_color, [0.5, 0.25, 0.75, 1.0]);
+    }
+
+    /// Existing 4-element 0.0-1.0 float RGBA data deserialises
+    /// byte-for-byte identically to the old strict `[f32; 4]` path —
+    /// no normalisation, alpha preserved.
+    #[test]
+    fn four_element_float_rgba_is_identical() {
+        let toml = r#"
+            [gui]
+            background_color = [0.2, 0.2, 0.2, 0.8]
+            border_color = [0.5, 0.5, 0.5, 1.0]
+
+            [text]
+            text_color = [1.0, 1.0, 1.0, 0.5]
+        "#;
+        let def = load_gui_definition_from_str(toml).unwrap();
+        assert_eq!(def.gui.background_color, [0.2, 0.2, 0.2, 0.8]);
+        assert_eq!(def.gui.border_color, [0.5, 0.5, 0.5, 1.0]);
+        assert_eq!(def.text.unwrap().text_color, [1.0, 1.0, 1.0, 0.5]);
+    }
+
+    /// Absent color keys fall back to the typed defaults (the `default
+    /// = …` arm runs, NOT the lenient deserialiser).
+    #[test]
+    fn missing_colors_use_defaults() {
+        let def = load_gui_definition_from_str("[gui]\nvisible = true\n").unwrap();
+        assert_eq!(def.gui.background_color, default_bg_color());
+        assert_eq!(def.gui.border_color, default_border_color());
+    }
+
+    /// A genuinely malformed color (length 2) still errors clearly.
+    #[test]
+    fn rejects_two_element_color() {
+        let toml = "[gui]\nbackground_color = [1.0, 0.0]\n";
+        assert!(load_gui_definition_from_str(toml).is_err());
+    }
+
+    /// Whole-number normalised floats (e.g. pure red `[1.0, 0.0, 0.0,
+    /// 1.0]`) are serialised by the `f32` field as TOML floats, never
+    /// bare integers, so a reload reads them verbatim and never
+    /// re-divides by 255. This guards the integer-vs-float heuristic
+    /// against a save→load round-trip after a template import.
+    #[test]
+    fn whole_number_float_color_not_treated_as_255() {
+        // Simulate the on-disk shape after a [255,0,0] import is saved
+        // back: the `f32` Serialize writes `1.0`, not `1`.
+        let toml = "[gui]\nbackground_color = [1.0, 0.0, 0.0, 1.0]\n";
+        let def = load_gui_definition_from_str(toml).unwrap();
+        assert_eq!(def.gui.background_color, [1.0, 0.0, 0.0, 1.0]);
     }
 }

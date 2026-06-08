@@ -242,6 +242,10 @@ pub use orbital::{
 // Re-export orbital class components
 pub use classes::{
     SolarSystem, CelestialBodyClass, RegionChunk,
+    // Two-tier streaming cold marker (P2 Update-bound lag fix) — re-exported
+    // so both the engine spawn/promote sites and the common-side
+    // `change_queue::emit_scene_change_deltas` filter can reach it.
+    ColdStreamed,
 };
 
 // Re-export event bus for convenience

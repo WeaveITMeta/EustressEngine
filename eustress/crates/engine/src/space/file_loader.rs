@@ -574,10 +574,17 @@ fn scan_dir_entries(
             }
 
             let Some(file_type) = FileType::from_path(&path) else { continue };
-            // Size from the source (Fjall has no mtime; modified is
-            // only consulted by the disk file-watcher, which is moot
-            // for Fjall-sourced loads). Use byte length for size.
-            let size = source.read(&rel).map(|b| b.len() as u64).unwrap_or(0);
+            // `FileMetadata.size` has ZERO downstream readers (verified by
+            // grep: every site constructs the struct, none reads `.size`;
+            // spawn/load/save/registry all key on path/name/file_type/
+            // service). The old code did `source.read(&rel)` here purely to
+            // measure a byte length that was never consumed — a SECOND full
+            // read of every eager-service file on top of the parallel
+            // `prewarm_read_cache` read. On the 161K-file Vehicle Simulator
+            // place that duplicate serial read cost ~2-3s of scan time for
+            // nothing. Drop the probe; record 0. (The source trait exposes
+            // no metadata-only stat, and the value is cosmetic anyway.)
+            let size = 0u64;
             let name = path.file_stem()
                 .and_then(|n| n.to_str())
                 .unwrap_or("Unknown")
@@ -612,12 +619,47 @@ pub fn scan_space_directory(
     // service tree straight from the DB.
     let services = discover_services(source);
 
+    // LAZY NON-WORKSPACE LOAD (large streaming Spaces only). The non-rendered
+    // storage services hold the bulk of a big imported place — Vehicle Simulator
+    // has ~161K instances under ReplicatedStorage (race courses, plane kits)
+    // alone. Spawning them as live ECS bloats every O(N) system AND the render
+    // extract/visibility pipeline even though they are never drawn. When the DB
+    // Space is in streaming mode, emit each non-essential service's HEADER (so it
+    // still appears in the Explorer) but do NOT scan/spawn its subtree.
+    // Workspace (rendered geometry — bare parts are already streamed by the
+    // residency manager), Lighting, and StarterGui stay eager.
+    // NOTE: this is the load-skip stage; lazy materialize-on-expand /
+    // play-mode-materialize is the follow-up so functionality is preserved.
+    //
+    // Big-space test computed INLINE here. We must NOT use `streaming_active()`:
+    // that flag is seeded by the residency boot-load decision, which runs minutes
+    // AFTER this service scan — so it reads false here and the lazy skip would
+    // never fire (observed: 223K entities still loaded). Mirror the file-loader's
+    // own STREAM_DB_PARTS condition instead — an active DB with more than the
+    // big-space threshold of binary cores — which IS already true at scan time
+    // (the DB is opened at boot, before this runs).
+    const BIG_SPACE_THRESHOLD: usize = 100_000;
+    let streaming = super::active_db::is_active()
+        && super::active_db::count_instance_cores_capped(BIG_SPACE_THRESHOLD + 1) > BIG_SPACE_THRESHOLD;
+    const EAGER_SERVICES: &[&str] = &["Workspace", "Lighting", "StarterGui"];
+
     for service_name in &services {
         if !source.exists(service_name) {
             continue;
         }
         let service_path = space_root.join(service_name);
-        let children = scan_dir_entries(source, space_root, service_name, service_name);
+        let lazy = streaming && !EAGER_SERVICES.contains(&service_name.as_str());
+        let children = if lazy {
+            Vec::new()
+        } else {
+            scan_dir_entries(source, space_root, service_name, service_name)
+        };
+        if lazy {
+            info!(
+                "⏬ Lazy service (streaming): '{}' header only — subtree not spawned (saves O(N) + render load)",
+                service_name
+            );
+        }
         entries.push(FileMetadata {
             path: service_path,
             file_type: FileType::Directory,
@@ -797,8 +839,10 @@ pub fn spawn_file_entry(
                 return None; // Skip loading Draco-compressed files
             }
             
-            // Use space:// asset source for GLB files in the Space directory
-            let space_root = super::default_space_root();
+            // Use space:// asset source for GLB files in the Space directory.
+            // Live root (follows runtime space/universe switches) — must match
+            // what the dynamic space:// reader joins, NOT the stale launch default.
+            let space_root = super::space_asset_source::space_asset_root();
             let relative_path = file_meta.path
                 .strip_prefix(&space_root)
                 .map(|p| p.to_string_lossy().replace('\\', "/"))
@@ -1217,6 +1261,34 @@ pub fn spawn_directory_entry(
     } else {
         eustress_common::classes::ClassName::Folder
     };
+
+    // STREAMING-PRIMARY: on the initial load of a large DB-backed Space, the
+    // residency manager streams bare parts from the `entities` partition by
+    // camera — so do NOT also bulk-spawn them from the tree here (that double-
+    // load is what pinned huge imports at ~2 FPS). Skip CONSERVATIVELY: only a
+    //   • childless dir (a part with child dirs would orphan them), that is
+    //   • a `BinaryEcs`-representation class (bare Part/WedgePart/Model …), with
+    //   • no custom-mesh reference (custom meshes are FileSystem-stored, not in
+    //     the partition residency streams — never drop them).
+    // `STREAM_DB_PARTS` is only set during the initial load of a qualifying
+    // Space and reset on settle, so paste / hot-reload always spawn normally.
+    if STREAM_DB_PARTS.load(std::sync::atomic::Ordering::Relaxed)
+        && !dir_meta.children.iter().any(|c| c.file_type == FileType::Directory)
+        && super::representation::representation_for(&format!("{:?}", class_name), None)
+            == super::representation::Representation::BinaryEcs
+    {
+        let has_custom_mesh = source.exists(&instance_toml_rel)
+            && src_read_string(source, space_path, &instance_toml_path)
+                .ok()
+                .map(|s| {
+                    let l = s.to_ascii_lowercase();
+                    l.contains("mesh") || l.contains(".glb") || l.contains(".obj")
+                })
+                .unwrap_or(false);
+        if !has_custom_mesh {
+            return; // residency streams this bare part from the DB
+        }
+    }
 
     // Stable UUID from `[metadata].uuid` — carried onto the spawned
     // `Instance` so cross-references resolve by identity (constraints bind
@@ -2149,6 +2221,58 @@ pub fn spawn_directory_entry(
 /// synchronously in one frame).
 const SPAWN_BUDGET_PER_FRAME: i64 = 4096;
 
+/// Default per-frame spawn budget DURING the initial load only. The eager
+/// Workspace set (~161K nodes on Vehicle Simulator) drains at
+/// [`SPAWN_BUDGET_PER_FRAME`] per frame, which at 4096 is ~40 budget-frames
+/// — the ~37s eager-spawn tail. While the user is WAITING on the cold load
+/// nothing is interactive, so long frames are fine: bursting the budget
+/// ~16× collapses that tail into a handful of long frames. Steady-state
+/// editing (after load) keeps the conservative [`SPAWN_BUDGET_PER_FRAME`] so
+/// a paste / hot-create / rescan never janks an interactive frame. Override
+/// with `EUSTRESS_LOAD_SPAWN_BUDGET` for no-rebuild tuning (e.g. `=65536` to
+/// drain effectively the whole queue per frame, or `=4096` to disable the
+/// burst entirely).
+const LOAD_SPAWN_BUDGET_DEFAULT: i64 = 8192;
+
+/// True ONLY while the initial / rescan / switch load is draining (mirrors
+/// `LoadInProgress.active`'s lifecycle exactly). Set in
+/// [`begin_budgeted_load`]; cleared in `tick_load_in_progress` the frame
+/// `LoadInProgress.active` flips false. Read by [`spawn_budget_per_frame`]
+/// from the plain spawn functions (which have no Bevy resource access), so
+/// the burst applies to every budget site — priority spawn, the spill
+/// threshold, and the per-frame drain — but ONLY during load.
+static LOAD_BURST_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The per-frame spawn budget to arm RIGHT NOW: the burst value while a load
+/// is in flight, the conservative steady-state value otherwise.
+///
+/// During load the burst value comes from `EUSTRESS_LOAD_SPAWN_BUDGET` (parsed
+/// once and cached), defaulting to [`LOAD_SPAWN_BUDGET_DEFAULT`]. A malformed
+/// or `<= 0` env value falls back to the default so a typo can't stall the
+/// load. After load every caller gets [`SPAWN_BUDGET_PER_FRAME`] again, so
+/// interactive spawns stay smooth.
+fn spawn_budget_per_frame() -> i64 {
+    if !LOAD_BURST_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        return SPAWN_BUDGET_PER_FRAME;
+    }
+    use std::sync::atomic::{AtomicI64, Ordering};
+    // -1 sentinel == "not yet parsed". Cached so we don't re-read the env on
+    // every budget arm (multiple per frame).
+    static CACHED: AtomicI64 = AtomicI64::new(-1);
+    let cached = CACHED.load(Ordering::Relaxed);
+    if cached >= 0 {
+        return cached;
+    }
+    let resolved = std::env::var("EUSTRESS_LOAD_SPAWN_BUDGET")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(LOAD_SPAWN_BUDGET_DEFAULT);
+    CACHED.store(resolved, Ordering::Relaxed);
+    resolved
+}
+
 /// Remaining spawn budget for the current frame. `i64::MAX` ==
 /// "unbudgeted": any spawn path NOT driven by the budgeted loader
 /// (hot-reload, single-entity create, MCP) is completely unaffected.
@@ -2179,7 +2303,12 @@ pub(crate) fn begin_budgeted_load(generation: u64) {
         q.clear();
     }
     SPILL_GEN.store(generation, std::sync::atomic::Ordering::Relaxed);
-    SPAWN_BUDGET.store(SPAWN_BUDGET_PER_FRAME, std::sync::atomic::Ordering::Relaxed);
+    // Arm the LOAD BURST: from here until `tick_load_in_progress` declares the
+    // load settled, every budget site uses the bursted per-frame budget so the
+    // eager set drains in a handful of long frames instead of ~40. Set BEFORE
+    // the store so `spawn_budget_per_frame()` already returns the burst value.
+    LOAD_BURST_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+    SPAWN_BUDGET.store(spawn_budget_per_frame(), std::sync::atomic::Ordering::Relaxed);
     // Every fresh load starts assuming a normal-sized scene: lossless
     // material keys (zero visual change). The first frame-budget spill
     // below re-engages dense color quantization for huge scenes only.
@@ -2208,7 +2337,7 @@ pub(crate) fn discard_pending_spawns() {
 /// Re-arm the budget before each priority service so a small one
 /// (`Lighting`) still loads instantly even after a huge one spilled.
 pub(crate) fn rearm_priority_budget() {
-    SPAWN_BUDGET.store(SPAWN_BUDGET_PER_FRAME, std::sync::atomic::Ordering::Relaxed);
+    SPAWN_BUDGET.store(spawn_budget_per_frame(), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Priority services loaded immediately at startup (the 3D scene).
@@ -2289,6 +2418,24 @@ pub fn tick_load_in_progress(
         load.frames_since_quiescent = load.frames_since_quiescent.saturating_add(1);
         if load.frames_since_quiescent >= LoadInProgress::QUIESCENT_THRESHOLD {
             load.active = false;
+            // Disarm the LOAD BURST: steady-state spawns (paste, hot-create,
+            // rescan spill) revert to the conservative per-frame budget so an
+            // interactive frame never janks. Mirrors LoadInProgress.active.
+            LOAD_BURST_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+            // Initial load done — let paste / hot-reload spawn parts normally.
+            STREAM_DB_PARTS.store(false, std::sync::atomic::Ordering::Relaxed);
+            // LOAD-PHASE milestone 5: eager spawn settled — the priority
+            // services finished spawning + the deferred queue drained + the
+            // async mesh/material backfill quiesced (LoadInProgress.active
+            // flips false here). For a streaming Space this is also when the
+            // residency manager is allowed to start filling the camera box.
+            super::load_phase::mark("eager-spawn-complete");
+            // M0 (diagnostics): emit the SPAWN-COST breakdown for the cores
+            // spawned during this load — decode vs arch_to_instance vs
+            // spawn_instance totals — at the same settle point the LOAD-PHASE
+            // mark fires. Env-gated on EUSTRESS_PROFILE; silent otherwise.
+            #[cfg(feature = "world-db")]
+            super::world_db_binary::spawn_cost::log_summary();
             info!(
                 "🟢 Load settled — TOML write-back enabled after {} quiescent frames",
                 load.frames_since_quiescent
@@ -2403,6 +2550,15 @@ fn repair_reserved_name_corruption(root: &Path) -> u32 {
     healed
 }
 
+/// Set true at the start of loading a large, DB-backed (migrated) Space. While
+/// set, the file-loader SKIPS bulk-spawning bare (`BinaryEcs`-representation)
+/// parts because the residency manager streams them from the `entities`
+/// partition by camera locality — avoiding the ~200K-live double-load that
+/// pinned huge imports at ~2 FPS. Reset to false when the load settles
+/// (`tick_load_in_progress`) so paste / hot-reload create parts normally.
+/// Custom-mesh / file-natured parts and parts with child dirs always spawn.
+static STREAM_DB_PARTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn load_space_files_system(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -2459,6 +2615,10 @@ pub fn load_space_files_system(
         }
     }
 
+    // LOAD-PHASE milestone 3a: service scan begins. The scan discovers
+    // services + walks the eager (Workspace/Lighting/StarterGui) subtrees;
+    // lazy storage services emit header-only (file_loader's existing gate).
+    super::load_phase::mark("scan-begin");
     let scan_t0 = std::time::Instant::now();
     let entries = scan_space_directory(source, space_path);
     info!(
@@ -2467,6 +2627,8 @@ pub fn load_space_files_system(
         entries.len(),
         scan_t0.elapsed()
     );
+    // LOAD-PHASE milestone 3b: service scan complete.
+    super::load_phase::mark("scan-complete");
 
     // Parallel pre-read+parse pass: read + UTF-8-decode every text node
     // the spawn walk will consume, across the whole rayon pool, into
@@ -2477,6 +2639,9 @@ pub fn load_space_files_system(
     // unchanged — it now just finds the text already in memory. Cleared
     // after the priority spawn returns (`clear_read_cache`).
     prewarm_read_cache(source, space_path, &entries);
+    // LOAD-PHASE milestone 4: parallel pre-read of eager-service text done
+    // (READ_CACHE populated; the spawn walk below reads from memory).
+    super::load_phase::mark("prewarm-complete");
 
     let cd_ref = class_defaults.as_deref();
     let mut deferred_entries = Vec::new();
@@ -2488,6 +2653,25 @@ pub fn load_space_files_system(
         q.clear();
     }
     SPILL_GEN.store(gen.0, std::sync::atomic::Ordering::Relaxed);
+
+    // STREAMING-PRIMARY gate: only skip file-spawning parts when the residency
+    // manager will actually stream them — match ITS enable condition (a
+    // DB-backed Space with more binary cores than the big-Space threshold). On
+    // a small or non-DB Space this stays false and the loader spawns everything
+    // as before.
+    {
+        const BIG_SPACE_THRESHOLD: usize = 100_000; // mirrors ResidencyConfig::big_space_threshold
+        let stream = super::active_db::is_active()
+            && super::active_db::count_instance_cores_capped(BIG_SPACE_THRESHOLD + 1)
+                > BIG_SPACE_THRESHOLD;
+        STREAM_DB_PARTS.store(stream, std::sync::atomic::Ordering::Relaxed);
+        if stream {
+            warn!(
+                target: "eustress_engine::world_db",
+                "STREAMING-PRIMARY: large DB Space — file-loader will skip bare parts (residency streams them by camera)"
+            );
+        }
+    }
 
     for entry in entries {
         let is_priority = PRIORITY_SERVICES.iter().any(|s| entry.name == *s);
@@ -2501,7 +2685,7 @@ pub fn load_space_files_system(
             // a small one (`Lighting`) still loads fully and instantly.
             // `prio_t0` elapsed should now be small even at 50k.
             let prio_t0 = std::time::Instant::now();
-            SPAWN_BUDGET.store(SPAWN_BUDGET_PER_FRAME, std::sync::atomic::Ordering::Relaxed);
+            SPAWN_BUDGET.store(spawn_budget_per_frame(), std::sync::atomic::Ordering::Relaxed);
             match entry.file_type {
                 FileType::Directory => {
                     spawn_directory_entry(
@@ -2723,15 +2907,19 @@ pub fn drain_pending_spawns(
         return;
     }
 
-    // Fresh per-frame budget for any recursion the drained nodes do.
-    SPAWN_BUDGET.store(SPAWN_BUDGET_PER_FRAME, Relaxed);
+    // Fresh per-frame budget for any recursion the drained nodes do. While the
+    // load is in flight this is the BURST budget (env-tunable), so the spill
+    // queue drains in a handful of long frames; after load it reverts to the
+    // conservative steady-state value for any interactive spill.
+    let per_frame = spawn_budget_per_frame();
+    SPAWN_BUDGET.store(per_frame, Relaxed);
 
     let batch: Vec<(FileMetadata, Option<Entity>)> = {
         let mut q = SPILL.lock().unwrap_or_else(|e| e.into_inner());
         if q.is_empty() {
             return;
         }
-        let n = q.len().min(SPAWN_BUDGET_PER_FRAME as usize);
+        let n = q.len().min(per_frame as usize);
         q.drain(..n).collect()
     };
 

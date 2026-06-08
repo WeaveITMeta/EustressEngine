@@ -17,9 +17,25 @@ use crate::realism::particles::components::ThermodynamicState;
 // ============================================================================
 
 /// Initialize deformable mesh components for entities with deformation enabled
+///
+/// PERF (P2 two-tier — Vehicle Simulator, ~120K residency-streamed COLD parts):
+/// `Without<ColdStreamed>` excludes the streamed cold parts from this
+/// `Changed<BasePart>` driver. Cold parts carry `BasePart` + `Mesh3d` and lack
+/// `DeformableMesh`, so without the filter Bevy O(N)-visits all ~120K of them
+/// every frame just to read change-ticks. A cold streamed part is static
+/// scenery with `deformation = false` (the system early-`continue`s on it
+/// anyway), and `deformation` can only be toggled on via the Properties panel
+/// after SELECTING the part — which promotes it by removing `ColdStreamed` (see
+/// `selection_sync::sync_selection_components`). So a cold part never needs a
+/// deformable mesh, and a promoted part's `deformation = true` edit is still
+/// caught. Skipping cold parts is therefore safe and removes the per-frame O(N)
+/// archetype visit.
 pub fn init_deformable_meshes(
     mut commands: Commands,
-    query: Query<(Entity, &BasePart, &Mesh3d), (Changed<BasePart>, Without<DeformableMesh>)>,
+    query: Query<
+        (Entity, &BasePart, &Mesh3d),
+        (Changed<BasePart>, Without<DeformableMesh>, Without<crate::classes::ColdStreamed>),
+    >,
     meshes: Res<Assets<Mesh>>,
 ) {
     for (entity, base_part, mesh3d) in query.iter() {

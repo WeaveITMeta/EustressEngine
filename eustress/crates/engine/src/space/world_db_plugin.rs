@@ -116,7 +116,60 @@ const MIRROR_PER_FRAME_BUDGET: usize = 2_048;
 /// churned. Mirrors the out-of-band `reseed-space-subtree` bin, run
 /// automatically. Returns the number of files reconciled.
 fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb) -> usize {
-    let mut reconciled = 0usize;
+    // PERF (load time): re-reading every `_instance.toml` on every open is the
+    // dominant cost on a large imported Space — Vehicle Simulator's ~161K files
+    // are ~57s of pure `std::fs::read` every open, even when nothing changed.
+    // mtime-GATE it: persist the last-reconcile wall-clock in
+    // `.eustress/last_reconcile`; a file whose mtime is at/older than that was
+    // already reconciled, so we SKIP its read. Correctness is preserved — any
+    // edit, INCLUDING the closed-engine disk edit this reconcile exists to
+    // catch, bumps the file's mtime past the marker and is read+synced. The
+    // marker is stamped with the time captured BEFORE the walk, so a file
+    // touched during the walk is caught on the next open, never missed. First
+    // open (no marker) does the full pass once, then stamps.
+    let marker = space_root.join(".eustress").join("last_reconcile");
+    let last_reconcile: u64 = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // PERF (load time): the serial recursion above was ~23s of pure tree walk
+    // after the mtime-gate landed — `std::fs::read_dir` + `entry.metadata()` +
+    // (for the few changed files) `std::fs::read` + `db.get_file` byte-compare,
+    // all on one thread over ~161K files. Parallelize the EXPENSIVE part — the
+    // per-file stat + mtime-gate + read + tree byte-compare — across the
+    // `rayon` global pool (already an engine dependency, Cargo.toml:162), then
+    // funnel the actual writes back to THIS thread.
+    //
+    // Two phases keep correctness identical to the serial version:
+    //   1. Single-thread directory walk to enumerate candidate `.toml` paths.
+    //      Cheap relative to per-file work; keeping it serial sidesteps any
+    //      `read_dir` recursion fan-out bookkeeping and preserves the exact
+    //      `.`/`world.fjalldb` dir-skip + `.toml`-only filter.
+    //   2. `par_iter` the candidates: each worker does the mtime-gate, reads
+    //      the file, and byte-compares against the tree via `db.get_file`. The
+    //      `WorldDb` trait is `Send + Sync + 'static` (worlddb/src/backend.rs
+    //      `pub trait WorldDb: Send + Sync + 'static` + module doc "Reads and
+    //      writes are concurrent — the backend serialises internally"), so
+    //      `db.get_file(&self, …)` is safe to call concurrently from the pool.
+    //      Each worker returns `Some((rel, bytes))` only for a file that
+    //      actually differs (or is absent) from the tree.
+    //   3. Back on this thread, serially `put_file` + drop the `#bin` cache for
+    //      each changed file. In the common case (mtime-gated) this set is tiny
+    //      — funneling the writes to one thread keeps the change-stream commit
+    //      order deterministic and the `reconciled` count exact, without
+    //      relying on concurrent-write semantics.
+    //
+    // Correctness is preserved exactly: same dir-skip, same mtime-gate, same
+    // byte-compare-before-write, same `#bin` delete, same final marker stamp.
+    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+
+    // Phase 1 — enumerate candidate `.toml` paths (serial walk).
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     let mut stack = vec![space_root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(read_dir) = std::fs::read_dir(&dir) else {
@@ -137,25 +190,55 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
             if path.extension().and_then(|e| e.to_str()) != Some("toml") {
                 continue;
             }
-            let Ok(stripped) = path.strip_prefix(space_root) else {
-                continue;
-            };
+            candidates.push(path);
+        }
+    }
+
+    // Phase 2 — parallel stat + mtime-gate + read + tree byte-compare. Returns
+    // only files whose disk bytes differ from (or are missing in) the tree.
+    let changed: Vec<(String, Vec<u8>)> = candidates
+        .par_iter()
+        .filter_map(|path| {
+            // mtime-gate: skip a file unchanged since the last reconcile so we
+            // never re-read the ~161K-file tree. On the first open
+            // (`last_reconcile == 0`) nothing is skipped.
+            if last_reconcile != 0 {
+                let unchanged = std::fs::metadata(path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() <= last_reconcile)
+                    .unwrap_or(false);
+                if unchanged {
+                    return None;
+                }
+            }
+            let stripped = path.strip_prefix(space_root).ok()?;
             let rel = stripped.to_string_lossy().replace('\\', "/");
-            let Ok(disk_bytes) = std::fs::read(&path) else {
-                continue;
-            };
+            let disk_bytes = std::fs::read(path).ok()?;
             // Only write when disk actually differs from the tree.
             if let Ok(Some(tree_bytes)) = db.get_file(&rel) {
                 if tree_bytes == disk_bytes {
-                    continue;
+                    return None;
                 }
             }
-            if db.put_file(&rel, &disk_bytes).is_ok() {
-                let _ = db.delete_file(&format!("{rel}#bin"));
-                reconciled += 1;
-            }
+            Some((rel, disk_bytes))
+        })
+        .collect();
+
+    // Phase 3 — funnel the (few) writes back to a single thread so the change-
+    // stream order is deterministic and `reconciled` stays exact.
+    let mut reconciled = 0usize;
+    for (rel, disk_bytes) in &changed {
+        if db.put_file(rel, disk_bytes).is_ok() {
+            let _ = db.delete_file(&format!("{rel}#bin"));
+            reconciled += 1;
         }
     }
+    // Stamp the marker (best-effort) so the next open can mtime-skip unchanged
+    // files. A write failure just means the next open does a full pass.
+    let _ = std::fs::create_dir_all(space_root.join(".eustress"));
+    let _ = std::fs::write(&marker, now_secs.to_string());
     reconciled
 }
 
@@ -187,6 +270,16 @@ fn open_world_db_on_space_change(
         return;
     }
     decision.0 = Some(space_root.0.clone());
+    // LOAD-PHASE milestone 1: space-open begins. Stamp the process-global
+    // start clock here (once per genuine Space switch, gated by the latch
+    // above) so every later milestone — in file_loader / residency — reads
+    // elapsed-since-open from the same anchor. Silent unless EUSTRESS_PROFILE.
+    super::load_phase::stamp_open_start();
+    // M0 (diagnostics): reset the per-load SPAWN-COST accumulators so this
+    // Space's decode/arch/spawn breakdown measures from zero. Paired with
+    // the `eager-spawn-complete` settle-point emit in file_loader. No-op
+    // cost when EUSTRESS_PROFILE is unset (atomics stay zero, never read).
+    super::world_db_binary::spawn_cost::reset();
     // Reset the DataStore for this decision; only a fully-successful
     // open re-populates it below. Every error path therefore leaves
     // it None (scripts see "DataStore unavailable", logged loudly).
@@ -371,6 +464,12 @@ fn open_world_db_on_space_change(
             super::active_db::set(db.clone(), space_root.0.clone());
             handle.0 = Some(db);
             sub.0 = Some(subscription);
+            // LOAD-PHASE milestone 2: Fjall keyspace recovery + auto-convert
+            // + TOML↔DB reconcile are all complete and the DB is installed
+            // as the live funnel/source. Everything above (backend::open,
+            // convert_space_if_needed, reconcile_disk_toml_into_tree) is the
+            // ~2.3s recovery+reconcile block the analysis called out.
+            super::load_phase::mark("db-recovery-complete");
         }
         Err(e) => {
             warn!(

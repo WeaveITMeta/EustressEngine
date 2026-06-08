@@ -15,7 +15,7 @@
 //!
 //! ## Integration with EustressStream + TOML materializer
 //!
-//! Because `emit_transform_deltas` and `emit_part_property_deltas` only fire
+//! Because `emit_transform_deltas` and `emit_scene_change_deltas` only fire
 //! on Bevy `Changed<T>`, throttled and culled entities produce **zero stream
 //! events and zero TOML materializer writes** — the disk and bus stay idle
 //! until the entity re-enters camera proximity.

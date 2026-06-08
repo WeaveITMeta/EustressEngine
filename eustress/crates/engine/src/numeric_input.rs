@@ -235,6 +235,13 @@ fn property_ref_lookup(key: &str) -> Option<f32> {
 /// from live entities. Keyed on `Instance.name`; fields: position
 /// (`.x/.y/.z`), size (`size.x/.y/.z`), rotation (`rot.x/.y/.z/.w`).
 fn refresh_property_ref_table(
+    // Only rebuild while the user is actively typing a numeric expression.
+    // Clearing + rebuilding the whole ref table (301K entities × 10 properties
+    // ≈ 3M entries) and CLONING it every frame cost ~2.1 s/frame on Vehicle
+    // Simulator — 31% of the frame. `NumericInputState.active` is true only
+    // during a gizmo-drag numeric entry, so outside that the last-built table is
+    // simply retained (fine for the rare Timeline/Rune expression consumers).
+    state: Res<NumericInputState>,
     mut table: ResMut<PropertyRefTable>,
     query: Query<(
         &crate::classes::Instance,
@@ -242,6 +249,9 @@ fn refresh_property_ref_table(
         Option<&crate::classes::BasePart>,
     )>,
 ) {
+    if !state.active {
+        return;
+    }
     table.values.clear();
     for (inst, gt, bp) in query.iter() {
         let t = gt.compute_transform();

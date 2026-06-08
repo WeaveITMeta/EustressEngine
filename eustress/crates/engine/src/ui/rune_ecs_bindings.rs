@@ -151,6 +151,11 @@ impl Plugin for RuneECSBindingsPlugin {
 
 /// Sync ECS components to bindings for script access
 fn sync_ecs_to_bindings(
+    // Only sync while PLAYING. This builds a per-entity snapshot map (a String
+    // key allocated per entity) EVERY frame for Rune script ECS access. In the
+    // idle editor it was ~404 ms/frame of waste on Vehicle Simulator (301K
+    // entities) — nothing reads the bindings unless scripts are running.
+    play: Res<State<crate::play_mode::PlayModeState>>,
     bindings: Res<ECSBindings>,
     query: Query<(
         Entity,
@@ -161,6 +166,9 @@ fn sync_ecs_to_bindings(
         Option<&MaterialProperties>,
     )>,
 ) {
+    if *play.get() != crate::play_mode::PlayModeState::Playing {
+        return;
+    }
     let mut entities_map = HashMap::new();
     
     let mut total_voltage = 0.0f32;

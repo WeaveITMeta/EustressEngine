@@ -831,6 +831,12 @@ pub fn open_space(world: &mut World, space_path: &Path) {
     }
 
     world.insert_resource(crate::space::SpaceRoot(space_path.to_path_buf()));
+    // Stamp the swappable `space://` asset root IMMEDIATELY (not just via the
+    // `Changed<SpaceRoot>` system next frame): the rescan triggered below can
+    // begin issuing `space://` mesh loads within this same world-command, and
+    // they must resolve against the NEW Space root, not the launch root —
+    // otherwise the new Space loads with no meshes (black screen).
+    crate::space::space_asset_source::set_space_asset_root(space_path.to_path_buf());
 
     let space_name = space_path
         .file_name()
