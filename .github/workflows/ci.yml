@@ -6,63 +6,34 @@ on:
   pull_request:
     branches: [ main, develop ]
 
+# NOTE (2026-06-09): this workflow previously targeted `eustress_demo/` and
+# `eustress-svelte/`, which no longer exist in the repository. Every job that
+# referenced them died at its first step — either "No such file or directory"
+# for the working directory, or setup-node's pnpm cache lookup (no
+# pnpm-lock.yaml is committed anywhere in the repo). The Rust workspace lives
+# in `eustress/`, and the current web app is the Leptos crate at
+# `eustress/crates/web` (Trunk-based, no pnpm). The stale rust-wasm-demo,
+# web-build, and e2e jobs were removed; CI for the new web crate can be added
+# once its build setup stabilises.
+
 jobs:
-  rust-wasm-demo:
-    name: Rust WASM Demo
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: eustress_demo
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.88.0
-          components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
-
-      - name: Cache Cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: fmt
-        run: cargo fmt --all -- --check
-
-      - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: build wasm (release)
-        run: cargo build --target wasm32-unknown-unknown --release
-
-      - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli --version 0.2.104
-
-      - name: Generate bindings (no-modules)
-        run: |
-          wasm-bindgen --target no-modules --out-dir ../eustress-svelte/public/wasm ./target/wasm32-unknown-unknown/release/eustress_demo.wasm
-
   security:
     name: Security (cargo-deny & cargo-audit)
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: eustress_demo
+        # The Cargo workspace root. The repo root has no Cargo.toml, so all
+        # cargo commands must run inside eustress/.
+        working-directory: eustress
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust
+        # Plain stable matches eustress/rust-toolchain.toml
+        # (channel = "stable"), so rustup does not have to download a second
+        # toolchain on the first cargo invocation inside eustress/.
         uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.88.0
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -70,93 +41,23 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-tools-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-tools-${{ hashFiles('eustress/Cargo.toml') }}
 
       - name: Generate lockfile
+        # eustress/Cargo.lock is not committed; resolve a fresh lockfile for
+        # the advisory scan.
         run: cargo generate-lockfile
 
       - name: Install cargo-deny
         run: cargo install cargo-deny
 
       - name: cargo-deny (advisories, bans, sources)
-        run: |
-          cargo deny check advisories bans sources
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-
-      - name: cargo-audit
-        run: cargo audit
-
-  web-build:
-    name: Web Build (pnpm)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: eustress-svelte
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - name: Use Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: 'pnpm'
-
-      - name: Install deps
-        run: pnpm install --frozen-lockfile
-
-      - name: Build
-        run: pnpm run build
-
-  e2e:
-    name: E2E (Playwright)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - name: Use Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: 'pnpm'
-
-      - name: Install web deps
-        working-directory: eustress-svelte
-        run: pnpm install --frozen-lockfile
-
-      - name: Build wasm (release)
-        working-directory: eustress_demo
-        run: cargo build --target wasm32-unknown-unknown --release
-
-      - name: Install wasm-bindgen-cli
-        working-directory: eustress_demo
-        run: cargo install wasm-bindgen-cli --version 0.2.104
-
-      - name: Generate bindings (no-modules)
-        working-directory: eustress_demo
-        run: |
-          wasm-bindgen --target no-modules --out-dir ../eustress-svelte/public/wasm ./target/wasm32-unknown-unknown/release/eustress_demo.wasm
-
-      - name: Install Playwright browsers
-        working-directory: eustress-svelte
-        run: pnpm exec playwright install --with-deps
-
-      - name: Run Playwright tests
-        working-directory: eustress-svelte
-        run: pnpm run test:e2e
+        # deny.toml lives at the repo root, one level above the workspace.
+        # NOTE: cargo-audit was removed from this job — it scans the same
+        # RustSec DB as `cargo deny check advisories` but reads no config,
+        # so it cannot honour the no-reachable-fix ignores documented in
+        # deny.toml and would hard-fail on them forever.
+        run: cargo deny check --config ../deny.toml advisories bans sources
 
   shader-validate:
     name: WGSL Validation (naga)
@@ -174,8 +75,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.88.0
 
       - name: Install naga-cli
         run: cargo install naga-cli || true
@@ -184,13 +83,33 @@ jobs:
         shell: bash
         run: |
           shopt -s globstar nullglob
-          files=(**/*.wgsl)
+          # Only validate the engine's own shaders. The vendored wgpu tree
+          # under eustress/.patches contains naga's own test corpus
+          # (including intentionally-invalid shaders) and must never be
+          # validated here.
+          files=(eustress/crates/**/*.wgsl)
           if [ ${#files[@]} -eq 0 ]; then
             echo "No WGSL files found. Skipping."
             exit 0
           fi
           which naga || { echo "naga CLI not found"; exit 1; }
+          validated=0
+          skipped=0
           for f in "${files[@]}"; do
+            # Bevy shaders are preprocessed by naga_oil at load time
+            # (#import / #ifdef / #{...} substitutions) and are not valid
+            # standalone WGSL — bare naga cannot parse them. Only validate
+            # self-contained WGSL files.
+            if grep -qE '^[[:space:]]*#(import|ifdef|ifndef|else|endif|define|if[[:space:]])|#\{' "$f"; then
+              echo "Skipping (naga_oil preprocessor directives): $f"
+              skipped=$((skipped + 1))
+              continue
+            fi
             echo "Validating: $f"
-            naga parse "$f"
+            # naga-cli takes the input file as a positional argument; there
+            # is no `parse` subcommand (the old `naga parse "$f"` invocation
+            # made naga try to open a file literally named "parse").
+            naga "$f"
+            validated=$((validated + 1))
           done
+          echo "WGSL validation done: $validated validated, $skipped skipped (naga_oil)."

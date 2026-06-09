@@ -31,7 +31,7 @@ State: release pipeline ✅; orchestration foundation ✅; **security gaps** (co
 
 **Code locations:**
 - `.github/workflows/release.yml` — multi-platform release (~30 min wall-clock, 3 platforms parallel)
-- `.github/workflows/ci.yml` — Rust WASM demo + security scan + web build + Playwright + WGSL validation; **no desktop engine build in CI**
+- `.github/workflows/ci.yml` — cargo-deny security scan + WGSL validation (stale Rust-WASM-demo / pnpm-web / Playwright jobs targeting removed directories were dropped 2026-06-09); **no desktop engine build in CI**
 - `infrastructure/forge/terraform/` — AWS VPC, ASGs, IAM, S3, CloudWatch
 - `infrastructure/forge/nomad/` — 4 job specs (forge-orchestrator, gameserver, physics, ai); meta-vars `experience_id`, `server_id`, `max_players`; QUIC port 4433
 - `infrastructure/forge/consul/` — **empty directory** (TODO)
@@ -236,7 +236,7 @@ State: release pipeline ✅; orchestration foundation ✅; **security gaps** (co
 ### Feature 1 — CI build coverage
 
 **State:** 🟡 partial · **Effort:** S · **Risk:** Med · **Touches:** [12]
-**Sub-features:** Rust WASM demo · cargo-deny / cargo-audit · pnpm web build · Playwright E2E · WGSL validation · **MISSING: desktop engine build**
+**Sub-features:** cargo-deny security scan · WGSL validation · **MISSING: desktop engine build** (the former WASM-demo / pnpm-web / Playwright jobs targeted directories no longer in the repo and were removed 2026-06-09)
 
 **Concept.** CI builds the WASM demo + the website + runs lint/security; the desktop engine binary is **not built in CI** (only on release-tag). This means PRs can land that break the engine without CI catching it.
 

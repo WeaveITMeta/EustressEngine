@@ -113,3 +113,7 @@ recover_trashed_spaces.ps1
 # so the untracked local copy never re-enters the index after we drop the
 # gitlink.
 eustress/.patches/wgpu-fresh/
+
+# Claude Code session state (worktrees, scheduled-task locks). Contains
+# full stale repo copies — must never be published to the public repo.
+.claude/
