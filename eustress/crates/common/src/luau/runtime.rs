@@ -78,6 +78,15 @@ pub struct LuauCreatedInstance {
     /// insertion to keep diffs deterministic (it's a set semantically, but a
     /// `Vec` for stable serialisation).
     pub tags: Vec<String>,
+
+    /// Attributes set on the instance via `inst:SetAttribute(name, value)`
+    /// while the script ran (the raw `_attr_<name>` fields on the instance
+    /// table, converted to typed [`AttributeValue`](crate::attributes::AttributeValue)s).
+    /// Sorted by name for deterministic output. The spawner persists these
+    /// to `_instance.toml`'s `[attributes]` table / the binary core's
+    /// `__attributes` cold tail, exactly like tags. Empty when the script
+    /// set none (or only set values with no typed mapping).
+    pub attributes: Vec<(String, crate::attributes::AttributeValue)>,
 }
 
 // Thread-local output buffer for capturing print/warn/error from Luau scripts.
@@ -90,6 +99,247 @@ thread_local! {
 /// Returns (text, is_error) pairs.
 pub fn drain_luau_output() -> Vec<(String, bool)> {
     LUAU_OUTPUT.with(|buf| buf.borrow_mut().drain(..).collect())
+}
+
+// ============================================================================
+// Engine ↔ VM attribute seam (GetAttribute / SetAttribute on ECS entities)
+// ============================================================================
+//
+// The Instance arms `GetAttribute` / `SetAttribute` / `GetAttributes` operate
+// on VM-local raw `_attr_<name>` fields — which is correct for script-created
+// instances but blind to the engine's ECS `Attributes` components. This seam
+// follows the SAME snapshot+drain architecture as CollectionService tags
+// (`seed_existing_tags` → script runs → `drain_created_instances`):
+//
+//  * READ:  an engine system (`sync_luau_attribute_snapshot` in
+//    `engine/space/instance_loader.rs`) publishes a uuid-keyed snapshot of
+//    every live entity's non-empty `Attributes` component here. The
+//    `GetAttribute`/`GetAttributes` arms fall back to it for any instance
+//    table stamped with a `_uuid` (the importer / instance_loader stamps
+//    pre-existing instances — the same field `FindByUUID` resolves).
+//  * WRITE: the `SetAttribute` arm, when the receiver carries a `_uuid`,
+//    pushes a typed [`EngineAttributeWrite`] into a process-global queue.
+//    An engine system (`apply_luau_attribute_writes`) drains it each frame
+//    and applies the values to the entity's `Attributes` component — whose
+//    `Changed<Attributes>` flag then drives the EXISTING persistence seams
+//    (`save_tags_and_attributes_changes` for TOML entities, the binary-ECS
+//    save mirror for cores).
+//
+// Keyed by UUID (not entity bits) deliberately: script-created instances use
+// a small VM-local `_entityId` counter that can collide with real entity
+// bits, while a `_uuid` exists ONLY on engine-seeded handles — so the seam
+// can never misroute a VM-local write onto an unrelated ECS entity.
+//
+// `Mutex` statics (not the `LUAU_OUTPUT` thread_local pattern) because seed
+// and drain happen in DIFFERENT Bevy systems, which the multithreaded
+// executor may run on different threads from the script execution itself.
+
+/// One attribute write a script performed on an engine-seeded instance
+/// (`value: None` = the script removed the attribute via `SetAttribute(name, nil)`).
+#[derive(Debug, Clone)]
+pub struct EngineAttributeWrite {
+    /// The instance's stable UUID (the `_uuid` raw field / `Instance.uuid`).
+    pub uuid: String,
+    /// Attribute name.
+    pub name: String,
+    /// New typed value, or `None` to remove the attribute.
+    pub value: Option<crate::attributes::AttributeValue>,
+}
+
+/// uuid → (name → value) snapshot of live ECS attributes, seeded by the
+/// engine. `None` until first seeded.
+static ENGINE_ATTR_SNAPSHOT: std::sync::Mutex<
+    Option<HashMap<String, HashMap<String, crate::attributes::AttributeValue>>>,
+> = std::sync::Mutex::new(None);
+
+/// Pending script → engine attribute writes awaiting the engine drain.
+static ENGINE_ATTR_WRITES: std::sync::Mutex<Vec<EngineAttributeWrite>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Publish (replace) the engine-side attribute snapshot. Call whenever any
+/// `Attributes` component changes; cheap to call with an unchanged map.
+pub fn seed_engine_attribute_snapshot(
+    snapshot: HashMap<String, HashMap<String, crate::attributes::AttributeValue>>,
+) {
+    if let Ok(mut guard) = ENGINE_ATTR_SNAPSHOT.lock() {
+        *guard = Some(snapshot);
+    }
+}
+
+/// Read one attribute for `uuid` from the engine snapshot.
+pub fn engine_attribute_get(uuid: &str, name: &str) -> Option<crate::attributes::AttributeValue> {
+    ENGINE_ATTR_SNAPSHOT
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(uuid).and_then(|a| a.get(name).cloned())))
+}
+
+/// Read ALL attributes for `uuid` from the engine snapshot (sorted by name
+/// for deterministic iteration in `GetAttributes`).
+pub fn engine_attributes_all(uuid: &str) -> Vec<(String, crate::attributes::AttributeValue)> {
+    let mut out: Vec<(String, crate::attributes::AttributeValue)> = ENGINE_ATTR_SNAPSHOT
+        .lock()
+        .ok()
+        .and_then(|g| {
+            g.as_ref()
+                .and_then(|m| m.get(uuid).map(|a| a.iter().map(|(k, v)| (k.clone(), v.clone())).collect()))
+        })
+        .unwrap_or_default();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Shadow-update the snapshot after a script-side `SetAttribute` on an
+/// engine-seeded instance, so a `GetAttribute` later in the SAME run (or in
+/// another fresh VM created before the engine drain) observes the write.
+fn engine_attribute_shadow(uuid: &str, name: &str, value: Option<&crate::attributes::AttributeValue>) {
+    if let Ok(mut guard) = ENGINE_ATTR_SNAPSHOT.lock() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        match value {
+            Some(v) => {
+                map.entry(uuid.to_string())
+                    .or_default()
+                    .insert(name.to_string(), v.clone());
+            }
+            None => {
+                if let Some(attrs) = map.get_mut(uuid) {
+                    attrs.remove(name);
+                }
+            }
+        }
+    }
+}
+
+/// Queue a script-side attribute write for the engine to apply.
+fn push_engine_attribute_write(write: EngineAttributeWrite) {
+    if let Ok(mut guard) = ENGINE_ATTR_WRITES.lock() {
+        guard.push(write);
+    }
+}
+
+/// Drain all pending script → engine attribute writes (engine side; called
+/// by `apply_luau_attribute_writes` each frame).
+pub fn drain_engine_attribute_writes() -> Vec<EngineAttributeWrite> {
+    ENGINE_ATTR_WRITES
+        .lock()
+        .map(|mut g| std::mem::take(&mut *g))
+        .unwrap_or_default()
+}
+
+/// [`AttributeValue`](crate::attributes::AttributeValue) → Lua value, using
+/// the SAME conventions the rest of the bindings use (Vector3 → `LuauVector3`
+/// userdata, Color/Color3 → `LuauColor3`, CFrame → `LuauCFrame`, UDim2 →
+/// `LuauUDim2`, BrickColor → integer palette number).
+///
+/// Types with no Lua binding yet map as follows:
+///  * `Vector2` → a plain read-only table `{X=…, Y=…}` (no LuauVector2 type
+///    exists; a table read can't be silently written back as a different
+///    typed attribute, which a zero-padded Vector3 could).
+///  * `Object` / `EntityRef` → `nil`. The importer stores instance refs as
+///    UUID *strings* (resolved via `FindByUUID`), so a live-Entity payload
+///    only appears via engine-internal seeding — unresolvable from the VM.
+///  * `Rect` / `Font` / `NumberRange` / `NumberSequence` / `ColorSequence`
+///    → `nil` (no binding types yet).
+#[cfg(feature = "luau")]
+pub fn attribute_value_to_lua(
+    lua: &mlua::Lua,
+    value: &crate::attributes::AttributeValue,
+) -> mlua::Result<mlua::Value> {
+    use crate::attributes::AttributeValue as A;
+    Ok(match value {
+        A::Bool(b) => mlua::Value::Boolean(*b),
+        // mlua's `Integer` width is build-configurable (i32 here); the
+        // attribute stores i64 — saturate rather than wrap on overflow.
+        A::Int(i) => mlua::Value::Integer(
+            (*i).clamp(mlua::Integer::MIN as i64, mlua::Integer::MAX as i64) as mlua::Integer,
+        ),
+        A::Number(n) => mlua::Value::Number(*n),
+        A::String(s) => mlua::Value::String(lua.create_string(s)?),
+        A::Vector3(v) => mlua::Value::UserData(lua.create_userdata(
+            super::types::LuauVector3::new(v.x as f64, v.y as f64, v.z as f64),
+        )?),
+        A::Vector2(v) => {
+            let t = lua.create_table()?;
+            t.set("X", v.x as f64)?;
+            t.set("Y", v.y as f64)?;
+            mlua::Value::Table(t)
+        }
+        A::Color(c) | A::Color3(c) => {
+            let s = c.to_srgba();
+            mlua::Value::UserData(lua.create_userdata(super::types::LuauColor3::new(
+                s.red as f64,
+                s.green as f64,
+                s.blue as f64,
+            ))?)
+        }
+        A::BrickColor(n) => mlua::Value::Integer(*n as mlua::Integer),
+        A::CFrame(t) => mlua::Value::UserData(lua.create_userdata(super::types::LuauCFrame(
+            crate::scripting::CFrame::from_transform(t),
+        ))?),
+        A::UDim2 { x_scale, x_offset, y_scale, y_offset } => mlua::Value::UserData(
+            lua.create_userdata(super::types::LuauUDim2::new(
+                *x_scale as f64,
+                *x_offset as f64,
+                *y_scale as f64,
+                *y_offset as f64,
+            ))?,
+        ),
+        // No Lua-side representation yet — read as nil rather than erroring,
+        // matching the missing-attribute contract.
+        A::Object(_) | A::EntityRef(_) => mlua::Value::Nil,
+        A::Rect { .. }
+        | A::Font { .. }
+        | A::NumberRange { .. }
+        | A::NumberSequence(_)
+        | A::ColorSequence(_) => mlua::Value::Nil,
+    })
+}
+
+/// Lua value → typed [`AttributeValue`](crate::attributes::AttributeValue).
+///
+/// `Ok(None)` for `nil` (= remove). `Err(type_name)` for values with no
+/// attribute mapping (function, thread, plain table, Instance, unknown
+/// userdata) — the `SetAttribute` arm surfaces that as a Lua error naming
+/// the type, matching Roblox's unsupported-attribute-type error.
+#[cfg(feature = "luau")]
+pub fn lua_value_to_attribute(
+    value: &mlua::Value,
+) -> Result<Option<crate::attributes::AttributeValue>, String> {
+    use crate::attributes::AttributeValue as A;
+    match value {
+        mlua::Value::Nil => Ok(None),
+        mlua::Value::Boolean(b) => Ok(Some(A::Bool(*b))),
+        mlua::Value::Integer(i) => Ok(Some(A::Int(*i as i64))),
+        mlua::Value::Number(n) => Ok(Some(A::Number(*n))),
+        mlua::Value::String(s) => Ok(Some(A::String(s.to_string_lossy().to_string()))),
+        mlua::Value::UserData(ud) => {
+            if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                Ok(Some(A::Vector3(Vec3::new(
+                    v.0.x as f32,
+                    v.0.y as f32,
+                    v.0.z as f32,
+                ))))
+            } else if let Ok(c) = ud.borrow::<super::types::LuauColor3>() {
+                Ok(Some(A::Color3(Color::srgb(
+                    c.0.r as f32,
+                    c.0.g as f32,
+                    c.0.b as f32,
+                ))))
+            } else if let Ok(cf) = ud.borrow::<super::types::LuauCFrame>() {
+                Ok(Some(A::CFrame(cf.0.to_transform())))
+            } else if let Ok(u) = ud.borrow::<super::types::LuauUDim2>() {
+                Ok(Some(A::UDim2 {
+                    x_scale: u.x_scale as f32,
+                    x_offset: u.x_offset as f32,
+                    y_scale: u.y_scale as f32,
+                    y_offset: u.y_offset as f32,
+                }))
+            } else {
+                Err("userdata".to_string())
+            }
+        }
+        other => Err(other.type_name().to_string()),
+    }
 }
 
 /// Convert Roblox-style Euler angles (degrees, YXZ-intrinsic per Roblox's
@@ -296,6 +546,28 @@ impl LuauRuntime {
                 })
                 .unwrap_or_default();
 
+            // SetAttribute stores raw `_attr_<name>` fields on the instance
+            // table; convert each to a typed AttributeValue so the spawner
+            // can persist them ([attributes] TOML table / binary cold tail)
+            // alongside tags. Values with no typed mapping are skipped
+            // (SetAttribute already rejects unsupported types, so in
+            // practice everything here converts). Sorted for determinism.
+            let attributes: Vec<(String, crate::attributes::AttributeValue)> = {
+                let mut list: Vec<(String, crate::attributes::AttributeValue)> = inst
+                    .pairs::<String, mlua::Value>()
+                    .filter_map(|p| p.ok())
+                    .filter_map(|(k, v)| {
+                        let name = k.strip_prefix("_attr_")?.to_string();
+                        match lua_value_to_attribute(&v) {
+                            Ok(Some(av)) => Some((name, av)),
+                            _ => None,
+                        }
+                    })
+                    .collect();
+                list.sort_by(|a, b| a.0.cmp(&b.0));
+                list
+            };
+
             instances.push(LuauCreatedInstance {
                 class_name,
                 name,
@@ -320,6 +592,7 @@ impl LuauRuntime {
                 luau_entity_id,
                 parent_entity_id,
                 tags,
+                attributes,
             });
         }
 
@@ -1240,21 +1513,63 @@ Enum = setmetatable({}, {
                     Ok(mlua::Value::Function(clear_fn))
                 }
                 "GetAttribute" => {
-                    let get_attr_fn = lua.create_function(|_, (this, name): (mlua::Table, String)| {
+                    let get_attr_fn = lua.create_function(|lua, (this, name): (mlua::Table, String)| {
                         let attrs_key = format!("_attr_{}", name);
                         let val: mlua::Value = this.raw_get(attrs_key)?;
-                        Ok(val)
+                        if !matches!(val, mlua::Value::Nil) {
+                            return Ok(val);
+                        }
+                        // Engine fallback: an instance table stamped with a
+                        // `_uuid` mirrors a live ECS entity — read its
+                        // `Attributes` component from the engine snapshot
+                        // (see the "Engine ↔ VM attribute seam" section).
+                        // Missing attribute stays nil.
+                        let uuid: String = this.raw_get("_uuid").unwrap_or_default();
+                        if !uuid.is_empty() {
+                            if let Some(av) = engine_attribute_get(&uuid, &name) {
+                                return attribute_value_to_lua(lua, &av);
+                            }
+                        }
+                        Ok(mlua::Value::Nil)
                     })?;
                     Ok(mlua::Value::Function(get_attr_fn))
                 }
                 "SetAttribute" => {
                     let set_attr_fn = lua.create_function(|lua, (this, name, value): (mlua::Table, String, mlua::Value)| {
+                        // Typed conversion FIRST so an unsupported value type
+                        // (function, thread, plain table, Instance) raises a
+                        // Lua error naming the type — Roblox parity — instead
+                        // of silently storing a value no persistence path can
+                        // represent. `nil` converts to None (= remove).
+                        let typed = lua_value_to_attribute(&value).map_err(|type_name| {
+                            mlua::Error::RuntimeError(format!(
+                                "SetAttribute: unsupported value type '{}' for attribute '{}'",
+                                type_name, name
+                            ))
+                        })?;
                         let attrs_key = format!("_attr_{}", name);
                         // Detect a real change so the signal only fires on change
                         // (matching Roblox AttributeChanged semantics).
                         let prev: mlua::Value = this.raw_get(attrs_key.clone())?;
                         let changed = prev != value;
                         this.raw_set(attrs_key, value)?;
+                        // Engine write-back: a `_uuid`-stamped table mirrors a
+                        // live ECS entity — queue the typed write for the
+                        // engine drain (`apply_luau_attribute_writes`) and
+                        // shadow the snapshot so same-run reads stay coherent.
+                        // VM-local instances (no `_uuid`) skip this and flow
+                        // through `drain_created_instances().attributes`.
+                        if changed {
+                            let uuid: String = this.raw_get("_uuid").unwrap_or_default();
+                            if !uuid.is_empty() {
+                                engine_attribute_shadow(&uuid, &name, typed.as_ref());
+                                push_engine_attribute_write(EngineAttributeWrite {
+                                    uuid,
+                                    name: name.clone(),
+                                    value: typed,
+                                });
+                            }
+                        }
                         // Fire the per-attribute changed signal for in-runtime
                         // (script-driven) attribute writes. This is the firing
                         // path for GetAttributeChangedSignal when the change
@@ -1279,6 +1594,18 @@ Enum = setmetatable({}, {
                 "GetAttributes" => {
                     let get_attrs_fn = lua.create_function(|lua, this: mlua::Table| {
                         let result = lua.create_table()?;
+                        // Engine layer first (uuid-stamped tables mirror live
+                        // ECS entities) so script-side `_attr_*` writes below
+                        // overlay it — same precedence as `GetAttribute`.
+                        let uuid: String = this.raw_get("_uuid").unwrap_or_default();
+                        if !uuid.is_empty() {
+                            for (attr_name, av) in engine_attributes_all(&uuid) {
+                                let lv = attribute_value_to_lua(lua, &av)?;
+                                if !matches!(lv, mlua::Value::Nil) {
+                                    result.set(attr_name, lv)?;
+                                }
+                            }
+                        }
                         for pair in this.pairs::<String, mlua::Value>() {
                             let (k, v) = pair?;
                             if let Some(attr_name) = k.strip_prefix("_attr_") {

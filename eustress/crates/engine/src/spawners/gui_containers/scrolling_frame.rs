@@ -80,7 +80,8 @@ impl ClassSpawner for ScrollingFrameSpawner {
             instance,
             frame,
             Name::new(name.clone()),
-            Node { display: Display::None, ..default() },
+            // No bevy_ui Node — rendered via GuiElementDisplay (PERF: see
+            // gui_loader::spawn_frame_element note).
             display,
         )).id();
 

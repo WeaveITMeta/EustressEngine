@@ -81,12 +81,12 @@ impl ClassSpawner for FrameSpawner {
             instance,
             frame,
             Name::new(name.clone()),
-            // Minimal Node — matches gui_loader::spawn_frame_element so
-            // the Bevy UI layout system doesn't try to lay out a Frame
-            // that's actually rendered by the billboard / surface GUI
-            // renderer. The runtime UI plugin attaches a real Node when
-            // this Frame is parented under a ScreenGui.
-            Node { display: Display::None, ..default() },
+            // No bevy_ui Node — matches gui_loader::spawn_frame_element:
+            // this Frame is rendered by the billboard / surface GUI / Slint
+            // overlay renderer. The runtime UI plugin attaches a real Node
+            // when this Frame is parented under a ScreenGui AND the
+            // development UI is visible (a Display::None Node still pays
+            // full ui_layout_system cost in bevy_ui 0.18).
             display,
         )).id();
 

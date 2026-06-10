@@ -1208,7 +1208,8 @@ fn handle_file_created(
                 uuid: String::new(),
                         },
                         display,
-                        Node { display: Display::None, ..default() },
+                        // No bevy_ui Node — rendered via GuiElementDisplay
+                        // (PERF: see gui_loader::spawn_frame_element note).
                         super::file_loader::LoadedFromFile {
                             path: event.path.clone(),
                             file_type: event.file_type,

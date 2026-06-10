@@ -1257,12 +1257,39 @@ fn do_import_roblox_place(world: &mut World, source: PathBuf) {
         fresh_space_root.display(),
     );
 
+    // 4b. Clear the scaffold's DEMO content from Workspace. The New-Space
+    //     scaffold seeds starter children (historically a lone Baseplate;
+    //     today Baseplate + WelcomeCube — and the set may grow), but an
+    //     imported place brings its OWN world: keeping the demo parts both
+    //     broke 1:1 fidelity (a phantom baseplate under the imported map)
+    //     and, when the scaffold grew past the guard's old ">1 marker"
+    //     threshold, made EVERY import fail its own contamination guard
+    //     ("Import would contaminate a non-empty Space"). Removing all
+    //     scaffold-seeded Workspace children — seconds-old generated
+    //     boilerplate, never user data — fixes both and is robust to any
+    //     future scaffold change. `_service.toml` (the Workspace service
+    //     marker itself) is a file, not a child dir, and is kept.
+    let scaffold_workspace = fresh_space_root.join("Workspace");
+    if let Ok(entries) = std::fs::read_dir(&scaffold_workspace) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                if let Err(e) = std::fs::remove_dir_all(&p) {
+                    warn!(
+                        "Roblox import: could not clear scaffold demo child {:?}: {}",
+                        p, e
+                    );
+                }
+            }
+        }
+    }
+
     // 5. GUARD (defense-in-depth): refuse to materialise into a Space whose
-    //    `Workspace` already holds user entities. A freshly-scaffolded
-    //    Space is always empty, so this never fires on the happy path — it
-    //    exists so no future caller can re-point the import at a populated
-    //    Space (the original contamination bug). `allow_merge = false`:
-    //    imports always create a fresh Space.
+    //    `Workspace` already holds user entities. The freshly-scaffolded
+    //    Space was cleared of demo content above, so this never fires on
+    //    the happy path — it exists so no future caller can re-point the
+    //    import at a populated Space (the original contamination bug).
+    //    `allow_merge = false`: imports always create a fresh Space.
     if let Err(msg) = guard_import_target(&fresh_space_root, false) {
         notify_err(world, msg);
         return;

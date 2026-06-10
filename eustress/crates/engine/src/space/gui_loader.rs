@@ -933,8 +933,13 @@ fn spawn_frame_element(
     let entity = commands.spawn((
         instance,
         Name::new(display_name.to_string()),
-        // Minimal Node for Bevy hierarchy — actual rendering is done by Slint overlay
-        Node { display: Display::None, ..default() },
+        // NO bevy_ui Node here — rendering is the Slint overlay via
+        // GuiElementDisplay. PERF: every entity carrying `Node` is walked by
+        // ui_layout_system / update_clipping / ui_stack EVERY frame even at
+        // Display::None (bevy_ui 0.18 only skips taffy compute, not the
+        // per-entity sync + recursion) — ~8K imported GUI elements cost
+        // ~9 ms/frame in the editor. runtime_ui attaches a real Node lazily
+        // when ShowDevelopmentUI renders ScreenGui elements through bevy_ui.
         gui_display_from_props(gui, None, "Frame"),
     )).id();
     commands.entity(entity).insert(loaded_from);
@@ -959,7 +964,7 @@ fn spawn_frame_element_with_text(
     let entity = commands.spawn((
         instance,
         Name::new(display_name.to_string()),
-        Node { display: Display::None, ..default() },
+        // No bevy_ui Node — see spawn_frame_element PERF note.
         gui_display_from_props(gui, text_props, &class_str),
     )).id();
     commands.entity(entity).insert(loaded_from);
@@ -977,7 +982,7 @@ fn spawn_scrolling_frame_element(
     let entity = commands.spawn((
         instance,
         Name::new(display_name.to_string()),
-        Node { display: Display::None, ..default() },
+        // No bevy_ui Node — see spawn_frame_element PERF note.
         gui_display_from_props(gui, None, "ScrollingFrame"),
     )).id();
     commands.entity(entity).insert(loaded_from);
@@ -1101,7 +1106,7 @@ fn spawn_text_button_element(
     let entity = commands.spawn((
         instance,
         Name::new(display_name.to_string()),
-        Node { display: Display::None, ..default() },
+        // No bevy_ui Node — see spawn_frame_element PERF note.
         gui_display_from_props(gui, text_props, "TextButton"),
     )).id();
     commands.entity(entity).insert(loaded_from);
@@ -1121,7 +1126,7 @@ fn spawn_text_box_element(
         instance,
         Name::new(display_name.to_string()),
         TextBoxMarker,
-        Node { display: Display::None, ..default() },
+        // No bevy_ui Node — see spawn_frame_element PERF note.
         gui_display_from_props(gui, text_props, "TextBox"),
     )).id();
     commands.entity(entity).insert(loaded_from);

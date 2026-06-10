@@ -1715,6 +1715,10 @@ pub fn execute_rune_oneshot(source: &str) -> Result<Vec<eustress_common::luau::r
                 text: None, text_color: None, text_size: None, font: None,
                 luau_entity_id: *id as i64, parent_entity_id: None,
                 tags,
+                // Rune's InstanceRune has no Get/SetAttribute surface yet —
+                // see the Luau seam in common/src/luau/runtime.rs for the
+                // pattern when it grows one.
+                attributes: Vec::new(),
             });
         }
     }

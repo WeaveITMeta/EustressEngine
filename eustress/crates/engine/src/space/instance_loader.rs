@@ -1825,6 +1825,39 @@ pub fn spawn_instance(
         });
     }
 
+    // ── Visual-only mesh adjustment (Roblox DataMesh fold) ────────────
+    //
+    // The Roblox importer folds legacy SpecialMesh / BlockMesh /
+    // CylinderMesh children into the parent part and records their
+    // `Scale` / `Offset` as TOP-LEVEL `mesh_scale` / `mesh_offset` TOML
+    // keys (arrays of 3 floats). Top-level — not inside `[asset]` —
+    // because `AssetReference`'s field set is frozen (struct-literal
+    // construction across the engine), while `InstanceDefinition.extra`
+    // (serde flatten) already captures unknown top-level keys on every
+    // load path. Extract + REMOVE them here so they never leak into
+    // attributes / `PendingExtraSections`; they affect ONLY the render
+    // transform below — never `BasePart.size`, the collider inputs, or
+    // the on-disk transform.
+    fn take_vec3_extra(
+        extra: &mut std::collections::HashMap<String, toml::Value>,
+        key: &str,
+    ) -> Option<Vec3> {
+        let v = extra.remove(key)?;
+        let arr = v.as_array()?;
+        if arr.len() != 3 {
+            return None;
+        }
+        let mut out = [0.0f32; 3];
+        for (slot, item) in out.iter_mut().zip(arr.iter()) {
+            *slot = item
+                .as_float()
+                .or_else(|| item.as_integer().map(|n| n as f64))? as f32;
+        }
+        Some(Vec3::from_array(out))
+    }
+    let mesh_visual_scale = take_vec3_extra(&mut instance.extra, "mesh_scale");
+    let mesh_visual_offset = take_vec3_extra(&mut instance.extra, "mesh_offset");
+
     // ── Stage 3: authored-unit → meter conversion ──────────────────────
     //
     // When `units_v1` is on, every dimensional value on this instance is
@@ -2019,7 +2052,25 @@ pub fn spawn_instance(
     };
 
     let transform = Transform::from(safe_instance_transform);
-    
+
+    // Render-only transform: apply the folded DataMesh `mesh_scale` /
+    // `mesh_offset` (offset rotated into the part's local space). The
+    // unadjusted `transform` keeps feeding `safe_collider_from` and
+    // `BasePart.cframe`, so physics + persisted state stay untouched —
+    // this is purely what gets drawn.
+    let render_transform = if mesh_visual_scale.is_some() || mesh_visual_offset.is_some() {
+        let mut t = transform;
+        if let Some(ms) = mesh_visual_scale {
+            t.scale *= ms;
+        }
+        if let Some(mo) = mesh_visual_offset {
+            t.translation += transform.rotation * mo;
+        }
+        t
+    } else {
+        transform
+    };
+
     if is_custom_mesh && absolute_mesh_path.exists() {
         // Check for Draco compression before loading
         if super::draco_decoder::is_draco_compressed(&absolute_mesh_path) {
@@ -2054,7 +2105,7 @@ pub fn spawn_instance(
         let entity = commands.spawn((
             Mesh3d(mesh_handle),
             MeshMaterial3d(material_handle),
-            transform,
+            render_transform,
             Visibility::default(),
             eustress_common::classes::Instance {
                 name: name.clone(),
@@ -2162,6 +2213,31 @@ pub fn spawn_instance(
         }
     }
     
+    // ── Loud missing-mesh fallback ──
+    //
+    // A custom-mesh part whose `.glb` is absent on disk silently rendered
+    // as a block, which made broken imports / moved asset folders look
+    // like an importer geometry bug. Warn ONCE per distinct mesh path
+    // (a 10K-part import referencing one missing mesh must not emit 10K
+    // lines) — subsequent hits stay at the existing debug! above.
+    if is_custom_mesh && !absolute_mesh_path.exists() {
+        use std::sync::{Mutex, OnceLock};
+        static WARNED_MISSING_MESHES: OnceLock<Mutex<std::collections::HashSet<String>>> =
+            OnceLock::new();
+        let warned = WARNED_MISSING_MESHES
+            .get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+        let key = absolute_mesh_path.to_string_lossy().to_string();
+        let first_hit = warned.lock().map(|mut s| s.insert(key)).unwrap_or(false);
+        if first_hit {
+            warn!(
+                "Custom mesh missing on disk — rendering block fallback: {:?} \
+                 (first hit: instance '{}' from {:?}; further parts referencing \
+                 this mesh fall back silently)",
+                absolute_mesh_path, name, toml_path
+            );
+        }
+    }
+
     // Fallback to primitive mesh (either Draco-compressed or no custom mesh)
     // ── Primitive mesh: load from engine assets/parts/ ──
     let glb_path = if let Some((_, asset_path, _)) = primitive {
@@ -2175,7 +2251,7 @@ pub fn spawn_instance(
     let entity = commands.spawn((
         Mesh3d(mesh_handle),
         MeshMaterial3d(material_handle),
-        transform,
+        render_transform,
         Visibility::default(),
         eustress_common::classes::Instance {
             name: name.clone(),
@@ -2791,7 +2867,7 @@ pub fn write_instance_changes_system(
 /// outside the round-trip-safe set (Object / EntityRef / CFrame / …)
 /// fall back to a string display so the file stays human-readable even
 /// when the data isn't recoverable on load.
-fn attribute_to_toml(value: &eustress_common::AttributeValue) -> toml::Value {
+pub(crate) fn attribute_to_toml(value: &eustress_common::AttributeValue) -> toml::Value {
     use eustress_common::AttributeValue as A;
     match value {
         A::Bool(b)      => toml::Value::Boolean(*b),
@@ -3008,6 +3084,11 @@ pub fn save_tags_and_attributes_changes(
 
     for (entity, instance_file, tags, attrs) in q.iter() {
         if just_added.contains(&entity) { continue; }
+        // Binary-ECS entities carry a SYNTHETIC `__bin_…` path that nothing
+        // ever writes (their persistence is the world-db save mirror, whose
+        // change filter includes `Changed<Attributes>`). Patching it here
+        // would just log a read-failure every edit.
+        if instance_file.toml_path.to_string_lossy().contains("__bin_") { continue; }
         // Deliberately don't skip on recently_written — see
         // `save_text_label_changes` for the rationale. The watcher's
         // hot-reload loop is broken by `mark_written` below; gating

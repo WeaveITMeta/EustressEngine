@@ -1115,18 +1115,14 @@ pub fn spawn_file_entry(
         }
     };
 
-    // Non-GUI, non-script files (sounds, loose data) inside StarterGui get a
-    // hidden Node so Bevy doesn't treat them as stray non-UI leaves of the UI
-    // root. Scripts are exempt — they carry SoulScriptData, not visuals, and
-    // forcing them into the UI tree risks the UI layout system touching them
-    // during play (historically scripts in StarterGui didn't execute).
-    let is_script = matches!(file_meta.file_type, FileType::Soul | FileType::Rune | FileType::Lua);
-    if file_meta.service == "StarterGui"
-        && !matches!(file_meta.file_type, FileType::GuiElement)
-        && !is_script
-    {
-        commands.entity(entity).insert(Node { display: Display::None, ..default() });
-    }
+    // PERF: non-GUI files inside StarterGui used to get a hidden
+    // `Node { display: None }` "so Bevy doesn't treat them as stray non-UI
+    // leaves of the UI root". Verified against bevy_ui 0.18 source: non-Node
+    // children of Node parents are silently skipped (ui_surface::update_children
+    // filters via entity_to_taffy; no warning, no panic), while every entity
+    // that DOES carry `Node` is walked by ui_layout_system/update_clipping/
+    // ui_stack every frame even at Display::None. The defensive Node was pure
+    // per-frame cost — removed.
     // Parent to Folder entity if provided
     if let Some(parent) = parent_entity {
         commands.entity(entity).insert(ChildOf(parent));
@@ -1341,7 +1337,9 @@ pub fn spawn_directory_entry(
                 service: dir_meta.service.clone(),
             },
             Name::new(dir_meta.name.clone()),
-            Node { display: Display::None, ..default() },
+            // No bevy_ui Node — ScreenGui renders via GuiElementDisplay/Slint
+            // overlay; a Node here only adds per-frame ui_layout cost (see
+            // gui_loader::spawn_frame_element PERF note).
             // GuiElementDisplay with visible flag — children inherit this for rendering
             eustress_common::gui::billboard_renderer::GuiElementDisplay {
                 x: 0.0, y: 0.0, width: 0.0, height: 0.0,
@@ -1408,7 +1406,7 @@ pub fn spawn_directory_entry(
                 service: dir_meta.service.clone(),
             },
             Name::new(dir_meta.name.clone()),
-            Node { display: Display::None, ..default() },
+            // No bevy_ui Node — rendered via GuiElementDisplay (PERF, see above).
             gui_display,
         )).id()
     } else if matches!(class_name, eustress_common::classes::ClassName::BillboardGui) {
@@ -1915,7 +1913,6 @@ pub fn spawn_directory_entry(
                         service: dir_meta.service.clone(),
                     },
                     Name::new(dir_meta.name.clone()),
-                    Node { display: Display::None, ..default() },
                 )).id()
             }
         }
@@ -2102,25 +2099,12 @@ pub fn spawn_directory_entry(
         )).id()
     };
 
-    // Non-GUI directories (e.g. "scripts/") inside StarterGui get a hidden Node
-    // so Bevy doesn't treat them as stray non-UI leaves of the UI root.
-    // Script folders (SoulScript) are exempt — they host SoulScriptData and
-    // shouldn't be dragged into the UI layout pass.
-    let is_non_gui_dir = dir_meta.service == "StarterGui" && !is_screen_gui && !is_gui_container
-        && !matches!(class_name,
-            eustress_common::classes::ClassName::Frame
-            | eustress_common::classes::ClassName::ScrollingFrame
-            | eustress_common::classes::ClassName::BillboardGui
-            | eustress_common::classes::ClassName::SurfaceGui
-            | eustress_common::classes::ClassName::SoulScript
-        );
-    if is_non_gui_dir {
-        // Spawned with Transform+Visibility above — swap to hidden Node
-        commands.entity(folder_entity)
-            .remove::<Transform>()
-            .remove::<Visibility>()
-            .insert(Node { display: Display::None, ..default() });
-    }
+    // PERF: non-GUI directories inside StarterGui used to be swapped from
+    // Transform+Visibility to a hidden `Node` so they wouldn't be "stray
+    // non-UI leaves of the UI root". bevy_ui 0.18 silently skips non-Node
+    // children (verified in ui_surface::update_children), so the swap only
+    // added per-frame ui_layout cost — removed; they keep the normal
+    // Transform+Visibility folder shape.
     if let Some(parent) = parent_entity {
         commands.entity(folder_entity).insert(ChildOf(parent));
     }
