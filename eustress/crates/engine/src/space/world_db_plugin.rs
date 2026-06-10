@@ -378,6 +378,54 @@ fn open_world_db_on_space_change(
                 }
             }
 
+            // ── Wave 9.C — voxel-chunk reconcile on open ─────────────
+            // The Roblox importer writes decoded terrain to
+            // `Workspace/Terrain/voxel_chunks/chunk_<cx>_<cy>_<cz>.bin`
+            // on DISK, but the runtime terrain loader
+            // (`terrain_voxel_load::load_voxel_terrain_on_space_open`)
+            // reads ONLY the Fjall `voxels` partition. Nothing else
+            // copies disk → partition, and a hook inside the one-shot
+            // initial migration would never run for an ALREADY-migrated
+            // Space (Vehicle Simulator: `header.migrated_at` set long
+            // before terrain import existed). So reconcile here, on
+            // EVERY open, for migrated and non-migrated Spaces alike:
+            //   - partition non-empty → O(1) probe, skip instantly
+            //     (idempotent; never re-seeds over live data);
+            //   - partition empty + chunk files on disk → seed it now;
+            //   - no `voxel_chunks/` dir → Ok(default), silent no-op
+            //     (most Spaces have no imported terrain).
+            // This runs synchronously BEFORE `handle.0` is installed
+            // below, and the voxel terrain loader can't act until it
+            // sees that handle — so on the first open after import the
+            // loader is guaranteed to find the partition populated.
+            if !db.has_voxel_chunks() {
+                match eustress_worlddb::import::import_voxel_chunks(db.as_ref(), &space_root.0) {
+                    Ok(s) if s.chunks_imported > 0 || s.skipped > 0 => {
+                        info!(
+                            target: "eustress_engine::world_db",
+                            chunks = s.chunks_imported,
+                            bytes = s.bytes_imported,
+                            skipped = s.skipped,
+                            space = %space_root.0.display(),
+                            "voxel reconcile: seeded Fjall `voxels` partition from \
+                             Workspace/Terrain/voxel_chunks on open"
+                        );
+                    }
+                    Ok(_) => {
+                        // No voxel_chunks dir / empty dir — the common case.
+                    }
+                    Err(e) => {
+                        warn!(
+                            target: "eustress_engine::world_db",
+                            error = %e,
+                            space = %space_root.0.display(),
+                            "voxel reconcile: disk → `voxels` partition import failed; \
+                             imported terrain will not render this Space"
+                        );
+                    }
+                }
+            }
+
             let subscription = db.subscribe(Filter::any());
             info!(
                 target: "eustress_engine::world_db",

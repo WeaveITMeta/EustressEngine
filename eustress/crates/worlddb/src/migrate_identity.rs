@@ -624,6 +624,9 @@ mod tests {
                 .map(|(coord, bytes)| (*coord, bytes.clone()))
                 .collect())
         }
+        fn has_voxel_chunks(&self) -> bool {
+            !self.voxels.read().is_empty()
+        }
     }
 
     // ── Test bake_fn — preserves uuid when present, mints when absent ──

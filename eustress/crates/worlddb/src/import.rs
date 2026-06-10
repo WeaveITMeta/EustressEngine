@@ -157,3 +157,135 @@ pub fn import_space(db: &dyn WorldDb, space_root: &Path) -> Result<ImportSummary
 
     Ok(summary)
 }
+
+/// Summary returned by [`import_voxel_chunks`].
+#[derive(Debug, Clone, Default)]
+pub struct VoxelImportSummary {
+    /// Chunk files written into the `voxels` partition.
+    pub chunks_imported: usize,
+    /// Total compressed bytes written.
+    pub bytes_imported: u64,
+    /// Files in the directory that did not parse as
+    /// `chunk_<cx>_<cy>_<cz>.bin` or failed to read/write (logged at warn).
+    pub skipped: usize,
+}
+
+/// Wave 9.C — mirror the Roblox-import voxel chunk files at
+/// `<space_root>/Workspace/Terrain/voxel_chunks/chunk_<cx>_<cy>_<cz>.bin`
+/// into `db`'s `voxels` partition via [`WorldDb::put_voxel_chunk`].
+///
+/// The importer (`roblox-import::terrain::import_terrain`) writes one
+/// LZ4 file per non-empty chunk with SIGNED decimal coords in the name
+/// (`format!("chunk_{}_{}_{}.bin", cx, cy, cz)` → e.g.
+/// `chunk_-4_0_-8.bin`); the bytes are stored opaque, exactly as the
+/// engine-side loader (`iter_all_voxel_chunks` + `decode_voxel_chunk`)
+/// expects.
+///
+/// Idempotent: re-running overwrites identical bytes at identical keys.
+/// Callers gate on the partition being empty (see
+/// [`WorldDb::has_voxel_chunks`]) so a populated partition is never
+/// re-seeded from disk on every open. No `voxel_chunks/` directory →
+/// `Ok(default)` — most Spaces have no imported terrain.
+pub fn import_voxel_chunks(db: &dyn WorldDb, space_root: &Path) -> Result<VoxelImportSummary> {
+    let _span =
+        tracing::info_span!("worlddb.import_voxel_chunks", space = %space_root.display())
+            .entered();
+
+    let chunks_dir = space_root
+        .join("Workspace")
+        .join("Terrain")
+        .join("voxel_chunks");
+    let mut summary = VoxelImportSummary::default();
+    if !chunks_dir.is_dir() {
+        return Ok(summary);
+    }
+
+    let entries = std::fs::read_dir(&chunks_dir).map_err(|e| {
+        Error::Other(format!(
+            "import_voxel_chunks: read_dir {:?} failed: {e}",
+            chunks_dir
+        ))
+    })?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            summary.skipped += 1;
+            continue;
+        };
+        // Parse `chunk_<cx>_<cy>_<cz>.bin` — coords are signed decimal
+        // i32 (the '-' sign is part of the number, never a separator,
+        // so a plain '_' split yields exactly three parseable parts).
+        let Some(coords) = name
+            .strip_prefix("chunk_")
+            .and_then(|s| s.strip_suffix(".bin"))
+        else {
+            summary.skipped += 1;
+            tracing::warn!(
+                target: "eustress_worlddb::import",
+                file = %path.display(),
+                "skip — not a chunk_<cx>_<cy>_<cz>.bin name"
+            );
+            continue;
+        };
+        let parts: Vec<&str> = coords.split('_').collect();
+        let parsed: Option<(i32, i32, i32)> = match parts.as_slice() {
+            [x, y, z] => match (x.parse(), y.parse(), z.parse()) {
+                (Ok(cx), Ok(cy), Ok(cz)) => Some((cx, cy, cz)),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((cx, cy, cz)) = parsed else {
+            summary.skipped += 1;
+            tracing::warn!(
+                target: "eustress_worlddb::import",
+                file = %path.display(),
+                "skip — chunk coords failed to parse as i32 triple"
+            );
+            continue;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => match db.put_voxel_chunk(cx, cy, cz, &bytes) {
+                Ok(()) => {
+                    summary.chunks_imported += 1;
+                    summary.bytes_imported += bytes.len() as u64;
+                }
+                Err(e) => {
+                    summary.skipped += 1;
+                    tracing::warn!(
+                        target: "eustress_worlddb::import",
+                        file = %path.display(),
+                        cx, cy, cz,
+                        error = %e,
+                        "skip — put_voxel_chunk failed"
+                    );
+                }
+            },
+            Err(e) => {
+                summary.skipped += 1;
+                tracing::warn!(
+                    target: "eustress_worlddb::import",
+                    file = %path.display(),
+                    error = %e,
+                    "skip — read failed"
+                );
+            }
+        }
+    }
+
+    db.flush()?;
+
+    tracing::info!(
+        target: "eustress_worlddb::import",
+        chunks = summary.chunks_imported,
+        bytes = summary.bytes_imported,
+        skipped = summary.skipped,
+        "voxel-chunk disk → Fjall `voxels` partition import complete"
+    );
+
+    Ok(summary)
+}

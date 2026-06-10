@@ -695,6 +695,17 @@ impl WorldDb for FjallWorldDb {
         Ok(out)
     }
 
+    fn has_voxel_chunks(&self) -> bool {
+        // One bounded prefix-scan step — O(1) emptiness probe. An Err row
+        // still proves a row EXISTS under the voxel prefix, so any
+        // `Some(_)` counts as non-empty (never re-seed over real data
+        // because one row failed to read).
+        self.voxels
+            .prefix(crate::keys::voxel_key_prefix())
+            .next()
+            .is_some()
+    }
+
     // ── IDENTITY.md Wave 2.1 ─────────────────────────────────────────
 
     fn put_entity_core_by_uuid(&self, uuid: &[u8; 16], core_bytes: &[u8]) -> Result<()> {

@@ -403,6 +403,18 @@ pub trait WorldDb: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    /// Cheap emptiness probe for the `voxels` partition — `true` when at
+    /// least one chunk is stored. Gates the Wave 9.C on-open voxel
+    /// reconcile ([`crate::import::import_voxel_chunks`]) so an
+    /// already-seeded partition skips the disk scan in O(1) instead of
+    /// materializing every chunk via [`iter_all_voxel_chunks`]. The
+    /// Fjall backend overrides this with a single prefix-scan `.next()`;
+    /// the default matches the other voxel defaults (no voxel support →
+    /// no chunks).
+    fn has_voxel_chunks(&self) -> bool {
+        false
+    }
+
     // ── UUID-keyed primary store — IDENTITY.md Wave 2.1 ──────────────
     //
     // The `entities_uuid` partition keys each entity's `ArchInstanceCore`
