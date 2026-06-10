@@ -43,6 +43,7 @@
 
 pub mod backend;
 pub mod bake;
+pub mod branch;
 pub mod changestream;
 pub mod datastore;
 pub mod error;
@@ -52,10 +53,12 @@ pub mod import;
 pub mod keys;
 pub mod migrate_identity;
 pub mod rkyv_values;
+pub mod rollout;
 pub mod schema;
 pub mod tracing_hooks;
 
 pub use backend::{Commit, EntityId, TreeEntry, WorldDb};
+pub use branch::{BranchHandle, WorldDbBranchExt};
 pub use changestream::{ChangeStream, CommitDelta, EntityChange, Filter, Subscription, TxId};
 pub use datastore::{DataStore, DataStorePages, DataStoreService, OrderedDataStore};
 pub use error::{Error, Result};
