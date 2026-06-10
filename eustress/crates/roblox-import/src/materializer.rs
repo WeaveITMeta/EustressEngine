@@ -255,6 +255,12 @@ struct TomlPatch {
     refs_unresolved: HashMap<String, String>,
     asset_path: Option<String>,
     asset_mesh: Option<String>,
+    /// Folded DataMesh (`SpecialMesh`/`BlockMesh`/`CylinderMesh`) visual
+    /// scale — written as a top-level `mesh_scale = [x, y, z]` key (see
+    /// `apply_toml_patch` for why it is NOT under `[asset]`).
+    mesh_scale: Option<[f32; 3]>,
+    /// Folded DataMesh visual offset — top-level `mesh_offset = [x, y, z]`.
+    mesh_offset: Option<[f32; 3]>,
     uuid_stamp: Option<String>,
     script_body: Option<String>,
     script_class: Option<ClassName>,
@@ -711,6 +717,200 @@ impl<'dom> Materializer<'dom> {
             }
         }
 
+        // ── SpecialMesh / BlockMesh / CylinderMesh → parent folding ──
+        //
+        // Roblox renders a legacy DataMesh child (`SpecialMesh`,
+        // `BlockMesh`, `CylinderMesh`) INSTEAD of the parent part's own
+        // shape. Eustress has no standalone runtime DataMesh instance —
+        // the idiomatic shape is the parent's own `[asset]` mesh. Mirror
+        // the ValueObject folding pattern above: detect the child class,
+        // fold its effect into THIS node's bag / pending patch, and add
+        // it to `folded_children` so it never materialises.
+        //
+        // MeshType routing (numeric values per the rbx reflection
+        // database, `rbx_reflection_database 2.0.2+roblox-700`:
+        // Head=0 Torso=1 Wedge=2 Sphere=3 Cylinder=4 FileMesh=5 Brick=6
+        // Prism=7 Pyramid=8 ParallelRamp=9 RightAngleRamp=10
+        // CornerWedge=11):
+        // - FileMesh(5) with a mesh ref → the ref joins the PARENT's
+        //   `bag.asset_refs` and rides the existing resolver/fetch path
+        //   below into `[asset].mesh`;
+        // - Brick(6)→block, Sphere(3)→ball, Cylinder(4)→cylinder,
+        //   Wedge(2)→wedge engine primitives; Head(0)→ball and
+        //   Torso(1)/Prism..CornerWedge(7..=11)→block, each with an
+        //   approximation note;
+        // - unknown values keep FileMesh when an asset ref is present,
+        //   else block + approximation;
+        // - `Scale` / `Offset` → additive top-level `mesh_scale` /
+        //   `mesh_offset` TOML keys the engine loader applies visually
+        //   (render transform only — never BasePart.size / collider).
+        let mut folded_mesh_primitive: Option<&'static str> = None;
+        let mut folded_mesh_scale: Option<[f32; 3]> = None;
+        let mut folded_mesh_offset: Option<[f32; 3]> = None;
+        let mut saw_mesh_child = false;
+        for child_ref in inst.children().iter() {
+            let Some(child) = self.dom.get_by_ref(*child_ref) else {
+                continue;
+            };
+            let child_class = child.class.as_str();
+            if !matches!(child_class, "SpecialMesh" | "BlockMesh" | "CylinderMesh") {
+                continue;
+            }
+            // Folded out of the instance tree regardless of how (or
+            // whether) it converts — a DataMesh child must never spawn
+            // as its own instance.
+            folded_children.insert(*child_ref);
+            report.total_nodes_seen += 1;
+
+            if saw_mesh_child {
+                // Roblox honours a single DataMesh per part; extras are
+                // dead data. Fold them out + note the drop.
+                report.record_approximation(
+                    parent_relpath,
+                    child_class,
+                    "asset",
+                    &format!(
+                        "duplicate mesh child '{}' under '{}' dropped — one DataMesh per part",
+                        child.name, requested_name
+                    ),
+                );
+                continue;
+            }
+            saw_mesh_child = true;
+
+            // Route the child's properties through the same mapper the
+            // parent used so every URI spelling (`Content` / legacy
+            // `ContentId` / plain `String`) of `MeshId` / `MeshContent`
+            // lands in `asset_refs` uniformly.
+            let child_props = props_to_string_map(child);
+            let child_bag = map_properties(&child_props, ClassName::SpecialMesh);
+
+            let mesh_uri: Option<String> = ["MeshId", "MeshContent", "Content"]
+                .iter()
+                .find_map(|k| child_bag.asset_refs.get(*k))
+                .cloned();
+
+            // Parent parts have no texture asset slot in the `[asset]`
+            // schema — record the drop instead of silently losing it.
+            for tex_key in ["TextureId", "TextureContent"] {
+                if let Some(uri) = child_bag.asset_refs.get(tex_key) {
+                    report.record_approximation(
+                        parent_relpath,
+                        child_class,
+                        "asset",
+                        &format!(
+                            "{tex_key} '{uri}' on '{}' dropped — parent part has no texture asset slot",
+                            child.name
+                        ),
+                    );
+                }
+            }
+
+            // DataMesh base properties: `Scale` (default 1,1,1) and
+            // `Offset` (default 0,0,0). Defaults are omitted so the
+            // emitted TOML stays additive-only.
+            if let Some(rbx_dom_weak::types::Variant::Vector3(v)) = child_props.get("Scale") {
+                if (v.x, v.y, v.z) != (1.0, 1.0, 1.0) {
+                    folded_mesh_scale = Some([v.x, v.y, v.z]);
+                }
+            }
+            if let Some(rbx_dom_weak::types::Variant::Vector3(v)) = child_props.get("Offset") {
+                if (v.x, v.y, v.z) != (0.0, 0.0, 0.0) {
+                    folded_mesh_offset = Some([v.x, v.y, v.z]);
+                }
+            }
+
+            let mesh_type: Option<u32> = match child_props.get("MeshType") {
+                Some(rbx_dom_weak::types::Variant::Enum(e)) => Some(e.to_u32()),
+                _ => None,
+            };
+
+            // `(primitive path, optional approximation note)`; `None`
+            // means "FileMesh — handled by the asset-ref path".
+            let primitive: Option<(&'static str, Option<String>)> = match child_class {
+                "BlockMesh" => Some(("parts/block.glb", None)),
+                "CylinderMesh" => Some(("parts/cylinder.glb", None)),
+                // SpecialMesh — dispatch on MeshType (mapping above).
+                _ => match mesh_type {
+                    Some(5) => {
+                        if mesh_uri.is_some() {
+                            None
+                        } else {
+                            Some((
+                                "parts/block.glb",
+                                Some(
+                                    "SpecialMesh FileMesh without a MeshId — block fallback"
+                                        .to_string(),
+                                ),
+                            ))
+                        }
+                    }
+                    Some(6) => Some(("parts/block.glb", None)),
+                    Some(4) => Some(("parts/cylinder.glb", None)),
+                    Some(3) => Some(("parts/ball.glb", None)),
+                    Some(0) => Some((
+                        "parts/ball.glb",
+                        Some("SpecialMesh Head approximated as sphere".to_string()),
+                    )),
+                    Some(2) => Some(("parts/wedge.glb", None)),
+                    Some(n) if n == 1 || (7..=11).contains(&n) => Some((
+                        "parts/block.glb",
+                        Some(format!("SpecialMesh MeshType {n} approximated as block")),
+                    )),
+                    Some(unknown) => {
+                        // Future/unrecognised enum value: keep FileMesh
+                        // when an asset ref is present, else block.
+                        if mesh_uri.is_some() {
+                            report.record_approximation(
+                                parent_relpath,
+                                child_class,
+                                "asset",
+                                &format!(
+                                    "unknown SpecialMesh MeshType {unknown} — treated as FileMesh"
+                                ),
+                            );
+                            None
+                        } else {
+                            Some((
+                                "parts/block.glb",
+                                Some(format!(
+                                    "unknown SpecialMesh MeshType {unknown} — block fallback"
+                                )),
+                            ))
+                        }
+                    }
+                    None => {
+                        if mesh_uri.is_some() {
+                            None
+                        } else {
+                            Some((
+                                "parts/block.glb",
+                                Some("SpecialMesh missing MeshType — block fallback".to_string()),
+                            ))
+                        }
+                    }
+                },
+            };
+
+            match primitive {
+                Some((path, note)) => {
+                    folded_mesh_primitive = Some(path);
+                    if let Some(note) = note {
+                        report.record_approximation(parent_relpath, child_class, "asset", &note);
+                    }
+                }
+                None => {
+                    // FileMesh: the ref joins the PARENT's asset_refs and
+                    // rides the existing resolve → fetch → `.glb` pipeline
+                    // below. `entry().or_insert` so a MeshPart's own
+                    // MeshId/MeshContent always wins over the child's.
+                    if let Some(uri) = mesh_uri {
+                        bag.asset_refs.entry("MeshId".to_string()).or_insert(uri);
+                    }
+                }
+            }
+        }
+
         // Build the per-node spec + route it through the selected sink.
         // Bare, scalable leaf parts bake straight to a binary-ECS core
         // (BinaryDirect / Hybrid); everything else — file-natured nodes,
@@ -752,11 +952,13 @@ impl<'dom> Materializer<'dom> {
             .asset_refs
             .keys()
             .any(|prop| is_mesh_property(prop, eustress_class));
-        // A parent that RECEIVED folded ValueObject attributes must stay a
-        // `_instance.toml` folder: the attributes are layered onto the TOML
-        // by the second-pass patch (`bag.attributes` → `[attributes]`), and
-        // a bare binary-ECS core has no TOML to patch. Mirrors the
-        // `has_mesh_asset_ref` term above.
+        // A parent that RECEIVED folded children must stay a
+        // `_instance.toml` folder: folded ValueObject attributes are
+        // layered onto the TOML by the second-pass patch
+        // (`bag.attributes` → `[attributes]`), and a folded DataMesh
+        // child's primitive routing + `mesh_scale`/`mesh_offset` keys are
+        // patched the same way — a bare binary-ECS core has no TOML to
+        // patch. Mirrors the `has_mesh_asset_ref` term above.
         let has_folded_value_object_children = !folded_children.is_empty();
         let take_binary = special == SpecialKind::None
             && inst.children().is_empty()
@@ -883,6 +1085,22 @@ impl<'dom> Materializer<'dom> {
             } else {
                 patch.asset_path = Some(asset_path_str);
             }
+        }
+
+        // Folded DataMesh child (SpecialMesh / BlockMesh / CylinderMesh):
+        // primitive routing + visual scale/offset. The primitive only
+        // fills an EMPTY mesh slot — a mesh the parent's own asset ref
+        // (or the CSG decoder below) resolves always wins.
+        if let Some(prim) = folded_mesh_primitive {
+            if patch.asset_mesh.is_none() {
+                patch.asset_mesh = Some(prim.to_string());
+            }
+        }
+        if folded_mesh_scale.is_some() {
+            patch.mesh_scale = folded_mesh_scale;
+        }
+        if folded_mesh_offset.is_some() {
+            patch.mesh_offset = folded_mesh_offset;
         }
 
         // Script-source post-processing.
@@ -1260,6 +1478,28 @@ fn apply_toml_patch(toml_path: &Path, patch: &TomlPatch) -> Result<(), ImportErr
         }
     }
 
+    // ── Folded DataMesh visual adjustment ──
+    //
+    // Written as TOP-LEVEL `mesh_scale` / `mesh_offset` keys, NOT under
+    // `[asset]`, deliberately: the engine deserialises `[asset]` into
+    // `AssetReference`, whose field set is frozen (it is struct-literal
+    // constructed across the engine), while `InstanceDefinition`'s
+    // `#[serde(flatten)] extra` map already captures unknown top-level
+    // keys on every load path — the loader extracts these two from there
+    // and applies them to the RENDER transform only.
+    if let Some(s) = &patch.mesh_scale {
+        root.insert(
+            "mesh_scale".to_string(),
+            toml::Value::Array(s.iter().map(|f| toml::Value::Float(*f as f64)).collect()),
+        );
+    }
+    if let Some(o) = &patch.mesh_offset {
+        root.insert(
+            "mesh_offset".to_string(),
+            toml::Value::Array(o.iter().map(|f| toml::Value::Float(*f as f64)).collect()),
+        );
+    }
+
     // ── Asset section ──
     if patch.asset_mesh.is_some() || patch.asset_path.is_some() {
         let asset = root
@@ -1330,7 +1570,12 @@ pub(crate) fn place_name_from_root(space_root: &Path) -> Option<String> {
 /// True when the Roblox property maps to a mesh asset (vs. a single
 /// `[asset].path`). Used to pick between `asset_mesh` and `asset_path`.
 fn is_mesh_property(roblox_prop: &str, class: ClassName) -> bool {
-    matches!(roblox_prop, "MeshId" | "CollisionMeshId")
+    // `MeshContent` is the modern `Content`-typed spelling of
+    // `MeshPart.MeshId` — without it here a MeshPart whose only mesh ref
+    // is `MeshContent` would (a) fail the `has_mesh_asset_ref` TOML gate
+    // and bake to a binary core that drops the ref, and (b) resolve as a
+    // single-path `[asset].path` instead of `[asset].mesh`.
+    matches!(roblox_prop, "MeshId" | "CollisionMeshId" | "MeshContent")
         || (roblox_prop == "Content" && matches!(class, ClassName::SpecialMesh))
 }
 
@@ -1916,5 +2161,139 @@ mod tests {
             .join("Catalog")
             .exists());
         let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// Import a single Workspace Part carrying one DataMesh child and
+    /// return `(space_root, parsed parent TOML, report)`. The parent
+    /// lands at `Workspace/<place>/MeshHost/_instance.toml`.
+    fn import_part_with_mesh_child(
+        prefix: &str,
+        child: InstanceBuilder,
+    ) -> (PathBuf, toml::Value, ImportReport) {
+        let dm = InstanceBuilder::new("DataModel").with_child(
+            InstanceBuilder::new("Workspace").with_child(
+                InstanceBuilder::new("Part")
+                    .with_name("MeshHost")
+                    .with_property("Size", Vector3::new(4.0, 1.0, 2.0))
+                    .with_child(child),
+            ),
+        );
+        let dom = WeakDom::new(dm);
+        let rbx = RobloxDom::from_dom(
+            dom,
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        );
+        let space_root = make_temp_root(prefix);
+        let report =
+            import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        let place = place_name_from_root(&space_root).expect("temp root has a name");
+        let host_dir = space_root.join("Workspace").join(&place).join("MeshHost");
+        let raw = std::fs::read_to_string(host_dir.join("_instance.toml"))
+            .expect("parent TOML exists");
+        let doc: toml::Value = raw.parse().expect("parent TOML parses");
+        // The folded child must never materialise as its own instance.
+        assert!(
+            !host_dir.join("Mesh").exists(),
+            "DataMesh child must not spawn standalone"
+        );
+        (space_root, doc, report)
+    }
+
+    fn asset_mesh_of(doc: &toml::Value) -> String {
+        doc.get("asset")
+            .and_then(|a| a.get("mesh"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[test]
+    fn special_mesh_brick_folds_to_block_with_scale() {
+        let child = InstanceBuilder::new("SpecialMesh")
+            .with_name("Mesh")
+            .with_property("MeshType", rbx_dom_weak::types::Enum::from_u32(6)) // Brick
+            .with_property("Scale", Vector3::new(2.0, 3.0, 4.0));
+        let (space_root, doc, _report) =
+            import_part_with_mesh_child("specialmesh_brick", child);
+        assert_eq!(asset_mesh_of(&doc), "parts/block.glb");
+        let scale: Vec<f64> = doc
+            .get("mesh_scale")
+            .and_then(|v| v.as_array())
+            .expect("top-level mesh_scale written")
+            .iter()
+            .filter_map(|v| v.as_float())
+            .collect();
+        assert_eq!(scale, vec![2.0, 3.0, 4.0]);
+        // Default offset is omitted.
+        assert!(doc.get("mesh_offset").is_none());
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    #[test]
+    fn special_mesh_filemesh_routes_mesh_ref_to_parent() {
+        let child = InstanceBuilder::new("SpecialMesh")
+            .with_name("Mesh")
+            .with_property("MeshType", rbx_dom_weak::types::Enum::from_u32(5)) // FileMesh
+            .with_property(
+                "MeshId",
+                rbx_dom_weak::types::Variant::ContentId(rbx_dom_weak::types::ContentId::from(
+                    "rbxassetid://123456",
+                )),
+            )
+            .with_property("Offset", Vector3::new(0.0, 1.5, 0.0));
+        let (space_root, doc, _report) =
+            import_part_with_mesh_child("specialmesh_filemesh", child);
+        // No fetcher configured → the parent's [asset].mesh carries the
+        // unresolved placeholder for the CHILD's MeshId.
+        let mesh = asset_mesh_of(&doc).replace('\\', "/");
+        assert!(
+            mesh.contains("_unresolved") && mesh.contains("123456"),
+            "parent [asset].mesh should carry the folded mesh ref placeholder, got {mesh:?}"
+        );
+        let offset: Vec<f64> = doc
+            .get("mesh_offset")
+            .and_then(|v| v.as_array())
+            .expect("top-level mesh_offset written")
+            .iter()
+            .filter_map(|v| v.as_float())
+            .collect();
+        assert_eq!(offset, vec![0.0, 1.5, 0.0]);
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    #[test]
+    fn special_mesh_head_folds_to_ball_with_approximation() {
+        let child = InstanceBuilder::new("SpecialMesh")
+            .with_name("Mesh")
+            .with_property("MeshType", rbx_dom_weak::types::Enum::from_u32(0)); // Head
+        let (space_root, doc, report) =
+            import_part_with_mesh_child("specialmesh_head", child);
+        assert_eq!(asset_mesh_of(&doc), "parts/ball.glb");
+        assert!(
+            report
+                .approximations
+                .iter()
+                .any(|a| a.reason.contains("Head")),
+            "Head→sphere approximation should be recorded: {:?}",
+            report.approximations
+        );
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    #[test]
+    fn block_and_cylinder_mesh_fold_to_primitives() {
+        let block_child = InstanceBuilder::new("BlockMesh")
+            .with_name("Mesh")
+            .with_property("Scale", Vector3::new(0.5, 0.5, 0.5));
+        let (root_a, doc_a, _) = import_part_with_mesh_child("blockmesh", block_child);
+        assert_eq!(asset_mesh_of(&doc_a), "parts/block.glb");
+        assert!(doc_a.get("mesh_scale").is_some());
+        let _ = std::fs::remove_dir_all(&root_a);
+
+        let cyl_child = InstanceBuilder::new("CylinderMesh").with_name("Mesh");
+        let (root_b, doc_b, _) = import_part_with_mesh_child("cylindermesh", cyl_child);
+        assert_eq!(asset_mesh_of(&doc_b), "parts/cylinder.glb");
+        let _ = std::fs::remove_dir_all(&root_b);
     }
 }

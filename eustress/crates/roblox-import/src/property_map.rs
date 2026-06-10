@@ -58,10 +58,10 @@ use std::collections::HashMap;
 use eustress_common::classes::ClassName;
 use eustress_common::instance_create::InstanceOverrides;
 use rbx_dom_weak::types::{
-    Axes, BinaryString, BrickColor, CFrame, Color3, Color3uint8, ColorSequence, Content, Enum,
-    Faces, Font, MaterialColors, NumberRange, NumberSequence, PhysicalProperties, Ray, Rect, Ref,
-    Region3, Region3int16, SharedString, Tags, UDim, UDim2, UniqueId, Variant, Vector2,
-    Vector2int16, Vector3, Vector3int16,
+    Axes, BinaryString, BrickColor, CFrame, Color3, Color3uint8, ColorSequence, Content,
+    ContentId, Enum, Faces, Font, MaterialColors, NumberRange, NumberSequence,
+    PhysicalProperties, Ray, Rect, Ref, Region3, Region3int16, SharedString, Tags, UDim, UDim2,
+    UniqueId, Variant, Vector2, Vector2int16, Vector3, Vector3int16,
 };
 
 // ---------------------------------------------------------------------------
@@ -191,6 +191,17 @@ fn apply_variant(bag: &mut PropertyBag, target_class: ClassName, key: &str, vari
         if let Variant::Content(c) = variant {
             bag.asset_refs
                 .insert(key.to_string(), c.as_uri().unwrap_or_default().to_string());
+            return;
+        }
+        if let Variant::ContentId(c) = variant {
+            // rbx_types 3.x split the old string `Content` into the legacy
+            // `ContentId` (a bare URI string — what `SpecialMesh.MeshId` /
+            // `FileMesh.TextureId` and other non-migrated properties decode
+            // to) and the modern object `Content`. Without this arm a
+            // `ContentId` mesh ref fell through to the opaque-extras path
+            // and never reached the asset resolver — imported SpecialMesh
+            // geometry was the visible symptom.
+            bag.asset_refs.insert(key.to_string(), c.as_str().to_string());
             return;
         }
         if let Variant::String(s) = variant {
@@ -700,6 +711,7 @@ fn variant_to_toml(variant: &Variant, bag: &mut PropertyBag) -> toml::Value {
         Variant::Rect(r) => rect_to_toml(r),
         Variant::Enum(e) => toml::Value::Integer(e.to_u32() as i64),
         Variant::Content(c) => toml::Value::String(c.as_uri().unwrap_or_default().to_string()),
+        Variant::ContentId(c) => toml::Value::String(c.as_str().to_string()),
         Variant::BinaryString(bs) => binary_string_to_toml(bs),
         Variant::SharedString(ss) => shared_string_to_toml(ss),
         Variant::NumberSequence(ns) => number_sequence_to_toml(ns),
@@ -983,6 +995,18 @@ fn is_asset_property_name(name: &str) -> bool {
         name,
         "SoundId"
             | "MeshId"
+            // Modern MeshPart mesh/texture refs. The current reflection
+            // database (roblox-700) declares `MeshPart.MeshId` with
+            // `Serialization::Migrate(MeshId → MeshContent,
+            // ContentIdToContent)`, and BOTH rbx_binary 2.x and rbx_xml 2.x
+            // apply that migration on deserialize — so a MeshPart's mesh
+            // reference arrives here as `MeshContent` (a `Variant::Content`)
+            // for legacy AND modern files alike. Without these names the
+            // ref landed in `[properties.extras] MeshContent = "rbxassetid
+            // ://…"` and the asset resolver never fetched it — every
+            // imported MeshPart rendered as a colored block.
+            | "MeshContent"
+            | "TextureContent"
             | "Image"
             | "Texture"
             | "TextureId"
@@ -1193,6 +1217,44 @@ mod tests {
         assert_eq!(
             bag.asset_refs.get("Texture"),
             Some(&"rbxassetid://9876".to_string())
+        );
+    }
+
+    #[test]
+    fn mesh_content_routes_to_asset_refs() {
+        // Modern MeshPart mesh ref (and the migrated legacy `MeshId` —
+        // rbx_binary/rbx_xml 2.x rewrite it to `MeshContent` on load).
+        let bag = map_properties(
+            &props_with(vec![(
+                "MeshContent",
+                Variant::Content(Content::from("rbxassetid://555")),
+            )]),
+            ClassName::Part,
+        );
+        assert_eq!(
+            bag.asset_refs.get("MeshContent"),
+            Some(&"rbxassetid://555".to_string())
+        );
+        assert!(
+            !bag.properties_extras.contains_key("MeshContent"),
+            "mesh ref must not leak into extras"
+        );
+    }
+
+    #[test]
+    fn content_id_mesh_id_routes_to_asset_refs() {
+        // SpecialMesh.MeshId decodes as the legacy `ContentId` variant
+        // (no migration entry in the reflection database).
+        let bag = map_properties(
+            &props_with(vec![(
+                "MeshId",
+                Variant::ContentId(ContentId::from("rbxassetid://777")),
+            )]),
+            ClassName::SpecialMesh,
+        );
+        assert_eq!(
+            bag.asset_refs.get("MeshId"),
+            Some(&"rbxassetid://777".to_string())
         );
     }
 
