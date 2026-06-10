@@ -826,13 +826,29 @@ fn spawn_bevy_gui_from_loaded_entities(
             bevy::prelude::Visibility::Hidden
         };
 
-        // Build the Bevy Node with absolute positioning
+        // Build the Bevy Node with absolute positioning.
+        //
+        // PERF: a `Visibility::Hidden` node is skipped at extract time but
+        // STILL laid out by `ui_layout_system` every frame. With ~8K
+        // StarterGui elements loaded that idle layout cost ~9.7 ms/frame in
+        // the editor even though nothing is drawn. `Display::None` removes
+        // the node from taffy layout entirely; since these nodes are
+        // absolute-positioned leaves of a transparent fullscreen root, an
+        // invisible node contributes nothing to any sibling's layout, so
+        // hidden ⇒ display:none is visually identical. The
+        // `sync_development_ui_visibility` system below restores
+        // `Display::Flex` in lockstep when ShowDevelopmentUI is enabled.
         let node = bevy::prelude::Node {
             position_type: bevy::prelude::PositionType::Absolute,
             left: bevy::prelude::Val::Px(pos_x),
             top: bevy::prelude::Val::Px(pos_y),
             width: bevy::prelude::Val::Px(width),
             height: bevy::prelude::Val::Px(height),
+            display: if visibility == bevy::prelude::Visibility::Hidden {
+                bevy::prelude::Display::None
+            } else {
+                bevy::prelude::Display::Flex
+            },
             ..Default::default()
         };
 
@@ -882,8 +898,8 @@ fn spawn_bevy_gui_from_loaded_entities(
 fn sync_development_ui_visibility(
     mut last_state: ResMut<ShowDevelopmentUIState>,
     service_components: Query<&crate::space::service_loader::ServiceComponent>,
-    spawned: Query<
-        (Entity, &crate::space::file_loader::LoadedFromFile, &mut Visibility),
+    mut spawned: Query<
+        (Entity, &crate::space::file_loader::LoadedFromFile, Option<&mut Node>),
         With<BevyGuiSpawned>,
     >,
     mut commands: Commands,
@@ -908,10 +924,22 @@ fn sync_development_ui_visibility(
     } else {
         Visibility::Hidden
     };
+    // Keep taffy layout in lockstep with visibility: hidden StarterGui
+    // nodes are also `Display::None` so ~8K idle editor nodes don't pay
+    // `ui_layout_system` every frame (see spawn site above). Restoring
+    // `Display::Flex` here is what makes the spawn-time gating safe.
+    let new_display = if show {
+        bevy::prelude::Display::Flex
+    } else {
+        bevy::prelude::Display::None
+    };
 
-    for (entity, loaded, _vis) in &spawned {
+    for (entity, loaded, node) in &mut spawned {
         if loaded.service == "StarterGui" {
             commands.entity(entity).insert(new_vis);
+            if let Some(mut node) = node {
+                node.display = new_display;
+            }
         }
     }
 }

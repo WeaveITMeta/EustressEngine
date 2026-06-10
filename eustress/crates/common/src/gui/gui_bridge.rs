@@ -13,9 +13,30 @@ use super::gui_commands::{drain_gui_commands, set_gui_snapshot, GuiCommand};
 
 /// Snapshot GUI element text values for gui_get_text() in scripts.
 /// Runs BEFORE script execution each frame.
+///
+/// PERF: change-gated. Rebuilding the name→text `HashMap` (String clones for
+/// every text-bearing element) every frame cost ~5 ms/frame once a large
+/// StarterGui import put ~8K `GuiElementDisplay` entities in the world — for
+/// a map whose contents almost never change. The driver query below matches
+/// only when a `GuiElementDisplay` or `Name` was added/mutated this frame
+/// (`Changed` includes `Added`), and `RemovedComponents` catches deletions so
+/// a despawned element's stale text can't linger in the snapshot. When
+/// nothing changed, the previous snapshot is still exactly correct, so we
+/// early-return and `gui_get_text()` keeps reading it.
 pub fn snapshot_gui_state(
     gui_query: Query<(&Name, &GuiElementDisplay)>,
+    // `With<GuiElementDisplay>` scopes the driver to GUI entities only —
+    // without it the `Changed<Name>` arm would match EVERY named entity in
+    // the world, so residency streaming (which spawns named parts every
+    // frame) would keep the gate permanently open AND the emptiness check
+    // would tick-scan ~120K entities instead of ~8K.
+    changed: Query<(), (With<GuiElementDisplay>, Or<(Changed<GuiElementDisplay>, Changed<Name>)>)>,
+    mut removed: RemovedComponents<GuiElementDisplay>,
 ) {
+    let any_removed = removed.read().next().is_some();
+    if changed.is_empty() && !any_removed {
+        return; // snapshot from a previous frame is still valid
+    }
     let mut snapshot = std::collections::HashMap::new();
     for (name, display) in &gui_query {
         if !display.text.is_empty() {

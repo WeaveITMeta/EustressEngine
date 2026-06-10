@@ -864,6 +864,28 @@ struct FlatElem {
 /// parent offsets so nested Frame > TextLabel layouts position correctly on
 /// the billboard canvas. The clip rect propagates through descendants until
 /// a deeper `clip_children = true` overrides it.
+/// Parent → direct GUI children, built ONCE per rebuild pass. The previous
+/// implementation passed the raw `Query` down and did a FULL LINEAR SCAN of
+/// every `GuiElementDisplay` in the World for EVERY subtree node of EVERY
+/// near billboard, every frame — O(billboards × nodes × total_gui_elements).
+/// On Vehicle Simulator (thousands of GUI leaves after the Color3 import
+/// fix) that one scan was 120 ms/frame, the single largest cost in the
+/// whole engine. The index makes each subtree walk O(its own nodes).
+type GuiChildIndex<'a> = std::collections::HashMap<Entity, Vec<(Entity, &'a GuiElementDisplay)>>;
+
+fn build_gui_child_index<'a>(
+    all_elements: &'a Query<(Entity, &GuiElementDisplay, &ChildOf)>,
+) -> GuiChildIndex<'a> {
+    let mut index: GuiChildIndex<'a> = std::collections::HashMap::new();
+    for (child_entity, disp, child_of) in all_elements.iter() {
+        index
+            .entry(child_of.parent())
+            .or_default()
+            .push((child_entity, disp));
+    }
+    index
+}
+
 fn collect_subtree(
     parent_entity: Entity,
     parent_abs_x: f32,
@@ -871,13 +893,13 @@ fn collect_subtree(
     parent_w: f32,
     parent_h: f32,
     clip_rect: Option<[f32; 4]>,
-    all_elements: &Query<(Entity, &GuiElementDisplay, &ChildOf)>,
+    children_of: &GuiChildIndex<'_>,
     out: &mut Vec<FlatElem>,
 ) {
-    for (child_entity, disp, child_of) in all_elements.iter() {
-        if child_of.parent() != parent_entity {
-            continue;
-        }
+    let Some(children) = children_of.get(&parent_entity) else {
+        return;
+    };
+    for &(child_entity, disp) in children {
         // Resolve UDim2 → pixels against the parent's resolved rect.
         // Roblox semantics: `pixel = scale * parent_extent + offset`.
         // A child with `Size = UDim2(1, 0, 1, 0)` therefore fills the
@@ -915,18 +937,19 @@ fn collect_subtree(
         elem.width = resolved_w;
         elem.height = resolved_h;
         out.push(FlatElem {
-            elem: elem.clone(),
+            elem,
             abs_x,
             abs_y,
             clip_rect: my_clip,
         });
         collect_subtree(
             child_entity, abs_x, abs_y, resolved_w, resolved_h,
-            my_clip, all_elements, out,
+            my_clip, children_of, out,
         );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_and_render_billboards(
     mut text_state: NonSendMut<BillboardTextState>,
     mut atlas: NonSendMut<BillboardAtlas>,
@@ -939,6 +962,21 @@ fn update_and_render_billboards(
     // background, debug label, etc.) — we include that as the root of
     // the subtree so a billboard with no children still paints.
     billboard_self_display: Query<&GuiElementDisplay>,
+    // ── Change-gate drivers (PERF). At steady state no GUI element
+    //    mutates, so re-collecting + re-hashing every near billboard's
+    //    subtree every frame is pure waste (it was 120 ms/frame on VS).
+    //    The gate bumps an epoch when anything GUI-shaped changed; a
+    //    billboard re-collects only when its painted epoch is stale. ──
+    changed_gui: Query<
+        (),
+        (
+            With<GuiElementDisplay>,
+            Or<(Changed<GuiElementDisplay>, Changed<ChildOf>)>,
+        ),
+    >,
+    mut removed_gui: RemovedComponents<GuiElementDisplay>,
+    mut epoch: Local<u64>,
+    mut painted_at: Local<std::collections::HashMap<Entity, u64>>,
 ) {
     // Cull billboard rebuilds to the near-camera vicinity. VS imports ~17K
     // billboards; collecting + hashing every one each frame cost ~208 ms (31%
@@ -950,12 +988,32 @@ fn update_and_render_billboards(
         .find(|(_, c)| c.order == 0)
         .map(|(gt, _)| gt.translation());
 
+    // Epoch bump: any GUI element added/changed/reparented/removed this
+    // frame invalidates every painted billboard (they lazily re-collect as
+    // they are visited in range). Steady state: both checks are empty and
+    // every painted billboard skips at one HashMap lookup.
+    if !changed_gui.is_empty() || removed_gui.read().count() > 0 {
+        *epoch = epoch.wrapping_add(1);
+    }
+
+    // Parent→children index, built lazily ONCE per pass and only when at
+    // least one billboard actually needs a rebuild (replaces the former
+    // per-node full scan of every GuiElementDisplay — the 120 ms/frame).
+    let mut child_index: Option<GuiChildIndex<'_>> = None;
+
     for (entity, mut handle, tile, bb_tf) in &mut billboards {
         if let Some(cp) = cam_pos {
             if bb_tf.translation().distance_squared(cp) > BILLBOARD_CULL_RADIUS_SQ {
                 continue;
             }
         }
+        // Up to date for the current epoch? (Covers both "painted" and
+        // "verified-unchanged-by-hash" — either way the tile is current.)
+        if painted_at.get(&entity) == Some(&*epoch) {
+            continue;
+        }
+        let children_of =
+            child_index.get_or_insert_with(|| build_gui_child_index(&gui_elements));
         let mut flat: Vec<FlatElem> = Vec::new();
         // Root parent rect = the billboard's resolved canvas, so a
         // child with `Size = UDim2(1, 0, 1, 0)` fills the billboard's
@@ -983,13 +1041,17 @@ fn update_and_render_billboards(
                 abs_y: 0.0,
                 clip_rect: clip,
             });
-            collect_subtree(entity, 0.0, 0.0, parent_w, parent_h, clip, &gui_elements, &mut flat);
+            collect_subtree(entity, 0.0, 0.0, parent_w, parent_h, clip, children_of, &mut flat);
         } else {
-            collect_subtree(entity, 0.0, 0.0, parent_w, parent_h, None, &gui_elements, &mut flat);
+            collect_subtree(entity, 0.0, 0.0, parent_w, parent_h, None, children_of, &mut flat);
         }
         flat.sort_by_key(|f| f.elem.z_order);
 
         let hash = label_hash(&flat);
+        // Tile verified current for this epoch — whether repainted below or
+        // already matching by hash — so the epoch gate skips it until the
+        // next GUI change.
+        painted_at.insert(entity, *epoch);
         if hash == handle.last_label_hash {
             continue;
         }

@@ -440,9 +440,21 @@ mod enabled {
             attrs.record(&mut visitor);
             // Fall back to the span's static metadata name if the field was
             // absent for some reason — never panic, never skip silently.
-            let name = visitor
+            let mut name = visitor
                 .name
                 .unwrap_or_else(|| span.metadata().name().to_owned());
+            // Bevy emits TWO spans per system per frame that carry the SAME
+            // `name` field: `"system"` (the system body) and
+            // `"system_commands"` (the deferred-`Commands` apply phase).
+            // Tallying both under one key made every Commands-using system
+            // report 2× calls/frame (e.g. 240 calls over a 120-frame window)
+            // and folded apply-deferred time into the system's own time —
+            // which read as "this system is registered twice". Disambiguate
+            // so the report shows the body and the command-apply phase as
+            // separate rows with honest call counts.
+            if span.metadata().name() == "system_commands" {
+                name.push_str(" [apply_deferred]");
+            }
             span.extensions_mut().insert(SystemName(name));
         }
 

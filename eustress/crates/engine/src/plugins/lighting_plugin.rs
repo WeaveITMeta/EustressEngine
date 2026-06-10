@@ -107,6 +107,24 @@ impl Plugin for LightingPlugin {
     }
 }
 
+/// Maximum sun cascade-shadow distance in meters.
+///
+/// Read once from `EUSTRESS_SHADOW_DISTANCE` (default 200.0). Street-level
+/// shadows only — beyond this the HLOD whole-map proxies are
+/// `NotShadowCaster` so longer cascades just re-walk near casters at
+/// coarser resolution. Set the env var higher (e.g. 2048) to restore the
+/// old long-range behavior for cinematic captures.
+fn sun_shadow_distance() -> f32 {
+    static D: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *D.get_or_init(|| {
+        std::env::var("EUSTRESS_SHADOW_DISTANCE")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(200.0)
+    })
+}
+
 /// Hydrate file-loaded Lighting/ entities with real ECS components.
 ///
 /// The file loader spawns `Instance` entities from `Lighting/*.instance.toml`
@@ -170,11 +188,20 @@ fn hydrate_lighting_entities(
         };
 
         let sun_dir = lighting.sun_direction();
+        // PERF: bound the sun's shadow frusta to street-level range.
+        // The old config (4 cascades to 2048 m) made bevy_pbr's
+        // queue_shadows + specialize_shadows walk every caster in a
+        // 2 km radius across 4 cascade views (~9 ms/frame on the 121K
+        // Vehicle Simulator scene). Distant geometry is HLOD proxies
+        // marked NotShadowCaster anyway, so cascades past ~200 m buy
+        // nothing. 2 cascades to 200 m keeps crisp near shadows and
+        // cuts the per-cascade caster set dramatically.
+        // Env-tunable: EUSTRESS_SHADOW_DISTANCE (meters, default 200).
         let cascade_shadow_config = CascadeShadowConfigBuilder {
-            num_cascades: 4,
+            num_cascades: 2,
             minimum_distance: 0.1,
-            maximum_distance: 2048.0,
-            first_cascade_far_bound: 16.0,
+            maximum_distance: sun_shadow_distance(),
+            first_cascade_far_bound: 40.0,
             overlap_proportion: 0.3,
             ..default()
         }

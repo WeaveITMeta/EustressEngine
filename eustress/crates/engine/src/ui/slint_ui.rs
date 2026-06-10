@@ -891,6 +891,16 @@ pub struct UnifiedExplorerState {
     /// each sync (ids are reassigned per sync). Lets Expand/Collapse on a
     /// "db_class" row resolve which class to toggle in `expanded_db_classes`.
     pub db_class_id_cache: std::collections::HashMap<i32, String>,
+    /// Per-container Explorer paging — how many child rows are currently
+    /// materialized for a container (keyed by service/bucket name, e.g.
+    /// "Workspace"). Absent key = one page (`explorer_page_size()`). Grown by
+    /// clicking the "Show next N" pager row; only consulted inside the
+    /// (already dirty-gated) tree rebuild, never per-frame.
+    pub page_windows: std::collections::HashMap<String, usize>,
+    /// Maps a "load_more" pager row's Slint node id → the container key whose
+    /// window it extends. Rebuilt each sync (same lifecycle as
+    /// `db_class_id_cache`).
+    pub load_more_id_cache: std::collections::HashMap<i32, String>,
 }
 
 fn default_space_root() -> std::path::PathBuf {
@@ -928,8 +938,26 @@ impl Default for UnifiedExplorerState {
             cached_db_pages: std::collections::HashMap::new(),
             db_cache_valid: false,
             db_class_id_cache: std::collections::HashMap::new(),
+            page_windows: std::collections::HashMap::new(),
+            load_more_id_cache: std::collections::HashMap::new(),
         }
     }
+}
+
+/// Explorer paging: how many child rows a container materializes per "page".
+/// Each click on the "Show next N" pager row grows that container's window by
+/// this much, so nothing is ever unreachable — a huge container just takes
+/// explicit clicks (one bounded rebuild per click) instead of a single
+/// multi-hundred-ms wall. Override with `EUSTRESS_EXPLORER_PAGE` (parsed once).
+fn explorer_page_size() -> usize {
+    static PAGE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *PAGE.get_or_init(|| {
+        std::env::var("EUSTRESS_EXPLORER_PAGE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(2000)
+    })
 }
 
 /// Maximum inter-click interval that counts as a double-click. Matches
@@ -5175,7 +5203,7 @@ fn drain_slint_actions(
                 // within DOUBLE_CLICK_MS → fire OpenNode and short-circuit
                 // the usual selection logic (we already selected on the
                 // first click).
-                if !ctrl && !shift {
+                if !ctrl && !shift && node_type != "load_more" {
                     if let Some(ref mut es) = res.explorer_state {
                         let now = std::time::Instant::now();
                         let is_double = matches!(
@@ -5220,7 +5248,22 @@ fn drain_slint_actions(
                     //   3. Shift-click C       (range A..C added; the
                     //      Ctrl-deselects from step 2 are preserved
                     //      outside the new range)
-                    if shift {
+                    //
+                    // ── "Show next N" pager row (checked FIRST) ──
+                    // Not a selectable node: clicking grows the clicked
+                    // container's Explorer paging window by one page and
+                    // forces an immediate tree rebuild. Handled before the
+                    // shift/ctrl/select logic so paging can never disturb
+                    // selection state or the shift anchor.
+                    if node_type == "load_more" {
+                        if let Some(key) = es.load_more_id_cache.get(&id).cloned() {
+                            let page = explorer_page_size();
+                            let win = es.page_windows.entry(key).or_insert(page);
+                            *win = win.saturating_add(page);
+                            es.needs_immediate_sync = true;
+                        }
+                    }
+                    else if shift {
                         if let (Some(anchor_id), Some(ref sel_mgr)) = (es.last_selected_node_id, &res.selection_manager) {
                             let order = &es.visible_node_order;
                             let anchor_pos = order.iter().position(|&n| n == anchor_id);
@@ -12505,31 +12548,94 @@ fn sync_unified_explorer_to_slint(
     let expanded_entities = explorer_state.expanded_entities.clone();
     let selected_item = explorer_state.selected.clone();
 
-    // Per-container node budget. A service with a huge FLAT child list (Vehicle
-    // Simulator: ~110K Workspace parts) must not make this rebuild take seconds
-    // — building a TreeNode per part (name clone + format! + icon + SharedStrings)
-    // is the dominant cost. Beyond this many nodes we stop building and the
-    // Workspace caller appends a "N more" sentinel. Normal Spaces (< budget) are
-    // unaffected. (A fully virtualized Explorer — only the rows in the scroll
-    // viewport — is the proper future fix; this bounds the cost to stay at frame.)
-    const MAX_NODES_PER_CONTAINER: usize = 500;
+    // Per-container paging window. A service with a huge FLAT child list
+    // (Vehicle Simulator: ~110K Workspace parts) must not make this rebuild
+    // take seconds — building a TreeNode per part (name clone + format! +
+    // icon + SharedStrings) is the dominant cost. Each container materializes
+    // at most its current window (default one page; grown per-container by
+    // clicking the "Show next N" pager row), so everything stays REACHABLE:
+    // each click pays one bounded, dirty-gated rebuild instead of a single
+    // multi-hundred-ms wall. Normal containers (< one page) are unaffected.
+    // (A fully virtualized Explorer — only the rows in the scroll viewport —
+    // is the proper future fix; this bounds the cost to stay at frame.)
+    let page_size = explorer_page_size();
+    let page_windows = explorer_state.page_windows.clone();
+    // Pager-row ids live in a dedicated high range so they can never collide
+    // with entity-index-derived row ids (entity rows use the low 31 bits of
+    // the entity index — far below 2^30 in practice) or the small sequential
+    // terrain/db ids.
+    const LOAD_MORE_ID_BASE: i32 = 0x4000_0000;
+    let mut load_more_ids: std::collections::HashMap<i32, String> =
+        std::collections::HashMap::new();
+    let mut next_load_more_id: i32 = LOAD_MORE_ID_BASE;
+
+    // Builds the clickable "Show next N" pager row for a windowed container.
+    // node_type "load_more" + id registered in `load_more_ids` so the
+    // SelectNode handler knows which container's window to extend.
+    let make_load_more_node = |container_key: &str,
+                               remaining: usize,
+                               depth: i32,
+                               load_more_ids: &mut std::collections::HashMap<i32, String>,
+                               next_load_more_id: &mut i32| -> TreeNode {
+        let id = *next_load_more_id;
+        *next_load_more_id += 1;
+        load_more_ids.insert(id, container_key.to_string());
+        TreeNode {
+            id,
+            name: format!(
+                "… Show next {} ({} more)",
+                page_size.min(remaining),
+                remaining
+            )
+            .into(),
+            icon: slint::Image::default(),
+            depth,
+            expandable: false,
+            expanded: false,
+            selected: false,
+            visible: true,
+            node_type: "load_more".into(),
+            class_name: slint::SharedString::default(),
+            path: slint::SharedString::default(),
+            is_directory: false,
+            extension: slint::SharedString::default(),
+            size: slint::SharedString::default(),
+            modified: false,
+        }
+    };
 
     // DFS helper — builds TreeNodes for a list of root entities.
     // Takes entity_id_cache and next_id by mutable reference so it can register IDs
     // without a ResMut borrow conflict with the immutable borrows above.
+    // `container_key` selects this container's paging window and labels the
+    // pager row appended when the window is exhausted.
     #[allow(clippy::too_many_arguments)]
     let build_entity_nodes = |root_list: &[Entity],
                                    base_depth: i32,
+                                   container_key: &str,
                                    entity_id_cache: &mut std::collections::HashMap<i32, Entity>,
-                                   next_id: &mut i32| -> Vec<TreeNode> {
+                                   next_id: &mut i32,
+                                   load_more_ids: &mut std::collections::HashMap<i32, String>,
+                                   next_load_more_id: &mut i32| -> Vec<TreeNode> {
         let mut nodes: Vec<TreeNode> = Vec::new();
         let mut stack: Vec<(Entity, i32)> = root_list.iter().rev().map(|e| (*e, base_depth)).collect();
+        let budget = page_windows.get(container_key).copied().unwrap_or(page_size);
 
         while let Some((entity, depth)) = stack.pop() {
-            // Stop once this container hits its node budget — bounds a huge flat
-            // child list (Vehicle Simulator ~110K Workspace parts) so a rebuild
-            // never costs seconds. Remaining siblings are summarized by the caller.
-            if nodes.len() >= MAX_NODES_PER_CONTAINER {
+            // Stop once this container fills its paging window — bounds a huge
+            // flat child list (Vehicle Simulator ~110K Workspace parts) so one
+            // rebuild never costs seconds. The remaining entities stay
+            // reachable through the pager row appended here (count is a lower
+            // bound: unexpanded descendants of queued entities aren't walked).
+            if nodes.len() >= budget {
+                let remaining = stack.len() + 1; // +1 = the entity just popped
+                nodes.push(make_load_more_node(
+                    container_key,
+                    remaining,
+                    base_depth,
+                    load_more_ids,
+                    next_load_more_id,
+                ));
                 break;
             }
             let Ok((_, instance)) = instances.get(entity) else { continue };
@@ -12643,12 +12749,13 @@ fn sync_unified_explorer_to_slint(
     let ws_has = !workspace_roots.is_empty() || has_terrain;
     // Bound the Workspace bucket BEFORE sorting/building: a flat list of ~110K
     // parts (Vehicle Simulator) would otherwise spend seconds sorting + building
-    // TreeNodes every rebuild. Truncate to the node budget; the sentinel below
-    // reports how many were filtered. (Truncation happens pre-sort so the sort
-    // itself is also bounded.)
+    // TreeNodes every rebuild. Truncate to Workspace's current paging window;
+    // the pager row below loads the next page on click. (Truncation happens
+    // pre-sort so the sort itself is also bounded.)
     let workspace_total = workspace_roots.len();
-    if workspace_total > MAX_NODES_PER_CONTAINER {
-        workspace_roots.truncate(MAX_NODES_PER_CONTAINER);
+    let ws_window = page_windows.get("Workspace").copied().unwrap_or(page_size);
+    if workspace_total > ws_window {
+        workspace_roots.truncate(ws_window);
     }
     // Sort workspace children: Camera first, then alphabetical
     workspace_roots.sort_by(|a, b| {
@@ -12666,30 +12773,25 @@ fn sync_unified_explorer_to_slint(
 
     tree_nodes.push(make_service_node("Workspace", "workspace", 0, ws_has, svc_expanded("Workspace"), &explorer_state, &selected_entity_ids));
     if svc_expanded("Workspace") {
-        tree_nodes.extend(build_entity_nodes(&workspace_roots, 1, &mut entity_id_cache, &mut next_id));
-        // Sentinel row when the Workspace bucket was filtered for performance.
-        if workspace_total > MAX_NODES_PER_CONTAINER {
-            tree_nodes.push(TreeNode {
-                id: 0,
-                name: format!(
-                    "… {} more parts (filtered — large Space)",
-                    workspace_total - MAX_NODES_PER_CONTAINER
-                )
-                .into(),
-                icon: slint::Image::default(),
-                depth: 1,
-                expandable: false,
-                expanded: false,
-                selected: false,
-                visible: true,
-                node_type: "entity".into(),
-                class_name: slint::SharedString::default(),
-                path: slint::SharedString::default(),
-                is_directory: false,
-                extension: slint::SharedString::default(),
-                size: slint::SharedString::default(),
-                modified: false,
-            });
+        tree_nodes.extend(build_entity_nodes(&workspace_roots, 1, "Workspace", &mut entity_id_cache, &mut next_id, &mut load_more_ids, &mut next_load_more_id));
+        // Pager row when the Workspace root list was windowed pre-sort. Skip
+        // it if the DFS already appended its own pager for "Workspace"
+        // (expanded descendants exhausted the same window) — one pager per
+        // container is enough, and both grow the same window.
+        if workspace_total > ws_window
+            && tree_nodes
+                .last()
+                .map(|n| n.node_type != "load_more")
+                .unwrap_or(true)
+        {
+            let pager = make_load_more_node(
+                "Workspace",
+                workspace_total - ws_window,
+                1,
+                &mut load_more_ids,
+                &mut next_load_more_id,
+            );
+            tree_nodes.push(pager);
         }
         
         // Inject Terrain entities (TerrainRoot + Chunks) into Workspace
@@ -12956,7 +13058,7 @@ fn sync_unified_explorer_to_slint(
     let lt_has = !lighting_roots.is_empty();
     tree_nodes.push(make_service_node("Lighting", "lighting", 0, lt_has, svc_expanded("Lighting"), &explorer_state, &selected_entity_ids));
     if svc_expanded("Lighting") {
-        tree_nodes.extend(build_entity_nodes(&lighting_roots, 1, &mut entity_id_cache, &mut next_id));
+        tree_nodes.extend(build_entity_nodes(&lighting_roots, 1, "Lighting", &mut entity_id_cache, &mut next_id, &mut load_more_ids, &mut next_load_more_id));
     }
 
     // Service: Players (depth 0) - runtime only, no children in editor
@@ -12966,7 +13068,7 @@ fn sync_unified_explorer_to_slint(
     let sg_has = !starter_gui_roots.is_empty();
     tree_nodes.push(make_service_node("StarterGui", "startergui", 0, sg_has, svc_expanded("StarterGui"), &explorer_state, &selected_entity_ids));
     if svc_expanded("StarterGui") {
-        tree_nodes.extend(build_entity_nodes(&starter_gui_roots, 1, &mut entity_id_cache, &mut next_id));
+        tree_nodes.extend(build_entity_nodes(&starter_gui_roots, 1, "StarterGui", &mut entity_id_cache, &mut next_id, &mut load_more_ids, &mut next_load_more_id));
     }
 
     // Service: StarterPack (depth 0) - no editor children
@@ -13027,21 +13129,21 @@ fn sync_unified_explorer_to_slint(
                 );
             }
         }
-        tree_nodes.extend(build_entity_nodes(&soul_service_roots, 1, &mut entity_id_cache, &mut next_id));
+        tree_nodes.extend(build_entity_nodes(&soul_service_roots, 1, "SoulService", &mut entity_id_cache, &mut next_id, &mut load_more_ids, &mut next_load_more_id));
     }
 
     // Service: MaterialService (depth 0) + material children (depth 1+)
     let ms_has = !material_service_roots.is_empty();
     tree_nodes.push(make_service_node("MaterialService", "materialservice", 0, ms_has, svc_expanded("MaterialService"), &explorer_state, &selected_entity_ids));
     if svc_expanded("MaterialService") {
-        tree_nodes.extend(build_entity_nodes(&material_service_roots, 1, &mut entity_id_cache, &mut next_id));
+        tree_nodes.extend(build_entity_nodes(&material_service_roots, 1, "MaterialService", &mut entity_id_cache, &mut next_id, &mut load_more_ids, &mut next_load_more_id));
     }
 
     // Service: AdornmentService (depth 0) + adornment children (depth 1+)
     let as_has = !adornment_service_roots.is_empty();
     tree_nodes.push(make_service_node("AdornmentService", "adornment", 0, as_has, svc_expanded("AdornmentService"), &explorer_state, &selected_entity_ids));
     if svc_expanded("AdornmentService") {
-        tree_nodes.extend(build_entity_nodes(&adornment_service_roots, 1, &mut entity_id_cache, &mut next_id));
+        tree_nodes.extend(build_entity_nodes(&adornment_service_roots, 1, "AdornmentService", &mut entity_id_cache, &mut next_id, &mut load_more_ids, &mut next_load_more_id));
     }
 
     // Service: SoundService (depth 0) - no editor children
@@ -13089,7 +13191,7 @@ fn sync_unified_explorer_to_slint(
             let has = !children.is_empty();
             tree_nodes.push(make_service_node(svc_name, icon_name, 0, has, svc_expanded(svc_name), &explorer_state, &selected_entity_ids));
             if svc_expanded(svc_name) && has {
-                tree_nodes.extend(build_entity_nodes(&children, 1, &mut entity_id_cache, &mut next_id));
+                tree_nodes.extend(build_entity_nodes(&children, 1, svc_name, &mut entity_id_cache, &mut next_id, &mut load_more_ids, &mut next_load_more_id));
             }
         }
     }
@@ -13097,6 +13199,9 @@ fn sync_unified_explorer_to_slint(
     // Write entity_id_cache and counter back to explorer_state
     explorer_state.entity_id_cache = entity_id_cache;
     explorer_state.next_entity_node_id = next_id;
+    // Pager-row id → container-key map (rebuilt every sync, like
+    // db_class_id_cache) — SelectNode resolves "load_more" clicks through it.
+    explorer_state.load_more_id_cache = load_more_ids;
 
     // ================================================================
     // Part 1.5: Virtual "Database (streamed)" section (Phase 4).

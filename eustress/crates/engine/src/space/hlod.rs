@@ -1030,6 +1030,11 @@ pub fn sys_hlod_collect(
             MeshMaterial3d(material.clone()),
             Transform::from_translation(merged.origin),
             Visibility::Inherited,
+            // Far-LOD proxies don't cast shadows: the shadow pass re-draws
+            // every caster per light, so 1412 merged cell meshes would near-
+            // double the render cost for a shadow that's imperceptible at
+            // proxy distance. (Near individuals still cast normally.)
+            bevy::light::NotShadowCaster,
             MergedCellProxy {
                 cell,
                 part_count: merged.part_count,
