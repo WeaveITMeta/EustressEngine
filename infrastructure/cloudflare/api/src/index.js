@@ -459,6 +459,12 @@ export default {
         return handleAdminDeleteUser(request, env, cors);
       if (url.pathname === '/api/admin/screening-report' && request.method === 'GET')
         return handleAdminScreeningReport(request, env, cors);
+      if (url.pathname === '/api/admin/stats' && request.method === 'GET')
+        return handleAdminStats(request, env, cors);
+
+      // Public, cookieless pageview beacon (feeds the admin funnel)
+      if (url.pathname === '/api/analytics/hit' && request.method === 'POST')
+        return handleAnalyticsHit(request, env, cors);
 
       // Tickets
       if (url.pathname === '/api/tickets/packages' && request.method === 'GET')
@@ -2000,6 +2006,126 @@ async function handleAdminListUsers(request, env, cors) {
     }
   }
   return json({ users, total: users.length }, 200, cors);
+}
+
+// ── Admin Analytics: "unique visits per sign-up" funnel ─────────────────────
+// Sign-ups are derived from the USERS KV (created_at). Visit counters come from
+// the optional ANALYTICS KV (populated by POST /api/analytics/hit). If the
+// ANALYTICS binding isn't bound yet, visits report as zero and the endpoint
+// still returns the full sign-up picture — so it's useful before collection
+// is wired. NOTE: KV counters use read-modify-write and are eventually
+// consistent; fine for an early-stage, low-traffic site with a single admin.
+// At higher volume, swap the visit store for Workers Analytics Engine or D1.
+async function handleAdminStats(request, env, cors) {
+  const adminId = await requireAdmin(request, env);
+  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
+
+  // --- Sign-ups: paginated scan of `user:` records in USERS KV ---
+  const byDay = {}, byDecision = {}, byIdType = {};
+  let total = 0, admins = 0, banned = 0, withEmail = 0, stripeConnected = 0, blissTotal = 0;
+  const MAX = 5000; // safety cap so one admin call can't scan unbounded
+  let cursor;
+  do {
+    const list = await env.USERS.list({ prefix: 'user:', limit: 1000, cursor });
+    for (const key of list.keys) {
+      if (total >= MAX) break;
+      const raw = await env.USERS.get(key.name);
+      if (!raw) continue;
+      let u; try { u = JSON.parse(raw); } catch { continue; }
+      total++;
+      if (u.role === 'admin') admins++;
+      if (u.banned) banned++;
+      if (u.email) withEmail++;
+      if (u.stripe_connect_id) stripeConnected++;
+      blissTotal += Number(u.bliss_balance || 0);
+      const day = (u.created_at || '').slice(0, 10);
+      if (day) byDay[day] = (byDay[day] || 0) + 1;
+      byDecision[u.risk_decision || 'UNSCREENED'] = (byDecision[u.risk_decision || 'UNSCREENED'] || 0) + 1;
+      byIdType[u.id_type || 'none'] = (byIdType[u.id_type || 'none'] || 0) + 1;
+    }
+    cursor = list.list_complete ? undefined : list.cursor;
+  } while (cursor && total < MAX);
+
+  // --- Visits: pageview (pv:) and unique (uv:) day counters in ANALYTICS KV ---
+  const pvByDay = {}, uvByDay = {};
+  let totalPv = 0, totalUv = 0;
+  if (env.ANALYTICS) {
+    for (const [prefix, bucket] of [['pv:', pvByDay], ['uv:', uvByDay]]) {
+      let c;
+      do {
+        const l = await env.ANALYTICS.list({ prefix, limit: 1000, cursor: c });
+        for (const k of l.keys) {
+          const day = k.name.slice(prefix.length);
+          const v = Number(await env.ANALYTICS.get(k.name)) || 0;
+          bucket[day] = v;
+          if (prefix === 'pv:') totalPv += v; else totalUv += v;
+        }
+        c = l.list_complete ? undefined : l.cursor;
+      } while (c);
+    }
+  }
+
+  const series = (o) => Object.keys(o).sort().map(d => ({ date: d, count: o[d] }));
+  const pairs  = (o) => Object.keys(o).sort((a, b) => o[b] - o[a]).map(k => ({ key: k, count: o[k] }));
+
+  const visitsPerSignup = total > 0 ? totalUv / total : 0;          // unique visits ÷ sign-ups
+  const conversionPct   = totalUv > 0 ? (total / totalUv) * 100 : 0; // sign-ups ÷ unique visits
+
+  return json({
+    generated_at: new Date().toISOString(),
+    analytics_enabled: !!env.ANALYTICS,
+    signups: {
+      total,
+      by_day: series(byDay),
+      by_decision: pairs(byDecision),
+      by_id_type: pairs(byIdType),
+    },
+    visits: {
+      total_pageviews: totalPv,
+      total_unique: totalUv,
+      unique_by_day: series(uvByDay),
+      pageviews_by_day: series(pvByDay),
+    },
+    funnel: {
+      unique_visits_per_signup: Number(visitsPerSignup.toFixed(2)),
+      signup_conversion_rate: Number(conversionPct.toFixed(2)),
+    },
+    accounts: {
+      admins, banned, with_email: withEmail,
+      stripe_connected: stripeConnected,
+      bliss_total: blissTotal,
+      capped: total >= MAX,
+    },
+  }, 200, cors);
+}
+
+// ── Public, cookieless pageview beacon ──────────────────────────────────────
+// Visitor identity is a daily-rotating salted hash of IP+UA: no cookie, no
+// stable cross-day identifier, nothing personal stored. No-ops gracefully if
+// the ANALYTICS KV binding isn't present, and never throws into page load.
+async function handleAnalyticsHit(request, env, cors) {
+  if (!env.ANALYTICS) return json({ ok: true, recorded: false }, 200, cors);
+  try {
+    const day = new Date().toISOString().slice(0, 10);
+    const ip = request.headers.get('cf-connecting-ip') || '';
+    const ua = request.headers.get('user-agent') || '';
+    const salt = env.ANALYTICS_SALT || 'eustress';
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${day}|${ip}|${ua}|${salt}`));
+    const hash = [...new Uint8Array(buf)].slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join('');
+
+    const pvKey = `pv:${day}`;
+    await env.ANALYTICS.put(pvKey, String((Number(await env.ANALYTICS.get(pvKey)) || 0) + 1), { expirationTtl: 86400 * 400 });
+
+    const seenKey = `seen:${day}:${hash}`;
+    if (!(await env.ANALYTICS.get(seenKey))) {
+      await env.ANALYTICS.put(seenKey, '1', { expirationTtl: 86400 * 2 });
+      const uvKey = `uv:${day}`;
+      await env.ANALYTICS.put(uvKey, String((Number(await env.ANALYTICS.get(uvKey)) || 0) + 1), { expirationTtl: 86400 * 400 });
+    }
+    return json({ ok: true, recorded: true }, 200, cors);
+  } catch (e) {
+    return json({ ok: false }, 200, cors); // analytics must never break a page load
+  }
 }
 
 async function handleAdminBan(request, env, cors) {

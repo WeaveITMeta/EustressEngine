@@ -43,6 +43,17 @@ id = "c1d7016c782641aeba8662e2fa08b28b"
 binding = "WORKSHOP_CONTEXT"
 id = "44abf849a950492c8699a3fd3b7e3c27"
 
+# Web analytics counters (pageviews + cookieless uniques) feeding /api/admin/stats.
+# The /api/analytics/hit beacon and /api/admin/stats both no-op gracefully until
+# this is bound, so deploys are safe with it commented out. To enable:
+#   1) npx wrangler kv namespace create ANALYTICS
+#   2) paste the printed id below and uncomment this block
+#   3) (optional) npx wrangler secret put ANALYTICS_SALT   # rotates the visitor hash
+#   4) npx wrangler deploy
+# [[kv_namespaces]]
+# binding = "ANALYTICS"
+# id = "PASTE_ANALYTICS_NAMESPACE_ID_HERE"
+
 # R2 bucket for KYC documents (global, jurisdiction prefix in object key)
 [[r2_buckets]]
 binding = "KYC_BUCKET"
