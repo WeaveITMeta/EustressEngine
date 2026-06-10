@@ -18,11 +18,14 @@ use crate::state::JurisdictionState;
 use crate::pages::{
     about::AboutPage,
     acts::ActsPage,
+    admin::AdminPage,
     ai::AiPage,
     home::HomePage,
     login::LoginPage,
     bliss::BlissPage,
     bliss_leaderboard::BlissLeaderboardPage,
+    blog::BlogPage,
+    blog_indie_studios::BlogIndieStudiosPage,
     careers::CareersPage,
     community::CommunityPage,
     contact::ContactPage,
@@ -116,7 +119,23 @@ pub fn App() -> impl IntoView {
     
     // Restore session from localStorage on startup
     app_state.restore_session();
-    
+
+    // Cookieless pageview beacon (feeds the /admin funnel). Fire-and-forget:
+    // a failure here must never affect the app. The Worker no-ops if the
+    // ANALYTICS namespace isn't bound yet.
+    {
+        let api_url = app_state.api_url.clone();
+        spawn_local(async move {
+            let client = crate::api::ApiClient::new(&api_url);
+            let _ = client
+                .post::<serde_json::Value, serde_json::Value>(
+                    "/api/analytics/hit",
+                    &serde_json::json!({}),
+                )
+                .await;
+        });
+    }
+
     // Detect jurisdiction from Cloudflare trace
     let jurisdiction_signal = app_state.jurisdiction;
     spawn_local(async move {
@@ -198,6 +217,8 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/careers") view=CareersPage />
                 <Route path=path!("/contact") view=ContactPage />
                 <Route path=path!("/press") view=PressPage />
+                <Route path=path!("/blog") view=BlogPage />
+                <Route path=path!("/blog/indie-studios") view=BlogIndieStudiosPage />
                 <Route path=path!("/premium") view=PremiumPage />
                 <Route path=path!("/profile/:username") view=ProfilePage />
                 <Route path=path!("/profile") view=ProfilePage />
@@ -216,6 +237,9 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/ai") view=AiPage />
                 <Route path=path!("/settings") view=SettingsPage />
                 <Route path=path!("/friends") view=FriendsPage />
+
+                // Admin-only (server-side gated by requireAdmin)
+                <Route path=path!("/admin") view=AdminPage />
             </Routes>
                         </Router>
                     }.into_any()

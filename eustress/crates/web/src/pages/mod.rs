@@ -9,9 +9,12 @@
 
 pub mod about;
 pub mod acts;
+pub mod admin;
 pub mod ai;
 pub mod bliss;
 pub mod bliss_leaderboard;
+pub mod blog;
+pub mod blog_indie_studios;
 pub mod careers;
 pub mod community;
 pub mod contact;
@@ -59,9 +62,12 @@ pub mod trust_registry;
 
 pub use about::AboutPage;
 pub use acts::ActsPage;
+pub use admin::AdminPage;
 pub use ai::AiPage;
 pub use bliss::BlissPage;
 pub use bliss_leaderboard::BlissLeaderboardPage;
+pub use blog::BlogPage;
+pub use blog_indie_studios::BlogIndieStudiosPage;
 pub use careers::CareersPage;
 pub use community::CommunityPage;
 pub use contact::ContactPage;
