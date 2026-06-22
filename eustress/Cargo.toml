@@ -31,6 +31,7 @@ members = [
     "crates/eustress-fjall",
     "crates/worlddb",
     "crates/data",
+    "crates/data-store",
     "crates/roblox-import",
     "crates/roblox-assets",
     "crates/eustress-space",

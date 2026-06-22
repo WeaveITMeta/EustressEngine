@@ -1,0 +1,23 @@
+# =============================================================================
+# eustress-data-store — the engine-free Data Platform bridge crate
+# =============================================================================
+# Glue between the columnar layer (`eustress-data` Frames) and the storage layer
+# (`eustress-worlddb` datasets/timeseries partitions). It lives in its OWN crate
+# — not the engine — so the materialize/load/query/Recorder logic is fast-
+# testable against a real `FjallWorldDb` with NO bevy/engine build and NO
+# display. Neither leaf depends on the other; this crate is the one place that
+# knows both (DATA_PLATFORM_PLAN.md §A.6 / D2).
+#
+# It is off-the-default-engine-graph: the engine depends on it only under the
+# `data` feature, so arrow/parquet still never enter the core build.
+# =============================================================================
+
+[package]
+name = "eustress-data-store"
+version = "0.1.0"
+edition = "2021"
+description = "Engine-free bridge: eustress-data Frames <-> WorldDb datasets/timeseries partitions (Data Platform)."
+
+[dependencies]
+eustress-data = { path = "../data", features = ["parquet"] }
+eustress-worlddb = { path = "../worlddb" }
