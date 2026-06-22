@@ -29,6 +29,8 @@ pub use error::{DataError, Result};
 pub mod numerics;
 /// Min-max LOD decimation for million-point charts (P3 data side). Pure std.
 pub mod decimate;
+/// k-means clustering + kNN anomaly scoring (P4). Pure std.
+pub mod ml;
 /// FFT / magnitude spectrum (P4). Requires the `spectral` feature.
 #[cfg(feature = "spectral")]
 pub mod spectral;
