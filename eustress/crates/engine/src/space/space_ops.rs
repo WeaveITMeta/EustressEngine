@@ -888,6 +888,7 @@ pub fn apply_space_rescan(
     mut registry: ResMut<crate::space::SpaceFileRegistry>,
     mut material_registry: ResMut<crate::space::material_loader::MaterialRegistry>,
     mut mesh_cache: ResMut<crate::space::instance_loader::PrimitiveMeshCache>,
+    mut decal_materials: ResMut<Assets<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>>,
     space_root: Res<crate::space::SpaceRoot>,
     class_defaults: Option<Res<crate::space::class_defaults::ClassDefaultsRegistry>>,
     mut deferred: ResMut<crate::space::file_loader::DeferredServiceLoader>,
@@ -934,14 +935,14 @@ pub fn apply_space_rescan(
                 FileType::Directory => {
                     crate::space::file_loader::spawn_directory_entry(
                         &mut commands, &asset_server, &mut meshes, &mut materials,
-                        &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
+                        &mut registry, &mut material_registry, &mut mesh_cache, &mut decal_materials, space_path, &entry, None,
                         cd_ref, source,
                     );
                 }
                 _ => {
                     crate::space::file_loader::spawn_file_entry(
                         &mut commands, &asset_server, &mut meshes, &mut materials,
-                        &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
+                        &mut registry, &mut material_registry, &mut mesh_cache, &mut decal_materials, space_path, &entry, None,
                         cd_ref, source,
                     );
                 }

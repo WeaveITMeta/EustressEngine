@@ -86,6 +86,10 @@ pub fn class_is_file_natured(class_name: &str) -> bool {
         | "Frame" | "ScrollingFrame"
         | "TextLabel" | "TextButton" | "TextBox"
         | "ImageLabel" | "ImageButton"
+        // Environment / lighting nodes: small TOML config read by the
+        // directory loader's env arm; keep FileSystem so they are not
+        // skipped on streaming-primary imports.
+        | "Atmosphere" | "Sky" | "Clouds" | "DirectionalLight"
     )
 }
 

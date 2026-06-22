@@ -5,6 +5,16 @@
 
 import { HorizontalBox, VerticalBox, ScrollView, Slider } from "std-widgets.slint";
 import { Theme, IconButton, ToolbarSeparator } from "theme.slint";
+import { ColorSwatchCell, ColorEntry } from "properties.slint";
+
+// One color wheel in the status-bar color picker's first step. `id` is the
+// stable lowercase wheel id the click routes through `pick-wheel(id)`
+// (matching `eustress_common::brick_palette::Wheel::id_str`); `name` is the
+// title-case label.
+export struct WheelData {
+    id: string,
+    name: string,
+}
 
 // Saved identity for multi-user quick switch
 export struct SavedIdentityData {
@@ -346,6 +356,26 @@ export component Ribbon inherits Rectangle {
     // `on-set-display-unit` with the new symbol on user click.
     in property <string> display-unit-symbol: "m";
     callback on-set-display-unit(string);
+
+    // Categorical color picker (status-bar widget, sibling to the unit
+    // selector). Bevy owns the state (ActiveColorWheel + ColorFavorites
+    // Resources); the Slint side is read-only for the values and emits the
+    // three callbacks below.
+    //   - `color-wheels`   : the seven top-level wheels (step 1 rows).
+    //   - `wheel-colors`   : the swatches of the active wheel (step 2 grid);
+    //                        empty when no wheel is drilled into.
+    //   - `favorite-colors`: the user's session favorites (step 1 grid).
+    //   - `active-wheel-id`: "" = step 1 (wheel list), else step 2 (that wheel).
+    in property <[WheelData]> color-wheels: [];
+    in property <[ColorEntry]> wheel-colors: [];
+    in property <[ColorEntry]> favorite-colors: [];
+    in property <string> active-wheel-id: "";
+    // Drill into a wheel by id (or "" to go back to the wheel list).
+    callback pick-wheel(string);
+    // Apply an "r, g, b" (0-255) color to the current selection.
+    callback pick-color(string);
+    // Toggle an "r, g, b" (0-255) color in the favorites list.
+    callback toggle-favorite(string);
 
     // Update system
     in property <bool> update-available: false;
@@ -1119,6 +1149,221 @@ export component Ribbon inherits Rectangle {
                                 DropdownItem { label: "Feet (ft)"; clicked => { root.on-set-display-unit("ft"); } }
                                 DropdownItem { label: "Inches (in)"; clicked => { root.on-set-display-unit("in"); } }
                                 DropdownItem { label: "Studs"; clicked => { root.on-set-display-unit("studs"); } }
+                            }
+                        }
+                    }
+                }
+
+                // 8px gap before color picker badge
+                Rectangle { width: 8px; }
+
+                // Categorical color picker — sibling badge to the unit
+                // selector. Clicking pops a two-step chooser: step 1 lists
+                // the seven color wheels + the user's favorites; step 2
+                // shows the swatches of the drilled-into wheel. The popup is
+                // right-aligned (it's wider than the unit popup) so it never
+                // clips the window's right edge.
+                Rectangle {
+                    width: 80px;
+                    height: 20px;
+                    background: #1a1a2e;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: #2a2a4a;
+
+                    color-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { color-popup.show(); }
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 4px;
+                        alignment: center;
+                        Text {
+                            text: "Colors";
+                            color: #9faaff;
+                            font-size: 10px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: "▾";
+                            color: #6c7080;
+                            font-size: 8px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    color-popup := PopupWindow {
+                        // Right-align: anchor the popup's right edge to the
+                        // badge's right edge so the wider panel grows toward
+                        // the window centre, never off the right side.
+                        x: parent.width - 320px;
+                        y: parent.height + 2px;
+                        width: 320px;
+
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: #00000080;
+                            width: 320px;
+
+                            // Swallow stray clicks so they don't bubble to the
+                            // viewport behind the popup.
+                            TouchArea { }
+
+                            VerticalLayout {
+                                padding: 8px;
+                                spacing: 6px;
+
+                                // ---- STEP 1: wheel list + favorites ----
+                                if root.active-wheel-id == "": VerticalLayout {
+                                    spacing: 6px;
+
+                                    DropdownHeader { label: "COLOR WHEELS"; }
+
+                                    for w[wi] in root.color-wheels: Rectangle {
+                                        height: 24px;
+                                        background: wheel-row-touch.has-hover ? #2a2a3a : transparent;
+                                        border-radius: 4px;
+
+                                        wheel-row-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.pick-wheel(w.id); }
+                                        }
+
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            alignment: space-between;
+                                            Text {
+                                                text: w.name;
+                                                color: Theme.text-primary;
+                                                font-size: 11px;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: "›";
+                                                color: #6c7080;
+                                                font-size: 12px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+
+                                    // FAVORITES grid (hidden when empty).
+                                    if root.favorite-colors.length > 0: DropdownHeader { label: "FAVORITES"; }
+                                    if root.favorite-colors.length > 0: Rectangle {
+                                        // 12 columns max (ColorFavorites::CAP),
+                                        // 22px per cell + ~19px row height.
+                                        width: 12 * 22px;
+                                        height: Math.ceil(root.favorite-colors.length / 12) * 20px + 2px;
+                                        background: transparent;
+
+                                        for fc[fi] in root.favorite-colors: ColorSwatchCell {
+                                            x: Math.mod(fi, 12) * 22px;
+                                            y: Math.floor(fi / 12) * 20px;
+                                            swatch-name: fc.name;
+                                            r: fc.r;
+                                            g: fc.g;
+                                            b: fc.b;
+                                            swatch-clicked => {
+                                                root.pick-color(fc.r + ", " + fc.g + ", " + fc.b);
+                                                color-popup.close();
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ---- STEP 2: one wheel's swatches ----
+                                if root.active-wheel-id != "": VerticalLayout {
+                                    spacing: 6px;
+
+                                    // Back row → return to the wheel list.
+                                    Rectangle {
+                                        height: 24px;
+                                        background: back-row-touch.has-hover ? #2a2a3a : transparent;
+                                        border-radius: 4px;
+
+                                        back-row-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.pick-wheel(""); }
+                                        }
+
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            alignment: start;
+                                            Text {
+                                                text: "‹ Back";
+                                                color: Theme.text-primary;
+                                                font-size: 11px;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+
+                                    // Swatch grid: 12 columns. Left-click a
+                                    // swatch applies its color to the selection;
+                                    // the small star in the top-right corner of
+                                    // each cell toggles that color as a favorite.
+                                    Rectangle {
+                                        width: 12 * 22px;
+                                        height: Math.max(1, Math.ceil(root.wheel-colors.length / 12)) * 20px + 2px;
+                                        background: transparent;
+
+                                        for wc[ci] in root.wheel-colors: Rectangle {
+                                            x: Math.mod(ci, 12) * 22px;
+                                            y: Math.floor(ci / 12) * 20px;
+                                            width: 22px;
+                                            height: 19px;
+
+                                            ColorSwatchCell {
+                                                swatch-name: wc.name;
+                                                r: wc.r;
+                                                g: wc.g;
+                                                b: wc.b;
+                                                swatch-clicked => {
+                                                    root.pick-color(wc.r + ", " + wc.g + ", " + wc.b);
+                                                    color-popup.close();
+                                                }
+                                            }
+
+                                            // Favorite toggle — tiny star hit
+                                            // target pinned to the cell corner.
+                                            star-touch := TouchArea {
+                                                x: 14px;
+                                                y: 0px;
+                                                width: 8px;
+                                                height: 8px;
+                                                mouse-cursor: pointer;
+                                                clicked => {
+                                                    root.toggle-favorite(wc.r + ", " + wc.g + ", " + wc.b);
+                                                }
+                                                Text {
+                                                    text: "★";
+                                                    color: star-touch.has-hover ? Theme.accent-blue : #ffffff60;
+                                                    font-size: 7px;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        text: "Click to apply · ★ to favorite";
+                                        color: #6c7080;
+                                        font-size: 9px;
+                                        wrap: word-wrap;
+                                    }
+                                }
                             }
                         }
                     }

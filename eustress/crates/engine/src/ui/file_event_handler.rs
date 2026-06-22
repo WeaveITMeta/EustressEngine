@@ -1367,7 +1367,10 @@ fn do_import_roblox_place(world: &mut World, source: PathBuf) {
     //    switches `SpaceRoot` — so binary-ECS storage is still achieved, on
     //    the correct (fresh) DB. Defaults route every standard service,
     //    derive a per-Space deterministic UUID salt, and stamp
-    //    `metadata.unit = "m"` (Roblox studs map 1:1 to Eustress meters).
+    //    `metadata.unit = "ft"` (1 stud = 1 foot; the engine converts ft→m at
+    //    load). This is set by `ImportOptions::default()` — both opts sites
+    //    below spread `..Default::default()`, so no struct-literal field is
+    //    needed here.
     #[cfg(feature = "world-db")]
     let opts = eustress_roblox_import::ImportOptions {
         // NOTE: intentionally None — see the comment above. Never reuse the

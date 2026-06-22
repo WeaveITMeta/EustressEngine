@@ -56,6 +56,7 @@ impl ClassSpawner for AttachmentSpawner {
                 .get_string("metadata.name")
                 .unwrap_or("Attachment")
                 .to_string(),
+            ..Default::default()
         };
 
         let instance = instance_from_bag(ClassName::Attachment, props);

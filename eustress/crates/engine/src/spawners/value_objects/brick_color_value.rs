@@ -8,6 +8,12 @@
 //! BrickColor palette). Eustress keeps the raw `i32`; downstream code resolves
 //! it to an RGB triple via the palette table when a color is actually needed.
 //!
+//! That palette table now exists as [`eustress_common::brick_palette`]; the
+//! stored index resolves to an sRGB triple via
+//! [`eustress_common::brick_palette::srgb_for_index`]. Use
+//! [`BrickColorValueSpawner::resolved_srgb`] as the convenience wrapper so the
+//! resolution rule (and its out-of-range fallback) lives in one place.
+//!
 //! ## Roblox value
 //!
 //! A Roblox `BrickColor` may surface through the Wave 2 adapter as
@@ -27,6 +33,18 @@ use eustress_common::{Attributes, Tags};
 /// Zero-sized spawner for [`ClassName::BrickColorValue`].
 #[derive(Default)]
 pub struct BrickColorValueSpawner;
+
+impl BrickColorValueSpawner {
+    /// Resolve a stored `BrickColorValue.value` index to its sRGB triple.
+    ///
+    /// Thin wrapper over [`eustress_common::brick_palette::srgb_for_index`] so
+    /// downstream code (renderers, exporters, the color widget) has one
+    /// canonical resolution point — including the out-of-range fallback that
+    /// function applies.
+    pub fn resolved_srgb(value: i32) -> [u8; 3] {
+        eustress_common::brick_palette::srgb_for_index(value)
+    }
+}
 
 impl ClassSpawner for BrickColorValueSpawner {
     fn class_name(&self) -> ClassName {
@@ -218,5 +236,15 @@ mod tests {
     #[test]
     fn stub_persistence_round_trips_through_empty() {
         assert!(BrickColorValueSpawner.deserialize(&[]).is_empty());
+    }
+
+    #[test]
+    fn resolved_srgb_matches_palette_table() {
+        // The convenience wrapper must agree with the common palette fn for the
+        // default index (194 = "Medium stone grey").
+        assert_eq!(
+            BrickColorValueSpawner::resolved_srgb(194),
+            eustress_common::brick_palette::srgb_for_index(194),
+        );
     }
 }

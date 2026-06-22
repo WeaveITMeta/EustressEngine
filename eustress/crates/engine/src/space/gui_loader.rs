@@ -44,6 +44,17 @@ pub struct GuiTomlFile {
     pub gui: GuiTomlProperties,
     #[serde(default)]
     pub text: Option<GuiTomlText>,
+    /// `[image]` — ImageLabel / ImageButton tint + scale (image SOURCE is in
+    /// `[asset].path`, not here).
+    #[serde(default)]
+    pub image: Option<GuiTomlImage>,
+    /// `[scrolling]` — ScrollingFrame canvas / scrollbar config.
+    #[serde(default)]
+    pub scrolling: Option<GuiTomlScrolling>,
+    /// `[viewport]` — ViewportFrame ambient/light config (data round-trip only;
+    /// no offscreen render yet).
+    #[serde(default)]
+    pub viewport: Option<GuiTomlViewport>,
     // ScreenGui files may use instance_loader format with [asset], [transform], [properties]
     #[serde(default)]
     pub asset: Option<toml::Value>,
@@ -194,6 +205,83 @@ pub struct GuiTomlText {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub text_scaled: bool,
 }
+
+/// `[image]` section — ImageLabel / ImageButton appearance. The image
+/// SOURCE path lives in `[asset].path` (the importer routes the `Image`
+/// asset_ref through the asset resolver); `image` here is only a fallback.
+/// Every color field MUST use `de_color_rgb_or_rgba` so a 3-element 0-255
+/// integer RGB array doesn't fail the whole gui parse.
+#[derive(Debug, Deserialize, Serialize, Default)]
+pub struct GuiTomlImage {
+    /// Fallback image path (importer normally writes the source to [asset].path).
+    #[serde(default)]
+    pub image: String,
+    #[serde(default = "default_image_color", deserialize_with = "de_color_rgb_or_rgba")]
+    pub image_color: [f32; 4],
+    #[serde(default)]
+    pub image_transparency: f32,
+    #[serde(default)]
+    pub scale_type: String,
+    #[serde(default)]
+    pub slice_center: Vec<f32>,
+    #[serde(default)]
+    pub slice_scale: f32,
+    #[serde(default)]
+    pub tile_size: Vec<f32>,
+    /// ImageButton-only: hover/pressed swap images (stored, not yet wired).
+    #[serde(default)]
+    pub hover_image: String,
+    #[serde(default)]
+    pub pressed_image: String,
+}
+
+/// `[scrolling]` section — ScrollingFrame canvas + scrollbar config.
+#[derive(Debug, Deserialize, Serialize, Default)]
+pub struct GuiTomlScrolling {
+    #[serde(default)]
+    pub scrolling_enabled: bool,
+    #[serde(default)]
+    pub scroll_bar_thickness: i32,
+    #[serde(default)]
+    pub canvas_size: Vec<f32>,
+    #[serde(default)]
+    pub canvas_position: Vec<f32>,
+    #[serde(default)]
+    pub scrolling_direction: String,
+    #[serde(default = "default_scrollbar_color", deserialize_with = "de_color_rgb_or_rgba")]
+    pub scroll_bar_image_color: [f32; 4],
+    #[serde(default)]
+    pub scroll_bar_image_transparency: f32,
+    #[serde(default)]
+    pub elastic_behavior: String,
+    #[serde(default)]
+    pub top_image: String,
+    #[serde(default)]
+    pub mid_image: String,
+    #[serde(default)]
+    pub bottom_image: String,
+}
+
+/// `[viewport]` section — ViewportFrame ambient/light config. Data
+/// round-trip only; the offscreen-render subsystem is a deferred FEATURE.
+#[derive(Debug, Deserialize, Serialize, Default)]
+pub struct GuiTomlViewport {
+    #[serde(default = "default_viewport_ambient", deserialize_with = "de_color_rgb_or_rgba")]
+    pub ambient: [f32; 4],
+    #[serde(default = "default_viewport_light_color", deserialize_with = "de_color_rgb_or_rgba")]
+    pub light_color: [f32; 4],
+    #[serde(default)]
+    pub light_direction: Vec<f32>,
+    #[serde(default = "default_image_color", deserialize_with = "de_color_rgb_or_rgba")]
+    pub image_color: [f32; 4],
+    #[serde(default)]
+    pub image_transparency: f32,
+}
+
+fn default_image_color() -> [f32; 4] { [1.0, 1.0, 1.0, 1.0] }
+fn default_scrollbar_color() -> [f32; 4] { [0.3, 0.3, 0.3, 1.0] }
+fn default_viewport_ambient() -> [f32; 4] { [0.78, 0.78, 0.78, 1.0] }
+fn default_viewport_light_color() -> [f32; 4] { [1.0, 1.0, 1.0, 1.0] }
 
 /// Map a font name to a CSS-style weight. Conservative: anything with "Bold"
 /// becomes 700, "Light" becomes 300, otherwise 400. Slint's software renderer
@@ -353,6 +441,9 @@ pub fn create_default_gui_toml(class_name: &str, display_name: &str) -> GuiTomlF
         instance: GuiTomlInstance {
             name: display_name.to_string(),
         },
+        image: None,
+        scrolling: None,
+        viewport: None,
         metadata: GuiTomlMetadata {
             class_name: class_name.to_string(),
             archivable: true,
@@ -717,11 +808,16 @@ pub fn spawn_gui_element(
         "TextLabel" => spawn_text_label_element(commands, instance, loaded_from, &display_name, gui, gui_def.text.as_ref()),
         "TextButton" => spawn_text_button_element(commands, instance, loaded_from, &display_name, gui, gui_def.text.as_ref()),
         "Frame" => spawn_frame_element(commands, instance, loaded_from, &display_name, gui),
-        "ScrollingFrame" => spawn_scrolling_frame_element(commands, instance, loaded_from, &display_name, gui),
+        "ScrollingFrame" => spawn_scrolling_frame_element(commands, instance, loaded_from, &display_name, gui, gui_def),
         "TextBox" => spawn_text_box_element(commands, instance, loaded_from, &display_name, gui, gui_def.text.as_ref()),
-        // Media classes — render as placeholder frames with class label until
+        // ImageLabel / ImageButton: render the actual image (source in
+        // [asset].path, resolved against the folder) via GuiElementDisplay.image_path.
+        "ImageLabel" | "ImageButton" => {
+            spawn_image_element(commands, instance, loaded_from, &display_name, gui, gui_def, path)
+        }
+        // Remaining media classes — placeholder frames with class label until
         // full media rendering is implemented (PDF, video, web, viewport)
-        "ImageLabel" | "ImageButton" | "DocumentFrame" | "VideoFrame" | "WebFrame" | "ViewportFrame" => {
+        "DocumentFrame" | "VideoFrame" | "WebFrame" | "ViewportFrame" => {
             // Use placeholder text showing the class type
             let placeholder_text = Some(GuiTomlText {
                 text: format!("[{}]", gui_type),
@@ -971,20 +1067,142 @@ fn spawn_frame_element_with_text(
     entity
 }
 
-/// ScrollingFrame — container with clip and scroll
+/// ScrollingFrame — container with clip and scroll. Attaches the typed
+/// `ScrollingFrame` component from the importer-written `[scrolling]`
+/// section and seeds the display's initial scroll offset from
+/// `canvas_position` so clip + starting scroll are honored on load.
+/// (Live scroll input + scrollbar visuals remain a deferred FEATURE.)
 fn spawn_scrolling_frame_element(
     commands: &mut Commands,
     instance: eustress_common::classes::Instance,
     loaded_from: super::file_loader::LoadedFromFile,
     display_name: &str,
     gui: &GuiTomlProperties,
+    gui_def: &GuiTomlFile,
 ) -> Entity {
+    let mut display = gui_display_from_props(gui, None, "ScrollingFrame");
+
+    // Build the typed component from [scrolling]; default-fill the rest.
+    let mut sf = eustress_common::classes::ScrollingFrame::default();
+    if let Some(s) = gui_def.scrolling.as_ref() {
+        sf.scrolling_enabled = s.scrolling_enabled;
+        if s.scroll_bar_thickness != 0 {
+            sf.scroll_bar_thickness = s.scroll_bar_thickness;
+        }
+        if s.canvas_size.len() == 2 {
+            sf.canvas_size = [s.canvas_size[0], s.canvas_size[1]];
+        }
+        if s.canvas_position.len() == 2 {
+            sf.canvas_position = [s.canvas_position[0], s.canvas_position[1]];
+        }
+        sf.scroll_bar_image_color3 = [
+            s.scroll_bar_image_color[0],
+            s.scroll_bar_image_color[1],
+            s.scroll_bar_image_color[2],
+        ];
+        sf.scroll_bar_image_transparency = s.scroll_bar_image_transparency;
+        if !s.top_image.is_empty() { sf.top_image = s.top_image.clone(); }
+        if !s.mid_image.is_empty() { sf.mid_image = s.mid_image.clone(); }
+        if !s.bottom_image.is_empty() { sf.bottom_image = s.bottom_image.clone(); }
+    }
+    sf.visible = gui.visible;
+    sf.z_index = gui.z_index;
+
+    // Seed the renderer's initial scroll offset from canvas_position.
+    display.scroll_x = sf.canvas_position[0];
+    display.scroll_y = sf.canvas_position[1];
+
     let entity = commands.spawn((
         instance,
         Name::new(display_name.to_string()),
         // No bevy_ui Node — see spawn_frame_element PERF note.
-        gui_display_from_props(gui, None, "ScrollingFrame"),
+        display,
+        sf,
     )).id();
+    commands.entity(entity).insert(loaded_from);
+    entity
+}
+
+/// ImageLabel / ImageButton — resolves the image SOURCE from
+/// `[asset].path` (importer-written) with a `[image].image` fallback,
+/// joins it against the GUI folder, sets `GuiElementDisplay.image_path`
+/// (the Slint overlay renderer reads this), and attaches the typed
+/// ImageLabel / ImageButton component so the Properties panel sees real
+/// data. (ImageButton hover/pressed state-swap is a deferred FEATURE.)
+fn spawn_image_element(
+    commands: &mut Commands,
+    instance: eustress_common::classes::Instance,
+    loaded_from: super::file_loader::LoadedFromFile,
+    display_name: &str,
+    gui: &GuiTomlProperties,
+    gui_def: &GuiTomlFile,
+    path: &Path,
+) -> Entity {
+    let is_button = matches!(instance.class_name, eustress_common::classes::ClassName::ImageButton);
+    let class_str = if is_button { "ImageButton" } else { "ImageLabel" };
+
+    // Image SOURCE: [asset].path first (importer), then [image].image.
+    let rel_image: Option<String> = gui_def
+        .asset
+        .as_ref()
+        .and_then(|a| a.get("path"))
+        .and_then(|p| p.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            gui_def
+                .image
+                .as_ref()
+                .map(|i| i.image.clone())
+                .filter(|s| !s.is_empty())
+        });
+
+    // Resolve the relative path against the GUI folder for slint load.
+    let mut display = gui_display_from_props(gui, None, class_str);
+    if let Some(rel) = rel_image.as_ref() {
+        if !rel.is_empty() {
+            let base = path.parent().unwrap_or(Path::new("."));
+            let abs = base.join(rel);
+            display.image_path = abs.to_string_lossy().to_string();
+        }
+    }
+
+    let img = gui_def.image.as_ref();
+    let image_color3 = img
+        .map(|i| [i.image_color[0], i.image_color[1], i.image_color[2]])
+        .unwrap_or([1.0, 1.0, 1.0]);
+    let image_transparency = img.map(|i| i.image_transparency).unwrap_or(0.0);
+    let resolved_image = rel_image.unwrap_or_default();
+
+    let entity = commands.spawn((
+        instance,
+        Name::new(display_name.to_string()),
+        // No bevy_ui Node — see spawn_frame_element PERF note.
+        display,
+    )).id();
+
+    if is_button {
+        let hover = img.map(|i| i.hover_image.clone()).unwrap_or_default();
+        let pressed = img.map(|i| i.pressed_image.clone()).unwrap_or_default();
+        commands.entity(entity).insert(eustress_common::classes::ImageButton {
+            image: resolved_image,
+            hover_image: hover,
+            pressed_image: pressed,
+            image_color3,
+            image_transparency,
+            visible: gui.visible,
+            z_index: gui.z_index,
+            ..Default::default()
+        });
+    } else {
+        commands.entity(entity).insert(eustress_common::classes::ImageLabel {
+            image: resolved_image,
+            image_color3,
+            image_transparency,
+            visible: gui.visible,
+            z_index: gui.z_index,
+            ..Default::default()
+        });
+    }
     commands.entity(entity).insert(loaded_from);
     entity
 }

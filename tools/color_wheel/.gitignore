@@ -1,0 +1,15 @@
+# Virtual environment
+.venv/
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Generated artifacts
+palette_manifest.json
+color_manifest.ndjson
+color_manifest.parquet

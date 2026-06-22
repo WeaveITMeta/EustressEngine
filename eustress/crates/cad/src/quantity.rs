@@ -160,13 +160,18 @@ fn force_to_newtons(u: ForceUnit) -> f64 {
 mod tests {
     use super::*;
 
+    fn approx(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-12, "expected {b}, got {a}");
+    }
+
     #[test]
     fn parse_common_forms() {
-        assert_eq!(Quantity::parse("50 mm").unwrap().to_si(), 0.05);
-        assert_eq!(Quantity::parse("1.5m").unwrap().to_si(), 1.5);
-        assert_eq!(Quantity::parse("90 deg").unwrap().to_si(),
-                   90.0_f64.to_radians());
-        assert_eq!(Quantity::parse("2 studs").unwrap().to_si(), 2.0);
-        assert_eq!(Quantity::parse("12 in").unwrap().to_si(), 0.3048);
+        approx(Quantity::parse("50 mm").unwrap().to_si(), 0.05);
+        approx(Quantity::parse("1.5m").unwrap().to_si(), 1.5);
+        approx(Quantity::parse("90 deg").unwrap().to_si(), 90.0_f64.to_radians());
+        approx(Quantity::parse("2 studs").unwrap().to_si(), 2.0);
+        // 12 in = 1 ft: unit factors multiply (0.0254 * 12), so allow
+        // one ulp of float drift against the exact 0.3048.
+        approx(Quantity::parse("12 in").unwrap().to_si(), 0.3048);
     }
 }

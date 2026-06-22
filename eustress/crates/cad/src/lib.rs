@@ -27,21 +27,23 @@
 //!                                                      + Avian collider)
 //! ```
 //!
-//! ## Shipped in this increment (v0)
+//! ## Shipped
 //!
 //! - `Quantity` + unit registry (length, angle, mass, force)
 //! - TOML schemas for `FeatureTree`, `Sketch`, `Feature::*`
-//! - Working **Extrude** feature end-to-end (sketch rectangle →
-//!   solid prism via truck)
-//! - Stubs + TODO markers for Revolve / Fillet / Chamfer / Shell /
-//!   Sweep / Loft / Mirror / Pattern — each has a typed variant
-//!   + an `evaluate` arm that logs "not yet implemented"
-//! - STL export path (truck-meshalgo already does this natively)
+//! - Working evaluators: Extrude, Revolve, Mirror, Pattern
+//!   (linear/circular), Boolean, Split, Hole
+//! - Real tessellation: [`tessellate_solid`] — truck Solid →
+//!   flat triangle arrays ([`EvalMesh`]) via truck-meshalgo, with
+//!   robust-retry for boolean output and per-tree
+//!   `metadata.mesh_tolerance` override
 //!
 //! ## What lands next
 //!
-//! Individual feature evaluators — each is a focused add (Extrude is
-//! the template). Sketch solver lands alongside the constraint types.
+//! Sweep / Loft / Shell evaluators; Fillet / Chamfer once
+//! truck-shapeops stabilizes upstream. Sketch solver lands as
+//! in-house Levenberg-Marquardt over constraint residuals (see
+//! docs/architecture/CAD_PLATFORM_PLAN.md Phase C).
 
 pub mod quantity;
 pub mod feature_tree;
@@ -61,17 +63,34 @@ pub use feature::{
     PatternKind, BooleanOp, EndCondition,
 };
 pub use error::{CadError, CadResult};
+pub use eval::{
+    evaluate_tree, tessellate_solid,
+    EvalOutput, EvalMesh, EntryStatus, DEFAULT_MESH_TOLERANCE,
+};
+
+/// Parse a feature tree from a TOML string. This is the primary entry
+/// point — feature trees live as TOML documents in the WorldDb tree
+/// partition, so they usually arrive as strings, not files.
+pub fn parse_tree(s: &str) -> CadResult<FeatureTree> {
+    toml::from_str(s).map_err(|e| CadError::Parse(e.to_string()))
+}
+
+/// Serialize a feature tree to a TOML string (the inverse of
+/// [`parse_tree`] — what gets written to the tree partition).
+pub fn tree_to_toml(tree: &FeatureTree) -> CadResult<String> {
+    toml::to_string_pretty(tree).map_err(|e| CadError::Serialize(e.to_string()))
+}
 
 /// Load a feature tree from TOML on disk. Callers pass the path to
 /// `<part>/features.toml`.
 pub fn load_tree(path: &std::path::Path) -> CadResult<FeatureTree> {
     let s = std::fs::read_to_string(path)
         .map_err(|e| CadError::Io(format!("read {:?}: {e}", path)))?;
-    toml::from_str(&s).map_err(|e| CadError::Parse(e.to_string()))
+    parse_tree(&s)
 }
 
 /// Write a feature tree to TOML on disk.
 pub fn save_tree(path: &std::path::Path, tree: &FeatureTree) -> CadResult<()> {
-    let s = toml::to_string_pretty(tree).map_err(|e| CadError::Serialize(e.to_string()))?;
+    let s = tree_to_toml(tree)?;
     std::fs::write(path, s).map_err(|e| CadError::Io(format!("write {:?}: {e}", path)))
 }

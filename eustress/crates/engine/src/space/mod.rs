@@ -55,6 +55,10 @@ pub mod world_db_plugin;
 /// both the columnar leaf (`data`) and the storage trait (`world-db`).
 #[cfg(all(feature = "data", feature = "world-db"))]
 pub mod dataset_store;
+/// P2 — the Data Platform Recorder seam: sensor samples → the `timeseries`
+/// partition, via a bounded drop-on-full channel + batched flush.
+#[cfg(all(feature = "data", feature = "world-db"))]
+pub mod data_recorder;
 /// Sim orchestration (Phase 6 engine seam + thin Phase 3 driver): lowers
 /// newly-resident residency cells into forge `SimCell`s and gang-schedules
 /// them through the in-forge reconciler. Gated on `sim-orchestration` (which

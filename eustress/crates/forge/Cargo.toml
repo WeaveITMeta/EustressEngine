@@ -9,8 +9,19 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Core orchestration platform
-# Using tls-ring for pure Rust crypto (no cmake/MSVC required on Windows)
-forge-orchestration = { version = "0.4.2", default-features = false, features = ["nomad", "quic", "tls-ring"] }
+# Using tls-ring for pure Rust crypto (no cmake/MSVC required on Windows).
+# 0.6.0 adds the scheduler::{sim,gang,deadline,reconcile} surface the Phase-2
+# `sim` module is built on, plus the RaftStateStore behind `raft-persist`
+# (the cross-node replicated cell-slice substrate — see `sim` module docs).
+# `raft-persist` implies `raft` (=> dep:openraft) and pulls dep:fjall, which
+# the workspace [patch.crates-io] fjall fork redirects transparently.
+forge-orchestration = { version = "0.6", default-features = false, features = ["nomad", "quic", "tls-ring", "raft-persist"] }
+
+# WorldDb is the local entity source-of-truth; the sim module reuses its
+# Morton cell encoding (keys::world_to_cell, MortonKeyEncoder, morton3_*)
+# so the residency-cell <-> Forge-SimCell mapping shares ONE coordinate
+# system with the engine's spatial-interest substrate (no const drift).
+eustress-worlddb = { path = "../worlddb" }
 
 # Core async runtime
 tokio = { workspace = true }
@@ -46,6 +57,27 @@ default = ["full"]
 full = ["metrics", "quic"]
 metrics = []
 quic = []
+
+# Forwarding gates for the upstream Raft storage backend. `raft` compiles the
+# in-memory RaftStateStore (bootstrap_single_node / start_node); `raft-persist`
+# additionally compiles open_persistent (Fjall-backed). The wrapper's
+# forge-orchestration dep already turns `raft-persist` on by default (see the
+# [dependencies] line), so both `RaftStateStore` and `open_persistent` are
+# available out of the box; these named gates exist so a consumer can express
+# the intent and so the `sim` module / demo bin can require them explicitly.
+raft = ["forge-orchestration/raft"]
+raft-persist = ["forge-orchestration/raft-persist", "raft"]
+
+# Public gate for the Phase-2 agents-in-sims scheduling module + headless demo.
+# Pulls in raft-persist (the SimCell submission channel + replicated cell-slice
+# ride on the same RaftStateStore). Default OFF so the game-server wrapper
+# (jobs/config/routing) stays buildable without linking openraft.
+sim-orchestration = ["raft-persist"]
+
+[[bin]]
+name = "forge-sim-demo"
+path = "src/bin/forge_sim_demo.rs"
+required-features = ["sim-orchestration"]
 
 [dev-dependencies]
 tokio-test = "0.4"

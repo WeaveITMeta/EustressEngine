@@ -8,6 +8,7 @@
 use bevy::prelude::*;
 use bevy::camera::primitives::MeshAabb;
 use bevy::camera::visibility::VisibilityRange;
+use bevy::pbr::decal::ForwardDecalMaterial;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1354,6 +1355,7 @@ pub fn spawn_instance_from_toml_str(
     materials: &mut Assets<StandardMaterial>,
     material_registry: &mut super::material_loader::MaterialRegistry,
     mesh_cache: &mut PrimitiveMeshCache,
+    decal_materials: &mut Assets<ForwardDecalMaterial<StandardMaterial>>,
     synthetic_toml_path: PathBuf,
     content: &str,
 ) -> Result<Entity, String> {
@@ -1364,6 +1366,7 @@ pub fn spawn_instance_from_toml_str(
         materials,
         material_registry,
         mesh_cache,
+        decal_materials,
         synthetic_toml_path,
         instance,
     ))
@@ -1670,15 +1673,16 @@ impl PrimitiveMeshCache {
 /// property** (`WorkspaceComponent.render_distance`, exposed via
 /// `PropertyAccess`). Metres; integer precision is ample for a cull
 /// radius and sidesteps any const-fn float-bits concern. Seeded to
-/// `WorkspaceComponent::default().render_distance` (300 — perf QW4b
-/// lowered it from 5000 so large imports cull most parts for a local
-/// camera; the user can raise it in the Properties panel). The
-/// Workspace-property apply path calls [`set_workspace_render_distance`]
-/// so editing the property in the Properties panel drives every part's
-/// `VisibilityRange`. NOT a hardcoded constant — it is the Workspace
-/// property's value at runtime.
+/// `WorkspaceComponent::default().render_distance` (1000 — perf QW4b
+/// had lowered it to 300/500 so large imports cull most parts for a
+/// local camera; raised back to 1000 on 2026-06-10 with the size-aware
+/// cull margin landing, and the user can change it in the Properties
+/// panel). The Workspace-property apply path calls
+/// [`set_workspace_render_distance`] so editing the property in the
+/// Properties panel drives every part's `VisibilityRange`. NOT a
+/// hardcoded constant — it is the Workspace property's value at runtime.
 static WORKSPACE_RENDER_DISTANCE_M: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(500);
+    std::sync::atomic::AtomicU32::new(1000);
 
 /// Push the Workspace `RenderDistance` property value into the live
 /// mirror. Call this wherever `WorkspaceComponent` is applied / when
@@ -1693,17 +1697,44 @@ pub fn set_workspace_render_distance(meters: f32) {
 /// Distance-cull component applied to every spawned part, driven by the
 /// customizable Workspace `RenderDistance`. Zero-width margins == a
 /// hard cut (no crossfade); `use_aabb: false` measures to the entity
-/// origin (cheap; parts are small). HONEST SCOPE: a built-in,
-/// zero-rewrite frame-rate lever that wins on large worlds /
-/// walk-throughs / the 2.1M case; it does NOT help a camera centred
-/// inside a grid smaller than the render distance (the 50k benchmark
-/// at default 5000 m) — that still needs streaming-primary.
-pub fn part_visibility_range() -> VisibilityRange {
+/// origin (cheap; and Bevy's `use_aabb: true` is no better here — it
+/// measures to the AABB *center*, which for a part IS the origin).
+///
+/// `half_extent` is the part's bounding-sphere radius (world metres,
+/// `scale.length() / 2` for a unit-cube mesh scaled to size). It
+/// extends the cull distance so LARGE parts cull by their nearest
+/// extent, not their centre: a 512 m baseplate whose origin sits 600 m
+/// away is still under the camera's feet, and an origin-only test was
+/// blinking exactly such parts out ("base plate disappears too
+/// quickly", 2026-06-10). Sphere-vs-sphere: visible while ANY point of
+/// the part's bounding sphere is within `RenderDistance`. For ordinary
+/// small parts (`half_extent` ≈ 1–3 m) this changes nothing.
+///
+/// HONEST SCOPE: a built-in, zero-rewrite frame-rate lever that wins
+/// on large worlds / walk-throughs / the 2.1M case; it does NOT help a
+/// camera centred inside a grid smaller than the render distance (the
+/// 50k benchmark at default 5000 m) — that still needs
+/// streaming-primary.
+pub fn part_visibility_range(half_extent: f32) -> VisibilityRange {
     let far = WORKSPACE_RENDER_DISTANCE_M.load(std::sync::atomic::Ordering::Relaxed) as f32;
+    let far = far + half_extent.max(0.0);
     VisibilityRange {
         start_margin: 0.0..0.0,
         end_margin: far..far,
         use_aabb: false,
+    }
+}
+
+/// Bounding-sphere radius (half-extent) of a part from its world
+/// `Transform.scale` — for unit-mesh parts, scale IS the world size,
+/// so the bounding sphere of the scaled unit cube has radius
+/// `|scale| / 2`. Non-finite scales (mid-load) clamp to zero.
+pub fn part_half_extent(scale: Vec3) -> f32 {
+    let r = scale.length() * 0.5;
+    if r.is_finite() {
+        r
+    } else {
+        0.0
     }
 }
 
@@ -1723,7 +1754,7 @@ pub fn sync_workspace_render_distance(
         &crate::space::service_loader::ServiceComponent,
         Changed<crate::space::service_loader::ServiceComponent>,
     >,
-    parts_q: Query<Entity, With<eustress_common::classes::Part>>,
+    parts_q: Query<(Entity, &Transform), With<eustress_common::classes::Part>>,
 ) {
     use crate::space::service_loader::PropertyValue;
     for svc in service_q.iter() {
@@ -1732,8 +1763,12 @@ pub fn sync_workspace_render_distance(
         }
         if let Some(PropertyValue::Float(v)) = svc.properties.get("render_distance") {
             set_workspace_render_distance(*v as f32);
-            for e in parts_q.iter() {
-                commands.entity(e).insert(part_visibility_range());
+            for (e, transform) in parts_q.iter() {
+                // Transform.scale = world size for unit-mesh parts, so
+                // the re-stamp keeps each part's size-aware cull margin.
+                commands
+                    .entity(e)
+                    .insert(part_visibility_range(part_half_extent(transform.scale)));
             }
         }
     }
@@ -1745,6 +1780,7 @@ pub fn spawn_instance(
     materials: &mut Assets<StandardMaterial>,
     material_registry: &mut super::material_loader::MaterialRegistry,
     mesh_cache: &mut PrimitiveMeshCache,
+    decal_materials: &mut Assets<ForwardDecalMaterial<StandardMaterial>>,
     toml_path: PathBuf,
     instance: InstanceDefinition,
 ) -> Entity {
@@ -1948,6 +1984,10 @@ pub fn spawn_instance(
             Name::new(name.clone()),
         )).id();
         commands.entity(entity).insert(measure_unit);
+        // Data-only VFX attach: ParticleEmitter/Beam carry no [asset] so they
+        // land here. Attaches the typed component from [particle]/[beam] so
+        // Properties + scripts see live data (renderers are still stubs).
+        attach_vfx_component(&mut commands.entity(entity), class_name, &instance.extra);
         // DEBUG: per-entity; an INFO here is a log-I/O stall at scale.
         debug!("🌅 Spawned non-visual instance '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
         return entity;
@@ -2148,7 +2188,7 @@ pub fn spawn_instance(
         let mut ec = commands.entity(entity);
         ec.insert(PartEntity { part_id });
         ec.insert(measure_unit);
-        ec.insert(part_visibility_range());
+        ec.insert(part_visibility_range(part_half_extent(scale)));
 
         // Only add physics collider when can_collide is true — avoids broadphase
         // overhead for thousands of static decorative parts.
@@ -2196,6 +2236,16 @@ pub fn spawn_instance(
         }
         // Attach UI ECS component if this is a UI class
         attach_ui_component(&mut ec, class_name, instance.ui.as_ref());
+        // End the EntityCommands borrow so the decal/mesh attach (which
+        // needs `&mut commands`) can run on the bound `entity` id. MUST run
+        // BEFORE the PendingExtraSections insert below: it removes the
+        // consumed `decal`/`mesh` key from `instance.extra` so the section
+        // is never double-dispatched.
+        drop(ec);
+        attach_decal_mesh_component(
+            commands, entity, asset_server, decal_materials, class_name,
+            &mut instance.extra, render_transform, &name,
+        );
         // Extra sections — anything present in the TOML that
         // neither the base template nor `InstanceDefinition` typed
         // fields consumed. Landed as `PendingExtraSections` so the
@@ -2204,7 +2254,7 @@ pub fn spawn_instance(
         // it. Unclaimed sections are preserved on disk via the
         // `extra` flatten field for future plugin pickup.
         if !instance.extra.is_empty() {
-            ec.insert(eustress_common::class_schema::PendingExtraSections {
+            commands.entity(entity).insert(eustress_common::class_schema::PendingExtraSections {
                 sections: instance.extra.clone(),
             });
         }
@@ -2286,7 +2336,7 @@ pub fn spawn_instance(
     let mut ec = commands.entity(entity);
     ec.insert(PartEntity { part_id });
     ec.insert(measure_unit);
-    ec.insert(part_visibility_range());
+    ec.insert(part_visibility_range(part_half_extent(scale)));
 
     // Only add physics collider when can_collide is true — avoids broadphase
     // overhead for thousands of static decorative parts.
@@ -2357,11 +2407,19 @@ pub fn spawn_instance(
     }
     // Attach UI ECS component if this is a UI class
     attach_ui_component(&mut ec, class_name, instance.ui.as_ref());
+    // End the EntityCommands borrow before the decal/mesh attach (needs
+    // `&mut commands`); the attach removes the consumed `decal`/`mesh` key
+    // so PendingExtraSections below never double-dispatches it.
+    drop(ec);
+    attach_decal_mesh_component(
+        commands, entity, asset_server, decal_materials, class_name,
+        &mut instance.extra, render_transform, &name,
+    );
     // Extra sections — see the custom-mesh branch above for
     // rationale. Third-party plugins claim these via
     // `ExtraSectionRegistry`.
     if !instance.extra.is_empty() {
-        ec.insert(eustress_common::class_schema::PendingExtraSections {
+        commands.entity(entity).insert(eustress_common::class_schema::PendingExtraSections {
             sections: instance.extra.clone(),
         });
     }
@@ -2532,6 +2590,273 @@ pub fn attach_ui_component(
                 scroll_bar_thickness: u.scroll_bar_thickness,
                 ..Default::default()
             });
+        }
+        _ => {}
+    }
+}
+
+// ============================================================================
+// Read-side hydrator helpers (Decal / SpecialMesh / ParticleEmitter / Beam)
+// ============================================================================
+
+/// Borrow a named `[section]` table out of the flattened `extra` map
+/// (case-insensitive on the section name).
+fn section_table<'a>(
+    extra: &'a std::collections::HashMap<String, toml::Value>,
+    name: &str,
+) -> Option<&'a toml::value::Table> {
+    extra
+        .get(name)
+        .or_else(|| extra.get(&name.to_ascii_uppercase()))
+        .and_then(|v| v.as_table())
+}
+
+/// `[r,g,b]` (or `[r,g,b,a]`) 0-255 INTEGER array → normalized `[f32;4]`
+/// RGBA. Tries `as_integer` (÷255) THEN `as_float` (pass-through) per
+/// channel so either encoding survives. Missing/short arrays fall back to
+/// the supplied default.
+fn color_u8_array_to_rgba(v: Option<&toml::Value>, fallback: [f32; 4]) -> [f32; 4] {
+    let Some(arr) = v.and_then(|v| v.as_array()) else {
+        return fallback;
+    };
+    if arr.len() != 3 && arr.len() != 4 {
+        return fallback;
+    }
+    let channel = |i: usize, def: f32| -> f32 {
+        match arr.get(i) {
+            Some(c) => c
+                .as_integer()
+                .map(|n| n as f32 / 255.0)
+                .or_else(|| c.as_float().map(|f| f as f32))
+                .unwrap_or(def),
+            None => def,
+        }
+    };
+    [
+        channel(0, fallback[0]),
+        channel(1, fallback[1]),
+        channel(2, fallback[2]),
+        if arr.len() == 4 { channel(3, fallback[3]) } else { fallback[3] },
+    ]
+}
+
+/// Read a scalar that may be authored as int OR float.
+fn toml_f32(v: Option<&toml::Value>) -> Option<f32> {
+    v.and_then(|v| {
+        v.as_float()
+            .or_else(|| v.as_integer().map(|n| n as f64))
+            .map(|f| f as f32)
+    })
+}
+
+/// Read a 3-element array (int or float) → `Vec3`.
+fn toml_vec3(v: Option<&toml::Value>) -> Option<Vec3> {
+    let arr = v.and_then(|v| v.as_array())?;
+    if arr.len() != 3 {
+        return None;
+    }
+    let mut out = [0.0f32; 3];
+    for (slot, item) in out.iter_mut().zip(arr.iter()) {
+        *slot = item.as_float().or_else(|| item.as_integer().map(|n| n as f64))? as f32;
+    }
+    Some(Vec3::from_array(out))
+}
+
+/// Map an importer `[decal].face` string → engine `Face` enum.
+fn face_from_str(s: &str) -> eustress_common::classes::Face {
+    use eustress_common::classes::Face;
+    match s {
+        "Top" => Face::Top,
+        "Bottom" => Face::Bottom,
+        "Back" => Face::Back,
+        "Left" => Face::Left,
+        "Right" => Face::Right,
+        _ => Face::Front,
+    }
+}
+
+/// Map an importer `[mesh].mesh_type` string → engine `MeshType` enum.
+fn mesh_type_from_str(s: &str) -> eustress_common::classes::MeshType {
+    use eustress_common::classes::MeshType;
+    match s {
+        "Head" => MeshType::Head,
+        "Torso" => MeshType::Torso,
+        "Brick" => MeshType::Brick,
+        "Sphere" => MeshType::Sphere,
+        "Cylinder" => MeshType::Cylinder,
+        _ => MeshType::FileMesh,
+    }
+}
+
+/// Attach the Decal / SpecialMesh component from the importer-written
+/// `[decal]` / `[mesh]` section. For a `Decal` it ALSO spawns a real
+/// `ForwardDecal` child (a bare `Decal` component renders nothing) and
+/// parents it to `host`. The consumed `decal`/`mesh` key is REMOVED from
+/// `extra` so the later `PendingExtraSections` insert never double-
+/// dispatches it.
+fn attach_decal_mesh_component(
+    commands: &mut Commands,
+    host: Entity,
+    asset_server: &AssetServer,
+    decal_materials: &mut Assets<ForwardDecalMaterial<StandardMaterial>>,
+    class_name: eustress_common::classes::ClassName,
+    extra: &mut std::collections::HashMap<String, toml::Value>,
+    base_transform: Transform,
+    name: &str,
+) {
+    use eustress_common::classes::{ClassName, Decal, Instance, SpecialMesh};
+    match class_name {
+        ClassName::Decal => {
+            let Some(sec) = section_table(extra, "decal") else { return; };
+            let color = color_u8_array_to_rgba(sec.get("color"), [1.0, 1.0, 1.0, 1.0]);
+            let transparency = toml_f32(sec.get("transparency")).unwrap_or(0.0);
+            let z_index = sec
+                .get("z_index")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(0) as i32;
+            let face = sec
+                .get("face")
+                .and_then(|v| v.as_str())
+                .map(face_from_str)
+                .unwrap_or(eustress_common::classes::Face::Front);
+            let texture = sec
+                .get("texture")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let decal = Decal {
+                texture,
+                face,
+                transparency,
+                color,
+                z_index,
+                ..Default::default()
+            };
+            let inst = Instance {
+                name: name.to_string(),
+                class_name: ClassName::Decal,
+                archivable: true,
+                id: 0,
+                ai: false,
+                uuid: String::new(),
+            };
+            let decal_entity = crate::spawn::spawn_decal(
+                commands,
+                asset_server,
+                decal_materials,
+                inst,
+                decal,
+                base_transform,
+            );
+            commands.entity(decal_entity).insert(ChildOf(host));
+            extra.remove("decal");
+            extra.remove("Decal");
+        }
+        ClassName::SpecialMesh => {
+            let Some(sec) = section_table(extra, "mesh") else { return; };
+            let mut sm = SpecialMesh::default();
+            if let Some(s) = sec.get("mesh_type").and_then(|v| v.as_str()) {
+                sm.mesh_type = mesh_type_from_str(s);
+            }
+            if let Some(v) = toml_vec3(sec.get("scale")) {
+                sm.scale = v;
+            }
+            if let Some(v) = toml_vec3(sec.get("offset")) {
+                sm.offset = v;
+            }
+            if let Some(s) = sec.get("mesh_id").and_then(|v| v.as_str()) {
+                sm.mesh_id = s.to_string();
+            }
+            commands.entity(host).insert(sm);
+            // texture_id / vertex_color have no SpecialMesh field — leave
+            // them in `extra` for round-trip.
+            extra.remove("mesh");
+            extra.remove("Mesh");
+        }
+        _ => {}
+    }
+}
+
+/// Attach the data-only ParticleEmitter / Beam component from the
+/// importer `[particle]` / `[beam]` section. These classes have no
+/// `[asset]`, so they hit the no-mesh branch and read from the flattened
+/// `extra` map. NOTHING renders yet (particles.rs / beams.rs are stubs) —
+/// this makes the data live for Properties / scripts only.
+fn attach_vfx_component(
+    ec: &mut bevy::ecs::system::EntityCommands,
+    class_name: eustress_common::classes::ClassName,
+    extra: &std::collections::HashMap<String, toml::Value>,
+) {
+    use eustress_common::classes::{Beam, ClassName, ParticleEmitter};
+    match class_name {
+        ClassName::ParticleEmitter => {
+            let Some(sec) = section_table(extra, "particle") else { return; };
+            let mut p = ParticleEmitter::default();
+            if let Some(v) = sec.get("enabled").and_then(|v| v.as_bool()) { p.enabled = v; }
+            if let Some(v) = toml_f32(sec.get("rate")) { p.rate = v; }
+            if let Some(v) = toml_f32(sec.get("drag")) { p.drag = v; }
+            if let Some(v) = toml_f32(sec.get("lifetime_min")) { p.lifetime.0 = v; }
+            if let Some(v) = toml_f32(sec.get("lifetime_max")) { p.lifetime.1 = v; }
+            if let Some(v) = toml_f32(sec.get("speed_min")) { p.speed.0 = v; }
+            if let Some(v) = toml_f32(sec.get("speed_max")) { p.speed.1 = v; }
+            if let Some(v) = toml_f32(sec.get("size")) { p.size = (v, v); }
+            if let Some(v) = toml_f32(sec.get("spread_angle")) { p.spread_angle = Vec2::splat(v); }
+            if let Some(v) = toml_f32(sec.get("rotation_speed_min")) { p.rotation_speed.0 = v; }
+            if let Some(v) = toml_f32(sec.get("rotation_speed_max")) { p.rotation_speed.1 = v; }
+            // light_emission is a float on the wire (>0 ⇒ emit).
+            if let Some(v) = toml_f32(sec.get("light_emission")) { p.light_emission = v > 0.0; }
+            if let Some(s) = sec.get("texture").and_then(|v| v.as_str()) { p.texture = s.to_string(); }
+            // Color (+ transparency) → 2-key color_sequence.
+            if let Some(rgba) = sec
+                .get("color")
+                .map(|c| color_u8_array_to_rgba(Some(c), [1.0, 1.0, 1.0, 1.0]))
+            {
+                let alpha = 1.0 - toml_f32(sec.get("transparency")).unwrap_or(0.0);
+                let start = Color::srgba(rgba[0], rgba[1], rgba[2], alpha);
+                let end = Color::srgba(rgba[0], rgba[1], rgba[2], 0.0);
+                p.color_sequence = vec![(0.0, start), (1.0, end)];
+            }
+            ec.insert(p);
+        }
+        ClassName::Beam => {
+            let Some(sec) = section_table(extra, "beam") else { return; };
+            let mut b = Beam::default();
+            if let Some(v) = sec.get("enabled").and_then(|v| v.as_bool()) { b.enabled = v; }
+            if let Some(v) = toml_f32(sec.get("width0")) { b.width0 = v; }
+            if let Some(v) = toml_f32(sec.get("width1")) { b.width1 = v; }
+            if let Some(v) = toml_f32(sec.get("curve_size0")) { b.curve_size0 = v; }
+            if let Some(v) = toml_f32(sec.get("curve_size1")) { b.curve_size1 = v; }
+            if let Some(v) = sec.get("segments").and_then(|v| v.as_integer()) { b.segments = v.max(0) as u32; }
+            if let Some(v) = toml_f32(sec.get("brightness")) { b.brightness = v; }
+            if let Some(v) = toml_f32(sec.get("light_emission")) { b.light_emission = v; }
+            if let Some(v) = toml_f32(sec.get("texture_length")) { b.texture_length = v; }
+            if let Some(v) = toml_f32(sec.get("texture_speed")) { b.texture_speed = v; }
+            if let Some(s) = sec.get("texture").and_then(|v| v.as_str()) { b.texture = s.to_string(); }
+            if let Some(v) = sec.get("face_camera").and_then(|v| v.as_bool()) {
+                b.face_mode = if v {
+                    eustress_common::classes::BeamFaceMode::FaceCamera
+                } else {
+                    eustress_common::classes::BeamFaceMode::Fixed
+                };
+            }
+            if let Some(s) = sec.get("texture_mode").and_then(|v| v.as_str()) {
+                b.texture_mode = match s {
+                    "Stretch" => eustress_common::classes::TextureMode::Stretch,
+                    "Static" => eustress_common::classes::TextureMode::Static,
+                    _ => eustress_common::classes::TextureMode::Tile,
+                };
+            }
+            if let Some(rgba) = sec
+                .get("color")
+                .map(|c| color_u8_array_to_rgba(Some(c), [1.0, 1.0, 1.0, 1.0]))
+            {
+                let c = Color::srgba(rgba[0], rgba[1], rgba[2], 1.0);
+                b.color_sequence = vec![(0.0, c), (1.0, c)];
+            }
+            if let Some(t) = toml_f32(sec.get("transparency")) {
+                b.transparency_sequence = vec![(0.0, t), (1.0, t)];
+            }
+            ec.insert(b);
         }
         _ => {}
     }

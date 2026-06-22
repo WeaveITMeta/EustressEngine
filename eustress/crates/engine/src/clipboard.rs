@@ -1663,6 +1663,12 @@ fn spawn_pasted_entity(
             let mat_reg = material_registry.unwrap_or(&mut default_mat_reg);
             let mut default_mesh_cache = crate::space::instance_loader::PrimitiveMeshCache::default();
             let mesh_c = mesh_cache.unwrap_or(&mut default_mesh_cache);
+            // Decal/SpecialMesh paste is rare here; this throwaway store mirrors
+            // the mat_reg/mesh_cache defaults above. A pasted Decal would land
+            // its ForwardDecal in this transient store and not render until the
+            // next reload — acceptable for the clipboard path.
+            let mut decal_materials =
+                bevy::asset::Assets::<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>::default();
 
             let entity = crate::space::instance_loader::spawn_instance(
                 commands,
@@ -1670,6 +1676,7 @@ fn spawn_pasted_entity(
                 materials,
                 mat_reg,
                 mesh_c,
+                &mut decal_materials,
                 toml_path.clone(),
                 instance_def,
             );

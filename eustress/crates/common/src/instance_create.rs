@@ -154,6 +154,13 @@ pub struct InstanceOverrides {
     pub scale: Option<[f32; 3]>,
     /// Optional RGBA color override. Sets `[properties].color`.
     pub color_rgba: Option<[f32; 4]>,
+    /// Roblox BrickColor palette number (the `u16` token) when the source
+    /// color came from a `BrickColor` property. Carries the token to the
+    /// per-place `color_manifest` (`roblox_brick` column); the additive
+    /// `[metadata].roblox_brick_color` key is written separately by the
+    /// importer. `None` for raw `Color3` / `Color3uint8` parts and for every
+    /// non-import create surface.
+    pub brick_number: Option<u16>,
     /// Optional material preset name. Sets `[properties].material`.
     pub material: Option<String>,
     /// Optional anchored flag. Sets `[properties].anchored`.

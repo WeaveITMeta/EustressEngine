@@ -406,12 +406,20 @@ pub fn spawn_binary_instance(
     let def_for_spawn = arch_instance::arch_to_instance(&arch);
 
     // 4. Spawn (shared path) + marker + parent under Workspace.
+    // Binary-ECS records are bare Parts (the router guards out custom-mesh /
+    // file-natured classes), so they never carry a `[decal]`/`[mesh]` section
+    // → a throwaway decal-material store is never written. The real
+    // ForwardDecalMaterial<StandardMaterial> Assets is a render resource the
+    // residency caller doesn't hold; a stack-local default is correct here.
+    let mut decal_materials =
+        bevy::asset::Assets::<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>::default();
     let entity = spawn_instance(
         commands,
         asset_server,
         materials,
         material_registry,
         mesh_cache,
+        &mut decal_materials,
         synthetic,
         def_for_spawn,
     );
@@ -557,12 +565,17 @@ pub(crate) fn spawn_binary_core(
     let def = arch_instance::arch_to_instance(&arch);
     let t2 = timing.then(std::time::Instant::now);
 
+    // Bare binary-ECS part — never a Decal/SpecialMesh host (see
+    // spawn_binary_instance). Stack-local decal store; never written.
+    let mut decal_materials =
+        bevy::asset::Assets::<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>::default();
     let entity = spawn_instance(
         commands,
         asset_server,
         materials,
         material_registry,
         mesh_cache,
+        &mut decal_materials,
         synthetic,
         def,
     );
@@ -1188,6 +1201,17 @@ fn mirror_binary_ecs_changes(
     }
 }
 
+/// Public SystemSet wrapping the residency load/mirror/evict `.chain()` so
+/// downstream plugins (e.g. `space::sim_orchestration::SimOrchestrationPlugin`)
+/// can order themselves `.after(ResidencyChainSet)` without reaching into the
+/// chain's internals. Tagging the existing tuple with `.in_set(...)` adds NO
+/// ordering by itself — the `.chain()` still enforces the load-bearing
+/// mirror-before-evict order. Only present under `world-db` (this whole module
+/// is gated on it); `sim-orchestration` implies `world-db`, so the set always
+/// exists when the sim driver names it.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ResidencyChainSet;
+
 /// Register the binary-ECS load + save systems. Called from
 /// [`super::world_db_plugin::WorldDbPlugin`].
 pub fn register(app: &mut App) {
@@ -1220,7 +1244,8 @@ pub fn register(app: &mut App) {
                 super::residency::sys_residency_evict,
                 super::hlod::sys_hlod_visibility,
             )
-                .chain(),
+                .chain()
+                .in_set(ResidencyChainSet),
         )
         // HLOD merge-collect (polls finished worker builds + spawns proxies)
         // and the Space-switch teardown run outside the ordered chain — they

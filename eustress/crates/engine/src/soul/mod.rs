@@ -30,6 +30,9 @@ pub mod rune_ecs_module;
 pub mod physics_bridge;
 pub mod gui_bridge;
 pub mod parallel_execution;
+/// L12 Kernel — Rune rewrite validator (agent-RSI accept/reject gate).
+/// See `kernel/mod.rs` for the scope distinction vs. universe-level law RSI.
+pub mod kernel;
 
 pub use builder::*;
 pub use cache::*;

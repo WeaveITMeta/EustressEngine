@@ -728,6 +728,7 @@ pub fn spawn_file_entry(
     registry: &mut ResMut<SpaceFileRegistry>,
     material_registry: &mut ResMut<super::material_loader::MaterialRegistry>,
     mesh_cache: &mut ResMut<super::instance_loader::PrimitiveMeshCache>,
+    decal_materials: &mut ResMut<Assets<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>>,
     space_path: &Path,
     file_meta: &FileMetadata,
     parent_entity: Option<Entity>,
@@ -811,6 +812,7 @@ pub fn spawn_file_entry(
                             materials,
                             material_registry,
                             mesh_cache,
+                            decal_materials,
                             file_meta.path.clone(),
                             instance,
                         );
@@ -1141,6 +1143,7 @@ pub fn spawn_directory_entry(
     registry: &mut ResMut<SpaceFileRegistry>,
     material_registry: &mut ResMut<super::material_loader::MaterialRegistry>,
     mesh_cache: &mut ResMut<super::instance_loader::PrimitiveMeshCache>,
+    decal_materials: &mut ResMut<Assets<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>>,
     space_path: &Path,
     dir_meta: &FileMetadata,
     parent_entity: Option<Entity>,
@@ -1209,14 +1212,14 @@ pub fn spawn_directory_entry(
                 FileType::Directory => {
                     spawn_directory_entry(
                         commands, asset_server, meshes, materials, registry,
-                        material_registry, mesh_cache, space_path, child, Some(service_entity),
+                        material_registry, mesh_cache, decal_materials, space_path, child, Some(service_entity),
                         class_defaults, source,
                     );
                 }
                 _ => {
                     spawn_file_entry(
                         commands, asset_server, meshes, materials, registry,
-                        material_registry, mesh_cache, space_path, child, Some(service_entity),
+                        material_registry, mesh_cache, decal_materials, space_path, child, Some(service_entity),
                         class_defaults, source,
                     );
                 }
@@ -1272,6 +1275,15 @@ pub fn spawn_directory_entry(
         && !dir_meta.children.iter().any(|c| c.file_type == FileType::Directory)
         && super::representation::representation_for(&format!("{:?}", class_name), None)
             == super::representation::Representation::BinaryEcs
+        // Part-subclasses (SpawnLocation/Seat/VehicleSeat) render via the
+        // widened Part arm + attach their subclass component; never let the
+        // streaming-primary skip drop them on large imports.
+        && !matches!(
+            class_name,
+            eustress_common::classes::ClassName::SpawnLocation
+                | eustress_common::classes::ClassName::Seat
+                | eustress_common::classes::ClassName::VehicleSeat
+        )
     {
         let has_custom_mesh = source.exists(&instance_toml_rel)
             && src_read_string(source, space_path, &instance_toml_path)
@@ -1852,6 +1864,7 @@ pub fn spawn_directory_entry(
                     materials,
                     material_registry,
                     mesh_cache,
+                    decal_materials,
                     instance_toml,
                     instance_def,
                 )
@@ -1916,6 +1929,179 @@ pub fn spawn_directory_entry(
                 )).id()
             }
         }
+    } else if matches!(class_name,
+        eustress_common::classes::ClassName::Atmosphere
+        | eustress_common::classes::ClassName::Sky
+        | eustress_common::classes::ClassName::Clouds
+        | eustress_common::classes::ClassName::DirectionalLight,
+    ) {
+        // Environment folder — hydrate the AUTHORED Atmosphere / Sky / Clouds /
+        // DirectionalLight component from the importer-written [section] so the
+        // scene renders with the imported values (not clear_day defaults). We
+        // insert the typed component in the SAME spawn, so `hydrate_lighting_
+        // entities`' `Without<Sky>`/`Without<EustressAtmosphere>` filters skip
+        // these entities (no double-hydrate). `sync_atmosphere_to_rendering`
+        // and `manage_cloud_particles` fire on the Changed<> insert.
+        use eustress_common::classes::{
+            Atmosphere, Sky, SkyboxTextures, Clouds, EustressDirectionalLight,
+        };
+        use crate::plugins::lighting_plugin::LightingServiceOwner;
+        use eustress_common::services::lighting::EustressAtmosphere;
+
+        let instance_toml = dir_meta.path.join("_instance.toml");
+        let toml_value: Option<toml::Value> =
+            src_read_string(source, space_path, &instance_toml)
+                .ok()
+                .and_then(|s| toml::from_str(&s).ok());
+
+        // u8 0-255 RGB array (÷255) → [f32;4] alpha 1.0; try int THEN float.
+        let rgba4 = |sec: Option<&toml::Value>, key: &str, fallback: [f32; 4]| -> [f32; 4] {
+            let Some(arr) = sec.and_then(|s| s.get(key)).and_then(|v| v.as_array()) else {
+                return fallback;
+            };
+            if arr.len() != 3 && arr.len() != 4 {
+                return fallback;
+            }
+            let ch = |i: usize, def: f32| -> f32 {
+                arr.get(i)
+                    .and_then(|v| v.as_integer().map(|n| n as f32 / 255.0).or_else(|| v.as_float().map(|f| f as f32)))
+                    .unwrap_or(def)
+            };
+            [ch(0, fallback[0]), ch(1, fallback[1]), ch(2, fallback[2]),
+             if arr.len() == 4 { ch(3, fallback[3]) } else { fallback[3] }]
+        };
+        let f32_at = |sec: Option<&toml::Value>, key: &str| -> Option<f32> {
+            sec.and_then(|s| s.get(key))
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|n| n as f64)))
+                .map(|f| f as f32)
+        };
+        let bool_at = |sec: Option<&toml::Value>, key: &str| -> Option<bool> {
+            sec.and_then(|s| s.get(key)).and_then(|v| v.as_bool())
+        };
+        let str_at = |sec: Option<&toml::Value>, key: &str| -> Option<String> {
+            sec.and_then(|s| s.get(key)).and_then(|v| v.as_str()).map(|s| s.to_string())
+        };
+
+        // Position (lights/sky/atmosphere are positionless, but keep transform).
+        let position = toml_value
+            .as_ref()
+            .and_then(|v| v.get("transform"))
+            .and_then(|t| t.get("position"))
+            .and_then(|p| p.as_array())
+            .and_then(|arr| Some(Vec3::new(
+                arr.first()?.as_float()? as f32,
+                arr.get(1)?.as_float()? as f32,
+                arr.get(2)?.as_float()? as f32,
+            )))
+            .unwrap_or(Vec3::ZERO);
+
+        let spawned = commands.spawn((
+            eustress_common::classes::Instance {
+                name: dir_meta.name.clone(),
+                class_name,
+                archivable: true,
+                id: 0,
+                ai: false,
+                uuid: instance_uuid.clone(),
+            },
+            LoadedFromFile {
+                path: dir_meta.path.clone(),
+                file_type: FileType::Directory,
+                service: dir_meta.service.clone(),
+            },
+            super::instance_loader::InstanceFile {
+                toml_path: instance_toml,
+                mesh_path: std::path::PathBuf::new(),
+                name: dir_meta.name.clone(),
+            },
+            Name::new(dir_meta.name.clone()),
+            Transform::from_translation(position),
+            Visibility::default(),
+        )).id();
+
+        match class_name {
+            eustress_common::classes::ClassName::Atmosphere => {
+                let sec = toml_value.as_ref().and_then(|v| v.get("atmosphere"));
+                let d = Atmosphere::default();
+                let atmo = Atmosphere {
+                    density: f32_at(sec, "density").unwrap_or(d.density),
+                    offset: f32_at(sec, "offset").unwrap_or(d.offset),
+                    color: rgba4(sec, "color", d.color),
+                    // Importer writes `decay_color`; older files may use `decay`.
+                    decay: if sec.and_then(|s| s.get("decay_color")).is_some() {
+                        rgba4(sec, "decay_color", d.decay)
+                    } else {
+                        rgba4(sec, "decay", d.decay)
+                    },
+                    glare: f32_at(sec, "glare").unwrap_or(d.glare),
+                    haze: f32_at(sec, "haze").unwrap_or(d.haze),
+                };
+                commands.entity(spawned).insert((
+                    atmo,
+                    EustressAtmosphere::default(),
+                    LightingServiceOwner,
+                ));
+            }
+            eustress_common::classes::ClassName::Sky => {
+                let sec = toml_value.as_ref().and_then(|v| v.get("sky"));
+                let d = Sky::default();
+                let sky = Sky {
+                    skybox_textures: SkyboxTextures {
+                        back: str_at(sec, "skybox_back").unwrap_or_default(),
+                        front: str_at(sec, "skybox_front").unwrap_or_default(),
+                        left: str_at(sec, "skybox_left").unwrap_or_default(),
+                        right: str_at(sec, "skybox_right").unwrap_or_default(),
+                        up: str_at(sec, "skybox_top").unwrap_or_default(),
+                        down: str_at(sec, "skybox_bottom").unwrap_or_default(),
+                    },
+                    star_count: sec
+                        .and_then(|s| s.get("star_count"))
+                        .and_then(|v| v.as_integer())
+                        .map(|n| n.max(0) as u32)
+                        .unwrap_or(d.star_count),
+                    celestial_bodies_shown: bool_at(sec, "celestial_bodies_shown")
+                        .unwrap_or(d.celestial_bodies_shown),
+                };
+                commands.entity(spawned).insert((sky, LightingServiceOwner));
+            }
+            eustress_common::classes::ClassName::Clouds => {
+                let sec = toml_value.as_ref().and_then(|v| v.get("clouds"));
+                let d = Clouds::default();
+                let clouds = Clouds {
+                    enabled: bool_at(sec, "enabled").unwrap_or(d.enabled),
+                    density: f32_at(sec, "density").unwrap_or(d.density),
+                    // Importer writes `cover` → engine `coverage`.
+                    coverage: f32_at(sec, "cover").unwrap_or(d.coverage),
+                    color: rgba4(sec, "color", d.color),
+                    ..d
+                };
+                commands.entity(spawned).insert((clouds, LightingServiceOwner));
+            }
+            _ => {
+                // DirectionalLight
+                let sec = toml_value.as_ref().and_then(|v| v.get("light"));
+                let color = rgba4(sec, "color", [1.0, 1.0, 1.0, 1.0]);
+                let brightness = f32_at(sec, "brightness").unwrap_or(1.0);
+                let shadows = bool_at(sec, "shadows").unwrap_or(true);
+                let mut edl = EustressDirectionalLight::default();
+                edl.brightness = brightness;
+                edl.color = Color::srgb(color[0], color[1], color[2]);
+                edl.shadows = shadows;
+                commands.entity(spawned).insert((
+                    DirectionalLight {
+                        color: Color::srgb(color[0], color[1], color[2]),
+                        illuminance: brightness * 10_000.0,
+                        shadows_enabled: shadows,
+                        shadow_depth_bias: edl.shadow_depth_bias,
+                        shadow_normal_bias: edl.shadow_normal_bias,
+                        ..default()
+                    },
+                    edl,
+                    LightingServiceOwner,
+                ));
+            }
+        }
+        spawned
     } else if matches!(class_name,
         eustress_common::classes::ClassName::PointLight
         | eustress_common::classes::ClassName::SpotLight
@@ -2173,7 +2359,7 @@ pub fn spawn_directory_entry(
             FileType::Directory => {
                 spawn_directory_entry(
                     commands, asset_server, meshes, materials, registry,
-                    material_registry, mesh_cache, space_path, child, Some(folder_entity),
+                    material_registry, mesh_cache, decal_materials, space_path, child, Some(folder_entity),
                     class_defaults, source,
                 );
             }
@@ -2185,7 +2371,7 @@ pub fn spawn_directory_entry(
                 }
                 spawn_file_entry(
                     commands, asset_server, meshes, materials, registry,
-                    material_registry, mesh_cache, space_path, child, Some(folder_entity),
+                    material_registry, mesh_cache, decal_materials, space_path, child, Some(folder_entity),
                     class_defaults, source,
                 );
             }
@@ -2551,6 +2737,7 @@ pub fn load_space_files_system(
     mut registry: ResMut<SpaceFileRegistry>,
     mut material_registry: ResMut<super::material_loader::MaterialRegistry>,
     mut mesh_cache: ResMut<super::instance_loader::PrimitiveMeshCache>,
+    mut decal_materials: ResMut<Assets<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>>,
     space_root: Res<super::SpaceRoot>,
     class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
     mut deferred: ResMut<DeferredServiceLoader>,
@@ -2674,14 +2861,14 @@ pub fn load_space_files_system(
                 FileType::Directory => {
                     spawn_directory_entry(
                         &mut commands, &asset_server, &mut meshes, &mut materials,
-                        &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
+                        &mut registry, &mut material_registry, &mut mesh_cache, &mut decal_materials, space_path, &entry, None,
                         cd_ref, source,
                     );
                 }
                 _ => {
                     spawn_file_entry(
                         &mut commands, &asset_server, &mut meshes, &mut materials,
-                        &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
+                        &mut registry, &mut material_registry, &mut mesh_cache, &mut decal_materials, space_path, &entry, None,
                         cd_ref, source,
                     );
                 }
@@ -2744,6 +2931,7 @@ pub fn drain_paste_spawn_queue(
     mut registry: ResMut<SpaceFileRegistry>,
     mut material_registry: ResMut<super::material_loader::MaterialRegistry>,
     mut mesh_cache: ResMut<super::instance_loader::PrimitiveMeshCache>,
+    mut decal_materials: ResMut<Assets<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>>,
     space_root: Res<super::SpaceRoot>,
     class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
     mut queue: ResMut<PasteSpawnQueue>,
@@ -2791,6 +2979,7 @@ pub fn drain_paste_spawn_queue(
             &mut registry,
             &mut material_registry,
             &mut mesh_cache,
+            &mut decal_materials,
             &space_path,
             &dir_meta,
             parent_entity,
@@ -2810,6 +2999,7 @@ pub fn load_deferred_services(
     mut registry: ResMut<SpaceFileRegistry>,
     mut material_registry: ResMut<super::material_loader::MaterialRegistry>,
     mut mesh_cache: ResMut<super::instance_loader::PrimitiveMeshCache>,
+    mut decal_materials: ResMut<Assets<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>>,
     space_root: Res<super::SpaceRoot>,
     class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
     mut deferred: ResMut<DeferredServiceLoader>,
@@ -2841,14 +3031,14 @@ pub fn load_deferred_services(
         FileType::Directory => {
             spawn_directory_entry(
                 &mut commands, &asset_server, &mut meshes, &mut materials,
-                &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
+                &mut registry, &mut material_registry, &mut mesh_cache, &mut decal_materials, space_path, &entry, None,
                 cd_ref, source,
             );
         }
         _ => {
             spawn_file_entry(
                 &mut commands, &asset_server, &mut meshes, &mut materials,
-                &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
+                &mut registry, &mut material_registry, &mut mesh_cache, &mut decal_materials, space_path, &entry, None,
                 cd_ref, source,
             );
         }
@@ -2872,6 +3062,7 @@ pub fn drain_pending_spawns(
     mut registry: ResMut<SpaceFileRegistry>,
     mut material_registry: ResMut<super::material_loader::MaterialRegistry>,
     mut mesh_cache: ResMut<super::instance_loader::PrimitiveMeshCache>,
+    mut decal_materials: ResMut<Assets<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>>,
     space_root: Res<super::SpaceRoot>,
     class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
     gen: Res<SpaceLoadGeneration>,
@@ -2922,14 +3113,14 @@ pub fn drain_pending_spawns(
             FileType::Directory => {
                 spawn_directory_entry(
                     &mut commands, &asset_server, &mut meshes, &mut materials,
-                    &mut registry, &mut material_registry, &mut mesh_cache, space_path, &meta, parent,
+                    &mut registry, &mut material_registry, &mut mesh_cache, &mut decal_materials, space_path, &meta, parent,
                     cd_ref, source,
                 );
             }
             _ => {
                 spawn_file_entry(
                     &mut commands, &asset_server, &mut meshes, &mut materials,
-                    &mut registry, &mut material_registry, &mut mesh_cache, space_path, &meta, parent,
+                    &mut registry, &mut material_registry, &mut mesh_cache, &mut decal_materials, space_path, &meta, parent,
                     cd_ref, source,
                 );
             }

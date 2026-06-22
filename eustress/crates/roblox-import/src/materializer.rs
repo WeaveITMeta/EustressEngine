@@ -120,7 +120,11 @@ pub struct ImportOptions {
     pub space_salt: Option<Vec<u8>>,
 
     /// Authoring unit symbol stamped into `metadata.unit`. Defaults to
-    /// `"m"` — Eustress is meter-native and Roblox studs map 1:1.
+    /// `"ft"` — imported Roblox parts treat 1 stud = 1 foot; the engine's
+    /// unit system converts ft->m (x0.3048) at the load boundary. Verbatim
+    /// Size / Position / CFrame stud numbers are unchanged; the tag does the
+    /// conversion. Angular props (Orientation, CFrame rotation) are never
+    /// unit-converted.
     pub unit_symbol: Option<String>,
 
     /// Optional asset fetcher (spec §11 / §19.3). `None` (the default)
@@ -159,7 +163,7 @@ impl Default for ImportOptions {
             recompute_csg_when_missing: true,
             transform_scripts: true,
             space_salt: None,
-            unit_symbol: Some("m".to_string()),
+            unit_symbol: Some("ft".to_string()),
             asset_fetcher: None,
             storage: ImportStorage::default(),
             #[cfg(feature = "binary-sink")]
@@ -238,6 +242,11 @@ pub struct Materializer<'dom> {
     /// in a binary storage mode — all go through this.
     toml_sink: TomlSink,
 
+    /// Per-place color manifest accumulated during the walk and flushed to
+    /// `<space_root>/.eustress/color_manifest.ndjson` in [`Materializer::run`].
+    /// One row per colored `BasePart` — the extract stage of the color study.
+    color_manifest: crate::color_manifest::ColorManifestWriter,
+
     /// The binary-ECS sink. Present only under the `binary-sink` feature
     /// AND when a `world_db` handle was supplied in a binary storage mode
     /// (`BinaryDirect`/`Hybrid`); otherwise binary modes degrade to TOML.
@@ -250,6 +259,13 @@ struct TomlPatch {
     extras: HashMap<String, toml::Value>,
     physics: HashMap<String, toml::Value>,
     attributes: HashMap<String, toml::Value>,
+    /// Additive `[metadata]` scalar keys (e.g. `roblox_brick_color`,
+    /// `roblox_color_srgb`) lifted from `PropertyBag::metadata_extras`.
+    metadata: HashMap<String, toml::Value>,
+    /// Overrides for whole top-level sections other than `[properties]`
+    /// (`section -> key -> value`) from `PropertyBag::section_props` — GUI
+    /// `[text]` / `[gui]` keys merged onto the class template.
+    section_props: HashMap<String, HashMap<String, toml::Value>>,
     tags: Vec<String>,
     refs_uuid: HashMap<String, String>,
     refs_unresolved: HashMap<String, String>,
@@ -339,6 +355,7 @@ impl<'dom> Materializer<'dom> {
             pending_patches: HashMap::new(),
             storage,
             toml_sink,
+            color_manifest: crate::color_manifest::ColorManifestWriter::default(),
             #[cfg(feature = "binary-sink")]
             binary_sink,
         })
@@ -396,6 +413,17 @@ impl<'dom> Materializer<'dom> {
 
         self.finalise_pending_patches()?;
         self.finalise_refs(report)?;
+
+        // ── Flush the per-place color manifest ──
+        if !self.color_manifest.is_empty() {
+            let dir = self.space_root.join(".eustress");
+            if std::fs::create_dir_all(&dir).is_ok() {
+                let path = dir.join("color_manifest.ndjson");
+                if self.color_manifest.flush_ndjson(&path).is_ok() {
+                    report.color_manifest_path = Some(path);
+                }
+            }
+        }
 
         report.elapsed = start.elapsed();
         Ok(())
@@ -932,6 +960,34 @@ impl<'dom> Materializer<'dom> {
         let uuid_hex = uuid_bytes_to_hex(uuid.as_bytes());
         self.referent_to_uuid.insert(referent, uuid);
 
+        // ── Color manifest row (one per colored part) ──
+        // Emitted here so BOTH the TOML and binary-ECS write paths
+        // contribute uniformly. Gated on a resolved color (default-grey
+        // parts carry no Color/BrickColor variant and are skipped).
+        if let Some(rgba) = overrides.color_rgba {
+            let srgb = [
+                (rgba[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+                (rgba[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+                (rgba[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+            ];
+            let pos = overrides.position.unwrap_or([0.0, 0.0, 0.0]);
+            let part_id = u64::from_be_bytes(uuid.as_bytes()[..8].try_into().unwrap());
+            self.color_manifest.push(crate::color_manifest::ColorRow {
+                world_id: self
+                    .space_root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string(),
+                part_id,
+                srgb,
+                oklch: crate::color_manifest::srgb_to_oklch(rgba[0], rgba[1], rgba[2]),
+                roblox_brick: overrides.brick_number,
+                class: eustress_class.as_str().to_string(),
+                morton: crate::color_manifest::morton_for(pos),
+            });
+        }
+
         // A node may take the binary fast-path only if it is a bare leaf:
         // no dedicated decoder (Terrain / CSG), no children to recurse
         // into, no `Ref` host-patching, and no script body. The sink itself
@@ -1052,6 +1108,12 @@ impl<'dom> Materializer<'dom> {
         }
         for t in bag.tags {
             patch.tags.push(t);
+        }
+        for (k, v) in bag.metadata_extras {
+            patch.metadata.insert(k, v);
+        }
+        for (section, kvs) in bag.section_props {
+            patch.section_props.entry(section).or_default().extend(kvs);
         }
         for (prop, target_ref) in bag.refs {
             self.pending_refs
@@ -1414,6 +1476,36 @@ fn apply_toml_patch(toml_path: &Path, patch: &TomlPatch) -> Result<(), ImportErr
                 }
             }
             t.insert("tags".to_string(), toml::Value::Array(tags_array));
+        }
+    }
+
+    // ── Metadata extras (roblox_brick_color, roblox_color_srgb) ──
+    if !patch.metadata.is_empty() {
+        let meta = root
+            .entry("metadata".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        if let Some(t) = meta.as_table_mut() {
+            for (k, v) in &patch.metadata {
+                t.insert(k.clone(), v.clone());
+            }
+        }
+    }
+
+    // ── Section overrides (GUI [text] / [gui] keys) ──
+    // Merge onto the class template's existing sections so unset keys keep
+    // their defaults (a TextLabel keeps its template [text] fields and only
+    // `text` / `z_index` are overridden from the source place).
+    for (section, kvs) in &patch.section_props {
+        if kvs.is_empty() {
+            continue;
+        }
+        let sect = root
+            .entry(section.clone())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        if let Some(t) = sect.as_table_mut() {
+            for (k, v) in kvs {
+                t.insert(k.clone(), v.clone());
+            }
         }
     }
 

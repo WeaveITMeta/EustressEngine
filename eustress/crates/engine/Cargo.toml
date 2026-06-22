@@ -190,6 +190,9 @@ eustress-worlddb = { path = "../worlddb", optional = true }
 # No engine code consumes it yet; the wiring + `data` feature establish the
 # boundary and give the CI guard something to verify. P1 wires consumers.
 eustress-data = { path = "../data", optional = true }
+# Data Platform bridge (P1d/P2): Frame <-> datasets/timeseries partitions + the
+# Recorder. Optional; pulled by the `data` feature only.
+eustress-data-store = { path = "../data-store", optional = true }
 # Roblox place importer (Wave 4/6) — File→Import→Roblox Place + drag-drop
 # call eustress_roblox_import::import_into_space.
 eustress-roblox-import = { path = "../roblox-import" }
@@ -380,7 +383,7 @@ sim-orchestration = ["dep:eustress-forge", "world-db"]
 # must stay out of the everyday editor build. Activate with
 # `cargo run -p eustress-engine --features data`. The `data-graph-purity` CI
 # guard fails the build if this ever leaks into the default feature graph.
-data = ["dep:eustress-data", "eustress-data/parquet"]
+data = ["dep:eustress-data", "eustress-data/parquet", "dep:eustress-data-store"]
 # Legacy TOML write-back authoring path. OPT-IN since 2026-05-15 —
 # the default build no longer writes `_instance.toml` on edit;
 # persistence goes to `world.fjalldb/`. Turn this on to restore the

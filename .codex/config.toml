@@ -1,0 +1,5 @@
+[mcp_servers.eustress]
+command = 'E:\Workspace\EustressEngine\eustress\target\release\eustress-mcp.exe'
+
+[mcp_servers.eustress.env]
+EUSTRESS_UNIVERSE = 'C:\Users\miksu\Documents\Eustress\Universe1'

@@ -254,21 +254,24 @@ fn spawn_instance_from_world(
     world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
         world.resource_scope(|world, mut mat_reg: Mut<MaterialRegistry>| {
             world.resource_scope(|world, mut mesh_cache: Mut<PrimitiveMeshCache>| {
-                let mut queue = bevy::ecs::world::CommandQueue::default();
-                let entity = {
-                    let mut commands = Commands::new(&mut queue, world);
-                    spawn_instance(
-                        &mut commands,
-                        &asset_server,
-                        &mut *materials,
-                        &mut *mat_reg,
-                        &mut *mesh_cache,
-                        toml_path.to_path_buf(),
-                        instance,
-                    )
-                };
-                queue.apply(world);
-                result = Some(entity);
+                world.resource_scope(|world, mut decal_materials: Mut<Assets<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>>| {
+                    let mut queue = bevy::ecs::world::CommandQueue::default();
+                    let entity = {
+                        let mut commands = Commands::new(&mut queue, world);
+                        spawn_instance(
+                            &mut commands,
+                            &asset_server,
+                            &mut *materials,
+                            &mut *mat_reg,
+                            &mut *mesh_cache,
+                            &mut *decal_materials,
+                            toml_path.to_path_buf(),
+                            instance,
+                        )
+                    };
+                    queue.apply(world);
+                    result = Some(entity);
+                });
             });
         });
     });

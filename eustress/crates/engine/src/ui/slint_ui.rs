@@ -284,6 +284,19 @@ pub enum SlintAction {
     /// and rejects unknown values so a typo doesn't poison state.
     SetDisplayUnit(String),
 
+    // Categorical color picker (status-bar widget). All carry strings so the
+    // Slint callbacks stay simple; the drain handler parses/validates.
+    /// Drill into a color wheel by stable id ("" = back to the wheel list).
+    /// Validated via `Wheel::from_id`; an unknown non-empty id clears the
+    /// active wheel rather than poisoning state.
+    PickWheel(String),
+    /// Apply an "r, g, b" (0-255) color to the current selection — routed
+    /// through the same `PropertyChanged("Color", …)` path the Properties
+    /// panel color field uses.
+    PickColor(String),
+    /// Toggle an "r, g, b" (0-255) color in the session favorites list.
+    ToggleFavorite(String),
+
     // Play controls
     PlaySolo,
     PlayWithCharacter,
@@ -1335,6 +1348,7 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_toast_undo_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_commit_flash_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_display_unit_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, sync_color_wheels_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_selection_summary_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_universe_browser.after(SlintSystems::Drain))
             .add_systems(Update, sync_gui_elements_to_slint.after(SlintSystems::Drain))
@@ -1524,6 +1538,13 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_new_universe(move || q.push(SlintAction::NewUniverse));
     let q = queue.clone();
     ui.on_set_display_unit(move |sym| q.push(SlintAction::SetDisplayUnit(sym.to_string())));
+    // Categorical color picker (status-bar widget).
+    let q = queue.clone();
+    ui.on_pick_wheel(move |id| q.push(SlintAction::PickWheel(id.to_string())));
+    let q = queue.clone();
+    ui.on_pick_color(move |c| q.push(SlintAction::PickColor(c.to_string())));
+    let q = queue.clone();
+    ui.on_toggle_favorite(move |c| q.push(SlintAction::ToggleFavorite(c.to_string())));
     let q = queue.clone();
     ui.on_new_universe_confirmed(move |name| q.push(SlintAction::NewUniverseConfirmed(name.to_string())));
     let q = queue.clone();
@@ -3130,6 +3151,11 @@ struct DrainResources<'w> {
     lighting: Option<ResMut<'w, eustress_common::services::LightingService>>,
     /// Stage 5 — user-selected display unit (set by status-bar dropdown).
     display_unit: Option<ResMut<'w, eustress_common::units::DisplayUnit>>,
+    /// Categorical color picker — which wheel the status-bar picker is
+    /// drilled into (None = top-level list).
+    active_color_wheel: Option<ResMut<'w, eustress_common::color_wheels::ActiveColorWheel>>,
+    /// Categorical color picker — session-scoped favorite swatches.
+    color_favorites: Option<ResMut<'w, eustress_common::color_wheels::ColorFavorites>>,
     /// API Reference filter state (search, category, language, status)
     api_filter: Option<ResMut<'w, ApiFilterState>>,
     /// Toast notification queue (dismiss/push from drain handlers)
@@ -3891,6 +3917,21 @@ fn do_reparent_node(
     }
 }
 
+/// Parse an `"r, g, b"` triple (0-255 each) into a `[u8; 3]`. Tolerant of
+/// surrounding whitespace; rejects anything without exactly three integer
+/// channels. Shared by the color-picker `PickColor` / `ToggleFavorite` arms.
+fn parse_rgb_u8(s: &str) -> Option<[u8; 3]> {
+    let parts: Vec<u8> = s
+        .split(',')
+        .filter_map(|p| p.trim().parse::<u8>().ok())
+        .collect();
+    if parts.len() == 3 {
+        Some([parts[0], parts[1], parts[2]])
+    } else {
+        None
+    }
+}
+
 /// Drains the SlintActionQueue each frame and dispatches to Bevy events/state.
 /// This is the Slint→Bevy direction: UI button clicks become Bevy state changes and events.
 #[inline(never)]
@@ -4099,6 +4140,46 @@ fn drain_slint_actions(
                     None => {
                         warn!("Ignored display-unit pick {:?} — not a known symbol", sym);
                     }
+                }
+            }
+
+            // Categorical color picker — drill into a wheel (or "" = back).
+            SlintAction::PickWheel(id) => {
+                if let Some(ref mut active) = res.active_color_wheel {
+                    active.0 = if id.is_empty() {
+                        None
+                    } else {
+                        // Unknown id clears rather than poisoning state.
+                        eustress_common::brick_palette::Wheel::from_id(&id)
+                    };
+                }
+            }
+
+            // Categorical color picker — apply the chosen color to the
+            // selection. Reuses the Properties-panel color-apply path by
+            // re-entering the drain with a synthetic `PropertyChanged("Color",
+            // "r, g, b")` — the exact same write-back the Properties color
+            // field triggers. Picked up next frame and applied to the selected
+            // BasePart(s).
+            SlintAction::PickColor(rgb) => {
+                if parse_rgb_u8(&rgb).is_some() {
+                    queue.push(SlintAction::PropertyChanged("Color".to_string(), rgb.clone()));
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Paint → ({})", rgb));
+                    }
+                } else {
+                    warn!("Ignored color pick {:?} — not an 'r, g, b' triple", rgb);
+                }
+            }
+
+            // Categorical color picker — toggle a color in session favorites.
+            SlintAction::ToggleFavorite(rgb) => {
+                if let Some(c) = parse_rgb_u8(&rgb) {
+                    if let Some(ref mut favorites) = res.color_favorites {
+                        favorites.toggle(c);
+                    }
+                } else {
+                    warn!("Ignored favorite toggle {:?} — not an 'r, g, b' triple", rgb);
                 }
             }
 
@@ -7741,6 +7822,9 @@ fn drain_slint_actions(
                     let mat_reg = res.material_registry.as_deref_mut().unwrap_or(&mut default_mat_reg);
                     let mut default_mesh_cache = crate::space::instance_loader::PrimitiveMeshCache::default();
                     let mesh_c = res.mesh_cache.as_deref_mut().unwrap_or(&mut default_mesh_cache);
+                    // Command-bar procgen spawns plain parts; throwaway decal store.
+                    let mut decal_materials =
+                        bevy::asset::Assets::<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>::default();
 
                     // Two-pass spawn: BillboardGui first (so TextLabel can reference parent entity).
                     // Maps Luau entity_id → spawned Bevy Entity for parent resolution.
@@ -7797,6 +7881,9 @@ fn drain_slint_actions(
                         }.to_string();
                         let gui_def = crate::space::gui_loader::GuiTomlFile {
                             instance: crate::space::gui_loader::GuiTomlInstance { name: inst.name.clone() },
+                            image: None,
+                            scrolling: None,
+                            viewport: None,
                             metadata: crate::space::gui_loader::GuiTomlMetadata {
                                 class_name: "BillboardGui".to_string(),
                                 archivable: true,
@@ -7918,6 +8005,9 @@ fn drain_slint_actions(
 
                         let gui_def = crate::space::gui_loader::GuiTomlFile {
                             instance: crate::space::gui_loader::GuiTomlInstance { name: inst.name.clone() },
+                            image: None,
+                            scrolling: None,
+                            viewport: None,
                             metadata: crate::space::gui_loader::GuiTomlMetadata {
                                 class_name: "TextLabel".to_string(),
                                 archivable: true,
@@ -8072,7 +8162,7 @@ fn drain_slint_actions(
 
                         let entity = crate::space::instance_loader::spawn_instance(
                             &mut commands, &asset_server, &mut res.materials,
-                            mat_reg, mesh_c, toml_path.clone(), instance_def,
+                            mat_reg, mesh_c, &mut decal_materials, toml_path.clone(), instance_def,
                         );
 
                         if let Some(ref mut registry) = res.file_registry {
@@ -8950,12 +9040,15 @@ fn drain_slint_actions(
                                 let mat_reg_ref = res.material_registry.as_deref_mut().unwrap_or(&mut default_mat_reg);
                                 let mut default_mesh_cache = crate::space::instance_loader::PrimitiveMeshCache::default();
                                 let mesh_cache_ref = res.mesh_cache.as_deref_mut().unwrap_or(&mut default_mesh_cache);
+                                let mut decal_materials =
+                                    bevy::asset::Assets::<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>::default();
                                 let entity = crate::space::instance_loader::spawn_instance(
                                     &mut commands,
                                     &asset_server,
                                     &mut res.materials,
                                     mat_reg_ref,
                                     mesh_cache_ref,
+                                    &mut decal_materials,
                                     toml_path.clone(),
                                     instance,
                                 );
@@ -9740,12 +9833,15 @@ fn drain_slint_actions(
                                     let mat_reg_ref2 = res.material_registry.as_deref_mut().unwrap_or(&mut default_mat_reg2);
                                     let mut default_mesh_cache2 = crate::space::instance_loader::PrimitiveMeshCache::default();
                                     let mesh_cache_ref2 = res.mesh_cache.as_deref_mut().unwrap_or(&mut default_mesh_cache2);
+                                    let mut decal_materials2 =
+                                        bevy::asset::Assets::<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>::default();
                                     let entity = crate::space::instance_loader::spawn_instance(
                                         &mut commands,
                                         &asset_server,
                                         &mut res.materials,
                                         mat_reg_ref2,
                                         mesh_cache_ref2,
+                                        &mut decal_materials2,
                                         toml_path.clone(),
                                         instance,
                                     );
@@ -10631,6 +10727,89 @@ fn sync_display_unit_to_slint(
     let current: String = ui.get_display_unit_symbol().into();
     if current != symbol {
         ui.set_display_unit_symbol(symbol.into());
+    }
+}
+
+/// Push the categorical color-picker state (the seven wheels, the active
+/// wheel's swatches, the favorites, and the active-wheel id) into the ribbon's
+/// status-bar widget. Clone of `sync_display_unit_to_slint`: standalone system
+/// kept off `sync_bevy_to_slint`'s already-crowded parameter list, with cheap
+/// diffs so we don't churn the models every frame.
+fn sync_color_wheels_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    active_wheel: Option<Res<eustress_common::color_wheels::ActiveColorWheel>>,
+    favorites: Option<Res<eustress_common::color_wheels::ColorFavorites>>,
+) {
+    use eustress_common::brick_palette::{Wheel, PALETTE};
+
+    let Some(slint_context) = slint_context else { return };
+    let ui = &slint_context.window;
+
+    // --- active wheel id (drives step 1 vs step 2) ---
+    let active = active_wheel.as_ref().and_then(|a| a.0);
+    let active_id: &str = active.map(Wheel::id_str).unwrap_or("");
+    let current_id: String = ui.get_active_wheel_id().into();
+    let id_changed = current_id != active_id;
+    if id_changed {
+        ui.set_active_wheel_id(active_id.into());
+    }
+
+    // --- wheel list (static, but set once when empty) ---
+    if ui.get_color_wheels().row_count() != Wheel::ALL.len() {
+        let wheels: Vec<WheelData> = Wheel::ALL
+            .iter()
+            .map(|w| WheelData {
+                id: w.id_str().into(),
+                name: w.display_name().into(),
+            })
+            .collect();
+        ui.set_color_wheels(slint::ModelRc::new(slint::VecModel::from(wheels)));
+    }
+
+    // --- active wheel's swatches (empty when no wheel drilled into) ---
+    let wheel_colors: Vec<ColorEntry> = match active {
+        Some(w) => eustress_common::color_wheels::wheel_colors(w)
+            .into_iter()
+            .map(|(name, r, g, b)| ColorEntry {
+                name: name.into(),
+                r: r as i32,
+                g: g as i32,
+                b: b as i32,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    // Re-push when the row count differs OR the active wheel just changed
+    // (two different wheels can share a swatch count, so length alone would
+    // leave stale colors on a same-count switch).
+    if id_changed || ui.get_wheel_colors().row_count() != wheel_colors.len() {
+        ui.set_wheel_colors(slint::ModelRc::new(slint::VecModel::from(wheel_colors)));
+    }
+
+    // --- favorites ---
+    if let Some(favorites) = favorites {
+        // Resolve a friendly name per favorite: exact palette match if any,
+        // else a hex label so the hover tag still reads sensibly.
+        let favs: Vec<ColorEntry> = favorites
+            .0
+            .iter()
+            .map(|&[r, g, b]| {
+                let name = PALETTE
+                    .iter()
+                    .find(|e| e.srgb == [r, g, b])
+                    .map(|e| e.name.to_string())
+                    .unwrap_or_else(|| format!("#{:02X}{:02X}{:02X}", r, g, b));
+                ColorEntry {
+                    name: name.into(),
+                    r: r as i32,
+                    g: g as i32,
+                    b: b as i32,
+                }
+            })
+            .collect();
+        if ui.get_favorite_colors().row_count() != favs.len() {
+            ui.set_favorite_colors(slint::ModelRc::new(slint::VecModel::from(favs)));
+        }
     }
 }
 

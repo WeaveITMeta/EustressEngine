@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "color-wheel"
+version = "0.1.0"
+description = "Learn named color wheels and semantic axes from an Eustress per-part color manifest."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Eustress" }]
+dependencies = [
+    "polars>=1.0",
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+    "pyarrow>=15",
+]
+
+[project.optional-dependencies]
+colour = ["colour-science>=0.4"]
+pandas = ["pandas>=2.2"]
+
+[project.scripts]
+color-wheel = "color_wheel.__main__:main"
+
+[tool.setuptools]
+packages = ["color_wheel", "color_wheel.embed"]
+
+[tool.setuptools.package-data]
+color_wheel = ["data/*.json"]

@@ -7,6 +7,16 @@ import { VerticalBox, HorizontalBox, LineEdit, ScrollView, CheckBox, Slider, Com
 import { Theme } from "theme.slint";
 import { TagsEditor, TagChip, TagSuggestion } from "tags_editor.slint";
 
+// One categorical-picker swatch as fed from Rust: a display name plus the
+// 0-255 sRGB channels. Shared between the Properties panel and the ribbon's
+// status-bar color widget (both render it through `ColorSwatchCell`).
+export struct ColorEntry {
+    name: string,
+    r: int,
+    g: int,
+    b: int,
+}
+
 // Property data structure
 export struct PropertyData {
     name: string,
@@ -1548,7 +1558,7 @@ component RotationVec3Row inherits Rectangle {
 // Cell box is 22×19 px; the hex chip occupies 18×16 of that, leaving
 // a 2-px gutter so adjacent cells read as discrete clickable targets
 // rather than a single mottled blob.
-component ColorSwatchCell inherits Rectangle {
+export component ColorSwatchCell inherits Rectangle {
     in property <string> swatch-name: "";
     in property <int> r: 128;
     in property <int> g: 128;

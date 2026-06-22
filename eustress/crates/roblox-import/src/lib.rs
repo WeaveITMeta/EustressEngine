@@ -64,6 +64,7 @@
 
 pub mod asset_resolver;
 pub mod class_map;
+pub mod color_manifest;
 pub mod csg;
 pub mod error;
 pub mod identity;

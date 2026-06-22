@@ -96,6 +96,11 @@ pub struct ImportReport {
     #[serde(default)]
     pub terrain_chunks_to_db: usize,
 
+    /// Path of the emitted per-part color manifest, if any colored parts
+    /// were imported. Lives at `<space_root>/.eustress/color_manifest.ndjson`.
+    #[serde(default)]
+    pub color_manifest_path: Option<PathBuf>,
+
     /// Wall-clock duration of the import call.
     pub elapsed: Duration,
 }

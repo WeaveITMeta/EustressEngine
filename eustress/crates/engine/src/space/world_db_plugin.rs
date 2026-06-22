@@ -778,5 +778,11 @@ impl Plugin for WorldDbPlugin {
         // Self-contained (its own latch + value-gate); a no-op when the
         // partition is empty, so it can't regress a legacy disk Space.
         super::world_db_binary::register(app);
+
+        // Data Platform Recorder (P2): durable batch-flush of sensor samples
+        // into the `timeseries` partition. Only when the `data` feature is on
+        // (world-db is implied — we're inside WorldDbPlugin).
+        #[cfg(feature = "data")]
+        app.add_plugins(super::data_recorder::DataRecorderPlugin);
     }
 }

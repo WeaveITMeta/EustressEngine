@@ -60,6 +60,11 @@ pub struct TreeMetadata {
     pub last_modified: String,
     #[serde(default)]
     pub author: String,
+    /// Tessellation deviation tolerance in meters. `None` uses
+    /// [`crate::eval::DEFAULT_MESH_TOLERANCE`]. Smaller = smoother
+    /// curved surfaces, more triangles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_tolerance: Option<f64>,
 }
 
 /// One tree entry — either a Sketch or a Feature. Tagged by `kind`.

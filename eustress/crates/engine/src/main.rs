@@ -343,6 +343,11 @@ fn main() {
         // ECS / Avian / disk stay in engine-native meters regardless.
         // Defaults to Meter (see Default impl).
         .init_resource::<eustress_common::units::DisplayUnit>()
+        // Categorical color picker (status-bar widget) — session-scoped
+        // state behind the ribbon's "Colors" badge. Cosmetic/session only;
+        // no disk persistence this pass.
+        .init_resource::<eustress_common::color_wheels::ActiveColorWheel>()
+        .init_resource::<eustress_common::color_wheels::ColorFavorites>()
         // Startup args
         .insert_resource(args.clone())
         // NotificationManager resource — always registered. The toast bridge
@@ -677,7 +682,16 @@ fn main() {
     // and mirrors Transform writes alongside the legacy TOML path.
     #[cfg(feature = "world-db")]
     app.add_plugins(space::world_db_plugin::WorldDbPlugin);
-        
+
+    // Sim orchestration (Phase 6 engine seam + thin Phase 3 driver). Gated by
+    // `sim-orchestration` (implies `world-db`), so the default build is
+    // unaffected. Registered AFTER WorldDbPlugin so its `register(app)` (which
+    // owns `ResidencyChainSet`) has run. DISTINCT from the connect-only
+    // `ForgePlugin` (SDK game-server deployment) — separate crate, separate
+    // concern. Activate with `--features sim-orchestration`.
+    #[cfg(feature = "sim-orchestration")]
+    app.add_plugins(space::sim_orchestration::SimOrchestrationPlugin);
+
     // Left-click part selection with raycasting
     #[cfg(not(target_arch = "wasm32"))]
     {

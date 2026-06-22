@@ -4,9 +4,9 @@
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, TabWidget, Button, ComboBox, LineEdit, ScrollView, StandardListView, CheckBox, Slider, GridBox, GroupBox, SpinBox, TextEdit } from "std-widgets.slint";
-import { Ribbon, SavedIdentityData, InsertClassData } from "ribbon.slint";
+import { Ribbon, SavedIdentityData, InsertClassData, WheelData } from "ribbon.slint";
 import { ExplorerPanel, TreeNode } from "explorer.slint";
-import { PropertiesPanel, PropertyData } from "properties.slint";
+import { PropertiesPanel, PropertyData, ColorEntry } from "properties.slint";
 import { TagChip, TagSuggestion } from "tags_editor.slint";
 import { OutputConsole, LogData } from "output.slint";
 import { CommandBar, ScriptOutputEntry } from "command_bar.slint";
@@ -382,6 +382,18 @@ export component StudioWindow inherits Window {
     callback set-display-unit(string);
     callback switch-identity(string);
     callback remove-identity(string);
+
+    // Categorical color picker (status-bar widget). Mirror of the Bevy
+    // ActiveColorWheel + ColorFavorites Resources — pushed by Rust and
+    // forwarded into the Ribbon below; the three callbacks bubble user
+    // intent back to Rust.
+    in-out property <[WheelData]> color-wheels: [];
+    in-out property <[ColorEntry]> wheel-colors: [];
+    in-out property <[ColorEntry]> favorite-colors: [];
+    in-out property <string> active-wheel-id: "";
+    callback pick-wheel(string);
+    callback pick-color(string);
+    callback toggle-favorite(string);
 
     // Update system
     in-out property <bool> update-available: false;
@@ -1010,6 +1022,15 @@ export component StudioWindow inherits Window {
             // Display unit (Stage 5)
             display-unit-symbol: root.display-unit-symbol;
             on-set-display-unit(sym) => { root.set-display-unit(sym); }
+
+            // Categorical color picker
+            color-wheels: root.color-wheels;
+            wheel-colors: root.wheel-colors;
+            favorite-colors: root.favorite-colors;
+            active-wheel-id: root.active-wheel-id;
+            pick-wheel(id) => { root.pick-wheel(id); }
+            pick-color(c) => { root.pick-color(c); }
+            toggle-favorite(c) => { root.toggle-favorite(c); }
 
             // Pipe dynamic keyboard shortcuts into the ribbon subtitles
             shortcut-new: root.shortcut-new;

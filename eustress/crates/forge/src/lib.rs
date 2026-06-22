@@ -1,6 +1,6 @@
 //! # Eustress Forge
 //!
-//! Game server orchestration built on [`forge_orchestration`] v0.4.0.
+//! Game server orchestration built on [`forge_orchestration`] v0.6.0.
 //!
 //! This crate extends the base `forge-orchestration` platform with game-server-specific
 //! functionality including experience routing, player matchmaking, and QUIC networking.
@@ -16,7 +16,7 @@
 //! │  ├── ExperienceRouter: Route players to experiences                      │
 //! │  └── EustressForgeConfig: Game-specific configuration                    │
 //! ├─────────────────────────────────────────────────────────────────────────┤
-//! │  forge-orchestration v0.4.0 (base crate)                                 │
+//! │  forge-orchestration v0.6.0 (base crate)                                 │
 //! │  ├── Forge: Core runtime with HTTP API                                   │
 //! │  ├── MoERouter: Hash, load-aware, GPU-aware, version-aware routing       │
 //! │  ├── Autoscaler: Threshold-based scaling with hysteresis                 │
@@ -95,6 +95,15 @@ pub mod error;
 pub mod jobs;
 pub mod routing;
 
+// Phase 2 (binding decision D2): the agents-in-sims scheduling code lives in a
+// NEW `sim` module INSIDE this crate (not a separate crate). It maps engine
+// residency cells onto forge_orchestration::scheduler SimCells and bridges the
+// cross-node replicated cell-slice through a RaftStateStore, with WorldDb
+// staying the local entity source-of-truth. Feature-gated so a plain
+// `cargo build -p eustress-forge` (game-server wrapper only) never links raft.
+#[cfg(feature = "sim-orchestration")]
+pub mod sim;
+
 // Re-export core forge-orchestration types
 pub use forge_orchestration::{
     // Core runtime
@@ -115,6 +124,23 @@ pub use forge_orchestration::{
     // Types (including new GpuResources)
     types::{Expert, GpuResources, NodeId, Region as BaseRegion, Shard, ShardId},
 };
+
+// Storage JSON helpers + the boxed store handle. New in the 0.6.0 surface the
+// `sim` module's store-mediated SimCell submission path is built on
+// (`store_set_json` writes a SimCell under `keys::simcell(id)`; the reconciler
+// discovers it via `list_prefix(keys::SIMCELLS)`). Surfaced here so consumers
+// of the seam don't reach into `forge_orchestration::storage` directly.
+pub use forge_orchestration::storage::{store_get_json, store_set_json, BoxedStateStore};
+
+// The persistent + in-memory Raft state store — the cross-node replicated
+// cell-slice substrate (WorldDb owns local entity cores; this owns ONLY the
+// cell-shared slice + the SimCell submission channel). Available because the
+// forge-orchestration dep enables `raft-persist`; gated on the forwarding
+// `raft` feature so the symbol tracks the backend actually being compiled in.
+// NOTE: deliberately exported but NOT constructed by the wrapper itself yet —
+// the demo bin / future engine driver own its lifecycle.
+#[cfg(feature = "raft")]
+pub use forge_orchestration::storage::RaftStateStore;
 
 // Re-export SDK for game servers (now includes sessions, spot, UDP ports)
 pub use forge_orchestration::sdk;
@@ -139,6 +165,20 @@ pub use config::{EustressForgeConfig, GameServerSpec, GameScalingConfig, Region}
 pub use error::{EustressForgeError, Result};
 pub use jobs::{GameServerJob, PhysicsServerJob, AIServerJob};
 pub use routing::ExperienceRouter;
+
+// Phase-2 sim-seam convenience re-exports (only when the module is compiled).
+#[cfg(feature = "sim-orchestration")]
+pub use sim::{
+    cell::{
+        cell_center_world, cell_cover_radius, cell_id, frame_cadence, parse_cell_id, to_sim_cell,
+        AgentSpec, SimCellSpec,
+    },
+    cell_sync::{
+        cell_slice_key, retire_sim_cell, submit_sim_cell, AgentIntent, CellSlice, CellSyncBridge,
+    },
+    driver::{binding_is_complete, find_binding, reconcile_once, single_node_reconciler},
+    CellCoord, Reconciler, ReconcileReport, SimBinding, SimCell, CELL_EDGE_M,
+};
 
 // ============================================================================
 // Prelude

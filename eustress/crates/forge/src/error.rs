@@ -53,6 +53,13 @@ pub enum EustressForgeError {
     /// Serialization error
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+
+    /// Local world-state store error, surfaced by the Phase-2 cell-sync
+    /// bridge. Carried as a String so `eustress_worlddb::Error` never leaks
+    /// into this crate's public signatures (and so `error.rs` does not gain a
+    /// hard dependency on worlddb when the sim feature is off).
+    #[error("WorldDb error: {0}")]
+    WorldDb(String),
 }
 
 /// Result type for Eustress Forge operations.

@@ -180,6 +180,19 @@ pub struct ResidencyState {
     first_fill_logged: bool,
 }
 
+impl ResidencyState {
+    /// Snapshot of the cells currently considered resident (within the keep
+    /// box). Exposed so the sim-orchestration driver
+    /// ([`super::sim_orchestration`]) can enumerate residency cells for its
+    /// per-cell gang-placement latch WITHOUT duplicating the camera box math
+    /// (which would risk a second, drifting coordinate authority). A cell is
+    /// inserted here at SCAN time, before its cores finish spawning — fine for
+    /// per-cell sim placement (one SimCell per spatial cell, not per entity).
+    pub fn resident_cells(&self) -> impl Iterator<Item = Cell> + '_ {
+        self.resident_cells.iter().copied()
+    }
+}
+
 // ── pure cell math (unit-tested) ────────────────────────────────────────
 
 /// Camera world position + radius → inclusive cell box, using the SAME

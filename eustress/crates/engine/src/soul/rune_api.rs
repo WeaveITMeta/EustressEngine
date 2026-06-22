@@ -377,6 +377,30 @@ pub fn compile_scripts_on_play(
         info!("  📜 Script '{}' ({} bytes)", s.name, s.source.len());
     }
 
+    // L12 GATE (play context) — validate each script against the active
+    // universe's Kernel laws before compiling for play.
+    //
+    // TODO(kernel-play-gate-policy): the OPEN QUESTION here is whether a
+    // law-violating play-mode script should be HARD-rejected (skip compile,
+    // surface the violation) or advisory-logged. RSI rewrites are hard-gated via
+    // `validate_rune_script` in `build_pipeline.rs`; for human-authored play
+    // scripts a softer policy may be preferable. Until that policy is decided,
+    // this seam VALIDATES + LOGS (non-fatal) so play behavior is unchanged while
+    // the gate's findings are observable. Flip to hard-reject by filtering
+    // `sources` on the verdict once the policy lands.
+    {
+        use crate::soul::kernel::{validate_rune_rewrite, UniverseLaws};
+        let laws = UniverseLaws::load_for_active_universe();
+        for s in &sources {
+            let verdict = validate_rune_rewrite(&s.source, &laws);
+            if !verdict.accepted {
+                for v in verdict.fatal() {
+                    warn!("🛡️ Kernel law violation in '{}': {}", s.name, v.to_message_line());
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "realism-scripting")]
     {
         eustress_common::soul::rune_runtime::compile_scripts(
@@ -480,8 +504,17 @@ pub fn execute_rune_script(_source: &str, _context: &mut super::soul_context::So
     Ok(())
 }
 
-pub fn validate_rune_script(_source: &str) -> Result<(), Vec<String>> {
-    Ok(())
+/// Validate a candidate Rune program against the active universe's Kernel laws.
+///
+/// L12 GATE. This is the accept/reject seam the RSI rewrite loop
+/// (`build_pipeline.rs`) already calls before committing a rewrite. It was a
+/// no-op stub (`Ok(())`); it now delegates to the real Kernel validator
+/// ([`crate::soul::kernel::validate_rune_script`]), so every RSI rewrite, and
+/// every other caller of this path, is gated. The `Result<(), Vec<String>>`
+/// shape is preserved exactly so the auto-fix loop's message-keyed deterministic
+/// fixes keep working.
+pub fn validate_rune_script(source: &str) -> Result<(), Vec<String>> {
+    crate::soul::kernel::validate_rune_script(source)
 }
 
 pub fn update_world_state(_world: &World) {}

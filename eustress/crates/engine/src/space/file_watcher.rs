@@ -417,7 +417,16 @@ pub fn process_file_changes(
                 );
             }
             FileChangeType::Created => {
-                handle_file_created(&event, &mut registry, &mut material_registry, &mut mesh_cache, &mut commands, &asset_server, &mut materials, &space_root.0, class_defaults.as_deref());
+                // `process_file_changes` is already at the 16-param ceiling, so
+                // we don't add a ForwardDecalMaterial ResMut here. A hot-created
+                // Decal lands its ForwardDecal in this transient store and
+                // renders on the next reload (the watcher-create path is for
+                // live external edits — rare for decals). Real decal rendering
+                // is driven by the cold-load file-loader path, which holds the
+                // live ResMut.
+                let mut decal_materials =
+                    bevy::asset::Assets::<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>::default();
+                handle_file_created(&event, &mut registry, &mut material_registry, &mut mesh_cache, &mut decal_materials, &mut commands, &asset_server, &mut materials, &space_root.0, class_defaults.as_deref());
             }
             FileChangeType::Removed => {
                 // Atomic-write replace (every TOML save: temp file →
@@ -743,6 +752,7 @@ fn handle_file_created(
     registry: &mut SpaceFileRegistry,
     material_registry: &mut super::material_loader::MaterialRegistry,
     mesh_cache: &mut super::instance_loader::PrimitiveMeshCache,
+    decal_materials: &mut Assets<bevy::pbr::decal::ForwardDecalMaterial<StandardMaterial>>,
     commands: &mut Commands,
     asset_server: &AssetServer,
     materials: &mut Assets<StandardMaterial>,
@@ -1107,6 +1117,7 @@ fn handle_file_created(
                         materials,
                         material_registry,
                         mesh_cache,
+                        decal_materials,
                         event.path.clone(),
                         instance,
                     );

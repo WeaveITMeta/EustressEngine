@@ -48,9 +48,16 @@ pub struct EvalOutput {
     pub entry_status: Vec<EntryStatus>,
 }
 
+/// Flat triangle arrays — the engine lifts these into a Bevy `Mesh`
+/// + Avian trimesh collider; the glTF exporter writes them as a
+/// primitive. Per-corner attributes are deduplicated: smooth-surface
+/// corners share vertices, crease corners (same position, different
+/// normal) are split.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct EvalMesh {
     pub positions: Vec<[f32; 3]>,
     pub normals:   Vec<[f32; 3]>,
+    pub uvs:       Vec<[f32; 2]>,
     pub indices:   Vec<u32>,
 }
 
@@ -61,10 +68,108 @@ pub struct EntryStatus {
     pub message: String,
 }
 
-/// Tolerance for boolean ops. Matches the default truck uses in its
-/// own tests. Can become user-configurable per-tree later via
-/// `FeatureTree.metadata`.
-const BOOLEAN_TOLERANCE: f64 = 0.01;
+/// Tolerance ladder for normalized boolean ops. Values are relative
+/// to the *normalized* geometry, where the geometric mean of the two
+/// operands' bounding-box diagonals is 1.0. The probe suite showed
+/// shapeops 0.4's success landscape is jagged and proportion-
+/// dependent (e.g. 0.005 succeeds where both 0.01 and 0.003 fail),
+/// so the ladder is dense; failed rungs return fast, so the walk is
+/// cheap relative to a successful op.
+const BOOLEAN_TOLERANCE_LADDER: [f64; 6] = [0.005, 0.01, 0.002, 0.02, 0.05, 0.001];
+
+/// Run a truck-shapeops binary op with **scale normalization**.
+///
+/// shapeops 0.4 has an absolute scale floor: identical geometry that
+/// booleans fine at unit scale returns `None` at centimeter scale
+/// (verified empirically in `tests/shapeops_probe.rs` — same
+/// part/hole ratio, only the absolute size varied). Since the engine
+/// is meter-native, real parts sit under that floor. Workaround:
+/// uniformly scale both operands toward unit size, run the op, scale
+/// the result back. The scale target is the *geometric mean* of the
+/// two bounding-box diagonals — it balances a large base against a
+/// small cut so both land near the unit-scale regime truck's own
+/// examples run in (min-based normalization left a 10 mm-hole-in-a-
+/// 40 mm-plate base at 4x while the cut sat at 1x, off the reliable
+/// band). Hugely asymmetric construction bodies (Split's half-space
+/// slab) pull the mean, so the scale is additionally clamped to keep
+/// the smaller operand within sane bounds.
+///
+/// The result is returned at the caller's (meter) scale, but its
+/// `IntersectionCurve` edges carry the composed transform — naively
+/// evaluating their surfaces at meter scale diverges (and truck
+/// panics on the internal unwrap). Every downstream surface-
+/// evaluating op must therefore re-normalize first: booleans do (this
+/// fn), and `tessellate_solid` does. Plain `builder::transformed`
+/// (Mirror/Pattern) only composes matrices and is safe.
+fn boolean_normalized<F>(a: &Solid, b: &Solid, op: F) -> Option<Solid>
+where
+    F: Fn(&Solid, &Solid, f64) -> Option<Solid>,
+{
+    let da = solid_bbox_diagonal(a);
+    let db = solid_bbox_diagonal(b);
+    let mean = (da * db).sqrt();
+    let scale = if mean > 1.0e-12 {
+        // Keep the smaller operand's normalized diagonal in [0.05, 20]
+        // even when the operands are wildly different sizes.
+        let s = 1.0 / mean;
+        let d_min = da.min(db);
+        s.clamp(0.05 / d_min.max(1.0e-12), 20.0 / d_min.max(1.0e-12))
+    } else {
+        1.0
+    };
+    let a = builder::transformed(a, Matrix4::from_scale(scale));
+    let b = builder::transformed(b, Matrix4::from_scale(scale));
+    for tol in BOOLEAN_TOLERANCE_LADDER {
+        // truck-geometry `unwrap()`s Newton projections internally
+        // (IntersectionCurve::subs), so a tolerance its numerics
+        // can't handle PANICS rather than returning None. Catch and
+        // treat as "this rung failed" — rayon propagates worker
+        // panics to this thread, so catch_unwind sees them all.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            op(&a, &b, tol)
+        }));
+        if let Ok(Some(out)) = result {
+            return Some(builder::transformed(&out, Matrix4::from_scale(1.0 / scale)));
+        }
+    }
+    None
+}
+
+/// Bounding-box diagonal from topological vertices — corner points
+/// only, but that's plenty for a scale estimate.
+fn solid_bbox_diagonal(s: &Solid) -> f64 {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for shell in s.boundaries() {
+        for v in shell.vertex_iter() {
+            let p = v.point();
+            let c = [p.x, p.y, p.z];
+            for axis in 0..3 {
+                min[axis] = min[axis].min(c[axis]);
+                max[axis] = max[axis].max(c[axis]);
+            }
+        }
+    }
+    if min[0] > max[0] {
+        return 1.0; // no vertices — fall back to unit scale
+    }
+    let dx = max[0] - min[0];
+    let dy = max[1] - min[1];
+    let dz = max[2] - min[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// Highest z over the solid's topological vertices — used by the Hole
+/// arm to detect when a cut reaches the far face (a through hole).
+/// v0 holes always cut along +z of the sketch plane, so z is the
+/// right axis until sketch-plane transforms land.
+fn solid_z_max(s: &Solid) -> f64 {
+    s.boundaries()
+        .iter()
+        .flat_map(|shell| shell.vertex_iter())
+        .map(|v| v.point().z)
+        .fold(f64::NEG_INFINITY, f64::max)
+}
 
 /// Walk the tree top-to-bottom, accumulating a running body.
 pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
@@ -124,7 +229,11 @@ pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
         }
     }
 
-    let mesh = body.as_ref().map(tessellate);
+    let tolerance = tree
+        .metadata
+        .mesh_tolerance
+        .unwrap_or(DEFAULT_MESH_TOLERANCE);
+    let mesh = body.as_ref().map(|b| tessellate_solid(b, tolerance));
     Ok(EvalOutput { body, mesh, entry_status })
 }
 
@@ -178,23 +287,40 @@ fn evaluate_feature_into_body(
             let radius = resolve_length_meters(diameter, vars)? * 0.5;
             let depth_m = resolve_length_meters(depth, vars)?;
 
-            let mut cut_body = extrude_circle(point, radius, depth_m, false)?;
+            // Cut bodies must protrude past the faces they enter —
+            // shapeops 0.4 booleans degenerate on coplanar/flush
+            // faces (see `boolean_not`). Over-extend above the
+            // sketch plane always, and out the bottom too when the
+            // hole reaches the far face (a through hole).
+            let overcut = (depth_m * 0.05).max(1.0e-4);
+            let through = current
+                .map(|cur| depth_m >= solid_z_max(cur) - 1.0e-9)
+                .unwrap_or(false);
+            let bottom_ext = if through { overcut } else { 0.0 };
+            let body = extrude_circle(point, radius, depth_m + overcut + bottom_ext, false)?;
+            let mut cut_body = builder::translated(&body, Vector3::new(0.0, 0.0, -overcut));
 
-            // Counterbore — wider shallow cylinder at the top
+            // Counterbore — wider shallow cylinder at the top.
+            // Staggered overcut (2x) so its top face isn't coplanar
+            // with the main cut's — that union would degenerate too.
             if let (Some(cb_d), Some(cb_depth)) = (counterbore_diameter, counterbore_depth) {
                 let cb_r = resolve_length_meters(cb_d, vars)? * 0.5;
                 let cb_depth_m = resolve_length_meters(cb_depth, vars)?;
-                let cb_body = extrude_circle(point, cb_r, cb_depth_m, false)?;
+                let cb_overcut = overcut * 2.0;
+                let cb_body = extrude_circle(point, cb_r, cb_depth_m + cb_overcut, false)?;
+                let cb_body = builder::translated(&cb_body, Vector3::new(0.0, 0.0, -cb_overcut));
                 // Union onto the hole cylinder — the whole thing
                 // subtracts from the current body below.
                 cut_body = boolean_or(&cut_body, &cb_body).unwrap_or(cut_body);
             }
             // Countersink — conical widening. Approximated in v0 as a
             // larger cylinder at the top; true cone lands with a
-            // Revolve-around-point path.
+            // Revolve-around-point path. Staggered overcut (3x).
             if let Some(csk_d) = countersink_diameter {
                 let csk_r = resolve_length_meters(csk_d, vars)? * 0.5;
-                let csk_body = extrude_circle(point, csk_r, 0.005, false)?;
+                let csk_overcut = overcut * 3.0;
+                let csk_body = extrude_circle(point, csk_r, 0.005 + csk_overcut, false)?;
+                let csk_body = builder::translated(&csk_body, Vector3::new(0.0, 0.0, -csk_overcut));
                 cut_body = boolean_or(&cut_body, &csk_body).unwrap_or(cut_body);
             }
 
@@ -680,22 +806,32 @@ fn union_many(bodies: &[Solid]) -> Option<Solid> {
 /// Boolean OR (union) via truck-shapeops. Thin layer so the
 /// one-time swap to a newer truck version lands in a single spot.
 fn boolean_or(a: &Solid, b: &Solid) -> Option<Solid> {
-    truck_shapeops::or(a, b, BOOLEAN_TOLERANCE)
+    boolean_normalized(a, b, |x, y, tol| truck_shapeops::or(x, y, tol))
 }
 
 fn boolean_and(a: &Solid, b: &Solid) -> Option<Solid> {
-    truck_shapeops::and(a, b, BOOLEAN_TOLERANCE)
+    boolean_normalized(a, b, |x, y, tol| truck_shapeops::and(x, y, tol))
 }
 
-/// Difference (A ∖ B). **Unsupported on truck-shapeops 0.4** — the
-/// crate exports only `or` + `and`; `not` lands in a future release.
-/// Returning `None` here lets the Boolean evaluator arm surface a
-/// clean "non-manifold or disjoint" error so the user knows the op
-/// didn't apply — we'd rather fail loudly than silently produce a
-/// wrong shape. Flip this to `truck_shapeops::not(a, b, TOL)` once
-/// the upstream fn ships.
-fn boolean_not(_a: &Solid, _b: &Solid) -> Option<Solid> {
-    None
+/// Difference (A ∖ B) = A ∩ ¬B. truck-shapeops 0.4 exports only
+/// `or` + `and`, but `truck_topology::Solid::not()` inverts face
+/// orientation, turning the solid inside-out — this is exactly how
+/// truck's own `punched-cube-shapeops` example computes difference.
+///
+/// Known limitation (shapeops 0.4): coplanar/flush faces between the
+/// operands degenerate the intersection curve and the op returns
+/// `None`. Cuts should protrude through the faces they enter (the
+/// evaluator's Hole arm over-extends its cut body for this reason).
+fn boolean_not(a: &Solid, b: &Solid) -> Option<Solid> {
+    // Invert INSIDE the normalized op — i.e. after the rescale.
+    // Scaling an already-inverted solid via builder::transformed
+    // breaks shapeops (every tolerance panics in IntersectionCurve);
+    // scale-then-invert matches truck's own example order and works.
+    boolean_normalized(a, b, |x, y, tol| {
+        let mut y_inverted = y.clone();
+        y_inverted.not();
+        truck_shapeops::and(x, &y_inverted, tol)
+    })
 }
 
 // ============================================================================
@@ -823,17 +959,113 @@ fn resolve_angle_radians(s: &str, vars: &HashMap<String, String>) -> CadResult<f
 }
 
 // ============================================================================
-// Tessellation stub — real mesh conversion goes through truck-meshalgo
+// Tessellation — truck Solid → flat triangle arrays via truck-meshalgo
 // ============================================================================
 
-fn tessellate(_solid: &Solid) -> EvalMesh {
-    // truck-meshalgo provides `to_polygon` / `PolygonMesh` conversions
-    // with a tolerance parameter. Engine-side glue lifts those into
-    // Bevy's `Mesh` (positions/normals/indices) and Avian collider
-    // trimeshes. Keeping this a stub in the kernel crate so it
-    // stays Bevy-free — the engine's hot-reload path pulls
-    // `truck-meshalgo` directly when it needs a render mesh.
-    EvalMesh { positions: Vec::new(), normals: Vec::new(), indices: Vec::new() }
+/// Default deviation tolerance for tessellation, in meters (the
+/// engine is meter-native). 1 mm keeps curved surfaces crisp at
+/// part scale without exploding triangle counts. Override per tree
+/// via `metadata.mesh_tolerance`.
+pub const DEFAULT_MESH_TOLERANCE: f64 = 0.001;
+
+/// Tessellate a truck `Solid` into flat triangle arrays ready to lift
+/// into a Bevy `Mesh` (engine side) or a glTF primitive (exporter).
+/// The kernel crate stays Bevy-free — output is plain `f32` arrays.
+///
+/// `tolerance` is the maximum deviation between the true surface and
+/// the triangle mesh, in model units (meters). Clamped to stay above
+/// truck's internal epsilon, which `triangulation` panics below.
+pub fn tessellate_solid(solid: &Solid, tolerance: f64) -> EvalMesh {
+    use truck_meshalgo::filters::{NormalFilters, OptimizingFilter};
+    use truck_meshalgo::tessellation::{MeshableShape, MeshedShape, RobustMeshableShape};
+
+    // Normalize to unit scale before evaluating any surface — the
+    // same absolute scale floor that breaks shapeops booleans on
+    // meter-native parts (see `boolean_normalized`) makes truck's
+    // Newton projections diverge (and panic) during triangulation
+    // of boolean results. Tessellate at ~unit size, then emit
+    // positions scaled back with plain f32 math — no truck
+    // transform touches the output.
+    let diagonal = solid_bbox_diagonal(solid);
+    let scale = if diagonal > 1.0e-12 { 1.0 / diagonal } else { 1.0 };
+    let solid = builder::transformed(solid, Matrix4::from_scale(scale));
+    let tolerance = (tolerance * scale).max(1.0e-5);
+    let inv_scale = (1.0 / scale) as f32;
+
+    // Fast path requires boundary curves to ride exactly on their
+    // surfaces. Boolean (shapeops) output can violate that within
+    // tolerance — faces then come back `None` and would silently
+    // drop, leaving holes. Detect and retry with the robust
+    // (project-onto-surface) path before giving up on those faces.
+    // Both paths run under catch_unwind: truck unwrap()s internal
+    // Newton projections, and a kernel panic must never take down
+    // the editor — degrade to an empty mesh instead.
+    let Ok(mut poly) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut meshed = solid.triangulation(tolerance);
+        if count_missing_faces(&meshed) > 0 {
+            meshed = solid.robust_triangulation(tolerance);
+        }
+        meshed.to_polygon()
+    })) else {
+        return EvalMesh::default();
+    };
+
+    // Weld attributes duplicated along shared edges so the triangle
+    // soup becomes a connected (closed, for the fast path) surface,
+    // drop anything the weld orphaned, then fill missing normals
+    // from face geometry. `false` = never overwrite the analytic
+    // surface normals tessellation already produced.
+    poly.put_together_same_attrs(truck_base::tolerance::TOLERANCE);
+    poly.remove_degenerate_faces().remove_unused_attrs();
+    poly.add_naive_normals(false);
+
+    // Expand truck's per-corner (pos, uv, nor) index triples into a
+    // single index space, deduplicating identical triples so shared
+    // smooth-surface corners stay welded while crease corners (same
+    // position, different normal) stay split.
+    let attrs = poly.attributes();
+    let mut remap: HashMap<(usize, Option<usize>, Option<usize>), u32> = HashMap::new();
+    let mut out = EvalMesh::default();
+    for tri in poly.faces().triangle_iter() {
+        for v in tri {
+            let key = (v.pos, v.uv, v.nor);
+            let next = remap.len() as u32;
+            let idx = *remap.entry(key).or_insert_with(|| {
+                let p = attrs.positions[v.pos];
+                out.positions.push([
+                    p.x as f32 * inv_scale,
+                    p.y as f32 * inv_scale,
+                    p.z as f32 * inv_scale,
+                ]);
+                let n = match v.nor {
+                    Some(i) => attrs.normals[i],
+                    None => Vector3::new(0.0, 0.0, 0.0),
+                };
+                out.normals.push([n.x as f32, n.y as f32, n.z as f32]);
+                let t = match v.uv {
+                    Some(i) => attrs.uv_coords[i],
+                    None => Vector2::new(0.0, 0.0),
+                };
+                out.uvs.push([t.x as f32, t.y as f32]);
+                next
+            });
+            out.indices.push(idx);
+        }
+    }
+    out
+}
+
+/// Count faces whose tessellation failed (`surface() == None`) in a
+/// meshed shape — the trigger for the robust-triangulation retry.
+fn count_missing_faces<P, C, S: Clone>(
+    meshed: &truck_topology::Solid<P, C, Option<S>>,
+) -> usize {
+    meshed
+        .boundaries()
+        .iter()
+        .flat_map(|shell| shell.face_iter())
+        .filter(|face| face.surface().is_none())
+        .count()
 }
 
 fn index_sketches(tree: &FeatureTree) -> HashMap<String, &Sketch> {

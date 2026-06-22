@@ -1644,6 +1644,26 @@ pub fn execute_rune_oneshot(source: &str) -> Result<Vec<eustress_common::luau::r
     ));
     set_instance_registry(instance_registry.clone());
 
+    // L12 GATE — validate the one-shot program against the active universe's
+    // Kernel laws BEFORE building the VM, so a law-violating command-bar script
+    // never executes (no side-effect window). The one-shot context permits
+    // `main()` / `on_init()` entrypoints (see `EntrypointContract::oneshot`).
+    {
+        use crate::soul::kernel::{validate_rune_rewrite, UniverseLaws, EntrypointContract};
+        let mut laws = UniverseLaws::load_for_active_universe();
+        laws.entrypoints = EntrypointContract::oneshot();
+        let verdict = validate_rune_rewrite(source, &laws);
+        if !verdict.accepted {
+            let msg = verdict
+                .fatal()
+                .map(|v| v.to_message_line())
+                .collect::<Vec<_>>()
+                .join("\n");
+            clear_instance_registry();
+            return Err(format!("Kernel validation failed:\n{}", msg));
+        }
+    }
+
     let modules: Vec<rune::Module> = match create_ecs_module() {
         Ok(m) => vec![m],
         Err(e) => { warn!("Failed to create ECS module: {:?}", e); vec![] }
