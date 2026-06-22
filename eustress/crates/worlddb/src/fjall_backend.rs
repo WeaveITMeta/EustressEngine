@@ -129,6 +129,10 @@ pub struct FjallWorldDb {
     s_class_index: eustress_fjall::StoreHandle,
     /// Multiplexer store for the Wave 9.A voxel-chunk terrain partition.
     s_voxels: eustress_fjall::StoreHandle,
+    /// Multiplexer stores for the Data Platform partitions, so each write
+    /// emits a sequenced replication delta after its durable commit.
+    s_datasets: eustress_fjall::StoreHandle,
+    s_timeseries: eustress_fjall::StoreHandle,
     keyspace: fjall::Keyspace,
     entities: fjall::PartitionHandle,
     meta: fjall::PartitionHandle,
@@ -169,6 +173,16 @@ pub struct FjallWorldDb {
     /// produces. Morton chunk-coord keys make a region scan a spatial
     /// chunk-window request, 1:1 with the entity streaming model.
     voxels: fjall::PartitionHandle,
+
+    // ── Data Platform — dataset-blob + timeseries partitions ──────────
+    /// Materialized columnar Parquet blobs, read-whole-value, keyed by a
+    /// 16-byte dataset id ([`crate::keys::encode_dataset_key`]). Opened
+    /// KV-separation-tuned so multi-MB blobs land in the value log.
+    datasets: fjall::PartitionHandle,
+    /// Per-series time-ordered append rows, keyed by
+    /// [`crate::keys::encode_timeseries_key`]; a series range scan == a
+    /// time-window query.
+    timeseries: fjall::PartitionHandle,
 
     /// Key layout. Boxed `dyn` so the engine plugin can swap encoders
     /// at open time (flat today, Morton in Phase 2).
@@ -238,6 +252,36 @@ impl FjallWorldDb {
         // world with no voxel rows stays loadable; it only fills when the
         // terrain importer redirects chunk writes here.
         let s_voxels = store("voxels")?;
+        // Data Platform partitions. Additive — a world predating the Data
+        // Platform has no rows in either; they fill only when the platform
+        // writes. `datasets` is KV-separation-tuned (multi-MB Parquet blobs
+        // → value log, far less LSM compaction churn) with a large scan
+        // block size; `timeseries` uses a scan-tuned block size for fast
+        // range reads. These create-time options are persisted on FIRST
+        // open and ignored on later opens (fjall semantics). Call
+        // `store_with_opts` directly — the `store` closure above hardcodes
+        // the default options, which would silently drop this tuning.
+        let s_datasets = efj
+            .store_with_opts(
+                "datasets",
+                fjall::PartitionCreateOptions::default()
+                    .block_size(64 * 1024)
+                    .compression(fjall::CompressionType::Lz4)
+                    .with_kv_separation(
+                        fjall::KvSeparationOptions::default().separation_threshold(4 * 1024),
+                    ),
+            )
+            .map_err(|e| crate::error::Error::Other(format!("eustress-fjall store datasets: {e}")))?;
+        let s_timeseries = efj
+            .store_with_opts(
+                "timeseries",
+                fjall::PartitionCreateOptions::default()
+                    .block_size(32 * 1024)
+                    .compression(fjall::CompressionType::Lz4),
+            )
+            .map_err(|e| {
+                crate::error::Error::Other(format!("eustress-fjall store timeseries: {e}"))
+            })?;
 
         let keyspace = s_entities.raw_keyspace();
         let entities = s_entities.raw_partition();
@@ -250,6 +294,8 @@ impl FjallWorldDb {
         let uuid_to_path = s_uuid_to_path.raw_partition();
         let class_index = s_class_index.raw_partition();
         let voxels = s_voxels.raw_partition();
+        let datasets = s_datasets.raw_partition();
+        let timeseries = s_timeseries.raw_partition();
 
         // Load the persisted tx counter; fall back to GENESIS for a
         // fresh world.
@@ -302,6 +348,8 @@ impl FjallWorldDb {
             s_uuid_to_path,
             s_class_index,
             s_voxels,
+            s_datasets,
+            s_timeseries,
             keyspace,
             entities,
             meta,
@@ -313,6 +361,8 @@ impl FjallWorldDb {
             uuid_to_path,
             class_index,
             voxels,
+            datasets,
+            timeseries,
             encoder,
             tx_counter: AtomicU64::new(tx_counter),
             commit_lock: Mutex::new(()),
@@ -704,6 +754,74 @@ impl WorldDb for FjallWorldDb {
             .prefix(crate::keys::voxel_key_prefix())
             .next()
             .is_some()
+    }
+
+    // ── Data Platform — dataset-blob partition ────────────────────────
+
+    fn put_dataset_chunk(&self, id: &[u8; 16], bytes: &[u8]) -> Result<()> {
+        let key = crate::keys::encode_dataset_key(id);
+        self.datasets.insert(key, bytes)?;
+        // Mirror put_voxel_chunk: emit AFTER the durable insert so replicas
+        // only ever see persisted state. Preview-cap the value.
+        self.s_datasets.publish_external(
+            eustress_fjall::ReplOp::Put,
+            &key,
+            &bytes[..bytes.len().min(64)],
+        );
+        Ok(())
+    }
+
+    fn get_dataset_chunk(&self, id: &[u8; 16]) -> Result<Option<Vec<u8>>> {
+        let key = crate::keys::encode_dataset_key(id);
+        Ok(self.datasets.get(key)?.map(|s| s.to_vec()))
+    }
+
+    fn iter_dataset_chunks(&self) -> Result<Vec<([u8; 16], Vec<u8>)>> {
+        // Every dataset key starts `D | ver`; that 2-byte prefix bounds the
+        // scan to this partition's dataset rows.
+        let prefix = crate::keys::dataset_key_prefix();
+        let mut out = Vec::new();
+        for res in self.datasets.prefix(prefix) {
+            let (key, value) = res?;
+            let id = crate::keys::decode_dataset_key(&key)?;
+            out.push((id, value.to_vec()));
+        }
+        Ok(out)
+    }
+
+    // ── Data Platform — timeseries partition ──────────────────────────
+
+    fn ts_append(&self, series: &str, ts: u64, seq: u32, row: &[u8]) -> Result<()> {
+        let key = crate::keys::encode_timeseries_key(series, ts, seq);
+        self.timeseries.insert(&key, row)?;
+        self.s_timeseries.publish_external(
+            eustress_fjall::ReplOp::Put,
+            &key,
+            &row[..row.len().min(64)],
+        );
+        Ok(())
+    }
+
+    fn ts_range(
+        &self,
+        series: &str,
+        min_ts: u64,
+        max_ts: u64,
+    ) -> Result<Vec<(u64, u32, Vec<u8>)>> {
+        // Inclusive bounds: low at seq 0, high at seq u32::MAX so the whole
+        // same-timestamp run is captured at each end. The series segment is
+        // a fixed prefix and ts is big-endian (order-preserving), so the
+        // range is EXACTLY the in-window rows — no post-filter needed
+        // (unlike the Morton voxel range, which returns a superset).
+        let lo = crate::keys::timeseries_range_bound(series, min_ts, 0);
+        let hi = crate::keys::timeseries_range_bound(series, max_ts, u32::MAX);
+        let mut out = Vec::new();
+        for res in self.timeseries.range(lo..=hi) {
+            let (key, value) = res?;
+            let (_series, ts, seq) = crate::keys::decode_timeseries_key(&key)?;
+            out.push((ts, seq, value.to_vec()));
+        }
+        Ok(out)
     }
 
     // ── IDENTITY.md Wave 2.1 ─────────────────────────────────────────

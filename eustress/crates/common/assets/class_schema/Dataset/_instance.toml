@@ -1,0 +1,6 @@
+# Dataset — Data Platform: a logical table / collection of observation Series.
+# Non-visual container modeled on Folder (DATA_PLATFORM_PLAN.md §A.1).
+
+[metadata]
+class_name = "Dataset"
+archivable = true

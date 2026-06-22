@@ -415,6 +415,73 @@ pub trait WorldDb: Send + Sync + 'static {
         false
     }
 
+    // ── Dataset-blob store — Data Platform (materialized Parquet) ─────
+    //
+    // A `datasets` partition mirroring `voxels`: read-whole-value opaque
+    // blobs (a materialized columnar Parquet file), addressed by a
+    // 16-byte dataset id. The default impls let non-Fjall test backends
+    // compile; `FjallWorldDb` overrides all three. The bytes are opaque
+    // here — the Parquet/Arrow encode lives in the off-by-default
+    // `eustress-data` leaf, never in this engine-free crate.
+
+    /// Store one dataset's opaque Parquet bytes under its 16-byte id.
+    /// Overwrites any blob already at that id.
+    fn put_dataset_chunk(&self, id: &[u8; 16], bytes: &[u8]) -> Result<()> {
+        let _ = (id, bytes);
+        Err(crate::error::Error::Other(
+            "put_dataset_chunk not supported by this backend".into(),
+        ))
+    }
+
+    /// Read one dataset blob by id. `Ok(None)` when absent.
+    fn get_dataset_chunk(&self, id: &[u8; 16]) -> Result<Option<Vec<u8>>> {
+        let _ = id;
+        Ok(None)
+    }
+
+    /// Eagerly collect every stored dataset as `(id, bytes)`. Eager (not a
+    /// borrowed iterator) so the engine data loader can consume it across
+    /// a Bevy system boundary.
+    fn iter_dataset_chunks(&self) -> Result<Vec<([u8; 16], Vec<u8>)>> {
+        Ok(Vec::new())
+    }
+
+    // ── Timeseries store — Data Platform (time-ordered append rows) ───
+    //
+    // A `timeseries` partition: per-series, time-ordered append rows,
+    // keyed by [`crate::keys::encode_timeseries_key`] so a range scan over
+    // one series between two timestamps returns rows in ascending time
+    // order. Rows are opaque bytes (the caller serialises one sample).
+    // NOT branch-isolated — see the `BranchHandle` note (D1: raw rows
+    // record to the shared parent; experiments branch at the materialized
+    // `datasets` blob level).
+
+    /// Append one row to `series` at timestamp `ts` (caller-chosen unit,
+    /// typically nanoseconds). `seq` disambiguates rows sharing a `ts` so
+    /// an append never overwrites a same-instant row — the caller passes a
+    /// per-(series, ts) monotonic counter, or simply 0 when collisions are
+    /// impossible.
+    fn ts_append(&self, series: &str, ts: u64, seq: u32, row: &[u8]) -> Result<()> {
+        let _ = (series, ts, seq, row);
+        Err(crate::error::Error::Other(
+            "ts_append not supported by this backend".into(),
+        ))
+    }
+
+    /// Range-scan one series for rows with `min_ts <= ts <= max_ts`,
+    /// ascending, returning `(ts, seq, row_bytes)`. Eager collect so it
+    /// crosses the engine system boundary; callers page by narrowing the
+    /// time window.
+    fn ts_range(
+        &self,
+        series: &str,
+        min_ts: u64,
+        max_ts: u64,
+    ) -> Result<Vec<(u64, u32, Vec<u8>)>> {
+        let _ = (series, min_ts, max_ts);
+        Ok(Vec::new())
+    }
+
     // ── UUID-keyed primary store — IDENTITY.md Wave 2.1 ──────────────
     //
     // The `entities_uuid` partition keys each entity's `ArchInstanceCore`

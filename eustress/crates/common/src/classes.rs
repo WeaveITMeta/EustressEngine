@@ -277,6 +277,11 @@ pub enum ClassName {
     SpecialMesh,
     Decal,
     Folder,
+    // Data Platform (DATA_PLATFORM_PLAN.md §A.1) — non-visual data nouns.
+    Dataset,
+    Series,
+    Column,
+    Run,
     BillboardGui,
     SurfaceGui,
     ScreenGui,
@@ -568,6 +573,10 @@ impl ClassName {
             ClassName::SpecialMesh => "SpecialMesh",
             ClassName::Decal => "Decal",
             ClassName::Folder => "Folder",
+            ClassName::Dataset => "Dataset",
+            ClassName::Series => "Series",
+            ClassName::Column => "Column",
+            ClassName::Run => "Run",
             ClassName::BillboardGui => "BillboardGui",
             ClassName::SurfaceGui => "SurfaceGui",
             ClassName::ScreenGui => "ScreenGui",
@@ -842,6 +851,10 @@ impl ClassName {
             "SpecialMesh" => Ok(ClassName::SpecialMesh),
             "Decal" => Ok(ClassName::Decal),
             "Folder" => Ok(ClassName::Folder),
+            "Dataset" => Ok(ClassName::Dataset),
+            "Series" => Ok(ClassName::Series),
+            "Column" => Ok(ClassName::Column),
+            "Run" => Ok(ClassName::Run),
             "BillboardGui" => Ok(ClassName::BillboardGui),
             "SurfaceGui" => Ok(ClassName::SurfaceGui),
             "ScreenGui" => Ok(ClassName::ScreenGui),
@@ -2333,10 +2346,25 @@ pub struct Attachment {
     /// Computed local transform (Eustress "CFrame")
     /// ReadOnly; syncs to Bevy Transform
     pub cframe: Transform,
-    
+
     /// Identifier for targeting (Eustress "Name")
     pub name: String,
+
+    /// Whether the attachment's debug visualizer is shown (Eustress "Visible").
+    #[serde(default)]
+    pub visible: bool,
+
+    /// Primary axis direction (Eustress "Axis"). Default +X.
+    #[serde(default = "default_attachment_axis")]
+    pub axis: Vec3,
+
+    /// Secondary axis direction (Eustress "SecondaryAxis"). Default +Y.
+    #[serde(default = "default_attachment_secondary_axis")]
+    pub secondary_axis: Vec3,
 }
+
+fn default_attachment_axis() -> Vec3 { Vec3::X }
+fn default_attachment_secondary_axis() -> Vec3 { Vec3::Y }
 
 impl Default for Attachment {
     fn default() -> Self {
@@ -2345,6 +2373,9 @@ impl Default for Attachment {
             orientation: Vec3::ZERO,
             cframe: Transform::IDENTITY,
             name: "Attachment".to_string(),
+            visible: false,
+            axis: Vec3::X,
+            secondary_axis: Vec3::Y,
         }
     }
 }
@@ -8137,7 +8168,12 @@ impl Default for WorkspaceComponent {
             // Raised 300 → 500 to pair with the larger residency load_radius
             // (lazy non-Workspace load freed the budget): streamed + eager parts
             // now draw to ~500 m. Live-tunable via the Workspace property.
-            render_distance: 500.0,
+            // Raised 500 → 1000 (2026-06-10, user: parts vanished too close).
+            // Paired with the size-aware cull margin in
+            // `part_visibility_range(half_extent)` — large parts (baseplates)
+            // now cull by their nearest extent, not their centre — so the
+            // visible-world radius is honest at this value.
+            render_distance: 1000.0,
             distance_lod_enabled: true,
             lod_bias: 0.0,
         }

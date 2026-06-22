@@ -34,11 +34,18 @@ pub mod file_events;
 // at the disk and display boundaries. ECS / Avian / rendering stay in
 // meters; authoring unit per instance, display unit per session.
 pub mod units;
+/// General SI dimension system (Data Platform D3) — see [`dimension::Dimension`].
+pub mod dimension;
 pub mod adornments;
 pub mod assets;
 pub mod attributes;
 // Roblox-parity 2D UI types: UDim, UDim2 with serde round-trip.
 pub mod ui_types;
+// Native Eustress BrickColor palette: sRGB-keyed swatches in 7 wheels, the
+// Roblox-BrickColor -> Eustress-token map, and a pure-Rust sRGB->OKLCH helper.
+pub mod brick_palette;
+// Seven-wheel categorical color-picker state (ActiveColorWheel / ColorFavorites).
+pub mod color_wheels;
 // Scene delta types (always available — rkyv is non-optional)
 pub mod scene_delta;
 // EustressStream change queue: Bevy Resource + producer/consumer (feature-gated)

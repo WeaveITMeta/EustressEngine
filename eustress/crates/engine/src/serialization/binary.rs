@@ -726,6 +726,14 @@ impl ClassId {
             ClassName::ColorGradingEffect => ClassId::Instance,
             ClassName::TerrainDetail => ClassId::Instance,
             ClassName::TerrainRegion => ClassId::Instance,
+            // Data Platform non-visual data nouns (DATA_PLATFORM_PLAN.md §A.1):
+            // container-like, so they fold to the Folder id. The reverse map
+            // (to_class_name) never produces these, so there is no round-trip
+            // ambiguity; no new ClassId variants are required.
+            ClassName::Dataset => ClassId::Folder,
+            ClassName::Series => ClassId::Folder,
+            ClassName::Column => ClassId::Folder,
+            ClassName::Run => ClassId::Folder,
         }
     }
 

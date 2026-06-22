@@ -351,6 +351,124 @@ pub fn world_to_chunk_coord(coord: f32, chunk_edge: f32) -> i32 {
     (coord / chunk_edge).floor() as i32
 }
 
+// ── Dataset-blob keys — Data Platform (materialized columnar blobs) ──
+//
+// A dataset is a whole materialized columnar Parquet blob, read as one
+// value (read-whole-value, like a voxel chunk but addressed by an opaque
+// 16-byte dataset id rather than a spatial coord). Keys are plain
+// lexicographic so a prefix scan over the tag returns every dataset id in
+// stable order. NOT Morton (no spatial locality to preserve); the tag
+// byte keeps a stray key from another partition from mis-decoding as a
+// dataset id (mirrors the voxel-key discipline above).
+
+/// Tag byte stamped on every dataset-blob key. Fresh, non-colliding with
+/// `F`/`M`/`V` (flat / morton / voxel).
+const DATASET_KEY_TAG: u8 = b'D';
+/// Schema version of the dataset-blob key wire form.
+const DATASET_KEY_VERSION: u8 = 1;
+
+/// Encode a dataset-blob key from its 16-byte id.
+/// Layout: `D | version(u8) | id(16)` — 18 bytes.
+pub fn encode_dataset_key(id: &[u8; 16]) -> [u8; 18] {
+    let mut out = [0u8; 18];
+    out[0] = DATASET_KEY_TAG;
+    out[1] = DATASET_KEY_VERSION;
+    out[2..18].copy_from_slice(id);
+    out
+}
+
+/// The tag+version prefix every dataset key starts with — the bound for a
+/// full `datasets`-partition scan.
+pub fn dataset_key_prefix() -> [u8; 2] {
+    [DATASET_KEY_TAG, DATASET_KEY_VERSION]
+}
+
+/// Inverse of [`encode_dataset_key`] → the 16-byte id.
+pub fn decode_dataset_key(bytes: &[u8]) -> Result<[u8; 16]> {
+    if bytes.len() != 18 {
+        return Err(Error::KeyDecode(format!(
+            "dataset key wrong length: {} (expected 18)",
+            bytes.len()
+        )));
+    }
+    if bytes[0] != DATASET_KEY_TAG || bytes[1] != DATASET_KEY_VERSION {
+        return Err(Error::KeyDecode(format!(
+            "dataset key wrong tag/version: 0x{:02x} v{} (expected 0x{:02x} v{})",
+            bytes[0], bytes[1], DATASET_KEY_TAG, DATASET_KEY_VERSION
+        )));
+    }
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&bytes[2..18]);
+    Ok(id)
+}
+
+// ── Timeseries keys — Data Platform (time-ordered append rows) ───────
+//
+// A timeseries row belongs to a named series and carries a u64 timestamp
+// (caller-chosen unit, typically nanoseconds). Keys are
+// `T | ver | series | 0x1f | ts_be8 | seq_be4` so a range scan over one
+// series between two timestamps returns rows in ascending time order.
+// Plain big-endian on the u64 ts is already order-preserving (unsigned);
+// the trailing u32 seq disambiguates rows sharing a timestamp so an
+// append never overwrites a same-instant row. NOT Morton (time is 1-D).
+// `0x1f` (unit separator) can't appear in a series name, so the series
+// segment is delimited collision-free (matches the DataStore key
+// discipline in fjall_backend.rs).
+
+/// Tag byte stamped on every timeseries key. Fresh, non-colliding.
+const TIMESERIES_KEY_TAG: u8 = b'T';
+/// Schema version of the timeseries key wire form.
+const TIMESERIES_KEY_VERSION: u8 = 1;
+
+/// Encode a timeseries row key.
+/// Layout: `T | ver(u8) | series_utf8 | 0x1f | ts(u64 be) | seq(u32 be)`.
+pub fn encode_timeseries_key(series: &str, ts: u64, seq: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + series.len() + 1 + 8 + 4);
+    out.push(TIMESERIES_KEY_TAG);
+    out.push(TIMESERIES_KEY_VERSION);
+    out.extend_from_slice(series.as_bytes());
+    out.push(0x1f);
+    out.extend_from_slice(&ts.to_be_bytes());
+    out.extend_from_slice(&seq.to_be_bytes());
+    out
+}
+
+/// Lower / upper bound key for a time range within one series. Pass
+/// `seq = 0` for the low bound and `seq = u32::MAX` for the high bound so
+/// the whole same-timestamp run is included at each end.
+pub fn timeseries_range_bound(series: &str, ts: u64, seq: u32) -> Vec<u8> {
+    encode_timeseries_key(series, ts, seq)
+}
+
+/// Decode a timeseries key → `(series, ts, seq)`.
+pub fn decode_timeseries_key(bytes: &[u8]) -> Result<(String, u64, u32)> {
+    if bytes.len() < 2 + 1 + 8 + 4 {
+        return Err(Error::KeyDecode(format!(
+            "timeseries key too short: {}",
+            bytes.len()
+        )));
+    }
+    if bytes[0] != TIMESERIES_KEY_TAG || bytes[1] != TIMESERIES_KEY_VERSION {
+        return Err(Error::KeyDecode(
+            "timeseries key wrong tag/version".to_string(),
+        ));
+    }
+    // The ts+seq tail is a fixed 12 bytes; the 0x1f sits just before it.
+    let tail_start = bytes.len() - 12;
+    let sep = tail_start
+        .checked_sub(1)
+        .filter(|&i| bytes[i] == 0x1f)
+        .ok_or_else(|| Error::KeyDecode("timeseries key missing 0x1f separator".into()))?;
+    let series = std::str::from_utf8(&bytes[2..sep])
+        .map_err(|e| Error::KeyDecode(format!("timeseries series not utf-8: {e}")))?
+        .to_string();
+    let mut t = [0u8; 8];
+    t.copy_from_slice(&bytes[tail_start..tail_start + 8]);
+    let mut s = [0u8; 4];
+    s.copy_from_slice(&bytes[tail_start + 8..]);
+    Ok((series, u64::from_be_bytes(t), u32::from_be_bytes(s)))
+}
+
 /// Spatial Morton key encoder — Phase 2, real. The key layout is
 ///
 /// ```text
@@ -518,6 +636,41 @@ mod morton_tests {
                 "voxel chunk roundtrip {cx},{cy},{cz}"
             );
         }
+    }
+
+    #[test]
+    fn dataset_key_roundtrip() {
+        let id = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let k = encode_dataset_key(&id);
+        assert_eq!(k[0], DATASET_KEY_TAG);
+        assert_eq!(decode_dataset_key(&k).unwrap(), id);
+        // wrong length and wrong tag are rejected
+        assert!(decode_dataset_key(&k[..17]).is_err());
+        let mut bad = k;
+        bad[0] = b'V';
+        assert!(decode_dataset_key(&bad).is_err());
+    }
+
+    #[test]
+    fn timeseries_key_roundtrip_and_order() {
+        let k = encode_timeseries_key("sensor.psi", 1_000_000, 7);
+        assert_eq!(
+            decode_timeseries_key(&k).unwrap(),
+            ("sensor.psi".to_string(), 1_000_000, 7)
+        );
+        // Lexicographic key order == (ts, seq) order within one series —
+        // the property the range scan relies on.
+        let a = encode_timeseries_key("s", 10, 0);
+        let b = encode_timeseries_key("s", 10, 1);
+        let c = encode_timeseries_key("s", 11, 0);
+        assert!(a < b && b < c, "timeseries keys must sort by (ts, seq)");
+        // A dotted/underscored series name (no 0x1f) round-trips at the
+        // u64/u32 extremes.
+        let k2 = encode_timeseries_key("a.b_c", u64::MAX, u32::MAX);
+        assert_eq!(
+            decode_timeseries_key(&k2).unwrap(),
+            ("a.b_c".to_string(), u64::MAX, u32::MAX)
+        );
     }
 
     #[test]

@@ -1265,6 +1265,23 @@ MyGame/
 
 ## Parameters Architecture
 
+> **STATUS (2026-06): NOT IMPLEMENTED / SUPERSEDED — design proposal, not current behavior.**
+> The typed 3-tier model below (the Global registry at `.eustress/parameters/global.toml`,
+> per-domain `{domain}.toml` files, and the typed `InstanceParameters` component with consent
+> gating) has **no runtime wiring**. No code reads or writes any `.eustress/parameters/` path
+> (verified by source grep); `GlobalParametersRegistry` is touched only by the deprecated,
+> UI-unreachable `.scene.json` path; and `InstanceParameters` is never attached to an entity nor
+> reflect-registered. The "file-system-first" premise was itself superseded by the
+> **WorldDb-primary binary pivot** — TOML `.glb.toml` is the authoring source of truth and the
+> `.eustress` binary archive is the primary runtime + distribution format (see
+> [`SERIALIZATION_AUDIT.md`](development/SERIALIZATION_AUDIT.md)). What actually persists per
+> instance today is a single flat, **untyped** `[parameters]` map (`HashMap<String, toml::Value>`)
+> folded into the binary archive's `extra` blob under the key `__parameters` and mirrored to the
+> instance TOML — no Global/Domain tier, no typed `ParameterValue`, no consent gating. See
+> [`DATA_PLATFORM_PLAN.md` §3.5](architecture/DATA_PLATFORM_PLAN.md) for the canonical
+> reconciliation (Parameters = semantics & governance schema; the Data Platform supplies the
+> implementations under it).
+
 ### 3-Tier Hierarchy
 
 | Level | Scope | Purpose | Storage |

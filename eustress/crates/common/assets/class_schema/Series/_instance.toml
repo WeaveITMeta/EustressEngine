@@ -1,0 +1,6 @@
+# Series — Data Platform: one observation set (a Run's recording); holds Columns.
+# Non-visual container modeled on Folder (DATA_PLATFORM_PLAN.md §A.1).
+
+[metadata]
+class_name = "Series"
+archivable = true

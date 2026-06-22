@@ -113,3 +113,49 @@ jobs:
             validated=$((validated + 1))
           done
           echo "WGSL validation done: $validated validated, $skipped skipped (naga_oil)."
+
+  data-graph-purity:
+    name: Columnar leaf stays out of the default engine graph
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # The Cargo workspace root (repo root has no Cargo.toml).
+        working-directory: eustress
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Assert eustress-data / arrow / parquet / polars are absent from the default engine graph
+        shell: bash
+        run: |
+          # DATA_PLATFORM_PLAN.md invariant D2: the columnar leaf and its
+          # arrow / parquet / polars deps must NEVER enter the default
+          # `cargo run` graph for the engine — they are pulled only by the
+          # off-by-default `data` feature. `cargo tree` is metadata-only
+          # (no compile), so this guard is cheap.
+          #
+          # `-e normal,build` excludes dev-dependencies (the `cargo run` graph,
+          # not the test graph). Default engine features (`default = ["core"]`)
+          # are used since no feature flags are passed.
+          tree="$(cargo tree -p eustress-engine -e normal,build)"
+          if printf '%s\n' "$tree" | grep -Eiq ' (eustress-data|arrow|arrow-[a-z]+|parquet|polars|polars-[a-z]+) v[0-9]'; then
+            echo "::error::Columnar leaf leaked into the default eustress-engine graph (DATA_PLATFORM_PLAN.md D2). Offending entries:"
+            printf '%s\n' "$tree" | grep -Ei ' (eustress-data|arrow|arrow-[a-z]+|parquet|polars|polars-[a-z]+) v[0-9]' || true
+            exit 1
+          fi
+          echo "OK: default engine graph is free of eustress-data / arrow / parquet / polars."
+
+      - name: Sanity-check that the data feature DOES pull the leaf
+        shell: bash
+        run: |
+          # Positive control: with `--features data`, the leaf must appear —
+          # otherwise the guard above could pass trivially from a typo.
+          tree="$(cargo tree -p eustress-engine -e normal,build --features data)"
+          if ! printf '%s\n' "$tree" | grep -Eiq ' eustress-data v[0-9]'; then
+            echo "::error::--features data did not pull eustress-data; the feature wiring is broken."
+            exit 1
+          fi
+          echo "OK: --features data pulls eustress-data as expected."

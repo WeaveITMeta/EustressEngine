@@ -1,0 +1,18 @@
+# DataService — Data Platform: top-level container for Datasets, Series, Columns,
+# and Runs. DATA_PLATFORM_PLAN.md §A.1. Data-driven: an unknown service class
+# loads as a Folder-like container (service_loader.rs `_ => ClassName::Folder`),
+# so no Rust enum entry is required.
+
+[service]
+class_name = "DataService"
+icon = "folder"
+description = "Container for Data Platform datasets, series, columns, and runs"
+can_have_children = true
+
+[properties]
+# No configurable properties — DataService is purely a container.
+
+[metadata]
+id = "dataservice-service"
+created = ""
+last_modified = ""

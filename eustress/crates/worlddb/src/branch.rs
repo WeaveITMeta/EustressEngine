@@ -130,6 +130,10 @@ struct Overlay {
     core_ops: Vec<CoreOp>,
     /// Voxel chunks keyed by signed chunk coords.
     voxels: BTreeMap<(i32, i32, i32), Option<Vec<u8>>>,
+    /// Materialized dataset blobs keyed by 16-byte dataset id. Experiments
+    /// branch a Dataset at this blob level; raw `timeseries` rows do NOT
+    /// get a RAM overlay (they branch only via the materialized blob).
+    datasets: BTreeMap<[u8; 16], Option<Vec<u8>>>,
     /// UUID-keyed primary store.
     uuid_cores: BTreeMap<[u8; 16], Option<Vec<u8>>>,
     /// `path → uuid` identity index.
@@ -153,6 +157,7 @@ impl Overlay {
             + self.ds_ord.len()
             + self.cores.len()
             + self.voxels.len()
+            + self.datasets.len()
             + self.uuid_cores.len()
             + self.path_to_uuid.len()
             + self.uuid_to_path.len()
@@ -276,6 +281,9 @@ impl BranchHandle {
             k[8..].copy_from_slice(&cz.to_le_bytes());
             put(&mut h, 7, &k, v.as_deref());
         }
+        for (id, v) in &o.datasets {
+            put(&mut h, 13, id, v.as_deref());
+        }
         for (u, v) in &o.uuid_cores {
             put(&mut h, 8, u, v.as_deref());
         }
@@ -364,6 +372,19 @@ impl BranchHandle {
                 // overwritten with empty bytes (loaders treat an empty
                 // chunk as absent).
                 None => self.parent.put_voxel_chunk(*cx, *cy, *cz, &[])?,
+            }
+        }
+
+        // ── datasets (blob-level CoW — replay before tree/identity refs
+        //    so a Run/Dataset ref naming this blob is never written before
+        //    the blob itself) ──────────────────────────────────────────
+        for (id, v) in &overlay.datasets {
+            match v {
+                Some(bytes) => self.parent.put_dataset_chunk(id, bytes)?,
+                // The trait has no dataset delete — a tombstoned blob is
+                // overwritten with empty bytes (readers treat an empty blob
+                // as absent), mirroring the voxel tombstone above.
+                None => self.parent.put_dataset_chunk(id, &[])?,
             }
         }
 
@@ -1017,6 +1038,61 @@ impl WorldDb for BranchHandle {
             return true;
         }
         self.parent.has_voxel_chunks()
+    }
+
+    // ── datasets — Data Platform (blob-level CoW) ────────────────────
+
+    fn put_dataset_chunk(&self, id: &[u8; 16], bytes: &[u8]) -> Result<()> {
+        self.overlay
+            .write()
+            .datasets
+            .insert(*id, Some(bytes.to_vec()));
+        Ok(())
+    }
+
+    fn get_dataset_chunk(&self, id: &[u8; 16]) -> Result<Option<Vec<u8>>> {
+        if let Some(v) = self.overlay.read().datasets.get(id) {
+            return Ok(v.clone());
+        }
+        self.parent.get_dataset_chunk(id)
+    }
+
+    fn iter_dataset_chunks(&self) -> Result<Vec<([u8; 16], Vec<u8>)>> {
+        let o = self.overlay.read();
+        let mut merged: BTreeMap<[u8; 16], Vec<u8>> = BTreeMap::new();
+        for (id, bytes) in self.parent.iter_dataset_chunks()? {
+            if o.datasets.contains_key(&id) {
+                continue; // overlay overrides or tombstones this id
+            }
+            merged.insert(id, bytes);
+        }
+        for (id, v) in &o.datasets {
+            if let Some(bytes) = v {
+                merged.insert(*id, bytes.clone());
+            }
+            // None = tombstone: stays out of the merged map.
+        }
+        Ok(merged.into_iter().collect())
+    }
+
+    // ── timeseries — NOT branch-isolated (D1) ────────────────────────
+    // Raw high-rate rows are never branched: they record to the shared
+    // parent timeseries, and experiments branch only at the materialized
+    // `datasets` blob level. Pass both ops straight through to the parent
+    // (read-through + write-through) — never the trait default, which would
+    // hide parent rows on read / error on write.
+
+    fn ts_append(&self, series: &str, ts: u64, seq: u32, row: &[u8]) -> Result<()> {
+        self.parent.ts_append(series, ts, seq, row)
+    }
+
+    fn ts_range(
+        &self,
+        series: &str,
+        min_ts: u64,
+        max_ts: u64,
+    ) -> Result<Vec<(u64, u32, Vec<u8>)>> {
+        self.parent.ts_range(series, min_ts, max_ts)
     }
 
     // ── uuid identity stores ─────────────────────────────────────────

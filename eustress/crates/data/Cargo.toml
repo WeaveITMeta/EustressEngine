@@ -1,0 +1,62 @@
+# =============================================================================
+# eustress-data — columnar data substrate (Data Platform, Phase P0)
+# =============================================================================
+# The OFF-BY-DEFAULT columnar leaf. Arrow-rs / Parquet (and, later, Polars)
+# live ONLY in this crate; it is NEVER part of the engine `core`/`default`
+# feature tier — see docs/architecture/DATA_PLATFORM_PLAN.md invariant D2 and
+# the `data-graph-purity` CI guard. The public surface names
+# `eustress_data::Frame`/`ColumnSpec`/`ColumnData` — never `arrow::*` /
+# `parquet::*` — so the backing engine stays swappable.
+#
+# Feature ladder (only `parquet` is implemented in P0):
+#   parquet  → arrow-rs in-memory columns + Parquet I/O (this phase)
+#   frames   → eager Polars DataFrames                  (reserved, P4)
+#   query    → Polars-lazy engine                       (reserved, P4)
+# The eager tiers are intentionally absent until their compile cost is measured
+# on this hardware (plan Risk 1) — a stray `eustress-data` dep with no feature
+# therefore adds ZERO arrow/parquet/polars compile cost.
+# =============================================================================
+
+[package]
+name = "eustress-data"
+version = "0.1.0"
+edition = "2021"
+description = "Columnar data substrate (Arrow/Parquet) for the Eustress Data Platform."
+
+[features]
+# The leaf does nothing unless a tier is requested.
+default = []
+# P0 tier: arrow-rs in-memory columns + Parquet read/write.
+parquet = ["dep:arrow", "dep:parquet", "dep:bytes"]
+# P4 spectral analysis (FFT). Pure-Rust rustfft, no C toolchain.
+spectral = ["dep:rustfft"]
+# P6 file import (CSV + JSON/JSONL → Frame, with dtype + unit inference).
+import = ["dep:csv", "dep:serde_json"]
+# Note: the `numerics` (stats / derivative / integral / interpolation /
+# curve-fit) and `decimate` (min-max LOD) modules are pure std and are ALWAYS
+# compiled — they add no dependency.
+
+[dependencies]
+# arrow-rs umbrella — core arrays/schema/record-batch only (default features
+# OFF drops csv/json/ipc/prettyprint). NOT arrow2.
+arrow = { version = "54", default-features = false, optional = true }
+# Parquet reader/writer with arrow integration. default-features OFF avoids the
+# native compression codecs (zstd/brotli need a C toolchain); P0 writes
+# UNCOMPRESSED, so no codec feature is required.
+parquet = { version = "54", default-features = false, features = ["arrow"], optional = true }
+# `bytes::Bytes` is a `parquet::ChunkReader`, used to read in-memory chunk blobs.
+bytes = { workspace = true, optional = true }
+# P4 FFT — pure-Rust, no C deps.
+rustfft = { version = "6", optional = true }
+# P6 CSV import.
+csv = { version = "1.3", optional = true }
+# P6 JSON / JSONL import.
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Test-only: exercise the P1d round-trip (Frame ⇄ the WorldDb `datasets`
+# partition) against a real FjallWorldDb. Dev-only, so it never enters the
+# shipped/default graph — D2 leaf purity and the CI `cargo tree -e normal,build`
+# guard are unaffected. eustress-worlddb does NOT depend on eustress-data, so
+# there is no dependency cycle.
+eustress-worlddb = { path = "../worlddb" }

@@ -1,0 +1,8 @@
+# Column — Data Platform: one typed, unit-tagged column of a Series.
+# Non-visual leaf modeled on Folder (DATA_PLATFORM_PLAN.md §A.1). The typed
+# dtype / unit / dimension schema lands with the DatasetColumn component (P1d);
+# kept minimal here so the class spawns non-visual (no gray-block fallback).
+
+[metadata]
+class_name = "Column"
+archivable = true

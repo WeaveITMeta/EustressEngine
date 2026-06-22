@@ -4,11 +4,8 @@
 # Parses .rbxl / .rbxlx / .rbxm / .rbxmx into the Eustress instance model
 # via the canonical eustress_common::instance_create pipeline.
 #
-# Wave 1 scaffold: NOT YET added to workspace members.
-# Wave 2 will:
-#   1. Uncomment the rbx_* deps below.
-#   2. Add "crates/roblox-import" to eustress/Cargo.toml [workspace.members].
-#   3. Wire FileEvent::ImportRobloxPlace + drop-target in engine::ui.
+# Status: wired — a workspace member with the rbx_* parsers active; File→Import
+# Roblox Place + drag-drop call eustress_roblox_import::import_into_space.
 #
 # Spec: docs/architecture/ROBLOX_IMPORT_SPEC.md
 # =============================================================================
@@ -66,11 +63,21 @@ rbx_reflection         = "6"   # ClassDescriptor / ClassTag — for the class-co
 # feature. When off, only TomlSink exists and the importer stays engine-free.
 eustress-worlddb = { path = "../worlddb", optional = true }
 
+# Columnar Parquet emit for the color manifest — the deferred
+# `color_manifest.parquet` (color_manifest.rs header note), now homed in the
+# eustress-data leaf. Optional so the default engine-free import build never
+# links arrow/parquet; the default emit stays NDJSON.
+eustress-data = { path = "../data", optional = true }
+
 [features]
 default = []
 # Spec §8.A: the direct-binary import backend. Pulls in eustress-worlddb so
 # BinarySink can write ArchInstanceCore rows straight into the Fjall store.
 binary-sink = ["dep:eustress-worlddb"]
+# Emit the color manifest as columnar Parquet (in addition to the default
+# NDJSON) via the eustress-data leaf (DATA_PLATFORM_PLAN.md P0). OFF by default
+# — pulls arrow-rs + parquet, so the default build is unchanged.
+parquet = ["dep:eustress-data", "eustress-data/parquet"]
 
 [dev-dependencies]
 # Fixture diffing for golden tests

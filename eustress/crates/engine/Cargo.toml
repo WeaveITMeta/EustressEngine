@@ -170,12 +170,26 @@ tracing = "0.1"
 inferno = { workspace = true, optional = true }
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 eustress-forge-sdk = { path = "../forge-sdk" }
+# Forge ORCHESTRATION crate (DISTINCT from the connect-only SDK above) —
+# carries the in-forge sim module (residency-cell → SimCell gang placement).
+# Optional + behind the `sim-orchestration` engine feature so the default
+# build never links forge-orchestration (openraft + fjall + quinn/tls).
+# The forge crate gates `pub mod sim` on ITS OWN `sim-orchestration` feature
+# (= raft-persist), so we MUST forward that feature or `eustress_forge::sim`
+# would not be compiled into the dependency.
+eustress-forge = { path = "../forge", optional = true, features = ["sim-orchestration"] }
 # WorldDb — Fjall-backed authoritative ECS persistence. Optional today;
 # wired by the `world-db` feature. When on, the Bevy plugin in
 # `space::world_db_plugin` opens `<universe>/<space>/world.fjalldb/`
 # on Space switch and mirrors Transform/BasePart writes alongside the
 # legacy TOML write path.
 eustress-worlddb = { path = "../worlddb", optional = true }
+# Data Platform columnar leaf (P0). Optional + OFF by default and NOT in
+# `core` — arrow-rs/parquet must never enter the default `cargo run` graph
+# (DATA_PLATFORM_PLAN.md D2; enforced by the `data-graph-purity` CI guard).
+# No engine code consumes it yet; the wiring + `data` feature establish the
+# boundary and give the CI guard something to verify. P1 wires consumers.
+eustress-data = { path = "../data", optional = true }
 # Roblox place importer (Wave 4/6) — File→Import→Roblox Place + drag-drop
 # call eustress_roblox_import::import_into_space.
 eustress-roblox-import = { path = "../roblox-import" }
@@ -351,6 +365,22 @@ units_v1 = ["eustress-common/units_v1"]
 # (do_import_roblox_place) can bake bare parts straight into this Space's
 # `entities` partition; file-natured nodes still land as _instance.toml.
 world-db = ["dep:eustress-worlddb", "eustress-roblox-import/binary-sink"]
+# Sim orchestration (Phase 6 engine seam, OPT-IN). Pulls the forge
+# ORCHESTRATION crate's sim module (residency-cell → SimCell gang placement)
+# and requires `world-db` for the residency cell encoding. NOT in `core`/
+# `default`: it links forge-orchestration (openraft + fjall + quinn/tls), so
+# the everyday editor build stays unaffected. Activate with
+# `cargo run -p eustress-engine --features sim-orchestration` (layers on top
+# of `default`/`core`, so world-db et al. stay enabled). The new
+# `SimOrchestrationPlugin` is DISTINCT from the connect-only `ForgePlugin`
+# (SDK game-server deployment) — they share no code.
+sim-orchestration = ["dep:eustress-forge", "world-db"]
+# Data Platform columnar substrate (DATA_PLATFORM_PLAN.md P0). OPT-IN, NOT in
+# `core`/`default`: pulls the `eustress-data` leaf (arrow-rs + parquet), which
+# must stay out of the everyday editor build. Activate with
+# `cargo run -p eustress-engine --features data`. The `data-graph-purity` CI
+# guard fails the build if this ever leaks into the default feature graph.
+data = ["dep:eustress-data", "eustress-data/parquet"]
 # Legacy TOML write-back authoring path. OPT-IN since 2026-05-15 —
 # the default build no longer writes `_instance.toml` on edit;
 # persistence goes to `world.fjalldb/`. Turn this on to restore the

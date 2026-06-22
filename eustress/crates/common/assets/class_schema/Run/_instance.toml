@@ -1,0 +1,6 @@
+# Run — Data Platform: provenance node for one experiment / recording; points at
+# the Series it produced. Non-visual modeled on Folder (DATA_PLATFORM_PLAN.md §A.1).
+
+[metadata]
+class_name = "Run"
+archivable = true

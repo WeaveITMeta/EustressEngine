@@ -381,6 +381,20 @@ impl EustressFjall {
     /// Many threads/players can hold and use different stores
     /// concurrently.
     pub fn store(&self, name: &str) -> Result<StoreHandle> {
+        self.store_with_opts(name, fjall::PartitionCreateOptions::default())
+    }
+
+    /// Like [`Self::store`] but passes scan-/blob-tuned partition create
+    /// options on FIRST open. fjall persists `block_size`, `compression`,
+    /// and `with_kv_separation` at partition creation and IGNORES them on
+    /// later opens — so `opts` only take effect the first time `name` is
+    /// ever created on disk, and a store already open in this process
+    /// returns the cached handle unchanged.
+    pub fn store_with_opts(
+        &self,
+        name: &str,
+        opts: fjall::PartitionCreateOptions,
+    ) -> Result<StoreHandle> {
         if let Some(h) = self.stores.read().get(name) {
             return Ok(h.clone());
         }
@@ -390,7 +404,7 @@ impl EustressFjall {
         }
         let partition = self
             .keyspace
-            .open_partition(name, fjall::PartitionCreateOptions::default())
+            .open_partition(name, opts)
             .map_err(|e| Error::Store(format!("open_partition {name}: {e}")))?;
         let handle = StoreHandle {
             name: name.to_string(),

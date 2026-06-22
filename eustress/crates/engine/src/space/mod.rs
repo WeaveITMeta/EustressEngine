@@ -50,6 +50,18 @@ pub mod residency;
 pub mod hlod;
 #[cfg(feature = "world-db")]
 pub mod world_db_plugin;
+/// P1d — Data Platform dataset materialization bridge: an `eustress-data`
+/// `Frame` (a Series' columns) ⇄ the WorldDb `datasets` partition. Gated on
+/// both the columnar leaf (`data`) and the storage trait (`world-db`).
+#[cfg(all(feature = "data", feature = "world-db"))]
+pub mod dataset_store;
+/// Sim orchestration (Phase 6 engine seam + thin Phase 3 driver): lowers
+/// newly-resident residency cells into forge `SimCell`s and gang-schedules
+/// them through the in-forge reconciler. Gated on `sim-orchestration` (which
+/// implies `world-db`), so it is absent from the default build and names
+/// `world_db_binary::ResidencyChainSet` safely.
+#[cfg(feature = "sim-orchestration")]
+pub mod sim_orchestration;
 
 /// Resource holding the current Space root path
 #[derive(Resource, Debug, Clone)]

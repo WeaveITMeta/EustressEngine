@@ -30,6 +30,7 @@ members = [
     "crates/identity",
     "crates/eustress-fjall",
     "crates/worlddb",
+    "crates/data",
     "crates/roblox-import",
     "crates/roblox-assets",
     "crates/eustress-space",
