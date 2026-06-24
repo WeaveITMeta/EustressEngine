@@ -341,6 +341,177 @@ pub fn hot_reload_dirty_luau_scripts(
     }
 }
 
+/// System (OnEnter Playing): (re)spawn every enabled Luau script body as a
+/// managed scheduler coroutine, so the script can `task.wait`, connect to
+/// `RunService.Heartbeat`, read `UserInputService`, and otherwise run live
+/// across frames — the Luau analogue of `run_script_init` for Rune.
+///
+/// This replaces the old "runs once, top-to-bottom" play-start path (which
+/// relied on `hot_reload_dirty_luau_scripts` firing `execute_chunk` on dirty
+/// scripts). We reset the VM first for a clean session, then clear each
+/// script's `dirty` flag so the hot-reload system does not double-run the
+/// body on the first Play frame. The per-frame ticking is done by
+/// [`eustress_common::luau::drive_luau_frame`], registered in `PlayModePlugin`.
+pub fn start_luau_scripts_on_play(
+    mut commands: Commands,
+    mut scripts: Query<(&Name, &mut super::SoulScriptData)>,
+    parts: Query<
+        (Entity, &eustress_common::classes::Instance),
+        With<eustress_common::classes::BasePart>,
+    >,
+    mut luau_state: Option<ResMut<eustress_common::luau::runtime::LuauRuntimeState>>,
+) {
+    #[cfg(feature = "luau")]
+    {
+        let Some(luau_state) = luau_state.as_deref_mut() else { return };
+
+        // Lazy-init the VM if no execution has happened yet this session.
+        if luau_state.runtime.is_none() {
+            match eustress_common::luau::runtime::LuauRuntime::new() {
+                Ok(rt) => {
+                    luau_state.runtime = Some(rt);
+                    luau_state.initialized = true;
+                }
+                Err(e) => {
+                    warn!("⚠ Luau runtime init failed at play start: {}", e);
+                    return;
+                }
+            }
+        }
+        let Some(runtime) = luau_state.runtime.as_mut() else { return };
+
+        // Clean slate: drop any coroutines / signal connections / script-created
+        // instances left over from a previous Play session.
+        runtime.reset_runtime_state();
+        eustress_common::luau::runtime::clear_entity_instances();
+
+        // Seed every scene BasePart into the VM (BEFORE running script bodies)
+        // and record the ECS-entity ↔ VM-id mapping, so an Avian collision can
+        // resolve back to the right instance and fire its `Touched`. Scene
+        // parts get NEGATIVE VM ids so they never collide with the positive
+        // ids `Instance.new` hands out.
+        let mut seeded = 0usize;
+        for (entity, instance) in parts.iter() {
+            let luau_id = -(entity.index() as i64) - 1;
+            let class = format!("{:?}", instance.class_name);
+            runtime.seed_instance(luau_id, &instance.name, &instance.uuid, &class);
+            runtime.workspace_attach(luau_id);
+            eustress_common::luau::runtime::register_entity_instance(entity.to_bits(), luau_id);
+            // Avian only writes CollisionStart/End for entities that opt in.
+            commands.entity(entity).insert(avian3d::prelude::CollisionEventsEnabled);
+            seeded += 1;
+        }
+        if seeded > 0 {
+            info!("🌱 Seeded {} scene part(s) into the Luau VM for Touched", seeded);
+        }
+
+        let mut spawned = 0usize;
+        for (name, mut data) in scripts.iter_mut() {
+            if data.run_context != super::SoulRunContext::Luau {
+                continue;
+            }
+            if data.source.is_empty() {
+                data.dirty = false;
+                continue;
+            }
+            let chunk_name = format!("play:{}", name.as_str());
+            match runtime.spawn_script(&data.source, &chunk_name) {
+                Ok(()) => {
+                    data.dirty = false;
+                    data.build_status = crate::soul::SoulBuildStatus::Built;
+                    data.errors.clear();
+                    spawned += 1;
+                }
+                Err(msg) => {
+                    warn!("⚠ Luau compile error in '{}': {}", name.as_str(), msg);
+                    data.dirty = false;
+                    data.build_status = crate::soul::SoulBuildStatus::Failed;
+                    data.errors = vec![msg];
+                }
+            }
+        }
+        if spawned > 0 {
+            info!("🎬 Spawned {} live Luau script(s) on play", spawned);
+        }
+    }
+    #[cfg(not(feature = "luau"))]
+    {
+        let _ = (&mut commands, &scripts, &parts, &luau_state);
+    }
+}
+
+/// System (OnExit Playing): tear down all live Luau coroutines, signal
+/// connections, and script-created instances so the next Play session — and
+/// Edit mode — start from a clean VM. Pairs with
+/// [`start_luau_scripts_on_play`].
+pub fn stop_luau_scripts_on_exit(
+    mut luau_state: Option<ResMut<eustress_common::luau::runtime::LuauRuntimeState>>,
+) {
+    #[cfg(feature = "luau")]
+    {
+        if let Some(luau_state) = luau_state.as_deref_mut() {
+            if let Some(runtime) = luau_state.runtime.as_ref() {
+                runtime.reset_runtime_state();
+                info!("🧹 Luau runtime reset on play stop");
+            }
+        }
+        eustress_common::luau::runtime::clear_entity_instances();
+    }
+    #[cfg(not(feature = "luau"))]
+    {
+        let _ = &luau_state;
+    }
+}
+
+/// System (Update, Playing): translate Avian collisions into Luau
+/// `Touched` / `TouchEnded` fires. Each colliding ECS entity is mapped back to
+/// its VM `_entityId` via the seed-time registry; if BOTH ends are seeded, the
+/// part's `Touched` signal fires carrying the other part (Roblox semantics).
+///
+/// NOTE: Avian only emits these events for entities that have collision events
+/// enabled. Parts get colliders via the play-mode physics activation; enabling
+/// per-part collision events (if the Avian build requires it) is the final
+/// wiring step for scene-part Touched.
+pub fn read_luau_collisions(
+    mut started: MessageReader<avian3d::prelude::CollisionStart>,
+    mut ended: MessageReader<avian3d::prelude::CollisionEnd>,
+    luau_state: Option<Res<eustress_common::luau::runtime::LuauRuntimeState>>,
+) {
+    #[cfg(feature = "luau")]
+    {
+        use eustress_common::luau::runtime::entity_luau_id;
+        let Some(luau_state) = luau_state else { return };
+        let Some(runtime) = luau_state.runtime.as_ref() else { return };
+
+        // Resolve a colliding entity to its VM id, preferring the collider
+        // entity but falling back to its rigid body (Eustress parts usually
+        // carry the collider on the part entity itself, so collider == body).
+        let resolve = |collider: Entity, body: Option<Entity>| -> Option<i64> {
+            entity_luau_id(collider.to_bits())
+                .or_else(|| body.and_then(|b| entity_luau_id(b.to_bits())))
+        };
+
+        for ev in started.read() {
+            if let (Some(ia), Some(ib)) =
+                (resolve(ev.collider1, ev.body1), resolve(ev.collider2, ev.body2))
+            {
+                runtime.fire_touch(ia, ib, false);
+            }
+        }
+        for ev in ended.read() {
+            if let (Some(ia), Some(ib)) =
+                (resolve(ev.collider1, ev.body1), resolve(ev.collider2, ev.body2))
+            {
+                runtime.fire_touch(ia, ib, true);
+            }
+        }
+    }
+    #[cfg(not(feature = "luau"))]
+    {
+        let _ = (&mut started, &mut ended, &luau_state);
+    }
+}
+
 /// System: compile all SoulScriptData entities when entering Playing state.
 /// Gathers script sources from ECS and delegates to common runtime.
 pub fn compile_scripts_on_play(

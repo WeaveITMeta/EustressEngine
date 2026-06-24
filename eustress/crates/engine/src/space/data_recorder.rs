@@ -20,6 +20,8 @@ use eustress_data_store::RecorderBuffer;
 
 use super::file_loader::LoadInProgress;
 use super::world_db_plugin::WorldDbHandle;
+use crate::play_mode::PlayModeState;
+use crate::space::DataRecording;
 
 /// One sensor sample bound for the `timeseries` partition.
 #[derive(Clone, Debug)]
@@ -84,8 +86,41 @@ impl Plugin for DataRecorderPlugin {
                 flush_every: 30,
                 frame: 0,
             })
-            .add_systems(Update, drain_and_flush_recorder);
+            .insert_resource(DataRecording::default())
+            .add_systems(Update, (drain_and_flush_recorder, record_sampler));
     }
+}
+
+/// Producer A — sample the armed target Part's `Transform` each Play frame and
+/// push x/y/z to the Recorder. Gated to `Playing` so editing never records;
+/// no-op until the `data:record` action arms a target.
+fn record_sampler(
+    mut rec: ResMut<DataRecording>,
+    play: Option<Res<State<PlayModeState>>>,
+    time: Res<Time>,
+    sender: Res<SensorRecorderSender>,
+    transforms: Query<&Transform>,
+) {
+    if !rec.active {
+        return;
+    }
+    let playing = play.map(|p| matches!(p.get(), PlayModeState::Playing)).unwrap_or(false);
+    if !playing {
+        return;
+    }
+    let Some(target) = rec.target else {
+        return;
+    };
+    let Ok(tf) = transforms.get(target) else {
+        return;
+    };
+    let ts = time.elapsed().as_millis() as u64;
+    let seq = rec.seq;
+    let base = format!("record.e{}", target.index());
+    sender.record(format!("{base}.x"), ts, seq, tf.translation.x as f64);
+    sender.record(format!("{base}.y"), ts, seq, tf.translation.y as f64);
+    sender.record(format!("{base}.z"), ts, seq, tf.translation.z as f64);
+    rec.seq = rec.seq.wrapping_add(1);
 }
 
 /// Drain queued samples into per-series buffers, then batch-flush to the

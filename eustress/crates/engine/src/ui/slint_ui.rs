@@ -284,18 +284,9 @@ pub enum SlintAction {
     /// and rejects unknown values so a typo doesn't poison state.
     SetDisplayUnit(String),
 
-    // Categorical color picker (status-bar widget). All carry strings so the
-    // Slint callbacks stay simple; the drain handler parses/validates.
-    /// Drill into a color wheel by stable id ("" = back to the wheel list).
-    /// Validated via `Wheel::from_id`; an unknown non-empty id clears the
-    /// active wheel rather than poisoning state.
-    PickWheel(String),
-    /// Apply an "r, g, b" (0-255) color to the current selection — routed
-    /// through the same `PropertyChanged("Color", …)` path the Properties
-    /// panel color field uses.
-    PickColor(String),
-    /// Toggle an "r, g, b" (0-255) color in the session favorites list.
-    ToggleFavorite(String),
+    // (PickWheel removed: the BrickColor wheel drill is now local to the Slint
+    // BrickColorRow — no Rust round-trip. The chosen cell's color still applies
+    // via the ordinary `PropertyChanged("BrickColor", "name|r, g, b")` path.)
 
     // Play controls
     PlaySolo,
@@ -1348,7 +1339,7 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_toast_undo_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_commit_flash_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_display_unit_to_slint.after(SlintSystems::Drain))
-            .add_systems(Update, sync_color_wheels_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, push_brick_color_honeycombs.after(SlintSystems::Drain))
             .add_systems(Update, sync_selection_summary_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_universe_browser.after(SlintSystems::Drain))
             .add_systems(Update, sync_gui_elements_to_slint.after(SlintSystems::Drain))
@@ -1538,13 +1529,10 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_new_universe(move || q.push(SlintAction::NewUniverse));
     let q = queue.clone();
     ui.on_set_display_unit(move |sym| q.push(SlintAction::SetDisplayUnit(sym.to_string())));
-    // Categorical color picker (status-bar widget).
-    let q = queue.clone();
-    ui.on_pick_wheel(move |id| q.push(SlintAction::PickWheel(id.to_string())));
-    let q = queue.clone();
-    ui.on_pick_color(move |c| q.push(SlintAction::PickColor(c.to_string())));
-    let q = queue.clone();
-    ui.on_toggle_favorite(move |c| q.push(SlintAction::ToggleFavorite(c.to_string())));
+    // BrickColor wheel picker (Properties panel): the two-step wheel drill is
+    // now entirely local to the Slint BrickColorRow (no Rust round-trip), so
+    // there is no per-pick callback to wire here. Rust only pushes the seven
+    // honeycombs once (see `push_brick_color_honeycombs`).
     let q = queue.clone();
     ui.on_new_universe_confirmed(move |name| q.push(SlintAction::NewUniverseConfirmed(name.to_string())));
     let q = queue.clone();
@@ -3151,11 +3139,6 @@ struct DrainResources<'w> {
     lighting: Option<ResMut<'w, eustress_common::services::LightingService>>,
     /// Stage 5 — user-selected display unit (set by status-bar dropdown).
     display_unit: Option<ResMut<'w, eustress_common::units::DisplayUnit>>,
-    /// Categorical color picker — which wheel the status-bar picker is
-    /// drilled into (None = top-level list).
-    active_color_wheel: Option<ResMut<'w, eustress_common::color_wheels::ActiveColorWheel>>,
-    /// Categorical color picker — session-scoped favorite swatches.
-    color_favorites: Option<ResMut<'w, eustress_common::color_wheels::ColorFavorites>>,
     /// API Reference filter state (search, category, language, status)
     api_filter: Option<ResMut<'w, ApiFilterState>>,
     /// Toast notification queue (dismiss/push from drain handlers)
@@ -3164,6 +3147,10 @@ struct DrainResources<'w> {
     notification_settings: Option<ResMut<'w, super::notifications_impl::NotificationSettings>>,
     /// Space load generation — bump on space switch so deferred loaders know to discard old entries
     space_load_gen: Option<ResMut<'w, crate::space::file_loader::SpaceLoadGeneration>>,
+    /// Data Platform — Recorder control (toggled by the `data:record` action;
+    /// sampled by `data_recorder::record_sampler`). None unless the recorder
+    /// plugin inserted it (data + world-db features).
+    data_recording: Option<ResMut<'w, crate::space::DataRecording>>,
     /// Deferred service loader — clear pending on space switch to prevent old-space services loading
     deferred_service_loader: Option<ResMut<'w, crate::space::file_loader::DeferredServiceLoader>>,
 }
@@ -3917,21 +3904,6 @@ fn do_reparent_node(
     }
 }
 
-/// Parse an `"r, g, b"` triple (0-255 each) into a `[u8; 3]`. Tolerant of
-/// surrounding whitespace; rejects anything without exactly three integer
-/// channels. Shared by the color-picker `PickColor` / `ToggleFavorite` arms.
-fn parse_rgb_u8(s: &str) -> Option<[u8; 3]> {
-    let parts: Vec<u8> = s
-        .split(',')
-        .filter_map(|p| p.trim().parse::<u8>().ok())
-        .collect();
-    if parts.len() == 3 {
-        Some([parts[0], parts[1], parts[2]])
-    } else {
-        None
-    }
-}
-
 /// Drains the SlintActionQueue each frame and dispatches to Bevy events/state.
 /// This is the Slint→Bevy direction: UI button clicks become Bevy state changes and events.
 #[inline(never)]
@@ -4143,45 +4115,8 @@ fn drain_slint_actions(
                 }
             }
 
-            // Categorical color picker — drill into a wheel (or "" = back).
-            SlintAction::PickWheel(id) => {
-                if let Some(ref mut active) = res.active_color_wheel {
-                    active.0 = if id.is_empty() {
-                        None
-                    } else {
-                        // Unknown id clears rather than poisoning state.
-                        eustress_common::brick_palette::Wheel::from_id(&id)
-                    };
-                }
-            }
-
-            // Categorical color picker — apply the chosen color to the
-            // selection. Reuses the Properties-panel color-apply path by
-            // re-entering the drain with a synthetic `PropertyChanged("Color",
-            // "r, g, b")` — the exact same write-back the Properties color
-            // field triggers. Picked up next frame and applied to the selected
-            // BasePart(s).
-            SlintAction::PickColor(rgb) => {
-                if parse_rgb_u8(&rgb).is_some() {
-                    queue.push(SlintAction::PropertyChanged("Color".to_string(), rgb.clone()));
-                    if let Some(ref mut out) = res.output {
-                        out.info(format!("Paint → ({})", rgb));
-                    }
-                } else {
-                    warn!("Ignored color pick {:?} — not an 'r, g, b' triple", rgb);
-                }
-            }
-
-            // Categorical color picker — toggle a color in session favorites.
-            SlintAction::ToggleFavorite(rgb) => {
-                if let Some(c) = parse_rgb_u8(&rgb) {
-                    if let Some(ref mut favorites) = res.color_favorites {
-                        favorites.toggle(c);
-                    }
-                } else {
-                    warn!("Ignored favorite toggle {:?} — not an 'r, g, b' triple", rgb);
-                }
-            }
+            // (BrickColor wheel drill is now local to the Slint BrickColorRow;
+            // there is no PickWheel action to drain.)
 
             // Play controls → StudioState flags (consumed by play_mode.rs)
             SlintAction::PlaySolo => {
@@ -5588,6 +5523,16 @@ fn drain_slint_actions(
                                         s.pending_open_script = Some((id, inst.name.clone()));
                                     }
                                 }
+                            } else if inst.class_name == eustress_common::classes::ClassName::Dataset
+                                || inst.class_name == eustress_common::classes::ClassName::Series {
+                                // Charts open from the Explorer like scripts: a
+                                // closable center tab for the selected Dataset / Series.
+                                if let Some(ref mut mgr) = res.tab_manager {
+                                    let idx = mgr.open_data_chart(entity, &inst.name);
+                                    if let Some(ref mut out) = res.output {
+                                        out.info(format!("Opened Chart: {} (tab {})", inst.name, idx));
+                                    }
+                                }
                             } else if inst.class_name == eustress_common::classes::ClassName::WorkshopConversation {
                                 // Open WorkshopConversation in Workshop panel.
                                 //
@@ -6331,6 +6276,18 @@ fn drain_slint_actions(
 
             // Properties write-back — apply edits from Slint properties panel to ECS
             SlintAction::PropertyChanged(key, raw_val) => {
+                // BrickColor is a presentation-only alias for Color: the wheel
+                // picker writes a "name|r, g, b" payload (the swatch name plus
+                // its RGB). We apply only the RGB through the exact same path
+                // the Color field uses; the name shown in the BrickColor field
+                // is re-derived from the part's color next frame (see the
+                // property-population loop's `nearest_base_name` lookup). Older
+                // callers that pass a bare "r, g, b" still work.
+                if key == "BrickColor" {
+                    let rgb = raw_val.rsplit('|').next().unwrap_or(&raw_val).to_string();
+                    queue.push(SlintAction::PropertyChanged("Color".to_string(), rgb));
+                    continue;
+                }
                 // Decode rotation step protocol: "step:axis:+1:x,y,z" or "step:axis:-1:x,y,z"
                 // Emitted by RotationVec3Row +/- buttons to avoid Slint float-to-string conversion.
                 let val: String = if raw_val.starts_with("step:") {
@@ -8027,6 +7984,10 @@ fn drain_slint_actions(
                                 text_x_alignment: "Center".to_string(),
                                 text_y_alignment: "Center".to_string(),
                                 text_scaled: false,
+                                // Compile scaffold (serde-default stroke) — co-agent finalizes wiring.
+                                text_transparency: 0.0,
+                                text_stroke_color: [0.0, 0.0, 0.0, 1.0],
+                                text_stroke_transparency: 1.0,
                             }),
                             asset: None,
                             transform: None,
@@ -9514,6 +9475,270 @@ fn drain_slint_actions(
                     _ => {}
                 }
 
+                // ── Data Platform ribbon actions ──────────────────────────────
+                // UI-switching data actions (grid / chart / timeline) are handled
+                // in main.slint. Analyze ops (Stats / Fit) run the eustress-data
+                // pipeline on the selected Dataset's backing CSV and report to the
+                // Output console; the rest are acknowledged until their pipeline
+                // lands. The compute path is gated on the `data` feature.
+                if let Some(act) = action.strip_prefix("data:") {
+                    // Resolve the selected entity's instance directory (same
+                    // pattern as insert:script below).
+                    let sel: Option<Entity> = res.explorer_state.as_ref().and_then(|es| match &es.selected {
+                        SelectedItem::Entity(e) => Some(*e),
+                        _ => None,
+                    });
+
+                    // Chart opens as a closable center tab — like a script — for
+                    // the selected Dataset / Series. Feature-independent (just UI).
+                    if act == "chart" {
+                        if let Some(e) = sel {
+                            let nm = queries.instances.get(e).map(|(_, i)| i.name.clone()).unwrap_or_default();
+                            if let Some(ref mut mgr) = res.tab_manager {
+                                let idx = mgr.open_data_chart(e, &nm);
+                                if let Some(ref mut out) = res.output {
+                                    out.info(format!("Opened Chart: {} (tab {})", nm, idx));
+                                }
+                            }
+                        } else if let Some(ref mut out) = res.output {
+                            out.info("Data · select a Dataset to chart first.".to_string());
+                        }
+                        continue;
+                    }
+
+                    // Import opens a file picker and creates a NEW Dataset instance
+                    // in the Space (it does not operate on the current selection).
+                    if act == "import" {
+                        #[cfg(feature = "data")]
+                        {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("Data", &["csv", "json", "jsonl", "parquet"])
+                                .set_title("Import data as a Dataset")
+                                .pick_file()
+                            {
+                                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+                                let frame = match ext.as_str() {
+                                    "csv" => std::fs::File::open(&path).ok().and_then(|f| eustress_data::import::frame_from_csv(f).ok()),
+                                    "json" | "jsonl" => std::fs::File::open(&path).ok().and_then(|f| eustress_data::import::frame_from_jsonl(f).ok()),
+                                    "parquet" => eustress_data::read_parquet(&path).ok(),
+                                    _ => None,
+                                };
+                                match frame {
+                                    Some(frame) => {
+                                        // Target dir: the selected folder, else Workspace.
+                                        let space_root = crate::space::default_space_root();
+                                        let base = sel
+                                            .and_then(|e| queries.loaded_from_file.get(e).ok())
+                                            .map(|(_, lff)| if lff.path.is_dir() {
+                                                lff.path.clone()
+                                            } else {
+                                                lff.path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| lff.path.clone())
+                                            })
+                                            .unwrap_or_else(|| space_root.join("Workspace"));
+                                        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Dataset").to_string();
+                                        let name = crate::space::instance_loader::unique_entity_name(&base, &stem);
+                                        let ds_dir = base.join(&name);
+                                        let _ = std::fs::create_dir_all(&ds_dir);
+                                        // Copy the source file in beside the _instance.toml so the
+                                        // analyze ops (which look for a .csv there) find it.
+                                        let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("data.csv").to_string();
+                                        let _ = std::fs::copy(&path, ds_dir.join(&fname));
+                                        // Inferred schema summary for the Dataset's attributes.
+                                        let cols_summary = frame.specs()
+                                            .map(|s| {
+                                                let u = s.unit.clone().map(|u| format!(" {u}")).unwrap_or_default();
+                                                format!("{}:{}{}", s.name, s.dtype.as_token(), u)
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join(", ");
+                                        let name_override = if name != stem { format!("name = \"{}\"\n", stem) } else { String::new() };
+                                        let toml = format!(
+                                            "[metadata]\nclass_name = \"Dataset\"\narchivable = true\n{}\n[attributes]\nsource = \"{}\"\nrows = {}\ncolumns = \"{}\"\n",
+                                            name_override, fname, frame.n_rows(), cols_summary,
+                                        );
+                                        let _ = std::fs::write(ds_dir.join("_instance.toml"), toml);
+                                        if let Some(ref mut out) = res.output {
+                                            out.info(format!("Imported Dataset '{}' — {} rows × {} cols ({})", stem, frame.n_rows(), frame.n_cols(), cols_summary));
+                                        }
+                                    }
+                                    None => {
+                                        if let Some(ref mut out) = res.output {
+                                            out.info("Data · import: could not parse the file (supported: csv, json/jsonl, parquet).".to_string());
+                                        }
+                                    }
+                                }
+                            } else {
+                                info!("Data · import cancelled");
+                            }
+                        }
+                        #[cfg(not(feature = "data"))]
+                        { warn!("Data Platform: rebuild with `--features data` to import."); }
+                        continue;
+                    }
+
+                    // Record toggles capturing the selected Part's Transform into
+                    // the timeseries partition during Play (no-op without the recorder).
+                    if act == "record" {
+                        if let Some(ref mut rec) = res.data_recording {
+                            if rec.active && rec.target == sel {
+                                rec.active = false;
+                                if let Some(ref mut out) = res.output { out.info("Data · recording stopped.".to_string()); }
+                            } else if let Some(e) = sel {
+                                rec.active = true;
+                                rec.target = Some(e);
+                                rec.seq = 0;
+                                if let Some(ref mut out) = res.output { out.info("Data · recording started — sampling the selected part's position each Play frame.".to_string()); }
+                            } else if let Some(ref mut out) = res.output {
+                                out.info("Data · select a Part to record first.".to_string());
+                            }
+                        } else if let Some(ref mut out) = res.output {
+                            out.info("Data · recorder unavailable in this build.".to_string());
+                        }
+                        continue;
+                    }
+
+                    let dir: Option<std::path::PathBuf> = sel
+                        .and_then(|e| queries.loaded_from_file.get(e).ok())
+                        .map(|(_, lff)| if lff.path.is_dir() {
+                            lff.path.clone()
+                        } else {
+                            lff.path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| lff.path.clone())
+                        });
+
+                    #[cfg(feature = "data")]
+                    {
+                        use eustress_data::{ColumnData, ColumnDtype};
+                        // First .csv beside the Dataset's _instance.toml.
+                        let csv = dir.as_ref().and_then(|d| {
+                            std::fs::read_dir(d).ok().and_then(|rd| {
+                                rd.filter_map(|e| e.ok())
+                                    .map(|e| e.path())
+                                    .find(|p| p.extension().and_then(|x| x.to_str())
+                                        .map(|x| x.eq_ignore_ascii_case("csv"))
+                                        .unwrap_or(false))
+                            })
+                        });
+                        match act {
+                            "stats" | "fit" | "fft" | "cluster" | "anomaly" => {
+                                match csv.as_ref()
+                                    .and_then(|p| std::fs::File::open(p).ok())
+                                    .and_then(|f| eustress_data::import::frame_from_csv(f).ok())
+                                {
+                                    Some(frame) => {
+                                        let cols = frame.columns();
+                                        // Numeric column indices / names, shared by several ops.
+                                        let nidx: Vec<usize> = cols.iter().enumerate()
+                                            .filter(|(_, (s, _))| matches!(s.dtype, ColumnDtype::F64 | ColumnDtype::I64))
+                                            .map(|(i, _)| i)
+                                            .collect();
+                                        let nnames: Vec<&str> = nidx.iter().map(|&i| cols[i].0.name.as_str()).collect();
+                                        match act {
+                                            "stats" => {
+                                                info!("Data · stats ({} rows):", frame.n_rows());
+                                                for (spec, data) in cols {
+                                                    if let Ok(s) = eustress_data::numerics::stats(data) {
+                                                        let u = spec.unit.clone().map(|u| format!(" {u}")).unwrap_or_default();
+                                                        info!("  {} — n={} mean={:.4}{u} min={:.3} max={:.3} sd={:.4}",
+                                                            spec.name, s.count, s.mean, s.min, s.max, s.std_dev);
+                                                    }
+                                                }
+                                            }
+                                            "fit" => {
+                                                if nidx.len() >= 2 {
+                                                    let (xi, yi) = (nidx[0], *nidx.last().unwrap());
+                                                    match eustress_data::numerics::fit_linear(&cols[xi].1, &cols[yi].1) {
+                                                        Ok(fit) => info!(
+                                                            "Data · linear fit {} vs {}: slope={:.5} intercept={:.4} R2={:.4}",
+                                                            cols[yi].0.name, cols[xi].0.name, fit.slope, fit.intercept, fit.r_squared),
+                                                        Err(e) => warn!("Data · fit failed: {e}"),
+                                                    }
+                                                } else {
+                                                    warn!("Data · fit needs at least two numeric columns.");
+                                                }
+                                            }
+                                            "fft" => {
+                                                // Spectrum of the last numeric column (1 sample/row).
+                                                if let Some(&yi) = nidx.last() {
+                                                    match eustress_data::spectral::magnitude_spectrum(&cols[yi].1, 1.0) {
+                                                        Ok(sp) => {
+                                                            let mut bk = 0usize;
+                                                            let mut bm = 0.0_f64;
+                                                            for k in 1..sp.magnitudes.len() {
+                                                                if sp.magnitudes[k] > bm { bm = sp.magnitudes[k]; bk = k; }
+                                                            }
+                                                            if bk > 0 && sp.freqs[bk] > 0.0 {
+                                                                info!("Data · FFT of {}: dominant period ≈ {:.1} samples (freq {:.4}/sample, amp {:.3})",
+                                                                    cols[yi].0.name, 1.0 / sp.freqs[bk], sp.freqs[bk], bm);
+                                                            } else {
+                                                                info!("Data · FFT of {}: no dominant cycle (monotone / flat signal)", cols[yi].0.name);
+                                                            }
+                                                        }
+                                                        Err(e) => warn!("Data · FFT failed: {e} (needs a gap-free, uniformly sampled column)"),
+                                                    }
+                                                } else {
+                                                    warn!("Data · FFT needs a numeric column.");
+                                                }
+                                            }
+                                            "cluster" => {
+                                                if !nnames.is_empty() {
+                                                    let k = 3usize.min(frame.n_rows().max(1));
+                                                    match eustress_data::ml::cluster_column(&frame, &nnames, k) {
+                                                        Ok(ColumnData::I64(ids)) => {
+                                                            let mut counts = vec![0usize; k];
+                                                            for id in ids.iter().flatten() {
+                                                                let c = *id as usize;
+                                                                if c < k { counts[c] += 1; }
+                                                            }
+                                                            info!("Data · k-means ({} cols, k={}): cluster sizes {:?}", nnames.len(), k, counts);
+                                                        }
+                                                        Ok(_) => {}
+                                                        Err(e) => warn!("Data · cluster failed: {e}"),
+                                                    }
+                                                } else {
+                                                    warn!("Data · cluster needs numeric columns.");
+                                                }
+                                            }
+                                            "anomaly" => {
+                                                if !nnames.is_empty() {
+                                                    match eustress_data::ml::anomaly_column(&frame, &nnames, 4) {
+                                                        Ok(ColumnData::F64(scores)) => {
+                                                            let mut order: Vec<usize> = (0..scores.len()).collect();
+                                                            order.sort_by(|&a, &b| {
+                                                                let sa = scores[a].unwrap_or(f64::NEG_INFINITY);
+                                                                let sb = scores[b].unwrap_or(f64::NEG_INFINITY);
+                                                                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+                                                            });
+                                                            info!("Data · anomaly (kNN, {} cols): most isolated rows:", nnames.len());
+                                                            for &i in order.iter().take(5) {
+                                                                if let Some(Some(s)) = scores.get(i) {
+                                                                    info!("  row {} — score {:.3}", i, s);
+                                                                }
+                                                            }
+                                                        }
+                                                        Ok(_) => {}
+                                                        Err(e) => warn!("Data · anomaly failed: {e}"),
+                                                    }
+                                                } else {
+                                                    warn!("Data · anomaly needs numeric columns.");
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    None => warn!("Data · select a Dataset with a .csv beside its _instance.toml first."),
+                                }
+                            }
+                            other => info!("Data · '{}' — surface ready; pipeline coming soon.", other),
+                        }
+                    }
+                    #[cfg(not(feature = "data"))]
+                    {
+                        let _ = (act, dir);
+                        warn!("Data Platform: rebuild with `--features data` to enable analysis.");
+                    }
+                    continue;
+                }
+
                 // Script insert → create folder with _instance.toml + empty .rune source
                 if action == "insert:script" || action == "insert:localscript" || action == "insert:modulescript" {
                     // Map ribbon action → canonical class name (matches
@@ -10730,87 +10955,49 @@ fn sync_display_unit_to_slint(
     }
 }
 
-/// Push the categorical color-picker state (the seven wheels, the active
-/// wheel's swatches, the favorites, and the active-wheel id) into the ribbon's
-/// status-bar widget. Clone of `sync_display_unit_to_slint`: standalone system
-/// kept off `sync_bevy_to_slint`'s already-crowded parameter list, with cheap
-/// diffs so we don't churn the models every frame.
-fn sync_color_wheels_to_slint(
+/// Push all seven BrickColor wheels' 127-cell honeycombs into the Properties
+/// panel ONCE. The two-step wheel drill (wheel list → that wheel's swatches) is
+/// entirely local to the Slint `BrickColorRow`, so Rust no longer tracks an
+/// active wheel or round-trips per pick — it just hands Slint every wheel's
+/// honeycomb up front and lets the UI switch between them. Each honeycomb is
+/// deterministic, so a `Local<bool>` latch makes this a one-shot.
+fn push_brick_color_honeycombs(
     slint_context: Option<NonSend<SlintUiState>>,
-    active_wheel: Option<Res<eustress_common::color_wheels::ActiveColorWheel>>,
-    favorites: Option<Res<eustress_common::color_wheels::ColorFavorites>>,
+    mut pushed: Local<bool>,
 ) {
-    use eustress_common::brick_palette::{Wheel, PALETTE};
+    use eustress_common::brick_palette::Wheel;
+    use eustress_common::color_wheels::wheel_honeycomb;
 
+    if *pushed {
+        return;
+    }
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
 
-    // --- active wheel id (drives step 1 vs step 2) ---
-    let active = active_wheel.as_ref().and_then(|a| a.0);
-    let active_id: &str = active.map(Wheel::id_str).unwrap_or("");
-    let current_id: String = ui.get_active_wheel_id().into();
-    let id_changed = current_id != active_id;
-    if id_changed {
-        ui.set_active_wheel_id(active_id.into());
-    }
-
-    // --- wheel list (static, but set once when empty) ---
-    if ui.get_color_wheels().row_count() != Wheel::ALL.len() {
-        let wheels: Vec<WheelData> = Wheel::ALL
-            .iter()
-            .map(|w| WheelData {
-                id: w.id_str().into(),
-                name: w.display_name().into(),
-            })
-            .collect();
-        ui.set_color_wheels(slint::ModelRc::new(slint::VecModel::from(wheels)));
-    }
-
-    // --- active wheel's swatches (empty when no wheel drilled into) ---
-    let wheel_colors: Vec<ColorEntry> = match active {
-        Some(w) => eustress_common::color_wheels::wheel_colors(w)
+    let to_model = |w: Wheel| -> slint::ModelRc<HoneycombCell> {
+        let cells: Vec<HoneycombCell> = wheel_honeycomb(w)
             .into_iter()
-            .map(|(name, r, g, b)| ColorEntry {
-                name: name.into(),
-                r: r as i32,
-                g: g as i32,
-                b: b as i32,
-            })
-            .collect(),
-        None => Vec::new(),
-    };
-    // Re-push when the row count differs OR the active wheel just changed
-    // (two different wheels can share a swatch count, so length alone would
-    // leave stale colors on a same-count switch).
-    if id_changed || ui.get_wheel_colors().row_count() != wheel_colors.len() {
-        ui.set_wheel_colors(slint::ModelRc::new(slint::VecModel::from(wheel_colors)));
-    }
-
-    // --- favorites ---
-    if let Some(favorites) = favorites {
-        // Resolve a friendly name per favorite: exact palette match if any,
-        // else a hex label so the hover tag still reads sensibly.
-        let favs: Vec<ColorEntry> = favorites
-            .0
-            .iter()
-            .map(|&[r, g, b]| {
-                let name = PALETTE
-                    .iter()
-                    .find(|e| e.srgb == [r, g, b])
-                    .map(|e| e.name.to_string())
-                    .unwrap_or_else(|| format!("#{:02X}{:02X}{:02X}", r, g, b));
-                ColorEntry {
-                    name: name.into(),
-                    r: r as i32,
-                    g: g as i32,
-                    b: b as i32,
-                }
+            .map(|c| HoneycombCell {
+                name: c.name.into(),
+                r: c.r as i32,
+                g: c.g as i32,
+                b: c.b as i32,
+                x: c.x,
+                y: c.y,
             })
             .collect();
-        if ui.get_favorite_colors().row_count() != favs.len() {
-            ui.set_favorite_colors(slint::ModelRc::new(slint::VecModel::from(favs)));
-        }
-    }
+        slint::ModelRc::new(slint::VecModel::from(cells))
+    };
+
+    ui.set_aether_honeycomb(to_model(Wheel::Aether));
+    ui.set_halo_honeycomb(to_model(Wheel::Halo));
+    ui.set_verdure_honeycomb(to_model(Wheel::Verdure));
+    ui.set_stone_honeycomb(to_model(Wheel::Stone));
+    ui.set_char_honeycomb(to_model(Wheel::Char));
+    ui.set_hex_honeycomb(to_model(Wheel::Hex));
+    ui.set_umbra_honeycomb(to_model(Wheel::Umbra));
+
+    *pushed = true;
 }
 
 /// Pushes Bevy state to Slint properties each frame (Bevy→Slint direction).
@@ -13069,22 +13256,13 @@ fn sync_unified_explorer_to_slint(
             let terrain_expanded = explorer_state.expanded_dirs.contains(&terrain_dir);
             let terrain_selected = matches!(&explorer_state.selected, SelectedItem::File(p) if p == &terrain_dir);
 
-            // Use cached file count — only rescan when file watcher signals change
-            if explorer_state.explorer_fs_stale || explorer_state.cached_terrain_file_count == 0 {
-                if let Ok(entries) = std::fs::read_dir(&terrain_dir) {
-                    explorer_state.cached_terrain_file_count = entries.flatten().filter(|e| e.path().is_file()).count();
-                }
-            }
-            let file_count = explorer_state.cached_terrain_file_count;
-            
-            let folder_icon = {
-                let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(load_file_icon("folder"));
-                slint::Image::load_from_path(&icon_path).unwrap_or_default()
-            };
+            // Terrain is a first-class Workspace child (Roblox parity): a bare
+            // "Terrain" label with the terrain service SVG icon — not a generic
+            // folder annotated with a file count.
             tree_nodes.push(TreeNode {
                 id: terrain_folder_id,
-                name: format!("Terrain ({} files)", file_count).into(),
-                icon: folder_icon,
+                name: "Terrain".into(),
+                icon: load_service_icon("terrain"),
                 depth: 1,
                 expandable: true,
                 expanded: terrain_expanded,
@@ -13230,6 +13408,31 @@ fn sync_unified_explorer_to_slint(
                     }
                 }
             }
+        }
+    }
+
+    // Roblox parity: Terrain sits directly under Camera in Workspace. The
+    // Terrain folder node is built after the Workspace children (it reads the
+    // filesystem), so right here its whole subtree is the tail of `tree_nodes`
+    // — splice it up to just after the Camera child (or the Workspace service
+    // node when there's no Camera).
+    if let Some(terrain_idx) = tree_nodes.iter().position(|n| {
+        n.depth == 1 && n.is_directory && n.name.as_str() == "Terrain" && n.node_type.as_str() == "file"
+    }) {
+        let block: Vec<TreeNode> = tree_nodes.split_off(terrain_idx);
+        let insert_at = tree_nodes
+            .iter()
+            .position(|n| n.depth == 1 && n.class_name.as_str() == "Camera")
+            .map(|i| i + 1)
+            .or_else(|| {
+                tree_nodes
+                    .iter()
+                    .position(|n| n.depth == 0 && n.name.as_str() == "Workspace")
+                    .map(|i| i + 1)
+            })
+            .unwrap_or(tree_nodes.len());
+        for (k, node) in block.into_iter().enumerate() {
+            tree_nodes.insert(insert_at + k, node);
         }
     }
 
@@ -14723,10 +14926,15 @@ fn sync_properties_to_slint(
                 }
             } else {
             // -- Properties section (BasePart / non-UI) --
-            add_prop("Appearance", "Color", format!("{}, {}, {}", 
+            let color_rgb = format!("{}, {}, {}",
                 (toml_def.properties.color[0] * 255.0).round() as u8,
                 (toml_def.properties.color[1] * 255.0).round() as u8,
-                (toml_def.properties.color[2] * 255.0).round() as u8), "color", true);
+                (toml_def.properties.color[2] * 255.0).round() as u8);
+            add_prop("Appearance", "Color", color_rgb.clone(), "color", true);
+            // BrickColor — the 7-wheel hexagon picker. Mirrors the part's
+            // current RGB for the preview swatch; a wheel pick reroutes to the
+            // Color write-back so the part recolors (see PropertyChanged).
+            add_prop("Appearance", "BrickColor", color_rgb, "brickcolor", true);
             add_prop("Appearance", "Transparency", format!("{:.3}", toml_def.properties.transparency), "float", true);
             add_prop("Appearance", "Reflectance", format!("{:.3}", toml_def.properties.reflectance), "float", true);
             add_prop("Appearance", "CastShadow", toml_def.properties.cast_shadow.to_string(), "bool", true);
@@ -15177,10 +15385,23 @@ fn sync_properties_to_slint(
                 // Parse the "r, g, b" value string for color rows so the
                 // Properties panel's swatch reflects the actual chosen
                 // RGB. Falls back to the gray placeholder if parsing fails.
-                let color_value = if prop_type == "color" {
+                // BrickColor rows carry the same "r, g, b" form for the preview.
+                let color_value = if prop_type == "color" || prop_type == "brickcolor" {
                     parse_color_rgb_string(&value).unwrap_or(placeholder_color)
                 } else {
                     placeholder_color
+                };
+
+                // BrickColor's text shows the nearest curated swatch NAME
+                // (e.g. "Seraph Blue"), not the raw "r, g, b" triple. The swatch
+                // preview still uses `color_value` (the actual RGB) above. The
+                // underlying value is "r, g, b" so the name re-derives whenever
+                // the part's color changes.
+                let display_value: String = if prop_type == "brickcolor" {
+                    let [r, g, b] = parse_color_rgb_u8(&value).unwrap_or([128, 128, 128]);
+                    eustress_common::color_wheels::nearest_base_name([r, g, b]).to_string()
+                } else {
+                    value.clone()
                 };
 
                 // Attribute rows (category == "Attributes") get the Roblox-style
@@ -15195,7 +15416,7 @@ fn sync_properties_to_slint(
 
                 flat_props.push(PropertyData {
                     name: name.as_str().into(),
-                    value: value.as_str().into(),
+                    value: display_value.as_str().into(),
                     property_type: prop_type.as_str().into(),
                     category: cat.as_str().into(),
                     editable,
@@ -15934,6 +16155,13 @@ fn service_name_for_log(class_name: &str, toml_path: &std::path::Path) -> String
 /// `None` when the string isn't a recognisable triple — the caller
 /// falls back to a neutral gray placeholder.
 fn parse_color_rgb_string(value: &str) -> Option<slint::Color> {
+    let [r, g, b] = parse_color_rgb_u8(value)?;
+    Some(slint::Color::from_rgb_u8(r, g, b))
+}
+
+/// Parse an `"r, g, b"` string (optionally wrapped in brackets/parens) into a
+/// clamped `[u8; 3]`. Shared by the swatch-color and BrickColor-name paths.
+fn parse_color_rgb_u8(value: &str) -> Option<[u8; 3]> {
     let cleaned: String = value
         .chars()
         .filter(|c| !matches!(c, '(' | ')' | '[' | ']'))
@@ -15944,7 +16172,7 @@ fn parse_color_rgb_string(value: &str) -> Option<slint::Color> {
     let g = parts[1].parse::<i32>().ok()?;
     let b = parts[2].parse::<i32>().ok()?;
     let clamp = |v: i32| v.clamp(0, 255) as u8;
-    Some(slint::Color::from_rgb_u8(clamp(r), clamp(g), clamp(b)))
+    Some([clamp(r), clamp(g), clamp(b)])
 }
 
 /// Builds filesystem properties for a selected file and pushes them to the Slint Properties panel.

@@ -10,6 +10,21 @@
 use bevy::prelude::*;
 use std::path::{Path, PathBuf};
 
+/// Data Platform — Recorder control state. Always compiled so the `slint_ui`
+/// SystemParam and the `data:record` action can reference it without the
+/// `data`/`world-db` cfg; the sampler system and the actual resource insertion
+/// live in the gated `data_recorder` module, so when neither feature is on
+/// nothing inserts this and the recorder simply doesn't exist.
+#[derive(Resource, Default)]
+pub struct DataRecording {
+    /// True while capturing the target's signal into the `timeseries` partition.
+    pub active: bool,
+    /// The Part whose `Transform` is sampled each Play frame; `None` = unarmed.
+    pub target: Option<Entity>,
+    /// Monotonic disambiguator for samples sharing a millisecond timestamp.
+    pub seq: u32,
+}
+
 pub mod active_db;
 pub mod class_defaults;
 pub mod launch;

@@ -226,6 +226,48 @@ pub fn drain_engine_attribute_writes() -> Vec<EngineAttributeWrite> {
         .unwrap_or_default()
 }
 
+// ============================================================================
+// Engine entity ↔ VM instance bridge (collision-driven Touched / TouchEnded)
+// ============================================================================
+//
+// Avian reports collisions as pairs of Bevy `Entity`s. To fire the right
+// instance's `Touched` signal, the engine must map each colliding `Entity`
+// back to the VM `_entityId` of the instance table that represents it. This
+// process-global map is populated when the engine seeds scene parts into the
+// VM at play start (`LuauRuntime::seed_instance` + `register_entity_instance`)
+// and read by the collision system (`entity_luau_id` → `LuauRuntime::fire_touch`).
+//
+// Keyed by `Entity::to_bits()`. Cleared on stop alongside the VM reset. A
+// `Mutex` (not the `LUAU_OUTPUT` thread-local) because seed and collision-read
+// run in different Bevy systems / threads.
+static ENTITY_LUAU_IDS: std::sync::Mutex<Option<HashMap<u64, i64>>> =
+    std::sync::Mutex::new(None);
+
+/// Record that the ECS entity (`entity_bits` = `Entity::to_bits()`) is
+/// represented in the VM by the instance with VM id `luau_id`.
+pub fn register_entity_instance(entity_bits: u64, luau_id: i64) {
+    if let Ok(mut g) = ENTITY_LUAU_IDS.lock() {
+        g.get_or_insert_with(HashMap::new).insert(entity_bits, luau_id);
+    }
+}
+
+/// Look up the VM `_entityId` for an ECS entity, if it has been seeded.
+pub fn entity_luau_id(entity_bits: u64) -> Option<i64> {
+    ENTITY_LUAU_IDS
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(&entity_bits).copied()))
+}
+
+/// Drop all entity↔instance mappings (call on play stop).
+pub fn clear_entity_instances() {
+    if let Ok(mut g) = ENTITY_LUAU_IDS.lock() {
+        if let Some(m) = g.as_mut() {
+            m.clear();
+        }
+    }
+}
+
 /// [`AttributeValue`](crate::attributes::AttributeValue) → Lua value, using
 /// the SAME conventions the rest of the bindings use (Vector3 → `LuauVector3`
 /// userdata, Color/Color3 → `LuauColor3`, CFrame → `LuauCFrame`, UDim2 →
@@ -450,6 +492,193 @@ impl LuauRuntime {
 
         result
     }
+
+    // ========================================================================
+    // Live runtime — host-driven scheduler entry points
+    //
+    // These turn the VM from "run once, top-to-bottom" into a persistent,
+    // per-frame runtime. A Bevy system (`mod.rs`) calls them each frame /
+    // on input / on collision. Unlike [`execute_chunk`](Self::execute_chunk)
+    // (which runs a body to completion on the main thread and therefore cannot
+    // `task.wait`), [`spawn_script`](Self::spawn_script) runs the body as a
+    // managed coroutine so it can yield, connect to Heartbeat, etc.
+    // ========================================================================
+
+    /// Run a script body as a managed scheduler coroutine. The synchronous
+    /// prefix executes immediately; if it `task.wait`s or only registers
+    /// signal connections, it is parked and lives across frames.
+    ///
+    /// Returns `Err` only for a COMPILE error. Runtime errors during the
+    /// initial resume are reported through the scheduler's error reporter
+    /// (`warn` → Output) and do not abort other scripts.
+    #[cfg(feature = "luau")]
+    pub fn spawn_script(&mut self, source: &str, chunk_name: &str) -> Result<(), String> {
+        self.stats.chunks_executed += 1;
+        let func = self.lua.load(source)
+            .set_name(chunk_name)
+            .into_function()
+            .map_err(|e| {
+                self.stats.failed += 1;
+                format!("Luau compile error in '{}': {}", chunk_name, e)
+            })?;
+        let spawn: mlua::Function = self.lua.globals().get("__sched_spawn_fn__")
+            .map_err(|e| format!("scheduler not installed: {}", e))?;
+        spawn.call::<()>(func)
+            .map_err(|e| format!("Luau spawn error in '{}': {}", chunk_name, e))?;
+        self.stats.successful += 1;
+        Ok(())
+    }
+
+    /// Advance the in-VM scheduler clock to `now` (seconds since play start),
+    /// waking due `task.wait`/`task.delay` coroutines and running deferred
+    /// ones. Call once per frame BEFORE/AFTER firing the frame signals.
+    #[cfg(feature = "luau")]
+    pub fn step_scheduler(&self, now: f64) {
+        if let Ok(step) = self.lua.globals().get::<mlua::Function>("__sched_step__") {
+            let _ = step.call::<()>(now);
+        }
+    }
+
+    /// Fire `RunService.Heartbeat(deltaTime)` — the after-physics per-frame
+    /// signal. Handlers run on the scheduler so they may `task.wait`.
+    #[cfg(feature = "luau")]
+    pub fn fire_heartbeat(&self, dt: f64) {
+        if let Ok(f) = self.lua.globals().get::<mlua::Function>("__fire_run_service__") {
+            let _ = f.call::<()>(("Heartbeat", dt));
+        }
+    }
+
+    /// Fire `RunService.Stepped(time, deltaTime)` — the before-physics signal.
+    #[cfg(feature = "luau")]
+    pub fn fire_stepped(&self, now: f64, dt: f64) {
+        if let Ok(f) = self.lua.globals().get::<mlua::Function>("__fire_run_service__") {
+            let _ = f.call::<()>(("Stepped", now, dt));
+        }
+    }
+
+    /// Fire `RunService.RenderStepped(deltaTime)` — the before-render signal
+    /// (client only in Roblox; fired everywhere here for parity).
+    #[cfg(feature = "luau")]
+    pub fn fire_render_stepped(&self, dt: f64) {
+        if let Ok(f) = self.lua.globals().get::<mlua::Function>("__fire_run_service__") {
+            let _ = f.call::<()>(("RenderStepped", dt));
+        }
+    }
+
+    /// Tear down all coroutines, signal connections, and script-created
+    /// instances so a finished Play session leaves no live state behind.
+    /// Call on the transition back to Edit (or whenever scripts should stop).
+    #[cfg(feature = "luau")]
+    pub fn reset_runtime_state(&self) {
+        if let Ok(f) = self.lua.globals().get::<mlua::Function>("__sched_reset__") {
+            let _ = f.call::<()>(());
+        }
+        // The entity-id counter is a plain global; reset it from Rust (the Lua
+        // side never writes sandboxed globals).
+        let _ = self.lua.globals().set("__NEXT_ENTITY_ID__", 1i64);
+    }
+
+    /// Seed a metatable-backed instance table for an existing engine part so
+    /// scripts can reference it (e.g. `workspace.Floor`) and collisions can
+    /// fire its `Touched`. Idempotent per `luau_id`. Pair with
+    /// [`register_entity_instance`] so the collision reader can resolve the
+    /// ECS entity back to this `luau_id`.
+    #[cfg(feature = "luau")]
+    pub fn seed_instance(&self, luau_id: i64, name: &str, uuid: &str, class_name: &str) {
+        if let Ok(f) = self.lua.globals().get::<mlua::Function>("__seed_instance__") {
+            let _ = f.call::<()>((luau_id, name, uuid, class_name));
+        }
+    }
+
+    /// Make a previously [`seed_instance`](Self::seed_instance)d part reachable
+    /// as `workspace.<Name>` so scripts can connect its `Touched` idiomatically.
+    #[cfg(feature = "luau")]
+    pub fn workspace_attach(&self, luau_id: i64) {
+        if let Ok(f) = self.lua.globals().get::<mlua::Function>("__attach_to_workspace__") {
+            let _ = f.call::<()>(luau_id);
+        }
+    }
+
+    /// Fire a collision-driven `Touched`/`TouchEnded` between two parts,
+    /// identified by their VM `_entityId`s (see Phase 4 wiring in the engine).
+    /// No-op unless BOTH parts are present in the instance registry.
+    #[cfg(feature = "luau")]
+    pub fn fire_touch(&self, entity_id: i64, other_id: i64, ended: bool) {
+        if let Ok(f) = self.lua.globals().get::<mlua::Function>("__fire_touch__") {
+            let _ = f.call::<()>((entity_id, other_id, ended));
+        }
+    }
+
+    /// Replace the live UserInputService state queried by `IsKeyDown` /
+    /// `IsMouseButtonPressed` / `GetMouseLocation` / `GetMouseDelta`.
+    /// `keys_down` / `buttons_down` hold Roblox `KeyCode` / `UserInputType`
+    /// names (e.g. `"Space"`, `"MouseButton1"`). Call once per frame.
+    #[cfg(feature = "luau")]
+    pub fn update_input_state(
+        &self,
+        keys_down: &[String],
+        buttons_down: &[String],
+        mouse_x: f64,
+        mouse_y: f64,
+        mouse_dx: f64,
+        mouse_dy: f64,
+    ) {
+        let Ok(set) = self.lua.globals().get::<mlua::Function>("__set_input_state__") else { return };
+        let (Ok(keys), Ok(btns)) = (self.lua.create_table(), self.lua.create_table()) else { return };
+        for (i, k) in keys_down.iter().enumerate() { let _ = keys.set((i as i64) + 1, k.as_str()); }
+        for (i, b) in buttons_down.iter().enumerate() { let _ = btns.set((i as i64) + 1, b.as_str()); }
+        let _ = set.call::<()>((keys, btns, mouse_x, mouse_y, mouse_dx, mouse_dy));
+    }
+
+    /// Fire a `UserInputService.InputBegan`/`InputEnded`/`InputChanged` event.
+    /// `which` is the signal name; `input_type` the `UserInputType`
+    /// (e.g. `"Keyboard"`, `"MouseButton1"`, `"MouseMovement"`); `key_code`
+    /// the Roblox `KeyCode` name for keyboard events (else `"Unknown"`).
+    #[cfg(feature = "luau")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn fire_input(
+        &self,
+        which: &str,
+        input_type: &str,
+        key_code: &str,
+        game_processed: bool,
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+    ) {
+        if let Ok(f) = self.lua.globals().get::<mlua::Function>("__fire_input_event__") {
+            let _ = f.call::<()>((which, input_type, key_code, game_processed, x, y, dx, dy));
+        }
+    }
+
+    // --- luau-disabled fallbacks (keep call sites compiling) ----------------
+    #[cfg(not(feature = "luau"))]
+    pub fn spawn_script(&mut self, _source: &str, _chunk_name: &str) -> Result<(), String> {
+        Err("Luau feature is not enabled".to_string())
+    }
+    #[cfg(not(feature = "luau"))]
+    pub fn step_scheduler(&self, _now: f64) {}
+    #[cfg(not(feature = "luau"))]
+    pub fn fire_heartbeat(&self, _dt: f64) {}
+    #[cfg(not(feature = "luau"))]
+    pub fn fire_stepped(&self, _now: f64, _dt: f64) {}
+    #[cfg(not(feature = "luau"))]
+    pub fn fire_render_stepped(&self, _dt: f64) {}
+    #[cfg(not(feature = "luau"))]
+    pub fn reset_runtime_state(&self) {}
+    #[cfg(not(feature = "luau"))]
+    pub fn fire_touch(&self, _entity_id: i64, _other_id: i64, _ended: bool) {}
+    #[cfg(not(feature = "luau"))]
+    pub fn seed_instance(&self, _luau_id: i64, _name: &str, _uuid: &str, _class_name: &str) {}
+    #[cfg(not(feature = "luau"))]
+    pub fn workspace_attach(&self, _luau_id: i64) {}
+    #[cfg(not(feature = "luau"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_input_state(&self, _k: &[String], _b: &[String], _mx: f64, _my: f64, _dx: f64, _dy: f64) {}
+    #[cfg(not(feature = "luau"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn fire_input(&self, _w: &str, _it: &str, _kc: &str, _gp: bool, _x: f64, _y: f64, _dx: f64, _dy: f64) {}
 
     /// Drain all instances created during script execution.
     /// Returns a list of (class_name, properties) for spawning in ECS.
@@ -739,6 +968,12 @@ impl LuauRuntime {
         #[cfg(feature = "gui")]
         Self::inject_gui_api(lua)?;
         Self::inject_event_system(lua)?;
+
+        // MUST be last: upgrades the task library, the RunService /
+        // UserInputService signals, and the instance event registry to be
+        // coroutine-scheduler-aware so task.wait / Signal:Wait actually yield
+        // and per-frame / input / collision signals fire across host frames.
+        Self::inject_scheduler(lua)?;
 
         Ok(())
     }
@@ -4145,6 +4380,656 @@ Enum = setmetatable({}, {
             .map_err(|e| format!("Failed to set __fire_event__: {}", e))?;
 
         Ok(())
+    }
+
+    // ========================================================================
+    // Cooperative coroutine scheduler — the seam that turns "run once,
+    // top-to-bottom" into live, per-frame, input- and collision-driven Luau.
+    //
+    // WHY THIS LIVES IN LUA: yielding a Luau coroutine (the mechanism behind
+    // `task.wait` and `Signal:Wait`) can only originate from Lua code — mlua
+    // cannot yield across the Rust callback boundary. So the scheduler that
+    // owns wait/resume must live INSIDE the VM. The host (a Bevy system, see
+    // `mod.rs`) drives it once per frame via [`step_scheduler`](Self::step_scheduler)
+    // and fires RunService / input / collision signals through the typed
+    // `fire_*` methods below.
+    //
+    // INSTALL STRATEGY: Luau's `sandbox(true)` makes the global table readonly
+    // to *Lua-side* writes, but Rust `globals.set` is privileged (the whole
+    // API surface above is installed that way post-sandbox). So the chunk only
+    // *reads* existing globals and *mutates user tables* (RunService /
+    // UserInputService / instance-event signals — none are frozen std libs),
+    // returns a `__SCHED__` table, and Rust installs every new global entry
+    // point from that table. No Lua-side global writes anywhere.
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_scheduler(lua: &mlua::Lua) -> Result<(), String> {
+        // The scheduler + scheduler-aware signal/event reimplementations.
+        // Evaluates to the `__SCHED__` table (no globals written from Lua).
+        let sched: mlua::Table = lua
+            .load(SCHEDULER_LUA)
+            .set_name("__eustress_scheduler__")
+            .eval()
+            .map_err(|e| format!("Failed to evaluate scheduler chunk: {}", e))?;
+
+        let globals = lua.globals();
+
+        // Persistent state + the table itself (so scripts/tools can introspect).
+        globals.set("__SCHED__", sched.clone())
+            .map_err(|e| format!("Failed to set __SCHED__: {}", e))?;
+
+        // Live input state read by UserInputService:IsKeyDown / GetMouseLocation.
+        let input_state: mlua::Table = sched.get("inputState")
+            .map_err(|e| format!("scheduler missing inputState: {}", e))?;
+        globals.set("__INPUT_STATE__", input_state)
+            .map_err(|e| format!("Failed to set __INPUT_STATE__: {}", e))?;
+
+        // Install each host/Lua entry point as a global, read out of __SCHED__.
+        // (Rust set bypasses the sandbox readonly that would block Lua writes.)
+        let install = |name: &str, key: &str| -> Result<(), String> {
+            let f: mlua::Function = sched.get(key)
+                .map_err(|e| format!("scheduler missing {}: {}", key, e))?;
+            globals.set(name, f)
+                .map_err(|e| format!("Failed to set {}: {}", name, e))
+        };
+
+        // Roblox task library (overrides the immediate-return stubs).
+        let task_lib: mlua::Table = sched.get("taskLib")
+            .map_err(|e| format!("scheduler missing taskLib: {}", e))?;
+        globals.set("task", task_lib)
+            .map_err(|e| format!("Failed to set task: {}", e))?;
+
+        // Legacy globals.
+        install("wait", "taskWait")?;
+        install("delay", "taskDelay")?;
+        install("spawn", "taskSpawn")?;
+
+        // Scheduler-aware instance event registry (Touched / Changed / etc.
+        // :Connect / :Wait / engine-driven :Fire).
+        install("__get_or_create_event__", "getOrCreateEvent")?;
+        install("__fire_event__", "fireEvent")?;
+
+        // Host-driven entry points (called from the Rust methods below).
+        install("__sched_step__", "step")?;
+        install("__sched_spawn_fn__", "spawnFn")?;
+        install("__sched_reset__", "reset")?;
+        install("__fire_run_service__", "fireRunService")?;
+        install("__fire_input__", "fireInput")?;
+        install("__fire_input_event__", "fireInputEvent")?;
+        install("__set_input_state__", "setInput")?;
+        install("__fire_touch__", "fireTouch")?;
+        install("__seed_instance__", "seedInstance")?;
+        install("__attach_to_workspace__", "attachToWorkspace")?;
+
+        Ok(())
+    }
+}
+
+/// The cooperative scheduler, written in Luau. Evaluates to the `__SCHED__`
+/// table. See [`LuauRuntime::inject_scheduler`] for why this is Lua, not Rust.
+#[cfg(feature = "luau")]
+const SCHEDULER_LUA: &str = r##"
+local pack = table.pack or function(...) return { n = select("#", ...), ... } end
+local unpack = table.unpack or unpack
+local running = coroutine.running
+local status = coroutine.status
+local create = coroutine.create
+local resume = coroutine.resume
+local yield = coroutine.yield
+local isyieldable = coroutine.isyieldable
+local close = coroutine.close
+
+local Sched = {
+    now = 0,           -- scheduler clock (seconds), advanced by the host
+    sleeping = {},     -- { co, resumeAt, startedAt, args?, cancelled? }
+    deferred = {},     -- { co, args, cancelled? }
+    inputState = { keys = {}, mouseButtons = {}, mouseX = 0, mouseY = 0, mouseDX = 0, mouseDY = 0 },
+}
+
+local function report(err)
+    -- Route script runtime errors to the Output panel (warn is captured).
+    if warn then warn("Luau runtime error: " .. tostring(err)) end
+end
+
+-- Resume a coroutine, reporting (not propagating) errors so one bad handler
+-- never tears the scheduler down.
+local function safe_resume(co, ...)
+    if not co or status(co) == "dead" then return end
+    local ok, err = resume(co, ...)
+    if not ok then report(err) end
+end
+Sched.resume = safe_resume
+
+function Sched.spawn(fn, ...)
+    local co = (type(fn) == "thread") and fn or create(fn)
+    safe_resume(co, ...)
+    return co
+end
+
+function Sched.defer(fn, ...)
+    local co = (type(fn) == "thread") and fn or create(fn)
+    Sched.deferred[#Sched.deferred + 1] = { co = co, args = pack(...) }
+    return co
+end
+
+function Sched.delay(sec, fn, ...)
+    local co = (type(fn) == "thread") and fn or create(fn)
+    Sched.sleeping[#Sched.sleeping + 1] = {
+        co = co, resumeAt = Sched.now + (tonumber(sec) or 0),
+        startedAt = Sched.now, args = pack(...),
+    }
+    return co
+end
+
+-- Yields the running coroutine for `sec` seconds. Returns the actual elapsed
+-- time (Roblox contract). No-op return when called outside a managed thread
+-- (e.g. a one-shot execute_chunk body) so legacy run-once scripts still work.
+function Sched.wait(sec)
+    local co = running()
+    if not co or not isyieldable() then return 0 end
+    Sched.sleeping[#Sched.sleeping + 1] = {
+        co = co, resumeAt = Sched.now + (tonumber(sec) or 0), startedAt = Sched.now,
+    }
+    return yield()
+end
+
+function Sched.cancel(co)
+    if type(co) ~= "thread" then return end
+    for _, e in ipairs(Sched.sleeping) do if e.co == co then e.cancelled = true end end
+    for _, e in ipairs(Sched.deferred) do if e.co == co then e.cancelled = true end end
+    if close and co ~= running() then pcall(close, co) end
+end
+
+-- Host entry: advance the clock to `now`, wake due sleepers, run deferred.
+function Sched.step(now)
+    Sched.now = now
+    -- Snapshot so entries added during this step wait until the next one.
+    local due, keep = {}, {}
+    for _, e in ipairs(Sched.sleeping) do
+        if e.cancelled then
+            -- dropped
+        elseif e.resumeAt <= now then
+            due[#due + 1] = e
+        else
+            keep[#keep + 1] = e
+        end
+    end
+    Sched.sleeping = keep
+    for _, e in ipairs(due) do
+        if e.args then
+            safe_resume(e.co, unpack(e.args, 1, e.args.n))
+        else
+            safe_resume(e.co, now - e.startedAt)  -- task.wait → elapsed seconds
+        end
+    end
+    local d = Sched.deferred
+    Sched.deferred = {}
+    for _, e in ipairs(d) do
+        if not e.cancelled then safe_resume(e.co, unpack(e.args, 1, e.args.n)) end
+    end
+end
+
+-- Host entry: tear everything down for a clean Stop (no leftover coroutines,
+-- connections, or script-created instances bleed into the next Play).
+function Sched.reset()
+    if close then
+        for _, e in ipairs(Sched.sleeping) do
+            if e.co and status(e.co) ~= "dead" and e.co ~= running() then pcall(close, e.co) end
+        end
+        for _, e in ipairs(Sched.deferred) do
+            if e.co and status(e.co) ~= "dead" and e.co ~= running() then pcall(close, e.co) end
+        end
+    end
+    Sched.sleeping = {}
+    Sched.deferred = {}
+    Sched.now = 0
+    -- Empty (in place — never reassign a sandboxed global) the event +
+    -- instance registries so all :Connect handlers and Instance.new tables
+    -- from the finished Play session are dropped.
+    local er = __EVENT_REGISTRY__
+    if er then for k in pairs(er) do er[k] = nil end end
+    local ir = __INSTANCE_REGISTRY__
+    if ir then for k in pairs(ir) do ir[k] = nil end end
+    local is = Sched.inputState
+    for k in pairs(is.keys) do is.keys[k] = nil end
+    for k in pairs(is.mouseButtons) do is.mouseButtons[k] = nil end
+    -- The standing service signals (RunService.*, UserInputService.*) hold
+    -- their connections on their OWN tables, not in __EVENT_REGISTRY__ — clear
+    -- those too so Stop fully silences Heartbeat/Stepped/input handlers.
+    local function clear_sig(sig)
+        if not sig then return end
+        if sig._connections then for k in pairs(sig._connections) do sig._connections[k] = nil end end
+        if sig._waiters then for k in pairs(sig._waiters) do sig._waiters[k] = nil end end
+    end
+    if RunService then
+        clear_sig(RunService.Heartbeat)
+        clear_sig(RunService.Stepped)
+        clear_sig(RunService.RenderStepped)
+    end
+    if UserInputService then
+        clear_sig(UserInputService.InputBegan)
+        clear_sig(UserInputService.InputEnded)
+        clear_sig(UserInputService.InputChanged)
+    end
+    -- Drop scene parts attached to workspace by name (re-seeded next play).
+    if workspace then
+        local kids = rawget(workspace, "_children")
+        if kids then for k in pairs(kids) do kids[k] = nil end end
+    end
+end
+
+-- Host entry: compile-as-function already done in Rust; just run the body as
+-- a managed coroutine so task.wait / signal connections inside it work.
+function Sched.spawnFn(fn, ...)
+    return Sched.spawn(fn, ...)
+end
+
+-- ---- scheduler-aware signal behaviour --------------------------------------
+-- Upgrade a signal table (with _connections) so handlers run on the scheduler
+-- (and may task.wait) and :Wait() truly yields. Idempotent.
+local function upgrade_signal(sig)
+    if not sig or sig.__upgraded then return sig end
+    sig._connections = sig._connections or {}
+    sig._waiters = sig._waiters or {}
+    sig._nextId = sig._nextId or 1
+    function sig.Connect(self, cb)
+        local id = self._nextId
+        self._nextId = id + 1
+        self._connections[id] = cb
+        local conn = { Connected = true }
+        function conn.Disconnect(c)
+            self._connections[id] = nil
+            c.Connected = false
+        end
+        return conn
+    end
+    function sig.Once(self, cb)
+        local conn
+        conn = self:Connect(function(...)
+            if conn then conn:Disconnect() end
+            cb(...)
+        end)
+        return conn
+    end
+    function sig.Wait(self)
+        local co = running()
+        if not co or not isyieldable() then return end
+        self._waiters[#self._waiters + 1] = co
+        return yield()
+    end
+    function sig.Fire(self, ...)
+        for _, cb in pairs(self._connections) do Sched.spawn(cb, ...) end
+        if #self._waiters > 0 then
+            local w = self._waiters
+            self._waiters = {}
+            for _, co in ipairs(w) do Sched.spawn(co, ...) end
+        end
+    end
+    sig.__upgraded = true
+    return sig
+end
+
+local function new_signal()
+    return upgrade_signal({ _connections = {}, _waiters = {}, _nextId = 1 })
+end
+
+-- Upgrade the standing service signals (created in Rust before this chunk).
+if RunService then
+    upgrade_signal(RunService.Heartbeat)
+    upgrade_signal(RunService.Stepped)
+    upgrade_signal(RunService.RenderStepped)
+end
+if UserInputService then
+    UserInputService.InputBegan = new_signal()
+    UserInputService.InputEnded = new_signal()
+    UserInputService.InputChanged = new_signal()
+    -- Live-state queries (override the const-false stubs).
+    local IS = Sched.inputState
+    local function key_name(k)
+        local n = (type(k) == "string") and k or tostring(k)
+        n = n:gsub("^Enum%.KeyCode%.", ""):gsub("^KeyCode%.", "")
+        return n
+    end
+    local function button_name(b)
+        local n = (type(b) == "string") and b or tostring(b)
+        n = n:gsub("^Enum%.UserInputType%.", ""):gsub("^UserInputType%.", "")
+        return n
+    end
+    function UserInputService.IsKeyDown(self, key) return IS.keys[key_name(key)] == true end
+    function UserInputService.IsMouseButtonPressed(self, btn) return IS.mouseButtons[button_name(btn)] == true end
+    function UserInputService.GetMouseLocation(self) return { X = IS.mouseX, Y = IS.mouseY } end
+    function UserInputService.GetMouseDelta(self) return { X = IS.mouseDX, Y = IS.mouseDY } end
+end
+
+-- ---- task library + legacy globals (installed from Rust) -------------------
+Sched.taskLib = {
+    wait = function(sec) return Sched.wait(sec) end,
+    spawn = function(fn, ...) return Sched.spawn(fn, ...) end,
+    defer = function(fn, ...) return Sched.defer(fn, ...) end,
+    delay = function(sec, fn, ...) return Sched.delay(sec, fn, ...) end,
+    cancel = function(co) return Sched.cancel(co) end,
+    synchronize = function() end,    -- single-threaded VM: parallel Luau no-ops
+    desynchronize = function() end,
+}
+Sched.taskWait = function(sec) return Sched.wait(sec) end
+Sched.taskDelay = function(sec, fn, ...) return Sched.delay(sec, fn, ...) end
+Sched.taskSpawn = function(fn, ...) return Sched.spawn(fn, ...) end
+
+-- ---- scheduler-aware instance event registry ------------------------------
+-- Reuses the Rust-created __EVENT_REGISTRY__ table (mutated, never reassigned).
+Sched.getOrCreateEvent = function(entityId, eventName)
+    local reg = __EVENT_REGISTRY__
+    local ev = reg[entityId]
+    if not ev then ev = {}; reg[entityId] = ev end
+    local sig = ev[eventName]
+    if not sig then sig = new_signal(); ev[eventName] = sig end
+    return sig
+end
+Sched.fireEvent = function(entityId, eventName, ...)
+    local reg = __EVENT_REGISTRY__
+    local ev = reg[entityId]
+    if not ev then return end
+    local sig = ev[eventName]
+    if sig then sig:Fire(...) end
+end
+
+-- ---- host signal fan-out --------------------------------------------------
+Sched.fireRunService = function(name, ...)
+    if not RunService then return end
+    local sig = RunService[name]
+    if sig and sig.Fire then sig:Fire(...) end
+end
+Sched.fireInput = function(which, inputObject, gameProcessed)
+    if not UserInputService then return end
+    local sig = UserInputService[which]
+    if sig and sig.Fire then sig:Fire(inputObject, gameProcessed or false) end
+end
+-- Seed a metatable-backed instance table for an existing engine part so the
+-- VM can resolve it for collision (Touched) and property access. Reuses the
+-- same __INSTANCE_MT__ that Instance.new uses, so a seeded scene part behaves
+-- exactly like a script-created one (raw fields shadow __index, so .Name reads
+-- directly while .Touched routes through the event registry by _entityId).
+Sched.seedInstance = function(luauId, name, uuid, className)
+    local reg = __INSTANCE_REGISTRY__
+    local existing = reg[luauId]
+    if existing then return existing end
+    local inst = setmetatable({}, __INSTANCE_MT__)
+    rawset(inst, "_entityId", luauId)
+    rawset(inst, "_uuid", uuid or "")
+    rawset(inst, "_className", className or "Part")
+    rawset(inst, "ClassName", className or "Part")
+    rawset(inst, "Name", name or "Part")
+    rawset(inst, "_children", {})
+    rawset(inst, "_properties", {})
+    reg[luauId] = inst
+    return inst
+end
+
+-- Make a seeded part reachable as `workspace.<Name>` (and `game.Workspace.<Name>`)
+-- so scripts can connect Touched idiomatically. Upgrades the bare `workspace`
+-- stub into a real instance (metatable-backed) the first time it's called, so
+-- the __index child-by-name lookup resolves seeded parts. Flattened: every
+-- seeded part is a direct workspace child (functional for reachability; not a
+-- faithful nested hierarchy — that needs the full scene↔VM bridge).
+Sched.attachToWorkspace = function(luauId)
+    local inst = __INSTANCE_REGISTRY__[luauId]
+    if not inst then return end
+    if rawget(workspace, "_entityId") == nil then
+        rawset(workspace, "_entityId", -999999)
+        rawset(workspace, "Name", "Workspace")
+        rawset(workspace, "_className", "Workspace")
+        rawset(workspace, "ClassName", "Workspace")
+    end
+    if getmetatable(workspace) ~= __INSTANCE_MT__ then
+        setmetatable(workspace, __INSTANCE_MT__)
+    end
+    local kids = rawget(workspace, "_children")
+    if not kids then kids = {}; rawset(workspace, "_children", kids) end
+    kids[#kids + 1] = inst
+    if game and rawget(game, "Workspace") == nil then
+        rawset(game, "Workspace", workspace)
+    end
+end
+
+-- Touched/TouchEnded: resolve both parts from the instance registry and fire
+-- on each (Roblox fires Touched on both parties), passing the OTHER part.
+Sched.fireTouch = function(idA, idB, ended)
+    local reg = __INSTANCE_REGISTRY__
+    if not reg then return end
+    local a, b = reg[idA], reg[idB]
+    if not (a and b) then return end
+    local ev = ended and "TouchEnded" or "Touched"
+    Sched.fireEvent(idA, ev, b)
+    Sched.fireEvent(idB, ev, a)
+end
+
+-- ---- live input state -----------------------------------------------------
+-- Rebuild the keys / mouseButtons sets in place (host passes Roblox-style
+-- name arrays each frame). Done in Lua so we never depend on a particular
+-- mlua Table::clear signature.
+Sched.setInput = function(keys, buttons, mx, my, dx, dy)
+    local IS = Sched.inputState
+    for k in pairs(IS.keys) do IS.keys[k] = nil end
+    for k in pairs(IS.mouseButtons) do IS.mouseButtons[k] = nil end
+    if keys then for _, name in ipairs(keys) do IS.keys[name] = true end end
+    if buttons then for _, name in ipairs(buttons) do IS.mouseButtons[name] = true end end
+    IS.mouseX, IS.mouseY = mx or 0, my or 0
+    IS.mouseDX, IS.mouseDY = dx or 0, dy or 0
+end
+
+-- Build an InputObject-like table for an InputBegan/Ended/Changed fire.
+Sched.makeInputObject = function(inputType, keyCode, x, y, dx, dy)
+    return {
+        UserInputType = inputType,
+        KeyCode = keyCode or "Unknown",
+        Position = { X = x or 0, Y = y or 0, Z = 0 },
+        Delta = { X = dx or 0, Y = dy or 0, Z = 0 },
+    }
+end
+
+-- One-call host entry: build the InputObject and fire the named signal.
+Sched.fireInputEvent = function(which, inputType, keyCode, gameProcessed, x, y, dx, dy)
+    Sched.fireInput(which, Sched.makeInputObject(inputType, keyCode, x, y, dx, dy), gameProcessed)
+end
+
+return Sched
+"##;
+
+// ============================================================================
+// Scheduler tests — prove the in-VM coroutine scheduler turns "run once" into
+// live per-frame scripting. These also validate that SCHEDULER_LUA parses and
+// runs (a failure surfaces as `LuauRuntime::new()` returning Err).
+// ============================================================================
+#[cfg(all(test, feature = "luau"))]
+mod scheduler_tests {
+    use super::*;
+
+    /// Collect captured print/warn lines since the last drain.
+    fn lines() -> Vec<String> {
+        drain_luau_output().into_iter().map(|(t, _)| t).collect()
+    }
+
+    fn count(of: &str) -> usize {
+        lines().into_iter().filter(|l| l == of).count()
+    }
+
+    #[test]
+    fn scheduler_chunk_loads() {
+        // Constructing the runtime evaluates SCHEDULER_LUA end to end.
+        let rt = LuauRuntime::new();
+        assert!(rt.is_ok(), "runtime init failed: {:?}", rt.err());
+    }
+
+    #[test]
+    fn heartbeat_connection_fires_each_frame() {
+        let mut rt = LuauRuntime::new().unwrap();
+        let _ = lines(); // clear init noise
+        rt.spawn_script(
+            r#"RunService.Heartbeat:Connect(function(dt) print("HB") end)"#,
+            "hb",
+        )
+        .unwrap();
+        // Connected but no frame driven yet → zero fires.
+        assert_eq!(count("HB"), 0);
+        // Two driven frames → two fires.
+        rt.step_scheduler(0.016);
+        rt.fire_heartbeat(0.016);
+        rt.step_scheduler(0.032);
+        rt.fire_heartbeat(0.016);
+        assert_eq!(count("HB"), 2, "expected one Heartbeat fire per frame");
+    }
+
+    #[test]
+    fn task_wait_yields_then_resumes() {
+        let mut rt = LuauRuntime::new().unwrap();
+        let _ = lines();
+        rt.spawn_script(
+            r#"task.spawn(function() task.wait(0.1) print("WOKE") end)"#,
+            "wait",
+        )
+        .unwrap();
+        // Body ran, registered the wait, and yielded — not resumed yet.
+        rt.step_scheduler(0.05);
+        assert_eq!(count("WOKE"), 0, "must not resume before the deadline");
+        // Clock passes the deadline → resumes exactly once.
+        rt.step_scheduler(0.2);
+        assert_eq!(count("WOKE"), 1, "must resume after the deadline");
+        rt.step_scheduler(0.3);
+        assert_eq!(count("WOKE"), 0, "must not resume again");
+    }
+
+    #[test]
+    fn task_spawn_runs_immediately_defer_waits_a_step() {
+        let mut rt = LuauRuntime::new().unwrap();
+        let _ = lines();
+        rt.spawn_script(
+            r#"
+                task.spawn(function() print("SPAWN") end)
+                task.defer(function() print("DEFER") end)
+            "#,
+            "order",
+        )
+        .unwrap();
+        // spawn ran synchronously; defer is queued for the next step.
+        assert_eq!(count("SPAWN"), 1);
+        assert_eq!(count("DEFER"), 0);
+        rt.step_scheduler(0.016);
+        assert_eq!(count("DEFER"), 1, "deferred body runs on the next step");
+    }
+
+    #[test]
+    fn signal_wait_resumes_on_fire() {
+        let mut rt = LuauRuntime::new().unwrap();
+        let _ = lines();
+        // A coroutine waits on Heartbeat via :Wait(); firing it resumes the body.
+        rt.spawn_script(
+            r#"task.spawn(function() RunService.Heartbeat:Wait() print("RESUMED") end)"#,
+            "sigwait",
+        )
+        .unwrap();
+        assert_eq!(count("RESUMED"), 0);
+        rt.fire_heartbeat(0.016);
+        assert_eq!(count("RESUMED"), 1, "Signal:Wait must resume on fire");
+    }
+
+    #[test]
+    fn reset_drops_connections_and_threads() {
+        let mut rt = LuauRuntime::new().unwrap();
+        rt.spawn_script(
+            r#"
+                RunService.Heartbeat:Connect(function() print("HB") end)
+                task.spawn(function() task.wait(1) print("LATE") end)
+            "#,
+            "live",
+        )
+        .unwrap();
+        let _ = lines();
+        rt.reset_runtime_state();
+        // After reset: heartbeat connection gone, parked coroutine dropped.
+        rt.fire_heartbeat(0.016);
+        rt.step_scheduler(2.0);
+        assert_eq!(count("HB"), 0, "reset must drop signal connections");
+        assert_eq!(count("LATE"), 0, "reset must drop parked coroutines");
+    }
+
+    #[test]
+    fn input_state_reflects_held_keys() {
+        let mut rt = LuauRuntime::new().unwrap();
+        let _ = lines();
+        rt.update_input_state(&["Space".to_string()], &["MouseButton1".to_string()], 12.0, 34.0, 0.0, 0.0);
+        rt.spawn_script(
+            r#"
+                if UserInputService:IsKeyDown(Enum.KeyCode.Space) then print("SPACE") end
+                if UserInputService:IsMouseButtonPressed("MouseButton1") then print("LMB") end
+                local m = UserInputService:GetMouseLocation()
+                if m.X == 12 and m.Y == 34 then print("MOUSE") end
+            "#,
+            "input",
+        )
+        .unwrap();
+        let out = lines();
+        assert!(out.contains(&"SPACE".to_string()), "IsKeyDown(Space) should be true");
+        assert!(out.contains(&"LMB".to_string()), "IsMouseButtonPressed should be true");
+        assert!(out.contains(&"MOUSE".to_string()), "GetMouseLocation should reflect host state");
+    }
+
+    #[test]
+    fn seeded_parts_fire_touched_with_other_part() {
+        let mut rt = LuauRuntime::new().unwrap();
+        // Engine seeds two scene parts into the VM (as it would on play start).
+        rt.seed_instance(9001, "PartA", "uuid-a", "Part");
+        rt.seed_instance(9002, "PartB", "uuid-b", "Part");
+        let _ = lines();
+        // A script connects Touched on PartA via the instance registry.
+        rt.spawn_script(
+            r#"
+                local a = __INSTANCE_REGISTRY__[9001]
+                a.Touched:Connect(function(other) print("TOUCH:" .. other.Name) end)
+            "#,
+            "touch",
+        )
+        .unwrap();
+        // Engine collision reader maps the colliding entities → these ids.
+        rt.fire_touch(9001, 9002, false);
+        assert_eq!(count("TOUCH:PartB"), 1, "Touched must fire carrying the OTHER part");
+        // TouchEnded on the same pair must NOT fire the Touched handler.
+        rt.fire_touch(9001, 9002, true);
+        assert_eq!(count("TOUCH:PartB"), 0, "TouchEnded is a separate signal");
+    }
+
+    #[test]
+    fn workspace_exposes_seeded_part_by_name_for_touched() {
+        let mut rt = LuauRuntime::new().unwrap();
+        // Engine seeds two scene parts and exposes the brick under workspace.
+        rt.seed_instance(7001, "KillBrick", "uuid-k", "Part");
+        rt.workspace_attach(7001);
+        rt.seed_instance(7002, "Player", "uuid-p", "Part");
+        let _ = lines();
+        // The idiomatic kill-brick pattern: reach the part by name off workspace.
+        rt.spawn_script(
+            r#"
+                workspace.KillBrick.Touched:Connect(function(other) print("HIT:" .. other.Name) end)
+            "#,
+            "ws",
+        )
+        .unwrap();
+        rt.fire_touch(7001, 7002, false);
+        assert_eq!(count("HIT:Player"), 1, "workspace.<name>.Touched must resolve and fire");
+    }
+
+    #[test]
+    fn input_began_signal_fires() {
+        let mut rt = LuauRuntime::new().unwrap();
+        let _ = lines();
+        rt.spawn_script(
+            r#"UserInputService.InputBegan:Connect(function(input, gp)
+                   print(tostring(input.KeyCode) .. ":" .. tostring(gp))
+               end)"#,
+            "inbegan",
+        )
+        .unwrap();
+        rt.fire_input("InputBegan", "Keyboard", "E", false, 0.0, 0.0, 0.0, 0.0);
+        assert_eq!(count("E:false"), 1, "InputBegan should deliver the InputObject + gameProcessed");
     }
 }
 

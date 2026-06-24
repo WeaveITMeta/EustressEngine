@@ -1221,7 +1221,12 @@ fn render_text(
         && elem.width > 0.0 && elem.height > 0.0
     {
         let weight = cosmic_text::Weight(elem.font_weight.clamp(100, 900) as u16);
-        let attrs = Attrs::new().family(Family::SansSerif).weight(weight);
+        let fam = if elem.font.is_empty() {
+            cosmic_text::Family::SansSerif
+        } else {
+            cosmic_text::Family::Name(&elem.font)
+        };
+        let attrs = Attrs::new().family(fam).weight(weight);
         // Shape the text at `candidate_size` and return whether the
         // resulting layout fits inside `(elem.width, elem.height)`.
         // Uses 1.4× line-height matching the body renderer so the test
@@ -1279,6 +1284,25 @@ fn render_text(
         elem.font_size.max(8.0)
     };
 
+    // ── TEMP DIAGNOSTIC (billboard text render) ──────────────────────────
+    // Logs the first handful of text renders so a "text doesn't appear" report
+    // can be pinned to data (empty/garbled text), layout (1×1 rect, font ≈1px),
+    // or font resolution (`Family::Name` miss) without guessing. Remove once
+    // imported-billboard text is confirmed rendering.
+    {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static DIAG: AtomicU32 = AtomicU32::new(0);
+        let n = DIAG.fetch_add(1, Ordering::Relaxed);
+        if n < 12 {
+            bevy::log::info!(
+                "🪧TEXT[{n}] text={:?} rect={:.1}x{:.1} font_size={:.1} font={:?} \
+                 color={:?} bg={:?} abs=({:.0},{:.0}) clip={:?}",
+                elem.text, elem.width, elem.height, font_size, elem.font,
+                elem.text_color, elem.bg_color, abs_x, abs_y, clip_rect
+            );
+        }
+    }
+
     // 1.4x line-height: tighter than typical 1.5 but more readable than the
     // 1.2 cosmic-text default at small sizes.
     let metrics = Metrics::new(font_size, font_size * 1.4);
@@ -1295,7 +1319,12 @@ fn render_text(
     buffer.set_wrap(&mut text_state.font_system, cosmic_text::Wrap::Word);
 
     let weight = cosmic_text::Weight(elem.font_weight.clamp(100, 900) as u16);
-    let attrs = Attrs::new().family(Family::SansSerif).weight(weight);
+    let fam = if elem.font.is_empty() {
+        cosmic_text::Family::SansSerif
+    } else {
+        cosmic_text::Family::Name(&elem.font)
+    };
+    let attrs = Attrs::new().family(fam).weight(weight);
     buffer.set_text(
         &mut text_state.font_system,
         &elem.text,
@@ -1888,6 +1917,12 @@ fn apply_text_label_to_toml(
         text_x_alignment: x_align.to_string(),
         text_y_alignment: y_align.to_string(),
         text_scaled: class.text_scaled,
+        // Compile scaffold: the struct's serde-default values (opaque text, no
+        // stroke) so the tree builds. Real stroke round-trip is the co-agent's
+        // in-flight text-stroke feature — left for them to wire from `class`.
+        text_transparency: 0.0,
+        text_stroke_color: [0.0, 0.0, 0.0, 1.0],
+        text_stroke_transparency: 1.0,
     });
 }
 
@@ -2017,6 +2052,10 @@ fn apply_text_button_to_toml(
         text_x_alignment: x_align.to_string(),
         text_y_alignment: "Center".to_string(),
         text_scaled: false,
+        // Compile scaffold (serde-default stroke) — co-agent finalizes wiring.
+        text_transparency: 0.0,
+        text_stroke_color: [0.0, 0.0, 0.0, 1.0],
+        text_stroke_transparency: 1.0,
     });
 }
 
@@ -2084,6 +2123,10 @@ fn apply_text_box_to_toml(
         text_x_alignment: "Left".to_string(),
         text_y_alignment: "Center".to_string(),
         text_scaled: false,
+        // Compile scaffold (serde-default stroke) — co-agent finalizes wiring.
+        text_transparency: 0.0,
+        text_stroke_color: [0.0, 0.0, 0.0, 1.0],
+        text_stroke_transparency: 1.0,
     });
 }
 

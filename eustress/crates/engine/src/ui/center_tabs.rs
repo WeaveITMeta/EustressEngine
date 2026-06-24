@@ -79,6 +79,9 @@ pub enum CenterTabType {
     ApiBrowser,
     /// Services Browser (catalog of all default Space services)
     ServicesBrowser,
+    /// Data Platform chart viewer (entity-keyed; opens from the Explorer like a
+    /// script and closes the same way).
+    DataChart,
 }
 
 /// Document sub-types for the Document tab
@@ -114,6 +117,7 @@ impl CenterTabType {
             CenterTabType::WebBrowser => "web",
             CenterTabType::ApiBrowser => "api",
             CenterTabType::ServicesBrowser => "services",
+            CenterTabType::DataChart => "chart",
         }
     }
 
@@ -137,6 +141,7 @@ impl CenterTabType {
             CenterTabType::WebBrowser => "globe",
             CenterTabType::ApiBrowser => "code",
             CenterTabType::ServicesBrowser => "package",
+            CenterTabType::DataChart => "viewport",
         }
     }
 }
@@ -363,6 +368,30 @@ impl CenterTabManager {
             id,
             name: format!("{} - Parameters", name),
             tab_type: CenterTabType::ParametersEditor,
+            entity: Some(entity),
+            file_path: None,
+            url: None,
+            pinned: false,
+            dirty: false,
+            loading: false,
+            content: String::new(),
+            summary_content: String::new(),
+        })
+    }
+
+    /// Open a Data Platform chart tab for an entity (or focus existing). Opens
+    /// from the Explorer like a script and closes the same way.
+    pub fn open_data_chart(&mut self, entity: Entity, name: &str) -> usize {
+        if let Some(idx) = self.find_tab_by_entity(entity, &CenterTabType::DataChart) {
+            self.active_tab = idx;
+            self.dirty = true;
+            return idx;
+        }
+        let id = self.next_id();
+        self.push_tab(CenterTabEntry {
+            id,
+            name: format!("{} - Chart", name),
+            tab_type: CenterTabType::DataChart,
             entity: Some(entity),
             file_path: None,
             url: None,

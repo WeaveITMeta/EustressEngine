@@ -4,9 +4,9 @@
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, TabWidget, Button, ComboBox, LineEdit, ScrollView, StandardListView, CheckBox, Slider, GridBox, GroupBox, SpinBox, TextEdit } from "std-widgets.slint";
-import { Ribbon, SavedIdentityData, InsertClassData, WheelData } from "ribbon.slint";
+import { Ribbon, SavedIdentityData, InsertClassData } from "ribbon.slint";
 import { ExplorerPanel, TreeNode } from "explorer.slint";
-import { PropertiesPanel, PropertyData, ColorEntry } from "properties.slint";
+import { PropertiesPanel, PropertyData, HoneycombCell } from "properties.slint";
 import { TagChip, TagSuggestion } from "tags_editor.slint";
 import { OutputConsole, LogData } from "output.slint";
 import { CommandBar, ScriptOutputEntry } from "command_bar.slint";
@@ -34,6 +34,9 @@ import { FloatingNumericInput } from "floating_numeric_input.slint";
 import { ToastUndo } from "toast_undo.slint";
 import { TimelinePanel, TimelineTrackData, TimelineMarkerData, TimelineFilterChipData } from "timeline_panel.slint";
 import { TimelineFilterModal, TimelineTagRow } from "timeline_filter_modal.slint";
+// Data Platform surfaces (Chart viewer tab + Data Grid bottom-panel tab).
+import { DataChartView } from "data_chart.slint";
+import { DataGrid, GridRow } from "data_grid.slint";
 // New components for complete egui parity
 import { TerrainEditor } from "terrain_editor.slint";
 import { SettingsDialog } from "settings.slint";
@@ -383,17 +386,17 @@ export component StudioWindow inherits Window {
     callback switch-identity(string);
     callback remove-identity(string);
 
-    // Categorical color picker (status-bar widget). Mirror of the Bevy
-    // ActiveColorWheel + ColorFavorites Resources — pushed by Rust and
-    // forwarded into the Ribbon below; the three callbacks bubble user
-    // intent back to Rust.
-    in-out property <[WheelData]> color-wheels: [];
-    in-out property <[ColorEntry]> wheel-colors: [];
-    in-out property <[ColorEntry]> favorite-colors: [];
-    in-out property <string> active-wheel-id: "";
-    callback pick-wheel(string);
-    callback pick-color(string);
-    callback toggle-favorite(string);
+    // BrickColor wheel picker (Properties panel). Rust pushes all seven
+    // wheels' 127-cell honeycombs ONCE; the two-step wheel drill is entirely
+    // local to the Slint BrickColorRow (no Rust round-trip). Forwarded into the
+    // PropertiesPanel below.
+    in-out property <[HoneycombCell]> aether-honeycomb: [];
+    in-out property <[HoneycombCell]> halo-honeycomb: [];
+    in-out property <[HoneycombCell]> verdure-honeycomb: [];
+    in-out property <[HoneycombCell]> stone-honeycomb: [];
+    in-out property <[HoneycombCell]> char-honeycomb: [];
+    in-out property <[HoneycombCell]> hex-honeycomb: [];
+    in-out property <[HoneycombCell]> umbra-honeycomb: [];
 
     // Update system
     in-out property <bool> update-available: false;
@@ -635,8 +638,17 @@ export component StudioWindow inherits Window {
     // Timeline. Title-bar buttons flip `bottom-panel-mode` between
     // "output" and "timeline"; the respective panel renders in the slot.
     // ──────────────────────────────────────────────────────────────────────
-    in-out property <string> bottom-panel-mode: "output"; // "output" | "timeline"
+    in-out property <string> bottom-panel-mode: "output"; // "output" | "timeline" | "datagrid"
     callback set-bottom-panel(string);
+    // Data Platform — rows for the Data Grid bottom-panel tab (Rust feeds
+    // these; a sample default keeps the panel legible in slint-viewer).
+    in-out property <[GridRow]> datagrid-rows: [
+        { c0: "2021", c1: "0.85", c2: "0.66", c3: "+0.19" },
+        { c0: "2022", c1: "0.89", c2: "0.66", c3: "+0.23" },
+        { c0: "2023", c1: "1.17", c2: "0.67", c3: "+0.50" },
+        { c0: "2024", c1: "1.28", c2: "0.68", c3: "+0.60", accent: true },
+        { c0: "2025", c1: "1.19", c2: "0.69", c3: "+0.51" },
+    ];
 
     // Timeline data reflected from Rust each frame.
     in-out property <[TimelineTrackData]>      timeline-tracks: [];
@@ -1023,15 +1035,6 @@ export component StudioWindow inherits Window {
             display-unit-symbol: root.display-unit-symbol;
             on-set-display-unit(sym) => { root.set-display-unit(sym); }
 
-            // Categorical color picker
-            color-wheels: root.color-wheels;
-            wheel-colors: root.wheel-colors;
-            favorite-colors: root.favorite-colors;
-            active-wheel-id: root.active-wheel-id;
-            pick-wheel(id) => { root.pick-wheel(id); }
-            pick-color(c) => { root.pick-color(c); }
-            toggle-favorite(c) => { root.toggle-favorite(c); }
-
             // Pipe dynamic keyboard shortcuts into the ribbon subtitles
             shortcut-new: root.shortcut-new;
             shortcut-open: root.shortcut-open;
@@ -1153,7 +1156,23 @@ export component StudioWindow inherits Window {
             on-show-settings => { root.show-settings-dialog = true; }
             on-open-url(url) => { root.open-url(url); }
             on-open-login => { root.show-login-dialog = true; }
-            on-menu-action(action) => { root.menu-action(action); }
+            on-menu-action(action) => {
+                // Data Platform surfaces switch UI-side (works in preview, no
+                // Rust needed): Grid / Timeline open the bottom panel, Chart
+                // opens the center viewer tab. Everything else (import, fit,
+                // record, …) routes to the Rust menu-action handler.
+                if action == "data:grid" {
+                    root.bottom-panel-mode = "datagrid";
+                    root.show-output = true;
+                } else if action == "data:timeline" {
+                    root.bottom-panel-mode = "timeline";
+                    root.show-output = true;
+                } else {
+                    // Chart opens as a closable center tab (handled Rust-side,
+                    // like opening a script), plus everything else.
+                    root.menu-action(action);
+                }
+            }
         }
 
         // ====================================================================
@@ -1608,11 +1627,11 @@ export component StudioWindow inherits Window {
                         Rectangle {
                             width: space1-label.preferred-width + 24px;
                             height: 35px;
-                            background: root.center-active-tab == 0 ? Theme.panel-background : 
+                            background: (root.center-active-tab == 0 && root.active-tab-type != "chart") ? Theme.panel-background :
                                         space1-touch.has-hover ? #ffffff08 : Theme.background-secondary;
-                            
+
                             // Active tab indicator (blue top border — VS Code style)
-                            if root.center-active-tab == 0: Rectangle {
+                            if root.center-active-tab == 0 && root.active-tab-type != "chart": Rectangle {
                                 y: 0px;
                                 height: 2px;
                                 background: Theme.accent-blue;
@@ -1631,6 +1650,7 @@ export component StudioWindow inherits Window {
                                 clicked => {
                                     root.center-active-tab = 0;
                                     root.select-center-tab(0);
+                                    root.active-tab-type = "scene";
                                 }
                                 // Right-click context menu
                                 pointer-event(event) => {
@@ -1645,7 +1665,7 @@ export component StudioWindow inherits Window {
                             
                             space1-label := Text {
                                 text: root.scene-tab-name;
-                                color: root.center-active-tab == 0 ? Theme.text-primary : Theme.text-secondary;
+                                color: (root.center-active-tab == 0 && root.active-tab-type != "chart") ? Theme.text-primary : Theme.text-secondary;
                                 font-size: 12px;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -1764,6 +1784,17 @@ export component StudioWindow inherits Window {
                                         width: 14px;
                                         height: 14px;
                                         source: @image-url("../../assets/icons/ui/new-file.svg");
+                                        image-fit: contain;
+                                        colorize: Theme.text-secondary;
+                                    }
+                                }
+                                if tab.tab-type == "chart": VerticalLayout {
+                                    alignment: center;
+                                    width: 14px;
+                                    Image {
+                                        width: 14px;
+                                        height: 14px;
+                                        source: @image-url("../../assets/icons/ui/viewport.svg");
                                         image-fit: contain;
                                         colorize: Theme.text-secondary;
                                     }
@@ -2486,6 +2517,13 @@ export component StudioWindow inherits Window {
                         }
                         copy-example(ex) => { root.api-copy-example(ex); }
                     }
+
+                    // Chart — Data Platform viewer tab. The GPU sub-rect camera
+                    // mounts here later; baked preview chrome for now.
+                    if root.active-tab-type == "chart": DataChartView {
+                        width: parent.width;
+                        height: parent.height;
+                    }
                 }
                 // ── Box Selection Overlay ──────────────────────────
                 // Renders on top of 3D viewport during drag-to-select
@@ -2749,6 +2787,15 @@ export component StudioWindow inherits Window {
                             properties: root.entity-properties;
                             show-help-icons: root.show-help-icons;
                             help-opens-in-tab: root.help-opens-in-tab;
+                            // BrickColor wheel picker — Rust pushes all seven
+                            // honeycombs once; the drill is local to the row.
+                            aether-honeycomb: root.aether-honeycomb;
+                            halo-honeycomb: root.halo-honeycomb;
+                            verdure-honeycomb: root.verdure-honeycomb;
+                            stone-honeycomb: root.stone-honeycomb;
+                            char-honeycomb: root.char-honeycomb;
+                            hex-honeycomb: root.hex-honeycomb;
+                            umbra-honeycomb: root.umbra-honeycomb;
                             on-property-changed(name, value) => { root.property-changed(name, value); }
                             on-section-toggle(category) => { root.section-toggle(category); }
                             // Attributes UX. Add opens the modal empty; edit
@@ -3022,6 +3069,17 @@ export component StudioWindow inherits Window {
                 search-changed(text)      => { root.timeline-search-changed(text); }
                 open-filter-modal         => { root.timeline-open-filter-modal(); }
                 marker-clicked(ix)        => { root.timeline-marker-clicked(ix); }
+            }
+
+            // Data Grid — Data Platform spreadsheet + formula bar. Shares the
+            // bottom-panel slot; its toolbar switches back to Output / Timeline.
+            if root.bottom-panel-mode == "datagrid": DataGrid {
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                panel-mode <=> root.bottom-panel-mode;
+                set-panel-mode(mode) => { root.set-bottom-panel(mode); }
+                rows: root.datagrid-rows;
             }
         }
 

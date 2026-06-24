@@ -1,0 +1,192 @@
+// ============================================================================
+// Eustress Data Platform — Data Grid (preview scaffold)
+// ============================================================================
+// The spreadsheet view of a Dataset, living as a bottom-panel tab beside
+// Output / Timeline (Data Platform §A "Logger-Pro-grade grid"). Editable cells
+// + a formula bar for calculated columns (e.g. `resid = temp_anomaly −
+// fit.linear(year)`). Columns are generic — driven by header strings + a row
+// model; the climate values here are just the mock tenant.
+//
+// Preview:  slint-viewer --auto-reload data_grid.slint
+// ============================================================================
+
+import { Theme } from "theme.slint";
+import { ScrollView } from "std-widgets.slint";
+
+// One row of the (4-column) preview grid. The live grid is column-generic;
+// this fixed shape keeps the standalone preview self-describing.
+export struct GridRow {
+    c0: string,
+    c1: string,
+    c2: string,
+    c3: string,
+    // Highlight the row (e.g. the record max) — purely visual.
+    accent: bool,
+}
+
+component HeaderCell inherits Rectangle {
+    in property <string> label: "";
+    background: Theme.header-background;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    HorizontalLayout {
+        padding-left: 8px;
+        Text {
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+component DataCell inherits Rectangle {
+    in property <string> text: "";
+    in property <color> tint: Theme.text-primary;
+    background: transparent;
+    HorizontalLayout {
+        padding-left: 8px;
+        Text {
+            text: root.text;
+            color: root.tint;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+export component DataGrid inherits Rectangle {
+    in property <string> col0: "year";
+    in property <string> col1: "temp_anomaly (°C)";
+    in property <string> col2: "trend";
+    in property <string> col3: "resid";
+    in property <string> formula: "resid = temp_anomaly − fit.linear(year)";
+    in property <[GridRow]> rows: [];
+    // Bottom-panel mode (shared with Output / Timeline) so the in-grid tab
+    // buttons can switch back. Mirrors OutputConsole / TimelinePanel.
+    in-out property <string> panel-mode: "datagrid";
+    callback set-panel-mode(string);
+
+    background: Theme.panel-background;
+
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+
+        // ── Tab strip + formula bar ───────────────────────────────────────
+        Rectangle {
+            height: 30px;
+            background: Theme.header-background;
+            Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Theme.border-color; }
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 14px;
+                Rectangle {
+                    width: 52px;
+                    TouchArea { mouse-cursor: pointer; clicked => { root.panel-mode = "output"; root.set-panel-mode("output"); } }
+                    Text { text: "Output"; color: root.panel-mode == "output" ? Theme.text-primary : Theme.text-secondary; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle {
+                    width: 60px;
+                    TouchArea { mouse-cursor: pointer; clicked => { root.panel-mode = "timeline"; root.set-panel-mode("timeline"); } }
+                    Text { text: "Timeline"; color: root.panel-mode == "timeline" ? Theme.text-primary : Theme.text-secondary; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle {
+                    width: 64px;
+                    TouchArea { mouse-cursor: pointer; clicked => { root.panel-mode = "datagrid"; root.set-panel-mode("datagrid"); } }
+                    Text { text: "Data Grid"; color: root.panel-mode == "datagrid" ? Theme.accent-cyan : Theme.text-secondary; font-weight: root.panel-mode == "datagrid" ? 600 : 400; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle { horizontal-stretch: 1; }
+
+                // Formula bar
+                Rectangle {
+                    width: 320px;
+                    height: 22px;
+                    y: (parent.height - self.height) / 2;
+                    background: Theme.input-background;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Theme.input-border;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 6px;
+                        spacing: 6px;
+                        Text { text: "ƒx"; color: Theme.accent-cyan; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.formula;
+                            color: Theme.text-primary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 34px;
+                        height: 18px;
+                        border-radius: 5px;
+                        background: Theme.button-background;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+                        Text { text: "calc"; color: Theme.text-secondary; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+            }
+        }
+
+        // ── Column header row ─────────────────────────────────────────────
+        HorizontalLayout {
+            height: 24px;
+            spacing: 0px;
+            HeaderCell { width: 90px; label: root.col0; }
+            HeaderCell { horizontal-stretch: 1; label: root.col1; }
+            HeaderCell { width: 110px; label: root.col2; }
+            HeaderCell { width: 110px; label: root.col3; }
+        }
+
+        // ── Data rows ─────────────────────────────────────────────────────
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                alignment: start;
+                for row in root.rows: Rectangle {
+                    height: 24px;
+                    background: row.accent ? #14233a : transparent;
+                    HorizontalLayout {
+                        spacing: 0px;
+                        DataCell { width: 90px; text: row.c0; tint: Theme.text-secondary; }
+                        DataCell { horizontal-stretch: 1; text: row.c1; tint: row.accent ? #7fe3f5 : Theme.text-primary; }
+                        DataCell { width: 110px; text: row.c2; tint: Theme.text-disabled; }
+                        DataCell { width: 110px; text: row.c3; tint: Theme.accent-orange; }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Standalone preview with the real GISTEMP tail rows.
+export component DataGridPreview inherits Window {
+    title: "Eustress · Data Grid";
+    preferred-width: 560px;
+    preferred-height: 320px;
+    background: Theme.background-primary;
+    DataGrid {
+        rows: [
+            { c0: "2019", c1: "0.98", c2: "0.65", c3: "+0.33" },
+            { c0: "2020", c1: "1.01", c2: "0.66", c3: "+0.35" },
+            { c0: "2021", c1: "0.85", c2: "0.66", c3: "+0.19" },
+            { c0: "2022", c1: "0.89", c2: "0.66", c3: "+0.23" },
+            { c0: "2023", c1: "1.17", c2: "0.67", c3: "+0.50" },
+            { c0: "2024", c1: "1.28", c2: "0.68", c3: "+0.60", accent: true },
+            { c0: "2025", c1: "1.19", c2: "0.69", c3: "+0.51" },
+        ];
+    }
+}

@@ -724,11 +724,15 @@ fn try_gui_property(
         "Visible" => val_bool(variant).map(|v| ("gui", "visible", v)),
         "Active" => val_bool(variant).map(|v| ("gui", "active", v)),
         "ClipsDescendants" => val_bool(variant).map(|v| ("gui", "clips_descendants", v)),
-        "BackgroundColor3" => color_u8(variant).map(|v| ("gui", "background_color", v)),
+        // GUI colors are 0..1 floats — the billboard/Slint renderer multiplies
+        // them by 255. (Unlike a BasePart's BrickColor/Color, which the color
+        // wheel keeps as the 0..255 sRGB spectrum.) Using `color_u8` here would
+        // hand the rasterizer 255.0 and saturate every channel to white.
+        "BackgroundColor3" => color_f32(variant).map(|v| ("gui", "background_color", v)),
         "BackgroundTransparency" => {
             val_float(variant).map(|v| ("gui", "background_transparency", v))
         }
-        "BorderColor3" => color_u8(variant).map(|v| ("gui", "border_color", v)),
+        "BorderColor3" => color_f32(variant).map(|v| ("gui", "border_color", v)),
         "BorderSizePixel" => val_int(variant).map(|v| ("gui", "border_size_pixel", v)),
         "BorderMode" => enum_u32(variant).map(|e| {
             let s = if e == 1 { "Middle" } else { "Outline" };
@@ -769,12 +773,12 @@ fn try_gui_property(
 
         // ── text family → [text] ──
         "Text" if is_text => val_string(variant).map(|v| ("text", "text", v)),
-        "TextColor3" if is_text => color_u8(variant).map(|v| ("text", "text_color", v)),
+        "TextColor3" if is_text => color_f32(variant).map(|v| ("text", "text_color", v)),
         "TextTransparency" if is_text => {
             val_float(variant).map(|v| ("text", "text_transparency", v))
         }
         "TextStrokeColor3" if is_text => {
-            color_u8(variant).map(|v| ("text", "text_stroke_color", v))
+            color_f32(variant).map(|v| ("text", "text_stroke_color", v))
         }
         "TextStrokeTransparency" if is_text => {
             val_float(variant).map(|v| ("text", "text_stroke_transparency", v))

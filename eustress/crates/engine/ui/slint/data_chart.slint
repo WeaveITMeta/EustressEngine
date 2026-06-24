@@ -1,0 +1,231 @@
+// ============================================================================
+// Eustress Data Platform — Chart view (preview scaffold)
+// ============================================================================
+// The viewport "Chart" view (Data Platform §V, "charts are cameras"). In the
+// engine the plot area is drawn by an on-screen sub-rect Camera3d (GPU); this
+// Slint component is the surrounding CHROME — view switcher, legend, axes,
+// gridlines — plus a baked-data preview polyline so the panel reads correctly
+// in `slint-viewer` with no Rust backend.
+//
+// The preview line/trend/projection coordinates are pre-computed (pixel space,
+// 640x300 plot box) from the REAL NASA GISTEMP annual series so the shape is
+// faithful. The live engine replaces the baked Path with the GPU draw.
+//
+// Preview:  slint-viewer --auto-reload data_chart.slint
+// ============================================================================
+
+import { Theme } from "theme.slint";
+
+// One chip in the view switcher / status strip.
+component Chip inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> active: false;
+    in property <color> accent: Theme.accent-cyan;
+    height: 22px;
+    border-radius: 6px;
+    background: root.active ? #0e3a44 : Theme.button-background;
+    border-width: 1px;
+    border-color: root.active ? root.accent : Theme.border-color;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        Text {
+            text: root.label;
+            color: root.active ? #7fe3f5 : Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// One legend entry: a colored swatch line + text.
+component LegendItem inherits HorizontalLayout {
+    in property <string> label: "";
+    in property <color> swatch: Theme.accent-cyan;
+    in property <bool> dot: false;
+    spacing: 5px;
+    VerticalLayout {
+        alignment: center;
+        Rectangle {
+            width: root.dot ? 8px : 14px;
+            height: root.dot ? 8px : 3px;
+            border-radius: root.dot ? 4px : 1.5px;
+            background: root.swatch;
+        }
+    }
+    Text {
+        text: root.label;
+        color: Theme.text-secondary;
+        font-size: 11px;
+        vertical-alignment: center;
+    }
+}
+
+export component DataChartView inherits Rectangle {
+    in property <string> title: "temp_anomaly";
+    in property <string> unit: "°C";
+    background: Theme.panel-background;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        // ── View switcher + status strip ──────────────────────────────────
+        HorizontalLayout {
+            height: 24px;
+            spacing: 6px;
+            Chip { label: "Chart  ▾"; active: true; }
+            Text {
+                text: "3D · Split · Grid";
+                color: Theme.text-disabled;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Chip { label: "Color by: " + root.title; }
+        }
+
+        // ── Legend ────────────────────────────────────────────────────────
+        HorizontalLayout {
+            height: 16px;
+            spacing: 16px;
+            alignment: start;
+            LegendItem { label: "Observed"; swatch: #38bdf8; }
+            LegendItem { label: "Linear fit · R²0.77"; swatch: #f5a524; }
+            LegendItem { label: "Projection → 2100"; swatch: #b9852f; }
+            LegendItem { label: "Anomaly"; swatch: #ef5350; dot: true; }
+        }
+
+        // ── Plot box (fixed 640x300 so the baked coordinates stay valid) ───
+        HorizontalLayout {
+            alignment: start;
+            Rectangle {
+                width: 640px;
+                height: 300px;
+                background: Theme.viewport-background;
+                border-width: 1px;
+                border-color: Theme.border-color;
+                border-radius: 4px;
+                clip: true;
+
+                // Horizontal gridlines + Y labels (py: 1.0=77, 0.5=137.9, 0=198.9, -0.5=259.8)
+                for g in [
+                    { y: 77.0, t: "1.0" },
+                    { y: 137.9, t: "0.5" },
+                    { y: 198.9, t: "0" },
+                    { y: 259.8, t: "-0.5" },
+                ]: Rectangle {
+                    x: 40px;
+                    y: g.y * 1px;
+                    width: parent.width - 56px;
+                    height: 1px;
+                    background: #ffffff10;
+                    Text {
+                        x: -34px;
+                        y: -7px;
+                        width: 30px;
+                        text: g.t;
+                        color: Theme.text-disabled;
+                        font-size: 9px;
+                        horizontal-alignment: right;
+                    }
+                }
+
+                // Vertical decade gridlines + X labels (px: 1900=96.7,1950=228.5,2000=360.4,2050=492.2,2100=624)
+                for g in [
+                    { x: 96.7, t: "1900" },
+                    { x: 228.5, t: "1950" },
+                    { x: 360.4, t: "2000" },
+                    { x: 492.2, t: "2050" },
+                    { x: 624.0, t: "2100" },
+                ]: Rectangle {
+                    x: g.x * 1px;
+                    y: 16px;
+                    width: 1px;
+                    height: 256px;
+                    background: #ffffff08;
+                    Text {
+                        x: -14px;
+                        y: 258px;
+                        width: 28px;
+                        text: g.t;
+                        color: Theme.text-disabled;
+                        font-size: 9px;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                // "now" divider at 2025 (px 426.3) separating observed / projection
+                Rectangle {
+                    x: 426.3px;
+                    y: 16px;
+                    width: 1px;
+                    height: 256px;
+                    background: #ffffff14;
+                }
+
+                // Projection (amber, dimmer) — drawn first so observed sits on top
+                Path {
+                    viewbox-x: 0; viewbox-y: 0; viewbox-width: 640; viewbox-height: 300;
+                    width: 100%; height: 100%;
+                    fill: transparent;
+                    stroke: #b9852f;
+                    stroke-width: 1.5px;
+                    commands: "M 426.3 115.4 L 624.0 39.3";
+                }
+                // Linear fit (amber)
+                Path {
+                    viewbox-x: 0; viewbox-y: 0; viewbox-width: 640; viewbox-height: 300;
+                    width: 100%; height: 100%;
+                    fill: transparent;
+                    stroke: #f5a524;
+                    stroke-width: 1.5px;
+                    commands: "M 44.0 262.4 L 426.3 115.4";
+                }
+                // Observed series (cyan) — baked from the real GISTEMP annual data
+                Path {
+                    viewbox-x: 0; viewbox-y: 0; viewbox-width: 640; viewbox-height: 300;
+                    width: 100%; height: 100%;
+                    fill: transparent;
+                    stroke: #38bdf8;
+                    stroke-width: 1.6px;
+                    commands: "M 44.0 220.8 L 46.6 209.8 L 49.3 212.3 L 51.9 220.8 L 54.5 234.2 L 57.2 240.3 L 59.8 237.9 L 62.5 242.7 L 65.1 220.8 L 67.7 212.3 L 70.4 242.7 L 73.0 226.9 L 75.6 233.0 L 78.3 236.6 L 80.9 236.6 L 83.5 226.9 L 86.2 213.5 L 88.8 212.3 L 91.5 233.0 L 94.1 220.8 L 96.7 209.8 L 99.4 218.4 L 102.0 233.0 L 104.6 244.0 L 107.3 257.4 L 109.9 230.6 L 112.5 225.7 L 115.2 246.4 L 117.8 251.3 L 120.5 258.6 L 123.1 252.5 L 125.7 253.7 L 128.4 244.0 L 131.0 241.5 L 133.6 218.4 L 136.3 217.1 L 138.9 244.0 L 141.5 254.9 L 144.2 235.4 L 146.8 233.0 L 149.5 233.0 L 152.1 222.0 L 154.7 233.0 L 157.4 231.8 L 160.0 231.8 L 162.6 225.7 L 165.3 212.3 L 167.9 225.7 L 170.5 223.2 L 173.2 242.7 L 175.8 218.4 L 178.5 209.8 L 181.1 218.4 L 183.7 234.2 L 186.4 214.7 L 189.0 223.2 L 191.6 217.1 L 194.3 202.5 L 196.9 198.9 L 199.5 201.3 L 202.2 184.2 L 204.8 176.9 L 207.5 191.5 L 210.1 187.9 L 212.7 174.5 L 215.4 187.9 L 218.0 207.4 L 220.6 202.5 L 223.3 212.3 L 225.9 212.3 L 228.5 219.6 L 231.2 207.4 L 233.8 197.6 L 236.5 189.1 L 239.1 214.7 L 241.7 215.9 L 244.4 222.0 L 247.0 192.8 L 249.6 191.5 L 252.3 195.2 L 254.9 202.5 L 257.5 191.5 L 260.2 195.2 L 262.8 192.8 L 265.5 223.2 L 268.1 212.3 L 270.7 206.2 L 273.4 201.3 L 276.0 208.6 L 278.6 192.8 L 281.3 195.2 L 283.9 208.6 L 286.5 197.6 L 289.2 179.4 L 291.8 207.4 L 294.5 200.1 L 297.1 211.0 L 299.7 176.9 L 302.4 190.3 L 305.0 179.4 L 307.6 167.2 L 310.3 159.8 L 312.9 181.8 L 315.5 161.1 L 318.2 179.4 L 320.8 184.2 L 323.5 176.9 L 326.1 159.8 L 328.7 151.3 L 331.4 165.9 L 334.0 144.0 L 336.6 148.9 L 339.3 172.0 L 341.9 170.8 L 344.5 159.8 L 347.2 144.0 L 349.8 158.6 L 352.5 141.6 L 355.1 124.5 L 357.7 152.5 L 360.4 151.3 L 363.0 134.2 L 365.6 122.1 L 368.3 123.3 L 370.9 134.2 L 373.5 116.0 L 376.2 120.8 L 378.8 117.2 L 381.5 133.0 L 384.1 118.4 L 386.7 109.9 L 389.4 124.5 L 392.0 119.6 L 394.6 116.0 L 397.3 107.4 L 399.9 89.1 L 402.5 75.7 L 405.2 86.7 L 407.8 95.2 L 410.5 79.4 L 413.1 75.7 L 415.7 95.2 L 418.4 90.4 L 421.0 56.2 L 423.6 42.8 L 426.3 53.8";
+                }
+
+                // Anomaly markers (real top residual outliers: 2024, 2016, 1881)
+                for d in [
+                    { x: 423.6, y: 42.8, t: "2024" },
+                    { x: 402.5, y: 75.7, t: "2016" },
+                    { x: 46.6, y: 209.8, t: "1881" },
+                ]: Rectangle {
+                    x: (d.x - 4) * 1px;
+                    y: (d.y - 4) * 1px;
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: #ef5350;
+                    border-width: 1px;
+                    border-color: #1b1b1f;
+                }
+
+                // Y-axis unit caption
+                Text {
+                    x: 6px;
+                    y: 6px;
+                    text: "anomaly (" + root.unit + ")";
+                    color: Theme.text-disabled;
+                    font-size: 9px;
+                }
+            }
+        }
+    }
+}
+
+// Standalone preview entry (slint-viewer renders the last exported component).
+export component DataChartPreview inherits Window {
+    title: "Eustress · Data Chart view";
+    preferred-width: 680px;
+    preferred-height: 380px;
+    background: Theme.background-primary;
+    DataChartView { }
+}

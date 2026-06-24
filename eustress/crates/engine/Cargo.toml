@@ -284,7 +284,14 @@ slint-build = { git = "https://github.com/slint-ui/slint", branch = "master" }
 # from the Core branch match main until we intentionally strip features. When a
 # module needs to be excluded from Core, remove it from this list — the module
 # itself stays gated by its individual feature flag.
-default = ["core"]
+#
+# `data` (the Data Platform columnar leaf — arrow/parquet) is ON BY DEFAULT as of
+# 2026-06-23 (user decision): the platform is data-centric, so the leaf ships in
+# the everyday build rather than behind an opt-in flag. This reverses the old D2
+# "off-by-default" invariant; the `data-graph-purity` CI guard was inverted to
+# assert the leaf IS present in the default graph. Build with
+# `--no-default-features` (or a trimmed feature set) to exclude it.
+default = ["core", "data"]
 core = [
     "realism-scripting",
     "webview",
@@ -383,7 +390,7 @@ sim-orchestration = ["dep:eustress-forge", "world-db"]
 # must stay out of the everyday editor build. Activate with
 # `cargo run -p eustress-engine --features data`. The `data-graph-purity` CI
 # guard fails the build if this ever leaks into the default feature graph.
-data = ["dep:eustress-data", "eustress-data/parquet", "dep:eustress-data-store"]
+data = ["dep:eustress-data", "eustress-data/parquet", "eustress-data/import", "eustress-data/spectral", "dep:eustress-data-store"]
 # Legacy TOML write-back authoring path. OPT-IN since 2026-05-15 —
 # the default build no longer writes `_instance.toml` on edit;
 # persistence goes to `world.fjalldb/`. Turn this on to restore the

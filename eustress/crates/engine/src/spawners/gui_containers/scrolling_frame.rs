@@ -299,6 +299,7 @@ fn make_display(frame: &ScrollingFrame) -> GuiElementDisplay {
         corner_radius: 0.0,
         text: String::new(),
         text_color: [1.0, 1.0, 1.0, 1.0],
+        font: String::new(),
         font_size: 14.0,
         font_weight: 400,
         text_align: "Center".to_string(),

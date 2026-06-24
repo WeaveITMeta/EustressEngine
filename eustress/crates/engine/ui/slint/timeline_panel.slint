@@ -241,6 +241,30 @@ export component TimelinePanel inherits Rectangle {
                     }
                 }
 
+                // Data Grid — Data Platform bottom-panel tab (right of Timeline).
+                Rectangle {
+                    width: 84px;
+                    background: root.panel-mode == "datagrid" ? Theme.panel-background : Theme.tab-inactive;
+                    border-top-left-radius: 4px;
+                    border-top-right-radius: 4px;
+
+                    tl-datagrid-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.panel-mode = "datagrid";
+                            root.set-panel-mode("datagrid");
+                        }
+                    }
+
+                    Text {
+                        text: "Data Grid";
+                        color: root.panel-mode == "datagrid" ? Theme.text-primary : Theme.text-secondary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
                 // Separator
                 Rectangle {
                     width: 9px;

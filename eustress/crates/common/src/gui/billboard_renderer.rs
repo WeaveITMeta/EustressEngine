@@ -62,6 +62,10 @@ pub struct GuiElementDisplay {
     pub corner_radius: f32,
     pub text: String,
     pub text_color: [f32; 4],
+    /// Imported font family name (e.g. "Arial", "GothamBold"). Empty = use
+    /// the renderer's default sans-serif. Passed to cosmic-text as
+    /// `Family::Name`; an unknown name falls back automatically.
+    pub font: String,
     pub font_size: f32,
     /// CSS-style font weight (400 = normal, 700 = bold). Drives
     /// `Text.font-weight` in the Slint billboard card; irrelevant

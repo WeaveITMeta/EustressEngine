@@ -932,6 +932,7 @@ pub fn spawn_text_label(
             label.text_color3[2],
             1.0 - label.text_transparency,
         ],
+        font: String::new(),
         font_size: label.font_size,
         font_weight,
         text_align: match label.text_x_alignment {

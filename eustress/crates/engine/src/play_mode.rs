@@ -1509,9 +1509,17 @@ impl Plugin for PlayModePlugin {
             .add_systems(OnEnter(PlayModeState::Playing), activate_physics_for_unanchored_parts)
             .add_systems(OnEnter(PlayModeState::Playing), start_play_server_if_server_mode)
             .add_systems(OnEnter(PlayModeState::Playing), crate::soul::rune_api::compile_scripts_on_play)
+            // Luau analogue of compile_scripts_on_play: spawn each Luau script
+            // body as a live scheduler coroutine (task.wait / Heartbeat / input
+            // become real). Runs after Rune compile so ordering is deterministic.
+            .add_systems(OnEnter(PlayModeState::Playing), crate::soul::rune_api::start_luau_scripts_on_play
+                .after(crate::soul::rune_api::compile_scripts_on_play))
             .add_systems(OnEnter(PlayModeState::Playing), snapshot_gui_on_play)
             .add_systems(OnExit(PlayModeState::Playing), deactivate_physics_for_parts)
             .add_systems(OnExit(PlayModeState::Playing), stop_play_server_if_server_mode)
+            // Tear down live Luau coroutines / connections so Stop fully stops
+            // script activity and the next Play starts from a clean VM.
+            .add_systems(OnExit(PlayModeState::Playing), crate::soul::rune_api::stop_luau_scripts_on_exit)
             // on_exit() on all scripts before cleanup (Godot-style _exit_tree)
             .add_systems(OnEnter(PlayModeState::Editing), crate::soul::rune_api::run_script_exit)
             .add_systems(OnEnter(PlayModeState::Editing), crate::soul::rune_api::cleanup_scripts_on_stop
@@ -1546,6 +1554,18 @@ impl Plugin for PlayModePlugin {
             .add_systems(Update, (
                 crate::soul::rune_api::hot_recompile_dirty_rune_scripts,
                 crate::soul::rune_api::hot_reload_dirty_luau_scripts,
+                // Pump keyboard/mouse into UserInputService (live IsKeyDown +
+                // InputBegan/Ended/Changed) before the frame driver, so input
+                // pressed this frame is visible in the same Heartbeat tick.
+                eustress_common::luau::sync_luau_input
+                    .after(crate::soul::rune_api::hot_reload_dirty_luau_scripts),
+                // Heartbeat of the live Luau VM: advance the coroutine scheduler
+                // and fire RunService.Stepped/RenderStepped/Heartbeat each frame.
+                eustress_common::luau::drive_luau_frame
+                    .after(eustress_common::luau::sync_luau_input),
+                // Translate Avian collisions into Luau Touched/TouchEnded.
+                crate::soul::rune_api::read_luau_collisions
+                    .after(eustress_common::luau::drive_luau_frame),
                 crate::soul::rune_api::prepare_script_bindings
                     .after(crate::soul::rune_api::hot_recompile_dirty_rune_scripts),
                 crate::soul::rune_api::run_script_init

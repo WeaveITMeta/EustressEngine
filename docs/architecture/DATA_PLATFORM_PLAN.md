@@ -20,7 +20,7 @@ canonical for *how* those compute (Phase C solver, Phase D FEA); this doc is can
 **Last revised:** 2026-06-20.
 **Target:** make Eustress Studio **data-centric** — manual entry, data science, BI, ETL,
 AND the closed-loop digital-twin (collect → fit → simulate → compare) — all over **one
-columnar substrate** (Polars/Arrow in a feature-gated leaf), with **GPU-drawn charts** that
+columnar substrate** (Polars/Arrow in one leaf crate, on by default since 2026-06-23), with **GPU-drawn charts** that
 scale to **millions of points** by the same HLOD/Morton/decimation machinery that streams the
 3D world. **Logger Pro X is the floor, not the ceiling.**
 
@@ -85,14 +85,18 @@ overlay** — live rows record to the *parent* `timeseries`, and the branch snap
 a branched `datasets` blob at branch time. D1 is the invariant; the blob-level workaround is
 the mechanism that makes it survivable. Do not call D1 "free."
 
-### D2 — One columnar leaf, off-by-default, never in `core`
-Polars/Arrow live in exactly one crate, `eustress/crates/data` (`eustress-data`), referenced
-by the engine `optional = true`, **never** in the `core`/`default` feature tier
-([`engine/Cargo.toml:279-306`](eustress/crates/engine/Cargo.toml)), and **never** in
-`common`, `cad`, `worlddb`, `stream`, or the non-optional `eustress-tools`. The default
-`cargo run` graph must stay **byte-for-byte unchanged**. The refactor must preserve:
-- **Build parity**: a CI guard fails if `cargo tree -e features` shows
-  `eustress-data`/`polars`/`arrow` in the default-feature graph.
+### D2 — One columnar leaf (ON BY DEFAULT as of 2026-06-23)
+Polars/Arrow live in exactly one crate, `eustress/crates/data` (`eustress-data`), and **never**
+in `common`, `cad`, `worlddb`, `stream`, or the non-optional `eustress-tools` — that crate is the
+single home of arrow/parquet/polars.
+
+**Reversal (2026-06-23, user decision):** the platform is data-centric, so the `data` feature now
+ships in the engine's `default` tier ([`engine/Cargo.toml`](eustress/crates/engine/Cargo.toml),
+`default = ["core", "data"]`) — the columnar leaf is part of the everyday `cargo run` build, not
+an opt-in flag. The original "off-by-default / byte-for-byte-unchanged default graph" rule is
+**retired**, and the `data-graph-purity` CI guard was inverted (now `data-graph-default`) to
+assert the leaf **is** present in the default graph. Still enforced:
+- **One leaf only**: arrow/parquet/polars never leak into `common`/`cad`/`worlddb`/`stream`/`eustress-tools`.
 - **A polars-free public surface**: callers name `eustress_data::Frame`/`Series`/`Column`,
   never `polars::*`/`arrow::*` — the dep stays swappable (the discipline `worlddb` uses for
   `fjall`).
@@ -416,7 +420,7 @@ hw-mqtt      = ["hw", "dep:rumqttc"]
 ```
 
 ```toml
-# eustress/crates/engine/Cargo.toml  (NOT in `core`)
+# eustress/crates/engine/Cargo.toml  (in `default` since 2026-06-23 — was opt-in)
 eustress-data = { path = "../data", optional = true }
 data        = ["dep:eustress-data", "eustress-data/parquet"]
 data-frames = ["data", "eustress-data/frames"]
@@ -1239,7 +1243,7 @@ partitions) lands first; the science leg is dependency-gated on CAD Phase C/D (P
 
 | Phase | Theme | Key work | Exit gate |
 |---|---|---|---|
-| **P0** | Columnar floor (D2) | `eustress-data` leaf, arrow-rs parquet only; CI `cargo tree` guard; migrate `color_manifest.parquet` off serde_json | Default `cargo run` graph byte-for-byte unchanged; `cargo test -p eustress-data` green; parquet round-trips |
+| **P0** ✅ | Columnar floor (D2) | `eustress-data` leaf, arrow-rs parquet only; CI `data-graph-default` guard; migrate `color_manifest.parquet` off serde_json | `eustress-data` present in the default graph; `cargo test -p eustress-data` green; parquet round-trips |
 | **P1** | Substrate + dimension (D3,D6) | `DataService`/`Dataset`/`Series`/`Column`/`Run` classes + 3-match `ClassName`; `datasets`/`timeseries` partitions (`store_with_opts`); `common/src/dimension.rs` (shipped) + `Dimension::from_unit_symbol` bridge — cad keeps its own `Quantity`, NO façade/eval rewrite | A `Column` renders non-visual (no gray block); a `Series` materializes to a `datasets` blob; existing `features.toml`/spaces still load |
 | **P2** | Query front door + durable collect (D5) | fill `query_stream_events`; `sensor.<name>` Recorder seam (batched, `dropped` counter); one serial hardware adapter + device-template TOML; editable `DataGrid` + validation + forms | A 1 kHz probe records ≥10 min into `timeseries`; `query_stream_events` reads past the 65 s ring window, identical in-engine and out-of-process |
 | **P3** | GPU charts + linked views | `charts/` + `ChartPanelPlugin` (Approach B, D-V1..D-V4); scatter/line/heatmap pipelines; LOD pyramid (min-max); `DataSelection` + 3 projection systems | Sub-rect chart renders under the chrome; a 10⁶-point series renders downsampled at >30 FPS (target, unmeasured on this hardware); scrubbing the chart recolors the 3D model |
@@ -1247,10 +1251,28 @@ partitions) lands first; the science leg is dependency-gated on CAD Phase C/D (P
 | **P5** | Closed loop + BI (gated on CAD P-C/D for nonlinear fit + FEA) | `fit_model`/`instantiate_model` (typed `Quantity`, dim-checked) via injected `LeastSquares`; `closed_loop` orchestrator; overlay-vs-simulated chart; `Dashboard`/`StatCard`/`Grid` + `build_dashboard`; FEA-result datasets | One-sentence "fit + run twin + show residual" produces an overlay + a committable winning branch; "dashboard-from-a-sentence" builds a saved, branch-surviving `Dashboard`; an FEA stress field charts; branching a Dataset with a materialized Series isolates the branch view from a parent mutation (D1 blob-level workaround proven) |
 | **P6** | ETL connectors + geospatial twin | CSV/Parquet/JSON/REST import with schema-on-import; legacy JSONL import; 3D-viewport dashboard cell; probe billboards colored by live `sensor.*`; heatmap data-texture quad | Import a 10M-row Parquet via schema-on-import; live IoT twin: probes over scene geometry update color from streaming sensor values |
 
+**Status (2026-06-24):** P0 ✅ (leaf shipped + tested) · P1 ✅ (classes + partitions +
+`dimension.rs`) · P2 partial (Recorder seam + producer A shipped; `query_stream_events` fill +
+hardware adapter pending) · P3 partial (Chart is a Slint scaffold; GPU pipelines + LOD +
+`DataSelection` pending) · P4 partial (`numerics`/`spectral`/`ml` shipped + wired to ribbon
+Stats/Fit/FFT/Cluster/Anomaly; the Rune per-cell column engine + notebook pending) · P5/P6 not
+started (P5 gated on CAD C/D). `data` is on by default.
+
 ---
 
 ## 6. Open Decisions
 
+**Resolved (2026-06-23/24, user) — the action-verb spec:** `data` is **on by default** (D2
+reversed). Run button **removed** (the experiment "run" is the existing sim Play with Record
+armed). **Branch** = snapshot a named `Run` (recorded signals + world snapshot + per-signal
+stats; restore-point, NOT live-fork). **Compare** = overlay chart + stat-delta table. **Columns**
+= per-cell Rune expression (column refs + neighbor access). **Connect** = REST poll + `sensor.*`
+stream topics first (each source a `Connector` instance configured via its Properties), then
+MQTT/BLE/SQL/OSC as their own opt-in features. **Overlay** = key-column ↔ entity Name/Tag recolor
+by a metric. **Dashboard** = a `Dashboard` instance → center-tab tile grid (in-scene GUI later).
+Recorder **producer = both** (property tap shipped; stream-topic bridge ships with Connect).
+
+Still open:
 - **D-sql** — native SQL driver behind `import-sql` vs external-tool-via-`run_bash` vs
   export-only. *Lean:* export-only first.
 - **D-frames-default** — should `frames` default-on inside `data` once eager-polars compile cost
@@ -1276,24 +1298,37 @@ partitions) lands first; the science leg is dependency-gated on CAD Phase C/D (P
 
 ## 7. What is designed vs. real
 
-- **Real, working, reused directly:** the run/experiment loop (`run_experiment`/`compare_runs`/
-  `list_experiments`); `WatchPointRegistry` telemetry with units; CoW branches (O(1)); the
-  recorder-tee precedent (`history_stream.rs`); the off-screen `RenderTarget::Image` camera
-  (`ai_camera.rs`); GPU instancing for 10K+ unique-color instances (`instanced_pbr.rs`); custom
-  WGSL + `Transparent3d` + quad expansion (`billboard_pipeline.rs`); the bottom-slot mode-switch
-  host; the Properties model/callback/hash-gate/focus-pause discipline; `InstanceColor` for the
-  3D overlay; the string-on-disk unit contract; the production HNSW index (`eustress-embedvec`);
-  `TimeSeries::compute_stats`.
-- **Designed, not built (this plan's deliverables):** the `eustress-data` crate; the
-  `datasets`/`timeseries` partitions + `store_with_opts`; `common/src/dimension.rs`; the
-  `DataService`/`Dataset`/`Series`/`Column`/`Run`/`Chart`/`Dashboard`/`Model` classes; the
-  Recorder seam; the GPU chart pipelines + `DataSelection` projections + LOD pyramid; the custom
-  `DataGrid` + validation + forms; the `data` Rune module + `numerics`/`fit`/`spectral`/`embed`;
-  the `closed_loop`/`fit_model`/`instantiate_model`/`build_dashboard` tools; the filled
-  `query_stream_events` front door.
+*(Updated 2026-06-24 — the substrate + Studio integration below shipped behind the now-default
+`data` feature; verified by `cargo test -p eustress-data` + repeated `cargo check -p
+eustress-engine`.)*
+
+- **Real & verified — the substrate (shipped):** the `eustress-data` leaf
+  (`Frame`/`ColumnSpec`/`ColumnData`; `numerics` stats/fit/derivative/integral/interpolate;
+  `decimate` min-max LOD; `spectral` FFT; `ml` k-means + kNN-anomaly; `import` CSV/JSON; parquet
+  I/O — ~60 passing tests); `eustress-data-store` (`Frame` ⇄ `datasets`/`timeseries` partitions +
+  `RecorderBuffer` + `query_timeseries_frame`, tested against a real `FjallWorldDb`); the
+  `datasets`/`timeseries` WorldDb partitions + `store_with_opts` + CoW for `datasets` in the
+  branch overlay; `common/src/dimension.rs` (SI exponent vector); the
+  `DataService`/`Dataset`/`Series`/`Column`/`Run` classes + `ClassName` arms + `binary.rs`
+  mapping; the Recorder seam + **producer A** (a selected Part's `Transform` sampled each Play
+  frame → `timeseries`). **`data` is ON BY DEFAULT** (D2 reversed; CI guard inverted).
+- **Real & wired into the live Studio (new):** the contextual **Data ribbon tab** (after
+  Drafting); **Chart** as a closable center-tab that opens/closes like a script
+  (`CenterTabType::DataChart`, from Explorer double-click + ribbon); **Data Grid** + **Timeline**
+  bottom-panel tabs (right of Output); **Stats/Fit/FFT/Cluster/Anomaly** running the real
+  `eustress-data` pipeline on the selected Dataset's `.csv` → Output console; **Import** (file
+  picker → parse → a new `Dataset` instance in the Space). 10/17 Data-ribbon verbs functional.
+- **Still designed, not built:** the GPU chart pipelines (today's Chart is a Slint scaffold with
+  baked geometry; the on-screen sub-rect `Camera3d` draw + `DataSelection` linked-view
+  projections + in-engine LOD are pending); the generic dynamic-column editable `DataGrid` fed by
+  selection; the per-cell **Rune column** engine; **Branch/Compare** (snapshot capture + Run
+  registry + compare view); **Connect** (REST/stream first, then the connector taxonomy) +
+  Recorder **producer B**; **Overlay**; **Dashboard**; `closed_loop`/`fit_model`/
+  `instantiate_model`; the filled `query_stream_events` front door.
 - **Deferred, not rejected:** Approach-A floating dashboard wall (readback fast-path); BLE/MQTT/
-  OSC hardware; native SQL driver; column-virtualized grid; `timeseries` CoW (blob-level
-  workaround in the interim); nonlinear fit + FEA datasets (gated on CAD Phase C/D).
+  OSC/SQL hardware + database connectors (each its own opt-in feature); **live-fork** whole-world
+  CoW (snapshot/restore-point chosen first); column-virtualized grid; `timeseries` CoW (blob-level
+  workaround interim); nonlinear fit + FEA datasets (gated on CAD Phase C/D).
 
 ---
 
@@ -1301,8 +1336,8 @@ partitions) lands first; the science leg is dependency-gated on CAD Phase C/D (P
 
 Eustress is already a data engine — it produces measured data every tick, runs branchable
 experiments, and draws 10K+ GPU instances in one call. This plan gives that data **identity** (a
-`Dataset` noun in the tree), a **columnar substrate** (Polars/Arrow in a feature-gated leaf that
-never touches the default build), **GPU-drawn charts** that scale to millions of points by the
+`Dataset` noun in the tree), a **columnar substrate** (Polars/Arrow in one leaf crate — on by
+default since 2026-06-23 — that never leaks beyond it), **GPU-drawn charts** that scale to millions of points by the
 same HLOD/Morton/decimation machinery that streams the 3D world, an **editable grid** for manual
 entry, **one-bus ETL** through a single Recorder, **dimension-correct analysis** that routes into
 the existing solver/FEA/embedvec rather than forking the math, and a **closed-loop digital twin**

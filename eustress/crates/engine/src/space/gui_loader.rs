@@ -111,6 +111,8 @@ pub struct GuiTomlProperties {
     #[serde(default = "default_bg_color", deserialize_with = "de_color_rgb_or_rgba")]
     pub background_color: [f32; 4],
     #[serde(default)]
+    pub background_transparency: f32,
+    #[serde(default)]
     pub border_size: f32,
     #[serde(default = "default_border_color", deserialize_with = "de_color_rgb_or_rgba")]
     pub border_color: [f32; 4],
@@ -186,6 +188,12 @@ pub struct GuiTomlText {
     pub text: String,
     #[serde(default = "default_text_color", deserialize_with = "de_color_rgb_or_rgba")]
     pub text_color: [f32; 4],
+    #[serde(default)]
+    pub text_transparency: f32,
+    #[serde(default = "default_text_stroke_color", deserialize_with = "de_color_rgb_or_rgba")]
+    pub text_stroke_color: [f32; 4],
+    #[serde(default = "default_text_stroke_transparency")]
+    pub text_stroke_transparency: f32,
     #[serde(default = "default_font_size")]
     pub font_size: f32,
     #[serde(default)]
@@ -299,6 +307,8 @@ fn default_size_udim2() -> eustress_common::ui_types::UDim2 {
 fn default_bg_color() -> [f32; 4] { [0.2, 0.2, 0.2, 0.8] }
 fn default_border_color() -> [f32; 4] { [0.5, 0.5, 0.5, 1.0] }
 fn default_text_color() -> [f32; 4] { [1.0, 1.0, 1.0, 1.0] }
+fn default_text_stroke_color() -> [f32; 4] { [0.0, 0.0, 0.0, 1.0] }
+fn default_text_stroke_transparency() -> f32 { 1.0 }
 fn default_font_size() -> f32 { 14.0 }
 fn default_left() -> String { "Left".to_string() }
 fn default_center() -> String { "Center".to_string() }
@@ -418,6 +428,12 @@ pub fn create_default_gui_toml(class_name: &str, display_name: &str) -> GuiTomlF
             text_x_alignment: "Center".to_string(),
             text_y_alignment: "Center".to_string(),
             text_scaled: false,
+            // Compile scaffold: struct serde-defaults (opaque text, no stroke)
+            // so this load path builds. Co-agent's text-stroke feature wires
+            // the real values from the loaded instance.
+            text_transparency: 0.0,
+            text_stroke_color: [0.0, 0.0, 0.0, 1.0],
+            text_stroke_transparency: 1.0,
         })
     } else {
         None
@@ -905,11 +921,13 @@ fn spawn_screen_gui_element(
 /// Frame — container with background color and optional border
 /// Build a GuiElementDisplay from TOML properties + optional text
 pub fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTomlText>, class_type: &str) -> GuiElementDisplay {
-    let (text, text_color, font_size, text_align, text_y_align, font_weight, text_scaled) = if let Some(tp) = text_props {
+    let (text, text_color, font, text_stroke_color, font_size, text_align, text_y_align, font_weight, text_scaled) = if let Some(tp) = text_props {
         let weight_source = if !tp.font.is_empty() { &tp.font } else { &tp.font_family };
         (
             tp.text.clone(),
-            tp.text_color,
+            [tp.text_color[0], tp.text_color[1], tp.text_color[2], (1.0 - tp.text_transparency).clamp(0.0, 1.0)],
+            if !tp.font.is_empty() { tp.font.clone() } else { tp.font_family.clone() },
+            [tp.text_stroke_color[0], tp.text_stroke_color[1], tp.text_stroke_color[2], (1.0 - tp.text_stroke_transparency).clamp(0.0, 1.0)],
             tp.font_size,
             tp.text_x_alignment.clone(),
             tp.text_y_alignment.clone(),
@@ -917,7 +935,7 @@ pub fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTo
             tp.text_scaled,
         )
     } else {
-        (String::new(), [1.0, 1.0, 1.0, 1.0], 14.0, "Center".to_string(), "Center".to_string(), 400, false)
+        (String::new(), [1.0, 1.0, 1.0, 1.0], String::new(), [0.0, 0.0, 0.0, 0.0], 14.0, "Center".to_string(), "Center".to_string(), 400, false)
     };
 
     // `gui.position` and `gui.size` are `UDim2`. We store the source
@@ -944,17 +962,23 @@ pub fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTo
         clip_children: class_type.eq_ignore_ascii_case("scrollingframe"),
         scroll_x: 0.0,
         scroll_y: 0.0,
-        bg_color: gui.background_color,
+        bg_color: [
+            gui.background_color[0],
+            gui.background_color[1],
+            gui.background_color[2],
+            (1.0 - gui.background_transparency).clamp(0.0, 1.0),
+        ],
         border_size: gui.border_size,
         border_color: gui.border_color,
         corner_radius: gui.corner_radius,
         text,
         text_color,
+        font,
         font_size,
         font_weight,
         text_align,
         text_y_align,
-        text_stroke_color: [0.0, 0.0, 0.0, 0.0],
+        text_stroke_color,
         text_scaled,
         image_path: String::new(),
         class_type: class_type.to_string(),

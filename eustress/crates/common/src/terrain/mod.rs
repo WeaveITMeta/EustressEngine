@@ -46,6 +46,13 @@ pub mod water;
 /// explicit `voxel_extract::` path (NOT glob-re-exported) so its names
 /// (`CHUNK_EDGE`, `Span`, …) don't collide with the other terrain modules'.
 pub mod voxel_extract;
+/// Phase B — deterministic multi-agent terrain *generation* (the new
+/// generation mechanic): seam-free base elevation, hydrology, erosion,
+/// climate/biome and material passes producing a `worldgen::GeneratedRegion`
+/// the engine seam lifts into `TerrainData`. Engine-free pure math.
+/// Referenced via the explicit `worldgen::` path (NOT glob-re-exported) so
+/// its names don't collide with the brush/edit `editor`/`brushes` modules.
+pub mod worldgen;
 
 pub use config::*;
 pub use chunk::*;
