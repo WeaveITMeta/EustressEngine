@@ -12498,6 +12498,7 @@ struct ChartData {
     fit_label: String,
     x_ticks: Vec<slint::SharedString>,
     y_ticks: Vec<slint::SharedString>,
+    points: Vec<ChartPoint>,
 }
 
 /// Build the chart payload from any Frame: x = first numeric column (or the row
@@ -12536,10 +12537,21 @@ fn compute_chart_data(frame: &eustress_data::Frame) -> Option<ChartData> {
     let (w, h) = (1000.0_f64, 600.0_f64);
     let map = |x: f64, y: f64| ((x - xmin) / xr * w, (1.0 - (y - ymin) / yr) * h);
 
+    let fmt = |v: f64| -> slint::SharedString {
+        if v.abs() >= 100.0 || v.fract().abs() < 1e-9 {
+            format!("{:.0}", v).into()
+        } else {
+            format!("{:.2}", v).into()
+        }
+    };
     let mut series_path = String::new();
+    let mut points: Vec<ChartPoint> = Vec::new();
     for (k, &(x, y)) in pts.iter().enumerate() {
         let (px, py) = map(x, y);
         series_path.push_str(&format!("{} {:.2} {:.2} ", if k == 0 { "M" } else { "L" }, px, py));
+        if points.len() < 2000 {
+            points.push(ChartPoint { px: px as f32, py: py as f32, xv: fmt(x), yv: fmt(y) });
+        }
     }
 
     let (fit_path, fit_label) = match chart_linfit(&pts) {
@@ -12555,13 +12567,6 @@ fn compute_chart_data(frame: &eustress_data::Frame) -> Option<ChartData> {
         None => (String::new(), String::new()),
     };
 
-    let fmt = |v: f64| -> slint::SharedString {
-        if v.abs() >= 100.0 || v.fract().abs() < 1e-9 {
-            format!("{:.0}", v).into()
-        } else {
-            format!("{:.2}", v).into()
-        }
-    };
     let x_ticks: Vec<slint::SharedString> = (0..5).map(|i| fmt(xmin + xr * i as f64 / 4.0)).collect();
     let y_ticks: Vec<slint::SharedString> = (0..5).map(|i| fmt(ymax - yr * i as f64 / 4.0)).collect();
 
@@ -12571,7 +12576,7 @@ fn compute_chart_data(frame: &eustress_data::Frame) -> Option<ChartData> {
         format!("{}{}", cols[yi].0.name, u)
     };
 
-    Some(ChartData { x_label, y_label, series_path, fit_path, fit_label, x_ticks, y_ticks })
+    Some(ChartData { x_label, y_label, series_path, fit_path, fit_label, x_ticks, y_ticks, points })
 }
 
 /// Feed the Chart center tab from the selected Dataset's CSV — series polyline,
@@ -12629,12 +12634,14 @@ fn sync_data_chart_to_slint(
             window.set_chart_fit_label(cd.fit_label.into());
             window.set_chart_x_ticks(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(cd.x_ticks))));
             window.set_chart_y_ticks(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(cd.y_ticks))));
+            window.set_chart_points(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(cd.points))));
         }
         None => {
             window.set_chart_title(name.into());
             window.set_chart_series_path("".into());
             window.set_chart_fit_path("".into());
             window.set_chart_fit_label("".into());
+            window.set_chart_points(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(Vec::<ChartPoint>::new()))));
         }
     }
 }

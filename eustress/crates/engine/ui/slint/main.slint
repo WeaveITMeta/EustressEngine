@@ -35,7 +35,7 @@ import { ToastUndo } from "toast_undo.slint";
 import { TimelinePanel, TimelineTrackData, TimelineMarkerData, TimelineFilterChipData } from "timeline_panel.slint";
 import { TimelineFilterModal, TimelineTagRow } from "timeline_filter_modal.slint";
 // Data Platform surfaces (Chart viewer tab + Data Grid bottom-panel tab).
-import { DataChartView } from "data_chart.slint";
+import { DataChartView, ChartPoint } from "data_chart.slint";
 import { DataGrid, DataGridRow } from "data_grid.slint";
 // New components for complete egui parity
 import { TerrainEditor } from "terrain_editor.slint";
@@ -736,6 +736,7 @@ export component StudioWindow inherits Window {
     in-out property <string> chart-fit-label;
     in-out property <[string]> chart-x-ticks;
     in-out property <[string]> chart-y-ticks;
+    in-out property <[ChartPoint]> chart-points;
 
     // Web browser state for active web tab
     in-out property <string> web-url-bar: "";
@@ -2539,6 +2540,7 @@ export component StudioWindow inherits Window {
                         fit-label: root.chart-fit-label;
                         x-ticks: root.chart-x-ticks;
                         y-ticks: root.chart-y-ticks;
+                        points: root.chart-points;
                     }
                 }
                 // ── Box Selection Overlay ──────────────────────────
