@@ -1,0 +1,17 @@
+# Connector — Data Platform: a live data source (REST / GraphQL / SQL / cloud
+# provider, or an engine stream topic). Non-visual container modeled on Folder
+# (DATA_PLATFORM_PLAN.md §A). The connection config lives in [attributes]; the
+# ribbon Data → Connect and the top-bar Data menu both create one of these as
+# the single "add a source" front door. `enabled = false` keeps it inert until
+# the poll/subscribe runtime (next increment) is wired.
+
+[metadata]
+class_name = "Connector"
+archivable = true
+
+[attributes]
+source_type = "REST"
+endpoint = ""
+poll_seconds = 10
+format = "json"
+enabled = false

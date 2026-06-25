@@ -145,8 +145,9 @@ pub fn category_for(class: ClassName) -> &'static str {
         BlockMesh | FileMesh | Texture | SurfaceAppearance | MaterialVariant
         | Bone | WrapDeformer | WrapLayer | WrapTarget => "Meshes",
 
-        // ── Data / curves / chat / misc ──
-        DataStoreGetOptions | DataStoreSetOptions | DataStoreIncrementOptions
+        // ── Data Platform + data/curves/chat/misc ──
+        Dataset | Series | Column | Run | Connector
+        | DataStoreGetOptions | DataStoreSetOptions | DataStoreIncrementOptions
         | DataStoreOptions | FloatCurve | RotationCurve | EulerRotationCurve
         | Vector3Curve | MarkerCurve | Path2D | LocalizationTable | Noise
         | TextChannel | TextChatCommand | TextChatMessageProperties | Team

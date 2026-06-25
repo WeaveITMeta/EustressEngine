@@ -704,7 +704,21 @@ export component Ribbon inherits Rectangle {
                                             label: item.category;
                                         }
                                         DropdownItem {
-                                            icon: @image-url("../../assets/icons/instance.svg");
+                                            // Per-category icon. Slint @image-url is compile-time,
+                                            // so a ternary over the (precomputed) category gives the
+                                            // dynamic rows real icons instead of one generic glyph.
+                                            icon: item.category == "Parts" ? @image-url("../../assets/icons/part.svg")
+                                                : item.category == "Structure" ? @image-url("../../assets/icons/folder.svg")
+                                                : item.category == "Lighting" ? @image-url("../../assets/icons/lighting.svg")
+                                                : item.category == "Constraints" ? @image-url("../../assets/icons/weldconstraint.svg")
+                                                : item.category == "Effects" ? @image-url("../../assets/icons/particleemitter.svg")
+                                                : item.category == "Audio" ? @image-url("../../assets/icons/sound.svg")
+                                                : item.category == "GUI" ? @image-url("../../assets/icons/screengui.svg")
+                                                : item.category == "Scripting" ? @image-url("../../assets/icons/script.svg")
+                                                : item.category == "Animation" ? @image-url("../../assets/icons/animator.svg")
+                                                : item.category == "Meshes" ? @image-url("../../assets/icons/meshpart.svg")
+                                                : item.category == "Data" ? @image-url("../../assets/icons/filetypes/table.svg")
+                                                : @image-url("../../assets/icons/instance.svg");
                                             label: item.display;
                                             clicked => { root.on-menu-action("insert:" + item.class-name); }
                                         }

@@ -117,3 +117,5 @@ eustress/.patches/wgpu-fresh/
 # Claude Code session state (worktrees, scheduled-task locks). Contains
 # full stale repo copies — must never be published to the public repo.
 .claude/
+.default_universe
+.trunk-web-target/

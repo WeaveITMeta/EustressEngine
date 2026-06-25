@@ -71,6 +71,7 @@ const SERVICE_FOLDERS: &[ServiceFolder] = &[
     ServiceFolder { name: "MaterialService",         class: "MaterialService",        icon: "materialservice",    description: "PBR material definitions (.mat.toml files)" },
     ServiceFolder { name: "SoundService",            class: "SoundService",           icon: "soundservice",       description: "Audio — Sound effects and music" },
     ServiceFolder { name: "AdornmentService",        class: "AdornmentService",       icon: "adornmentservice",   description: "Beams, billboards, particles, highlights" },
+    ServiceFolder { name: "DataService",             class: "DataService",            icon: "folder",             description: "Data Platform — datasets, series, columns, and runs" },
     ServiceFolder { name: "Teams",                   class: "Teams",                  icon: "teams",              description: "Team definitions and spawn points" },
     ServiceFolder { name: "Chat",                    class: "Chat",                   icon: "chat",               description: "In-game chat system" },
 ];

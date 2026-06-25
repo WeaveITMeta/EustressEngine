@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- DataService: information "i" surrounded by atomic orbits on three axes (R/G/B) -->
+  <g transform="translate(8 8)" fill="none" stroke-width="0.85">
+    <ellipse rx="7" ry="2.8" stroke="#FF5A5A" transform="rotate(0)"/>
+    <ellipse rx="7" ry="2.8" stroke="#35D07A" transform="rotate(60)"/>
+    <ellipse rx="7" ry="2.8" stroke="#3B82F6" transform="rotate(120)"/>
+    <circle r="0.95" fill="#FF5A5A" cx="7" cy="0" transform="rotate(0)"/>
+    <circle r="0.95" fill="#35D07A" cx="7" cy="0" transform="rotate(60)"/>
+    <circle r="0.95" fill="#3B82F6" cx="7" cy="0" transform="rotate(120)"/>
+  </g>
+  <!-- nucleus backing so the "i" reads over the crossing orbits -->
+  <circle cx="8" cy="8" r="3" fill="#0E1726"/>
+  <!-- the information "i", in blue -->
+  <circle cx="8" cy="6.3" r="0.95" fill="#5CA8FF"/>
+  <rect x="7.25" y="7.7" width="1.5" height="3.4" rx="0.75" fill="#5CA8FF"/>
+</svg>

@@ -734,6 +734,7 @@ impl ClassId {
             ClassName::Series => ClassId::Folder,
             ClassName::Column => ClassId::Folder,
             ClassName::Run => ClassId::Folder,
+            ClassName::Connector => ClassId::Folder,
         }
     }
 

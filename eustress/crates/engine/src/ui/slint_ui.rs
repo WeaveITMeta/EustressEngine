@@ -365,6 +365,9 @@ pub enum SlintAction {
     
     // Bottom panel mode (Output / Timeline tab switch)
     SetBottomPanel(String),
+
+    // Data Platform — top-bar Data menu "Add Source" → create a Connector.
+    AddDataSource(String),
     
     // Context menu
     InsertPart(String),
@@ -1405,6 +1408,10 @@ impl Plugin for SlintUiPlugin {
             // Runs after Drain (like the other one-shot Slint feeds) and
             // self-gates until the ClassRegistry is populated.
             .add_systems(Update, init_insert_classes_to_slint.after(SlintSystems::Drain))
+            // Data Grid: feed generic columns/rows from the selected Dataset's
+            // CSV (selection-driven; re-reads only when the Dataset changes).
+            .add_systems(Update, sync_data_grid_to_selection.after(SlintSystems::Drain))
+            .init_resource::<DataGridFedFor>()
             // Center tab sync: drain_slint_actions → CenterTabManager → StudioState → Slint
             .add_systems(Update, sync_tab_manager_to_studio_state
                 .after(SlintSystems::Drain)
@@ -1770,6 +1777,11 @@ fn setup_slint_overlay(world: &mut World) {
     // Bottom panel mode (Output ↔ Timeline tab switch)
     let q = queue.clone();
     ui.on_set_bottom_panel(move |mode| q.push(SlintAction::SetBottomPanel(mode.to_string())));
+
+    // Top-bar Data menu: "QUICK ADD SOURCE" / "CLOUD PROVIDERS" items → create
+    // a Connector instance of that source type (the data:connect front door).
+    let q = queue.clone();
+    ui.on_add_data_source(move |source_type| q.push(SlintAction::AddDataSource(source_type.to_string())));
     
     // Toolbox part insertion
     let q = queue.clone();
@@ -8151,9 +8163,28 @@ fn drain_slint_actions(
                 use crate::timeline_panel::BottomPanelMode;
                 let target = match mode.as_str() {
                     "timeline" => BottomPanelMode::Timeline,
+                    "datagrid" => BottomPanelMode::DataGrid,
                     _          => BottomPanelMode::Output,
                 };
                 commands.insert_resource(target);
+            }
+
+            SlintAction::AddDataSource(source_type) => {
+                // Front door: the top-bar Data menu's source items create a
+                // Connector instance under DataService (same path the ribbon's
+                // Data → Connect uses). The live poll/stream runtime that
+                // consumes enabled Connectors is the next increment.
+                let space_root = crate::space::default_space_root();
+                match write_connector(&space_root, &source_type) {
+                    Ok(name) => if let Some(ref mut out) = res.output {
+                        out.info(format!(
+                            "Data · created {source_type} Connector '{name}' in DataService — set the endpoint + enable it in Properties.",
+                        ));
+                    },
+                    Err(e) => if let Some(ref mut out) = res.output {
+                        out.error(format!("Data · add source failed: {e}"));
+                    },
+                }
             }
 
             // Help icons — open /learn documentation URL
@@ -9593,6 +9624,25 @@ fn drain_slint_actions(
                             }
                         } else if let Some(ref mut out) = res.output {
                             out.info("Data · recorder unavailable in this build.".to_string());
+                        }
+                        continue;
+                    }
+
+                    // Connect (ribbon Data → Connect): create a Connector
+                    // instance under DataService — the same Connector path the
+                    // top-bar Data menu's source items use (AddDataSource), so
+                    // both are one front door to the Data Platform.
+                    if act == "connect" {
+                        let space_root = crate::space::default_space_root();
+                        match write_connector(&space_root, "REST") {
+                            Ok(name) => if let Some(ref mut out) = res.output {
+                                out.info(format!(
+                                    "Data · created Connector '{name}' (REST) in DataService — set the endpoint + enable it in Properties.",
+                                ));
+                            },
+                            Err(e) => if let Some(ref mut out) = res.output {
+                                out.error(format!("Data · connect failed: {e}"));
+                            },
                         }
                         continue;
                     }
@@ -12249,8 +12299,22 @@ fn init_insert_classes_to_slint(
     initialized.0 = true;
 
     let registry_count = registry.len();
+    // Data Platform classes (Dataset/Series/Column/Run) have creatable
+    // class_schema templates + ClassName variants but no registered spawner
+    // yet — Insert creates via `create_instance`/template, not the registry
+    // spawn path, so a template is all a successful click needs. Chain them
+    // onto the registered set; `.filter(!contains)` keeps the row de-duped if
+    // one of them later gains a real spawner.
+    let data_platform = [
+        eustress_common::classes::ClassName::Dataset,
+        eustress_common::classes::ClassName::Series,
+        eustress_common::classes::ClassName::Column,
+        eustress_common::classes::ClassName::Run,
+    ]
+    .into_iter()
+    .filter(|c| !registry.contains(*c));
     let descriptors = super::insert_classes::build_catalog(
-        registry.registered_classes(),
+        registry.registered_classes().chain(data_platform),
         super::insert_classes::template_exists,
     );
 
@@ -12273,6 +12337,144 @@ fn init_insert_classes_to_slint(
          filtered to those with a creatable class_schema template)",
         listed_count, registry_count,
     );
+}
+
+/// Tracks which Dataset entity the Data Grid was last built for, so the CSV is
+/// only re-read when the selected Dataset actually changes. Non-Dataset
+/// selections are ignored — the grid keeps showing the last Dataset.
+#[derive(Resource, Default)]
+struct DataGridFedFor(Option<Entity>);
+
+/// Feed the Data Grid bottom-panel tab from the selected Dataset's CSV.
+/// Generic over columns — the grid reflects whatever Dataset is selected in
+/// the Explorer, with any number of columns (Data Platform §A: generic grid).
+/// Reads the first `.csv` beside the Dataset's `_instance.toml` (the same file
+/// the `data:stats`/`fit`/… ops use) and pushes headers + stringified rows.
+#[cfg(feature = "data")]
+fn sync_data_grid_to_selection(
+    slint_context: Option<NonSend<SlintUiState>>,
+    explorer: Option<Res<UnifiedExplorerState>>,
+    loaded: Query<&crate::space::LoadedFromFile>,
+    instances: Query<&eustress_common::classes::Instance>,
+    mut fed: ResMut<DataGridFedFor>,
+) {
+    use eustress_common::classes::ClassName;
+
+    let Some(ctx) = slint_context else { return };
+    let Some(explorer) = explorer else { return };
+
+    let sel = match &explorer.selected {
+        SelectedItem::Entity(e) => Some(*e),
+        _ => None,
+    };
+    // Only act on Dataset selections; leave the grid on the last Dataset while
+    // the user clicks other entities in the scene.
+    let dataset = sel.filter(|&e| {
+        instances.get(e).map(|i| i.class_name == ClassName::Dataset).unwrap_or(false)
+    });
+    let Some(entity) = dataset else { return };
+    if fed.0 == Some(entity) {
+        return; // same Dataset already shown — no re-read
+    }
+    fed.0 = Some(entity);
+
+    // First .csv beside the Dataset's _instance.toml.
+    let frame = loaded.get(entity).ok().and_then(|lff| {
+        let path = lff.path.clone();
+        let dir = if path.is_dir() { path } else { path.parent()?.to_path_buf() };
+        let csv = std::fs::read_dir(&dir).ok()?
+            .filter_map(|x| x.ok())
+            .map(|x| x.path())
+            .find(|p| {
+                p.extension().and_then(|x| x.to_str())
+                    .map(|x| x.eq_ignore_ascii_case("csv")).unwrap_or(false)
+            })?;
+        std::fs::File::open(&csv).ok()
+            .and_then(|f| eustress_data::import::frame_from_csv(f).ok())
+    });
+
+    let name = instances.get(entity).map(|i| i.name.clone()).unwrap_or_default();
+    let window = &ctx.window;
+
+    match frame {
+        Some(frame) => {
+            // Header label = "name (unit)" when the column carries a unit.
+            let headers: Vec<slint::SharedString> = frame.specs().map(|s| {
+                let u = s.unit.clone().map(|u| format!(" ({u})")).unwrap_or_default();
+                slint::SharedString::from(format!("{}{}", s.name, u))
+            }).collect();
+
+            // Cap the model so a huge CSV can't stall the UI thread; the grid is
+            // a preview, not a paginated viewer (that's a later increment).
+            const MAX_ROWS: usize = 1000;
+            let cols = frame.columns();
+            let total = frame.n_rows();
+            let n = total.min(MAX_ROWS);
+            let mut rows: Vec<DataGridRow> = Vec::with_capacity(n);
+            for r in 0..n {
+                let cells: Vec<slint::SharedString> = cols.iter()
+                    .map(|(_, data)| slint::SharedString::from(data_cell_string(data, r)))
+                    .collect();
+                rows.push(DataGridRow {
+                    cells: slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(cells))),
+                });
+            }
+
+            info!("Data Grid: showing {n} of {total} rows for Dataset '{name}'");
+            window.set_datagrid_columns(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(headers))));
+            window.set_datagrid_rows(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(rows))));
+            window.set_datagrid_name(slint::SharedString::from(name));
+        }
+        None => {
+            // A Dataset is selected but has no parseable CSV — clear the grid.
+            window.set_datagrid_columns(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(Vec::<slint::SharedString>::new()))));
+            window.set_datagrid_rows(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(Vec::<DataGridRow>::new()))));
+            window.set_datagrid_name(slint::SharedString::from(name));
+        }
+    }
+}
+
+/// No-op stand-in when the `data` feature is off (keeps the plugin's system
+/// registration unconditional; the real feed needs eustress-data's CSV reader).
+#[cfg(not(feature = "data"))]
+fn sync_data_grid_to_selection() {}
+
+/// Stringify one cell of a column for the Data Grid. `None` (missing/null —
+/// Logger-Pro gaps) renders as an empty cell.
+#[cfg(feature = "data")]
+fn data_cell_string(data: &eustress_data::ColumnData, r: usize) -> String {
+    use eustress_data::ColumnData;
+    match data {
+        ColumnData::F64(v) => v.get(r).and_then(|o| *o).map(|x| format!("{x}")).unwrap_or_default(),
+        ColumnData::I64(v) => v.get(r).and_then(|o| *o).map(|x| x.to_string()).unwrap_or_default(),
+        ColumnData::Bool(v) => v.get(r).and_then(|o| *o).map(|x| x.to_string()).unwrap_or_default(),
+        ColumnData::Str(v) => v.get(r).and_then(|o| o.clone()).unwrap_or_default(),
+    }
+}
+
+/// Write a new Connector instance folder under the Space's `DataService` and
+/// return its (unique) folder name. Mirrors the Dataset write in the
+/// `data:import` handler — the established data-platform create pattern (inline
+/// `_instance.toml`; the file-watcher spawns it, Properties exposes its config).
+///
+/// This is the **front door**: both the ribbon's Data → Connect and the
+/// top-bar Data menu's QUICK ADD SOURCE / CLOUD PROVIDERS items land here, so a
+/// "source" is always a Connector instance you configure in Properties. The
+/// live poll (REST) / subscribe (stream-topic) runtime that consumes `enabled`
+/// Connectors and ingests into a sibling Dataset is the next increment —
+/// `enabled = false` here keeps a freshly-created Connector inert until then.
+fn write_connector(space_root: &std::path::Path, source_type: &str) -> std::io::Result<String> {
+    let dir = space_root.join("DataService");
+    std::fs::create_dir_all(&dir)?;
+    let base = format!("{source_type} Source");
+    let name = crate::space::instance_loader::unique_entity_name(&dir, &base);
+    let cdir = dir.join(&name);
+    std::fs::create_dir_all(&cdir)?;
+    let toml = format!(
+        "[metadata]\nclass_name = \"Connector\"\narchivable = true\n\n[attributes]\nsource_type = \"{source_type}\"\nendpoint = \"\"\npoll_seconds = 10\nformat = \"json\"\nenabled = false\n",
+    );
+    std::fs::write(cdir.join("_instance.toml"), toml)?;
+    Ok(name)
 }
 
 /// Tracks last known window size to detect resize (Changed<Window> is unreliable)
@@ -14472,6 +14674,10 @@ struct PropertyExtraQueries<'w, 's> {
         Option<&'static eustress_common::attributes::Tags>,
         Option<&'static eustress_common::attributes::Attributes>,
     )>,
+    /// On-disk source for entities that carry `LoadedFromFile` instead of
+    /// `InstanceFile` — data-subsystem Datasets resolve their backing CSV this
+    /// way (same path the Data→Stats handler uses).
+    loaded_from_file: Query<'w, 's, &'static crate::space::LoadedFromFile>,
 }
 
 /// Syncs the selected entity's properties to the Slint properties panel.
@@ -14627,7 +14833,36 @@ fn sync_properties_to_slint(
     ui.set_selected_count(1);
     ui.set_selected_class(format!("{:?}", instance.class_name).into());
     ui.set_selected_icon(load_class_icon(&instance.class_name));
-    
+
+    // ── Data Platform: a Dataset's Properties DERIVE from its data, not the
+    // generic Part/Instance sections. Build Schema · Source · Stats (live) ·
+    // Storage · Metadata from the backing CSV + [attributes], emit, return.
+    // (Series/Model nesting is a follow-up — needs child instances to select.)
+    if instance.class_name == eustress_common::classes::ClassName::Dataset {
+        // instance-folder Datasets carry InstanceFile; data-subsystem Datasets
+        // carry LoadedFromFile (→ the CSV) instead. Resolve whichever exists.
+        let src_path = instance_files.get(selected_entity).ok().map(|f| f.toml_path.clone())
+            .or_else(|| extra_q.loaded_from_file.get(selected_entity).ok().map(|lff| lff.path.clone()));
+        if let Some(src_path) = src_path {
+            let flat = build_dataset_properties(
+                &src_path, instance, &studio_state.collapsed_sections,
+            );
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for p in &flat {
+                p.name.hash(&mut hasher); p.value.hash(&mut hasher);
+                p.category.hash(&mut hasher); p.is_header.hash(&mut hasher);
+                p.section_collapsed.hash(&mut hasher);
+            }
+            let h = hasher.finish();
+            if h != studio_state.last_properties_hash {
+                studio_state.last_properties_hash = h;
+                ui.set_entity_properties(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(flat))));
+            }
+            return;
+        }
+    }
+
     // Collect raw properties with categories into buckets
     // category -> Vec<(name, value, type, editable)>
     let mut categorized: std::collections::BTreeMap<String, Vec<(String, String, String, bool)>> = std::collections::BTreeMap::new();
@@ -15512,6 +15747,151 @@ fn sync_properties_to_slint(
         let model_rc = std::rc::Rc::new(slint::VecModel::from(flat_props));
         ui.set_entity_properties(slint::ModelRc::from(model_rc));
     }
+}
+
+/// Build the Data-Platform Properties sections for a Dataset instance —
+/// Schema · Source · Stats (live) · Storage · Metadata — replacing the generic
+/// Part/Instance sections so "sections derive from the selected class." Values
+/// are computed live from the backing CSV + the instance's `[attributes]`.
+fn build_dataset_properties(
+    path: &std::path::Path,
+    instance: &eustress_common::classes::Instance,
+    collapsed: &std::collections::HashSet<String>,
+) -> Vec<PropertyData> {
+    // The backing path may be the _instance.toml, the instance dir, or the CSV
+    // (data-subsystem Datasets carry LoadedFromFile → the CSV). Normalize to the
+    // instance dir + its _instance.toml so attributes + the CSV both resolve.
+    let dir = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.to_path_buf())
+    };
+    let toml_path = if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+        path.to_path_buf()
+    } else {
+        dir.join("_instance.toml")
+    };
+    let placeholder = slint::Color::from_rgb_u8(0x80, 0x80, 0x80);
+    let header = |cat: &str| PropertyData {
+        name: slint::SharedString::default(), value: slint::SharedString::default(),
+        property_type: slint::SharedString::default(), category: cat.into(),
+        editable: false, options: slint::ModelRc::default(), is_header: true,
+        section_collapsed: collapsed.contains(cat),
+        x_value: slint::SharedString::default(), y_value: slint::SharedString::default(),
+        z_value: slint::SharedString::default(), x_scale: slint::SharedString::default(),
+        x_offset: slint::SharedString::default(), y_scale: slint::SharedString::default(),
+        y_offset: slint::SharedString::default(), color_value: placeholder,
+        description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
+        is_attribute: false, attribute_type: slint::SharedString::default(),
+    };
+    let rowf = |cat: &str, name: &str, value: &str| PropertyData {
+        name: name.into(), value: value.into(), property_type: "string".into(),
+        category: cat.into(), editable: false, options: slint::ModelRc::default(),
+        is_header: false, section_collapsed: collapsed.contains(cat),
+        x_value: slint::SharedString::default(), y_value: slint::SharedString::default(),
+        z_value: slint::SharedString::default(), x_scale: slint::SharedString::default(),
+        x_offset: slint::SharedString::default(), y_scale: slint::SharedString::default(),
+        y_offset: slint::SharedString::default(), color_value: placeholder,
+        description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
+        is_attribute: false, attribute_type: slint::SharedString::default(),
+    };
+
+    let mut out: Vec<PropertyData> = Vec::new();
+    let mut schema_rows: Vec<(String, String)> = Vec::new();
+    let mut stats_rows: Vec<(String, String)> = Vec::new();
+    let mut row_count: Option<String> = None;
+
+    #[cfg(feature = "data")]
+    {
+        if let Some(frame) = read_dataset_frame(&dir) {
+            use eustress_data::ColumnDtype;
+            row_count = Some(frame.n_rows().to_string());
+            for (spec, data) in frame.columns() {
+                let ty = match data.dtype() {
+                    ColumnDtype::F64 => "f64", ColumnDtype::I64 => "i64",
+                    ColumnDtype::Bool => "bool", ColumnDtype::Str => "str",
+                };
+                let unit = spec.unit.as_deref().map(|u| format!(" · {u}")).unwrap_or_default();
+                schema_rows.push((spec.name.clone(), format!("{ty}{unit}")));
+            }
+            // Stats of the primary value column (last numeric column).
+            if let Some((spec, data)) = frame.columns().iter().rev()
+                .find(|(_, d)| matches!(d.dtype(), ColumnDtype::F64 | ColumnDtype::I64))
+            {
+                if let Ok(s) = eustress_data::numerics::stats(data) {
+                    let u = spec.unit.as_deref().map(|u| format!(" {u}")).unwrap_or_default();
+                    stats_rows.push(("n".into(), s.count.to_string()));
+                    stats_rows.push(("mean".into(), format!("{:.4}{u}", s.mean)));
+                    stats_rows.push(("min".into(), format!("{:.3}", s.min)));
+                    stats_rows.push(("max".into(), format!("{:.3}", s.max)));
+                    stats_rows.push(("σ".into(), format!("{:.4}{u}", s.std_dev)));
+                }
+            }
+        }
+    }
+
+    let attrs = read_toml_attributes(&toml_path);
+
+    // Schema (live columns)
+    if !schema_rows.is_empty() {
+        out.push(header("Schema"));
+        for (n, v) in &schema_rows { out.push(rowf("Schema", n, v)); }
+    }
+    // Source (provenance from [attributes])
+    out.push(header("Source"));
+    out.push(rowf("Source", "connector", "CSV"));
+    if let Some(v) = attrs.get("source")   { out.push(rowf("Source", "provenance", v)); }
+    if let Some(v) = attrs.get("measure")  { out.push(rowf("Source", "measure", v)); }
+    if let Some(v) = attrs.get("unit")     { out.push(rowf("Source", "unit", v)); }
+    if let Some(v) = attrs.get("baseline") { out.push(rowf("Source", "baseline", v)); }
+    // Stats (live)
+    if !stats_rows.is_empty() {
+        out.push(header("Stats (live)"));
+        for (n, v) in &stats_rows { out.push(rowf("Stats (live)", n, v)); }
+    }
+    // Storage
+    out.push(header("Storage"));
+    let rows_val = row_count.or_else(|| attrs.get("rows").cloned()).unwrap_or_else(|| "—".to_string());
+    out.push(rowf("Storage", "rows", &rows_val));
+    out.push(rowf("Storage", "partition", "datasets"));
+    out.push(rowf("Storage", "branch", "main"));
+    // Metadata
+    out.push(header("Metadata"));
+    out.push(rowf("Metadata", "Archivable", if instance.archivable { "Enabled" } else { "Disabled" }));
+    out.push(rowf("Metadata", "ClassName", "Dataset"));
+    out.push(rowf("Metadata", "Name", &instance.name));
+
+    out
+}
+
+/// Parse the `[attributes]` table of an instance TOML into a flat string map.
+fn read_toml_attributes(toml_path: &std::path::Path) -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    if let Ok(txt) = std::fs::read_to_string(toml_path) {
+        if let Ok(val) = txt.parse::<toml::Value>() {
+            if let Some(tbl) = val.get("attributes").and_then(|a| a.as_table()) {
+                for (k, v) in tbl {
+                    let s = match v {
+                        toml::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    m.insert(k.clone(), s);
+                }
+            }
+        }
+    }
+    m
+}
+
+/// Read the first `.csv` beside a Dataset's `_instance.toml` into a Frame.
+#[cfg(feature = "data")]
+fn read_dataset_frame(dir: &std::path::Path) -> Option<eustress_data::Frame> {
+    let csv = std::fs::read_dir(dir).ok()?
+        .filter_map(|e| e.ok()).map(|e| e.path())
+        .find(|p| p.extension().and_then(|x| x.to_str())
+            .map(|x| x.eq_ignore_ascii_case("csv")).unwrap_or(false))?;
+    std::fs::File::open(&csv).ok()
+        .and_then(|f| eustress_data::import::frame_from_csv(f).ok())
 }
 
 /// Converts a property name + string value into a typed PropertyValue.

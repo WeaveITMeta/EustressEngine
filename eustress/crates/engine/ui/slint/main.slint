@@ -36,7 +36,7 @@ import { TimelinePanel, TimelineTrackData, TimelineMarkerData, TimelineFilterChi
 import { TimelineFilterModal, TimelineTagRow } from "timeline_filter_modal.slint";
 // Data Platform surfaces (Chart viewer tab + Data Grid bottom-panel tab).
 import { DataChartView } from "data_chart.slint";
-import { DataGrid, GridRow } from "data_grid.slint";
+import { DataGrid, DataGridRow } from "data_grid.slint";
 // New components for complete egui parity
 import { TerrainEditor } from "terrain_editor.slint";
 import { SettingsDialog } from "settings.slint";
@@ -640,15 +640,13 @@ export component StudioWindow inherits Window {
     // ──────────────────────────────────────────────────────────────────────
     in-out property <string> bottom-panel-mode: "output"; // "output" | "timeline" | "datagrid"
     callback set-bottom-panel(string);
-    // Data Platform — rows for the Data Grid bottom-panel tab (Rust feeds
-    // these; a sample default keeps the panel legible in slint-viewer).
-    in-out property <[GridRow]> datagrid-rows: [
-        { c0: "2021", c1: "0.85", c2: "0.66", c3: "+0.19" },
-        { c0: "2022", c1: "0.89", c2: "0.66", c3: "+0.23" },
-        { c0: "2023", c1: "1.17", c2: "0.67", c3: "+0.50" },
-        { c0: "2024", c1: "1.28", c2: "0.68", c3: "+0.60", accent: true },
-        { c0: "2025", c1: "1.19", c2: "0.69", c3: "+0.51" },
-    ];
+    // Data Platform — the Data Grid bottom-panel tab. Columns + rows are fed
+    // generically from Rust (`sync_data_grid_to_selection`) off the selected
+    // Dataset's CSV; empty by default so the grid shows its "select a Dataset"
+    // hint until a Dataset is selected.
+    in-out property <[string]> datagrid-columns: [];
+    in-out property <[DataGridRow]> datagrid-rows: [];
+    in-out property <string> datagrid-name: "";
 
     // Timeline data reflected from Rust each frame.
     in-out property <[TimelineTrackData]>      timeline-tracks: [];
@@ -3079,7 +3077,9 @@ export component StudioWindow inherits Window {
                 height: parent.height;
                 panel-mode <=> root.bottom-panel-mode;
                 set-panel-mode(mode) => { root.set-bottom-panel(mode); }
+                columns: root.datagrid-columns;
                 rows: root.datagrid-rows;
+                dataset-name: root.datagrid-name;
             }
         }
 

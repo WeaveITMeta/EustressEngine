@@ -198,6 +198,10 @@ impl TimelineFilter {
 pub enum BottomPanelMode {
     Output,
     Timeline,
+    /// Data Platform spreadsheet grid (shares the bottom-panel slot with
+    /// Output / Timeline). Without this variant the Slint "datagrid" mode
+    /// could not round-trip through Rust and flashed back to Output.
+    DataGrid,
 }
 
 impl Default for BottomPanelMode {

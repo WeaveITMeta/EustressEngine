@@ -282,6 +282,9 @@ pub enum ClassName {
     Series,
     Column,
     Run,
+    /// Data Platform: a live data source (REST / stream-topic / SQL / cloud).
+    /// Non-visual, Folder-like; connection config lives in its attributes.
+    Connector,
     BillboardGui,
     SurfaceGui,
     ScreenGui,
@@ -577,6 +580,7 @@ impl ClassName {
             ClassName::Series => "Series",
             ClassName::Column => "Column",
             ClassName::Run => "Run",
+            ClassName::Connector => "Connector",
             ClassName::BillboardGui => "BillboardGui",
             ClassName::SurfaceGui => "SurfaceGui",
             ClassName::ScreenGui => "ScreenGui",
@@ -855,6 +859,7 @@ impl ClassName {
             "Series" => Ok(ClassName::Series),
             "Column" => Ok(ClassName::Column),
             "Run" => Ok(ClassName::Run),
+            "Connector" => Ok(ClassName::Connector),
             "BillboardGui" => Ok(ClassName::BillboardGui),
             "SurfaceGui" => Ok(ClassName::SurfaceGui),
             "ScreenGui" => Ok(ClassName::ScreenGui),

@@ -48,6 +48,7 @@ fn sync_bottom_panel_mode(
     let target = match *mode {
         BottomPanelMode::Output   => "output",
         BottomPanelMode::Timeline => "timeline",
+        BottomPanelMode::DataGrid => "datagrid",
     };
     let current: String = ui.get_bottom_panel_mode().into();
     if current != target {

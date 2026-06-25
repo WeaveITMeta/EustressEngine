@@ -671,6 +671,29 @@ pub fn scan_space_directory(
         });
     }
 
+    // Synthesize header-only entries for canonical services the source does not
+    // list yet. A Space migrated to the DB *before* a service existed (e.g.
+    // DataService, added with the Data Platform) has no record for it, and
+    // `ensure_space_integrity` deliberately skips migrated worlds — so without
+    // this the service would never appear in the Explorer. Header-only: the
+    // backing dir / DB record is created lazily when the user adds the first
+    // child. Disk-based Spaces already list every service via discover_services,
+    // so this only fires for the genuinely-missing case.
+    for &canonical in KNOWN_SERVICE_NAMES {
+        if entries.iter().any(|e| e.name == canonical) {
+            continue;
+        }
+        entries.push(FileMetadata {
+            path: space_root.join(canonical),
+            file_type: FileType::Directory,
+            service: canonical.to_string(),
+            name: canonical.to_string(),
+            size: 0,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            children: Vec::new(),
+        });
+    }
+
     entries
 }
 
@@ -679,7 +702,7 @@ pub fn scan_space_directory(
 /// Well-known service directory names — auto-discovered even without _service.toml marker.
 const KNOWN_SERVICE_NAMES: &[&str] = &[
     "Workspace", "Lighting", "StarterGui", "SoulService", "MaterialService",
-    "AdornmentService",
+    "AdornmentService", "DataService",
     "Players", "StarterPack", "StarterPlayer", "ReplicatedStorage",
     "ServerStorage", "ServerScriptService", "SoundService", "Teams", "Chat",
 ];

@@ -45,10 +45,15 @@ pub enum CharacterModel {
 impl CharacterModel {
     /// Get the asset path for this character model
     pub fn asset_path(&self) -> &'static str {
+        // Character GLBs live in the COMMON crate's assets, which the engine
+        // registers as the `bundled` asset source (see engine main.rs). The
+        // engine's *default* root (`engine/assets`) does NOT contain them, so
+        // bare `characters/...` paths 404. Resolve via the `bundled://` source —
+        // the same convention material_loader.rs uses for textures/fonts.
         match self {
-            CharacterModel::XBot => "characters/x_bot.glb",
-            CharacterModel::YBot => "characters/y_bot.glb",
-            CharacterModel::Custom => "characters/custom.glb",
+            CharacterModel::XBot => "bundled://characters/x_bot.glb",
+            CharacterModel::YBot => "bundled://characters/y_bot.glb",
+            CharacterModel::Custom => "bundled://characters/custom.glb",
         }
     }
     
@@ -94,13 +99,15 @@ impl CharacterAnimationPaths {
             CharacterGender::Female => "female",
         };
         
+        // Animations also live in the COMMON crate's assets (`bundled` source);
+        // see CharacterModel::asset_path. The engine default `assets` root lacks them.
         Self {
-            idle: format!("characters/animations/{}_idle.glb#Animation0", prefix),
-            walk: format!("characters/animations/{}_walking.glb#Animation0", prefix),
-            run: format!("characters/animations/{}_running.glb#Animation0", prefix),
+            idle: format!("bundled://characters/animations/{}_idle.glb#Animation0", prefix),
+            walk: format!("bundled://characters/animations/{}_walking.glb#Animation0", prefix),
+            run: format!("bundled://characters/animations/{}_running.glb#Animation0", prefix),
             // Use running animation for sprint (no separate sprint animation yet)
-            sprint: format!("characters/animations/{}_running.glb#Animation0", prefix),
-            jump: format!("characters/animations/{}_jump.glb#Animation0", prefix),
+            sprint: format!("bundled://characters/animations/{}_running.glb#Animation0", prefix),
+            jump: format!("bundled://characters/animations/{}_jump.glb#Animation0", prefix),
         }
     }
 }
@@ -268,7 +275,19 @@ pub struct NeedsAnimationSetup;
 /// System to mark newly spawned characters for animation setup
 pub fn mark_new_characters_for_animation(
     mut commands: Commands,
-    new_characters: Query<Entity, (With<SkinnedCharacter>, Without<NeedsAnimationSetup>, Without<super::animation_plugin::CharacterAnimationLink>)>,
+    // Excludes characters already mid-setup (NeedsAnimationSetup) OR awaiting
+    // clip load (PendingAnimationGraph) OR fully linked (CharacterAnimationLink).
+    // Without the PendingAnimationGraph guard this re-fired every frame: `load`
+    // removes NeedsAnimationSetup + adds PendingAnimationGraph, but if the clips
+    // never finish loading (e.g. missing GLBs) the graph is never built, so the
+    // entity had neither NeedsAnimationSetup nor CharacterAnimationLink and got
+    // re-marked + re-loaded forever.
+    new_characters: Query<Entity, (
+        With<SkinnedCharacter>,
+        Without<NeedsAnimationSetup>,
+        Without<super::animation_plugin::PendingAnimationGraph>,
+        Without<super::animation_plugin::CharacterAnimationLink>,
+    )>,
     children: Query<&Children>,
 ) {
     for entity in new_characters.iter() {
