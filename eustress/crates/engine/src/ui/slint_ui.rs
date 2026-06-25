@@ -1412,6 +1412,8 @@ impl Plugin for SlintUiPlugin {
             // CSV (selection-driven; re-reads only when the Dataset changes).
             .add_systems(Update, sync_data_grid_to_selection.after(SlintSystems::Drain))
             .init_resource::<DataGridFedFor>()
+            .add_systems(Update, sync_data_chart_to_slint.after(SlintSystems::Drain))
+            .init_resource::<DataChartFedFor>()
             // Center tab sync: drain_slint_actions → CenterTabManager → StudioState → Slint
             .add_systems(Update, sync_tab_manager_to_studio_state
                 .after(SlintSystems::Drain)
@@ -12452,6 +12454,195 @@ fn data_cell_string(data: &eustress_data::ColumnData, r: usize) -> String {
     }
 }
 
+/// Tracks the last Dataset fed to the chart, so the CSV is re-read only when the
+/// selected Dataset changes (mirrors `DataGridFedFor`).
+#[derive(Resource, Default)]
+struct DataChartFedFor(Option<Entity>);
+
+/// Read a numeric cell as f64 (floats direct, ints widened; else None).
+#[cfg(feature = "data")]
+fn chart_cell_f64(data: &eustress_data::ColumnData, r: usize) -> Option<f64> {
+    use eustress_data::ColumnData;
+    match data {
+        ColumnData::F64(v) => v.get(r).and_then(|o| *o),
+        ColumnData::I64(v) => v.get(r).and_then(|o| *o).map(|x| x as f64),
+        _ => None,
+    }
+}
+
+/// Ordinary least-squares over the plotted points → (slope, intercept, r²).
+#[cfg(feature = "data")]
+fn chart_linfit(pts: &[(f64, f64)]) -> Option<(f64, f64, f64)> {
+    let n = pts.len() as f64;
+    if n < 2.0 { return None; }
+    let (mut sx, mut sy, mut sxx, mut sxy, mut syy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for &(x, y) in pts {
+        sx += x; sy += y; sxx += x * x; sxy += x * y; syy += y * y;
+    }
+    let denom = n * sxx - sx * sx;
+    if denom.abs() < 1e-12 { return None; }
+    let slope = (n * sxy - sx * sy) / denom;
+    let intercept = (sy - slope * sx) / n;
+    let rd = ((n * sxx - sx * sx) * (n * syy - sy * sy)).sqrt();
+    let r2 = if rd.abs() < 1e-12 { 0.0 } else { let r = (n * sxy - sx * sy) / rd; r * r };
+    Some((slope, intercept, r2))
+}
+
+/// Computed chart payload for the Slint view (coords in a 1000x600 viewbox).
+#[cfg(feature = "data")]
+struct ChartData {
+    x_label: String,
+    y_label: String,
+    series_path: String,
+    fit_path: String,
+    fit_label: String,
+    x_ticks: Vec<slint::SharedString>,
+    y_ticks: Vec<slint::SharedString>,
+}
+
+/// Build the chart payload from any Frame: x = first numeric column (or the row
+/// index when there is only one numeric column), y = last numeric column.
+/// Domain-agnostic — no climate/unit assumptions.
+#[cfg(feature = "data")]
+fn compute_chart_data(frame: &eustress_data::Frame) -> Option<ChartData> {
+    use eustress_data::ColumnDtype;
+    let cols = frame.columns();
+    let numeric: Vec<usize> = cols.iter().enumerate()
+        .filter(|(_, (_, d))| matches!(d.dtype(), ColumnDtype::F64 | ColumnDtype::I64))
+        .map(|(i, _)| i)
+        .collect();
+    if numeric.is_empty() { return None; }
+    let yi = *numeric.last().unwrap();
+    let use_row_index = numeric.len() < 2;
+    let xi = if use_row_index { yi } else { numeric[0] };
+
+    let n = frame.n_rows();
+    let mut pts: Vec<(f64, f64)> = Vec::with_capacity(n);
+    for r in 0..n {
+        let y = chart_cell_f64(&cols[yi].1, r);
+        let x = if use_row_index { Some(r as f64) } else { chart_cell_f64(&cols[xi].1, r) };
+        if let (Some(x), Some(y)) = (x, y) { pts.push((x, y)); }
+    }
+    if pts.len() < 2 { return None; }
+
+    let xmin = pts.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+    let xmax = pts.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
+    let mut ymin = pts.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+    let mut ymax = pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+    let pad = ((ymax - ymin) * 0.05).max(1e-9);
+    ymin -= pad; ymax += pad;
+    let xr = (xmax - xmin).max(1e-9);
+    let yr = (ymax - ymin).max(1e-9);
+    let (w, h) = (1000.0_f64, 600.0_f64);
+    let map = |x: f64, y: f64| ((x - xmin) / xr * w, (1.0 - (y - ymin) / yr) * h);
+
+    let mut series_path = String::new();
+    for (k, &(x, y)) in pts.iter().enumerate() {
+        let (px, py) = map(x, y);
+        series_path.push_str(&format!("{} {:.2} {:.2} ", if k == 0 { "M" } else { "L" }, px, py));
+    }
+
+    let (fit_path, fit_label) = match chart_linfit(&pts) {
+        Some((slope, intercept, r2)) => {
+            let (x0, y0) = map(xmin, slope * xmin + intercept);
+            let (x1, y1) = map(xmax, slope * xmax + intercept);
+            let sign = if intercept >= 0.0 { "+" } else { "-" };
+            (
+                format!("M {:.2} {:.2} L {:.2} {:.2}", x0, y0, x1, y1),
+                format!("y = {:.4}x {} {:.3} · R²={:.2}", slope, sign, intercept.abs(), r2),
+            )
+        }
+        None => (String::new(), String::new()),
+    };
+
+    let fmt = |v: f64| -> slint::SharedString {
+        if v.abs() >= 100.0 || v.fract().abs() < 1e-9 {
+            format!("{:.0}", v).into()
+        } else {
+            format!("{:.2}", v).into()
+        }
+    };
+    let x_ticks: Vec<slint::SharedString> = (0..5).map(|i| fmt(xmin + xr * i as f64 / 4.0)).collect();
+    let y_ticks: Vec<slint::SharedString> = (0..5).map(|i| fmt(ymax - yr * i as f64 / 4.0)).collect();
+
+    let x_label = if use_row_index { "row".to_string() } else { cols[xi].0.name.clone() };
+    let y_label = {
+        let u = cols[yi].0.unit.clone().map(|u| format!(" ({u})")).unwrap_or_default();
+        format!("{}{}", cols[yi].0.name, u)
+    };
+
+    Some(ChartData { x_label, y_label, series_path, fit_path, fit_label, x_ticks, y_ticks })
+}
+
+/// Feed the Chart center tab from the selected Dataset's CSV — series polyline,
+/// linear fit, axis ticks, labels. Selection-driven like the Data Grid; stays on
+/// the last Dataset while other entities are clicked.
+#[cfg(feature = "data")]
+fn sync_data_chart_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    explorer: Option<Res<UnifiedExplorerState>>,
+    loaded: Query<&crate::space::LoadedFromFile>,
+    instances: Query<&eustress_common::classes::Instance>,
+    mut fed: ResMut<DataChartFedFor>,
+) {
+    use eustress_common::classes::ClassName;
+    let Some(ctx) = slint_context else { return };
+    let Some(explorer) = explorer else { return };
+
+    let sel = match &explorer.selected {
+        SelectedItem::Entity(e) => Some(*e),
+        _ => None,
+    };
+    let dataset = sel.filter(|&e| {
+        instances.get(e).map(|i| i.class_name == ClassName::Dataset).unwrap_or(false)
+    });
+    let Some(entity) = dataset else { return };
+    if fed.0 == Some(entity) {
+        return;
+    }
+    fed.0 = Some(entity);
+
+    let frame = loaded.get(entity).ok().and_then(|lff| {
+        let path = lff.path.clone();
+        let dir = if path.is_dir() { path } else { path.parent()?.to_path_buf() };
+        let csv = std::fs::read_dir(&dir).ok()?
+            .filter_map(|x| x.ok())
+            .map(|x| x.path())
+            .find(|p| {
+                p.extension().and_then(|x| x.to_str())
+                    .map(|x| x.eq_ignore_ascii_case("csv")).unwrap_or(false)
+            })?;
+        std::fs::File::open(&csv).ok()
+            .and_then(|f| eustress_data::import::frame_from_csv(f).ok())
+    });
+
+    let name = instances.get(entity).map(|i| i.name.clone()).unwrap_or_default();
+    let window = &ctx.window;
+
+    match frame.as_ref().and_then(compute_chart_data) {
+        Some(cd) => {
+            window.set_chart_title(name.into());
+            window.set_chart_x_label(cd.x_label.into());
+            window.set_chart_y_label(cd.y_label.into());
+            window.set_chart_series_path(cd.series_path.into());
+            window.set_chart_fit_path(cd.fit_path.into());
+            window.set_chart_fit_label(cd.fit_label.into());
+            window.set_chart_x_ticks(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(cd.x_ticks))));
+            window.set_chart_y_ticks(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(cd.y_ticks))));
+        }
+        None => {
+            window.set_chart_title(name.into());
+            window.set_chart_series_path("".into());
+            window.set_chart_fit_path("".into());
+            window.set_chart_fit_label("".into());
+        }
+    }
+}
+
+/// No-op stand-in when the `data` feature is off (keeps registration uncoditional).
+#[cfg(not(feature = "data"))]
+fn sync_data_chart_to_slint() {}
+
 /// Write a new Connector instance folder under the Space's `DataService` and
 /// return its (unique) folder name. Mirrors the Dataset write in the
 /// `data:import` handler — the established data-platform create pattern (inline
@@ -13252,6 +13443,10 @@ fn sync_unified_explorer_to_slint(
                     .unwrap_or(false)
             {
                 load_service_icon("wrench")
+            } else if instance.name.eq_ignore_ascii_case("DataService") {
+                // DataService synthesizes as a plain Folder (no ServiceComponent),
+                // so give it the data-platform atom icon by name.
+                load_service_icon("dataservice")
             } else {
                 load_class_icon(&instance.class_name)
             };
@@ -17432,6 +17627,12 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
         ClassName::Material => "materialservice",
         ClassName::Image => "imagelabel",
         ClassName::WorkshopConversation => "classes/WorkshopConversation",
+        // Data Platform classes
+        ClassName::Dataset => "dataset",
+        ClassName::Series => "series",
+        ClassName::Run => "run",
+        ClassName::Column => "column",
+        ClassName::Connector => "connector",
         // Workshop folder uses wrench icon (not a ClassName but handled via name match below)
         _ => "instance",
     }

@@ -726,7 +726,17 @@ export component StudioWindow inherits Window {
     
     // Active tab type helper (set by Rust sync system)
     in-out property <string> active-tab-type: "scene"; // "scene", "script", "web"
-    
+
+    // Data Platform chart — set by sync_data_chart_to_slint for the selected Dataset.
+    in-out property <string> chart-title;
+    in-out property <string> chart-x-label;
+    in-out property <string> chart-y-label;
+    in-out property <string> chart-series-path;
+    in-out property <string> chart-fit-path;
+    in-out property <string> chart-fit-label;
+    in-out property <[string]> chart-x-ticks;
+    in-out property <[string]> chart-y-ticks;
+
     // Web browser state for active web tab
     in-out property <string> web-url-bar: "";
     in-out property <image> web-content-image;  // Offscreen-rendered web page
@@ -2521,6 +2531,14 @@ export component StudioWindow inherits Window {
                     if root.active-tab-type == "chart": DataChartView {
                         width: parent.width;
                         height: parent.height;
+                        title: root.chart-title;
+                        x-label: root.chart-x-label;
+                        y-label: root.chart-y-label;
+                        series-path: root.chart-series-path;
+                        fit-path: root.chart-fit-path;
+                        fit-label: root.chart-fit-label;
+                        x-ticks: root.chart-x-ticks;
+                        y-ticks: root.chart-y-ticks;
                     }
                 }
                 // ── Box Selection Overlay ──────────────────────────

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- Column: one field highlighted within a table -->
+  <rect x="2.5" y="2.5" width="11" height="11" rx="1.5" fill="none" stroke="#38bdf8" stroke-width="0.9" opacity="0.55"/>
+  <rect x="9.1" y="2.9" width="4" height="10.2" rx="0.6" fill="#38bdf8" opacity="0.85"/>
+  <path d="M2.5 6.1 H13.5 M2.5 9.7 H13.5" stroke="#38bdf8" stroke-width="0.6" opacity="0.45"/>
+</svg>
