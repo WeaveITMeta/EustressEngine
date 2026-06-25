@@ -745,10 +745,10 @@ When the player's health reaches zero, show the game over screen."}</code></pre>
                                 <span class="nav-title">"Earning"</span>
                             </div>
                         </a>
-                        <a href="/learn" class="nav-next">
+                        <a href="/docs/universes" class="nav-next">
                             <div>
                                 <span class="nav-label">"Next"</span>
-                                <span class="nav-title">"Back to Learn"</span>
+                                <span class="nav-title">"Universes"</span>
                             </div>
                             <img src="/assets/icons/arrow-right.svg" alt="Next" />
                         </a>

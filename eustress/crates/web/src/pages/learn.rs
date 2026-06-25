@@ -332,6 +332,11 @@ pub fn LearnPage() -> impl IntoView {
                         <h3>"Philosophy"</h3>
                         <p>"File-system-first, IDE agnostic, no vendor lock-in"</p>
                     </a>
+                    <a href="/docs/universes" class="doc-card featured">
+                        <img src="/assets/icons/grid.svg" alt="Universes" class="doc-icon" />
+                        <h3>"Universes"</h3>
+                        <p>"The staging environment for reality — forkable worlds you branch, rehearse, and commit"</p>
+                    </a>
                     <a href="/docs/scripting" class="doc-card">
                         <img src="/assets/icons/code.svg" alt="Scripting" class="doc-icon" />
                         <h3>"Scripting"</h3>

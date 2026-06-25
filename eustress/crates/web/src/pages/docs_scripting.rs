@@ -1107,11 +1107,11 @@ use eustress_common::prelude::*;"}</code></pre>
 
                     // Navigation footer
                     <nav class="docs-nav-footer">
-                        <a href="/docs/getting-started" class="nav-prev">
+                        <a href="/docs/universes" class="nav-prev">
                             <img src="/assets/icons/arrow-left.svg" alt="Previous" />
                             <div>
                                 <span class="nav-label">"Previous"</span>
-                                <span class="nav-title">"Getting Started"</span>
+                                <span class="nav-title">"Universes"</span>
                             </div>
                         </a>
                         <a href="/docs/networking" class="nav-next">
