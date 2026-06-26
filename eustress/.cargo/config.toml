@@ -28,6 +28,9 @@ studio-dev    = "build -p eustress-engine"
 run-core       = "run --release -p eustress-engine --bin eustress-engine --no-default-features --features core"
 run-studio     = "run -p eustress-engine --bin eustress-engine"
 run-studio-rel = "run --release -p eustress-engine --bin eustress-engine"
+# Run the generative player / client (the runtime that plays published worlds).
+run-client     = "run -p eustress-client --bin eustress-client"
+run-client-rel = "run --release -p eustress-client --bin eustress-client"
 
 # Use rust-lld (ships with rustup) on Windows MSVC — typically 30-50%
 # faster link time than the default link.exe. rust-lld is the LLVM linker
