@@ -36,6 +36,7 @@ Eustress is **not (only) a game engine.** It's a general-purpose **simulation an
 - **AI-native.** A built-in **Workshop** AI assistant plus a **Model Context Protocol (MCP)** bridge let AI agents inspect, drive, and build inside a _live_ world, even from their own independent off-screen camera, so the AI can _see_ what it is making and iterate alongside you.
 - **Kernel laws: the gold-collar unlock.** Engineers and scientists can rewrite how the engine processes physics, chemistry, and more _at the kernel level_ to validate their **own** simulations (e.g. the bundled V-Cell solid-state-battery model). Lose this and it is just a game engine; this is _the_ unlock.
 - **Photoreal & native.** One Rust window: a native **Bevy** 3D viewport with a declarative **Slint** UI overlay, and no web stack, no IPC, no overhead.
+- **Data-native.** The same studio that builds a world also ingests, models, and charts data: `Dataset`s are first-class instances with live stats, curve fits, and interactive charts, so a digital twin's telemetry lives in the same scene as the parts it describes.
 
 ## Principles (the non-negotiables)
 
@@ -63,6 +64,7 @@ Eustress is a Rust monorepo. The most important crates (`eustress/crates/`):
 | `client` · `player-mobile` | Generative player / renderer |
 | `common` | Shared scene format, instance classes, services, units, and realism / kernel laws |
 | `worlddb` · `eustress-fjall` | Binary simulation store (the Fjall LSM-tree `WorldDb`) |
+| `data` | Data Platform analytics leaf: columnar frames, stats, curve fits, and clustering (Polars/Arrow), bridged into the world store |
 | `mcp` · `mcp-server` | Model Context Protocol, letting AI inspect and drive the live engine |
 | `workshop` | Built-in AI Workshop assistant |
 | `cad` | CAD / B-rep kernel (via `truck`) |
@@ -103,7 +105,20 @@ cargo build --workspace --release      # binaries → eustress/target/release/
 - **Move / Rotate / Scale** gizmos and smart build tools
 - **Live AI co-creation**: the Workshop assistant and MCP bridge let AI build with you, with its own independent camera to view its work
 - **Kernel-law realism** sections (thermodynamic, electrochemical, …) attached per entity
+- **Data Platform**: `Dataset` instances with a live Schema/Stats Properties inspector, interactive charts, and a Data Grid (see [Data Platform](#data-platform))
 - Console / output panel, undo history, and a timeline
+
+## Data Platform
+
+The same studio that builds a 3D world is also a **data workbench**. Eustress treats data as a first-class citizen, so a digital twin's telemetry, an experiment's measurements, or a market's history live in the same scene as the parts they describe, on the same store, under the same tools.
+
+- **Datasets are instances.** A `Dataset` sits in the Explorer alongside `Part` and `Light`, under a `DataService`, nesting `Series` (columns / timeseries) and `Run` (scenarios) the way a Model nests parts.
+- **One polymorphic inspector.** Select a Dataset and the same Properties panel that shows a Part's Appearance / Physics shows the data's **Schema**, **Source & provenance**, **live Stats** (n, mean, min/max, σ), and **Storage**, computed on the fly from the backing data.
+- **Interactive charts & grids.** A Dataset opens as a chart tab: an auto-scaling plot with point hover, a least-squares fit and its equation, Chart / Grid / Split views, and adjustable axes, plus a spreadsheet-style Data Grid.
+- **Analysis built in.** The `eustress-data` crate (Polars / Arrow-backed) supplies the stats, curve fits, and clustering (k-means, kNN) that the **Data** ribbon runs on the selected Dataset.
+- **Connect & persist.** A `Connector` configures an external source (CSV, REST, stream); datasets, parts, and simulation state all persist in the same copy-on-write **WorldDb**, so you can fork a world and rehearse a scenario against real data.
+
+It is **domain-agnostic**: climate modeling is the first tenant, but nothing about a factory line, a portfolio, or a genome is baked into the engine.
 
 ## Project structure
 
@@ -116,6 +131,7 @@ eustress/                  # Cargo workspace
 │   ├── common/            # Scene format, classes, kernel laws
 │   ├── worlddb/           # Binary WorldDb trait
 │   ├── eustress-fjall/    # Fjall LSM-tree backend
+│   ├── data/              # Data Platform: frames, stats, fits, clustering
 │   ├── mcp-server/        # MCP server (AI tooling)
 │   ├── workshop/          # AI Workshop assistant
 │   ├── cad/  mesh-edit/   # CAD + mesh kernels
