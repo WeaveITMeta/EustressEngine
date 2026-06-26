@@ -12457,7 +12457,7 @@ fn data_cell_string(data: &eustress_data::ColumnData, r: usize) -> String {
 /// Tracks the last Dataset fed to the chart, so the CSV is re-read only when the
 /// selected Dataset changes (mirrors `DataGridFedFor`).
 #[derive(Resource, Default)]
-struct DataChartFedFor(Option<Entity>);
+struct DataChartFedFor(Option<(Entity, String)>);
 
 /// Read a numeric cell as f64 (floats direct, ints widened; else None).
 #[cfg(feature = "data")]
@@ -12505,7 +12505,7 @@ struct ChartData {
 /// index when there is only one numeric column), y = last numeric column.
 /// Domain-agnostic — no climate/unit assumptions.
 #[cfg(feature = "data")]
-fn compute_chart_data(frame: &eustress_data::Frame) -> Option<ChartData> {
+fn compute_chart_data(frame: &eustress_data::Frame, ov: [Option<f64>; 4]) -> Option<ChartData> {
     use eustress_data::ColumnDtype;
     let cols = frame.columns();
     let numeric: Vec<usize> = cols.iter().enumerate()
@@ -12532,9 +12532,14 @@ fn compute_chart_data(frame: &eustress_data::Frame) -> Option<ChartData> {
     let mut ymax = pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
     let pad = ((ymax - ymin) * 0.05).max(1e-9);
     ymin -= pad; ymax += pad;
+    // Manual axis overrides (an empty input leaves the auto-range in place).
+    let xmin = ov[0].unwrap_or(xmin);
+    let xmax = ov[1].unwrap_or(xmax);
+    let ymin = ov[2].unwrap_or(ymin);
+    let ymax = ov[3].unwrap_or(ymax);
     let xr = (xmax - xmin).max(1e-9);
     let yr = (ymax - ymin).max(1e-9);
-    let (w, h) = (1000.0_f64, 600.0_f64);
+    let (w, h) = (1000.0_f64, 500.0_f64);
     let map = |x: f64, y: f64| ((x - xmin) / xr * w, (1.0 - (y - ymin) / yr) * h);
 
     let fmt = |v: f64| -> slint::SharedString {
@@ -12602,10 +12607,24 @@ fn sync_data_chart_to_slint(
         instances.get(e).map(|i| i.class_name == ClassName::Dataset).unwrap_or(false)
     });
     let Some(entity) = dataset else { return };
-    if fed.0 == Some(entity) {
+    let window = &ctx.window;
+    // Manual axis overrides — re-read each frame; recompute when they change.
+    let parse_ov = |s: slint::SharedString| -> Option<f64> {
+        let t = s.to_string();
+        let t = t.trim();
+        if t.is_empty() { None } else { t.parse::<f64>().ok() }
+    };
+    let ov = [
+        parse_ov(window.get_chart_xmin_in()), parse_ov(window.get_chart_xmax_in()),
+        parse_ov(window.get_chart_ymin_in()), parse_ov(window.get_chart_ymax_in()),
+    ];
+    let ov_sig = format!("{}|{}|{}|{}",
+        window.get_chart_xmin_in(), window.get_chart_xmax_in(),
+        window.get_chart_ymin_in(), window.get_chart_ymax_in());
+    if fed.0.as_ref().map(|(e, s)| *e == entity && s == &ov_sig).unwrap_or(false) {
         return;
     }
-    fed.0 = Some(entity);
+    fed.0 = Some((entity, ov_sig));
 
     let frame = loaded.get(entity).ok().and_then(|lff| {
         let path = lff.path.clone();
@@ -12622,9 +12641,8 @@ fn sync_data_chart_to_slint(
     });
 
     let name = instances.get(entity).map(|i| i.name.clone()).unwrap_or_default();
-    let window = &ctx.window;
 
-    match frame.as_ref().and_then(compute_chart_data) {
+    match frame.as_ref().and_then(|f| compute_chart_data(f, ov)) {
         Some(cd) => {
             window.set_chart_title(name.into());
             window.set_chart_x_label(cd.x_label.into());
@@ -14880,6 +14898,8 @@ struct PropertyExtraQueries<'w, 's> {
     /// `InstanceFile` — data-subsystem Datasets resolve their backing CSV this
     /// way (same path the Data→Stats handler uses).
     loaded_from_file: Query<'w, 's, &'static crate::space::LoadedFromFile>,
+    /// Parent link — a child Series/Column resolves its parent Dataset's CSV here.
+    child_of: Query<'w, 's, &'static bevy::prelude::ChildOf>,
 }
 
 /// Syncs the selected entity's properties to the Slint properties panel.
@@ -15040,15 +15060,30 @@ fn sync_properties_to_slint(
     // generic Part/Instance sections. Build Schema · Source · Stats (live) ·
     // Storage · Metadata from the backing CSV + [attributes], emit, return.
     // (Series/Model nesting is a follow-up — needs child instances to select.)
-    if instance.class_name == eustress_common::classes::ClassName::Dataset {
-        // instance-folder Datasets carry InstanceFile; data-subsystem Datasets
+    {
+        use eustress_common::classes::ClassName;
+        let is_data_class = matches!(instance.class_name,
+            ClassName::Dataset | ClassName::Series | ClassName::Column | ClassName::Run);
+        // instance-folder data instances carry InstanceFile; data-subsystem ones
         // carry LoadedFromFile (→ the CSV) instead. Resolve whichever exists.
-        let src_path = instance_files.get(selected_entity).ok().map(|f| f.toml_path.clone())
-            .or_else(|| extra_q.loaded_from_file.get(selected_entity).ok().map(|lff| lff.path.clone()));
+        let src_path = if is_data_class {
+            instance_files.get(selected_entity).ok().map(|f| f.toml_path.clone())
+                .or_else(|| extra_q.loaded_from_file.get(selected_entity).ok().map(|lff| lff.path.clone()))
+        } else { None };
         if let Some(src_path) = src_path {
-            let flat = build_dataset_properties(
-                &src_path, instance, &studio_state.collapsed_sections,
-            );
+            let flat = match instance.class_name {
+                ClassName::Dataset =>
+                    build_dataset_properties(&src_path, instance, &studio_state.collapsed_sections),
+                ClassName::Run =>
+                    build_run_properties(&src_path, instance, &studio_state.collapsed_sections),
+                _ => {
+                    // Series / Column — live stats come from the PARENT Dataset's CSV.
+                    let parent_csv = extra_q.child_of.get(selected_entity).ok()
+                        .and_then(|c| extra_q.loaded_from_file.get(c.parent()).ok())
+                        .map(|lff| lff.path.clone());
+                    build_series_properties(&src_path, parent_csv.as_deref(), instance, &studio_state.collapsed_sections)
+                }
+            };
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             for p in &flat {
@@ -16063,6 +16098,125 @@ fn build_dataset_properties(
     out.push(rowf("Metadata", "ClassName", "Dataset"));
     out.push(rowf("Metadata", "Name", &instance.name));
 
+    out
+}
+
+/// Section header row for a data-class Properties panel.
+fn data_hdr(cat: &str, collapsed: &std::collections::HashSet<String>) -> PropertyData {
+    PropertyData {
+        name: slint::SharedString::default(), value: slint::SharedString::default(),
+        property_type: slint::SharedString::default(), category: cat.into(),
+        editable: false, options: slint::ModelRc::default(), is_header: true,
+        section_collapsed: collapsed.contains(cat),
+        x_value: slint::SharedString::default(), y_value: slint::SharedString::default(),
+        z_value: slint::SharedString::default(), x_scale: slint::SharedString::default(),
+        x_offset: slint::SharedString::default(), y_scale: slint::SharedString::default(),
+        y_offset: slint::SharedString::default(), color_value: slint::Color::from_rgb_u8(0x80, 0x80, 0x80),
+        description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
+        is_attribute: false, attribute_type: slint::SharedString::default(),
+    }
+}
+/// Value row for a data-class Properties panel.
+fn data_row(cat: &str, name: &str, value: &str, collapsed: &std::collections::HashSet<String>) -> PropertyData {
+    PropertyData {
+        name: name.into(), value: value.into(), property_type: "string".into(),
+        category: cat.into(), editable: false, options: slint::ModelRc::default(), is_header: false,
+        section_collapsed: collapsed.contains(cat),
+        x_value: slint::SharedString::default(), y_value: slint::SharedString::default(),
+        z_value: slint::SharedString::default(), x_scale: slint::SharedString::default(),
+        x_offset: slint::SharedString::default(), y_scale: slint::SharedString::default(),
+        y_offset: slint::SharedString::default(), color_value: slint::Color::from_rgb_u8(0x80, 0x80, 0x80),
+        description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
+        is_attribute: false, attribute_type: slint::SharedString::default(),
+    }
+}
+
+/// Properties for a Series/Column: schema from its own attributes + live stats
+/// of its column read from the PARENT Dataset's CSV (resolved via ChildOf).
+fn build_series_properties(
+    path: &std::path::Path,
+    parent_csv: Option<&std::path::Path>,
+    instance: &eustress_common::classes::Instance,
+    collapsed: &std::collections::HashSet<String>,
+) -> Vec<PropertyData> {
+    let toml_path = if path.is_dir() {
+        path.join("_instance.toml")
+    } else if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+        path.to_path_buf()
+    } else {
+        path.parent().map(|p| p.join("_instance.toml")).unwrap_or_else(|| path.to_path_buf())
+    };
+    let attrs = read_toml_attributes(&toml_path);
+    let class = format!("{:?}", instance.class_name);
+    let mut out: Vec<PropertyData> = Vec::new();
+
+    // Schema — from the Series' own attributes.
+    out.push(data_hdr("Schema", collapsed));
+    if let Some(v) = attrs.get("column")    { out.push(data_row("Schema", "column", v, collapsed)); }
+    if let Some(v) = attrs.get("dtype")     { out.push(data_row("Schema", "dtype", v, collapsed)); }
+    if let Some(v) = attrs.get("unit")      { out.push(data_row("Schema", "unit", v, collapsed)); }
+    if let Some(v) = attrs.get("role")      { out.push(data_row("Schema", "role", v, collapsed)); }
+    if let Some(v) = attrs.get("dimension") { out.push(data_row("Schema", "dimension", v, collapsed)); }
+
+    // Stats (live) — this Series' column, computed from the parent Dataset's CSV.
+    #[cfg(feature = "data")]
+    {
+        if let (Some(pcsv), Some(col)) = (parent_csv, attrs.get("column")) {
+            let dir = if pcsv.is_dir() { pcsv.to_path_buf() }
+                else { pcsv.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| pcsv.to_path_buf()) };
+            if let Some(frame) = read_dataset_frame(&dir) {
+                if let Some((spec, data)) = frame.columns().iter().find(|(s, _)| &s.name == col) {
+                    if let Ok(s) = eustress_data::numerics::stats(data) {
+                        let u = spec.unit.as_deref().map(|x| format!(" {x}")).unwrap_or_default();
+                        out.push(data_hdr("Stats (live)", collapsed));
+                        out.push(data_row("Stats (live)", "n", &s.count.to_string(), collapsed));
+                        out.push(data_row("Stats (live)", "mean", &format!("{:.4}{u}", s.mean), collapsed));
+                        out.push(data_row("Stats (live)", "min", &format!("{:.3}", s.min), collapsed));
+                        out.push(data_row("Stats (live)", "max", &format!("{:.3}", s.max), collapsed));
+                        out.push(data_row("Stats (live)", "σ", &format!("{:.4}{u}", s.std_dev), collapsed));
+                    }
+                }
+            }
+        }
+    }
+
+    // Metadata
+    out.push(data_hdr("Metadata", collapsed));
+    out.push(data_row("Metadata", "Archivable", if instance.archivable { "Enabled" } else { "Disabled" }, collapsed));
+    out.push(data_row("Metadata", "ClassName", &class, collapsed));
+    out.push(data_row("Metadata", "Name", &instance.name, collapsed));
+    out
+}
+
+/// Properties for a Run: its scenario/provenance attributes + metadata.
+fn build_run_properties(
+    path: &std::path::Path,
+    instance: &eustress_common::classes::Instance,
+    collapsed: &std::collections::HashSet<String>,
+) -> Vec<PropertyData> {
+    let toml_path = if path.is_dir() {
+        path.join("_instance.toml")
+    } else if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+        path.to_path_buf()
+    } else {
+        path.parent().map(|p| p.join("_instance.toml")).unwrap_or_else(|| path.to_path_buf())
+    };
+    let attrs = read_toml_attributes(&toml_path);
+    let class = format!("{:?}", instance.class_name);
+    let mut out: Vec<PropertyData> = Vec::new();
+
+    // Scenario — all provenance attributes (sorted for a stable order).
+    let mut kv: Vec<(&String, &String)> = attrs.iter().collect();
+    kv.sort_by(|a, b| a.0.cmp(b.0));
+    if !kv.is_empty() {
+        out.push(data_hdr("Scenario", collapsed));
+        for (k, v) in kv { out.push(data_row("Scenario", k, v, collapsed)); }
+    }
+    // Metadata
+    out.push(data_hdr("Metadata", collapsed));
+    out.push(data_row("Metadata", "Archivable", if instance.archivable { "Enabled" } else { "Disabled" }, collapsed));
+    out.push(data_row("Metadata", "ClassName", &class, collapsed));
+    out.push(data_row("Metadata", "Name", &instance.name, collapsed));
     out
 }
 

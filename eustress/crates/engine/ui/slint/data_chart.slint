@@ -80,12 +80,22 @@ component PlotBox inherits Rectangle {
     property <length> mr: 14px;
     property <length> mt: 10px;
     property <length> mb: 20px;
+    // Aspect-lock the plot to the 1000x500 viewbox so Slint's aspect-preserving
+    // Path fills it exactly — then the line, dots, and gridlines share one
+    // mapping and align. (sc = fit scale; pw/ph = plot size; px0/py0 = centered.)
+    property <length> aw: self.width - self.ml - self.mr;
+    property <length> ah: self.height - self.mt - self.mb;
+    property <length> sc: (self.aw / 1000 > self.ah / 500) ? (self.ah / 500) : (self.aw / 1000);
+    property <length> pw: 1000 * self.sc;
+    property <length> ph: 500 * self.sc;
+    property <length> px0: self.ml + (self.aw - self.pw) / 2;
+    property <length> py0: self.mt + (self.ah - self.ph) / 2;
 
     // Horizontal gridlines + Y labels (top → bottom = ymax → ymin)
     for t[i] in root.y-ticks: Rectangle {
-        x: parent.ml;
-        y: parent.mt + (parent.height - parent.mt - parent.mb) * i / 4;
-        width: parent.width - parent.ml - parent.mr;
+        x: root.px0;
+        y: root.py0 + root.ph * i / 4;
+        width: root.pw;
         height: 1px;
         background: #ffffff10;
         Text {
@@ -96,10 +106,10 @@ component PlotBox inherits Rectangle {
     }
     // Vertical gridlines + X labels (left → right = xmin → xmax)
     for t[i] in root.x-ticks: Rectangle {
-        x: parent.ml + (parent.width - parent.ml - parent.mr) * i / 4;
-        y: parent.mt;
+        x: root.px0 + root.pw * i / 4;
+        y: root.py0;
         width: 1px;
-        height: parent.height - parent.mt - parent.mb;
+        height: root.ph;
         background: #ffffff08;
         Text {
             x: -18px; y: parent.height + 3px; width: 36px;
@@ -110,18 +120,18 @@ component PlotBox inherits Rectangle {
 
     // Inner plot area — paths, fit-hover, per-point markers + hover
     inner := Rectangle {
-        x: parent.ml; y: parent.mt;
-        width: parent.width - parent.ml - parent.mr;
-        height: parent.height - parent.mt - parent.mb;
+        x: root.px0; y: root.py0;
+        width: root.pw;
+        height: root.ph;
 
         Path {
-            viewbox-x: 0; viewbox-y: 0; viewbox-width: 1000; viewbox-height: 600;
+            viewbox-x: 0; viewbox-y: 0; viewbox-width: 1000; viewbox-height: 500;
             width: 100%; height: 100%;
             commands: root.fit-path;
             fill: transparent; stroke: #f5a524; stroke-width: 1.5px;
         }
         Path {
-            viewbox-x: 0; viewbox-y: 0; viewbox-width: 1000; viewbox-height: 600;
+            viewbox-x: 0; viewbox-y: 0; viewbox-width: 1000; viewbox-height: 500;
             width: 100%; height: 100%;
             commands: root.series-path;
             fill: transparent; stroke: #38bdf8; stroke-width: 1.6px;
@@ -144,7 +154,7 @@ component PlotBox inherits Rectangle {
         // Per-point markers + (X,Y) hover (on top, so they win over plot-ta)
         for p in root.points: Rectangle {
             x: inner.width * (p.px / 1000) - 5px;
-            y: inner.height * (p.py / 600) - 5px;
+            y: inner.height * (p.py / 500) - 5px;
             width: 10px; height: 10px;
             pta := TouchArea {}
             Rectangle {
@@ -211,6 +221,39 @@ component SeriesTable inherits Rectangle {
     }
 }
 
+// One editable axis-bound field — Enter applies the value; empty = auto.
+component AxisField inherits Rectangle {
+    in property <string> placeholder;
+    in property <string> value;
+    callback applied(string);
+    width: 50px;
+    height: 18px;
+    background: #0d1420;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    border-radius: 3px;
+    clip: true;
+    ti := TextInput {
+        x: 4px;
+        width: parent.width - 8px;
+        height: 100%;
+        text: root.value;
+        color: Theme.text-primary;
+        font-size: 10px;
+        vertical-alignment: center;
+        single-line: true;
+        accepted => { root.applied(self.text); }
+    }
+    if root.value == "" && !ti.has-focus: Text {
+        x: 4px;
+        height: 100%;
+        vertical-alignment: center;
+        text: root.placeholder;
+        color: Theme.text-disabled;
+        font-size: 10px;
+    }
+}
+
 export component DataChartView inherits Rectangle {
     in property <string> title;
     in property <string> x-label;
@@ -221,6 +264,10 @@ export component DataChartView inherits Rectangle {
     in property <[string]> x-ticks;
     in property <[string]> y-ticks;
     in property <[ChartPoint]> points;
+    in-out property <string> xmin-in;
+    in-out property <string> xmax-in;
+    in-out property <string> ymin-in;
+    in-out property <string> ymax-in;
     property <string> view-mode: "chart";
     background: Theme.panel-background;
 
@@ -247,6 +294,20 @@ export component DataChartView inherits Rectangle {
             alignment: start;
             LegendItem { label: root.title == "" ? "Series" : root.title; swatch: #38bdf8; }
             LegendItem { label: root.fit-label == "" ? "Linear fit" : root.fit-label; swatch: #f5a524; }
+        }
+
+        // ── Axis range controls (type a value + Enter to apply; empty = auto) ─
+        HorizontalLayout {
+            height: 20px;
+            spacing: 4px;
+            alignment: start;
+            Text { text: "X"; color: Theme.text-disabled; font-size: 10px; vertical-alignment: center; }
+            AxisField { placeholder: "min"; value: root.xmin-in; applied(v) => { root.xmin-in = v; } }
+            AxisField { placeholder: "max"; value: root.xmax-in; applied(v) => { root.xmax-in = v; } }
+            Rectangle { width: 10px; }
+            Text { text: "Y"; color: Theme.text-disabled; font-size: 10px; vertical-alignment: center; }
+            AxisField { placeholder: "min"; value: root.ymin-in; applied(v) => { root.ymin-in = v; } }
+            AxisField { placeholder: "max"; value: root.ymax-in; applied(v) => { root.ymax-in = v; } }
         }
 
         // ── Content (switches on view mode) ───────────────────────────────

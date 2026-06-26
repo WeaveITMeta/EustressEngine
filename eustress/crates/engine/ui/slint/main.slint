@@ -737,6 +737,10 @@ export component StudioWindow inherits Window {
     in-out property <[string]> chart-x-ticks;
     in-out property <[string]> chart-y-ticks;
     in-out property <[ChartPoint]> chart-points;
+    in-out property <string> chart-xmin-in;
+    in-out property <string> chart-xmax-in;
+    in-out property <string> chart-ymin-in;
+    in-out property <string> chart-ymax-in;
 
     // Web browser state for active web tab
     in-out property <string> web-url-bar: "";
@@ -2541,6 +2545,10 @@ export component StudioWindow inherits Window {
                         x-ticks: root.chart-x-ticks;
                         y-ticks: root.chart-y-ticks;
                         points: root.chart-points;
+                        xmin-in <=> root.chart-xmin-in;
+                        xmax-in <=> root.chart-xmax-in;
+                        ymin-in <=> root.chart-ymin-in;
+                        ymax-in <=> root.chart-ymax-in;
                     }
                 }
                 // ── Box Selection Overlay ──────────────────────────
