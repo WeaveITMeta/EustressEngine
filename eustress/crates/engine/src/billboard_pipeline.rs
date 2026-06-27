@@ -548,7 +548,7 @@ impl SpecializedMeshPipeline for BillboardPipeline {
             depth_stencil: Some(DepthStencilState {
                 format: TextureFormat::Depth32Float,
                 depth_write_enabled: Some(false), // never write — don't occlude future draws (wgpu 29: now Option<bool>)
-                depth_compare,
+                depth_compare: Some(depth_compare), // wgpu 29: now Option<CompareFunction>
                 stencil: default(),
                 bias: default(),
             }),
@@ -557,7 +557,7 @@ impl SpecializedMeshPipeline for BillboardPipeline {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            push_constant_ranges: vec![],
+            immediate_size: 0, // 0.19: replaced push_constant_ranges (we used none)
             zero_initialize_workgroup_memory: false,
         })
     }
