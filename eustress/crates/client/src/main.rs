@@ -22,7 +22,9 @@ use bevy::prelude::*;
 use avian3d::prelude::*;
 use eustress_common::{spawn_baseplate, spawn_welcome_cube};
 use eustress_common::services::TeamServicePlugin;
-use eustress_networking::p2p::DistributedWorldPlugin;
+// DISABLED for bevy 0.19 — bevy_quinnet (p2p QUIC) has no 0.19 release yet.
+// Re-enable with the `p2p` feature once upstream ships (see BEVY_019_MIGRATION.md).
+// use eustress_networking::p2p::DistributedWorldPlugin;
 use plugins::{
     EnhancementPlugin, PlayerServicePlugin, LightingServicePlugin,
     PauseMenuPlugin, ClientTerrainPlugin, CharacterAnimationPlugin,
@@ -83,9 +85,10 @@ fn main() {
         .add_plugins(soul::ClientSoulPlugin)
         .add_plugins(soul::ClientPhysicsBridgePlugin)
 
-        // P2P Distributed World (CRDT-based chunk sync)
-        .add_plugins(DistributedWorldPlugin)
-        
+        // P2P Distributed World (CRDT-based chunk sync) — DISABLED for bevy 0.19
+        // until bevy_quinnet ships a 0.19-compatible release (BEVY_019_MIGRATION.md)
+        // .add_plugins(DistributedWorldPlugin)
+
         // Register types needed for GLTF scene spawning
         .register_type::<Transform>()
         .register_type::<GlobalTransform>()
