@@ -1301,6 +1301,17 @@ pub struct BasePart {
     /// When true: mesh vertices deform from stress, temperature, and impacts
     /// When false: behaves as rigid body (default)
     pub deformation: bool,
+
+    /// Gap 5 — when true, the engine does NOT apply its single derived
+    /// `StandardMaterial` over this part; the mesh keeps the material it
+    /// loaded with (the embedded glTF material). Lets a multi-material
+    /// custom mesh render with its own materials instead of being
+    /// flattened to one engine material. Default `false` preserves the
+    /// existing single-material behaviour; old binary saves predating the
+    /// field deserialise unchanged via `#[serde(default)]`. Gates ONLY the
+    /// material apply in `sync_basepart_to_material`.
+    #[serde(default)]
+    pub respect_gltf_materials: bool,
 }
 
 impl Default for BasePart {
@@ -1339,6 +1350,7 @@ impl Default for BasePart {
             cast_shadow: true,
             deformation: false,
             texture_repeat: [1.0, 1.0],
+            respect_gltf_materials: false,
         }
     }
 }

@@ -180,7 +180,14 @@ fn sync_basepart_to_material(
         // Editing one part re-resolves it to the handle matching its NEW look,
         // never mutating others (the deleted in-place `get_mut` was the classic
         // "edit one, change all" bug once handles are shared).
-        if let Some(ref mut registry) = material_registry {
+        // Gap 5 — respect embedded glTF materials. When the part opts in,
+        // skip applying the single engine-derived StandardMaterial entirely
+        // so the mesh keeps the material it loaded with (its own glTF
+        // material). The shadow / transmission bookkeeping below still runs.
+        if basepart.respect_gltf_materials {
+            // fall through to shadow/transmission handling without touching
+            // MeshMaterial3d
+        } else if let Some(ref mut registry) = material_registry {
             // Custom `.mat.toml` name first, then the preset enum name — the
             // (possibly textured) base material to clone+tint, if registered.
             let mat_name = if basepart.material_name.is_empty() {

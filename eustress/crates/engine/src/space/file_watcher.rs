@@ -412,6 +412,7 @@ pub fn process_file_changes(
                     &mut registry,
                     &mut commands,
                     &asset_server,
+                    &mut mesh_cache,
                     &file_entities,
                     &mut soul_scripts,
                 );
@@ -454,6 +455,7 @@ pub fn process_file_changes(
                         &mut registry,
                         &mut commands,
                         &asset_server,
+                        &mut mesh_cache,
                         &file_entities,
                         &mut soul_scripts,
                     );
@@ -497,6 +499,7 @@ fn handle_file_modified(
     registry: &mut SpaceFileRegistry,
     commands: &mut Commands,
     asset_server: &AssetServer,
+    mesh_cache: &mut super::instance_loader::PrimitiveMeshCache,
     file_entities: &Query<(Entity, &super::file_loader::LoadedFromFile)>,
     soul_scripts: &mut Query<&mut crate::soul::SoulScriptData>,
 ) {
@@ -635,6 +638,83 @@ fn handle_file_modified(
                                         commands
                                             .entity(entity)
                                             .insert(crate::space::instance_loader::NeedsMeshSize);
+
+                                        // Gap 4 — mesh hot-swap. Re-resolve the
+                                        // Mesh3d handle on a TOML reload so an
+                                        // in-place `[asset] mesh = ...` edit swaps
+                                        // the live geometry instead of requiring
+                                        // delete+recreate. Mirrors spawn_instance's
+                                        // custom-mesh path: normalise the joined
+                                        // path, build the space:// URL, pin it in
+                                        // the resident cache. Primitives and
+                                        // missing/Draco meshes are skipped (the part
+                                        // keeps its current mesh); the NeedsMeshSize
+                                        // insert above re-derives BasePart.size.
+                                        if let Some(asset_ref) = instance_def.asset.as_ref() {
+                                            let mesh_lc = asset_ref.mesh.to_lowercase();
+                                            let fname =
+                                                mesh_lc.rsplit('/').next().unwrap_or(&mesh_lc);
+                                            let is_primitive = [
+                                                "block", "ball", "cylinder", "wedge",
+                                                "corner_wedge", "cone",
+                                            ]
+                                            .iter()
+                                            .any(|hint| fname.contains(hint));
+                                            if !is_primitive {
+                                                let toml_dir = event
+                                                    .path
+                                                    .parent()
+                                                    .unwrap_or_else(|| std::path::Path::new("."));
+                                                // Inline `..`/`.` normalisation —
+                                                // canonicalize would add the Windows
+                                                // \\?\ verbatim prefix and break the
+                                                // strip_prefix below.
+                                                let joined = toml_dir.join(&asset_ref.mesh);
+                                                let mut absolute_mesh_path =
+                                                    std::path::PathBuf::new();
+                                                for comp in joined.components() {
+                                                    match comp {
+                                                        std::path::Component::ParentDir => {
+                                                            absolute_mesh_path.pop();
+                                                        }
+                                                        std::path::Component::CurDir => {}
+                                                        _ => absolute_mesh_path
+                                                            .push(comp.as_os_str()),
+                                                    }
+                                                }
+                                                if absolute_mesh_path.exists()
+                                                    && !super::draco_decoder::is_draco_compressed(
+                                                        &absolute_mesh_path,
+                                                    )
+                                                {
+                                                    let space_root =
+                                                        super::space_asset_source::space_asset_root();
+                                                    let relative_mesh_path = absolute_mesh_path
+                                                        .strip_prefix(&space_root)
+                                                        .map(|p| {
+                                                            p.to_string_lossy().replace('\\', "/")
+                                                        })
+                                                        .unwrap_or_else(|_| {
+                                                            absolute_mesh_path
+                                                                .to_string_lossy()
+                                                                .replace('\\', "/")
+                                                        });
+                                                    let mesh_url = format!(
+                                                        "space://{}#Mesh0/Primitive0",
+                                                        relative_mesh_path
+                                                    );
+                                                    let mesh_handle = mesh_cache
+                                                        .get_or_load_custom(asset_server, &mesh_url);
+                                                    commands
+                                                        .entity(entity)
+                                                        .insert(Mesh3d(mesh_handle));
+                                                    debug!(
+                                                        "[mesh hot-swap] {:?} -> {}",
+                                                        event.path, mesh_url
+                                                    );
+                                                }
+                                            }
+                                        }
 
                                         if let Some(ref mat) = instance_def.material {
                                             commands.entity(entity).insert(mat.to_component());

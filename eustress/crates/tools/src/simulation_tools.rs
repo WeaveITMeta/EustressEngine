@@ -14,6 +14,16 @@
 use crate::{ToolContext, ToolDefinition, ToolHandler, ToolResult};
 use crate::modes::WorkshopMode;
 
+/// Tolerant numeric arg parse: accepts a JSON number (`60`, `60.0`) OR a
+/// string-encoded number (`"60"`). Returns `None` only when the key is absent
+/// or the value is neither a number nor a numeric string. Closes the brittle
+/// `as_f64()`-only gap where some MCP clients pass numbers as strings and the
+/// tool wrongly reports a present param as missing (Gap 6).
+fn num_arg(input: &serde_json::Value, key: &str) -> Option<f64> {
+    let v = input.get(key)?;
+    v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+}
+
 // ---------------------------------------------------------------------------
 // Get Simulation Value
 // ---------------------------------------------------------------------------
@@ -80,7 +90,7 @@ impl ToolHandler for GetSimValueTool {
                 tool_name: "get_sim_value".to_string(),
                 tool_use_id: String::new(),
                 success: false,
-                content: format!("Runtime snapshot unavailable: {}. Is the engine running?", e),
+                content: format!("Runtime snapshot unavailable: {}", e),
                 structured_data: None,
                 stream_topic: None,
             },
@@ -224,7 +234,7 @@ impl ToolHandler for ListSimValuesTool {
                 tool_name: "list_sim_values".to_string(),
                 tool_use_id: String::new(),
                 success: false,
-                content: format!("Runtime snapshot unavailable: {}. Is the engine running?", e),
+                content: format!("Runtime snapshot unavailable: {}", e),
                 structured_data: None,
                 stream_topic: None,
             },
@@ -1127,8 +1137,8 @@ impl ToolHandler for RunSimulationTool {
     }
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
-        let time_scale = input.get("time_scale").and_then(|v| v.as_f64()).unwrap_or(1.0);
-        let duration_s = input.get("duration_s").and_then(|v| v.as_f64());
+        let time_scale = num_arg(&input, "time_scale").unwrap_or(1.0);
+        let duration_s = num_arg(&input, "duration_s");
 
         // Queue the command via sim-commands.jsonl — the engine reads this
         // on its next frame and transitions PlayModeState accordingly.
@@ -1268,7 +1278,7 @@ impl ToolHandler for GetSimulationStateTool {
             Err(e) => ToolResult {
                 tool_name: "get_simulation_state".to_string(), tool_use_id: String::new(),
                 success: false,
-                content: format!("Runtime snapshot unavailable: {}. Is the engine running?", e),
+                content: format!("Runtime snapshot unavailable: {}", e),
                 structured_data: None, stream_topic: None,
             },
         }
@@ -1314,10 +1324,37 @@ fn read_sim_snapshot(ctx: &ToolContext) -> Result<SnapshotReading, String> {
         .universe_root
         .join(".eustress")
         .join("runtime-snapshot.json");
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            // Distinguish "engine not running" from "engine running but no
+            // live snapshot yet". The `engine.port` sibling is written at
+            // bridge Startup and removed on shutdown, so its presence is the
+            // canonical liveness signal — independent of play state (Gap 1b/2).
+            let port_file = ctx.universe_root.join(".eustress").join("engine.port");
+            let engine_up = port_file.exists();
+            if e.kind() == std::io::ErrorKind::NotFound {
+                if engine_up {
+                    return Err(format!(
+                        "engine is running but no runtime snapshot has been written yet \
+                         (missing {}). It is written ~4 Hz once a Space is open in either \
+                         Edit or Play mode; retry in a moment.",
+                        path.display(),
+                    ));
+                } else {
+                    return Err(format!(
+                        "engine does not appear to be running — no {} and no live \
+                         snapshot at {}. Launch the engine on this Universe first.",
+                        port_file.display(),
+                        path.display(),
+                    ));
+                }
+            }
+            return Err(format!("read {}: {}", path.display(), e));
+        }
+    };
     let val: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse snapshot: {}", e))?;
+        .map_err(|e| format!("runtime snapshot at {} is unparseable (mid-write or corrupt): {}", path.display(), e))?;
 
     let sim_values = val.get("sim_values")
         .and_then(|v| v.as_object())
@@ -1499,7 +1536,7 @@ impl ToolHandler for RunExperimentTool {
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
         let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("experiment").to_string();
         let description = input.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let duration_s = match input.get("duration_s").and_then(|v| v.as_f64()) {
+        let duration_s = match num_arg(&input, "duration_s") {
             Some(d) => d,
             None => return ToolResult {
                 tool_name: "run_experiment".to_string(), tool_use_id: String::new(),
@@ -1507,9 +1544,9 @@ impl ToolHandler for RunExperimentTool {
                 structured_data: None, stream_topic: None,
             },
         };
-        let time_scale = input.get("time_scale").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        let time_scale = num_arg(&input, "time_scale").unwrap_or(1.0);
         let create_branch = input.get("create_branch").and_then(|v| v.as_bool()).unwrap_or(false);
-        let timeout_s = input.get("timeout_s").and_then(|v| v.as_f64()).unwrap_or(300.0);
+        let timeout_s = num_arg(&input, "timeout_s").unwrap_or(300.0);
         let sim_values: std::collections::HashMap<String, f64> = input
             .get("sim_values").and_then(|v| v.as_object())
             .map(|m| m.iter().filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n))).collect())
@@ -1520,7 +1557,7 @@ impl ToolHandler for RunExperimentTool {
 
         // Step 1 — optionally create a git branch
         let branch_created = if create_branch {
-            match run_git_in_universe(&ctx.universe_root, &["checkout", "-b", &branch_name]) {
+            match run_git_in_universe(&ctx.space_root, &["checkout", "-b", &branch_name]) {
                 Ok(_) => Some(branch_name.clone()),
                 Err(e) => {
                     return ToolResult {
@@ -1848,11 +1885,14 @@ impl ToolHandler for ListExperimentsTool {
 // Shared helpers for experiment tools
 // ---------------------------------------------------------------------------
 
-fn run_git_in_universe(universe_root: &std::path::Path, args: &[&str]) -> Result<String, String> {
-    let mut cur = universe_root.to_path_buf();
+fn run_git_in_universe(start_root: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    // `start_root` is the active Space root (Spaces/<Space>/), whose `.git`
+    // lives BELOW the Universe root — so walk up from here, not the Universe
+    // root, to find the experiment's repo (Gap 9).
+    let mut cur = start_root.to_path_buf();
     let cwd = loop {
         if cur.join(".git").exists() { break cur.clone(); }
-        if !cur.pop() { break universe_root.to_path_buf(); }
+        if !cur.pop() { break start_root.to_path_buf(); }
     };
     let out = std::process::Command::new("git").args(args).current_dir(&cwd)
         .output().map_err(|e| format!("git: {}", e))?;

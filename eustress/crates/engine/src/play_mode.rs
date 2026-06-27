@@ -618,7 +618,14 @@ fn handle_start_play(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cursor_options: Query<&mut CursorOptions, With<Window>>,
-    cameras: Query<(Entity, &Transform), With<Camera3d>>,
+    // Gap 3 — exclude the off-screen AI camera. It is built from the SAME
+    // `studio_camera_bundle` as the editor camera (so it carries `Camera3d`) and
+    // would otherwise be deactivated + clobbered to a default `Camera` by the
+    // WithCharacter "disable ALL cameras" loop below — which stops it rendering
+    // into its `RenderTarget::Image`, blanking the AI "eyes" after a Play→Edit
+    // cycle (recovered only on restart) and wiping its `order: -1`. Filtering it
+    // out keeps it active + at order -1 across the whole Play cycle.
+    cameras: Query<(Entity, &Transform), (With<Camera3d>, Without<crate::ai_camera::AiCamera>)>,
     spawn_locations: Query<(&Transform, &SpawnLocation)>,
     lighting: Option<Res<eustress_common::services::LightingService>>,
     snapshot_query: Query<(

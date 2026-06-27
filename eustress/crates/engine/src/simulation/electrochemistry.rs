@@ -156,6 +156,7 @@ fn apply_sim_values_to_ecs(
 /// - Nernst OCV, Butler-Volmer kinetics, ohmic losses
 /// - Coulomb counting for SOC, heat generation, dendrite risk
 fn electrochemical_tick(
+    time: Res<Time>,
     clock: Res<SimulationClock>,
     mut query: Query<(
         &Name,
@@ -163,7 +164,16 @@ fn electrochemical_tick(
         Option<&mut ThermodynamicState>,
     )>,
 ) {
-    let dt = clock.dt() as f32;
+    // Gap 8 — integrate by the COMPRESSED simulation time elapsed this frame so
+    // electrochemistry actually honors `time_scale`. Previously this ran a single
+    // fixed `clock.dt()` per frame, so a high time_scale only advanced the clock
+    // counter / auto-stop but not the integrated state (the run looked
+    // near-realtime). Cap at the clock's per-frame budget for explicit-Euler
+    // stability under extreme compression, and floor at one fixed step so
+    // realtime (time_scale<=1) is byte-for-byte unchanged.
+    let frame_sim_dt = time.delta_secs_f64() * clock.time_scale;
+    let max_step = clock.dt() * clock.max_ticks_per_frame.max(1) as f64;
+    let dt = frame_sim_dt.min(max_step).max(clock.dt()) as f32;
     if dt <= 0.0 { return; }
 
     for (_name, mut echem_state, mut thermo) in &mut query {

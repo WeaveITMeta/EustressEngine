@@ -24,12 +24,14 @@ fn find_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
     }
 }
 
-/// Run a git command in the nearest `.git`-rooted ancestor of the
-/// Universe root. Falls back to `ctx.universe_root` if no repo is
-/// found so the error message clearly says "not a git repository"
-/// rather than bubbling up a misleading path.
+/// Run a git command in the nearest `.git`-rooted ancestor of the active
+/// Space root. The actual repo lives at `Spaces/<Space>/.git` (BELOW the
+/// Universe root), so we walk up from `ctx.space_root`, not
+/// `ctx.universe_root` — an upward walk from the Universe root can never
+/// reach a repo nested under it (Gap 9). Falls back to `ctx.space_root` if
+/// no repo is found so the error clearly says "not a git repository".
 fn git(ctx: &ToolContext, args: &[&str]) -> Result<String, String> {
-    let cwd = find_git_root(&ctx.universe_root).unwrap_or_else(|| ctx.universe_root.clone());
+    let cwd = find_git_root(&ctx.space_root).unwrap_or_else(|| ctx.space_root.clone());
     let output = Command::new("git")
         .args(args)
         .current_dir(&cwd)

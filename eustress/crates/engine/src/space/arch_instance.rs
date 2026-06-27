@@ -236,6 +236,7 @@ pub fn arch_to_instance(core: &ArchInstanceCore) -> InstanceDefinition {
             material: core.material.clone(),
             locked: core.locked,
             physics: None,
+            respect_gltf_materials: false,
         },
         metadata,
         material,

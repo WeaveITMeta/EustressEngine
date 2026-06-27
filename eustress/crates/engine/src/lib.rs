@@ -49,6 +49,11 @@ pub mod keybindings;
 pub mod editor_settings;
 pub mod undo;
 pub mod camera_controller;
+// Off-screen AI camera (marker/state/plugin). Also declared in main.rs; mirror
+// it here so the LIBRARY compile of `play_mode` can resolve
+// `crate::ai_camera::AiCamera` (gap-3 Play→Edit camera-disable filter). Its only
+// crate dependency is `crate::default_scene`, which is already in this lib.
+pub mod ai_camera;
 pub mod runtime;
 pub mod gizmo_tools;
 pub mod move_tool;

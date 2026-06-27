@@ -171,7 +171,20 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-        handle_message(&req, &state, &subs, &stdout).await?;
+        // Gap 7 — handle each request on its own task so a long-running tool
+        // (e.g. `await_simulation`, which blocks polling for up to `timeout_s`)
+        // can't wedge the stdin read loop. Other requests (ping,
+        // get_simulation_state, inspect_scene, …) keep flowing WHILE a sim runs —
+        // required for live optimize/telemetry loops. Outgoing writes stay
+        // serialized by the shared tokio Mutex in `write_response`.
+        let state = Arc::clone(&state);
+        let subs = Arc::clone(&subs);
+        let stdout = Arc::clone(&stdout);
+        tokio::spawn(async move {
+            if let Err(e) = handle_message(&req, &state, &subs, &stdout).await {
+                tracing::error!("request handling failed: {e}");
+            }
+        });
     }
 
     subs.shutdown();
@@ -327,7 +340,21 @@ async fn dispatch(
             // engine's Universe (via its port file), everything else uses the
             // explicit `universe` arg or the server default.
             let universe = resolve_shared_universe(name, &args, state);
-            if let Some(result) = shared_registry::try_dispatch(name, &args, universe.as_ref()) {
+            // Gap 7 — shared-registry tools are synchronous and some BLOCK for a
+            // long time (`await_simulation` / `run_experiment` poll with
+            // `std::thread::sleep` until the run ends or `timeout_s`). Run them on
+            // tokio's blocking pool so they never stall the single-threaded
+            // executor that drives the stdin read loop and the other in-flight
+            // request tasks. `try_dispatch` returns an owned, Send Option, so the
+            // offload is a clean move.
+            let name_owned = name.to_string();
+            let args_owned = args.clone();
+            let dispatched = tokio::task::spawn_blocking(move || {
+                shared_registry::try_dispatch(&name_owned, &args_owned, universe.as_ref())
+            })
+            .await
+            .map_err(|e| RpcError::internal(format!("tool dispatch task failed: {e}")))?;
+            if let Some(result) = dispatched {
                 return Ok(shared_registry::to_mcp_json(result));
             }
 

@@ -513,6 +513,11 @@ pub struct InstanceProperties {
     /// When true, the entity cannot be selected via 3D click (e.g. Baseplate)
     #[serde(default)]
     pub locked: bool,
+    /// Gap 5 — opt-in: keep the mesh's embedded glTF materials instead of
+    /// applying the single engine `StandardMaterial`. Surfaced to
+    /// `BasePart.respect_gltf_materials`; default false → unchanged behaviour.
+    #[serde(default)]
+    pub respect_gltf_materials: bool,
     /// Roblox `PhysicalProperties` decomposition written by the importer
     /// under `[properties.physics]`. Optional — absent for hand-authored
     /// parts. When present, the collider-insert path attaches the
@@ -650,6 +655,7 @@ impl Default for InstanceProperties {
             material: default_material_name_plastic(),
             locked: false,
             physics: None,
+            respect_gltf_materials: false,
         }
     }
 }
@@ -2088,6 +2094,7 @@ pub fn spawn_instance(
         material: eustress_common::classes::Material::from_string(&instance.properties.material),
         material_name: instance.properties.material.clone(),
         cframe: Transform::from(safe_instance_transform.clone()),
+        respect_gltf_materials: instance.properties.respect_gltf_materials,
         ..default()
     };
 

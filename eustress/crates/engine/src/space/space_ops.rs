@@ -539,6 +539,7 @@ pub fn save_space(world: &mut World) {
                         reflectance: base_part.reflectance,
                         locked: base_part.locked,
                         physics: None,
+                        respect_gltf_materials: false,
                     },
                     metadata: InstanceMetadata {
                         class_name,
@@ -1490,7 +1491,12 @@ auto_start = false\n\
 \n\
 [simulation.recording]\n\
 enabled = false\n\
-output_dir = \".eustress/local/recordings\"\n\
+# NOTE: the engine exports recordings to\n\
+#   .eustress/knowledge/recordings/<space_name>/sim_<timestamp>.json\n\
+# and appends live watchpoint telemetry to .eustress/telemetry.jsonl.\n\
+# output_dir below is reserved for a future user-overridable target and\n\
+# is NOT consulted today; do not rely on the old .eustress/local path.\n\
+output_dir = \".eustress/knowledge/recordings\"\n\
 format = \"both\"\n\
 auto_export = false\n\
 \n\

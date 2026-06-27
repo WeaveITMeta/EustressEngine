@@ -165,6 +165,7 @@ fn def_from_components(
                 material: b.material_name.clone(),
                 locked: b.locked,
                 physics: None,
+                respect_gltf_materials: false,
             }
         })
         .unwrap_or_default();
