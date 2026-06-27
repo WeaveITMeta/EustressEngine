@@ -2630,7 +2630,7 @@ fn render_slint_to_texture(
         return;
     }
 
-    let Some(image) = images.get_mut(&scene.image) else { return };
+    let Some(mut image) = images.get_mut(&scene.image) else { return };
     if let Some(data) = image.data.as_mut() {
         let staging_bytes: &[u8] = bytemuck::cast_slice(&staging.pixels);
         let len = data.len().min(staging_bytes.len());
@@ -12747,7 +12747,7 @@ fn handle_window_resize(
     
     // Resize the Slint texture to match physical framebuffer
     if let Some(scene) = slint_scenes.iter().next() {
-        if let Some(image) = images.get_mut(&scene.image) {
+        if let Some(mut image) = images.get_mut(&scene.image) {
             let new_size = Extent3d {
                 width: new_width,
                 height: new_height,

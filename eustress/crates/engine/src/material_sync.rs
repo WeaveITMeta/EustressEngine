@@ -80,7 +80,7 @@ fn set_material_textures_to_repeat(
                 continue;
             };
             if needs_update {
-                if let Some(image) = images.get_mut(&opt_handle) {
+                if let Some(mut image) = images.get_mut(&opt_handle) {
                     image.sampler = bevy::image::ImageSampler::Descriptor(
                         bevy::image::ImageSamplerDescriptor {
                             address_mode_u: bevy::image::ImageAddressMode::Repeat,

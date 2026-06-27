@@ -599,7 +599,7 @@ fn update_cloud_colors(
     
     // Update particle materials
     for (particle, material_handle) in particle_query.iter() {
-        if let Some(material) = materials.get_mut(&material_handle.0) {
+        if let Some(mut material) = materials.get_mut(&material_handle.0) {
             let mut color = base_color.with_alpha(particle.opacity);
             
             // Add lightning flash (brightens clouds)

@@ -180,6 +180,11 @@ impl Default for BillboardDepth {
     fn default() -> Self { Self(true) }
 }
 
+// 0.19: ExtractComponent now requires SyncComponent (main->render world sync).
+impl bevy::render::sync_component::SyncComponent for BillboardDepth {
+    type Target = Self;
+}
+
 impl ExtractComponent for BillboardDepth {
     type QueryData = &'static BillboardDepth;
     type QueryFilter = With<Billboard>;
@@ -196,6 +201,10 @@ impl ExtractComponent for BillboardDepth {
 pub struct BillboardLockAxis {
     pub y_axis: bool,
     pub rotation: bool,
+}
+
+impl bevy::render::sync_component::SyncComponent for BillboardLockAxis {
+    type Target = Self;
 }
 
 impl ExtractComponent for BillboardLockAxis {
@@ -538,7 +547,7 @@ impl SpecializedMeshPipeline for BillboardPipeline {
             },
             depth_stencil: Some(DepthStencilState {
                 format: TextureFormat::Depth32Float,
-                depth_write_enabled: false, // never write — don't occlude future draws
+                depth_write_enabled: Some(false), // never write — don't occlude future draws (wgpu 29: now Option<bool>)
                 depth_compare,
                 stencil: default(),
                 bias: default(),
@@ -774,7 +783,13 @@ pub fn queue_billboards(
 
             // Bevy 0.18: `entity` is `(Entity, MainEntity)` and `indexed`
             // is required so phase sorting knows the draw call shape.
-            transparent_phase.add(Transparent3d {
+            // 0.19: SortedRenderPhase::add -> add_transient (per-frame items);
+            // Transparent3d gained `sorting_info` (distance is derived from it).
+            transparent_phase.add_transient(Transparent3d {
+                sorting_info: bevy::core_pipeline::core_3d::TransparentSortingInfo3d::Sorted {
+                    mesh_center: uniform.transform.col(3).truncate(),
+                    depth_bias: 0.0,
+                },
                 pipeline: pipeline_id,
                 entity: (entity, *main_entity),
                 draw_function: draw_billboard,

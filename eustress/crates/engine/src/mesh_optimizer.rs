@@ -97,8 +97,8 @@ fn optimize_loaded_meshes(
             }
         }
 
-        let Some(mesh) = meshes.get_mut(id) else { continue };
-        optimize_mesh_in_place(mesh);
+        let Some(mut mesh) = meshes.get_mut(id) else { continue };
+        optimize_mesh_in_place(&mut mesh);
         tracker.processed.insert(id);
     }
 }

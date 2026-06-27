@@ -1064,7 +1064,8 @@ fn mirror_binary_ecs_changes(
     // ── Borrow 1 (immutable): change-detect + value-gate + collect. ──
     let mut pending: Vec<PendingMirror> = Vec::new();
     {
-        let q = query_state.get(world);
+        // 0.19: SystemState::get now returns Result (validation at fetch time).
+        let Ok(q) = query_state.get(world) else { return; };
         for (entity, instance, transform, base, tags, mesh_src, bin, dirty) in q.iter() {
             let new_pos = transform.translation.to_array();
             let new_rot = [

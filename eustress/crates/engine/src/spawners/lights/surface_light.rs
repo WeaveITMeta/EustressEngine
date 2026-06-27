@@ -316,7 +316,7 @@ impl ClassSpawner for SurfaceLightSpawner {
                 if let Some(mut materials) =
                     world.get_resource_mut::<Assets<StandardMaterial>>()
                 {
-                    if let Some(mat) = materials.get_mut(&handle) {
+                    if let Some(mut mat) = materials.get_mut(&handle) {
                         mat.base_color = new_color;
                         mat.emissive = new_color.to_linear() * new_brightness;
                     }
