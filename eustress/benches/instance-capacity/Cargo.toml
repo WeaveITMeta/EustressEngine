@@ -28,7 +28,7 @@ rayon = "1.10"
 # ── Bevy — headless GPU render + ECS (no window, no audio, no UI) ────────────
 # bevy_render submits real GPU draw calls; bevy_pbr spawns real PbrBundle meshes.
 # multi_threaded enables the Bevy task pool (mirrors engine config).
-bevy = { version = "0.18", default-features = false, features = [
+bevy = { version = "0.19", default-features = false, features = [
     "bevy_log",
     "bevy_render",
     "bevy_pbr",
@@ -40,7 +40,7 @@ bevy = { version = "0.18", default-features = false, features = [
 ] }
 
 # ── Physics — Avian3D 0.6 (workspace version, parry-f32 broad+narrow phase) ──
-avian3d = { version = "0.6", default-features = false, features = [
+avian3d = { version = "0.7", default-features = false, features = [
     "3d", "f32", "parry-f32", "parallel",
 ] }
 

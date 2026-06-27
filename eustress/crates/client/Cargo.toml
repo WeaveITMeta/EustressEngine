@@ -11,7 +11,7 @@ path = "src/main.rs"
 [dependencies]
 # Workspace members
 eustress-common = { path = "../common", features = ["gui", "realism-scripting", "luau", "physics", "realism"] }
-eustress-networking = { path = "../common/eustress-networking", features = ["p2p"] }
+eustress-networking = { path = "../common/eustress-networking" }  # p2p feature dropped: bevy_quinnet has no bevy-0.19 release (see docs/architecture/BEVY_019_MIGRATION.md)
 bevy-camera-controller = { path = "../common/bevy-camera-controller" }
 
 # Workspace dependencies (Bevy 0.19)
