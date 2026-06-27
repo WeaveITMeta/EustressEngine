@@ -231,7 +231,7 @@ pub fn spawn_skinned_character(
     
     // Load and spawn the GLTF scene as a child
     let scene_path = format!("{}#{}", model.asset_path(), model.scene_label());
-    let scene_handle: Handle<Scene> = asset_server.load(scene_path);
+    let scene_handle: Handle<WorldAsset> = asset_server.load(scene_path);
     
     // Y-Bot/X-Bot models have origin at feet, so offset mesh down to align with capsule bottom
     // Capsule center is at character_height/2, so mesh needs to go down by capsule_half_height + capsule_radius

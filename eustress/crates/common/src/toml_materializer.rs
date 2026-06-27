@@ -39,7 +39,9 @@ use crate::scene_delta::{
 // MaterializerConfig
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+// 0.19: Resource is a subtrait of Component, so a manual `impl Resource` now
+// requires the type to also be a Component.
+#[derive(Debug, Clone, bevy::prelude::Component)]
 pub struct MaterializerConfig {
     /// Legacy field — retained for API compatibility, not used.
     pub iggy_url: String,

@@ -294,7 +294,7 @@ fn spawn_ron_entity(
                     color,
                     intensity: light.brightness * 1000.0,
                     range: light.range,
-                    shadows_enabled: light.shadows,
+                    shadow_maps_enabled: light.shadows,
                     ..default()
                 },
                 transform,
@@ -525,7 +525,7 @@ fn spawn_json_point_light(
             color,
             intensity: brightness * 1000.0,
             range,
-            shadows_enabled: shadows,
+            shadow_maps_enabled: shadows,
             ..default()
         },
         transform,

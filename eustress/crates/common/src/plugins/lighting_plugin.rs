@@ -12,7 +12,8 @@
 use bevy::prelude::*;
 use bevy::pbr::{DistanceFog, FogFalloff};
 // 0.19: Atmosphere, ScatteringMedium and Skybox all moved to bevy_light.
-use bevy::light::{Atmosphere as BevyAtmosphere, ScatteringMedium, Skybox, GlobalAmbientLight, SunDisk};
+use bevy::light::{Atmosphere as BevyAtmosphere, Skybox, GlobalAmbientLight, SunDisk};
+use bevy::light::atmosphere::ScatteringMedium; // pub via the atmosphere module, not the bevy_light root
 use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension, Extent3d, TextureDimension, TextureFormat};
 use tracing::info;
 
@@ -190,7 +191,7 @@ fn update_sun_position(
         let elevation = sun_dir.y;
         let intensity_factor = elevation.max(0.0).powf(0.4);
         sun_light.illuminance = lighting.sun_intensity * intensity_factor;
-        sun_light.shadows_enabled = elevation > 0.05;
+        sun_light.shadow_maps_enabled = elevation > 0.05;
 
         let sun_distance = 100.0;
         sun_transform.translation = sun_dir * sun_distance;
@@ -259,7 +260,7 @@ fn update_moon_position(
         let moon_intensity = moon_data.current_intensity(sun_elevation) * phase_illumination;
         
         moon_light.illuminance = moon_intensity.max(0.01); // Minimum visibility
-        moon_light.shadows_enabled = sun_elevation < -0.1 && phase_illumination > 0.3;
+        moon_light.shadow_maps_enabled = sun_elevation < -0.1 && phase_illumination > 0.3;
         
         // Position moon in sky
         let moon_distance = 100.0;
@@ -754,7 +755,7 @@ fn regenerate_skybox_on_sun_change(
     
     // Update all cameras that already have a Skybox component
     for mut skybox in camera_query.iter_mut() {
-        skybox.image = new_handle.clone();
+        skybox.image = Some(new_handle.clone());
     }
 }
 

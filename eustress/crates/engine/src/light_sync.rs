@@ -74,14 +74,14 @@ fn sync_point_lights(
             pl.intensity = intensity;
             pl.range = light.range;
             pl.radius = light.radius;
-            pl.shadows_enabled = light.shadows;
+            pl.shadow_maps_enabled = light.shadows;
         } else {
             commands.entity(entity).insert(PointLight {
                 color: light.color,
                 intensity,
                 range: light.range,
                 radius: light.radius,
-                shadows_enabled: light.shadows,
+                shadow_maps_enabled: light.shadows,
                 ..default()
             });
         }
@@ -107,7 +107,7 @@ fn sync_spot_lights(
             sl.range = light.range;
             sl.inner_angle = inner_angle;
             sl.outer_angle = outer_angle;
-            sl.shadows_enabled = light.shadows;
+            sl.shadow_maps_enabled = light.shadows;
         } else {
             commands.entity(entity).insert(SpotLight {
                 color: light.color,
@@ -115,7 +115,7 @@ fn sync_spot_lights(
                 range: light.range,
                 inner_angle,
                 outer_angle,
-                shadows_enabled: light.shadows,
+                shadow_maps_enabled: light.shadows,
                 ..default()
             });
         }
@@ -135,14 +135,14 @@ fn sync_directional_lights(
         if let Some(mut dl) = existing {
             dl.color = light.color;
             dl.illuminance = illuminance;
-            dl.shadows_enabled = light.shadows;
+            dl.shadow_maps_enabled = light.shadows;
             dl.shadow_depth_bias = light.shadow_depth_bias;
             dl.shadow_normal_bias = light.shadow_normal_bias;
         } else {
             commands.entity(entity).insert(DirectionalLight {
                 color: light.color,
                 illuminance,
-                shadows_enabled: light.shadows,
+                shadow_maps_enabled: light.shadows,
                 shadow_depth_bias: light.shadow_depth_bias,
                 shadow_normal_bias: light.shadow_normal_bias,
                 ..default()
@@ -166,13 +166,13 @@ fn sync_surface_lights(
             pl.color = light.color;
             pl.intensity = intensity;
             pl.range = light.range;
-            pl.shadows_enabled = light.shadows;
+            pl.shadow_maps_enabled = light.shadows;
         } else {
             commands.entity(entity).insert(PointLight {
                 color: light.color,
                 intensity,
                 range: light.range,
-                shadows_enabled: light.shadows,
+                shadow_maps_enabled: light.shadows,
                 ..default()
             });
         }
