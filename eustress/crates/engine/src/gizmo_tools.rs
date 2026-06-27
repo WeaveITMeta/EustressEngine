@@ -47,7 +47,7 @@ fn diagnose_gizmos_once(
     let (cfg, _) = config_store.config::<bevy::gizmos::config::DefaultGizmoConfigGroup>();
     info!("  DefaultGizmoGroup:   enabled={}, line_width={}, depth_bias={}",
         cfg.enabled, cfg.line.width, cfg.depth_bias);
-    let (cfg, _) = config_store.config::<bevy::gizmos::light::LightGizmoConfigGroup>();
+    let (cfg, _) = config_store.config::<bevy::light::LightGizmoConfigGroup>();
     info!("  LightGizmoGroup:     enabled={}, line_width={}, depth_bias={}",
         cfg.enabled, cfg.line.width, cfg.depth_bias);
     for (entity, camera) in &cameras {
@@ -82,7 +82,7 @@ fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
 
     // Light gizmos — always on top so they're visible through geometry
     {
-        let (config, light_config) = config_store.config_mut::<bevy::gizmos::light::LightGizmoConfigGroup>();
+        let (config, light_config) = config_store.config_mut::<bevy::light::LightGizmoConfigGroup>();
         config.enabled = true;
         config.depth_bias = -1.0; // Always visible
         config.line.width = 1.5;
@@ -94,7 +94,7 @@ fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
         // color are kept so a future "Show Lights" toggle re-enables it by simply
         // flipping `light_config.draw_all = true` at runtime.
         light_config.draw_all = false;
-        light_config.color = bevy::gizmos::light::LightGizmoColor::MatchLightColor;
+        light_config.color = bevy::light::LightGizmoColor::MatchLightColor;
     }
 }
 

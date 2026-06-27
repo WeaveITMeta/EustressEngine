@@ -257,7 +257,7 @@ fn main() {
         // Minimal plugins (no rendering)
         .add_plugins(MinimalPlugins)
         .add_plugins(bevy::asset::AssetPlugin::default())
-        .add_plugins(bevy::scene::ScenePlugin)
+        .add_plugins(bevy::world_serialization::WorldSerializationPlugin)
         
         // Fixed timestep for physics
         .insert_resource(Time::<Fixed>::from_hz(tick_rate as f64))

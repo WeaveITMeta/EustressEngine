@@ -10,7 +10,11 @@ use bevy::prelude::*;
 /// resource into a matching component on each chunk entity so
 /// reflection-driven tools (Inspector / TOML mirror) still pick it
 /// up per-entity.
-#[derive(Component, Resource, Clone, Reflect, Debug)]
+// 0.19: Resource is now a subtrait of Component. TerrainConfig is load-bearing
+// as a Component (spawned on the terrain root, queried by chunk/LOD/water/editor
+// systems), so keep Component and drop Resource; the lone Res reader
+// (part_to_terrain) was converted to a query.
+#[derive(Component, Clone, Reflect, Debug)]
 #[reflect(Component)]
 pub struct TerrainConfig {
     /// Size of each chunk in world units

@@ -117,6 +117,7 @@ use bevy::render::render_resource::{
 use bevy::render::renderer::RenderDevice;
 use bevy::render::sync_world::{MainEntity, RenderEntity};
 use bevy::render::texture::GpuImage;
+use bevy::render::camera::ExtractedCamera; // 0.19: hdr moved off ExtractedView onto ExtractedCamera
 use bevy::render::view::{
     ExtractedView, ViewUniform, ViewUniformOffset, ViewUniforms,
 };
@@ -697,7 +698,7 @@ pub fn queue_billboards(
     pipeline: Res<BillboardPipeline>,
     gpu_images: Res<RenderAssets<GpuImage>>,
     gpu_meshes: Res<RenderAssets<RenderMesh>>,
-    views: Query<(Entity, &ExtractedView, Option<&Msaa>)>,
+    views: Query<(Entity, &ExtractedView, Option<&ExtractedCamera>, Option<&Msaa>)>,
     // All billboards in the render world (from `extract_billboards`).
     // Visibility was already filtered there via `InheritedVisibility`, so
     // every entity here should be drawn. We use `MainEntity` to populate
@@ -719,7 +720,7 @@ pub fn queue_billboards(
     // `create_bind_group` call) and guarantees correctness on resize.
     image_bind_groups.values.clear();
 
-    for (_view_entity, view, msaa) in views.iter() {
+    for (_view_entity, view, extracted_camera, msaa) in views.iter() {
         // Bevy 0.18: `ViewSortedRenderPhases` is keyed by
         // `RetainedViewEntity` (a stable identifier that survives the
         // main→render extract roundtrip), not the render-world Entity.
@@ -749,7 +750,7 @@ pub fn queue_billboards(
                 if lock.y_axis { key |= BillboardPipelineKey::LOCK_Y; }
                 if lock.rotation { key |= BillboardPipelineKey::LOCK_ROTATION; }
             }
-            if view.hdr { key |= BillboardPipelineKey::HDR; }
+            if extracted_camera.map_or(false, |c| c.hdr) { key |= BillboardPipelineKey::HDR; }
 
             let pipeline_id = match pipelines.specialize(&pipeline_cache, &pipeline, key, &gpu_mesh.layout) {
                 Ok(id) => id,

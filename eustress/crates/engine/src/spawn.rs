@@ -1018,7 +1018,7 @@ pub fn spawn_text_label_ui(
         UiText::new(label.text.clone()),
         bevy::text::TextColor(text_color),
         bevy::text::TextFont {
-            font_size: label.font_size,
+            font_size: bevy::text::FontSize::Px(label.font_size),
             ..default()
         },
         ui::widget::Label, // Marker for non-interactive text
@@ -1124,7 +1124,7 @@ pub fn spawn_text_button(
         UiText::new(button.text.clone()),
         bevy::text::TextColor(text_color),
         bevy::text::TextFont {
-            font_size: button.font_size,
+            font_size: bevy::text::FontSize::Px(button.font_size),
             ..default()
         },
     )).id()
@@ -1231,7 +1231,7 @@ pub fn spawn_text_box(
         UiText::new(text_box.text.clone()),
         bevy::text::TextColor(text_color),
         bevy::text::TextFont {
-            font_size: text_box.font_size,
+            font_size: bevy::text::FontSize::Px(text_box.font_size),
             ..default()
         },
         // Marker for text input handling

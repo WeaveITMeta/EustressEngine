@@ -110,11 +110,14 @@ fn handle_part_to_terrain(
         &mut eustress_common::terrain::Chunk,
         &mut eustress_common::terrain::TerrainData,
     )>,
-    config: Option<Res<eustress_common::terrain::TerrainConfig>>,
+    // 0.19: TerrainConfig is a Component (not a Resource), spawned on the terrain
+    // root — read it via a query instead of Res. (This also fixes a latent bug:
+    // nothing ever inserted it as a resource, so the old Res was always None.)
+    terrain_config: Query<&eustress_common::terrain::TerrainConfig>,
 ) {
     for event in events.read() {
-        let Some(config) = config.as_deref() else {
-            warn!("🏔 Part to Terrain: no TerrainConfig resource — terrain not active");
+        let Some(config) = terrain_config.iter().next() else {
+            warn!("🏔 Part to Terrain: no TerrainConfig component — terrain not active");
             continue;
         };
 

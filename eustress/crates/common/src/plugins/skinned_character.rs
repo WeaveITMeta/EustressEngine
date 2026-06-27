@@ -242,7 +242,7 @@ pub fn spawn_skinned_character(
     let rotation_fix = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
     
     let scene_entity = commands.spawn((
-        SceneRoot(scene_handle),
+        WorldAssetRoot(scene_handle),
         Transform::from_scale(Vec3::splat(scale))
             .with_rotation(rotation_fix)
             .with_translation(Vec3::Y * mesh_offset),

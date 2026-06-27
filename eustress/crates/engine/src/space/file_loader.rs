@@ -876,7 +876,7 @@ pub fn spawn_file_entry(
             info!("🔧 Loading GLTF: {} (from {:?})", asset_path, file_meta.path);
             let scene_handle = asset_server.load(asset_path);
             let e = commands.spawn((
-                SceneRoot(scene_handle),
+                WorldAssetRoot(scene_handle),
                 Transform::default(),
                 Visibility::default(),
                 eustress_common::classes::Instance {

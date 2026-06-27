@@ -552,7 +552,7 @@ fn handle_file_modified(
                     if ent == entity && loaded.path == event.path {
                         // Reload the scene
                         let scene_handle = asset_server.load(format!("{}#Scene0", event.path.display()));
-                        commands.entity(entity).insert(SceneRoot(scene_handle));
+                        commands.entity(entity).insert(WorldAssetRoot(scene_handle));
                         
                         info!("🔄 Hot-reloaded glTF model: {:?}", event.path);
                         break;
@@ -891,7 +891,7 @@ fn handle_file_created(
                 .to_string();
             
             let entity = commands.spawn((
-                SceneRoot(scene_handle),
+                WorldAssetRoot(scene_handle),
                 Transform::default(),
                 eustress_common::classes::Instance {
                     name: name.clone(),

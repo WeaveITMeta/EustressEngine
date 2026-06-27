@@ -884,7 +884,7 @@ fn spawn_bevy_gui_from_loaded_entities(
                 bevy::prelude::Text::new(text_str),
                 bevy::prelude::TextColor(text_color),
                 bevy::prelude::TextFont {
-                    font_size,
+                    font_size: bevy::text::FontSize::Px(font_size),
                     ..Default::default()
                 },
             ));

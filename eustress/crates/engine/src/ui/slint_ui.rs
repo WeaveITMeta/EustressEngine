@@ -2165,7 +2165,7 @@ fn setup_slint_overlay(world: &mut World) {
         // Hdr marker — required for gizmo pipeline to work correctly when main
         // camera uses Atmosphere (HDR). Without this, gizmo render passes are
         // suppressed or corrupted on the secondary camera.
-        bevy::render::view::Hdr,
+        bevy::camera::Hdr,
         eustress_common::plugins::lighting_plugin::SkyboxAttached,
         eustress_common::plugins::lighting_plugin::NoAtmosphere,
         Name::new("Slint Overlay Camera"),

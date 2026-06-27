@@ -10,9 +10,9 @@
 //! - Realtime-filtered environment maps with AtmosphereEnvironmentMapLight
 
 use bevy::prelude::*;
-use bevy::pbr::{Atmosphere as BevyAtmosphere, ScatteringMedium, DistanceFog, FogFalloff};
-use bevy::core_pipeline::Skybox;
-use bevy::light::{GlobalAmbientLight, SunDisk};
+use bevy::pbr::{DistanceFog, FogFalloff};
+// 0.19: Atmosphere, ScatteringMedium and Skybox all moved to bevy_light.
+use bevy::light::{Atmosphere as BevyAtmosphere, ScatteringMedium, Skybox, GlobalAmbientLight, SunDisk};
 use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension, Extent3d, TextureDimension, TextureFormat};
 use tracing::info;
 
@@ -566,7 +566,7 @@ fn attach_skybox_to_cameras(
 
         commands.entity(camera_entity).insert((
             Skybox {
-                image: skybox_image.clone(),
+                image: Some(skybox_image.clone()),
                 brightness: 1000.0,
                 rotation: Quat::IDENTITY,
             },
@@ -628,7 +628,7 @@ fn apply_atmosphere_to_cameras(
 
     // Create the scattering medium once and cache the handle
     let medium_handle = cached_medium.get_or_insert_with(|| {
-        mediums.add(ScatteringMedium::earthlike(256, 256))
+        mediums.add(ScatteringMedium::earth(256, 256))
     }).clone();
 
     // Apply custom atmosphere to cameras that have EustressAtmosphere component
@@ -654,7 +654,7 @@ fn apply_atmosphere_settings(
     medium_handle: &Handle<ScatteringMedium>,
 ) {
     commands.entity(camera_entity).insert((
-        BevyAtmosphere::earthlike(medium_handle.clone()),
+        BevyAtmosphere::earth(medium_handle.clone()),
         AtmosphereApplied,
     ));
     info!("🌍 Applied Bevy Atmosphere to camera {:?}", camera_entity);

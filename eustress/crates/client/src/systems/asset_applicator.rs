@@ -58,7 +58,7 @@ pub fn apply_loaded_assets_system(
                         // Spawn the GLTF scene as a child of the entity
                         commands.entity(entity).with_children(|parent| {
                             parent.spawn((
-                                SceneRoot(scene_handle.clone()),
+                                WorldAssetRoot(scene_handle.clone()),
                                 Transform::default(),
                             ));
                         });
@@ -69,7 +69,7 @@ pub fn apply_loaded_assets_system(
                         let scene_handle = &gltf.scenes[0];
                         commands.entity(entity).with_children(|parent| {
                             parent.spawn((
-                                SceneRoot(scene_handle.clone()),
+                                WorldAssetRoot(scene_handle.clone()),
                                 Transform::default(),
                             ));
                         });
