@@ -464,9 +464,13 @@ pub fn spawn_surface_light(
     commands: &mut Commands,
     instance: Instance,
     light: SurfaceLight,
-    _parent: Entity,
+    transform: Transform,
 ) -> Entity {
     let name = instance.name.clone();
+    // `light_sync::sync_surface_lights` rescales this PointLight's intensity from
+    // `brightness` and keeps it live; the important thing here is that the entity
+    // carries its AUTHORED transform, not the origin (the old bug), so the
+    // surface lights the scene from where it was placed.
     commands.spawn((
         PointLight {
             color: light.color,
@@ -475,7 +479,7 @@ pub fn spawn_surface_light(
             shadows_enabled: light.shadows,
             ..default()
         },
-        Transform::default(),
+        transform,
         instance,
         light,
         Name::new(name),

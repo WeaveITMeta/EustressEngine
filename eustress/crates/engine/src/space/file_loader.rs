@@ -2255,10 +2255,10 @@ pub fn spawn_directory_entry(
                 if let Some(r) = read_f32("Range", "light_range") { light.range = r; }
                 if let Some(c) = read_color() { light.color = c; }
                 if let Some(s) = read_bool("Shadows", "light_shadows") { light.shadows = s; }
-                // `_parent` arg is unused by the spawner today; pass the
-                // resolved parent when present, else PLACEHOLDER.
-                let p = parent_entity.unwrap_or(Entity::PLACEHOLDER);
-                crate::spawn::spawn_surface_light(commands, instance, light, p)
+                // Pass the AUTHORED transform so the surface lights from where it
+                // was placed (not the origin); light_sync keeps its PointLight
+                // intensity/color synced from `brightness`.
+                crate::spawn::spawn_surface_light(commands, instance, light, transform)
             }
         };
 

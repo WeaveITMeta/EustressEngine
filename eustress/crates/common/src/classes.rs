@@ -2109,7 +2109,7 @@ pub struct EustressPointLight {
 impl Default for EustressPointLight {
     fn default() -> Self {
         Self {
-            brightness: 100000.0, // Lumens — physically based (bright indoor light)
+            brightness: 1.0, // Roblox-style 0..N dial; scaled to lumens by engine light_sync (was raw lumens, inconsistent with the 1.0 template)
             color: Color::WHITE,
             range: 60.0,
             radius: 0.0, // Point source by default, increase for area light
@@ -2142,7 +2142,7 @@ pub struct EustressSpotLight {
 impl Default for EustressSpotLight {
     fn default() -> Self {
         Self {
-            brightness: 40000.0, // Lumens — physically based (matches Bevy examples)
+            brightness: 1.0, // Roblox-style 0..N dial; scaled to lumens by engine light_sync (was raw lumens, inconsistent with the 1.0 template)
             color: Color::WHITE,
             range: 60.0,
             angle: 45.0, // Degrees — typical spotlight cone

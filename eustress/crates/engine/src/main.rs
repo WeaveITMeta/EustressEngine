@@ -102,6 +102,7 @@ mod engine_bridge;
 // Independent off-screen AI camera (bin module: its bridge handlers and the
 // plugin must share the bin's TypeIds, same reason as engine_bridge).
 mod ai_camera;
+mod light_sync; // resolve Eustress light components -> real Bevy lights (+ live property sync)
 mod part_selection;
 mod transform_space;
 mod clipboard;
@@ -412,6 +413,8 @@ fn main() {
         })
         // Material sync
         .add_plugins(MaterialSyncPlugin)
+        // Light-class sync: Eustress light components -> real Bevy lights + live edit
+        .add_plugins(light_sync::LightClassPlugin)
         // R1 photoreal: registers AutoExposurePlugin (DefaultPlugins omits it)
         // + PhotorealSettings. The post-effect COMPONENTS live in
         // studio_camera_bundle so editor + AI camera stay in lockstep.

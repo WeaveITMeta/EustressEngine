@@ -920,7 +920,8 @@ fn spawn_entity_from_data(
         }
         ClassName::SurfaceLight => {
             let light = surfacelight_from_properties(&data.properties);
-            spawn_surface_light(commands, instance, light, Entity::PLACEHOLDER)
+            let transform = transform_from_properties(&data.properties);
+            spawn_surface_light(commands, instance, light, transform)
         }
         ClassName::Sound => {
             let sound = sound_from_properties(&data.properties);

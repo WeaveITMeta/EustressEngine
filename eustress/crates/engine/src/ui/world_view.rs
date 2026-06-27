@@ -1060,7 +1060,7 @@ pub fn apply_ui_actions(
                                 &mut commands, instance, EustressSpotLight::default(), light_xf),
                             _ => spawn_surface_light(
                                 &mut commands, instance, SurfaceLight::default(),
-                                selected_parent.unwrap_or(Entity::PLACEHOLDER)),
+                                light_xf),
                         };
                         match selected_parent {
                             Some(parent) => { commands.entity(light_entity).insert(bevy::prelude::ChildOf(parent)); }
