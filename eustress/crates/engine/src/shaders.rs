@@ -198,7 +198,7 @@ fn update_moon_phase(
     // Get the texture handle from the material and update it in-place
     let Some(mat) = materials.get(&mat_handle.0) else { return };
     let Some(ref tex_handle) = mat.base_color_texture else { return };
-    let Some(image) = images.get_mut(tex_handle) else { return };
+    let Some(mut image) = images.get_mut(tex_handle) else { return };
 
     let tex_size = 128;
     let new_pixels = generate_moon_texture(tex_size, cos_phase, waxing_sign);

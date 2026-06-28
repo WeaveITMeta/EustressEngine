@@ -179,7 +179,7 @@ pub fn render_slint_guis(
             adapter.resize(gui.width, gui.height);
         }
 
-        let Some(image) = images.get_mut(&gui.image) else { continue };
+        let Some(mut image) = images.get_mut(&gui.image) else { continue };
         if let Some(data) = image.data.as_mut() {
             adapter.software_renderer.render(
                 bytemuck::cast_slice_mut::<u8, slint::platform::software_renderer::PremultipliedRgbaColor>(data),

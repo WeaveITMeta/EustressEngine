@@ -876,7 +876,7 @@ pub fn spawn_file_entry(
             info!("🔧 Loading GLTF: {} (from {:?})", asset_path, file_meta.path);
             let scene_handle = asset_server.load(asset_path);
             let e = commands.spawn((
-                SceneRoot(scene_handle),
+                WorldAssetRoot(scene_handle),
                 Transform::default(),
                 Visibility::default(),
                 eustress_common::classes::Instance {
@@ -2116,7 +2116,7 @@ pub fn spawn_directory_entry(
                     DirectionalLight {
                         color: Color::srgb(color[0], color[1], color[2]),
                         illuminance: brightness * 10_000.0,
-                        shadows_enabled: shadows,
+                        shadow_maps_enabled: shadows,
                         shadow_depth_bias: edl.shadow_depth_bias,
                         shadow_normal_bias: edl.shadow_normal_bias,
                         ..default()

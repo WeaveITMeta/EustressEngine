@@ -216,7 +216,7 @@ fn hydrate_lighting_entities(
                     lighting.sun_color[3],
                 ),
                 illuminance: lux::RAW_SUNLIGHT,
-                shadows_enabled: true,
+                shadow_maps_enabled: true,
                 shadow_depth_bias: 0.02,
                 shadow_normal_bias: 1.8,
                 ..default()
@@ -245,7 +245,7 @@ fn hydrate_lighting_entities(
             DirectionalLight {
                 color: Color::srgb(0.7, 0.75, 0.9),
                 illuminance: 500.0,
-                shadows_enabled: false,
+                shadow_maps_enabled: false,
                 ..default()
             },
             Transform::from_xyz(50.0, 80.0, -30.0)
@@ -339,7 +339,7 @@ fn update_directional_light_from_sun_class(
         if let Ok((mut light, mut transform)) = light_query.single_mut() {
             light.color = Color::srgba(color[0], color[1], color[2], color[3]);
             light.illuminance = intensity;
-            light.shadows_enabled = sun.cast_shadows;
+            light.shadow_maps_enabled = sun.cast_shadows;
             
             // Position light in direction of sun
             transform.translation = sun_dir * sun_distance;

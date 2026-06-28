@@ -77,7 +77,7 @@ impl ClassSpawner for DirectionalLightSpawner {
                 DirectionalLight {
                     color,
                     illuminance: brightness * ILLUMINANCE_PER_BRIGHTNESS,
-                    shadows_enabled: shadows,
+                    shadow_maps_enabled: shadows,
                     shadow_depth_bias,
                     shadow_normal_bias,
                     ..default()
@@ -198,7 +198,7 @@ impl ClassSpawner for DirectionalLightSpawner {
                 dl.illuminance = b * ILLUMINANCE_PER_BRIGHTNESS;
             }
             if let Some(s) = props.get_bool("light.shadows") {
-                dl.shadows_enabled = s;
+                dl.shadow_maps_enabled = s;
             }
             if let Some(b) = props.get_f32("shadows.depth_bias") {
                 dl.shadow_depth_bias = b;

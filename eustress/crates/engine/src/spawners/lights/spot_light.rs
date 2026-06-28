@@ -73,7 +73,7 @@ impl ClassSpawner for SpotLightSpawner {
                     range,
                     inner_angle: inner_rad,
                     outer_angle: outer_rad,
-                    shadows_enabled: shadows,
+                    shadow_maps_enabled: shadows,
                     ..default()
                 },
                 transform,
@@ -193,7 +193,7 @@ impl ClassSpawner for SpotLightSpawner {
                 sl.inner_angle = (a * 0.85).to_radians();
             }
             if let Some(s) = props.get_bool("light.shadows") {
-                sl.shadows_enabled = s;
+                sl.shadow_maps_enabled = s;
             }
         }
         // Every SpotLight prop is a cheap mutation — LIGHTING_AUDIT.md §4.3
@@ -342,7 +342,7 @@ mod tests {
                     range: 30.0,
                     outer_angle: 1.0,
                     inner_angle: 0.85,
-                    shadows_enabled: true,
+                    shadow_maps_enabled: true,
                     ..default()
                 },
                 Transform::default(),

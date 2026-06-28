@@ -220,7 +220,7 @@ pub fn apply_body_colors_system(
             let Ok(mat_handle) = limb_materials.get(limb_entity) else {
                 continue; // limb has no material — skip
             };
-            let Some(material) = materials.get_mut(&mat_handle.0) else {
+            let Some(mut material) = materials.get_mut(&mat_handle.0) else {
                 continue;
             };
             material.base_color = brick_color_to_srgb(limb_color(&limb, colors));
@@ -421,7 +421,7 @@ fn apply_texture_to_limbs(
         let Ok(mat_handle) = limb_materials.get(limb_entity) else {
             continue;
         };
-        if let Some(material) = materials.get_mut(&mat_handle.0) {
+        if let Some(mut material) = materials.get_mut(&mat_handle.0) {
             material.base_color_texture = Some(texture.clone());
         }
     }

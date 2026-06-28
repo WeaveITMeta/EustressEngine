@@ -555,7 +555,10 @@ pub fn bridge_export_requests_to_stream(
 // ============================================================================
 
 /// Parameters component for entity-level data source configuration
-#[derive(Component, Resource, Default, Clone, Debug, Serialize, Deserialize)]
+// 0.19: Resource is now a subtrait of Component — a type can no longer derive
+// both. Parameters is only ever used as a Component (the resource is the
+// distinct GlobalParameters), so drop Resource.
+#[derive(Component, Default, Clone, Debug, Serialize, Deserialize)]
 pub struct Parameters {
     pub sources: HashMap<String, DataSourceConfig>,
     pub domain: String,

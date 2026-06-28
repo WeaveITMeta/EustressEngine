@@ -11,7 +11,7 @@
 //! camera and:
 //!
 //! - **Shadows:** only the nearest [`SHADOW_LIGHT_BUDGET`] keep
-//!   `shadows_enabled = true`; all others have shadows turned off. This is
+//!   `shadow_maps_enabled = true`; all others have shadows turned off. This is
 //!   the single biggest lever — it collapses thousands of shadow maps to a
 //!   few dozen.
 //! - **Active intensity:** only the nearest [`ACTIVE_LIGHT_BUDGET`] *and*
@@ -38,7 +38,7 @@
 //!
 //! ## Safety
 //!
-//! Visual-only and fully reversible: it mutates only `shadows_enabled` and
+//! Visual-only and fully reversible: it mutates only `shadow_maps_enabled` and
 //! `intensity` on lights, never despawns, and restores authored intensity
 //! from the stored component. The DirectionalLight sun/moon are untouched
 //! (this only queries `PointLight` / `SpotLight`).
@@ -52,7 +52,7 @@ use bevy::prelude::*;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct OriginalLightIntensity(pub f32);
 
-/// Nearest-N lights that keep `shadows_enabled = true`. Every other light's
+/// Nearest-N lights that keep `shadow_maps_enabled = true`. Every other light's
 /// shadows are turned off. Conservative: the closest set the player is most
 /// likely looking at keeps real shadows.
 const SHADOW_LIGHT_BUDGET: usize = 32;
@@ -176,7 +176,7 @@ pub fn cull_lights_to_nearest(
                     apply_light_policy(
                         &mut commands,
                         *entity,
-                        &mut light.shadows_enabled,
+                        &mut light.shadow_maps_enabled,
                         &mut light.intensity,
                         original.copied(),
                         want_shadows,
@@ -196,7 +196,7 @@ pub fn cull_lights_to_nearest(
                     apply_light_policy(
                         &mut commands,
                         *entity,
-                        &mut light.shadows_enabled,
+                        &mut light.shadow_maps_enabled,
                         &mut light.intensity,
                         original.copied(),
                         want_shadows,
@@ -238,20 +238,20 @@ pub fn enforce_shadow_budget(
     }
     let mut kept = 0usize;
     for mut light in point_lights.iter_mut() {
-        if light.shadows_enabled {
+        if light.shadow_maps_enabled {
             if kept < SHADOW_LIGHT_BUDGET {
                 kept += 1;
             } else {
-                light.shadows_enabled = false;
+                light.shadow_maps_enabled = false;
             }
         }
     }
     for mut light in spot_lights.iter_mut() {
-        if light.shadows_enabled {
+        if light.shadow_maps_enabled {
             if kept < SHADOW_LIGHT_BUDGET {
                 kept += 1;
             } else {
-                light.shadows_enabled = false;
+                light.shadow_maps_enabled = false;
             }
         }
     }

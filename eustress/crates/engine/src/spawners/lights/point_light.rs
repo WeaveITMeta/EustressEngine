@@ -6,7 +6,7 @@
 //! ## Components attached on spawn
 //!
 //! - `bevy_pbr::PointLight` — the live rendered light
-//!   (`color/intensity/range/radius/shadows_enabled`).
+//!   (`color/intensity/range/radius/shadow_maps_enabled`).
 //! - `eustress_common::classes::EustressPointLight` — the Eustress
 //!   authoring component (the one the Properties panel + scripts mutate).
 //! - `eustress_common::classes::Instance` — class identity + name.
@@ -95,7 +95,7 @@ impl ClassSpawner for PointLightSpawner {
                     intensity: brightness,
                     range,
                     radius,
-                    shadows_enabled: shadows,
+                    shadow_maps_enabled: shadows,
                     ..default()
                 },
                 transform,
@@ -226,7 +226,7 @@ impl ClassSpawner for PointLightSpawner {
                 pl.radius = r;
             }
             if let Some(s) = props.get_bool("light.shadows") {
-                pl.shadows_enabled = s;
+                pl.shadow_maps_enabled = s;
             }
         }
         // Per spec §2.1 + LIGHTING_AUDIT.md §4.2 — every PointLight prop
@@ -430,7 +430,7 @@ mod tests {
                     intensity: 12345.0,
                     range: 42.0,
                     radius: 0.5,
-                    shadows_enabled: true,
+                    shadow_maps_enabled: true,
                     color: Color::srgb(1.0, 0.8, 0.5),
                     ..default()
                 },
@@ -489,7 +489,7 @@ mod tests {
         );
         let pl = world.entity(entity).get::<PointLight>().unwrap();
         assert_eq!(pl.intensity, 12345.0);
-        assert!(pl.shadows_enabled);
+        assert!(pl.shadow_maps_enabled);
     }
 
     #[test]

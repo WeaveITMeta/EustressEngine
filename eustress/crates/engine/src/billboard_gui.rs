@@ -198,7 +198,7 @@ impl BillboardAtlas {
         // Resize the GPU-bound asset. Image::resize extends the data Vec
         // at the END (row-major linear layout grows downward), so
         // existing tile pixel positions are preserved automatically.
-        let Some(image) = images.get_mut(&self.texture) else {
+        let Some(mut image) = images.get_mut(&self.texture) else {
             warn!("🪧 atlas: Image handle not in Assets<Image>, cannot grow");
             return None;
         };
@@ -1106,7 +1106,7 @@ fn upload_atlas_to_gpu(
     if !atlas.dirty {
         return;
     }
-    let Some(image) = images.get_mut(&atlas.texture) else { return };
+    let Some(mut image) = images.get_mut(&atlas.texture) else { return };
     let Some(data) = image.data.as_mut() else { return };
     if data.len() != atlas.cpu_buf.len() {
         data.resize(atlas.cpu_buf.len(), 0);

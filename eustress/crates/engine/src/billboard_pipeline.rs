@@ -117,6 +117,7 @@ use bevy::render::render_resource::{
 use bevy::render::renderer::RenderDevice;
 use bevy::render::sync_world::{MainEntity, RenderEntity};
 use bevy::render::texture::GpuImage;
+use bevy::render::camera::ExtractedCamera; // 0.19: hdr moved off ExtractedView onto ExtractedCamera
 use bevy::render::view::{
     ExtractedView, ViewUniform, ViewUniformOffset, ViewUniforms,
 };
@@ -179,6 +180,11 @@ impl Default for BillboardDepth {
     fn default() -> Self { Self(true) }
 }
 
+// 0.19: ExtractComponent now requires SyncComponent (main->render world sync).
+impl bevy::render::sync_component::SyncComponent for BillboardDepth {
+    type Target = Self;
+}
+
 impl ExtractComponent for BillboardDepth {
     type QueryData = &'static BillboardDepth;
     type QueryFilter = With<Billboard>;
@@ -195,6 +201,10 @@ impl ExtractComponent for BillboardDepth {
 pub struct BillboardLockAxis {
     pub y_axis: bool,
     pub rotation: bool,
+}
+
+impl bevy::render::sync_component::SyncComponent for BillboardLockAxis {
+    type Target = Self;
 }
 
 impl ExtractComponent for BillboardLockAxis {
@@ -537,8 +547,8 @@ impl SpecializedMeshPipeline for BillboardPipeline {
             },
             depth_stencil: Some(DepthStencilState {
                 format: TextureFormat::Depth32Float,
-                depth_write_enabled: false, // never write — don't occlude future draws
-                depth_compare,
+                depth_write_enabled: Some(false), // never write — don't occlude future draws (wgpu 29: now Option<bool>)
+                depth_compare: Some(depth_compare), // wgpu 29: now Option<CompareFunction>
                 stencil: default(),
                 bias: default(),
             }),
@@ -547,7 +557,7 @@ impl SpecializedMeshPipeline for BillboardPipeline {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            push_constant_ranges: vec![],
+            immediate_size: 0, // 0.19: replaced push_constant_ranges (we used none)
             zero_initialize_workgroup_memory: false,
         })
     }
@@ -697,7 +707,7 @@ pub fn queue_billboards(
     pipeline: Res<BillboardPipeline>,
     gpu_images: Res<RenderAssets<GpuImage>>,
     gpu_meshes: Res<RenderAssets<RenderMesh>>,
-    views: Query<(Entity, &ExtractedView, Option<&Msaa>)>,
+    views: Query<(Entity, &ExtractedView, Option<&ExtractedCamera>, Option<&Msaa>)>,
     // All billboards in the render world (from `extract_billboards`).
     // Visibility was already filtered there via `InheritedVisibility`, so
     // every entity here should be drawn. We use `MainEntity` to populate
@@ -719,7 +729,7 @@ pub fn queue_billboards(
     // `create_bind_group` call) and guarantees correctness on resize.
     image_bind_groups.values.clear();
 
-    for (_view_entity, view, msaa) in views.iter() {
+    for (_view_entity, view, extracted_camera, msaa) in views.iter() {
         // Bevy 0.18: `ViewSortedRenderPhases` is keyed by
         // `RetainedViewEntity` (a stable identifier that survives the
         // main→render extract roundtrip), not the render-world Entity.
@@ -749,7 +759,7 @@ pub fn queue_billboards(
                 if lock.y_axis { key |= BillboardPipelineKey::LOCK_Y; }
                 if lock.rotation { key |= BillboardPipelineKey::LOCK_ROTATION; }
             }
-            if view.hdr { key |= BillboardPipelineKey::HDR; }
+            if extracted_camera.map_or(false, |c| c.hdr) { key |= BillboardPipelineKey::HDR; }
 
             let pipeline_id = match pipelines.specialize(&pipeline_cache, &pipeline, key, &gpu_mesh.layout) {
                 Ok(id) => id,
@@ -773,7 +783,13 @@ pub fn queue_billboards(
 
             // Bevy 0.18: `entity` is `(Entity, MainEntity)` and `indexed`
             // is required so phase sorting knows the draw call shape.
-            transparent_phase.add(Transparent3d {
+            // 0.19: SortedRenderPhase::add -> add_transient (per-frame items);
+            // Transparent3d gained `sorting_info` (distance is derived from it).
+            transparent_phase.add_transient(Transparent3d {
+                sorting_info: bevy::core_pipeline::core_3d::TransparentSortingInfo3d::Sorted {
+                    mesh_center: uniform.transform.col(3).truncate(),
+                    depth_bias: 0.0,
+                },
                 pipeline: pipeline_id,
                 entity: (entity, *main_entity),
                 draw_function: draw_billboard,

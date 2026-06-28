@@ -420,7 +420,7 @@ pub fn spawn_point_light(
             intensity: light.brightness, // Lumens — physically based
             range: light.range,
             radius: light.radius, // Spherical area light radius
-            shadows_enabled: light.shadows,
+            shadow_maps_enabled: light.shadows,
             ..default()
         },
         transform,
@@ -449,7 +449,7 @@ pub fn spawn_spot_light(
             range: light.range,
             inner_angle: (light.angle * 0.85).to_radians(),
             outer_angle: light.angle.to_radians(),
-            shadows_enabled: light.shadows,
+            shadow_maps_enabled: light.shadows,
             ..default()
         },
         transform,
@@ -476,7 +476,7 @@ pub fn spawn_surface_light(
             color: light.color,
             intensity: light.brightness * 500.0,
             range: light.range,
-            shadows_enabled: light.shadows,
+            shadow_maps_enabled: light.shadows,
             ..default()
         },
         transform,
@@ -502,7 +502,7 @@ pub fn spawn_directional_light(
         bevy::prelude::DirectionalLight {
             color: light.color,
             illuminance: light.brightness * 10000.0,
-            shadows_enabled: light.shadows,
+            shadow_maps_enabled: light.shadows,
             shadow_depth_bias: light.shadow_depth_bias,
             shadow_normal_bias: light.shadow_normal_bias,
             ..default()
@@ -1018,7 +1018,7 @@ pub fn spawn_text_label_ui(
         UiText::new(label.text.clone()),
         bevy::text::TextColor(text_color),
         bevy::text::TextFont {
-            font_size: label.font_size,
+            font_size: bevy::text::FontSize::Px(label.font_size),
             ..default()
         },
         ui::widget::Label, // Marker for non-interactive text
@@ -1124,7 +1124,7 @@ pub fn spawn_text_button(
         UiText::new(button.text.clone()),
         bevy::text::TextColor(text_color),
         bevy::text::TextFont {
-            font_size: button.font_size,
+            font_size: bevy::text::FontSize::Px(button.font_size),
             ..default()
         },
     )).id()
@@ -1231,7 +1231,7 @@ pub fn spawn_text_box(
         UiText::new(text_box.text.clone()),
         bevy::text::TextColor(text_color),
         bevy::text::TextFont {
-            font_size: text_box.font_size,
+            font_size: bevy::text::FontSize::Px(text_box.font_size),
             ..default()
         },
         // Marker for text input handling

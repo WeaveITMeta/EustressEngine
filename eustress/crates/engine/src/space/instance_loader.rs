@@ -2140,7 +2140,7 @@ pub fn spawn_instance(
         
         // Load mesh and material directly instead of using SceneRoot (avoids unregistered type panic)
         let mesh_path = format!("space://{}#Mesh0/Primitive0", relative_mesh_path);
-        let material_path = format!("space://{}#Material0", relative_mesh_path);
+        let material_path = format!("space://{}#Material0/std", relative_mesh_path);
         debug!("🔧 Loading mesh from: {} (absolute: {:?}, space_root: {:?})", mesh_path, absolute_mesh_path, space_root);
         // PERF: pin the custom mesh handle in the resident cache so streaming
         // evict never drops the last strong ref (which would free the GPU slab

@@ -262,7 +262,7 @@ fn main() {
                 ..default()
             })
             .set(RenderPlugin {
-                render_creation: bevy::render::settings::RenderCreation::Automatic(
+                render_creation: bevy::render::settings::RenderCreation::Automatic(Box::new(
                     bevy::render::settings::WgpuSettings {
                         // Request discrete GPU (NVIDIA/AMD) over integrated
                         power_preference: bevy::render::settings::PowerPreference::HighPerformance,
@@ -270,7 +270,7 @@ fn main() {
                         backends: Some(bevy::render::settings::Backends::all()),
                         ..default()
                     }
-                ),
+                )), // 0.19: RenderCreation::Automatic now takes Box<WgpuSettings>
                 // Compile all shader pipelines synchronously to prevent mid-session
                 // GPU pipeline stall stutters (750ms spikes visible in frame diagnostics)
                 synchronous_pipeline_compilation: true,

@@ -367,7 +367,7 @@ pub mod handlers {
             )> = SystemState::new(world);
             let outcome = {
                 let (mut commands, asset_server, mut materials, mut material_registry, mut mesh_cache, space_root, services) =
-                    state.get_mut(world);
+                    state.get_mut(world).unwrap(); // 0.19: SystemState::get_mut now returns Result
                 match services
                     .iter()
                     .find(|(_, s)| s.class_name == "Workspace")

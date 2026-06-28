@@ -248,7 +248,7 @@ fn pulse_ghost_preview_alpha(
     let Some(mats_res) = mats_res else { return };
     let t = time.elapsed_secs();
     let alpha = 0.40 + 0.10 * (t * std::f32::consts::TAU * 1.5).sin();
-    if let Some(m) = materials.get_mut(&mats_res.ghost_preview) {
+    if let Some(mut m) = materials.get_mut(&mats_res.ghost_preview) {
         m.base_color.set_alpha(alpha);
     }
 }

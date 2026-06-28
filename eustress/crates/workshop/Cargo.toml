@@ -44,7 +44,7 @@ rumqttc = { version = "0.24", optional = true }
 # Bevy ECS integration for 3D digital twin Space
 # Each .tool.toml spawns as an instanced mesh entity with a ToolComponent
 # Note: bevy_ecs, bevy_app, bevy_transform, bevy_reflect are always included in Bevy 0.18
-bevy = { version = "0.18", default-features = false, features = [
+bevy = { version = "0.19", default-features = false, features = [
     "bevy_log",
     "bevy_asset",
 ], optional = true }

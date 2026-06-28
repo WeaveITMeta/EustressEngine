@@ -167,7 +167,7 @@ fn spawn_tool_entities(
         let mesh_path = tool.mesh.mesh_path.clone();
         if !mesh_path.is_empty() && mesh_path != "assets/models/tools/generic_tool.glb" {
             commands.spawn((
-                SceneRoot(asset_server.load(format!("{}#Scene0", mesh_path))),
+                WorldAssetRoot(asset_server.load(format!("{}#Scene0", mesh_path))),
                 transform,
                 tool_component,
                 Name::new(format!("Tool: {}", tool.name)),

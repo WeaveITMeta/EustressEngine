@@ -78,7 +78,7 @@ eustress-geo = { path = "../geo" }
 # eustress-networking = { path = "../common/eustress-networking", features = ["server", "client", "physics"] }
 
 # bevy_shader provides ShaderRef, used in MaterialExtension implementations (Bevy 0.18)
-bevy_shader = { version = "0.18", default-features = false }
+bevy_shader = { version = "0.19", default-features = false }
 
 # Workspace dependencies (Bevy 0.18). `debug` enabled so B0001 query-
 # conflict panics report system + type names — essential when iterating
@@ -124,7 +124,7 @@ bevy = { workspace = true, default-features = false, features = [
 #      broader `bevy/trace`, which turns on the `profiling` CRATE's tracing
 #      backend workspace-wide and fails to compile rbx_binary
 #      (Ustr: !tracing::Value) + rav1e. Unifies with the bevy_ecs `bevy` pulls.
-bevy_ecs = { version = "0.18", default-features = false, features = ["trace"] }
+bevy_ecs = { version = "0.19", default-features = false, features = ["trace"] }
 # Slint UI (software renderer + FemtoVG OpenGL GPU renderer)
 slint = { workspace = true }
 # CEF webview for browser tabs (macOS only currently)

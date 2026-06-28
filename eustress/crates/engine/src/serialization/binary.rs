@@ -1352,7 +1352,7 @@ pub fn save_binary_scene(
                 color: light.color,
                 brightness: light.intensity,
                 range: light.range,
-                shadows: light.shadows_enabled,
+                shadows: light.shadow_maps_enabled,
                 angle: 0.0,
                 direction: Vec3::ZERO,
                 enabled: true,
@@ -1366,7 +1366,7 @@ pub fn save_binary_scene(
                 color: light.color,
                 brightness: light.intensity,
                 range: light.range,
-                shadows: light.shadows_enabled,
+                shadows: light.shadow_maps_enabled,
                 angle: light.outer_angle,
                 direction: transform.forward().as_vec3(),
                 enabled: true,
@@ -1380,7 +1380,7 @@ pub fn save_binary_scene(
                 color: light.color,
                 brightness: light.illuminance,
                 range: f32::INFINITY,
-                shadows: light.shadows_enabled,
+                shadows: light.shadow_maps_enabled,
                 angle: 0.0,
                 direction: transform.forward().as_vec3(),
                 enabled: true,
@@ -2124,7 +2124,7 @@ pub fn load_binary_scene_to_world(
                                 color: light.color,
                                 intensity: light.brightness * 1000.0,
                                 range: light.range,
-                                shadows_enabled: light.shadows,
+                                shadow_maps_enabled: light.shadows,
                                 ..Default::default()
                             };
                             
@@ -2150,7 +2150,7 @@ pub fn load_binary_scene_to_world(
                                 color: light.color,
                                 intensity: light.brightness * 1000.0,
                                 range: light.range,
-                                shadows_enabled: light.shadows,
+                                shadow_maps_enabled: light.shadows,
                                 outer_angle: light.angle,
                                 ..Default::default()
                             };
@@ -2176,7 +2176,7 @@ pub fn load_binary_scene_to_world(
                             let dir_light = DirectionalLight {
                                 color: light.color,
                                 illuminance: light.brightness,
-                                shadows_enabled: light.shadows,
+                                shadow_maps_enabled: light.shadows,
                                 ..Default::default()
                             };
                             

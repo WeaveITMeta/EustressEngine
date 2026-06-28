@@ -72,7 +72,7 @@ pub fn studio_camera_bundle(name: &str, transform: Transform) -> impl Bundle {
 fn diagnose_scene_once(
     cameras: Query<(Entity, &Transform, &Camera), With<Camera3d>>,
     meshes: Query<(Entity, &Transform, Option<&Name>), With<Mesh3d>>,
-    scene_roots: Query<(Entity, &SceneRoot, Option<&Name>, &Transform)>,
+    scene_roots: Query<(Entity, &WorldAssetRoot, Option<&Name>, &Transform)>,
     instances: Query<(Entity, &eustress_common::classes::Instance)>,
     children_query: Query<&Children>,
     all_entities: Query<(Entity, Option<&Name>)>,

@@ -250,7 +250,7 @@ fn build_panel(
                 Text::new(prompt),
                 TextColor(Color::WHITE),
                 TextFont {
-                    font_size: 16.0,
+                    font_size: bevy::text::FontSize::Px(16.0),
                     ..default()
                 },
                 DialogPromptText,
@@ -287,7 +287,7 @@ fn spawn_choice_button(
                 Text::new(label.to_string()),
                 TextColor(Color::srgb(0.85, 0.9, 1.0)),
                 TextFont {
-                    font_size: 14.0,
+                    font_size: bevy::text::FontSize::Px(14.0),
                     ..default()
                 },
             ));

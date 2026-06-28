@@ -231,7 +231,7 @@ pub fn spawn_skinned_character(
     
     // Load and spawn the GLTF scene as a child
     let scene_path = format!("{}#{}", model.asset_path(), model.scene_label());
-    let scene_handle: Handle<Scene> = asset_server.load(scene_path);
+    let scene_handle: Handle<WorldAsset> = asset_server.load(scene_path);
     
     // Y-Bot/X-Bot models have origin at feet, so offset mesh down to align with capsule bottom
     // Capsule center is at character_height/2, so mesh needs to go down by capsule_half_height + capsule_radius
@@ -242,7 +242,7 @@ pub fn spawn_skinned_character(
     let rotation_fix = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
     
     let scene_entity = commands.spawn((
-        SceneRoot(scene_handle),
+        WorldAssetRoot(scene_handle),
         Transform::from_scale(Vec3::splat(scale))
             .with_rotation(rotation_fix)
             .with_translation(Vec3::Y * mesh_offset),

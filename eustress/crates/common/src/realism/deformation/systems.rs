@@ -291,7 +291,7 @@ pub fn update_mesh_vertices(
         }
         
         // Now get mutable reference to deformed mesh and update it
-        let Some(mesh) = meshes.get_mut(&deform_mesh.deformed_mesh) else {
+        let Some(mut mesh) = meshes.get_mut(&deform_mesh.deformed_mesh) else {
             continue;
         };
         

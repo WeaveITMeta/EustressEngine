@@ -41,8 +41,8 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-# Core Bevy 0.18 (uses wgpu 28 for Slint GPU renderer compatibility)
-bevy = { version = "0.18", default-features = false }
+# Core Bevy 0.19 (wgpu 29.0.3, MSRV 1.95, edition 2024 upstream) — see docs/architecture/BEVY_019_MIGRATION.md
+bevy = { version = "0.19", default-features = false }
 
 # UI - Slint from git with software renderer + FemtoVG GPU renderer (OpenGL)
 # NOTE: renderer-femtovg-wgpu would share Bevy's wgpu device, but Slint master targets wgpu 28
@@ -75,11 +75,11 @@ bincode = "1.3"
 
 # P2P & CRDTs for Persistent Distributed Worlds
 loro = "1.4"  # High-perf CRDT library
-bevy_quinnet = "0.14"  # QUIC client/server for P2P (Bevy 0.19 compatible)
+bevy_quinnet = "0.14"  # QUIC P2P — NO bevy-0.19 release yet (0.14=bevy0.15); de-fused by dropping the client `p2p` feature until upstream ships 0.19
 quinn = "0.11"  # Underlying QUIC transport
 
-# Physics (Avian 0.6.0 — crates.io release, Bevy 0.18 compatible)
-avian3d = { version = "0.6", default-features = false, features = ["3d", "f32", "parry-f32", "debug-plugin", "parallel", "collider-from-mesh", "bevy_scene", "xpbd_joints"] }
+# Physics (Avian 0.7.0 — crates.io release 2026-06-20, Bevy 0.19 compatible)
+avian3d = { version = "0.7", default-features = false, features = ["3d", "f32", "parry-f32", "debug-plugin", "parallel", "collider-from-mesh", "bevy_scene", "xpbd_joints"] }
 
 # Luau scripting runtime (Roblox Luau via mlua)
 mlua = { version = "0.10", features = ["luau", "serialize", "send"] }

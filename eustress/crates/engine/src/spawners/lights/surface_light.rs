@@ -168,7 +168,7 @@ impl ClassSpawner for SurfaceLightSpawner {
                     color,
                     intensity: brightness * AREA_LIGHT_BRIGHTNESS_SCALE,
                     range,
-                    shadows_enabled: shadows,
+                    shadow_maps_enabled: shadows,
                     ..default()
                 },
                 light_transform,
@@ -301,7 +301,7 @@ impl ClassSpawner for SurfaceLightSpawner {
                 pl.color = new_color;
                 pl.intensity = new_brightness * AREA_LIGHT_BRIGHTNESS_SCALE;
                 pl.range = new_range;
-                pl.shadows_enabled = new_shadows;
+                pl.shadow_maps_enabled = new_shadows;
             }
             // Sync the emissive material color. Two-step: first read
             // the handle, then mutate the underlying material; the
@@ -316,7 +316,7 @@ impl ClassSpawner for SurfaceLightSpawner {
                 if let Some(mut materials) =
                     world.get_resource_mut::<Assets<StandardMaterial>>()
                 {
-                    if let Some(mat) = materials.get_mut(&handle) {
+                    if let Some(mut mat) = materials.get_mut(&handle) {
                         mat.base_color = new_color;
                         mat.emissive = new_color.to_linear() * new_brightness;
                     }

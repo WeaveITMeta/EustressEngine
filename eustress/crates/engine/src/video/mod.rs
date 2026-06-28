@@ -111,7 +111,7 @@ fn attach_pending_video_players(
         // material. Reusing the material handle (rather than minting
         // a new one) preserves the colour tint / transparency /
         // alpha-mode the file_loader already set on it.
-        if let Some(mat) = materials.get_mut(&material_handle.0) {
+        if let Some(mut mat) = materials.get_mut(&material_handle.0) {
             mat.base_color_texture = Some(player.texture.clone());
             // Switch off the placeholder emissive — the texture now
             // carries colour information of its own.
@@ -280,7 +280,7 @@ fn pump_video_frames(
             continue;
         };
 
-        let Some(image) = images.get_mut(&texture) else { continue };
+        let Some(mut image) = images.get_mut(&texture) else { continue };
         if let Some(data) = image.data.as_mut() {
             data[..expected_len].copy_from_slice(&bytes_owned[..expected_len]);
         }
