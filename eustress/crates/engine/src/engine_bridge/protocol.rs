@@ -173,6 +173,10 @@ pub enum MethodName {
     EntityPromote,
     /// Phase 3.5 — fold a bare, artifact-free FileSystem entity back to binary.
     EntityDemote,
+    /// Tail the causal op-log (Phase 1, Way 8) — the most recent N mutation
+    /// records (create/delete with provenance) as serde views. The AI's
+    /// "what changed, in order, and why" read surface. Read-only.
+    OplogTail,
     Unknown(String),
 }
 
@@ -206,6 +210,7 @@ where
         "entity.remove_tag" => MethodName::EntityRemoveTag,
         "entity.promote" => MethodName::EntityPromote,
         "entity.demote" => MethodName::EntityDemote,
+        "oplog.tail" => MethodName::OplogTail,
         _ => MethodName::Unknown(s),
     })
 }
@@ -225,6 +230,39 @@ pub mod handlers {
             req.id.clone(),
             serde_json::json!({ "pong": true, "engine": "eustress" }),
         )
+    }
+
+    /// Tail the causal op-log — the most recent `limit` mutation records
+    /// (default 50, capped 1000), oldest-first, as serde `MutationView`s. No
+    /// World access (reads the active-DB op-log static). Read-only.
+    pub fn oplog_tail(req: &BridgeRequest) -> BridgeResponse {
+        #[cfg(not(feature = "world-db"))]
+        {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("oplog.tail: world-db disabled"),
+            );
+        }
+        #[cfg(feature = "world-db")]
+        {
+            let limit = req
+                .params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.min(1000) as usize)
+                .unwrap_or(50);
+            let views = crate::space::active_db::tail_mutations(limit);
+            match serde_json::to_value(&views) {
+                Ok(json) => BridgeResponse::ok(
+                    req.id.clone(),
+                    serde_json::json!({ "count": views.len(), "mutations": json }),
+                ),
+                Err(e) => BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::internal(format!("oplog.tail serialize: {e}")),
+                ),
+            }
+        }
     }
 
     // ── Binary-ECS entity CRUD (Phase 3 — AI-on-binary) ──────────────────

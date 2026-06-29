@@ -478,6 +478,28 @@ mod imp {
             .unwrap_or_default()
     }
 
+    /// Tail the causal op-log: the most recent `limit` mutation records,
+    /// oldest-first, projected to the serde read view. Empty when no DB is
+    /// active. The read surface behind the bridge `oplog.tail` method.
+    pub fn tail_mutations(limit: usize) -> Vec<eustress_worlddb::MutationView> {
+        let Ok(g) = ACTIVE.read() else {
+            return Vec::new();
+        };
+        let Some(a) = g.as_ref() else {
+            return Vec::new();
+        };
+        let all = a.db.iter_mutations(0, u64::MAX).unwrap_or_default();
+        let start = all.len().saturating_sub(limit);
+        all[start..]
+            .iter()
+            .filter_map(|(seq, bytes)| {
+                eustress_worlddb::decode_mutation(bytes)
+                    .ok()
+                    .map(|rec| eustress_worlddb::MutationView::from_record(*seq, &rec))
+            })
+            .collect()
+    }
+
     /// Region scan for camera-locality streaming: cores whose Morton cell
     /// lies in the inclusive cell box. Empty when no DB is active.
     pub fn iter_instance_cores_in_region(
