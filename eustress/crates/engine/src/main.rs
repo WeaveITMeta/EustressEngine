@@ -678,6 +678,14 @@ fn main() {
         // writing eustress_profile.{txt,svg}.
         .add_plugins(profiler::ProfilerPlugin);
 
+    // Gaussian Splatting / radiance-field rendering (battle plan:
+    // docs/architecture/GAUSSIAN_SPLATTING_BATTLE_PLAN.md, Phase 0). Gated by the
+    // default-off `gaussian-splatting` feature so the everyday editor build is
+    // unaffected; wraps `bevy_gaussian_splatting` behind `eustress-radiance`.
+    // Activate with `--features gaussian-splatting`.
+    #[cfg(feature = "gaussian-splatting")]
+    app.add_plugins(eustress_radiance::RadiancePlugin);
+
     // WorldDb — Fjall-backed authoritative ECS store (2026-05-15 binary
     // pivot; memory project_eustress_binary_pivot). Gated by the
     // `world-db` feature so the engine still boots on TOML when the

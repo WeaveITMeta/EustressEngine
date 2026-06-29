@@ -193,6 +193,11 @@ eustress-data = { path = "../data", optional = true }
 # Data Platform bridge (P1d/P2): Frame <-> datasets/timeseries partitions + the
 # Recorder. Optional; pulled by the `data` feature only.
 eustress-data-store = { path = "../data-store", optional = true }
+# Radiance-field (Gaussian Splatting) rendering — wraps bevy_gaussian_splatting
+# behind a stable API. Optional + OFF by default (NOT in `core`): the everyday
+# editor build must not pull the splat render pipeline. Pulled by the
+# `gaussian-splatting` feature. See GAUSSIAN_SPLATTING_BATTLE_PLAN.md.
+eustress-radiance = { path = "../radiance", optional = true }
 # Roblox place importer (Wave 4/6) — File→Import→Roblox Place + drag-drop
 # call eustress_roblox_import::import_into_space.
 eustress-roblox-import = { path = "../roblox-import" }
@@ -391,6 +396,11 @@ sim-orchestration = ["dep:eustress-forge", "world-db"]
 # `cargo run -p eustress-engine --features data`. The `data-graph-purity` CI
 # guard fails the build if this ever leaks into the default feature graph.
 data = ["dep:eustress-data", "eustress-data/parquet", "eustress-data/import", "eustress-data/spectral", "dep:eustress-data-store"]
+# Gaussian Splatting / radiance-field rendering (GAUSSIAN_SPLATTING_BATTLE_PLAN.md
+# Phase 0). OPT-IN, NOT in `core`/`default`: pulls `eustress-radiance` →
+# `bevy_gaussian_splatting` (GPU splat pipeline). Keep out of the everyday build
+# until validated. Activate with `cargo run -p eustress-engine --features gaussian-splatting`.
+gaussian-splatting = ["dep:eustress-radiance"]
 # Legacy TOML write-back authoring path. OPT-IN since 2026-05-15 —
 # the default build no longer writes `_instance.toml` on edit;
 # persistence goes to `world.fjalldb/`. Turn this on to restore the

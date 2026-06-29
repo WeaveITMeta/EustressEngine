@@ -1,0 +1,10 @@
+[package]
+name = "eustress-ppisp"
+version = "0.1.0"
+edition = "2021"
+description = "Physically-Plausible ISP (PPISP) — differentiable post-render photometric correction (exposure / vignette / color / CRF) for radiance-field capture. Pure-Rust port of nv-tlabs/ppisp. See docs/architecture/PPISP_RUST_PORT_PROPOSAL.md."
+
+[dependencies]
+# Intentionally dependency-free for now: this is the CPU reference oracle
+# (PPISP_RUST_PORT_PROPOSAL.md §5.a `reference/`). glam/wgpu/burn arrive when the
+# GPU path and controller land.

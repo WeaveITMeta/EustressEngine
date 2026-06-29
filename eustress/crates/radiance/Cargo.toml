@@ -1,0 +1,28 @@
+[package]
+name = "eustress-radiance"
+version = "0.1.0"
+edition = "2021"
+description = "Radiance-field (Gaussian Splatting) rendering for Eustress — wraps bevy_gaussian_splatting behind a stable, engine-facing API. See docs/architecture/GAUSSIAN_SPLATTING_BATTLE_PLAN.md."
+
+[dependencies]
+# Core Bevy facade. `bevy_asset` so we can hold Handles / use AssetServer in the
+# spawn helper; the rest of the render/asset features arrive transitively from
+# bevy_gaussian_splatting and (in the engine build) from the engine crate.
+bevy = { workspace = true, default-features = false, features = ["bevy_asset"] }
+
+# Upstream Gaussian-Splatting render pipeline. v8.x == Bevy 0.19 + wgpu 29.
+# default-features = false + NO `nightly_generic_alias` so this builds on the
+# repo's pinned STABLE toolchain (the crate's defaults require nightly GATs).
+# Feature set mirrors the upstream `headless` preset (known stable-safe) plus
+# `file_asset` for loading local `file://` clouds.
+bevy_gaussian_splatting = { version = "8", default-features = false, features = [
+    "io_ply",          # .ply loader (ply-rs)
+    "io_flexbuffers",  # native .gcloud loader
+    "planar",          # planar (structure-of-arrays) cloud storage
+    "buffer_storage",  # storage-buffer render path (not texture)
+    "sh3",             # spherical harmonics degree 3 (full view-dependent color)
+    "sort_radix",      # GPU radix depth sort (production)
+    "sort_std",        # CPU fallback sort
+    "sort_rayon",      # CPU multithreaded sort
+    "file_asset",      # load clouds from file:// paths
+] }
