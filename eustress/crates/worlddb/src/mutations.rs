@@ -92,6 +92,64 @@ pub fn decode_mutation(bytes: &[u8]) -> Result<MutationRecord> {
         .map_err(|e| Error::Archive(format!("rkyv decode MutationRecord: {e}")))
 }
 
+/// serde-native, AI-readable view of one op-log entry (`seq` from the partition
+/// key + the decoded [`MutationRecord`]). `before`/`after` collapse to presence
+/// flags — the raw rkyv core bytes are not useful over JSON; the causal SHAPE
+/// (op / class / uuid / actor / reason / time) is. This is what the planned
+/// `oplog.tail` bridge/MCP read surface returns. (serde derives are fully
+/// qualified because this module's `Serialize`/`Deserialize` are rkyv's.)
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct MutationView {
+    pub seq: u64,
+    pub tx_id: u64,
+    pub ts_nanos: u64,
+    /// "User" | "Script:<name>" | "Mcp:<tool>" | "Importer" | "FileWatcher" | "System".
+    pub actor: String,
+    /// "Create" | "Update" | "Delete".
+    pub op: String,
+    pub class: String,
+    pub uuid: String,
+    pub rel_path: Option<String>,
+    pub has_before: bool,
+    pub has_after: bool,
+    pub parent_tx: Option<u64>,
+    pub reason: Option<String>,
+}
+
+impl MutationView {
+    /// Project an op-log entry (`seq` + record) into the serde read view.
+    pub fn from_record(seq: u64, r: &MutationRecord) -> Self {
+        let actor = match &r.actor {
+            MutationActor::User => "User".to_string(),
+            MutationActor::Script(s) => format!("Script:{s}"),
+            MutationActor::Mcp(s) => format!("Mcp:{s}"),
+            MutationActor::Importer => "Importer".to_string(),
+            MutationActor::FileWatcher => "FileWatcher".to_string(),
+            MutationActor::System => "System".to_string(),
+        };
+        let op = match r.op {
+            MutationOp::Create => "Create",
+            MutationOp::Update => "Update",
+            MutationOp::Delete => "Delete",
+        }
+        .to_string();
+        MutationView {
+            seq,
+            tx_id: r.tx_id,
+            ts_nanos: r.ts_nanos,
+            actor,
+            op,
+            class: r.class_name.clone(),
+            uuid: r.uuid.clone(),
+            rel_path: r.rel_path.clone(),
+            has_before: r.before.is_some(),
+            has_after: r.after.is_some(),
+            parent_tx: r.parent_tx,
+            reason: r.reason.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +184,31 @@ mod tests {
         };
         let back2 = decode_mutation(&encode_mutation(&del).unwrap()).unwrap();
         assert_eq!(del, back2);
+    }
+
+    #[test]
+    fn mutation_view_projects_and_json_round_trips() {
+        let rec = MutationRecord {
+            tx_id: 7,
+            ts_nanos: 123,
+            actor: MutationActor::Mcp("create_entity".into()),
+            op: MutationOp::Delete,
+            class_name: "Part".into(),
+            uuid: "u-9".into(),
+            rel_path: Some("Workspace/Foo".into()),
+            before: Some(vec![1, 2]),
+            after: None,
+            parent_tx: Some(6),
+            reason: Some("undo".into()),
+        };
+        let v = MutationView::from_record(42, &rec);
+        assert_eq!(v.seq, 42);
+        assert_eq!(v.actor, "Mcp:create_entity");
+        assert_eq!(v.op, "Delete");
+        assert_eq!(v.class, "Part");
+        assert!(v.has_before && !v.has_after);
+        let json = serde_json::to_string(&v).unwrap();
+        let back: MutationView = serde_json::from_str(&json).unwrap();
+        assert_eq!(v, back);
     }
 }

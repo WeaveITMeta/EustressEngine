@@ -72,7 +72,7 @@ pub use rkyv_values::{
     decode_transform, encode_eusvalue, encode_instance_core, encode_transform,
 };
 pub use mutations::{
-    decode_mutation, encode_mutation, MutationActor, MutationOp, MutationRecord,
+    decode_mutation, encode_mutation, MutationActor, MutationOp, MutationRecord, MutationView,
 };
 pub use projection::{EntitySnapshot, TransformSnapshot, WorldSnapshot};
 pub use schema::{ClassSchemaVersion, SchemaMigration, SchemaMigrationRegistry};
