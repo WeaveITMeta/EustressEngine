@@ -184,6 +184,101 @@ impl ToolHandler for OplogTailTool {
 }
 
 // ---------------------------------------------------------------------------
+
+pub struct SimStepTool;
+
+impl ToolHandler for SimStepTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "sim_step",
+            description: "Deterministically advance the LIVE engine's physics simulation by N fixed-timestep ticks (1 tick = 1/60s), then return — the POMDP control primitive (observe -> act -> STEP -> observe). Pause the sim first (pause_simulation) so ONLY these steps advance the world; then sim_step(ticks) advances physics by exactly that many ticks, wall-clock-independent and reproducible. After stepping, read the new state with inspect_scene. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ticks": { "type": "integer", "description": "Number of 1/60s fixed ticks to advance (default 1, max 10000)." }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = serde_json::Map::new();
+        if let Some(v) = input.get("ticks") {
+            if !v.is_null() {
+                params.insert("ticks".to_string(), v.clone());
+            }
+        }
+        match call_engine(&ctx.universe_root, "sim.step", Value::Object(params)) {
+            Ok(result) => {
+                let stepped = result.get("stepped").and_then(|v| v.as_u64()).unwrap_or(0);
+                let secs = result.get("sim_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let summary = format!(
+                    "stepped {stepped} fixed tick(s) ({secs:.3}s sim time); read inspect_scene for the new state"
+                );
+                ok("sim_step", summary, result)
+            }
+            Err(e) => fail("sim_step", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+pub struct SceneRaycastTool;
+
+impl ToolHandler for SceneRaycastTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "scene_raycast",
+            description: "Cast a world-space ray against the LIVE engine's Avian colliders and return the hits (entity / name / distance / point), nearest first — the POMDP 'sense' primitive. Supply `origin` [x,y,z] and `direction` [x,y,z] (default straight down); optional `max_distance`, `max_hits`. Requires the engine running. Read-only.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "origin": { "type": "array", "items": {"type":"number"}, "description": "Ray origin [x,y,z] in meters (default [0,0,0])." },
+                    "direction": { "type": "array", "items": {"type":"number"}, "description": "Ray direction [x,y,z] (need not be normalized; default [0,-1,0])." },
+                    "max_distance": { "type": "number", "description": "Max ray length in meters (default 1000)." },
+                    "max_hits": { "type": "integer", "description": "Max hits to return (default 8, max 256)." }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = serde_json::Map::new();
+        for key in ["origin", "direction", "max_distance", "max_hits"] {
+            if let Some(v) = input.get(key) {
+                if !v.is_null() {
+                    params.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+        match call_engine(&ctx.universe_root, "scene.raycast", Value::Object(params)) {
+            Ok(result) => {
+                let n = result.get("hit_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mut lines = Vec::new();
+                if let Some(arr) = result.get("hits").and_then(|v| v.as_array()) {
+                    for h in arr.iter().take(10) {
+                        let name = h.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                        let dist = h.get("distance").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let ent = h.get("entity").and_then(|v| v.as_str()).unwrap_or("?");
+                        lines.push(format!("  {name} ({ent}) @ {dist:.3}m"));
+                    }
+                }
+                let summary = format!("{n} hit(s):\n{}", lines.join("\n"));
+                ok("scene_raycast", summary, result)
+            }
+            Err(e) => fail("scene_raycast", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // equip_tool  ->  tool.equip
 // ---------------------------------------------------------------------------
 

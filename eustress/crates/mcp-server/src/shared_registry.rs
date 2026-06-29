@@ -37,6 +37,10 @@ fn registry() -> &'static ToolRegistry {
         r.register(crate::bridge_tools::CaptureViewportTool);
         // Causal op-log read surface (Phase 1, Way 8) — the AI's audit trail.
         r.register(crate::bridge_tools::OplogTailTool);
+        // POMDP control primitive (Phase 2) — deterministic stepped simulation.
+        r.register(crate::bridge_tools::SimStepTool);
+        // POMDP sense primitive (Phase 2) — world-space raycast.
+        r.register(crate::bridge_tools::SceneRaycastTool);
         // Independent AI camera — the AI's own off-screen eyes.
         r.register(crate::bridge_tools::AiCameraSetPoseTool);
         r.register(crate::bridge_tools::AiCameraOrbitTool);
@@ -83,6 +87,8 @@ pub const BRIDGE_TOOL_NAMES: &[&str] = &[
     "invoke_action",
     "capture_viewport",
     "oplog_tail",
+    "sim_step",
+    "scene_raycast",
     "ai_camera_set_pose",
     "ai_camera_orbit",
     "ai_camera_frame",

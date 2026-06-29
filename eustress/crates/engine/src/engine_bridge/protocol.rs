@@ -177,6 +177,13 @@ pub enum MethodName {
     /// records (create/delete with provenance) as serde views. The AI's
     /// "what changed, in order, and why" read surface. Read-only.
     OplogTail,
+    /// Deterministically advance the fixed-timestep simulation by N ticks
+    /// (the POMDP control primitive). Unpauses physics for exactly those
+    /// ticks, drives FixedMain manually (wall-clock-independent), restores.
+    SimStep,
+    /// Cast a world-space ray against live Avian colliders — the POMDP "sense"
+    /// primitive. Returns hits (entity / name / distance / point), nearest first.
+    Raycast,
     Unknown(String),
 }
 
@@ -211,6 +218,8 @@ where
         "entity.promote" => MethodName::EntityPromote,
         "entity.demote" => MethodName::EntityDemote,
         "oplog.tail" => MethodName::OplogTail,
+        "sim.step" => MethodName::SimStep,
+        "scene.raycast" => MethodName::Raycast,
         _ => MethodName::Unknown(s),
     })
 }
@@ -263,6 +272,142 @@ pub mod handlers {
                 ),
             }
         }
+    }
+
+    /// Deterministically advance the fixed-timestep simulation by `ticks` fixed
+    /// updates (default 1, capped 10000), then return — the POMDP control
+    /// primitive. Drives the sim with the SAME manual loop the determinism test
+    /// uses (advance `Time<Fixed>` + run `FixedMain`), so the advance is
+    /// wall-clock-independent and reproducible. Avian physics is unpaused for the
+    /// pumps and then LEFT PAUSED: `sim.step` is "stepped mode" — the world only
+    /// advances on an explicit step. Resume free-running via play / run_simulation.
+    pub fn sim_step(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        // `pause`/`unpause`/`is_paused` on `Time<Physics>` come from an Avian
+        // trait (same import `play_mode.rs` relies on).
+        use avian3d::prelude::*;
+        let ticks = req
+            .params
+            .get("ticks")
+            .and_then(|v| v.as_u64())
+            .map(|n| n.min(10_000))
+            .unwrap_or(1);
+        let dt = std::time::Duration::from_secs_f64(1.0 / 60.0);
+
+        // Unpause Avian physics so the manual FixedMain pumps advance dynamics
+        // (Edit mode keeps it paused). Best-effort — resource present once
+        // avian3d is loaded.
+        if let Some(mut pt) = world.get_resource_mut::<Time<avian3d::prelude::Physics>>() {
+            pt.unpause();
+        }
+        for _ in 0..ticks {
+            if let Some(mut fixed) = world.get_resource_mut::<Time<bevy::time::Fixed>>() {
+                fixed.advance_by(dt);
+            }
+            world.run_schedule(bevy::app::FixedMain);
+        }
+        // Leave physics PAUSED so the world is frozen between steps (stepped mode).
+        if let Some(mut pt) = world.get_resource_mut::<Time<avian3d::prelude::Physics>>() {
+            pt.pause();
+        }
+
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({
+                "stepped": ticks,
+                "sim_seconds": ticks as f64 / 60.0,
+            }),
+        )
+    }
+
+    /// Cast a world-space ray (origin + direction, default straight down)
+    /// against the live Avian colliders and return the hits — the POMDP "sense"
+    /// primitive. Same physics raycast the editor's click-selection uses
+    /// (`part_selection`), but with an agent-supplied ray. Read-only.
+    pub fn raycast(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        use avian3d::prelude::{SpatialQuery, SpatialQueryFilter};
+        use bevy::ecs::system::SystemState;
+
+        // Inline vec3 parse — `param_vec3` is world-db-gated; raycast is not.
+        let parse3 = |key: &str, default: [f32; 3]| -> [f32; 3] {
+            req.params
+                .get(key)
+                .and_then(|v| v.as_array())
+                .and_then(|a| {
+                    if a.len() >= 3 {
+                        Some([
+                            a[0].as_f64()? as f32,
+                            a[1].as_f64()? as f32,
+                            a[2].as_f64()? as f32,
+                        ])
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(default)
+        };
+        let origin = parse3("origin", [0.0, 0.0, 0.0]);
+        let direction = parse3("direction", [0.0, -1.0, 0.0]);
+        let max_distance = req
+            .params
+            .get("max_distance")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1000.0) as f32;
+        let max_hits = req
+            .params
+            .get("max_hits")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(8)
+            .min(256) as u32;
+
+        let dir_vec = bevy::math::Vec3::new(direction[0], direction[1], direction[2]);
+        let Ok(dir) = bevy::math::Dir3::new(dir_vec) else {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("raycast: direction must be non-zero and finite"),
+            );
+        };
+        let origin_vec = bevy::math::Vec3::new(origin[0], origin[1], origin[2]);
+
+        let mut state: SystemState<(SpatialQuery, Query<&Name>)> = SystemState::new(world);
+        // 0.19: SystemState::get returns Result; these params are always valid.
+        let (spatial, names) = state.get(world).unwrap();
+        let hits = spatial.ray_hits(
+            origin_vec,
+            dir,
+            max_distance,
+            max_hits,
+            true,
+            &SpatialQueryFilter::default(),
+        );
+
+        let mut hit_json: Vec<serde_json::Value> = hits
+            .iter()
+            .map(|h| {
+                let point = origin_vec + *dir * h.distance;
+                let name = names.get(h.entity).ok().map(|n| n.as_str().to_string());
+                serde_json::json!({
+                    "entity": format!("{}v{}", h.entity.index(), h.entity.generation()),
+                    "name": name,
+                    "distance": h.distance,
+                    "point": [point.x, point.y, point.z],
+                })
+            })
+            .collect();
+        hit_json.sort_by(|a, b| {
+            let da = a.get("distance").and_then(|v| v.as_f64()).unwrap_or(f64::MAX);
+            let db = b.get("distance").and_then(|v| v.as_f64()).unwrap_or(f64::MAX);
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({
+                "origin": origin,
+                "direction": direction,
+                "hit_count": hit_json.len(),
+                "hits": hit_json,
+            }),
+        )
     }
 
     // ── Binary-ECS entity CRUD (Phase 3 — AI-on-binary) ──────────────────
