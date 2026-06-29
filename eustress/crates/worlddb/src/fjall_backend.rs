@@ -198,6 +198,14 @@ pub struct FjallWorldDb {
     /// graceful shutdown.
     tx_counter: AtomicU64,
 
+    /// Monotonic op-log sequence counter (the `mutations` partition key).
+    /// Loaded from `meta:mutation_seq` at open; advanced atomically per
+    /// recorded mutation and persisted on each record (semantic mutations are
+    /// infrequent, so persist-on-write is cheap). Distinct from `tx_counter`:
+    /// the op-log owns its ordering because the binary-ECS create path that
+    /// produces most mutations carries no commit tx.
+    mutation_seq: AtomicU64,
+
     /// Mutex held briefly during commit to serialise the
     /// "compute tx_id → write keys → publish delta" sequence so
     /// subscribers see deltas in tx-id order matching the SSTable
@@ -215,6 +223,9 @@ impl FjallWorldDb {
     /// version — lets `WorldDb` reject a DB whose on-disk layout
     /// disagrees with its header.bin without re-reading the file.
     const META_SCHEMA: &'static [u8] = b"schema_version";
+
+    /// Tag for the meta key holding the op-log sequence high-water mark.
+    const META_MUTATION_SEQ: &'static [u8] = b"mutation_seq";
 
     /// Open or create a Fjall world database at `path`. `path` is the
     /// `world.fjalldb/` directory INSIDE the `.eustress` container —
@@ -317,6 +328,16 @@ impl FjallWorldDb {
             _ => TxId::GENESIS.0,
         };
 
+        // Load the persisted op-log sequence high-water mark (fresh world → 0).
+        let mutation_seq = match meta.get(Self::META_MUTATION_SEQ)? {
+            Some(bytes) if bytes.len() == 8 => {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&bytes);
+                u64::from_le_bytes(arr)
+            }
+            _ => 0,
+        };
+
         // Cross-check schema version against header.bin's claim.
         // If absent (fresh world), stamp ours.
         let on_disk_schema = match meta.get(Self::META_SCHEMA)? {
@@ -376,6 +397,7 @@ impl FjallWorldDb {
             mutations,
             encoder,
             tx_counter: AtomicU64::new(tx_counter),
+            mutation_seq: AtomicU64::new(mutation_seq),
             commit_lock: Mutex::new(()),
             change_stream: ChangeStream::new(),
         })
@@ -837,25 +859,33 @@ impl WorldDb for FjallWorldDb {
 
     // ── Mutation op-log — Phase 1 causal-audit stream ─────────────────
 
-    fn record_mutation(&self, tx_id: u64, rec: &[u8]) -> Result<()> {
-        let key = crate::keys::encode_mutation_key(tx_id);
+    fn record_mutation(&self, rec: &[u8]) -> Result<u64> {
+        // The op-log owns its ordering: assign the next monotonic sequence as
+        // the key (the binary-ECS create path that produces most mutations
+        // carries no commit tx). Persist the high-water mark so the next open
+        // continues monotonically — semantic mutations are infrequent, so this
+        // extra small meta write per record is cheap.
+        let seq = self.mutation_seq.fetch_add(1, Ordering::SeqCst);
+        let key = crate::keys::encode_mutation_key(seq);
         self.mutations.insert(&key, rec)?;
+        self.meta
+            .insert(Self::META_MUTATION_SEQ, &(seq + 1).to_le_bytes())?;
         self.s_mutations.publish_external(
             eustress_fjall::ReplOp::Put,
             &key,
             &rec[..rec.len().min(64)],
         );
-        Ok(())
+        Ok(seq)
     }
 
-    fn iter_mutations(&self, min_tx: u64, max_tx: u64) -> Result<Vec<(u64, Vec<u8>)>> {
-        let lo = crate::keys::encode_mutation_key(min_tx);
-        let hi = crate::keys::encode_mutation_key(max_tx);
+    fn iter_mutations(&self, min_seq: u64, max_seq: u64) -> Result<Vec<(u64, Vec<u8>)>> {
+        let lo = crate::keys::encode_mutation_key(min_seq);
+        let hi = crate::keys::encode_mutation_key(max_seq);
         let mut out = Vec::new();
         for res in self.mutations.range(lo..=hi) {
             let (key, value) = res?;
-            let tx = crate::keys::decode_mutation_key(&key)?;
-            out.push((tx, value.to_vec()));
+            let seq = crate::keys::decode_mutation_key(&key)?;
+            out.push((seq, value.to_vec()));
         }
         Ok(out)
     }
@@ -1604,38 +1634,41 @@ mod mutations_tests {
     // green; exercise it with `--ignored` or `-- --test-threads=1`.
     #[test]
     #[ignore = "opens a FjallWorldDb keyspace; run with --test-threads=1 or --ignored (worlddb concurrent-keyspace teardown limit on Windows)"]
-    fn record_and_iter_in_tx_order() {
+    fn record_and_iter_in_sequence_order() {
         let (db, tmp) = fresh_db();
 
-        // Record out of order; a range scan must replay in ascending tx order.
-        for tx in [30u64, 10, 20] {
-            let bytes = encode_mutation(&rec(tx, MutationOp::Create)).unwrap();
-            db.record_mutation(tx, &bytes).unwrap();
+        // record_mutation assigns monotonic op-log sequences in call order;
+        // the record's own tx_id field is just correlation, not the key.
+        let mut seqs = Vec::new();
+        for n in [10u64, 20, 30] {
+            let bytes = encode_mutation(&rec(n, MutationOp::Create)).unwrap();
+            seqs.push(db.record_mutation(&bytes).unwrap());
         }
+        assert_eq!(seqs, vec![0, 1, 2], "op-log sequences are monotonic from 0");
 
         let all = db.iter_mutations(0, u64::MAX).unwrap();
-        let order: Vec<u64> = all.iter().map(|(tx, _)| *tx).collect();
+        let order: Vec<u64> = all.iter().map(|(s, _)| *s).collect();
         assert_eq!(
             order,
-            vec![10, 20, 30],
-            "op-log must replay in ascending tx order"
+            vec![0, 1, 2],
+            "op-log replays in ascending sequence order"
         );
 
-        // The stored bytes decode back to the original record.
-        let (tx0, bytes0) = &all[0];
+        // The first record (n=10) decodes back from its stored bytes.
+        let (seq0, bytes0) = &all[0];
         let decoded = decode_mutation(bytes0).unwrap();
-        assert_eq!(*tx0, 10);
+        assert_eq!(*seq0, 0);
         assert_eq!(decoded.uuid, "u-10");
         assert_eq!(decoded.op, MutationOp::Create);
 
-        // Inclusive bounded window.
+        // Inclusive bounded window over sequences.
         let windowed: Vec<u64> = db
-            .iter_mutations(20, 30)
+            .iter_mutations(1, 2)
             .unwrap()
             .iter()
-            .map(|(tx, _)| *tx)
+            .map(|(s, _)| *s)
             .collect();
-        assert_eq!(windowed, vec![20, 30]);
+        assert_eq!(windowed, vec![1, 2]);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

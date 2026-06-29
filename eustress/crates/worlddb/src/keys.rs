@@ -423,18 +423,19 @@ const MUTATION_KEY_TAG: u8 = b'U';
 /// Schema version of the mutation key wire form.
 const MUTATION_KEY_VERSION: u8 = 1;
 
-/// Encode a mutation op-log key: `U | ver(u8) | tx_id(u64 be)`. Big-endian
-/// tx-id makes a partition range-scan return rows in ascending tx order — the
-/// replay primitive.
-pub fn encode_mutation_key(tx_id: u64) -> Vec<u8> {
+/// Encode a mutation op-log key: `U | ver(u8) | seq(u64 be)`. The big-endian
+/// op-log sequence makes a partition range-scan return rows in ascending order
+/// — the replay primitive. `seq` is the backend-assigned op-log sequence, not a
+/// commit tx (the dominant create path carries no tx).
+pub fn encode_mutation_key(seq: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(2 + 8);
     out.push(MUTATION_KEY_TAG);
     out.push(MUTATION_KEY_VERSION);
-    out.extend_from_slice(&tx_id.to_be_bytes());
+    out.extend_from_slice(&seq.to_be_bytes());
     out
 }
 
-/// Decode a mutation op-log key → `tx_id`.
+/// Decode a mutation op-log key → `seq`.
 pub fn decode_mutation_key(bytes: &[u8]) -> Result<u64> {
     if bytes.len() != 2 + 8 {
         return Err(Error::KeyDecode(format!(

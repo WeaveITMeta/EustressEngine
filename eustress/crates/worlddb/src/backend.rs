@@ -484,26 +484,30 @@ pub trait WorldDb: Send + Sync + 'static {
 
     // ── Mutation op-log — Phase 1 causal-audit stream ─────────────────
     //
-    // A `mutations` partition: append-only, tx-ordered `MutationRecord` rows
-    // (see [`crate::mutations`]) keyed by [`crate::keys::encode_mutation_key`],
-    // so a tx-id range scan replays mutations in causal order. Additive —
+    // A `mutations` partition: append-only `MutationRecord` rows (see
+    // [`crate::mutations`]) keyed by a backend-assigned monotonic op-log
+    // SEQUENCE ([`crate::keys::encode_mutation_key`]), so a sequence range scan
+    // replays mutations in the exact order they were recorded. Additive —
     // backends that don't support it (test stubs) get the no-op defaults below.
 
-    /// Append one encoded `MutationRecord` to the op-log under `tx_id`
-    /// (big-endian key → ascending scan). Encode via
-    /// [`crate::mutations::encode_mutation`].
-    fn record_mutation(&self, tx_id: u64, rec: &[u8]) -> Result<()> {
-        let _ = (tx_id, rec);
+    /// Append one encoded `MutationRecord` to the op-log, assigning the next
+    /// monotonic op-log sequence as the key and returning it. The caller does
+    /// NOT supply a key: the dominant semantic-create path (binary-ECS) carries
+    /// no commit tx, so the op-log owns its ordering. Encode via
+    /// [`crate::mutations::encode_mutation`]; set the record's `tx_id` field to
+    /// the correlated commit tx (or 0) before encoding.
+    fn record_mutation(&self, rec: &[u8]) -> Result<u64> {
+        let _ = rec;
         Err(crate::error::Error::Other(
             "record_mutation not supported by this backend".into(),
         ))
     }
 
-    /// Range-scan the op-log for `min_tx <= tx_id <= max_tx`, ascending,
-    /// returning `(tx_id, record_bytes)`. Decode each via
+    /// Range-scan the op-log for `min_seq <= seq <= max_seq`, ascending,
+    /// returning `(seq, record_bytes)`. Decode each via
     /// [`crate::mutations::decode_mutation`].
-    fn iter_mutations(&self, min_tx: u64, max_tx: u64) -> Result<Vec<(u64, Vec<u8>)>> {
-        let _ = (min_tx, max_tx);
+    fn iter_mutations(&self, min_seq: u64, max_seq: u64) -> Result<Vec<(u64, Vec<u8>)>> {
+        let _ = (min_seq, max_seq);
         Ok(Vec::new())
     }
 

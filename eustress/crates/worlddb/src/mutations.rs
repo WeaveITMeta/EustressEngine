@@ -4,9 +4,9 @@
 //! Today's durable record is current STATE (the entities/tree keys overwrite in
 //! place) plus a lossy in-memory `history.<kind>` stream — so the *sequence of
 //! causes* that produced a world cannot be replayed across a restart. This adds
-//! an append-only op-log: each create/update/delete lands a tx-ordered,
-//! causally-annotated record in Fjall, keyed by
-//! [`crate::keys::encode_mutation_key`] (a range scan == replay).
+//! an append-only op-log: each create/update/delete lands a causally-annotated
+//! record in Fjall, keyed by a backend-assigned monotonic op-log sequence
+//! ([`crate::keys::encode_mutation_key`]); a range scan == replay.
 //!
 //! SCAFFOLD: the type + the [`crate::WorldDb::record_mutation`] / `iter_mutations`
 //! storage API land here additively. Wiring the live producers (apply_commit
@@ -43,7 +43,9 @@ pub enum MutationActor {
 /// (e.g. the script-run tx that caused this); `reason` is free-form provenance.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MutationRecord {
-    /// Links to the state commit. The op-log key is this id, big-endian.
+    /// Correlated commit tx, or 0 if none (e.g. the binary-ECS create path
+    /// carries no commit tx). This is correlation only — NOT the op-log key;
+    /// `record_mutation` assigns the key (its own monotonic sequence).
     pub tx_id: u64,
     pub ts_nanos: u64,
     pub actor: MutationActor,
