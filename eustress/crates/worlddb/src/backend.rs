@@ -482,6 +482,31 @@ pub trait WorldDb: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    // ── Mutation op-log — Phase 1 causal-audit stream ─────────────────
+    //
+    // A `mutations` partition: append-only, tx-ordered `MutationRecord` rows
+    // (see [`crate::mutations`]) keyed by [`crate::keys::encode_mutation_key`],
+    // so a tx-id range scan replays mutations in causal order. Additive —
+    // backends that don't support it (test stubs) get the no-op defaults below.
+
+    /// Append one encoded `MutationRecord` to the op-log under `tx_id`
+    /// (big-endian key → ascending scan). Encode via
+    /// [`crate::mutations::encode_mutation`].
+    fn record_mutation(&self, tx_id: u64, rec: &[u8]) -> Result<()> {
+        let _ = (tx_id, rec);
+        Err(crate::error::Error::Other(
+            "record_mutation not supported by this backend".into(),
+        ))
+    }
+
+    /// Range-scan the op-log for `min_tx <= tx_id <= max_tx`, ascending,
+    /// returning `(tx_id, record_bytes)`. Decode each via
+    /// [`crate::mutations::decode_mutation`].
+    fn iter_mutations(&self, min_tx: u64, max_tx: u64) -> Result<Vec<(u64, Vec<u8>)>> {
+        let _ = (min_tx, max_tx);
+        Ok(Vec::new())
+    }
+
     // ── UUID-keyed primary store — IDENTITY.md Wave 2.1 ──────────────
     //
     // The `entities_uuid` partition keys each entity's `ArchInstanceCore`

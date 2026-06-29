@@ -52,6 +52,7 @@ pub mod header;
 pub mod import;
 pub mod keys;
 pub mod migrate_identity;
+pub mod mutations;
 pub mod projection;
 pub mod rkyv_values;
 pub mod rollout;
@@ -69,6 +70,9 @@ pub use keys::{ComponentTypeId, KeyEncoder, FlatKeyEncoder, MortonKeyEncoder};
 pub use rkyv_values::{
     ArchInstanceCore, ArchTransform, EusValue, decode_eusvalue, decode_instance_core,
     decode_transform, encode_eusvalue, encode_instance_core, encode_transform,
+};
+pub use mutations::{
+    decode_mutation, encode_mutation, MutationActor, MutationOp, MutationRecord,
 };
 pub use projection::{EntitySnapshot, TransformSnapshot, WorldSnapshot};
 pub use schema::{ClassSchemaVersion, SchemaMigration, SchemaMigrationRegistry};

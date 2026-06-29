@@ -417,6 +417,39 @@ pub fn decode_dataset_key(bytes: &[u8]) -> Result<[u8; 16]> {
 
 /// Tag byte stamped on every timeseries key. Fresh, non-colliding.
 const TIMESERIES_KEY_TAG: u8 = b'T';
+// ── Mutation op-log keys (Phase 1 — causal-audit stream) ─────────────
+/// Tag for mutation op-log keys (the append-only causal-audit partition).
+const MUTATION_KEY_TAG: u8 = b'U';
+/// Schema version of the mutation key wire form.
+const MUTATION_KEY_VERSION: u8 = 1;
+
+/// Encode a mutation op-log key: `U | ver(u8) | tx_id(u64 be)`. Big-endian
+/// tx-id makes a partition range-scan return rows in ascending tx order — the
+/// replay primitive.
+pub fn encode_mutation_key(tx_id: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + 8);
+    out.push(MUTATION_KEY_TAG);
+    out.push(MUTATION_KEY_VERSION);
+    out.extend_from_slice(&tx_id.to_be_bytes());
+    out
+}
+
+/// Decode a mutation op-log key → `tx_id`.
+pub fn decode_mutation_key(bytes: &[u8]) -> Result<u64> {
+    if bytes.len() != 2 + 8 {
+        return Err(Error::KeyDecode(format!(
+            "mutation key wrong length: {}",
+            bytes.len()
+        )));
+    }
+    if bytes[0] != MUTATION_KEY_TAG || bytes[1] != MUTATION_KEY_VERSION {
+        return Err(Error::KeyDecode("mutation key wrong tag/version".to_string()));
+    }
+    let mut t = [0u8; 8];
+    t.copy_from_slice(&bytes[2..10]);
+    Ok(u64::from_be_bytes(t))
+}
+
 /// Schema version of the timeseries key wire form.
 const TIMESERIES_KEY_VERSION: u8 = 1;
 
