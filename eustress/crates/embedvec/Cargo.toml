@@ -28,9 +28,10 @@ tokio = { workspace = true, optional = true }
 # Sled embedded database (optional, pure-Rust, for KnowledgeStore + PersistentIndex)
 sled = { version = "0.34", optional = true }
 
-# RocksDB embedded database (optional, cold-tier column-family layout).
-# Requires libclang/LLVM on the build host. Set LIBCLANG_PATH if not in PATH.
-rocksdb = { version = "0.22", optional = true }
+# Fjall embedded LSM database (optional, cold-tier partition layout). The
+# standard workspace KV store (same engine as worlddb / eustress-fjall) — pure
+# Rust, no libclang/LLVM build dependency.
+fjall = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -38,11 +39,11 @@ default = []
 persistence = ["sled", "tokio"]
 # Enable Sled persistence alias (same as persistence)
 persistence-sled = ["persistence"]
-# Enable RocksDB-based persistence (requires LLVM/libclang)
-persistence-rocksdb = ["rocksdb", "tokio"]
+# Enable Fjall-based persistence (LSM-tree; standard workspace KV, pure Rust)
+persistence-fjall = ["fjall", "tokio"]
 # Enable SIMD acceleration
 simd = ["embedvec/simd"]
-# Full feature set (Sled persistence — use persistence-rocksdb separately if needed)
+# Full feature set (Sled persistence — use persistence-fjall separately if needed)
 full = ["persistence", "simd"]
 
 [dev-dependencies]

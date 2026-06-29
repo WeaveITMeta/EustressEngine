@@ -27,8 +27,8 @@ mod memory;
 mod ontology;
 #[cfg(feature = "persistence")]
 mod persistence;
-#[cfg(feature = "persistence-rocksdb")]
-mod rocksdb_store;
+#[cfg(feature = "persistence-fjall")]
+mod fjall_store;
 mod plugin;
 mod resource;
 mod spatial;
@@ -48,8 +48,8 @@ pub use ontology::*;
 pub use persistence::{
     IndexStats, KnowledgeStore, PersistenceConfig, PersistentIndex, PersistentOntologyIndex,
 };
-#[cfg(feature = "persistence-rocksdb")]
-pub use rocksdb_store::{RocksConfig, RocksIndex, RocksOntologyIndex};
+#[cfg(feature = "persistence-fjall")]
+pub use fjall_store::{FjallConfig, FjallIndex, FjallOntologyIndex};
 pub use plugin::{AutoIndexPlugin, EmbedvecAppExt, EmbedvecBuilder, EmbedvecPlugin};
 #[cfg(feature = "persistence")]
 pub use plugin::{KnowledgeStorePlugin, KnowledgeStoreResource, SpaceRootRef};
@@ -74,8 +74,8 @@ pub mod prelude {
     pub use crate::persistence::{
         IndexStats, KnowledgeStore, PersistenceConfig, PersistentIndex, PersistentOntologyIndex,
     };
-    #[cfg(feature = "persistence-rocksdb")]
-    pub use crate::rocksdb_store::{RocksConfig, RocksIndex, RocksOntologyIndex};
+    #[cfg(feature = "persistence-fjall")]
+    pub use crate::fjall_store::{FjallConfig, FjallIndex, FjallOntologyIndex};
     pub use crate::plugin::{AutoIndexPlugin, EmbedvecPlugin};
     pub use crate::resource::{EmbedvecIndex, EmbedvecResource, IndexConfig, SearchResult};
     pub use crate::spatial::{SpatialContextEmbedder, SpatialFeatures, SpatialTrainingRecord};

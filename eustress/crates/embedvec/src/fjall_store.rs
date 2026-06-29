@@ -1,93 +1,75 @@
-//! # RocksDB Persistence — Cold-tier vector index backed by RocksDB
+//! # Fjall Persistence — Cold-tier vector index backed by Fjall (LSM-tree)
 //!
-//! ## Table of Contents
-//! 1. RocksConfig   — configuration for the RocksDB instance
-//! 2. RocksEntry    — serialisable entry stored per embedding
-//! 3. RocksIndex    — RocksDB-backed vector index (mirrors PersistentIndex API)
-//! 4. RocksOntologyIndex — ontology-aware wrapper (mirrors PersistentOntologyIndex)
+//! Replaces the former RocksDB backend so embedvec persistence standardizes on
+//! **Fjall** — the same LSM store `worlddb` / `eustress-fjall` use — removing the
+//! foreign RocksDB dependency from the workspace.
 //!
 //! ## Design
 //!
-//! Four column families mirror the Sled tree layout so the two backends are
-//! drop-in replaceable:
+//! Four partitions mirror the Sled tree / former-RocksDB column-family layout so
+//! the backends stay drop-in replaceable:
 //!
-//! | CF              | Key                        | Value              |
+//! | Partition       | Key                        | Value              |
 //! |-----------------|----------------------------|--------------------|
-//! | `embeddings`    | UUID (16 bytes)            | JSON `RocksEntry`  |
+//! | `embeddings`    | UUID (16 bytes)            | JSON `FjallEntry`  |
 //! | `entity_index`  | entity bits (8 bytes, BE)  | UUID (16 bytes)    |
 //! | `class_index`   | `"{class}:{uuid}"` (UTF-8) | UUID (16 bytes)    |
 //! | `meta`          | arbitrary UTF-8 key        | arbitrary bytes    |
 //!
-//! In-memory cache mirrors the Sled implementation: embeddings are loaded
-//! into a `HashMap` at open time for O(1) HNSW-style cosine search.
-//! RocksDB is the durable backing store — all mutations are written through.
+//! An in-memory cache holds embeddings for cosine search; Fjall is the durable
+//! backing store — all mutations are written through.
 
 use crate::components::EmbeddingMetadata;
 use crate::error::{EmbedvecError, Result};
 use crate::resource::{IndexConfig, SearchResult};
 use bevy::prelude::*;
-use rocksdb::{ColumnFamilyDescriptor, Options, DB};
+use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle, PersistMode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Column family names
+// Partition names
 // ─────────────────────────────────────────────────────────────────────────────
 
-const CF_EMBEDDINGS: &str = "embeddings";
-const CF_ENTITY_INDEX: &str = "entity_index";
-const CF_CLASS_INDEX: &str = "class_index";
-const CF_META: &str = "meta";
+const P_EMBEDDINGS: &str = "embeddings";
+const P_ENTITY_INDEX: &str = "entity_index";
+const P_CLASS_INDEX: &str = "class_index";
+const P_META: &str = "meta";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RocksConfig
+// FjallConfig
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Configuration for the RocksDB cold-tier store.
+/// Configuration for the Fjall cold-tier store.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RocksConfig {
-    /// Path to the RocksDB directory.
+pub struct FjallConfig {
+    /// Path to the Fjall keyspace directory.
     pub path: String,
-    /// LZ4 compression on all column families.
-    pub compression: bool,
-    /// Write buffer size per column family in bytes (default: 64 MB).
-    pub write_buffer_size: usize,
-    /// Maximum number of open files (default: 1000; -1 = unlimited).
-    pub max_open_files: i32,
 }
 
-impl Default for RocksConfig {
+impl Default for FjallConfig {
     fn default() -> Self {
         Self {
-            path: "./embedvec_rocks".to_string(),
-            compression: true,
-            write_buffer_size: 64 * 1024 * 1024,
-            max_open_files: 1000,
+            path: "./embedvec_fjall".to_string(),
         }
     }
 }
 
-impl RocksConfig {
+impl FjallConfig {
     pub fn with_path(mut self, path: impl Into<String>) -> Self {
         self.path = path.into();
-        self
-    }
-
-    pub fn with_write_buffer(mut self, bytes: usize) -> Self {
-        self.write_buffer_size = bytes;
         self
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RocksEntry
+// FjallEntry
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Serialisable entry stored in the `embeddings` column family.
+/// Serialisable entry stored in the `embeddings` partition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct RocksEntry {
+struct FjallEntry {
     entity_bits: u64,
     embedding_id: Uuid,
     embedding: Vec<f32>,
@@ -96,50 +78,50 @@ struct RocksEntry {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RocksIndex
+// FjallIndex
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// RocksDB-backed vector index.
+/// Fjall-backed vector index.
 ///
-/// Provides the same interface as `PersistentIndex` (Sled) so callers can
-/// swap backends without changing call sites.
-pub struct RocksIndex {
-    db: Arc<DB>,
+/// Provides the same interface as `PersistentIndex` (Sled) so callers can swap
+/// backends without changing call sites.
+pub struct FjallIndex {
+    keyspace: Keyspace,
+    embeddings: PartitionHandle,
+    entity_index: PartitionHandle,
+    class_index: PartitionHandle,
+    /// Reserved for arbitrary metadata KV (layout parity with the prior backend).
+    #[allow(dead_code)]
+    meta: PartitionHandle,
     config: IndexConfig,
     /// In-memory cache for cosine search (loaded at open, kept in sync).
-    cache: HashMap<Uuid, RocksEntry>,
+    cache: HashMap<Uuid, FjallEntry>,
 }
 
-impl RocksIndex {
-    /// Open or create a RocksDB index at the configured path.
-    pub fn open(index_config: IndexConfig, rocks_config: RocksConfig) -> Result<Self> {
-        let mut opts = Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-        opts.set_max_open_files(rocks_config.max_open_files);
+impl FjallIndex {
+    /// Open or create a Fjall index at the configured path.
+    pub fn open(index_config: IndexConfig, fjall_config: FjallConfig) -> Result<Self> {
+        let keyspace = Config::new(&fjall_config.path)
+            .open()
+            .map_err(|e| EmbedvecError::Persistence(format!("Fjall open: {e}")))?;
 
-        let cf_opts = {
-            let mut o = Options::default();
-            o.set_write_buffer_size(rocks_config.write_buffer_size);
-            if rocks_config.compression {
-                o.set_compression_type(rocksdb::DBCompressionType::Lz4);
-            }
-            o
+        let mut open_p = |name: &str| -> Result<PartitionHandle> {
+            keyspace
+                .open_partition(name, PartitionCreateOptions::default())
+                .map_err(|e| EmbedvecError::Persistence(format!("Fjall partition {name}: {e}")))
         };
 
-        let cf_descriptors = vec![
-            ColumnFamilyDescriptor::new(CF_EMBEDDINGS, cf_opts.clone()),
-            ColumnFamilyDescriptor::new(CF_ENTITY_INDEX, cf_opts.clone()),
-            ColumnFamilyDescriptor::new(CF_CLASS_INDEX, cf_opts.clone()),
-            ColumnFamilyDescriptor::new(CF_META, cf_opts),
-        ];
+        let embeddings = open_p(P_EMBEDDINGS)?;
+        let entity_index = open_p(P_ENTITY_INDEX)?;
+        let class_index = open_p(P_CLASS_INDEX)?;
+        let meta = open_p(P_META)?;
 
-        let db = DB::open_cf_descriptors(&opts, &rocks_config.path, cf_descriptors)
-            .map_err(|e| EmbedvecError::Persistence(format!("RocksDB open: {e}")))?;
-
-        let db = Arc::new(db);
         let mut index = Self {
-            db,
+            keyspace,
+            embeddings,
+            entity_index,
+            class_index,
+            meta,
             config: index_config,
             cache: HashMap::new(),
         };
@@ -148,24 +130,18 @@ impl RocksIndex {
     }
 
     fn load_cache(&mut self) -> Result<()> {
-        let cf = self
-            .db
-            .cf_handle(CF_EMBEDDINGS)
-            .ok_or_else(|| EmbedvecError::Persistence("CF embeddings missing".into()))?;
-
         self.cache.clear();
-        let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
-        for item in iter {
+        for kv in self.embeddings.iter() {
             let (key, value) =
-                item.map_err(|e| EmbedvecError::Persistence(format!("RocksDB iter: {e}")))?;
+                kv.map_err(|e| EmbedvecError::Persistence(format!("Fjall iter: {e}")))?;
             let id = Uuid::from_slice(&key)
                 .map_err(|e| EmbedvecError::Persistence(format!("Bad UUID key: {e}")))?;
-            let entry: RocksEntry = serde_json::from_slice(&value)
+            let entry: FjallEntry = serde_json::from_slice(&value)
                 .map_err(|e| EmbedvecError::Serialization(e.to_string()))?;
             self.cache.insert(id, entry);
         }
 
-        tracing::info!(count = self.cache.len(), "RocksIndex: loaded embeddings from disk");
+        tracing::info!(count = self.cache.len(), "FjallIndex: loaded embeddings from disk");
         Ok(())
     }
 
@@ -197,7 +173,7 @@ impl RocksIndex {
             });
         }
 
-        let entry = RocksEntry {
+        let entry = FjallEntry {
             entity_bits: entity.to_bits(),
             embedding_id,
             embedding,
@@ -205,41 +181,22 @@ impl RocksIndex {
             class_path: class_path.clone(),
         };
 
-        let entry_bytes = serde_json::to_vec(&entry)
-            .map_err(|e| EmbedvecError::Serialization(e.to_string()))?;
+        let entry_bytes =
+            serde_json::to_vec(&entry).map_err(|e| EmbedvecError::Serialization(e.to_string()))?;
 
-        // Write to embeddings CF
-        let cf_emb = self
-            .db
-            .cf_handle(CF_EMBEDDINGS)
-            .ok_or_else(|| EmbedvecError::Persistence("CF embeddings missing".into()))?;
-        self.db
-            .put_cf(&cf_emb, embedding_id.as_bytes(), &entry_bytes)
-            .map_err(|e| EmbedvecError::Persistence(format!("put embeddings: {e}")))?;
+        self.embeddings
+            .insert(embedding_id.as_bytes(), &entry_bytes)
+            .map_err(|e| EmbedvecError::Persistence(format!("insert embeddings: {e}")))?;
 
-        // Write to entity_index CF
-        let cf_ent = self
-            .db
-            .cf_handle(CF_ENTITY_INDEX)
-            .ok_or_else(|| EmbedvecError::Persistence("CF entity_index missing".into()))?;
-        self.db
-            .put_cf(
-                &cf_ent,
-                entity.to_bits().to_be_bytes(),
-                embedding_id.as_bytes(),
-            )
-            .map_err(|e| EmbedvecError::Persistence(format!("put entity_index: {e}")))?;
+        self.entity_index
+            .insert(entity.to_bits().to_be_bytes(), embedding_id.as_bytes())
+            .map_err(|e| EmbedvecError::Persistence(format!("insert entity_index: {e}")))?;
 
-        // Write to class_index CF if applicable
         if let Some(ref path) = class_path {
-            let cf_cls = self
-                .db
-                .cf_handle(CF_CLASS_INDEX)
-                .ok_or_else(|| EmbedvecError::Persistence("CF class_index missing".into()))?;
             let class_key = format!("{path}:{embedding_id}");
-            self.db
-                .put_cf(&cf_cls, class_key.as_bytes(), embedding_id.as_bytes())
-                .map_err(|e| EmbedvecError::Persistence(format!("put class_index: {e}")))?;
+            self.class_index
+                .insert(class_key.as_bytes(), embedding_id.as_bytes())
+                .map_err(|e| EmbedvecError::Persistence(format!("insert class_index: {e}")))?;
         }
 
         self.cache.insert(embedding_id, entry);
@@ -248,75 +205,55 @@ impl RocksIndex {
 
     /// Remove an entity from the index.
     pub fn remove(&mut self, entity: Entity) -> Result<()> {
-        let cf_ent = self
-            .db
-            .cf_handle(CF_ENTITY_INDEX)
-            .ok_or_else(|| EmbedvecError::Persistence("CF entity_index missing".into()))?;
-
         let id_bytes = self
-            .db
-            .get_cf(&cf_ent, entity.to_bits().to_be_bytes())
+            .entity_index
+            .get(entity.to_bits().to_be_bytes())
             .map_err(|e| EmbedvecError::Persistence(format!("get entity_index: {e}")))?
             .ok_or(EmbedvecError::EntityNotFound(entity))?;
 
         let embedding_id = Uuid::from_slice(&id_bytes)
             .map_err(|e| EmbedvecError::Persistence(format!("Bad UUID: {e}")))?;
 
-        // Remove class index entry if present
+        // Remove class index entry if present (best-effort).
         if let Some(entry) = self.cache.get(&embedding_id) {
             if let Some(ref path) = entry.class_path {
-                if let Some(cf_cls) = self.db.cf_handle(CF_CLASS_INDEX) {
-                    let class_key = format!("{path}:{embedding_id}");
-                    let _ = self.db.delete_cf(&cf_cls, class_key.as_bytes());
-                }
+                let class_key = format!("{path}:{embedding_id}");
+                let _ = self.class_index.remove(class_key.as_bytes());
             }
         }
 
-        // Remove from embeddings CF
-        let cf_emb = self
-            .db
-            .cf_handle(CF_EMBEDDINGS)
-            .ok_or_else(|| EmbedvecError::Persistence("CF embeddings missing".into()))?;
-        self.db
-            .delete_cf(&cf_emb, embedding_id.as_bytes())
-            .map_err(|e| EmbedvecError::Persistence(format!("delete embeddings: {e}")))?;
+        self.embeddings
+            .remove(embedding_id.as_bytes())
+            .map_err(|e| EmbedvecError::Persistence(format!("remove embeddings: {e}")))?;
 
-        // Remove from entity_index CF
-        self.db
-            .delete_cf(&cf_ent, entity.to_bits().to_be_bytes())
-            .map_err(|e| EmbedvecError::Persistence(format!("delete entity_index: {e}")))?;
+        self.entity_index
+            .remove(entity.to_bits().to_be_bytes())
+            .map_err(|e| EmbedvecError::Persistence(format!("remove entity_index: {e}")))?;
 
         self.cache.remove(&embedding_id);
         Ok(())
     }
 
     pub fn contains(&self, entity: Entity) -> bool {
-        self.db
-            .cf_handle(CF_ENTITY_INDEX)
-            .and_then(|cf| {
-                self.db
-                    .get_cf(&cf, entity.to_bits().to_be_bytes())
-                    .ok()
-                    .flatten()
-            })
-            .is_some()
+        self.entity_index
+            .get(entity.to_bits().to_be_bytes())
+            .map(|opt| opt.is_some())
+            .unwrap_or(false)
     }
 
     pub fn get_embedding(&self, entity: Entity) -> Option<Vec<f32>> {
-        let cf_ent = self.db.cf_handle(CF_ENTITY_INDEX)?;
         let id_bytes = self
-            .db
-            .get_cf(&cf_ent, entity.to_bits().to_be_bytes())
+            .entity_index
+            .get(entity.to_bits().to_be_bytes())
             .ok()??;
         let id = Uuid::from_slice(&id_bytes).ok()?;
         self.cache.get(&id).map(|e| e.embedding.clone())
     }
 
     pub fn get_metadata(&self, entity: Entity) -> Option<EmbeddingMetadata> {
-        let cf_ent = self.db.cf_handle(CF_ENTITY_INDEX)?;
         let id_bytes = self
-            .db
-            .get_cf(&cf_ent, entity.to_bits().to_be_bytes())
+            .entity_index
+            .get(entity.to_bits().to_be_bytes())
             .ok()??;
         let id = Uuid::from_slice(&id_bytes).ok()?;
         self.cache.get(&id).map(|e| e.metadata.clone())
@@ -406,64 +343,59 @@ impl RocksIndex {
         })
     }
 
-    /// Flush all pending writes (RocksDB handles this automatically via WAL,
-    /// but an explicit flush ensures everything is on disk before archival).
+    /// Persist all pending writes to disk.
     pub fn flush(&self) -> Result<()> {
-        self.db
-            .flush()
-            .map_err(|e| EmbedvecError::Persistence(format!("RocksDB flush: {e}")))?;
-        tracing::debug!("RocksIndex: flushed to disk");
+        self.keyspace
+            .persist(PersistMode::SyncAll)
+            .map_err(|e| EmbedvecError::Persistence(format!("Fjall persist: {e}")))?;
+        tracing::debug!("FjallIndex: persisted to disk");
         Ok(())
     }
 
-    /// Approximate size on disk (sum of live SST file sizes).
+    /// Approximate size on disk (sum of live segment sizes across the keyspace).
     pub fn size_on_disk(&self) -> u64 {
-        self.db
-            .property_int_value("rocksdb.total-sst-files-size")
-            .ok()
-            .flatten()
-            .unwrap_or(0)
+        self.keyspace.disk_space()
     }
 
     pub fn clear(&mut self) -> Result<()> {
-        // Drop and recreate: simplest way to clear all CFs atomically.
-        // For production use, iterate and delete range instead.
         self.cache.clear();
-        tracing::warn!("RocksIndex::clear() cleared in-memory cache only; use DB::destroy to wipe disk");
+        tracing::warn!(
+            "FjallIndex::clear() cleared in-memory cache only; delete the keyspace dir to wipe disk"
+        );
         Ok(())
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RocksOntologyIndex
+// FjallOntologyIndex
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Ontology-aware vector index backed by RocksDB.
+/// Ontology-aware vector index backed by Fjall.
 ///
 /// Mirrors `PersistentOntologyIndex` (Sled) so the two are drop-in replaceable.
-pub struct RocksOntologyIndex {
-    index: RocksIndex,
+pub struct FjallOntologyIndex {
+    index: FjallIndex,
     ontology: crate::ontology::OntologyTree,
 }
 
-impl RocksOntologyIndex {
+impl FjallOntologyIndex {
     pub fn open(
         ontology: crate::ontology::OntologyTree,
         index_config: IndexConfig,
-        rocks_config: RocksConfig,
+        fjall_config: FjallConfig,
     ) -> Result<Self> {
-        let index = RocksIndex::open(index_config, rocks_config)?;
+        let index = FjallIndex::open(index_config, fjall_config)?;
         Ok(Self { index, ontology })
     }
 
     pub fn with_eustress_base(
         index_config: IndexConfig,
-        rocks_config: RocksConfig,
+        fjall_config: FjallConfig,
     ) -> Result<Self> {
         Self::open(
             crate::ontology::OntologyTree::with_eustress_base(),
             index_config,
-            rocks_config,
+            fjall_config,
         )
     }
 
@@ -484,8 +416,13 @@ impl RocksOntologyIndex {
                 "Unknown ontology class path: {class_path}"
             )));
         }
-        self.index
-            .upsert(entity, instance_id, embedding, metadata, Some(class_path.to_string()))
+        self.index.upsert(
+            entity,
+            instance_id,
+            embedding,
+            metadata,
+            Some(class_path.to_string()),
+        )
     }
 
     pub fn remove(&mut self, entity: Entity) -> Result<()> {
@@ -557,10 +494,10 @@ mod tests {
     #[test]
     fn open_insert_search_flush() {
         let dir = tempdir().unwrap();
-        let rocks_config = RocksConfig::default().with_path(dir.path().to_str().unwrap());
+        let fjall_config = FjallConfig::default().with_path(dir.path().to_str().unwrap());
         let index_config = IndexConfig::default().with_dimension(16);
 
-        let mut index = RocksIndex::open(index_config, rocks_config).unwrap();
+        let mut index = FjallIndex::open(index_config, fjall_config).unwrap();
 
         let entity = Entity::from_bits(1);
         let id = Uuid::new_v4();
@@ -591,9 +528,9 @@ mod tests {
 
         // Write
         {
-            let mut idx = RocksIndex::open(
+            let mut idx = FjallIndex::open(
                 IndexConfig::default().with_dimension(8),
-                RocksConfig::default().with_path(&path),
+                FjallConfig::default().with_path(&path),
             )
             .unwrap();
             idx.upsert(
@@ -609,9 +546,9 @@ mod tests {
 
         // Reload
         {
-            let idx = RocksIndex::open(
+            let idx = FjallIndex::open(
                 IndexConfig::default().with_dimension(8),
-                RocksConfig::default().with_path(&path),
+                FjallConfig::default().with_path(&path),
             )
             .unwrap();
             assert_eq!(idx.len(), 1);
