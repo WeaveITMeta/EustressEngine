@@ -47,6 +47,11 @@ fn build_world(seed: GlobalRngSeed) -> App {
             Transform::from_xyz(x, y, z),
         ));
     }
+    // Plugins (incl. Avian) insert resources in `finish`; a manually-driven App
+    // (one that never calls `run()`) must call finish + cleanup before stepping,
+    // or systems panic with "Resource does not exist".
+    app.finish();
+    app.cleanup();
     app
 }
 
@@ -91,7 +96,7 @@ fn run_n_steps(seed: GlobalRngSeed, steps: usize) -> u64 {
         app.world_mut()
             .resource_mut::<Time<Fixed>>()
             .advance_by(std::time::Duration::from_secs_f64(1.0 / 60.0));
-        app.world_mut().run_schedule(FixedMain);
+        app.world_mut().run_schedule(bevy::app::FixedMain);
     }
     hash_state(&mut app)
 }
