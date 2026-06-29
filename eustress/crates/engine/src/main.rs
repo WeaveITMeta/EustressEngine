@@ -605,9 +605,20 @@ fn main() {
         })
         // Terrain
         .add_plugins(EngineTerrainPlugin)
-        // Physics (avian3d from git main - supports Bevy 0.18)
+        // Physics (Avian 0.7 — runs at a fixed timestep)
         .add_plugins(avian3d::PhysicsPlugins::default())
         .insert_resource(avian3d::prelude::Gravity(bevy::math::Vec3::NEG_Y * 9.80665))
+        // ── Determinism pins (C2) ──────────────────────────────────────────
+        // Avian's step = Time<Fixed>.delta() * relative_speed. Pin the fixed
+        // timestep explicitly (was relying on Bevy's version-dependent implicit
+        // default) so per-step dt is a fixed contract ("Avian (Deterministic)").
+        // 60 Hz matches the sim clock (common::simulation).
+        .insert_resource(Time::<bevy::time::Fixed>::from_hz(60.0))
+        // Pin substep count + solver config at Avian defaults so a future Avian
+        // default change can't silently alter trajectories. (SubstepCount is in
+        // avian3d::prelude; SolverConfig is not — use its full module path.)
+        .insert_resource(avian3d::prelude::SubstepCount(6))
+        .insert_resource(avian3d::dynamics::solver::SolverConfig::default())
         // Cap virtual-time max-delta to break the fixed-timestep DEATH SPIRAL.
         // Bevy's default (250 ms) lets `FixedUpdate` run ~16× per render frame at
         // low FPS to "catch up" — and the profiler showed EVERY Fixed-schedule
@@ -621,6 +632,9 @@ fn main() {
             vt.set_max_delta(std::time::Duration::from_millis(33));
             vt
         })
+        // Determinism — registers the GlobalRngSeed resource (C7). Cheap,
+        // resource-only; up before any simulation RNG consumer reads it.
+        .add_plugins(eustress_common::physics::DeterminismPlugin)
         // Realism Physics System (materials, thermodynamics, fluids, deformation, visualizers)
         .add_plugins(eustress_common::realism::RealismPlugin)
         // Tick-based simulation with time compression (integrates with PlayModeState)

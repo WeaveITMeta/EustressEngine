@@ -153,7 +153,11 @@ pub fn run_simulation(scenario: &mut Scenario, config: &SimulationConfig) -> Sim
         .map(|&id| (id, Arc::new(AtomicU64::new(0))))
         .collect();
 
-    let seed_base = config.seed.unwrap_or_else(|| rand::thread_rng().next_u64());
+    // Deterministic fallback (C7): when no explicit seed is given, derive from
+    // the global seed instead of OS entropy so repeated runs are reproducible.
+    let seed_base = config
+        .seed
+        .unwrap_or_else(|| eustress_common::physics::GlobalRngSeed::default().0);
 
     // Parallel sampling
     (0..config.num_samples).into_par_iter().for_each(|i| {

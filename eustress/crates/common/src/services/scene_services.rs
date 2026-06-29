@@ -147,7 +147,14 @@ fn apply_atmosphere_to_lighting(atmosphere: &AtmosphereSettings, lighting: &mut 
 
 /// Apply workspace settings to Workspace resource
 fn apply_workspace_settings(settings: &WorkspaceSettings, workspace: &mut Workspace) {
-    workspace.gravity = Vec3::new(0.0, -settings.gravity, 0.0);
+    // `WorkspaceSettings.gravity` is authored in studs/s²; `Workspace.gravity`
+    // is engine-native m/s². Convert the magnitude through the unit system.
+    let g_meters = crate::units::convert_accel_f32(
+        settings.gravity,
+        crate::units::Unit::Stud,
+        crate::units::ENGINE_NATIVE_UNIT,
+    );
+    workspace.gravity = Vec3::new(0.0, -g_meters, 0.0);
     workspace.max_entity_speed = settings.max_entity_speed;
     workspace.streaming_enabled = settings.streaming_enabled;
     workspace.streaming_target_radius = settings.streaming_target_radius;
@@ -192,7 +199,13 @@ fn parse_time_of_day(time_str: &str) -> f32 {
 impl Workspace {
     /// Apply settings from scene WorkspaceSettings
     pub fn apply_scene_settings(&mut self, settings: &WorkspaceSettings) {
-        self.gravity = Vec3::new(0.0, -settings.gravity, 0.0);
+        // studs/s² (authored) → m/s² (engine-native), via the unit system.
+        let g_meters = crate::units::convert_accel_f32(
+            settings.gravity,
+            crate::units::Unit::Stud,
+            crate::units::ENGINE_NATIVE_UNIT,
+        );
+        self.gravity = Vec3::new(0.0, -g_meters, 0.0);
         self.max_entity_speed = settings.max_entity_speed;
         self.streaming_enabled = settings.streaming_enabled;
         self.streaming_target_radius = settings.streaming_target_radius;

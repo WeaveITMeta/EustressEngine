@@ -351,6 +351,34 @@ pub fn authored_to_engine_f32(v: f32, authored: Unit) -> f32 {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Acceleration (gravity) conversion
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Acceleration is a length per time². Because the engine's time unit is the
+// same second everywhere, converting an acceleration between unit systems is
+// the identical length ratio used by `convert_f32` — the s² cancels. So gravity
+// in studs/s² → m/s² is just the stud→meter ratio applied to the magnitude, and
+// the generic length helpers below give us this for free without adding an
+// acceleration variant to `Unit`. These named wrappers exist so gravity-sync
+// code reads (and `grep`s) as an acceleration conversion, not a length one.
+
+/// Convert a scalar acceleration (e.g. gravity magnitude) authored in `from`
+/// to the value in `to`. Same numeric ratio as [`convert_f32`] because the time
+/// component is shared across unit systems.
+#[inline]
+pub fn convert_accel_f32(v: f32, from: Unit, to: Unit) -> f32 {
+    convert_f32(v, from, to)
+}
+
+/// Convert an acceleration vector (e.g. an Avian gravity vector) authored in
+/// `from` to engine-native (meter) units. Component-wise; identity when
+/// `from == ENGINE_NATIVE_UNIT`.
+#[inline]
+pub fn accel_to_engine_vec3_f32(v: [f32; 3], from: Unit) -> [f32; 3] {
+    convert_vec3_f32(v, from, ENGINE_NATIVE_UNIT)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Display-side formatting
 // ─────────────────────────────────────────────────────────────────────────────
 

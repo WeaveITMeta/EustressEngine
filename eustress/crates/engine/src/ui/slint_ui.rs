@@ -205,6 +205,19 @@ pub use super::{
 };
 
 // (Duplicate type definitions removed — using super:: imports above)
+//
+// C8 SINGLE-SOURCE GUARD: `StudioState` has exactly ONE definition, at
+// `crate::ui::StudioState` (ui/mod.rs). Do NOT add a local `struct StudioState`
+// here or anywhere else — the bridge/Slint drain writes the resource by type, so
+// a second definition would silently split state and break the toolbar/play
+// buttons. The `pub use super::StudioState` above already makes a local
+// redefinition fail (E0255); the assertion below also fails to compile if the
+// canonical path disappears or stops being a `Resource`.
+const _: () = {
+    fn _c8_studio_state_single_source(_: &crate::ui::StudioState) {}
+    fn _c8_assert_is_resource<T: bevy::prelude::Resource>() {}
+    let _ = _c8_assert_is_resource::<crate::ui::StudioState>;
+};
 
 // ============================================================================
 // System Set Labels

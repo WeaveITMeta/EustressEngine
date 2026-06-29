@@ -216,7 +216,9 @@ impl OrbitalSettings {
 /// Workspace/physics settings for the scene
 #[derive(Debug, Clone, Serialize, Deserialize, Reflect)]
 pub struct WorkspaceSettings {
-    /// Gravity strength (studs/s²) - default 35.0 (Roblox-style)
+    /// Gravity strength in studs/s². Default `196.8` ≡ SI standard gravity
+    /// after conversion through `eustress_common::units` (1 stud = 9.815/196.8 m),
+    /// matching `Workspace::default().gravity` and the engine's startup gravity.
     pub gravity: f32,
     
     /// Maximum entity speed (studs/s)
@@ -241,7 +243,9 @@ pub struct WorkspaceSettings {
 impl Default for WorkspaceSettings {
     fn default() -> Self {
         Self {
-            gravity: 35.0,              // Roblox default: 196.2 studs/s² but we use 35 for gameplay
+            // 196.8 studs/s² → ~9.815 m/s² (≈ SI standard gravity) via the unit
+            // system; keeps loaded-scene gravity equal to Workspace::default().
+            gravity: 196.8,
             max_entity_speed: 100.0,
             max_fall_speed: 200.0,
             air_density: 0.0,           // No air resistance by default

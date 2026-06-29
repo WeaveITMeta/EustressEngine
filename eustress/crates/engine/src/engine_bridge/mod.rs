@@ -50,6 +50,7 @@ use std::sync::Arc;
 
 mod port_file;
 mod protocol;
+mod self_test;
 mod server;
 
 pub use protocol::{BridgeRequest, BridgeResponse, BridgeError, MethodName};
@@ -140,34 +141,27 @@ fn setup_engine_bridge(
 
     let queue = queue.0.clone();
 
-    // Spawn the listener on the shared tokio runtime. `Handle::block_on`
-    // isn't what we want here — we want a fire-and-forget task. The
-    // result goes back via `oneshot` so the Bevy thread can record the
-    // bound port without blocking.
-    let (port_tx, port_rx) = std::sync::mpsc::channel::<Option<u16>>();
-    handle.spawn(async move {
-        match server::start_listener(queue).await {
-            Ok(port) => {
-                let _ = port_tx.send(Some(port));
-            }
-            Err(e) => {
-                warn!("EngineBridge: listener failed to start: {}", e);
-                let _ = port_tx.send(None);
-            }
-        }
-    });
-
-    // Wait briefly for the bind to complete. Done with a bounded recv
-    // so a stuck tokio doesn't deadlock startup — 500 ms is enough for
-    // localhost bind, which takes microseconds.
-    let port = match port_rx.recv_timeout(std::time::Duration::from_millis(500)) {
-        Ok(Some(p)) => p,
-        _ => {
-            warn!("EngineBridge: listener did not report a port within 500ms");
+    // Bind SYNCHRONOUSLY on the runtime via `block_on`. Bind is a near-instant
+    // syscall, so this returns the real OS-assigned port deterministically —
+    // unlike the old `spawn` + 500 ms `recv_timeout` handshake, which on 0.19's
+    // heavier startup routinely timed out before a freshly created worker thread
+    // ran the bind. On timeout the old code early-returned and DROPPED the local
+    // `runtime`, shutting tokio down and aborting the (possibly-just-bound)
+    // listener — leaving the bridge unbound, no port file, and siblings hitting
+    // connect timeouts. Binding here removes the race entirely.
+    let (listener, port) = match handle.block_on(server::bind_listener()) {
+        Ok(bound) => bound,
+        Err(e) => {
+            error!("EngineBridge: listener failed to bind 127.0.0.1:0: {} — bridge disabled", e);
             commands.insert_resource(EngineBridgeHandle::default());
             return;
         }
     };
+
+    // Spawn the long-lived accept loop on the runtime. The runtime is moved into
+    // `BridgeRuntime` (below) and lives as long as the engine, so this task is
+    // never aborted by an early drop.
+    handle.spawn(server::run_accept_loop(listener, queue));
 
     // Write the port to `.eustress/engine.port` under whichever Universe
     // is current at startup. If `SpaceRoot` isn't set yet (bare engine
@@ -194,6 +188,14 @@ fn setup_engine_bridge(
         port: Some(port),
         port_file: Some(Arc::new(port_file)),
     });
+
+    // STARTUP SELF-TEST — connect to our own port and do one `ping` round-trip
+    // so a silent regression (bound-but-not-accepting, or the drain not running)
+    // screams in the log instead of surfacing hours later as a dead MCP loop.
+    // Spawned (not blocking): the response is serviced by `drain_bridge_requests`
+    // on a later `Update` frame, so blocking Startup on it would deadlock.
+    handle.spawn(self_test::run(port));
+
     commands.insert_resource(BridgeRuntime {
         handle,
         _runtime: runtime,

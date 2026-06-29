@@ -58,35 +58,38 @@ impl PendingRequests {
 // Listener entry point
 // ---------------------------------------------------------------------------
 
-/// Bind `127.0.0.1:0`, return the OS-assigned port, and spawn the
-/// accept loop. The caller hands off to `handle.spawn` — this function
-/// itself returns immediately after the bind so the port can be
-/// written to the sentinel file.
-pub(crate) async fn start_listener(queue: PendingRequests) -> std::io::Result<u16> {
+/// Bind `127.0.0.1:0` and return both the bound listener and its
+/// OS-assigned port. Bind is a near-instant syscall, so the caller can run
+/// this via `Handle::block_on` and learn the real port deterministically —
+/// no dependence on a freshly spawned worker thread getting scheduled in
+/// time (the 0.19 startup race that left the bridge unbound).
+pub(crate) async fn bind_listener() -> std::io::Result<(TcpListener, u16)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
+    Ok((listener, port))
+}
 
-    tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _addr)) => {
-                    let queue = queue.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, queue).await {
-                            tracing::debug!("EngineBridge: connection closed: {}", e);
-                        }
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!("EngineBridge: accept failed: {}", e);
-                    // Brief backoff so a thrashed error doesn't spin.
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
+/// Run the accept loop on an already-bound listener. Intended to be
+/// `handle.spawn`-ed as a long-lived task; each accepted connection gets
+/// its own task so siblings can talk to the bridge in parallel.
+pub(crate) async fn run_accept_loop(listener: TcpListener, queue: PendingRequests) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _addr)) => {
+                let queue = queue.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(stream, queue).await {
+                        tracing::debug!("EngineBridge: connection closed: {}", e);
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::warn!("EngineBridge: accept failed: {}", e);
+                // Brief backoff so a thrashed error doesn't spin.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         }
-    });
-
-    Ok(port)
+    }
 }
 
 // ---------------------------------------------------------------------------

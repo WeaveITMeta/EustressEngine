@@ -1119,10 +1119,32 @@ impl NumberRange {
         value.clamp(self.min, self.max)
     }
 
-    /// Random value within range
+    /// Random value within range, from the process-global deterministic RNG.
+    ///
+    /// Seeded once from a fixed seed (not OS entropy) and ADVANCED per call, so
+    /// a reproducible call order yields a reproducible sequence ("same inputs ->
+    /// same world"). Reached by both Luau and Rune via the shared `common` types.
+    /// For strict determinism under parallel scheduling, sim code should thread a
+    /// seeded RNG via [`Self::random_with`] instead.
     pub fn random(&self) -> f64 {
         use rand::Rng;
-        rand::thread_rng().gen_range(self.min..=self.max)
+        use std::sync::{LazyLock, Mutex};
+        static SIM_RNG: LazyLock<Mutex<rand::rngs::StdRng>> = LazyLock::new(|| {
+            use rand::SeedableRng;
+            Mutex::new(rand::rngs::StdRng::seed_from_u64(
+                crate::physics::GlobalRngSeed::default().0,
+            ))
+        });
+        let mut guard = SIM_RNG.lock().unwrap_or_else(|p| p.into_inner());
+        guard.gen_range(self.min..=self.max)
+    }
+
+    /// Random value within range, drawn from a caller-supplied reproducible RNG.
+    /// Prefer this in simulation code: pass an RNG derived from `GlobalRngSeed`
+    /// (see [`crate::physics::sim_rng`]) so results are deterministic regardless
+    /// of call interleaving.
+    pub fn random_with(&self, rng: &mut impl rand::Rng) -> f64 {
+        rng.gen_range(self.min..=self.max)
     }
 }
 

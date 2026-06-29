@@ -25,6 +25,16 @@ pub const STUD_TO_METERS: f32 = 1.0;
 /// Legacy constant - Eustress uses meters natively
 pub const METERS_TO_STUDS: f32 = 1.0;
 
+/// The unit `Workspace.gravity` is authored/stored in.
+///
+/// The engine is meter-native (see [`crate::units::ENGINE_NATIVE_UNIT`]), so
+/// gravity is stored in m/s² and the SI default `-9.80665 m/s²` needs no
+/// conversion before it reaches Avian. This constant is the single source of
+/// truth the canonical [`sync_workspace_gravity_to_avian`] system reads when
+/// converting through [`crate::units`]; change it here and every gravity-sync
+/// path converts correctly.
+pub const GRAVITY_AUTHORED_UNIT: crate::units::Unit = crate::units::ENGINE_NATIVE_UNIT;
+
 // ============================================================================
 // Workspace Resource
 // ============================================================================
@@ -126,8 +136,44 @@ impl Default for Workspace {
     }
 }
 
+/// Canonical gravity-sync system: copy `Workspace.gravity` into Avian's
+/// `Gravity` resource, converting through [`crate::units`] from the authored
+/// unit ([`GRAVITY_AUTHORED_UNIT`]) to engine-native meters.
+///
+/// This is the ONE place gravity reaches Avian. `eustress-runtime` and
+/// `eustress-networking` both schedule this function instead of each defining
+/// their own (which previously raced last-writer-wins and skipped unit
+/// conversion entirely). Runs only when an `avian3d::prelude::Gravity` resource
+/// exists, so it is harmless in editor/headless builds that never inserted one.
+///
+/// Gated on common's existing `physics` feature (which pulls `avian3d`); there
+/// is intentionally no separate `avian` feature.
+#[cfg(feature = "physics")]
+pub fn sync_workspace_gravity_to_avian(
+    workspace: Option<Res<Workspace>>,
+    gravity: Option<ResMut<avian3d::prelude::Gravity>>,
+) {
+    let (Some(ws), Some(mut gravity)) = (workspace, gravity) else { return };
+    // Authored unit → engine-native meters. Identity (zero-cost) while
+    // GRAVITY_AUTHORED_UNIT == ENGINE_NATIVE_UNIT, but routes through `units`
+    // so a future studs-authored gravity converts automatically.
+    let converted = crate::units::accel_to_engine_vec3_f32(
+        ws.gravity.to_array(),
+        GRAVITY_AUTHORED_UNIT,
+    );
+    let converted = Vec3::from_array(converted);
+    if gravity.0 != converted {
+        gravity.0 = converted;
+        info!(
+            "Avian gravity set to {:?} m/s² (from Workspace.gravity {:?} {})",
+            converted, ws.gravity, GRAVITY_AUTHORED_UNIT.symbol()
+        );
+    }
+}
+
 impl Workspace {
-    /// Create with custom gravity (in studs/s²)
+    /// Create with custom gravity (in m/s² — engine-native; see
+    /// [`GRAVITY_AUTHORED_UNIT`]).
     pub fn with_gravity(mut self, gravity: Vec3) -> Self {
         self.gravity = gravity;
         self

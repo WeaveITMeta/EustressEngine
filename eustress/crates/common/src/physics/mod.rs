@@ -38,6 +38,9 @@
 pub mod gravity;
 pub mod dynamic_gravity;
 pub mod exotic_propulsion;
+pub mod determinism;
+
+pub use determinism::{GlobalRngSeed, DeterminismPlugin, sim_rng};
 
 pub use gravity::{
     GravityPlugin,
