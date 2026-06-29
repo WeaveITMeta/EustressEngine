@@ -84,6 +84,31 @@ MCP/bridge, file-watcher, importer, and rune/script paths contain **no**
 so threading does not fan out across handlers. Do NOT block the additive op-log
 on causality — ship pass 1 with `actor=System`, enrich later.
 
+## Empirical coverage finding (2026-06-29 live run)
+
+Confirmed against a live engine (Voltec space, bridge up, `inspect_scene` green):
+the producer fires ONLY on the explicit binary create/delete chokepoints — bridge
+`entity.create`, editor Insert (`spawn_events`), bridge `entity.delete`,
+keybindings, undo. It does NOT fire on the **disk / file-watcher create path**:
+`mcp__eustress__create_entity` writes an `_instance.toml`, and the resulting
+file-watcher spawn persists via the PER-FRAME mirror (`mirror_binary_ecs_changes`
+→ `mirror_binary_core`), which is deliberately NOT recorded (bloat gate). So an AI
+creating via the MCP `create_entity` tool is currently NOT captured in the op-log.
+
+PRIORITISED NEXT COVERAGE TARGET: capture the file-watcher/disk create (the AI's
+own primary create route). This needs new-vs-move disambiguation inside
+`mirror_binary_core` (record only the FIRST persist of an entity id, never a
+subsequent move) — the same class of problem as the Update path. Until then, the
+op-log captures explicit editor/bridge creates + all deletes, not disk creates.
+
+LIVE-TEST GOTCHA: the disk-based MCP tools (`create_entity`, `execute_luau`) write
+to the MCP server's CONFIGURED universe (e.g. Universe1), NOT the running engine's
+universe (Voltec here) — so they cannot drive a live op-log test against a
+mismatched engine. Bridge tools (`inspect_scene`, `invoke_action`,
+`select_entity`) DO follow the live port. To trigger a binary create/delete live,
+use `select_entity` + `invoke_action("Delete")` (hits `delete_binary_instance`),
+an editor-Insert action, or launch the engine on the MCP-configured universe.
+
 ## Verification (the bloat-regression gate)
 
 In a live space: scripted create + move (many idle/physics frames) + delete via
