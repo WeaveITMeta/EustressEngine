@@ -129,6 +129,61 @@ impl ToolHandler for InspectSceneTool {
 }
 
 // ---------------------------------------------------------------------------
+
+pub struct OplogTailTool;
+
+impl ToolHandler for OplogTailTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "oplog_tail",
+            description: "Read the LIVE engine's causal op-log over the bridge — the most recent entity mutations (create/delete) in order, each with op/class/uuid/actor (provenance) and timestamp. This is the AI's 'what changed in the world, in what order, and why' audit trail, distinct from query_audit_log. Read-only; requires the engine running. NOTE (Phase 1): captures explicit create/delete today; disk/file-watcher-create coverage is pending.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "Max records, oldest-first (default 50, max 1000)." }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = serde_json::Map::new();
+        if let Some(v) = input.get("limit") {
+            if !v.is_null() {
+                params.insert("limit".to_string(), v.clone());
+            }
+        }
+
+        match call_engine(&ctx.universe_root, "oplog.tail", Value::Object(params)) {
+            Ok(result) => {
+                let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                // Spell the newest records into `content` (the AI reads content).
+                let mut lines: Vec<String> = Vec::new();
+                if let Some(arr) = result.get("mutations").and_then(|v| v.as_array()) {
+                    for m in arr.iter().rev().take(20) {
+                        let seq = m.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let op = m.get("op").and_then(|v| v.as_str()).unwrap_or("?");
+                        let class = m.get("class").and_then(|v| v.as_str()).unwrap_or("?");
+                        let uuid = m.get("uuid").and_then(|v| v.as_str()).unwrap_or("?");
+                        let actor = m.get("actor").and_then(|v| v.as_str()).unwrap_or("?");
+                        lines.push(format!("  #{seq} {op} {class} uuid={uuid} by={actor}"));
+                    }
+                }
+                let summary = format!(
+                    "{count} op-log record(s) (newest first):\n{}",
+                    lines.join("\n")
+                );
+                ok("oplog_tail", summary, result)
+            }
+            Err(e) => fail("oplog_tail", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // equip_tool  ->  tool.equip
 // ---------------------------------------------------------------------------
 
