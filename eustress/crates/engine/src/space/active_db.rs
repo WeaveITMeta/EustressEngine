@@ -96,6 +96,67 @@ mod imp {
         }
     }
 
+    /// Wall-clock nanoseconds for a `MutationRecord` timestamp. Used ONLY at
+    /// semantic op-log sites (create/delete), never on a per-frame path, so the
+    /// wall clock never enters a determinism-sensitive system.
+    fn now_nanos() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Append one SEMANTIC mutation to the causal op-log (Phase 1, Way 8).
+    /// Best-effort: a failure here NEVER fails the create/delete that already
+    /// committed. Called ONLY from the semantic create/delete sites — never the
+    /// per-frame move mirror (`mirror_binary_core`) — so it cannot bloat the
+    /// `mutations` partition. `actor`/`reason` are pass-1 placeholders
+    /// (System/None); see docs/architecture/CAUSAL_OPLOG_WIRING.md.
+    fn record_semantic(
+        db: &Arc<dyn WorldDb>,
+        op: eustress_worlddb::MutationOp,
+        uuid: &[u8; 16],
+        class_name: &str,
+        rel: &str,
+        after: Option<&[u8]>,
+    ) {
+        let rec = eustress_worlddb::MutationRecord {
+            tx_id: 0,
+            ts_nanos: now_nanos(),
+            actor: eustress_worlddb::MutationActor::System,
+            op,
+            class_name: class_name.to_string(),
+            uuid: uuid_bytes_to_hex(uuid),
+            rel_path: if rel.is_empty() {
+                None
+            } else {
+                Some(rel.to_string())
+            },
+            before: None,
+            after: after.map(|b| b.to_vec()),
+            parent_tx: None,
+            reason: None,
+        };
+        match eustress_worlddb::encode_mutation(&rec) {
+            Ok(bytes) => match db.record_mutation(&bytes) {
+                Ok(seq) => tracing::debug!(
+                    target: "eustress_engine::active_db",
+                    seq, op = ?rec.op, uuid = %rec.uuid, class = %class_name,
+                    "op-log: recorded semantic mutation"
+                ),
+                Err(e) => tracing::warn!(
+                    target: "eustress_engine::active_db",
+                    error = %e,
+                    "op-log: record_mutation failed (best-effort; the create/delete still applied)"
+                ),
+            },
+            Err(e) => tracing::warn!(
+                target: "eustress_engine::active_db",
+                error = %e, "op-log: encode_mutation failed"
+            ),
+        }
+    }
+
     /// One-shot snapshot of the counters for an end-of-load summary.
     pub fn stats_summary() -> String {
         format!(
@@ -585,6 +646,20 @@ mod imp {
         } else if core_ok {
             note(&INSTANCE_PUTS, "binary instance create (5-store)");
         }
+        // Causal op-log: record the semantic create iff the canonical (Morton)
+        // core persisted. NOTE: promote.rs reuses this for a binary->TOML
+        // representation change, which therefore shows as a Create in pass 1
+        // (DB-accurate; the causality follow-up labels it via `reason`).
+        if core_ok {
+            record_semantic(
+                &a.db,
+                eustress_worlddb::MutationOp::Create,
+                uuid,
+                class_name,
+                synthetic_rel,
+                Some(core),
+            );
+        }
         core_ok && index_failures.is_empty()
     }
 
@@ -615,6 +690,19 @@ mod imp {
         let _ = a.db.delete_path_to_uuid(synthetic_rel);
         let _ = a.db.delete_uuid_to_path(uuid);
         let _ = a.db.delete_class_index(class_name, uuid);
+        // Causal op-log: record the semantic delete iff the canonical core was
+        // removed. (promote teardown also routes here — shows as a Delete in
+        // pass 1; labeled via `reason` in the causality follow-up.)
+        if core_removed {
+            record_semantic(
+                &a.db,
+                eustress_worlddb::MutationOp::Delete,
+                uuid,
+                class_name,
+                synthetic_rel,
+                None,
+            );
+        }
         core_removed
     }
 
