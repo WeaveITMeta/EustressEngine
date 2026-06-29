@@ -95,11 +95,21 @@ file-watcher spawn persists via the PER-FRAME mirror (`mirror_binary_ecs_changes
 → `mirror_binary_core`), which is deliberately NOT recorded (bloat gate). So an AI
 creating via the MCP `create_entity` tool is currently NOT captured in the op-log.
 
-PRIORITISED NEXT COVERAGE TARGET: capture the file-watcher/disk create (the AI's
-own primary create route). This needs new-vs-move disambiguation inside
-`mirror_binary_core` (record only the FIRST persist of an entity id, never a
-subsequent move) — the same class of problem as the Update path. Until then, the
-op-log captures explicit editor/bridge creates + all deletes, not disk creates.
+DISK-CREATE COVERAGE — RESOLVED 2026-06-29 (the earlier `mirror_binary_core`
+prediction was WRONG). A follow-up investigation found disk/file-watcher creates
+do NOT go through the binary mirror at all: a new `_instance.toml` spawns a TOML
+(FileSystem-rep) entity via `instance_loader::spawn_instance` (NO BinaryEcsInstance
+marker), so `mirror_binary_core` never touches it. The clean, one-shot, create-only
+funnel is `file_watcher::handle_file_created`'s instance arm. The op-log now records
+a Create there (`active_db::record_disk_create`, actor = `FileWatcher`), reading
+`instance.metadata.uuid` (skip-with-warn if absent — never mint a phantom id).
+The discriminator is control-flow reachability, structurally airtight: moves drive
+the per-frame write systems (record nothing); residency stream-ins (`spawn_binary_core`)
+and boot/cold-load (`spawn_file_entry`) never reach `handle_file_created`; and its
+`is_loaded` guard + atomic-write re-route drop spurious/replace events. REMAINING
+gaps: GUI-element disk-creates (separate `put_gui` identity surface) and the
+Update/property-edit path (no clean create-vs-update chokepoint — `put_instance`
+is an upsert).
 
 LIVE-TEST GOTCHA: the disk-based MCP tools (`create_entity`, `execute_luau`) write
 to the MCP server's CONFIGURED universe (e.g. Universe1), NOT the running engine's

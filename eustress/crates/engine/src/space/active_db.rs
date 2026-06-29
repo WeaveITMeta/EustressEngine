@@ -114,6 +114,7 @@ mod imp {
     /// (System/None); see docs/architecture/CAUSAL_OPLOG_WIRING.md.
     fn record_semantic(
         db: &Arc<dyn WorldDb>,
+        actor: eustress_worlddb::MutationActor,
         op: eustress_worlddb::MutationOp,
         uuid: &[u8; 16],
         class_name: &str,
@@ -123,7 +124,7 @@ mod imp {
         let rec = eustress_worlddb::MutationRecord {
             tx_id: 0,
             ts_nanos: now_nanos(),
-            actor: eustress_worlddb::MutationActor::System,
+            actor,
             op,
             class_name: class_name.to_string(),
             uuid: uuid_bytes_to_hex(uuid),
@@ -155,6 +156,33 @@ mod imp {
                 error = %e, "op-log: encode_mutation failed"
             ),
         }
+    }
+
+    /// Record a SEMANTIC create that arrived as a new on-disk `_instance.toml`
+    /// (the file-watcher path — e.g. an MCP `create_entity`, which writes a TOML
+    /// folder rather than going through the binary `create_binary_instance`).
+    /// actor = FileWatcher (the observing mechanism; the true origin —
+    /// Mcp / User / Importer — is the causality follow-up). `after` may be None
+    /// (the bytes re-derive from the TOML). Best-effort; no-op if no DB active.
+    /// Called ONLY from `file_watcher::handle_file_created`'s instance arm — the
+    /// one-shot create-only funnel — never an edit/move path, so it cannot bloat
+    /// the op-log. See docs/architecture/CAUSAL_OPLOG_WIRING.md.
+    pub fn record_disk_create(uuid: &[u8; 16], class_name: &str, rel: &str, after: Option<&[u8]>) {
+        let Ok(g) = ACTIVE.read() else {
+            return;
+        };
+        let Some(a) = g.as_ref() else {
+            return;
+        };
+        record_semantic(
+            &a.db,
+            eustress_worlddb::MutationActor::FileWatcher,
+            eustress_worlddb::MutationOp::Create,
+            uuid,
+            class_name,
+            rel,
+            after,
+        );
     }
 
     /// One-shot snapshot of the counters for an end-of-load summary.
@@ -675,6 +703,7 @@ mod imp {
         if core_ok {
             record_semantic(
                 &a.db,
+                eustress_worlddb::MutationActor::System,
                 eustress_worlddb::MutationOp::Create,
                 uuid,
                 class_name,
@@ -718,6 +747,7 @@ mod imp {
         if core_removed {
             record_semantic(
                 &a.db,
+                eustress_worlddb::MutationActor::System,
                 eustress_worlddb::MutationOp::Delete,
                 uuid,
                 class_name,
@@ -960,6 +990,13 @@ mod imp {
         _synthetic_rel: &str,
     ) -> bool {
         false
+    }
+    pub fn record_disk_create(
+        _uuid: &[u8; 16],
+        _class_name: &str,
+        _rel: &str,
+        _after: Option<&[u8]>,
+    ) {
     }
     pub fn write_filesystem_identity(
         _uuid: &[u8; 16],

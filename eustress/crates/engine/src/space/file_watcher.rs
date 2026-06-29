@@ -1191,6 +1191,14 @@ fn handle_file_created(
             // Load .part.toml, .model.toml, .instance.toml files
             match super::instance_loader::load_instance_definition_with_defaults(&event.path, class_defaults) {
                 Ok(instance) => {
+                    // Capture identity BEFORE `instance` is moved into spawn_instance
+                    // (used by the op-log create record below, after registration).
+                    let create_uuid = instance
+                        .metadata
+                        .uuid
+                        .as_deref()
+                        .and_then(eustress_common::instance_create::uuid_hex_to_bytes);
+                    let create_class = instance.metadata.class_name.clone();
                     let entity = super::instance_loader::spawn_instance(
                         commands,
                         asset_server,
@@ -1261,6 +1269,28 @@ fn handle_file_created(
                     );
 
                     info!("✅ Loaded new instance file: {:?}", event.path);
+
+                    // Causal op-log (Phase 1, Way 8): a new on-disk `_instance.toml`
+                    // is the one-shot create funnel for a disk / MCP `create_entity`
+                    // create. Record it exactly once (actor = FileWatcher). Moves,
+                    // edits, residency stream-ins and boot/cold-load never reach this
+                    // arm (the `is_loaded` guard + atomic-write re-route ensure it).
+                    // Skip if the TOML carries no valid uuid — don't mint a phantom
+                    // identity. Best-effort; never affects the spawn.
+                    if let Some(uuid_bytes) = create_uuid {
+                        let rel = event
+                            .path
+                            .strip_prefix(space_root)
+                            .ok()
+                            .map(|p| p.to_string_lossy().replace('\\', "/"))
+                            .unwrap_or_default();
+                        super::active_db::record_disk_create(&uuid_bytes, &create_class, &rel, None);
+                    } else {
+                        warn!(
+                            "op-log: new _instance.toml {:?} has no valid uuid — create not recorded",
+                            event.path
+                        );
+                    }
                 }
                 Err(e) => {
                     error!("Failed to load new instance file {:?}: {}", event.path, e);
