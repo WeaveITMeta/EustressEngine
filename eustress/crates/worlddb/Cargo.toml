@@ -49,3 +49,7 @@ toml = "0.8"
 # Deterministic per-chunk content hashing for `.echk` bake → R2 delta
 # uploads (Phase 5). Same major the engine already uses.
 blake3 = "1"
+
+[dev-dependencies]
+# JSON round-trip for the WorldState projection DTO tests (projection.rs).
+serde_json = "1"

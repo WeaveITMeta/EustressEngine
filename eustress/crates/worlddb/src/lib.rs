@@ -52,6 +52,7 @@ pub mod header;
 pub mod import;
 pub mod keys;
 pub mod migrate_identity;
+pub mod projection;
 pub mod rkyv_values;
 pub mod rollout;
 pub mod schema;
@@ -69,4 +70,5 @@ pub use rkyv_values::{
     ArchInstanceCore, ArchTransform, EusValue, decode_eusvalue, decode_instance_core,
     decode_transform, encode_eusvalue, encode_instance_core, encode_transform,
 };
+pub use projection::{EntitySnapshot, TransformSnapshot, WorldSnapshot};
 pub use schema::{ClassSchemaVersion, SchemaMigration, SchemaMigrationRegistry};
