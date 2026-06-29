@@ -684,7 +684,12 @@ fn main() {
     // unaffected; wraps `bevy_gaussian_splatting` behind `eustress-radiance`.
     // Activate with `--features gaussian-splatting`.
     #[cfg(feature = "gaussian-splatting")]
-    app.add_plugins(eustress_radiance::RadiancePlugin);
+    {
+        app.add_plugins(eustress_radiance::RadiancePlugin);
+        // Env-driven demo spawn (EUSTRESS_SPLAT=<cloud path>) for eyeballing the
+        // Phase-0 render path. No-op when the var is unset.
+        app.add_plugins(eustress_radiance::RadianceDemoPlugin);
+    }
 
     // WorldDb — Fjall-backed authoritative ECS store (2026-05-15 binary
     // pivot; memory project_eustress_binary_pivot). Gated by the

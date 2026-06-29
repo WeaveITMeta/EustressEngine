@@ -17,7 +17,15 @@
 //!   decomposition physically grounded.
 
 use bevy::prelude::*;
-use bevy_gaussian_splatting::{CloudSettings, GaussianSplattingPlugin, PlanarGaussian3dHandle};
+use bevy_gaussian_splatting::{
+    camera::GaussianCameraPlugin,
+    gaussian::{cloud::CloudPlugin, settings::SettingsPlugin},
+    io::loader::{Gaussian3dLoader, Gaussian4dLoader},
+    query::QueryPlugin,
+    render::RenderPipelinePlugin,
+    CloudSettings, Gaussian3d, Gaussian4d, GaussianCamera, PlanarGaussian3dHandle,
+    PlanarStoragePlugin, SphericalHarmonicCoefficients,
+};
 
 pub mod collider;
 
@@ -31,7 +39,40 @@ pub struct RadiancePlugin;
 
 impl Plugin for RadiancePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(GaussianSplattingPlugin);
+        // We replicate `bevy_gaussian_splatting::GaussianSplattingPlugin` EXACTLY
+        // EXCEPT its glTF scene loader (`io::scene::GaussianScenePlugin`). That
+        // loader registers an `AssetLoader` for `.glb`/`.gltf` and SHADOWS Bevy's
+        // `GltfLoader`, so the engine's normal part meshes (`parts/block.glb`)
+        // fail with "no KHR_gaussian_splatting primitives found" and vanish from
+        // the scene. We only need `.ply`/`.gcloud` clouds, so we bring up the
+        // render + cloud loaders WITHOUT the scene loader → splats and normal
+        // meshes coexist. (If we later want glTF-embedded splat scenes, register
+        // a loader scoped to a distinct extension instead of plain `.glb`.)
+        app.register_type::<SphericalHarmonicCoefficients>();
+
+        // == IoPlugin, minus GaussianScenePlugin ==
+        app.init_asset_loader::<Gaussian3dLoader>();
+        app.init_asset_loader::<Gaussian4dLoader>();
+
+        app.add_plugins((
+            GaussianCameraPlugin,
+            SettingsPlugin,
+            CloudPlugin::<Gaussian3d>::default(),
+            CloudPlugin::<Gaussian4d>::default(),
+        ));
+        app.add_plugins((
+            PlanarStoragePlugin::<Gaussian3d>::default(),
+            PlanarStoragePlugin::<Gaussian4d>::default(),
+        ));
+        app.add_plugins((
+            RenderPipelinePlugin::<Gaussian3d>::default(),
+            RenderPipelinePlugin::<Gaussian4d>::default(),
+        ));
+        app.add_plugins((
+            bevy_gaussian_splatting::material::MaterialPlugin,
+            QueryPlugin,
+        ));
+
         app.register_type::<SplatCloud>();
     }
 }
@@ -46,6 +87,58 @@ impl Plugin for RadiancePlugin {
 pub struct SplatCloud {
     /// Source asset path the cloud was loaded from (for display / round-trip).
     pub source: String,
+}
+
+/// Optional demo: when the `EUSTRESS_SPLAT` env var is set to a cloud path
+/// (a `file://` URI or an asset-relative path), spawn that cloud at the origin
+/// on startup. Lets you eyeball the Phase-0 render path end to end:
+///
+/// ```text
+/// EUSTRESS_SPLAT=scenes/sample_sphere.ply \
+///   cargo run -p eustress-engine --features gaussian-splatting
+/// ```
+pub struct RadianceDemoPlugin;
+
+impl Plugin for RadianceDemoPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, demo_spawn_from_env);
+        app.add_systems(Update, demo_tag_gaussian_cameras);
+    }
+}
+
+/// Demo helper: the upstream renderer only draws clouds to cameras tagged
+/// [`GaussianCamera`]. The editor's `Camera3d` is not, so without this, clouds
+/// load but never render (the log shows "no gaussian cameras found"). Tag any
+/// untagged 3D camera so the demo is visible.
+///
+/// Production should tag only the intended viewport camera rather than every
+/// `Camera3d` (force-tagging all cameras, incl. AI/offscreen cameras, is a demo
+/// convenience) — see the roadmap engine-contention audit.
+fn demo_tag_gaussian_cameras(
+    mut commands: Commands,
+    cameras: Query<(Entity, &Camera), (With<Camera3d>, Without<GaussianCamera>)>,
+) {
+    for (entity, camera) in &cameras {
+        // The upstream sorter asserts `camera.order >= 0` (it uses the order as a
+        // `usize` index into gaussian cameras — see bevy_gaussian_splatting
+        // sort/mod.rs:166). The engine's offscreen / AI cameras use NEGATIVE
+        // orders, so tagging them panics. Only tag on-screen (order >= 0)
+        // cameras. Production should select the one intended viewport camera
+        // explicitly rather than every order>=0 Camera3d.
+        if camera.order >= 0 {
+            commands.entity(entity).insert(GaussianCamera::default());
+        }
+    }
+}
+
+fn demo_spawn_from_env(mut commands: Commands, asset_server: Res<AssetServer>) {
+    if let Ok(path) = std::env::var("EUSTRESS_SPLAT") {
+        if !path.is_empty() {
+            // `eprintln!` (not `info!`) so this crate needs no bevy_log feature.
+            eprintln!("[radiance] EUSTRESS_SPLAT set -> spawning splat cloud: {path}");
+            spawn_splat_cloud(&mut commands, &asset_server, path, Transform::IDENTITY);
+        }
+    }
 }
 
 /// Spawn a Gaussian-splat cloud from an asset path (`.ply` / `.gcloud` / glTF).
