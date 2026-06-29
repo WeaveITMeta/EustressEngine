@@ -379,6 +379,36 @@ pub fn accel_to_engine_vec3_f32(v: [f32; 3], from: Unit) -> [f32; 3] {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Velocity conversion
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Velocity is length per time; the shared second cancels, so it's the same
+// length ratio as `convert_f32` (exactly like acceleration above). These named
+// wrappers exist so velocity-handling code reads as a velocity conversion.
+// NOTE: ANGULAR velocity (rad/s) is length-invariant — never route it here.
+
+/// Convert a scalar velocity (a speed) authored in `from` to the value in `to`.
+#[inline]
+pub fn convert_velocity_f32(v: f32, from: Unit, to: Unit) -> f32 {
+    convert_f32(v, from, to)
+}
+
+/// Convert a velocity vector (e.g. an Avian `LinearVelocity`) authored in `from`
+/// to engine-native (meter) units. Component-wise; identity when
+/// `from == ENGINE_NATIVE_UNIT`.
+#[inline]
+pub fn velocity_authored_to_engine_vec3_f32(v: [f32; 3], from: Unit) -> [f32; 3] {
+    convert_vec3_f32(v, from, ENGINE_NATIVE_UNIT)
+}
+
+/// Inverse of [`velocity_authored_to_engine_vec3_f32`] for write-back: convert
+/// an engine-native velocity vector to the authored unit.
+#[inline]
+pub fn velocity_engine_to_authored_vec3_f32(v: [f32; 3], authored: Unit) -> [f32; 3] {
+    convert_vec3_f32(v, ENGINE_NATIVE_UNIT, authored)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Display-side formatting
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -445,6 +475,25 @@ mod tests {
     use super::*;
 
     const FUZZ: f64 = 1e-10;
+
+    /// Velocity vectors round-trip authored->engine->authored (studs<->meters),
+    /// and are identity when authored == engine-native. Acceleration/gravity
+    /// share the same length-ratio path (exercised by gravity sync).
+    #[test]
+    fn velocity_vec3_round_trip() {
+        let v = [12.5_f32, -3.25, 100.0];
+        let eng = velocity_authored_to_engine_vec3_f32(v, Unit::Stud);
+        let back = velocity_engine_to_authored_vec3_f32(eng, Unit::Stud);
+        for i in 0..3 {
+            assert!(
+                (v[i] - back[i]).abs() < 1e-3,
+                "velocity round-trip studs->m->studs failed at {i}: {} vs {}",
+                v[i], back[i]
+            );
+        }
+        // Identity when authored unit == engine-native (no conversion).
+        assert_eq!(velocity_authored_to_engine_vec3_f32(v, ENGINE_NATIVE_UNIT), v);
+    }
 
     /// Identity conversion is bit-exact.
     #[test]

@@ -31,10 +31,14 @@
 //! [`super::arch_instance`] (`instance_to_arch` / `arch_to_instance`).
 //!
 //! NOTE: this module is the *decision* layer. It is pure (no Bevy, no DB
-//! handle) so it can be unit-tested and called from any site. The actual
-//! storage routing only honors `BinaryEcs` once the K2 codec swap and the
-//! entities-partition load path are wired — until then everything stays
-//! FileSystem (current behavior, no regression).
+//! handle) so it can be unit-tested and called from any site. The
+//! entities-partition load + save path (`world_db_binary`) and the Morton
+//! ("K2") `INSTANCE_CORE` codec (`keys::MortonKeyEncoder`,
+//! `fjall_backend::put_instance_core`) are wired and live; `spawn_binary_instance`
+//! already honors this router at create. The remaining work is flipping the
+//! *create default* at every Insert/paste/MCP site to route bare Parts here
+//! (roadmap Phase 1, the "create-flip") and pointing the Properties inspector at
+//! the live core instead of re-parsing disk TOML — not the storage path itself.
 
 use std::path::Path;
 
