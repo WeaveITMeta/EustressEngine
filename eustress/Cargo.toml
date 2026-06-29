@@ -37,6 +37,7 @@ members = [
     "crates/eustress-space",
     "crates/radiance",
     "crates/ppisp",
+    "crates/genesis",
     "benches/instance-capacity"
 ]
 
