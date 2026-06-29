@@ -48,6 +48,24 @@ fn not_running(detail: &str) -> String {
     )
 }
 
+/// Read a port from `port_path`, parse it, and open a TCP connection to the
+/// bridge (short timeout so a dead engine fails fast). Used for both the
+/// per-universe port file and the global workspace-root fallback.
+fn connect_via_port_file(port_path: &Path) -> Result<TcpStream, String> {
+    let raw = std::fs::read_to_string(port_path)
+        .map_err(|_| not_running(&format!("no port file at {}", port_path.display())))?;
+    let port: u16 = raw
+        .trim()
+        .parse()
+        .map_err(|_| not_running(&format!("invalid port file contents: {:?}", raw.trim())))?;
+    let addr = format!("127.0.0.1:{port}");
+    let sock_addr: SocketAddr = addr
+        .parse()
+        .map_err(|e| format!("internal: bad bridge address {addr}: {e}"))?;
+    TcpStream::connect_timeout(&sock_addr, TIMEOUT)
+        .map_err(|e| not_running(&format!("connect {addr} failed: {e}")))
+}
+
 /// Call one bridge method and return its `result` value.
 ///
 /// `universe_dir` is the Universe root (`ToolContext::universe_root`);
@@ -62,22 +80,26 @@ pub fn call_engine(
     method: &str,
     params: Value,
 ) -> Result<Value, String> {
-    // ── Discover the port ────────────────────────────────────────────
-    let port_path = universe_dir.join(".eustress").join("engine.port");
-    let raw = std::fs::read_to_string(&port_path)
-        .map_err(|_| not_running(&format!("no port file at {}", port_path.display())))?;
-    let port: u16 = raw
-        .trim()
-        .parse()
-        .map_err(|_| not_running(&format!("invalid port file contents: {:?}", raw.trim())))?;
+    // ── Discover the port + connect ──────────────────────────────────
+    // Try the configured universe's port file first; if it is missing or its
+    // engine isn't answering, fall back to the GLOBAL port file at the shared
+    // Eustress workspace root (the engine writes both). This lets the MCP find
+    // the live engine even when it launched into a DIFFERENT universe than the
+    // one this server is configured for.
+    let universe_port = universe_dir.join(".eustress").join("engine.port");
+    let global_port = universe_dir
+        .parent()
+        .map(|ws| ws.join(".eustress").join("engine.port"));
 
-    // ── Connect (short timeout so a dead engine fails fast) ──────────
-    let addr = format!("127.0.0.1:{port}");
-    let sock_addr: SocketAddr = addr
-        .parse()
-        .map_err(|e| format!("internal: bad bridge address {addr}: {e}"))?;
-    let stream = TcpStream::connect_timeout(&sock_addr, TIMEOUT)
-        .map_err(|e| not_running(&format!("connect {addr} failed: {e}")))?;
+    let stream = match connect_via_port_file(&universe_port) {
+        Ok(s) => s,
+        Err(primary_err) => match global_port {
+            // On global failure, surface the PRIMARY (per-universe) error — it's
+            // the more relevant "your configured universe has no live engine".
+            Some(gp) => connect_via_port_file(&gp).map_err(|_| primary_err)?,
+            None => return Err(primary_err),
+        },
+    };
     stream
         .set_read_timeout(Some(TIMEOUT))
         .map_err(|e| format!("internal: set_read_timeout failed: {e}"))?;

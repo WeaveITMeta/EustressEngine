@@ -12,6 +12,11 @@ use std::path::{Path, PathBuf};
 /// if shutdown isn't graceful.
 pub struct PortFile {
     path: PathBuf,
+    /// Global fallback copy at the shared workspace root (parent of all
+    /// universes). Lets a sibling (MCP server) configured for a *different*
+    /// universe still discover the live engine. `None` for placeholders / when
+    /// the universe has no parent. Cleaned up on `Drop` alongside `path`.
+    global_path: Option<PathBuf>,
     /// When true, we never actually wrote anything to disk — the
     /// placeholder variant used when no Universe is loaded yet at
     /// startup. Prevents `Drop` from trying to delete a nonexistent
@@ -30,7 +35,22 @@ impl PortFile {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("engine.port");
         std::fs::write(&path, port.to_string())?;
-        Ok(Self { path, placeholder: false })
+
+        // Also write a GLOBAL copy at the shared workspace root (the parent of
+        // all universes) so a sibling (MCP server) configured for a DIFFERENT
+        // universe can still discover the live engine. The per-universe file
+        // disambiguates when multiple engines run; the global is the
+        // single-engine fallback. Best-effort: a global write failure must not
+        // fail the authoritative per-universe write.
+        let global_path = universe.parent().and_then(|ws| {
+            let gdir = ws.join(".eustress");
+            std::fs::create_dir_all(&gdir).ok()?;
+            let gp = gdir.join("engine.port");
+            std::fs::write(&gp, port.to_string()).ok()?;
+            Some(gp)
+        });
+
+        Ok(Self { path, global_path, placeholder: false })
     }
 
     /// Back-compat convenience: resolve the Universe ourselves (no
@@ -44,7 +64,7 @@ impl PortFile {
     /// port is still reachable via env var / log output, just not via
     /// the sentinel convention.
     pub fn placeholder() -> Self {
-        Self { path: PathBuf::new(), placeholder: true }
+        Self { path: PathBuf::new(), global_path: None, placeholder: true }
     }
 
     pub fn display_path(&self) -> String {
@@ -69,6 +89,9 @@ impl Drop for PortFile {
             return;
         }
         let _ = std::fs::remove_file(&self.path);
+        if let Some(gp) = &self.global_path {
+            let _ = std::fs::remove_file(gp);
+        }
     }
 }
 
