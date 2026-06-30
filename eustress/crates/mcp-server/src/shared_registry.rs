@@ -70,6 +70,9 @@ fn registry() -> &'static ToolRegistry {
         // is an in-process op on the live World + single-writer DB.
         r.register(crate::bridge_tools::PromoteEntityTool);
         r.register(crate::bridge_tools::DemoteEntityTool);
+        // Disk world-container tools — create Universes / Spaces (no engine).
+        r.register(crate::bridge_tools::NewUniverseTool);
+        r.register(crate::bridge_tools::NewSpaceTool);
         r
     })
 }

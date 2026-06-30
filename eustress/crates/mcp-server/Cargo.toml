@@ -44,6 +44,9 @@ dirs = { workspace = true }
 # external IDEs get every Workshop tool. Consumed WITHOUT the `bevy`
 # feature so we don't drag in Bevy on the MCP-server side.
 eustress-tools = { path = "../tools" }
+# For service_templates_dir() — new_space scaffolds a Space from the templates.
+# default-features off so this stays Bevy-free on the MCP-server side.
+eustress-common = { path = "../common", default-features = false }
 
 # Release profile is inherited from the workspace root (`opt-level = 3`,
 # `strip = true`). That's already enough to get the binary well under 10 MB

@@ -279,6 +279,156 @@ impl ToolHandler for SceneRaycastTool {
 }
 
 // ---------------------------------------------------------------------------
+// new_universe / new_space — DISK tools (no engine needed). They scaffold the
+// on-disk world containers so an agent can spin up a fresh sandbox to test in.
+// They operate on the MCP session's active Universe (ctx.universe_root), NOT the
+// live engine port — so they are NOT in BRIDGE_TOOL_NAMES.
+// ---------------------------------------------------------------------------
+
+/// Recursively copy a directory tree (used to scaffold a Space from the service
+/// templates).
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_all(&path, &target)?;
+        } else {
+            std::fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
+}
+
+pub struct NewUniverseTool;
+
+impl ToolHandler for NewUniverseTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "new_universe",
+            description: "Create a new Universe (a top-level world container with a Spaces/ folder) as a sibling of the active Universe under the Eustress documents root. Disk-based — writes the directory tree; pair with new_space to scaffold a first Space. Returns the new Universe path.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Universe folder name (e.g. 'TestWorld')." }
+                },
+                "required": ["name"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let name = match input.get("name").and_then(|v| v.as_str()) {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => return fail("new_universe", "missing or empty 'name'".to_string()),
+        };
+        // Universes are siblings under the Eustress documents root (the active
+        // Universe's parent).
+        let root = match ctx.universe_root.parent() {
+            Some(p) => p.to_path_buf(),
+            None => return fail("new_universe", "cannot resolve the documents root".to_string()),
+        };
+        let uni = root.join(&name);
+        if uni.exists() {
+            return fail("new_universe", format!("universe '{name}' already exists at {}", uni.display()));
+        }
+        for sub in [".eustress/assets/meshes", ".eustress/assets/parts", ".eustress/knowledge", "Spaces"] {
+            if let Err(e) = std::fs::create_dir_all(uni.join(sub)) {
+                return fail("new_universe", format!("create {}: {e}", uni.join(sub).display()));
+            }
+        }
+        ok(
+            "new_universe",
+            format!("created Universe '{name}' at {}", uni.display()),
+            serde_json::json!({ "name": name, "path": uni.to_string_lossy() }),
+        )
+    }
+}
+
+pub struct NewSpaceTool;
+
+impl ToolHandler for NewSpaceTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "new_space",
+            description: "Create a new Space inside a Universe by scaffolding the standard service folders (Workspace, Lighting, MaterialService, ...) from the service templates. Disk-based; the engine creates the world database on first open. Defaults to the active Universe. Returns the new Space path + the services created.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Space folder name (e.g. 'Sandbox')." },
+                    "universe": { "type": "string", "description": "Universe name or absolute path. Defaults to the active Universe." }
+                },
+                "required": ["name"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let name = match input.get("name").and_then(|v| v.as_str()) {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => return fail("new_space", "missing or empty 'name'".to_string()),
+        };
+        // Resolve the target Universe: explicit path, explicit name (sibling of
+        // the active Universe), or the active Universe.
+        let universe = match input.get("universe").and_then(|v| v.as_str()) {
+            Some(u) if u.contains('/') || u.contains('\\') => std::path::PathBuf::from(u),
+            Some(u) => ctx
+                .universe_root
+                .parent()
+                .map(|p| p.join(u))
+                .unwrap_or_else(|| ctx.universe_root.clone()),
+            None => ctx.universe_root.clone(),
+        };
+        let space = universe.join("Spaces").join(&name);
+        if space.exists() {
+            return fail("new_space", format!("space '{name}' already exists at {}", space.display()));
+        }
+        let templates = eustress_common::service_templates_dir();
+        if !templates.is_dir() {
+            return fail("new_space", format!("service templates not found at {}", templates.display()));
+        }
+        if let Err(e) = std::fs::create_dir_all(space.join(".eustress")) {
+            return fail("new_space", format!("create {}: {e}", space.display()));
+        }
+        // Copy every service-template folder into the new Space.
+        let mut services = Vec::new();
+        let entries = match std::fs::read_dir(&templates) {
+            Ok(e) => e,
+            Err(e) => return fail("new_space", format!("read service templates: {e}")),
+        };
+        for entry in entries.flatten() {
+            let src = entry.path();
+            if src.is_dir() {
+                let svc = entry.file_name().to_string_lossy().to_string();
+                if let Err(e) = copy_dir_all(&src, &space.join(&svc)) {
+                    return fail("new_space", format!("copy service {svc}: {e}"));
+                }
+                services.push(svc);
+            }
+        }
+        services.sort();
+        ok(
+            "new_space",
+            format!(
+                "created Space '{name}' at {} with {} services ({})",
+                space.display(),
+                services.len(),
+                services.join(", ")
+            ),
+            serde_json::json!({ "name": name, "path": space.to_string_lossy(), "services": services }),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // equip_tool  ->  tool.equip
 // ---------------------------------------------------------------------------
 
