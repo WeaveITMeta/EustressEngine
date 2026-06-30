@@ -324,6 +324,10 @@ core = [
     # Override with `--no-default-features` (+ re-add needed tiers) to
     # diagnose a WorldDb issue in isolation.
     "world-db",
+    # Gaussian-Splatting radiance rendering — ON by default 2026-06-29 (user
+    # directive). Wraps bevy_gaussian_splatting (stable, via the `radiance`
+    # crate). Splats coexist with normal meshes; demo spawn via EUSTRESS_SPLAT.
+    "gaussian-splatting",
 ]
 
 # ── Individual feature gates ──────────────────────────────────────────────────
