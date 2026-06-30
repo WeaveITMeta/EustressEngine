@@ -215,6 +215,10 @@ pub enum ClassName {
     BasePart,
     Part,
     Model,
+    /// Gaussian-Splatting radiance field — a rendered splat cloud (the visual
+    /// channel; mesh/CSG/voxel remains the authoritative state). Shown in the
+    /// Explorer so captured/generated splat scenes are browsable + selectable.
+    GaussianSplats,
     Humanoid,
     Camera,
     PointLight,
@@ -516,6 +520,7 @@ impl ClassName {
             ClassName::BasePart => "BasePart",
             ClassName::Part => "Part",
             ClassName::Model => "Model",
+            ClassName::GaussianSplats => "GaussianSplats",
             ClassName::Humanoid => "Humanoid",
             ClassName::Camera => "Camera",
             ClassName::PointLight => "PointLight",

@@ -444,6 +444,11 @@ impl ClassId {
             // persistence is the Fjall entities partition + TOML, not this path.
             ClassName::ArcReactorCore => ClassId::Part,
             ClassName::Model => ClassId::Model,
+            // Gaussian-Splatting cloud — mapped to Model for the legacy binary/RON
+            // scene tag (no dedicated ClassId; primary persistence is the Fjall
+            // entities partition + the runtime spawn, not this path). Same
+            // fallback rationale as ArcReactorCore above.
+            ClassName::GaussianSplats => ClassId::Model,
             ClassName::Folder => ClassId::Folder,
             ClassName::Humanoid => ClassId::Humanoid,
             ClassName::Camera => ClassId::Camera,

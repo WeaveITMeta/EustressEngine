@@ -703,6 +703,9 @@ fn main() {
         // Env-driven demo spawn (EUSTRESS_SPLAT=<cloud path>) for eyeballing the
         // Phase-0 render path. No-op when the var is unset.
         app.add_plugins(eustress_radiance::RadianceDemoPlugin);
+        // Make splat clouds browsable: tag them with an Instance so the unified
+        // Explorer sync lists + nests them under Workspace.
+        app.add_systems(Update, tag_splats_for_explorer);
     }
 
     // WorldDb — Fjall-backed authoritative ECS store (2026-05-15 binary
@@ -802,6 +805,45 @@ fn main() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Window title — "Universe > Space - Eustress Engine"
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Make Gaussian-Splatting clouds appear in the Explorer. radiance spawns each
+/// GPU cloud with only `Name` + `SplatCloud` (it cannot reference the engine's
+/// scene-tree types), so the engine tags every newly-spawned cloud with an
+/// `Instance` (class `GaussianSplats`) and parents it under Workspace — the two
+/// things the unified-explorer sync (`Query<(Entity, &Instance)>`) needs to list
+/// and nest it. Selectable + inspectable like any other instance.
+#[cfg(feature = "gaussian-splatting")]
+fn tag_splats_for_explorer(
+    mut commands: Commands,
+    new_splats: Query<
+        (Entity, &Name),
+        (
+            Added<eustress_radiance::SplatCloud>,
+            Without<eustress_common::classes::Instance>,
+        ),
+    >,
+    services: Query<(Entity, &crate::space::service_loader::ServiceComponent)>,
+) {
+    if new_splats.is_empty() {
+        return;
+    }
+    let workspace = services
+        .iter()
+        .find(|(_, s)| s.class_name == "Workspace")
+        .map(|(e, _)| e);
+    for (entity, name) in &new_splats {
+        commands
+            .entity(entity)
+            .insert(eustress_common::classes::Instance {
+                name: name.as_str().to_string(),
+                class_name: eustress_common::classes::ClassName::GaussianSplats,
+                ..Default::default()
+            });
+        if let Some(ws) = workspace {
+            commands.entity(entity).insert(ChildOf(ws));
+        }
+    }
+}
 
 /// Update the primary window title whenever `SpaceRoot` changes.
 fn update_window_title(
