@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- GaussianSplats - a cluster of soft, overlapping colored gaussian blobs
+       (a radiance-field point cloud). Each splat is an anisotropic ellipse with
+       a radial-gradient falloff - the defining look of Gaussian Splatting. -->
+  <defs>
+    <radialGradient id="gsC" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#33E0FF" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="#33E0FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="gsM" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FF4FD8" stop-opacity="0.90"/>
+      <stop offset="100%" stop-color="#FF4FD8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="gsY" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FFD23F" stop-opacity="0.90"/>
+      <stop offset="100%" stop-color="#FFD23F" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="gsW" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.98"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <ellipse cx="6.2" cy="7.2" rx="5.2" ry="3.6" fill="url(#gsC)" transform="rotate(-22 6.2 7.2)"/>
+  <ellipse cx="10.2" cy="9.2" rx="4.8" ry="3.2" fill="url(#gsM)" transform="rotate(26 10.2 9.2)"/>
+  <ellipse cx="9.6" cy="5.4" rx="4.2" ry="2.8" fill="url(#gsY)" transform="rotate(12 9.6 5.4)"/>
+  <ellipse cx="7.6" cy="8.4" rx="3.0" ry="2.1" fill="url(#gsW)" transform="rotate(-12 7.6 8.4)"/>
+</svg>

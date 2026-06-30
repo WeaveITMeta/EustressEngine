@@ -17751,6 +17751,7 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
     match class_name {
         ClassName::Part | ClassName::BasePart => "part",
         ClassName::Model | ClassName::PVInstance => "model",
+        ClassName::GaussianSplats => "gaussiansplats",
         ClassName::Folder => "folder",
         ClassName::Humanoid => "humanoid",
         ClassName::Camera => "camera",
