@@ -178,6 +178,17 @@ pub trait WorldDb: Send + Sync + 'static {
     /// tree (caller falls back to disk or treats as absent).
     fn get_file(&self, rel_path: &str) -> Result<Option<Vec<u8>>>;
 
+    /// Cheap existence check for a tree file. Used by the disk→tree reconcile
+    /// to ALWAYS ingest a file that is MISSING from the tree (never mtime-skip
+    /// it — an un-ingested file with an old mtime would otherwise be skipped
+    /// forever, the "I dropped SoulScripts into a migrated Space and nothing
+    /// registers" bug). The default reads the value via [`get_file`]; the Fjall
+    /// backend overrides with a key-only `contains_key` so a large reconcile
+    /// pays no value reads.
+    fn has_file(&self, rel_path: &str) -> Result<bool> {
+        Ok(self.get_file(rel_path)?.is_some())
+    }
+
     /// Remove one file from the tree (entity despawn, script delete).
     fn delete_file(&self, rel_path: &str) -> Result<()>;
 

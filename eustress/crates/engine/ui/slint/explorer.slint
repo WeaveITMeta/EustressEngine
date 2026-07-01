@@ -378,9 +378,13 @@ export component ExplorerPanel inherits Rectangle {
                         }
                     }
 
-                    // Empty space fill — click to deselect
+                    // Empty space fill below the tree — click to deselect.
+                    // NOTE: deliberately NO `vertical-stretch` here. A stretch
+                    // element inside a ScrollView pins the content height to the
+                    // viewport, which silently kills wheel scrolling the moment
+                    // the tree outgrows the panel (the "Explorer scrolling broke"
+                    // bug — surfaced once disk SoulScripts filled the tree).
                     Rectangle {
-                        vertical-stretch: 1;
                         min-height: 100px;
                         background: transparent;
                         TouchArea {

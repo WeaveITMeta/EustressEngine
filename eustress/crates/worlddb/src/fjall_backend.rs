@@ -1103,6 +1103,13 @@ impl WorldDb for FjallWorldDb {
         Ok(self.tree.get(key.as_bytes())?.map(|s| s.to_vec()))
     }
 
+    fn has_file(&self, rel_path: &str) -> Result<bool> {
+        // Key-only existence — no value read/deserialize, so the reconcile's
+        // per-file presence check stays cheap even on a 161K-file tree.
+        let key = normalise_rel(rel_path);
+        Ok(self.tree.contains_key(key.as_bytes())?)
+    }
+
     fn delete_file(&self, rel_path: &str) -> Result<()> {
         let key = normalise_rel(rel_path);
         self.tree.remove(key.as_bytes())?;

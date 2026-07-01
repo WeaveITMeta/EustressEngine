@@ -110,7 +110,9 @@ const MIRROR_PER_FRAME_BUDGET: usize = 2_048;
 /// walks the disk tree and, for every `.toml` whose bytes differ from the
 /// tree (or are missing from it), overwrites the tree key and drops the
 /// matching `#bin` bincode cache (which `active_db::get_instance` reads
-/// before the base key). Only `.toml` is considered — the large GLB/asset
+/// before the base key). Only small text files are considered — `.toml`
+/// entity defs plus `.rune`/`.luau`/`.soul`/`.md` script sources (a DB-primary
+/// `FjallSource` load reads script bodies from the tree). The large GLB/asset
 /// bytes the tree also holds are skipped, so this stays cheap. Unchanged
 /// files are left alone, so the change-stream and `#bin` caches aren't
 /// churned. Mirrors the out-of-band `reseed-space-subtree` bin, run
@@ -187,8 +189,13 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
                 stack.push(path);
                 continue;
             }
-            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-                continue;
+            // `.toml` = entity/instance definitions; `.rune`/`.luau`/`.soul`/`.md`
+            // = script sources a DB-primary (FjallSource) load reads from the
+            // tree. All small text files — the large GLB/image asset bytes the
+            // tree also holds are still skipped, keeping the walk cheap.
+            match path.extension().and_then(|e| e.to_str()) {
+                Some("toml" | "rune" | "luau" | "soul" | "md") => {}
+                _ => continue,
             }
             candidates.push(path);
         }
@@ -199,10 +206,19 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
     let changed: Vec<(String, Vec<u8>)> = candidates
         .par_iter()
         .filter_map(|path| {
-            // mtime-gate: skip a file unchanged since the last reconcile so we
-            // never re-read the ~161K-file tree. On the first open
-            // (`last_reconcile == 0`) nothing is skipped.
-            if last_reconcile != 0 {
+            let stripped = path.strip_prefix(space_root).ok()?;
+            let rel = stripped.to_string_lossy().replace('\\', "/");
+            // A file MISSING from the tree was never ingested (dropped into a
+            // migrated Space, or the reconcile was gated off for it) — always
+            // ingest it, no matter how old its mtime. The mtime-gate skips ONLY
+            // files ALREADY in the tree: an unchanged in-tree file was
+            // reconciled before, so skipping its read keeps a ~161K-file tree
+            // open cheap. `has_file` is a key-only existence probe (no value
+            // read), so the presence check stays cheap at scale. Without it, an
+            // un-ingested file whose mtime predates the marker is skipped
+            // forever — the "I dropped SoulScripts in and nothing registers" bug.
+            let in_tree = db.has_file(&rel).unwrap_or(false);
+            if in_tree && last_reconcile != 0 {
                 let unchanged = std::fs::metadata(path)
                     .ok()
                     .and_then(|m| m.modified().ok())
@@ -213,13 +229,14 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
                     return None;
                 }
             }
-            let stripped = path.strip_prefix(space_root).ok()?;
-            let rel = stripped.to_string_lossy().replace('\\', "/");
             let disk_bytes = std::fs::read(path).ok()?;
-            // Only write when disk actually differs from the tree.
-            if let Ok(Some(tree_bytes)) = db.get_file(&rel) {
-                if tree_bytes == disk_bytes {
-                    return None;
+            // Only write when disk actually differs from the tree (in-tree only;
+            // a missing file always falls through to the write below).
+            if in_tree {
+                if let Ok(Some(tree_bytes)) = db.get_file(&rel) {
+                    if tree_bytes == disk_bytes {
+                        return None;
+                    }
                 }
             }
             Some((rel, disk_bytes))
@@ -359,13 +376,21 @@ fn open_world_db_on_space_change(
             // V-Cell-staleness class of bug). Reconcile the changed `.toml`
             // back into the tree here, BEFORE FjallSource goes live, so the
             // human-editable disk hierarchy and the database always agree
-            // on open. Skipped for a migrated Space (no loose disk tree).
+            // on open. Runs for a migrated Space TOO: the loose disk tree is the
+            // git-versioned source of truth (world.fjalldb is a derived,
+            // .gitignore'd cache), so Parts and SoulScripts dropped onto disk
+            // while the engine was closed get ingested into the tree on open —
+            // else a DB-primary (FjallSource) load never sees them and they
+            // silently vanish ("I put files in the Space and nothing registers").
+            // Mtime-gated, so an empty/unchanged disk tree on a migrated Space
+            // pays ~nothing.
             let migrated = WorldHeader::read(&space_root.0)
                 .ok()
                 .flatten()
                 .map(|h| h.is_migrated())
                 .unwrap_or(false);
-            if !migrated {
+            let _ = migrated; // reconcile now runs for migrated Spaces too — disk is the SoT
+            {
                 let n = reconcile_disk_toml_into_tree(&space_root.0, db.as_ref());
                 if n > 0 {
                     let _ = db.flush();
