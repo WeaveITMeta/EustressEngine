@@ -31,7 +31,7 @@ pub use bliss_events as events;
 pub use bliss_wallet as wallet;
 
 pub use api::start_server;
-pub use cosign::CosignClient;
+pub use cosign::{CosignClient, HeartbeatReply};
 pub use error::BlissError;
 pub use node::{BlissNode, NodeConfig, NodeMode};
 

@@ -44,6 +44,14 @@ impl NodeMode {
         }
     }
 
+    /// Wire name for the witness protocol ("Light" / "Full").
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            NodeMode::Light => "Light",
+            NodeMode::Full => "Full",
+        }
+    }
+
     /// Short description for settings panel.
     pub fn description(&self) -> &'static str {
         match self {
@@ -264,7 +272,13 @@ impl BlissNode {
         // Request co-signature from witness Worker
         let result = self
             .cosign_client
-            .cosign(user_id, contribution_hash, contribution_type, duration_secs)
+            .cosign(
+                user_id,
+                contribution_hash,
+                contribution_type,
+                duration_secs,
+                self.config.mode.wire_name(),
+            )
             .await?;
 
         // Update local state
@@ -335,6 +349,12 @@ impl BlissNode {
 pub struct CosignResult {
     pub server_signature: String,
     pub co_signed_at: String,
+    /// Weighted score the witness credited (weight × minutes × node bonus).
+    #[serde(default)]
+    pub score_added: f64,
+    /// Lifetime contribution score after this credit.
+    #[serde(default)]
+    pub total_score: f64,
 }
 
 /// Snapshot of current session statistics.

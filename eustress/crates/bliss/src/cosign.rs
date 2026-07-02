@@ -17,6 +17,9 @@ struct CosignRequest {
     contribution_type: String,
     duration_secs: u64,
     timestamp: String,
+    /// "Light" or "Full" — the witness applies the +10% Full-node bonus
+    /// server-side so the client can't self-award it silently.
+    node_mode: String,
 }
 
 /// Response from the co-signing endpoint.
@@ -24,6 +27,13 @@ struct CosignRequest {
 struct CosignResponse {
     server_signature: String,
     co_signed_at: String,
+    /// Weighted score the witness credited for this contribution
+    /// (weight × minutes × node bonus). Absent on older witnesses.
+    #[serde(default)]
+    score_added: f64,
+    /// Lifetime contribution score after this credit.
+    #[serde(default)]
+    total_score: f64,
 }
 
 /// Error response from the co-signing endpoint.
@@ -37,6 +47,10 @@ pub struct CosignClient {
     http: reqwest::Client,
     witness_url: String,
     fork_id: String,
+    /// Bearer JWT from the Eustress login flow. The witness rejects
+    /// unauthenticated co-sign requests (401), so this must be set
+    /// before `cosign` is called with a logged-in user.
+    auth_token: Option<String>,
 }
 
 impl CosignClient {
@@ -46,16 +60,28 @@ impl CosignClient {
             http: reqwest::Client::new(),
             witness_url,
             fork_id,
+            auth_token: None,
         }
     }
 
+    /// Set (or clear) the bearer token used to authenticate co-sign
+    /// requests. The token is the JWT issued by the witness's own
+    /// login flow (`/api/auth/verify-challenge`).
+    pub fn set_auth_token(&mut self, token: Option<String>) {
+        self.auth_token = token;
+    }
+
     /// Request a co-signature for a contribution hash.
+    ///
+    /// `node_mode` is "Light" or "Full" — the witness applies the
+    /// +10% Full-node bonus server-side.
     pub async fn cosign(
         &self,
         user_id: &str,
         contribution_hash: &str,
         contribution_type: &str,
         duration_secs: u64,
+        node_mode: &str,
     ) -> Result<CosignResult, BlissError> {
         let timestamp = chrono::Utc::now().to_rfc3339();
 
@@ -65,16 +91,15 @@ impl CosignClient {
             contribution_type: contribution_type.to_string(),
             duration_secs,
             timestamp,
+            node_mode: node_mode.to_string(),
         };
 
         let url = format!("{}/api/cosign", self.witness_url);
-        let response = self
-            .http
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .map_err(BlissError::Network)?;
+        let mut req = self.http.post(&url).json(&request);
+        if let Some(token) = self.auth_token.as_ref() {
+            req = req.bearer_auth(token);
+        }
+        let response = req.send().await.map_err(BlissError::Network)?;
 
         let status = response.status();
         if status.is_success() {
@@ -85,6 +110,8 @@ impl CosignClient {
             Ok(CosignResult {
                 server_signature: body.server_signature,
                 co_signed_at: body.co_signed_at,
+                score_added: body.score_added,
+                total_score: body.total_score,
             })
         } else {
             let error_text = response
@@ -107,29 +134,62 @@ impl CosignClient {
     }
 
     /// Send a heartbeat to the witness to report node status.
+    ///
+    /// When `user_id` is provided the witness replies with the user's
+    /// authoritative BLS balance and today's pending contribution score
+    /// — this is how the engine badge stays in sync with the ledger.
     pub async fn heartbeat(
         &self,
         node_id: &str,
         mode: &str,
         players: u32,
         uptime_secs: u64,
-    ) -> Result<(), BlissError> {
+        user_id: Option<&str>,
+    ) -> Result<HeartbeatReply, BlissError> {
         let url = format!("{}/api/node/heartbeat", self.witness_url);
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "node_id": node_id,
             "mode": mode,
             "players": players,
             "uptime_secs": uptime_secs,
             "fork_id": self.fork_id,
         });
+        if let Some(uid) = user_id {
+            body["user_id"] = serde_json::Value::String(uid.to_string());
+        }
 
-        let _ = self.http
+        let response = self.http
             .post(&url)
             .json(&body)
             .send()
             .await
             .map_err(BlissError::Network)?;
 
-        Ok(())
+        if response.status().is_success() {
+            let reply: HeartbeatReply = response
+                .json()
+                .await
+                .map_err(BlissError::Network)?;
+            Ok(reply)
+        } else {
+            Err(BlissError::Cosign(format!(
+                "heartbeat HTTP {}",
+                response.status()
+            )))
+        }
     }
+}
+
+/// Witness reply to a node heartbeat. Balance fields are zero unless
+/// a `user_id` was included in the request.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HeartbeatReply {
+    #[serde(default)]
+    pub ok: bool,
+    /// Authoritative BLS balance from the ledger (whole BLS).
+    #[serde(default)]
+    pub bliss_balance: f64,
+    /// Today's pending (not yet distributed) contribution score.
+    #[serde(default)]
+    pub pending_score: f64,
 }

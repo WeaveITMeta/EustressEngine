@@ -18,6 +18,7 @@ use eustress_common::change_queue::{ChangeQueueConfig, StreamingPlugin};
 use eustress_common::sim_stream::SimStreamWriter;
 
 mod auth;
+mod bliss_tracker;
 mod forge;
 mod terrain_plugin;
 // Wave 9.C — imported-terrain voxel loader (reads Fjall voxels, fills the
@@ -404,6 +405,15 @@ fn main() {
         .add_plugins(ai_camera::AiCameraPlugin)
         // Slint UI (software renderer overlay)
         .add_plugins(ui::slint_ui::SlintUiPlugin)
+        // Studio auth + Bliss node — starts the local Bliss node API.
+        // Must come after SlintUiPlugin (which owns `auth_poll_system`;
+        // this plugin deliberately does not re-register it).
+        .add_plugins(auth::StudioAuthPlugin)
+        // Bliss contribution tracker — attributes real work (scene edits,
+        // script edits, active time) to contribution buckets, submits them
+        // to the witness for co-signing, and syncs the authoritative BLS
+        // balance into the ribbon's top-right Bliss badge.
+        .add_plugins(bliss_tracker::BlissTrackerPlugin)
         // Floating windows
         .add_plugins(ui::floating_windows::FloatingWindowsPlugin)
         // 3D rendering
