@@ -627,6 +627,15 @@ export component StudioWindow inherits Window {
     callback toast-undo-clicked();
     callback toast-undo-dismissed();
 
+    // ──────────────────────────────────────────────────────────────────────
+    // Space-load progress pill — bottom-center of the viewport while the
+    // frame-budgeted loader streams instances in. Rust drives these from
+    // `LoadInProgress` + `DeferredServiceLoader` + the spawn spill queue
+    // (`sync_load_progress_to_slint`); Slint is a pure projection.
+    // ──────────────────────────────────────────────────────────────────────
+    in-out property <bool>   loading-active: false;
+    in-out property <string> loading-detail: "";
+
     // Commit-success flash — driven by a Rust system that subscribes
     // to `ModalToolCommittedEvent`. Sets `commit-flash-progress = 1.0`
     // on commit, then tweens to 0 over 150ms. The ToolOptionsBar
@@ -2249,6 +2258,49 @@ export component StudioWindow inherits Window {
                             dismissed      => { root.toast-undo-dismissed(); }
                         }
                         
+                        // Space-load progress pill — bottom-center while
+                        // the frame-budgeted loader streams instances in.
+                        // Indeterminate cyan sweep + live queue counts.
+                        // Non-interactive: purely informational, never
+                        // blocks viewport input.
+                        if root.loading-active: Rectangle {
+                            x: (parent.width - self.width) / 2;
+                            y: parent.height - self.height - 16px;
+                            width: 360px;
+                            height: 46px;
+                            border-radius: 8px;
+                            background: #1a1d21ee;
+                            border-width: 1px;
+                            border-color: #00bcd455;
+                            VerticalLayout {
+                                padding: 9px;
+                                spacing: 7px;
+                                Text {
+                                    text: root.loading-detail;
+                                    color: #e8eaed;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
+                                    overflow: elide;
+                                }
+                                Rectangle {
+                                    height: 4px;
+                                    border-radius: 2px;
+                                    background: #ffffff14;
+                                    clip: true;
+                                    Rectangle {
+                                        width: 30%;
+                                        height: parent.height;
+                                        border-radius: 2px;
+                                        background: #00bcd4;
+                                        // Indeterminate sweep: bounce across the
+                                        // track on the global animation clock.
+                                        x: (parent.width - self.width)
+                                            * abs(sin(360deg * (animation-tick() / 1.6s)));
+                                    }
+                                }
+                            }
+                        }
+
                         // Performance Overlay (top-right)
                         if root.show-performance-overlay: PerformanceOverlay {
                             x: parent.width - self.width - 8px;

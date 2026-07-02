@@ -2529,6 +2529,13 @@ pub(crate) fn discard_pending_spawns() {
     }
 }
 
+/// Number of spawns still queued in the frame-budget spill. Feeds the
+/// Slint Space-load progress pill so the user sees live progress instead
+/// of a silent half-populated scene during large loads.
+pub(crate) fn pending_spill_len() -> usize {
+    SPILL.lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
 /// Re-arm the budget before each priority service so a small one
 /// (`Lighting`) still loads instantly even after a huge one spilled.
 pub(crate) fn rearm_priority_budget() {

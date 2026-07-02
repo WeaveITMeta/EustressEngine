@@ -51,24 +51,46 @@ fn sync_cursor_badge_state(
     active: Res<crate::modal_tool::ActiveModalTool>,
     windows: Query<&Window, With<PrimaryWindow>>,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
+    // Gizmo hover states — a hovered transform handle shows a matching
+    // badge so the user knows the handle is live BEFORE clicking (AAA
+    // audit: "gizmo handles show no cursor feedback").
+    move_state: Option<Res<crate::move_tool::MoveToolState>>,
+    scale_state: Option<Res<crate::scale_tool::ScaleToolState>>,
+    rotate_state: Option<Res<crate::rotate_tool::RotateToolState>>,
 ) {
-    // No active tool → hide.
-    let Some(tool_id) = active.id() else {
-        state.visible = false;
-        state.icon_path.clear();
-        return;
-    };
-
-    // Map tool id → badge icon. Tools that don't have a badge
-    // (Select / Move / Rotate / Scale) render no badge.
-    let icon_path = match tool_id {
-        "gap_fill"             => "assets/icons/ui/cursor-badge-gap-fill.svg",
-        "resize_align"         => "assets/icons/ui/cursor-badge-resize-align.svg",
-        "edge_align"           => "assets/icons/ui/cursor-badge-edge-align.svg",
-        "part_swap_positions"  => "assets/icons/ui/cursor-badge-part-swap.svg",
-        "model_reflect"        => "assets/icons/ui/cursor-badge-mirror.svg",
-        "material_flip"        => "assets/icons/ui/cursor-badge-material-flip.svg",
-        _ => "",
+    // Modal tools take precedence; otherwise fall through to gizmo-hover
+    // badges for the transform tools.
+    let icon_path = if let Some(tool_id) = active.id() {
+        match tool_id {
+            "gap_fill"             => "assets/icons/ui/cursor-badge-gap-fill.svg",
+            "resize_align"         => "assets/icons/ui/cursor-badge-resize-align.svg",
+            "edge_align"           => "assets/icons/ui/cursor-badge-edge-align.svg",
+            "part_swap_positions"  => "assets/icons/ui/cursor-badge-part-swap.svg",
+            "model_reflect"        => "assets/icons/ui/cursor-badge-mirror.svg",
+            "material_flip"        => "assets/icons/ui/cursor-badge-material-flip.svg",
+            _ => "",
+        }
+    } else if move_state
+        .as_deref()
+        .map(|s| s.hovered_axis.is_some() || s.hovered_plane.is_some() || s.dragged_axis.is_some())
+        .unwrap_or(false)
+    {
+        "assets/icons/ui/cursor-badge-move.svg"
+    } else if scale_state
+        .as_deref()
+        .map(|s| s.hovered_axis.is_some() || s.dragged_axis.is_some())
+        .unwrap_or(false)
+    {
+        "assets/icons/ui/cursor-badge-scale.svg"
+    } else if rotate_state
+        .as_deref()
+        // RotateToolState tracks no hover — badge appears while dragging.
+        .map(|s| s.dragged_axis.is_some())
+        .unwrap_or(false)
+    {
+        "assets/icons/ui/cursor-badge-rotate.svg"
+    } else {
+        ""
     };
 
     if icon_path.is_empty() {

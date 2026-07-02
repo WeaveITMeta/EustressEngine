@@ -22,6 +22,10 @@ export component NumericField inherits Rectangle {
     in property <float>  max:  1000000000;
     /// Stepper increment (and arrow-key step). Pass 0 to hide steppers.
     in property <float>  step: 0;
+    /// Drag-scrub / arrow-key increment used when `step` is 0 (fields
+    /// that hide steppers still deserve AAA numeric UX). One step per
+    /// SCRUB-PX-PER-STEP horizontal pixels while scrubbing.
+    in property <float>  scrub-step: 0.1;
     /// Optional unit suffix shown right-aligned inside the field.
     in property <string> unit: "";
     /// Decimal digits used when formatting the value back to text.
@@ -79,6 +83,63 @@ export component NumericField inherits Rectangle {
                 changed has-focus => {
                     if !self.has-focus {
                         commit();
+                    }
+                }
+                key-pressed(ev) => {
+                    // Arrow-key increments (AAA numeric UX): ↑/↓ step the
+                    // value, Shift×10 for coarse moves. Each press commits —
+                    // one keypress, one undo entry.
+                    if ev.text == Key.UpArrow {
+                        nudge(ev.modifiers.shift ? 10.0 : 1.0);
+                        return accept;
+                    }
+                    if ev.text == Key.DownArrow {
+                        nudge(ev.modifiers.shift ? -10.0 : -1.0);
+                        return accept;
+                    }
+                    reject
+                }
+            }
+
+            // Drag-scrub (AAA numeric UX): press + drag horizontally to
+            // slide the value like Blender/Maya; a plain click (no drag)
+            // falls through to normal text editing. While scrubbing only
+            // the DISPLAY buffer updates; the value commits ONCE on
+            // release, so one scrub gesture = one undo entry (streaming
+            // commits would flood the undo stack + TOML writer).
+            scrub := TouchArea {
+                property <float> start-value: 0;
+                property <bool>  scrubbing: false;
+                mouse-cursor: self.scrubbing ? MouseCursor.ew-resize : MouseCursor.default;
+                pointer-event(e) => {
+                    if e.button == PointerEventButton.left && e.kind == PointerEventKind.down {
+                        self.start-value = parse-buffer(root.buffer);
+                        self.scrubbing = false;
+                    }
+                    if e.button == PointerEventButton.left && e.kind == PointerEventKind.up {
+                        if self.scrubbing {
+                            commit();
+                        } else {
+                            // Plain click — hand focus to the text input for
+                            // normal caret editing.
+                            text-input.focus();
+                        }
+                        self.scrubbing = false;
+                    }
+                }
+                moved => {
+                    if self.pressed {
+                        // 4px dead-zone so a sloppy click doesn't scrub.
+                        if !self.scrubbing && abs((self.mouse-x - self.pressed-x) / 1px) > 4 {
+                            self.scrubbing = true;
+                        }
+                        if self.scrubbing {
+                            // One step per 4px of horizontal travel.
+                            let s = root.step > 0 ? root.step : root.scrub-step;
+                            let steps = (self.mouse-x - self.pressed-x) / 4px;
+                            let next = clamp(self.start-value + steps * s, root.min, root.max);
+                            root.buffer = format-value(next, root.decimals);
+                        }
                     }
                 }
             }
@@ -144,6 +205,15 @@ export component NumericField inherits Rectangle {
     }
 
     // ── Helpers ────────────────────────────────────────────────────────
+
+    /// Step the value by `mult × step` (arrow keys). Uses `scrub-step`
+    /// when the field hides its steppers (`step == 0`), then commits.
+    function nudge(mult: float) {
+        let s = root.step > 0 ? root.step : root.scrub-step;
+        let next = clamp(parse-buffer(root.buffer) + mult * s, root.min, root.max);
+        root.buffer = format-value(next, root.decimals);
+        root.value-changed(root.buffer);
+    }
 
     /// Commit the current buffer to the parent. Parses, clamps, and
     /// re-formats so the user sees a clean number even if they typed

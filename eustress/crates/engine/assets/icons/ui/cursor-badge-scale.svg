@@ -1,0 +1,6 @@
+<!-- Scale-gizmo hover badge — diagonal resize arrows for 16×16 cursor overlay. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <line x1="3" y1="13" x2="13" y2="3"/>
+  <polyline points="9,3 13,3 13,7"/>
+  <polyline points="7,13 3,13 3,9"/>
+</svg>

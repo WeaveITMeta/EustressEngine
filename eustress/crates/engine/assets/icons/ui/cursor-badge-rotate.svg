@@ -1,0 +1,5 @@
+<!-- Rotate-gizmo drag badge — circular arrow for 16×16 cursor overlay. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M 13.5 8 A 5.5 5.5 0 1 1 8 2.5"/>
+  <polyline points="8,0.5 8,4.5 4.5,3"/>
+</svg>

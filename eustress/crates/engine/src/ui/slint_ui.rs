@@ -1388,6 +1388,8 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, handle_window_resize)
             // UI-freeze diagnosability: loud one-shot error if SlintScene vanishes
             .add_systems(Update, slint_scene_watchdog)
+            // Space-load progress pill (AAA audit: silent loads read as hangs)
+            .add_systems(Update, sync_load_progress_to_slint.after(SlintSystems::Drain))
             // Performance tracking
             .add_systems(Update, update_ui_performance)
             // Simulation clock display in ribbon
@@ -7478,25 +7480,104 @@ fn drain_slint_actions(
                         }
                     }
                     
-                    // ── Undo push (AAA audit fix) ──
+                    // ── Undo push + multi-select broadcast (AAA audit fixes) ──
                     // Re-snapshot after the mutation above; a real change
-                    // lands on the undo stack as ChangeProperty, restorable
-                    // via `apply_property_value_to_entity`. Branches that
+                    // lands on the undo stack, restorable via
+                    // `apply_property_value_to_entity`. Branches that
                     // `continue` out of the match (rare rename fallbacks)
                     // skip this — acceptable: they either mutated nothing or
                     // surfaced their own warning.
+                    //
+                    // BROADCAST: simple appearance/physics properties apply
+                    // to EVERY selected entity, not just the Properties
+                    // panel's primary one — "select 5 parts, set Color once"
+                    // (the audit's multi-select-editing gap). Name/Position/
+                    // Rotation/Scale/Size stay single-entity (per-entity
+                    // semantics). Other entities persist via the
+                    // Changed<BasePart> save pipeline; undo is ONE
+                    // ChangePropertyMulti covering the whole selection.
                     if let (Some(prop), Some(old)) = (undo_prop, undo_old) {
                         if let Some(new) = snapshot_panel_property(prop, entity, &queries) {
                             if new != old {
-                                if let (Some(ref mut stack), Ok((_, inst))) =
-                                    (res.undo_stack.as_mut(), queries.instances.get(entity))
-                                {
-                                    stack.push(crate::undo::Action::ChangeProperty {
-                                        id: inst.id,
-                                        property: prop.to_string(),
-                                        old_value: old,
-                                        new_value: new,
-                                    });
+                                use crate::undo::PropertyValueSnapshot as S;
+                                let mut multi_old: Vec<(u32, S)> = Vec::new();
+                                if let Ok((_, inst)) = queries.instances.get(entity) {
+                                    multi_old.push((inst.id, old.clone()));
+                                }
+                                let broadcast = matches!(
+                                    prop,
+                                    "Color" | "Transparency" | "Reflectance"
+                                        | "Anchored" | "CanCollide" | "Locked"
+                                );
+                                if broadcast {
+                                    let others: Vec<Entity> = queries
+                                        .selected_entities
+                                        .iter()
+                                        .filter(|e| *e != entity)
+                                        .collect();
+                                    for other in others {
+                                        let Some(o_old) =
+                                            snapshot_panel_property(prop, other, &queries)
+                                        else {
+                                            continue;
+                                        };
+                                        if o_old == new {
+                                            continue; // already at the target value
+                                        }
+                                        let Ok(mut bp) = queries.base_parts.get_mut(other) else {
+                                            continue;
+                                        };
+                                        let applied = match (prop, &new) {
+                                            ("Color", S::Color(c)) => {
+                                                bp.color = Color::srgba(c[0], c[1], c[2], c[3]);
+                                                true
+                                            }
+                                            ("Transparency", S::Float(f)) => {
+                                                bp.transparency = *f;
+                                                true
+                                            }
+                                            ("Reflectance", S::Float(f)) => {
+                                                bp.reflectance = *f;
+                                                true
+                                            }
+                                            ("Anchored", S::Bool(b)) => {
+                                                bp.anchored = *b;
+                                                true
+                                            }
+                                            ("CanCollide", S::Bool(b)) => {
+                                                bp.can_collide = *b;
+                                                true
+                                            }
+                                            ("Locked", S::Bool(b)) => {
+                                                bp.locked = *b;
+                                                true
+                                            }
+                                            _ => false,
+                                        };
+                                        if applied {
+                                            if let Ok((_, oinst)) = queries.instances.get(other) {
+                                                multi_old.push((oinst.id, o_old));
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(ref mut stack) = res.undo_stack {
+                                    if multi_old.len() > 1 {
+                                        stack.push(crate::undo::Action::ChangePropertyMulti {
+                                            entities: multi_old,
+                                            property: prop.to_string(),
+                                            new_value: new,
+                                        });
+                                    } else {
+                                        if let Ok((_, inst)) = queries.instances.get(entity) {
+                                            stack.push(crate::undo::Action::ChangeProperty {
+                                                id: inst.id,
+                                                property: prop.to_string(),
+                                                old_value: old,
+                                                new_value: new,
+                                            });
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -12897,6 +12978,42 @@ struct LastWindowSize {
     width: u32,
     height: u32,
     scale_factor: f32,
+}
+
+/// Pushes Space-load progress to the Slint loading pill (bottom-center of
+/// the viewport). Large Spaces stream in over many frames via the loader's
+/// frame budget — previously with ZERO user feedback, so a half-populated
+/// scene read as "the engine hung" (AAA audit: critical gap). Shows queued
+/// service + instance counts while loading, "settling…" through the
+/// quiescent window, then hides.
+fn sync_load_progress_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    load: Option<Res<crate::space::file_loader::LoadInProgress>>,
+    deferred: Option<Res<crate::space::file_loader::DeferredServiceLoader>>,
+) {
+    let Some(ctx) = slint_context else { return };
+    let ui = &ctx.window;
+
+    let active = load.as_deref().map(|l| l.active).unwrap_or(false);
+    if ui.get_loading_active() != active {
+        ui.set_loading_active(active);
+    }
+    if !active {
+        return;
+    }
+
+    let services = deferred.as_deref().map(|d| d.pending.len()).unwrap_or(0);
+    let instances = crate::space::file_loader::pending_spill_len();
+    let detail = match (services, instances) {
+        (0, 0) => "Loading Space — settling…".to_string(),
+        (s, 0) => format!("Loading Space — {s} services queued…"),
+        (0, i) => format!("Loading Space — {i} instances queued…"),
+        (s, i) => format!("Loading Space — {s} services + {i} instances queued…"),
+    };
+    let current: String = ui.get_loading_detail().into();
+    if current != detail {
+        ui.set_loading_detail(detail.into());
+    }
 }
 
 /// Watchdog: if the `SlintScene` entity ever disappears after setup, the UI
