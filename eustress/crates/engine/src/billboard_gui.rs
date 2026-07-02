@@ -2207,20 +2207,16 @@ impl Plugin for BillboardGuiPlugin {
     fn build(&self, app: &mut App) {
         app.insert_non_send_resource(BillboardTextState::default())
             .init_resource::<BillboardEditState>()
-            // Register THIS compilation unit's DoubleClickedPart. The engine
-            // crate is dual-compiled (lib AND bin): main.rs registers the
-            // BIN's `part_selection::DoubleClickedPart`, but this plugin's
-            // systems are the LIB instance and read the LIB's type — a
-            // DIFFERENT TypeId, so on bevy 0.19 the readers failed fetch-time
-            // validation and were silently skipped every frame. Registering
-            // via `crate::` here guarantees the readers' own type exists.
-            //
-            // KNOWN GAP (pre-existing, predates 0.19): the WRITER
-            // (part_selection_system) is added in main.rs from the BIN
-            // instance, so its messages land in the BIN type's channel — the
-            // LIB readers here won't receive them. Billboard double-click
-            // editing therefore stays inert until the lib/bin dual-compile is
-            // untangled (tracked: engine-crate decomposition).
+            // Register DoubleClickedPart alongside the systems that read it.
+            // History: the engine crate used to be DUAL-COMPILED (lib + bin
+            // each declaring these modules), so the bin's writer and this
+            // lib plugin's readers held DIFFERENT TypeIds and never connected
+            // — double-click billboard editing was silently dead, and on
+            // bevy 0.19 the readers were fetch-time-skipped outright. The
+            // 2026-07-02 thin-bin untangling made the lib the single
+            // compilation, so writer, readers, and this registration now
+            // share one type. Kept here (not only in main.rs) so the plugin
+            // is self-sufficient for future headless/alternate bins.
             .add_message::<crate::part_selection::DoubleClickedPart>()
             .add_systems(Startup, init_billboard_atlas)
             .add_systems(

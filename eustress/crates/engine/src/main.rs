@@ -7,7 +7,7 @@ use bevy::render::RenderPlugin;
 use bevy::gltf::{GltfExtras, GltfSceneExtras, GltfMeshExtras, GltfMaterialExtras, GltfMeshName, GltfMaterialName};
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin, EntityCountDiagnosticsPlugin};
 // Window icon: embedded in exe via winres (build.rs), runtime set in setup_slint_overlay
-use crate::plugins::lighting_plugin::LightingPlugin;
+use eustress_engine::plugins::lighting_plugin::LightingPlugin;
 use eustress_common::services::{TeamServicePlugin, PlayerService};
 
 #[cfg(feature = "streaming")]
@@ -17,163 +17,78 @@ use eustress_common::change_queue::{ChangeQueueConfig, StreamingPlugin};
 #[cfg(feature = "streaming")]
 use eustress_common::sim_stream::SimStreamWriter;
 
-mod auth;
-mod bliss_tracker;
-mod forge;
-mod terrain_plugin;
-// Wave 9.C — imported-terrain voxel loader (reads Fjall voxels, fills the
-// runtime heightfield). Engine-side because `eustress-common` must not dep
-// `eustress-worlddb`. Whole module is `#![cfg(feature = "world-db")]`.
+// ── Thin-bin module imports (dual-compile untangling, 2026-07-02) ────
+// The engine used to DUAL-COMPILE ~104 modules: declared `mod X;` here
+// AND `pub mod X;` in lib.rs, producing TWO instances of every type
+// with different TypeIds. Systems added from one instance never saw
+// resources/messages registered by the other — engine_bridge had to be
+// made bin-local to see any resource at all, and billboard_gui's
+// DoubleClickedPart readers (lib) never received part_selection's
+// writes (bin), leaving double-click billboard editing silently dead.
+// The bin is now a THIN SHELL over the lib: one compilation of every
+// module, one TypeId universe, and the engine compiles ONCE instead of
+// twice. The five formerly bin-only modules (engine_bridge,
+// history_stream, light_sync, photoreal, soul_script_migration) were
+// promoted to lib.rs — engine_bridge in the lib is also the
+// HEADLESS_RUNTIME plan's keystone.
+#[allow(unused_imports)]
+use eustress_engine::{
+    accessibility, adornment_renderer, ai_camera, align_distribute, array_tools,
+    attachment_editor_tool, attribute_tag_migration, auth, bliss_tracker, camera,
+    camera_controller, class_registry, classes, clipboard, commands, commit_flash,
+    constraint_editor_tool, cursor_badge, default_scene, duplicate_place_tool,
+    editor_settings, embedded_client, embedvec_dispatch, engine_bridge, entity_utils,
+    forge, frame_diagnostics, generative_pipeline, geom_snap, gizmo_tools, grouping,
+    history_stream, interaction, io_manager, keybindings, lasso_paint_select,
+    light_cull, light_sync, lock_tool, manufacturing, material_sync, math_utils,
+    measure_tool, mesh_import, mirror_link, modal_tool, move_handles, move_tool,
+    network_benchmark, notifications, numeric_input, part_selection, part_to_terrain,
+    parts, photoreal, physics, pivot_mode, play_mode, play_mode_runtime, play_server,
+    plugins, profiler, properties, rendering, rotate_handles, rotate_tool,
+    rune_tool_sandbox, runtime, saved_viewpoints, scale_handles, scale_tool, scenes,
+    seats, select_tool, selection_box, selection_sets, selection_sync, serialization,
+    shaders, simulation, smart_guides, soul, soul_script_migration, space,
+    spatial_query_bridge, spawn, spawners, startup, studio_plugins, telemetry,
+    terrain_plugin, timeline_animation, timeline_panel, timeline_slint_sync,
+    toast_undo, toolbox, tools_smart, transform_constraints, transform_space,
+    txt_to_toml_watcher, ui, undo, updater, video, viga, window_focus, workshop,
+};
+// Wave 9.C — imported-terrain voxel loader. Whole module is
+// `#![cfg(feature = "world-db")]` in the lib; mirror the gate here.
 #[cfg(feature = "world-db")]
-mod terrain_voxel_load;
-mod ui;
-mod parts;
-mod classes;        // Roblox-style class system
-mod class_registry; // ClassSpawner trait registry + plugin + LOOP-5 assertion (Wave 2.3)
-mod spawners;       // Per-class ClassSpawner impls (Wave 3 — lights / GUI / constraints / containers / audio_vfx)
-mod physics;        // Wave 6.B — mover runtime systems (MoversPlugin)
-mod interaction;    // Wave 6.D — interaction runtime systems (InteractionPlugin)
-mod properties;     // Property access system
-mod rendering;
-mod camera;
-mod commands;
-mod scenes;
-mod default_scene;
-mod photoreal;      // R1 — photoreal post-stack registration (AutoExposurePlugin + settings)
-mod serialization;  // Scene save/load
-mod spawn;          // Entity spawn helpers
-mod camera_controller;
-mod gizmo_tools;
-mod selection_box;
-mod select_tool;
-mod move_tool;
-mod rotate_tool;
-mod scale_tool;
-mod move_handles;
-mod scale_handles;
-mod rotate_handles;
-mod adornment_renderer;
-mod modal_tool;
-mod numeric_input;
-mod align_distribute;
-mod array_tools;
-mod measure_tool;
-mod duplicate_place_tool;
-mod selection_sets;
-mod pivot_mode;
-mod geom_snap;
-mod smart_guides;
-mod mirror_link;
-mod part_to_terrain;
-mod lasso_paint_select;
-mod saved_viewpoints;
-mod attachment_editor_tool;
-mod constraint_editor_tool;
-mod transform_constraints;
-mod toast_undo;
-mod commit_flash;
-mod embedvec_dispatch;
-mod rune_tool_sandbox;
-mod mesh_import;
-mod cursor_badge;
-mod timeline_panel;
-mod timeline_slint_sync;
-mod timeline_animation;
-mod attribute_tag_migration;
-mod accessibility;
-mod tools_smart;
-mod selection_sync;
-mod editor_settings;
-mod undo;
-mod history_stream;
-mod soul_script_migration;
-mod notifications;
-mod keybindings;
-// Engine Bridge is compiled as a BIN module (NOT pulled from the
-// `eustress_engine` lib) ON PURPOSE. Its handlers read/write engine
-// resources (StudioState, SelectionSyncManager, SpaceRoot), query
-// components (spawn::MeshSource, instance_loader::InstanceFile), and emit
-// MenuActionEvent — all of which are ALSO declared by the bin's own
-// `mod`s. The lib compiles its own copies of those types with different
-// `TypeId`s, so a lib-side bridge silently sees `None` for every engine
-// resource and never matches bin-spawned components (mesh/source come
-// back null). Compiling the bridge in the bin crate keeps its `TypeId`s
-// identical to the running engine's. See `engine_bridge::protocol`.
-mod engine_bridge;
-// Independent off-screen AI camera (bin module: its bridge handlers and the
-// plugin must share the bin's TypeIds, same reason as engine_bridge).
-mod ai_camera;
-mod light_sync; // resolve Eustress light components -> real Bevy lights (+ live property sync)
-mod part_selection;
-mod transform_space;
-mod clipboard;
-mod grouping;
-mod material_sync;
-mod light_cull;        // Perf QW1/QW2 — nearest-N shadow + intensity light cull
-mod lock_tool;
-mod video;
-mod play_mode;          // Play mode with character spawning
-mod play_mode_runtime;  // Client-like runtime systems for play mode
-mod play_server;        // In-process server + client for Play Server mode
-mod embedded_client;    // Embedded client runtime (same as standalone client)
-mod runtime;            // Runtime systems (physics events, lighting, scripts)
-mod seats;              // Seat and VehicleSeat systems (auto-sit, controller input)
-mod soul;               // Soul scripting integration
-mod telemetry;          // Opt-in error reporting via Sentry
-mod window_focus;       // Window focus management (sleep when unfocused)
-mod startup;            // Command-line args and file associations
-mod studio_plugins;     // Studio plugin system (MindSpace, etc.)
-mod math_utils;         // Shared math utilities (ray intersection, AABB, etc.)
-mod entity_utils;       // Entity ID helpers
-mod spatial_query_bridge; // Unified raycasting bridge for Rune + Luau scripting
-mod io_manager;         // Async data fetching for Parameters
-mod space;              // Space file-system-first architecture
-mod simulation;         // Tick-based simulation with time compression
-mod toolbox;            // Toolbox mesh insertion system
-mod txt_to_toml_watcher; // Automatic .txt to .toml converter
-mod workshop;           // Workshop Panel (System 0: Ideation)
-mod manufacturing;      // Manufacturing Program: investor + manufacturer registry + AI allocation
-mod frame_diagnostics;  // Frame time tracking to identify stutters
-mod profiler;           // Opt-in per-system frame micro-profiler (feature `profiling`)
-mod network_benchmark;  // Stress test with sysinfo hardware detection
-mod updater;            // In-app self-update system
+#[allow(unused_imports)]
+use eustress_engine::terrain_voxel_load;
 
-mod plugins;
-mod shaders;
-mod generative_pipeline;
-mod viga;  // VIGA: Vision-as-Inverse-Graphics Agent
-// mod slint_bevy_adapter;  // Disabled - Skia ICU conflicts on Windows
-
-use rendering::PartRenderingPlugin;
-use commands::{SelectionManager, TransformManager}; // Production-ready managers
-use default_scene::DefaultScenePlugin;
-use plugins::WorkspacePlugin;
-use camera_controller::{CameraControllerPlugin, setup_camera_controller};
-use gizmo_tools::GizmoToolsPlugin;
-use selection_box::SelectionBoxPlugin;
-use select_tool::SelectToolPlugin;
-use move_tool::MoveToolPlugin;
-use transform_space::TransformSpacePlugin;
-use rotate_tool::RotateToolPlugin;
-use scale_tool::ScaleToolPlugin;
-use selection_sync::SelectionSyncPlugin;
-use editor_settings::EditorSettingsPlugin;
-use undo::UndoPlugin;
-use notifications::NotificationPlugin;
-use keybindings::KeyBindingsPlugin;
-use clipboard::ClipboardPlugin;
-use grouping::GroupingPlugin;
-use material_sync::MaterialSyncPlugin;
-use terrain_plugin::EngineTerrainPlugin;
-use play_mode::PlayModePlugin;
+use eustress_engine::rendering::PartRenderingPlugin;
+use eustress_engine::commands::{SelectionManager, TransformManager}; // Production-ready managers
+use eustress_engine::default_scene::DefaultScenePlugin;
+use eustress_engine::plugins::WorkspacePlugin;
+use eustress_engine::camera_controller::{CameraControllerPlugin, setup_camera_controller};
+use eustress_engine::gizmo_tools::GizmoToolsPlugin;
+use eustress_engine::selection_box::SelectionBoxPlugin;
+use eustress_engine::select_tool::SelectToolPlugin;
+use eustress_engine::move_tool::MoveToolPlugin;
+use eustress_engine::transform_space::TransformSpacePlugin;
+use eustress_engine::rotate_tool::RotateToolPlugin;
+use eustress_engine::scale_tool::ScaleToolPlugin;
+use eustress_engine::selection_sync::SelectionSyncPlugin;
+use eustress_engine::editor_settings::EditorSettingsPlugin;
+use eustress_engine::undo::UndoPlugin;
+use eustress_engine::notifications::NotificationPlugin;
+use eustress_engine::keybindings::KeyBindingsPlugin;
+use eustress_engine::clipboard::ClipboardPlugin;
+use eustress_engine::grouping::GroupingPlugin;
+use eustress_engine::material_sync::MaterialSyncPlugin;
+use eustress_engine::terrain_plugin::EngineTerrainPlugin;
+use eustress_engine::play_mode::PlayModePlugin;
 use eustress_engine::script_editor;
-use window_focus::WindowFocusPlugin;
-use startup::{StartupPlugin, StartupArgs};
+use eustress_engine::window_focus::WindowFocusPlugin;
+use eustress_engine::startup::{StartupPlugin, StartupArgs};
 // ServicePropertiesPlugin removed - now handled by Slint UI
-use soul::EngineSoulPlugin;
-use workshop::WorkshopPlugin;
-use space::SpaceFileLoaderPlugin;
-use space::{SpaceRoot, UniverseRegistryPlugin};
+use eustress_engine::soul::EngineSoulPlugin;
+use eustress_engine::workshop::WorkshopPlugin;
+use eustress_engine::space::SpaceFileLoaderPlugin;
+use eustress_engine::space::{SpaceRoot, UniverseRegistryPlugin};
 
 fn main() {
     println!("Starting Eustress Engine...");
@@ -832,7 +747,7 @@ fn tag_splats_for_explorer(
             Without<eustress_common::classes::Instance>,
         ),
     >,
-    services: Query<(Entity, &crate::space::service_loader::ServiceComponent)>,
+    services: Query<(Entity, &space::service_loader::ServiceComponent)>,
 ) {
     if new_splats.is_empty() {
         return;

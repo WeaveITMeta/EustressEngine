@@ -179,6 +179,24 @@ pub mod profiler;
 pub mod io_manager;
 pub mod window_focus;
 
+// ── Promoted from the bin (dual-compile untangling, 2026-07-02) ──────
+// These five modules were declared ONLY in main.rs, which forced the
+// bridge/history/light-sync systems to live in the BIN's type universe
+// while ~104 other modules were compiled TWICE (bin `mod X;` + lib
+// `pub mod X;`) with different TypeIds — writers and readers of the
+// same nominal type silently never connected (engine_bridge saw None
+// for every resource until it was made bin-local; billboard_gui's
+// DoubleClickedPart readers never received part_selection's writes).
+// The bin is now a THIN SHELL over the lib (`use eustress_engine::*`
+// in main.rs), so there is exactly ONE instance of every type — and
+// promoting engine_bridge here is the HEADLESS_RUNTIME plan's keystone
+// (the future eustress-headless bin needs lib-side bridge TypeIds).
+pub mod engine_bridge;
+pub mod history_stream;
+pub mod light_sync;
+pub mod photoreal;
+pub mod soul_script_migration;
+
 // SimWriterResource must live in the lib so scenarios/plugin.rs and viga/pipeline.rs
 // can reference it via `crate::SimWriterResource` from library code.
 #[cfg(feature = "streaming")]
