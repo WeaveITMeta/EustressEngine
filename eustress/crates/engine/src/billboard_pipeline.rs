@@ -317,6 +317,15 @@ bitflags::bitflags! {
         const LOCK_Y        = (1 << 1);
         const LOCK_ROTATION = (1 << 2);
         const HDR           = (1 << 3);
+        /// The view's main texture is the swapchain surface in
+        /// `Bgra8UnormSrgb` (Windows/Vulkan default) rather than the
+        /// `bevy_default()` Rgba8 intermediate. Without this bit the
+        /// pipeline's color target mismatched the pass and wgpu KILLED
+        /// the app ("Incompatible color attachments … Bgra8UnormSrgb vs
+        /// Rgba8UnormSrgb → Quitting due to Validation RenderError") the
+        /// first time a billboard rendered on a non-HDR direct-to-surface
+        /// view.
+        const SURFACE_BGRA  = (1 << 4);
         const MSAA_BITS     = Self::MSAA_MASK_BITS << Self::MSAA_SHIFT_BITS;
     }
 }
@@ -516,8 +525,14 @@ impl SpecializedMeshPipeline for BillboardPipeline {
                 entry_point: Some("fragment".into()),
                 shader_defs,
                 targets: vec![Some(ColorTargetState {
+                    // MUST match the render pass's actual attachment format:
+                    // HDR intermediate, the Bgra8 swapchain surface (Windows/
+                    // Vulkan direct-to-surface views — see SURFACE_BGRA), or
+                    // the Rgba8 bevy_default intermediate.
                     format: if key.contains(BillboardPipelineKey::HDR) {
                         bevy::render::view::ViewTarget::TEXTURE_FORMAT_HDR
+                    } else if key.contains(BillboardPipelineKey::SURFACE_BGRA) {
+                        TextureFormat::Bgra8UnormSrgb
                     } else {
                         TextureFormat::bevy_default()
                     },
@@ -707,7 +722,15 @@ pub fn queue_billboards(
     pipeline: Res<BillboardPipeline>,
     gpu_images: Res<RenderAssets<GpuImage>>,
     gpu_meshes: Res<RenderAssets<RenderMesh>>,
-    views: Query<(Entity, &ExtractedView, Option<&ExtractedCamera>, Option<&Msaa>)>,
+    views: Query<(
+        Entity,
+        &ExtractedView,
+        Option<&ExtractedCamera>,
+        Option<&Msaa>,
+        // ViewTarget exists by Queue (created in RenderSet::ManageViews);
+        // its main texture format drives the SURFACE_BGRA pipeline-key bit.
+        Option<&bevy::render::view::ViewTarget>,
+    )>,
     // All billboards in the render world (from `extract_billboards`).
     // Visibility was already filtered there via `InheritedVisibility`, so
     // every entity here should be drawn. We use `MainEntity` to populate
@@ -729,7 +752,7 @@ pub fn queue_billboards(
     // `create_bind_group` call) and guarantees correctness on resize.
     image_bind_groups.values.clear();
 
-    for (_view_entity, view, extracted_camera, msaa) in views.iter() {
+    for (_view_entity, view, extracted_camera, msaa, view_target) in views.iter() {
         // Bevy 0.18: `ViewSortedRenderPhases` is keyed by
         // `RetainedViewEntity` (a stable identifier that survives the
         // main→render extract roundtrip), not the render-world Entity.
@@ -760,6 +783,15 @@ pub fn queue_billboards(
                 if lock.rotation { key |= BillboardPipelineKey::LOCK_ROTATION; }
             }
             if extracted_camera.map_or(false, |c| c.hdr) { key |= BillboardPipelineKey::HDR; }
+            // Key on the view's ACTUAL attachment format: non-HDR views can
+            // render straight to the Bgra8 swapchain surface, and a pipeline
+            // built for Rgba8 there is a fatal wgpu validation error (the
+            // "engine closes itself 5s after load" crash).
+            if view_target
+                .map_or(false, |t| t.main_texture_format() == TextureFormat::Bgra8UnormSrgb)
+            {
+                key |= BillboardPipelineKey::SURFACE_BGRA;
+            }
 
             let pipeline_id = match pipelines.specialize(&pipeline_cache, &pipeline, key, &gpu_mesh.layout) {
                 Ok(id) => id,
