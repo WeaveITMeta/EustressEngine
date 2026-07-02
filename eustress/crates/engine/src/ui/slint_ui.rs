@@ -108,6 +108,13 @@ impl BevyWindowAdapter {
         });
         self.slint_window
             .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor });
+        // A resize invalidates every previously-painted pixel: the texture and
+        // quad are about to be replaced at the new dimensions, so the next
+        // frame MUST repaint even if no property changed. Without this, a
+        // static UI (no input, no animation) keeps displaying the old-size
+        // pixel data stretched onto the new quad — the fullscreen "resolution
+        // glitch" that persists until the next mouse move.
+        self.needs_redraw.set(true);
     }
 }
 
@@ -586,23 +593,29 @@ impl Default for SlintActionQueue {
 }
 
 impl SlintActionQueue {
+    /// Lock the queue, RECOVERING from a poisoned mutex instead of dropping
+    /// input. The queue holds a plain `Vec<SlintAction>` — there is no
+    /// invariant a mid-push panic could corrupt (the Vec is either pushed or
+    /// not), so poison-recovery is safe here. Before this, ONE panic anywhere
+    /// inside a Slint callback poisoned the lock and every subsequent UI
+    /// action was silently swallowed — the UI kept rendering but responded to
+    /// nothing (the "Slint UI becomes unresponsive" bug).
+    fn lock_recover(&self) -> std::sync::MutexGuard<'_, Vec<SlintAction>> {
+        self.0.lock().unwrap_or_else(|poisoned| {
+            error!("⚠ SlintActionQueue mutex was poisoned by a panic in a Slint callback — recovering (UI actions continue to flow)");
+            poisoned.into_inner()
+        })
+    }
+
     /// Push an action from a Slint callback
     pub fn push(&self, action: SlintAction) {
-        if let Ok(mut queue) = self.0.lock() {
-            // Debug logging removed — was firing every action every frame, killing FPS
-            queue.push(action);
-        } else {
-            error!("❌ SlintActionQueue::push FAILED — mutex poisoned!");
-        }
+        // Debug logging removed — was firing every action every frame, killing FPS
+        self.lock_recover().push(action);
     }
-    
+
     /// Drain all queued actions (called by Bevy system each frame)
     pub fn drain(&self) -> Vec<SlintAction> {
-        if let Ok(mut queue) = self.0.lock() {
-            queue.drain(..).collect()
-        } else {
-            Vec::new()
-        }
+        self.lock_recover().drain(..).collect()
     }
 }
 
@@ -1349,7 +1362,12 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, drain_slint_actions.in_set(SlintSystems::Drain))
             .init_resource::<super::viewport_context_menu::ViewportRightClickState>()
             .add_systems(Update, super::viewport_context_menu::detect_viewport_right_click)
-            .add_systems(Update, sync_bevy_to_slint.after(SlintSystems::Drain))
+            // `.after(handle_window_resize)`: this system polls the Slint
+            // viewport geometry into `ViewportBounds` (physical px) using the
+            // adapter scale factor. On a resize frame it must read the
+            // POST-resize layout, or the camera sub-rect + click hit-testing
+            // run one frame on stale bounds (and a maximize could glitch).
+            .add_systems(Update, sync_bevy_to_slint.after(SlintSystems::Drain).after(handle_window_resize))
             .add_systems(Update, sync_tool_options_bar_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_numeric_input_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_toast_undo_to_slint.after(SlintSystems::Drain))
@@ -1359,9 +1377,17 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_selection_summary_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_universe_browser.after(SlintSystems::Drain))
             .add_systems(Update, sync_gui_elements_to_slint.after(SlintSystems::Drain))
-            .add_systems(Update, render_slint_to_texture.after(sync_bevy_to_slint))
+            // `.after(handle_window_resize)`: on a resize frame the staging
+            // buffer, Slint texture, overlay quad, and camera projection are
+            // all replaced — the render must observe them post-resize or it
+            // paints with mismatched sizes (the fullscreen/maximize
+            // "resolution glitch": stretched/garbled UI for a frame, sticky
+            // until the next repaint).
+            .add_systems(Update, render_slint_to_texture.after(sync_bevy_to_slint).after(handle_window_resize))
             // Window resize handling
             .add_systems(Update, handle_window_resize)
+            // UI-freeze diagnosability: loud one-shot error if SlintScene vanishes
+            .add_systems(Update, slint_scene_watchdog)
             // Performance tracking
             .add_systems(Update, update_ui_performance)
             // Simulation clock display in ribbon
@@ -3113,6 +3139,10 @@ impl BrushState {
 struct DrainResources<'w> {
     state: Option<ResMut<'w, StudioState>>,
     output: Option<ResMut<'w, OutputConsole>>,
+    /// Undo stack — Properties-panel edits push `Action::ChangeProperty`
+    /// here so panel mutations are Ctrl+Z-able like every other edit
+    /// surface (they previously bypassed undo entirely — AAA audit fix).
+    undo_stack: Option<ResMut<'w, crate::undo::UndoStack>>,
     explorer_state: Option<ResMut<'w, UnifiedExplorerState>>,
     space_root: Option<Res<'w, crate::space::SpaceRoot>>,
     view_state: Option<ResMut<'w, super::ViewSelectorState>>,
@@ -3123,6 +3153,9 @@ struct DrainResources<'w> {
     editor_settings: Option<ResMut<'w, crate::editor_settings::EditorSettings>>,
     auth_state: Option<ResMut<'w, crate::auth::AuthState>>,
     bliss_state: Option<ResMut<'w, crate::auth::BlissNodeState>>,
+    /// Bliss contribution tracker — script-editor edits are marked here
+    /// so editing time attributes to the `Development` bucket.
+    bliss_tracker: Option<ResMut<'w, crate::bliss_tracker::BlissTracker>>,
     update_state: Option<ResMut<'w, crate::updater::UpdateState>>,
     viewport_bounds: Option<ResMut<'w, super::ViewportBounds>>,
     tab_manager: Option<ResMut<'w, super::center_tabs::CenterTabManager>>,
@@ -3507,6 +3540,108 @@ struct DrainActionQueries<'w, 's> {
     /// it to TOML. Tags are set via `commands.insert(Tags(..))` instead — a
     /// `&mut Tags` query here would alias the read-only `entity_tags` above.
     attributes: Query<'w, 's, &'static mut eustress_common::attributes::Attributes>,
+}
+
+/// Snapshot the CURRENT value of a canonical undo property for an entity,
+/// reading through `DrainActionQueries`' existing (mutable) queries via
+/// read-only `.get()`. Used by the Properties-panel PropertyChanged handler
+/// to capture old/new values around a mutation so panel edits land on the
+/// undo stack (they previously bypassed undo entirely — the AAA audit's
+/// gating defect). Property names + value shapes MUST match what
+/// `crate::undo::apply_property_value_to_entity` restores.
+fn snapshot_panel_property(
+    prop: &str,
+    entity: Entity,
+    queries: &DrainActionQueries,
+) -> Option<crate::undo::PropertyValueSnapshot> {
+    use crate::undo::PropertyValueSnapshot as S;
+    match prop {
+        "Name" => queries
+            .instances
+            .get(entity)
+            .ok()
+            .map(|(_, i)| S::String(i.name.clone())),
+        // The panel writes Position/Rotation/Scale through Transform; undo's
+        // apply writes BOTH Transform and BasePart.cframe, so Transform is
+        // the coherent capture source.
+        "Position" => queries
+            .transforms
+            .get(entity)
+            .ok()
+            .map(|t| S::Vector3(t.translation.to_array())),
+        "Orientation" => queries.transforms.get(entity).ok().map(|t| {
+            let (x, y, z) = t.rotation.to_euler(EulerRot::XYZ);
+            S::Vector3([x.to_degrees(), y.to_degrees(), z.to_degrees()])
+        }),
+        "Scale" => queries
+            .transforms
+            .get(entity)
+            .ok()
+            .map(|t| S::Vector3(t.scale.to_array())),
+        "Size" => queries
+            .base_parts
+            .get(entity)
+            .ok()
+            .map(|bp| S::Vector3(bp.size.to_array())),
+        "Color" => queries.base_parts.get(entity).ok().map(|bp| {
+            let c = bp.color.to_srgba();
+            S::Color([c.red, c.green, c.blue, c.alpha])
+        }),
+        "Material" => queries
+            .base_parts
+            .get(entity)
+            .ok()
+            .map(|bp| S::Material(format!("{:?}", bp.material))),
+        "Transparency" => queries
+            .base_parts
+            .get(entity)
+            .ok()
+            .map(|bp| S::Float(bp.transparency)),
+        "Reflectance" => queries
+            .base_parts
+            .get(entity)
+            .ok()
+            .map(|bp| S::Float(bp.reflectance)),
+        "Anchored" => queries
+            .base_parts
+            .get(entity)
+            .ok()
+            .map(|bp| S::Bool(bp.anchored)),
+        "CanCollide" => queries
+            .base_parts
+            .get(entity)
+            .ok()
+            .map(|bp| S::Bool(bp.can_collide)),
+        "Locked" => queries
+            .base_parts
+            .get(entity)
+            .ok()
+            .map(|bp| S::Bool(bp.locked)),
+        _ => None,
+    }
+}
+
+/// Map a Properties-panel key to its canonical undo property. Per-axis keys
+/// map to the whole-vector property (undo restores the full vector). GUI
+/// (UDim2) variants of Position/Size are handled by their own match arms and
+/// are NOT undo-wired yet, so they map to None here via the caller's guards.
+fn canonical_undo_property(key: &str) -> Option<&'static str> {
+    match key {
+        "Name" => Some("Name"),
+        "Position" | "Position.X" | "Position.Y" | "Position.Z" => Some("Position"),
+        // Panel calls it Rotation; undo's apply arm is "Orientation".
+        "Rotation" => Some("Orientation"),
+        "Scale" | "Scale.X" | "Scale.Y" | "Scale.Z" => Some("Scale"),
+        "Size" => Some("Size"),
+        "Color" => Some("Color"),
+        "Material" => Some("Material"),
+        "Transparency" => Some("Transparency"),
+        "Reflectance" => Some("Reflectance"),
+        "Anchored" => Some("Anchored"),
+        "CanCollide" => Some("CanCollide"),
+        "Locked" => Some("Locked"),
+        _ => None,
+    }
 }
 
 /// Parse a Properties-panel string edit into an `AttributeValue`, PRESERVING
@@ -4926,6 +5061,10 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::ScriptContentChanged(text) => {
+                // Bliss: script editing is Development-weighted work.
+                if let Some(ref mut tracker) = res.bliss_tracker {
+                    tracker.last_script_edit = tracker.now;
+                }
                 // Update the correct field based on current mode (Summary / Markdown / Code)
                 if let Some(ref mut mgr) = res.tab_manager {
                     let idx = mgr.active_tab;
@@ -6358,6 +6497,17 @@ fn drain_slint_actions(
                 }
 
                 if let Some(entity) = selected_entity {
+                    // ── Undo capture (AAA audit fix) ──
+                    // Properties-panel edits previously bypassed the undo
+                    // stack entirely: rename, position, color, transparency,
+                    // anchored … were all unrecoverable. Snapshot the OLD
+                    // value before the match below mutates it; the matching
+                    // NEW snapshot is pushed after the match. A no-op edit
+                    // (new == old) pushes nothing.
+                    let undo_prop = canonical_undo_property(&key);
+                    let undo_old =
+                        undo_prop.and_then(|p| snapshot_panel_property(p, entity, &queries));
+
                     match key.as_str() {
                         // Instance fields
                         "Name" => {
@@ -7328,6 +7478,30 @@ fn drain_slint_actions(
                         }
                     }
                     
+                    // ── Undo push (AAA audit fix) ──
+                    // Re-snapshot after the mutation above; a real change
+                    // lands on the undo stack as ChangeProperty, restorable
+                    // via `apply_property_value_to_entity`. Branches that
+                    // `continue` out of the match (rare rename fallbacks)
+                    // skip this — acceptable: they either mutated nothing or
+                    // surfaced their own warning.
+                    if let (Some(prop), Some(old)) = (undo_prop, undo_old) {
+                        if let Some(new) = snapshot_panel_property(prop, entity, &queries) {
+                            if new != old {
+                                if let (Some(ref mut stack), Ok((_, inst))) =
+                                    (res.undo_stack.as_mut(), queries.instances.get(entity))
+                                {
+                                    stack.push(crate::undo::Action::ChangeProperty {
+                                        id: inst.id,
+                                        property: prop.to_string(),
+                                        old_value: old,
+                                        new_value: new,
+                                    });
+                                }
+                            }
+                        }
+                    }
+
                     // ══════════════════════════════════════════════════════════
                     // File-System-First: write property to TOML — ONE writer
                     // for every class.
@@ -11358,12 +11532,23 @@ fn sync_bevy_to_slint(
         if current_mode != bliss.mode {
             ui.set_bliss_node_mode(bliss.mode.clone().into());
             ui.set_bliss_bonus(bliss.bonus.clone().into());
+        }
+        // Enabled syncs on its own change gate — it toggles independently
+        // of mode (BlissToggleEnabled), so gating it behind the mode
+        // comparison left the badge visually stale after a toggle.
+        if ui.get_bliss_enabled() != bliss.enabled {
             ui.set_bliss_enabled(bliss.enabled);
         }
         let current_balance: String = ui.get_bliss_balance().into();
         if current_balance != bliss.balance {
             ui.set_bliss_balance(bliss.balance.clone().into());
             ui.set_bliss_balance_short(bliss.balance_short.clone().into());
+        }
+        // Pending moves independently of balance (score accrues all day;
+        // balance only changes at the UTC-midnight distribution), so it
+        // gets its own change gate.
+        let current_pending: String = ui.get_bliss_pending().into();
+        if current_pending != bliss.pending {
             ui.set_bliss_pending(bliss.pending.clone().into());
         }
     }
@@ -12712,6 +12897,30 @@ struct LastWindowSize {
     width: u32,
     height: u32,
     scale_factor: f32,
+}
+
+/// Watchdog: if the `SlintScene` entity ever disappears after setup, the UI
+/// render path (`render_slint_to_texture`) and the resize path both silently
+/// no-op — the editor UI freezes forever with zero log output. Nothing is
+/// supposed to remove it, so its absence is always a bug: scream ONCE, loudly,
+/// so the failure is diagnosable instead of a mystery "UI stopped responding".
+fn slint_scene_watchdog(
+    slint_scenes: Query<Entity, With<SlintScene>>,
+    slint_context: Option<NonSend<SlintUiState>>,
+    mut warned: Local<bool>,
+) {
+    // Only meaningful once Slint is initialized (setup spawns the scene).
+    if slint_context.is_none() || *warned {
+        return;
+    }
+    if slint_scenes.is_empty() {
+        *warned = true;
+        error!(
+            "SlintScene entity is GONE — the editor UI can no longer render or resize. \
+             Something despawned it (scene clear? overlay cleanup?). The UI will appear \
+             frozen from this point. This is a bug — report the actions that preceded it."
+        );
+    }
 }
 
 /// Handles window resize: updates Slint texture, overlay quad, and overlay camera.

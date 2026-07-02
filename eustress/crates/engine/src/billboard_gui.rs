@@ -2207,6 +2207,21 @@ impl Plugin for BillboardGuiPlugin {
     fn build(&self, app: &mut App) {
         app.insert_non_send_resource(BillboardTextState::default())
             .init_resource::<BillboardEditState>()
+            // Register THIS compilation unit's DoubleClickedPart. The engine
+            // crate is dual-compiled (lib AND bin): main.rs registers the
+            // BIN's `part_selection::DoubleClickedPart`, but this plugin's
+            // systems are the LIB instance and read the LIB's type — a
+            // DIFFERENT TypeId, so on bevy 0.19 the readers failed fetch-time
+            // validation and were silently skipped every frame. Registering
+            // via `crate::` here guarantees the readers' own type exists.
+            //
+            // KNOWN GAP (pre-existing, predates 0.19): the WRITER
+            // (part_selection_system) is added in main.rs from the BIN
+            // instance, so its messages land in the BIN type's channel — the
+            // LIB readers here won't receive them. Billboard double-click
+            // editing therefore stays inert until the lib/bin dual-compile is
+            // untangled (tracked: engine-crate decomposition).
+            .add_message::<crate::part_selection::DoubleClickedPart>()
             .add_systems(Startup, init_billboard_atlas)
             .add_systems(
                 Update,

@@ -218,7 +218,9 @@ pub enum Action {
 }
 
 /// Snapshot of a property value for undo/redo
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// (`PartialEq` so producers can skip pushing no-op edits — e.g. the
+/// Properties panel committing an unchanged field on blur.)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PropertyValueSnapshot {
     String(String),
     Float(f32),
@@ -387,6 +389,14 @@ impl UndoStack {
     /// in `history_stream.rs` once per frame.
     pub fn drain_pending_stream(&mut self) -> Vec<PendingHistoryStreamEvent> {
         std::mem::take(&mut self.pending_stream)
+    }
+
+    /// Monotonic push counter — increments on every push, unaffected
+    /// by undo/redo/trim. Subscribers (History stream, Bliss
+    /// contribution tracker) compare it across frames to detect that
+    /// new undoable work happened.
+    pub fn sequence(&self) -> u64 {
+        self.push_sequence
     }
 
     /// Topic-kind for the action at `index`, if it exists. Used by the
@@ -1178,6 +1188,15 @@ fn apply_property_value_to_entity(id: u32, property: &str, value: &PropertyValue
         ("Size", PropertyValueSnapshot::Vector3(size)) => {
             if let Some(mut bp) = world.get_mut::<BasePart>(entity) {
                 bp.size = Vec3::from_array(*size);
+            }
+        }
+        // Properties-panel "Scale.X/Y/Z" edits write Transform.scale (GLB /
+        // mesh entities size via scale, not BasePart.size) — restore the
+        // same field. Without this arm those edits warned "unknown property"
+        // on undo.
+        ("Scale", PropertyValueSnapshot::Vector3(scale)) => {
+            if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+                transform.scale = Vec3::from_array(*scale);
             }
         }
         ("Color", PropertyValueSnapshot::Color(rgba)) => {

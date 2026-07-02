@@ -196,6 +196,10 @@ fn draw_move_gizmos(
         (Without<Selected>, Without<bevy::ui::Node>),
     >,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
+    // Render-Aabb fallback for BasePart-less selectables (Gaussian Splat
+    // clouds) so the gizmo centers on the cloud's actual bounds instead of
+    // a 1×1×1 box at the entity origin.
+    aabbs: Query<&bevy::camera::primitives::Aabb>,
 ) {
     // Draw Move gizmos when Move tool is active OR Select tool is active (Roblox UX:
     // selecting an object immediately shows transform handles for visual feedback).
@@ -222,8 +226,20 @@ fn draw_move_gizmos(
         if let Some(bg) = billboard {
             t.translation = global_transform.translation() + Vec3::from_array(bg.units_offset);
         }
-        let size = base_part.map(|bp| bp.size).unwrap_or(t.scale);
-        let (mn, mx) = calculate_rotated_aabb(t.translation, size * 0.5, t.rotation);
+        // Bounds priority: BasePart.size → render Aabb (Gaussian Splat
+        // clouds have no BasePart; bevy_gaussian_splatting inserts a
+        // local-space Aabb) → Transform.scale.
+        let (obb_center, size) = if let Some(bp) = base_part {
+            (t.translation, bp.size)
+        } else if let Ok(a) = aabbs.get(entity) {
+            (
+                t.translation + t.rotation * (Vec3::from(a.center) * t.scale),
+                Vec3::from(a.half_extents) * 2.0 * t.scale,
+            )
+        } else {
+            (t.translation, t.scale)
+        };
+        let (mn, mx) = calculate_rotated_aabb(obb_center, size * 0.5, t.rotation);
         bounds_min = bounds_min.min(mn);
         bounds_max = bounds_max.max(mx);
         count += 1;

@@ -56,6 +56,12 @@ pub struct PartClickExtras<'w, 's> {
     /// attribute on the hit entity and open it in the OS default
     /// browser without going through the selection path.
     pub attributes_q: Query<'w, 's, &'static eustress_common::attributes::Attributes>,
+    /// Render-Aabb lookup for the OBB hit-test fallback. Gaussian Splat
+    /// clouds have no BasePart / Mesh3d / Collider — their only bounds
+    /// are the `Aabb` bevy_gaussian_splatting computes and inserts.
+    /// Lives in this bundle so the parent system stays under Bevy's
+    /// 16-param ceiling.
+    pub aabb_q: Query<'w, 's, &'static bevy::camera::primitives::Aabb>,
 }
 
 /// Supports both PartEntity (legacy) and Instance (modern) components
@@ -412,9 +418,23 @@ pub fn part_selection_system(
         for (entity, _pe, _pem, _inst, transform, _mesh, basepart, _child_of) in part_entities_query.iter() {
             if !entity_part_ids.contains_key(&entity) { continue; }
             let t = transform.compute_transform();
-            let size = basepart.map(|bp| bp.size).unwrap_or(t.scale);
+            // Bounds priority: BasePart.size (Parts) → render Aabb
+            // (Gaussian Splat clouds — bevy_gaussian_splatting inserts a
+            // computed Aabb, and they have no BasePart/Mesh3d/Collider, so
+            // without this they hit-tested as a 1×1×1 box at the entity
+            // origin and were unselectable in the viewport) → Transform.scale.
+            // The Aabb is LOCAL-space (center + half_extents), so transform
+            // its center into world space and scale its extents.
+            let (obb_center, size) = if let Some(bp) = basepart {
+                (t.translation, bp.size)
+            } else if let Ok(aabb) = click_extras.aabb_q.get(entity) {
+                let world_center = t.translation + t.rotation * (Vec3::from(aabb.center) * t.scale);
+                (world_center, Vec3::from(aabb.half_extents) * 2.0 * t.scale)
+            } else {
+                (t.translation, t.scale)
+            };
             // ray_obb_intersection takes HALF-extents, not full size
-            if let Some(distance) = ray_obb_intersection(ray.origin, *ray.direction, t.translation, size * 0.5, t.rotation) {
+            if let Some(distance) = ray_obb_intersection(ray.origin, *ray.direction, obb_center, size * 0.5, t.rotation) {
                 if let Some((part_id, parent_model)) = entity_part_ids.get(&entity) {
                     if closest_hit.as_ref().map_or(true, |(_, d, _, _)| distance < *d) {
                         closest_hit = Some((part_id.clone(), distance, entity, *parent_model));

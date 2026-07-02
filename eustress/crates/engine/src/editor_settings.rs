@@ -439,18 +439,30 @@ fn auto_save_scene_system(
         match git_autosave_commit(&space_path, &message, identity.as_ref()) {
             Ok(GitAutosave::Committed(sha)) => {
                 info!("✅ Autosave committed to git @ {} ({})", sha, space_path.display());
+                crate::notifications::notify_from_background(
+                    crate::notifications::NotificationLevel::Info,
+                    "Auto-saved (git)".to_string(),
+                );
             }
             Ok(GitAutosave::NoChanges) => {
                 // Quiet no-op — nothing changed since the last autosave.
             }
             Err(e) => {
                 warn!("git autosave failed at {:?}: {}", space_path, e);
+                // Surface the failure — silent autosave failure is silent
+                // data-loss risk. (The toast used to fire optimistically on
+                // the main thread BEFORE the commit ran, so the user was told
+                // "Auto-saved" even when git failed.)
+                crate::notifications::notify_from_background(
+                    crate::notifications::NotificationLevel::Error,
+                    format!("Autosave git commit FAILED: {e}. Your on-disk files are current, but no recovery snapshot was made."),
+                );
             }
         }
     });
 
     auto_save.last_save = Some(std::time::Instant::now());
-    notifications.info("Auto-saved (git)".to_string());
+    let _ = &notifications; // toast now reported truthfully from the git thread
 }
 
 pub(crate) enum GitAutosave {

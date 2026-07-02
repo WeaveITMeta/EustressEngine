@@ -197,6 +197,11 @@ fn spawn_selection_adornments(
     query: Query<(Entity, &GlobalTransform, Option<&BasePart>, Option<&Part>), Added<Selected>>,
     children_query: Query<&Children>,
     descendant_parts: Query<(&GlobalTransform, &BasePart), Without<SelectionAdornment>>,
+    // Render-Aabb fallback for entities with no BasePart AND no descendant
+    // BaseParts — Gaussian Splat clouds (bevy_gaussian_splatting inserts a
+    // computed local-space Aabb). Without this, selecting a splat cloud
+    // produced no wireframe at all.
+    own_aabb: Query<&bevy::camera::primitives::Aabb>,
 ) {
     let Some(mats) = materials else { return };
     if query.is_empty() { return; }
@@ -229,6 +234,31 @@ fn spawn_selection_adornments(
                 spawn_corner_dots_at(
                     &mut commands, &mut cache, &mut meshes, &mats,
                     entity, aabb_size, local_offset,
+                );
+            } else if let Ok(aabb) = own_aabb.get(entity) {
+                // No descendant BaseParts either — a Gaussian Splat cloud (or
+                // any bounds-only renderable). Use its own render Aabb, which
+                // is LOCAL-space: as a child of the entity, the adornment
+                // inherits the parent transform, so local center/size are
+                // exactly right with no world-space conversion.
+                let aabb_size = Vec3::from(aabb.half_extents) * 2.0;
+                let local_center = Vec3::from(aabb.center);
+                let wireframe_handle = get_or_create_wireframe(
+                    &mut cache, &mut meshes, ShapeKind::Box, aabb_size,
+                );
+                commands.spawn((
+                    Mesh3d(wireframe_handle),
+                    MeshMaterial3d(mats.selection.clone()),
+                    Transform::from_translation(local_center),
+                    SelectionAdornment,
+                    eustress_common::adornments::Adornment { meta: true },
+                    NotShadowCaster,
+                    Name::new("SelectionWireframe"),
+                    ChildOf(entity),
+                ));
+                spawn_corner_dots_at(
+                    &mut commands, &mut cache, &mut meshes, &mats,
+                    entity, aabb_size, local_center,
                 );
             }
             continue;

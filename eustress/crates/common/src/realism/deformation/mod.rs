@@ -43,6 +43,12 @@ impl Plugin for DeformationPlugin {
             .init_resource::<components::DeformationConfig>()
             .register_type::<components::DeformableMesh>()
             .register_type::<components::DeformationState>()
+            // bevy 0.19: a MessageReader whose type was never registered
+            // fails fetch-time validation and the system is SILENTLY skipped
+            // every frame ("Message not initialized" warn once at startup).
+            // Without these, impact deformation + fracture never ran.
+            .add_message::<components::ImpactDeformEvent>()
+            .add_message::<components::FractureMeshEvent>()
             .add_systems(Update, (
                 systems::init_deformable_meshes,
                 systems::update_stress_deformation,

@@ -369,8 +369,16 @@ pub mod handlers {
         let origin_vec = bevy::math::Vec3::new(origin[0], origin[1], origin[2]);
 
         let mut state: SystemState<(SpatialQuery, Query<&Name>)> = SystemState::new(world);
-        // 0.19: SystemState::get returns Result; these params are always valid.
-        let (spatial, names) = state.get(world).unwrap();
+        // 0.19: SystemState::get returns Result — param validation happens at
+        // fetch time, so "always valid" isn't guaranteed (physics may not be
+        // ready on a very early bridge call). Surface a bridge error instead
+        // of panicking the engine main thread.
+        let Ok((spatial, names)) = state.get(world) else {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("raycast: physics system params unavailable (world still initializing)"),
+            );
+        };
         let hits = spatial.ray_hits(
             origin_vec,
             dir,
@@ -549,8 +557,17 @@ pub mod handlers {
                 Query<(Entity, &ServiceComponent)>,
             )> = SystemState::new(world);
             let outcome = {
-                let (mut commands, asset_server, mut materials, mut material_registry, mut mesh_cache, space_root, services) =
-                    state.get_mut(world).unwrap(); // 0.19: SystemState::get_mut now returns Result
+                // 0.19: SystemState::get_mut returns Result — a fetch failure
+                // (Space not loaded yet, resource missing) must surface as a
+                // bridge error, not a main-thread panic.
+                let Ok((mut commands, asset_server, mut materials, mut material_registry, mut mesh_cache, space_root, services)) =
+                    state.get_mut(world)
+                else {
+                    return BridgeResponse::error(
+                        req.id.clone(),
+                        BridgeError::internal("entity.create: system params unavailable (Space still loading?)"),
+                    );
+                };
                 match services
                     .iter()
                     .find(|(_, s)| s.class_name == "Workspace")

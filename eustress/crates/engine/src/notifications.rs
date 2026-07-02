@@ -78,6 +78,44 @@ impl NotificationManager {
     }
 }
 
+// ============================================================================
+// Background-thread → main-thread notification bridge
+// ============================================================================
+
+/// Pending notifications produced OFF the main thread (git autosave thread,
+/// save workers, network tasks). `NotificationManager` is a Bevy resource and
+/// can't be touched from a spawned thread, which previously meant background
+/// failures were log-only — the user was told "Auto-saved (git)" even when
+/// the commit failed. Threads push here; `drain_background_notifications`
+/// moves entries into the manager each frame on the main thread.
+static PENDING_BG_NOTIFICATIONS: Mutex<Vec<(NotificationLevel, String)>> = Mutex::new(Vec::new());
+
+/// Queue a notification from ANY thread. Safe to call from `std::thread::spawn`
+/// workers; the message surfaces as a toast on the next frame.
+pub fn notify_from_background(level: NotificationLevel, message: impl Into<String>) {
+    let mut q = PENDING_BG_NOTIFICATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    q.push((level, message.into()));
+}
+
+/// Main-thread drain: background-queued notifications → `NotificationManager`
+/// (which the toast bridge then renders).
+fn drain_background_notifications(mut manager: ResMut<NotificationManager>) {
+    let pending: Vec<(NotificationLevel, String)> = {
+        let mut q = PENDING_BG_NOTIFICATIONS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if q.is_empty() {
+            return;
+        }
+        std::mem::take(&mut *q)
+    };
+    for (level, message) in pending {
+        manager.add(level, message);
+    }
+}
+
 /// Resource for polling favorite updates
 #[derive(Resource)]
 pub struct FavoriteUpdatePoller {
@@ -164,7 +202,10 @@ impl Plugin for NotificationPlugin {
     fn build(&self, app: &mut App) {
         app
             .init_resource::<NotificationManager>()
-            .init_resource::<FavoriteUpdatePoller>();
+            .init_resource::<FavoriteUpdatePoller>()
+            // Background-thread notifications (git autosave failures etc.)
+            // surface on the main thread every frame.
+            .add_systems(Update, drain_background_notifications);
 
         // Bridge drain → toasts is only useful when the notifications UI is
         // compiled in. Without the feature, `NotificationManager.success/…`

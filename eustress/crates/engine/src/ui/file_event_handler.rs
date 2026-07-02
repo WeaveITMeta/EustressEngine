@@ -338,6 +338,14 @@ fn do_save_space(world: &mut World) {
                 }
                 Err(e) => {
                     warn!("Manual save: git commit failed at {:?}: {}", space_path, e);
+                    // Surface it — the main thread already toasted "Space
+                    // saved", so without this the user believes the git
+                    // snapshot landed when it didn't (silent recovery-history
+                    // gap discovered in the AAA UX audit).
+                    crate::notifications::notify_from_background(
+                        crate::notifications::NotificationLevel::Warning,
+                        format!("Save succeeded, but the git snapshot commit failed: {e}"),
+                    );
                 }
             }
         });

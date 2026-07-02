@@ -1557,6 +1557,14 @@ impl Plugin for PlayModePlugin {
             // LSP-grade script-error drainer. Runs in Update (outside
             // any Play-state gate) so users see compile diagnostics from
             // the analyzer even in Edit mode — before they press Play.
+            //
+            // bevy 0.19: LuauScriptErrorEvent was only registered inside
+            // common's LuauPlugin, which the engine never adds — so this
+            // reader (and every writer of the event) failed fetch-time
+            // validation and was SILENTLY skipped: Luau script errors never
+            // reached the Output panel. Register the message here, where the
+            // consuming system lives.
+            .add_message::<eustress_common::luau::runtime::LuauScriptErrorEvent>()
             .add_systems(Update, crate::soul::rune_api::drain_script_errors_to_output)
             .add_systems(Update, (
                 crate::soul::rune_api::hot_recompile_dirty_rune_scripts,
