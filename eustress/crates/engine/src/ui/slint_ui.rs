@@ -395,6 +395,9 @@ pub enum SlintAction {
     
     // Terrain
     GenerateTerrain(String),
+    /// Generate World (full worldgen pipeline) — seed string + size preset
+    /// ("small" | "medium" | "large") from the Terrain panel.
+    GenerateWorld { seed: String, preset: String },
     ToggleTerrainEditMode,
     SetTerrainBrush(String),
     BrushSizeChanged(f32),
@@ -1390,12 +1393,13 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, slint_scene_watchdog)
             // Space-load progress pill (AAA audit: silent loads read as hangs)
             .add_systems(Update, sync_load_progress_to_slint.after(SlintSystems::Drain))
+            // Generate World busy flag + phase/progress text (Terrain panel)
+            .add_systems(Update, sync_worldgen_progress_to_slint.after(SlintSystems::Drain))
             // Performance tracking
             .add_systems(Update, update_ui_performance)
             // Simulation clock display in ribbon
             .add_systems(Update, sync_sim_clock_to_slint)
             // Axis orientation gizmo (bottom-right of viewport)
-            .add_systems(Update, sync_axis_gizmo_to_slint)
             // History panel sync
             .add_systems(Update, sync_history_to_slint.after(SlintSystems::Drain))
             // Publish dialog state sync (for camera blocking)
@@ -1845,6 +1849,11 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_toggle_terrain_edit_mode(move || q.push(SlintAction::ToggleTerrainEditMode));
     let q = queue.clone();
     ui.on_set_terrain_brush(move |brush| q.push(SlintAction::SetTerrainBrush(brush.to_string())));
+    let q = queue.clone();
+    ui.on_generate_world(move |seed, preset| q.push(SlintAction::GenerateWorld {
+        seed: seed.to_string(),
+        preset: preset.to_string(),
+    }));
     // TODO: Uncomment after Slint regenerates bindings for brush settings callbacks
     // let q = queue.clone();
     // ui.on_brush_size_changed(move |size| q.push(SlintAction::BrushSizeChanged(size)));
@@ -2817,6 +2826,10 @@ pub fn update_slint_ui_focus(
     )>,
     slint_context: Option<NonSend<SlintUiState>>,
     mouse: Res<ButtonInput<bevy::input::mouse::MouseButton>>,
+    // In-viewport billboard text editing (double-click a BillboardGui) —
+    // NOT a Slint text input, so it must be OR'd into the same gate or
+    // typing into the billboard also flies the camera around.
+    billboard_edit: Option<Res<crate::billboard_gui::BillboardEditState>>,
 ) {
     // Block engine keyboard handling whenever ANY Slint modal is open
     // or a text input has focus. The atomic this feeds is what the
@@ -2864,6 +2877,14 @@ pub fn update_slint_ui_focus(
                 || w.get_show_new_space_dialog()
         })
         .unwrap_or(false);
+    // In-viewport billboard text editing captures the keyboard exactly like
+    // a Slint text input: while typing into a double-clicked billboard,
+    // WASD/Q/E must not fly the camera and Delete must not delete parts.
+    let any_focus = any_focus
+        || billboard_edit
+            .as_deref()
+            .map(|b| b.editing.is_some())
+            .unwrap_or(false);
     ui_focus.text_input_focused = any_focus;
     OVERLAY_INPUT_FOCUSED.store(any_focus, std::sync::atomic::Ordering::Relaxed);
 
@@ -3097,6 +3118,7 @@ struct DrainEventWriters<'w> {
     terrain_toggle: MessageWriter<'w, super::spawn_events::ToggleTerrainEditEvent>,
     terrain_brush: MessageWriter<'w, super::spawn_events::SetTerrainBrushEvent>,
     terrain_import: MessageWriter<'w, super::spawn_events::ImportTerrainEvent>,
+    worldgen_request: MessageWriter<'w, super::spawn_events::GenerateWorldEvent>,
     // Workshop Panel (System 0: Ideation)
     workshop_send: MessageWriter<'w, crate::workshop::WorkshopSendMessageEvent>,
     workshop_approve: MessageWriter<'w, crate::workshop::WorkshopApproveMcpEvent>,
@@ -5206,14 +5228,69 @@ fn drain_slint_actions(
             
             // Terrain
             SlintAction::GenerateTerrain(size) => {
-                // Spawn terrain with size-appropriate config and switch to Terrain tab
-                use eustress_common::terrain::TerrainConfig;
-                let config = match size.as_str() {
-                    "small" => TerrainConfig::small(),
-                    "large" => TerrainConfig::large(),
-                    _ => TerrainConfig::default(), // "medium"
+                // Quick-generate presets now route through the FULL worldgen
+                // pipeline (rivers / climate / materials), not the old flat-noise
+                // path — so the ribbon + panel Small/Medium/Large buttons produce
+                // real worlds. Seed is fixed (42) for a deterministic quick
+                // result; the panel's seed field + Generate World button drives
+                // custom seeds. (SpawnTerrainEvent is still used by heightmap import.)
+                use eustress_common::terrain::worldgen::pipeline::WorldSpec;
+                // region_res sets generation detail (samples per region side →
+                // metres-per-cell). Bumped above the 256 default for finer
+                // terrain, scaled DOWN as the world grows so background
+                // generation time stays bounded (cost ~ regions × region_res²).
+                let (regions, region_res) = match size.as_str() {
+                    "small" => (2u32, 384u32),
+                    "large" => (4u32, 288u32),
+                    _ => (3u32, 320u32), // "medium"
                 };
-                events.terrain_spawn.write(super::spawn_events::SpawnTerrainEvent { config });
+                let spec = WorldSpec {
+                    seed: 42,
+                    regions_x: regions,
+                    regions_z: regions,
+                    region_res,
+                    ..Default::default()
+                };
+                events.worldgen_request.write(super::spawn_events::GenerateWorldEvent { spec });
+                if let Some(ref mut s) = res.state {
+                    s.show_terrain_editor = true;
+                }
+            }
+            SlintAction::GenerateWorld { seed, preset } => {
+                // Full worldgen pipeline: parse panel inputs → WorldSpec →
+                // GenerateWorldEvent (background generation + export + load
+                // in ui/spawn_events.rs). Seed parse failure is a loud
+                // no-op — no silent fallback seed.
+                use eustress_common::terrain::worldgen::pipeline::WorldSpec;
+                let parsed_seed = match seed.trim().parse::<u64>() {
+                    Ok(s) => s,
+                    Err(_) => {
+                        let msg = format!("Generate World: seed must be a whole number (got \"{}\")", seed.trim());
+                        if let Some(ref mut output) = res.output {
+                            output.error(msg.clone());
+                        }
+                        warn!("{}", msg);
+                        continue;
+                    }
+                };
+                // Presets map to region counts @ the default 1024 m regions.
+                // region_res sets generation detail (samples/region side); bumped
+                // above the 256 default for finer terrain, scaled DOWN as the
+                // world grows so background gen time stays bounded (cost ~
+                // regions × region_res²). Mirror of the GenerateTerrain arm.
+                let (regions, region_res) = match preset.as_str() {
+                    "small" => (2u32, 384u32),
+                    "large" => (4u32, 288u32),
+                    _ => (3u32, 320u32), // "medium"
+                };
+                let spec = WorldSpec {
+                    seed: parsed_seed,
+                    regions_x: regions,
+                    regions_z: regions,
+                    region_res,
+                    ..Default::default()
+                };
+                events.worldgen_request.write(super::spawn_events::GenerateWorldEvent { spec });
                 if let Some(ref mut s) = res.state {
                     s.show_terrain_editor = true;
                 }
@@ -11320,6 +11397,17 @@ fn push_brick_color_honeycombs(
     *pushed = true;
 }
 
+/// Terrain state queries for `sync_bevy_to_slint`, bundled into one
+/// SystemParam to stay under Bevy's 16-param ceiling.
+#[derive(bevy::ecs::system::SystemParam)]
+struct TerrainSyncParams<'w, 's> {
+    roots: Query<'w, 's, Entity, With<eustress_common::terrain::TerrainRoot>>,
+    config: Query<'w, 's, &'static eustress_common::terrain::TerrainConfig, With<eustress_common::terrain::TerrainRoot>>,
+    chunks: Query<'w, 's, Entity, With<eustress_common::terrain::Chunk>>,
+    mode: Option<Res<'w, eustress_common::terrain::TerrainMode>>,
+    brush: Option<Res<'w, eustress_common::terrain::TerrainBrush>>,
+}
+
 /// Pushes Bevy state to Slint properties each frame (Bevy→Slint direction).
 /// Updates tool selection, play state, FPS, panel visibility, output logs, etc.
 fn sync_bevy_to_slint(
@@ -11335,16 +11423,13 @@ fn sync_bevy_to_slint(
     // Direct entity count query as fallback when snapshot is empty
     instance_query: Query<Entity, With<eustress_common::classes::Instance>>,
     play_mode_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
-    // Terrain state sync
-    terrain_roots: Query<Entity, With<eustress_common::terrain::TerrainRoot>>,
-    terrain_config: Query<&eustress_common::terrain::TerrainConfig, With<eustress_common::terrain::TerrainRoot>>,
-    terrain_chunks: Query<Entity, With<eustress_common::terrain::Chunk>>,
-    terrain_mode: Option<Res<eustress_common::terrain::TerrainMode>>,
-    terrain_brush: Option<Res<eustress_common::terrain::TerrainBrush>>,
+    // Terrain state sync — bundled into one SystemParam (see
+    // `TerrainSyncParams`) to stay under Bevy's 16-param ceiling.
+    terrain: TerrainSyncParams,
 ) {
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
-    
+
     // ── Per-frame: viewport bounds (needed by camera every frame) ──
     if let Some(ref mut vb) = viewport_bounds {
         let scale = slint_context.adapter.scale_factor.get();
@@ -11449,19 +11534,19 @@ fn sync_bevy_to_slint(
     if ui.get_show_terrain_editor() != state.show_terrain_editor {
         ui.set_show_terrain_editor(state.show_terrain_editor);
     }
-    let has_terrain = !terrain_roots.is_empty();
+    let has_terrain = !terrain.roots.is_empty();
     if ui.get_has_terrain() != has_terrain {
         ui.set_has_terrain(has_terrain);
     }
     // Terrain mode
-    if let Some(ref tm) = terrain_mode {
+    if let Some(ref tm) = terrain.mode {
         let terrain_edit = **tm == eustress_common::terrain::TerrainMode::Editor;
         if ui.get_terrain_edit_mode() != terrain_edit {
             ui.set_terrain_edit_mode(terrain_edit);
         }
     }
     // Terrain brush
-    if let Some(ref tb) = terrain_brush {
+    if let Some(ref tb) = terrain.brush {
         let brush_str = match tb.mode {
             eustress_common::terrain::BrushMode::Raise => "raise",
             eustress_common::terrain::BrushMode::Lower => "lower",
@@ -11480,7 +11565,7 @@ fn sync_bevy_to_slint(
         }
     }
     // Terrain config - only sync when values change
-    if let Ok(config) = terrain_config.single() {
+    if let Ok(config) = terrain.config.single() {
         let (total_w, _total_d) = config.total_size();
         let size_str = format!("{:.0}", total_w);
         let current_size: String = ui.get_terrain_size().into();
@@ -11493,7 +11578,7 @@ fn sync_bevy_to_slint(
             ui.set_terrain_material("Default".into());
         }
     }
-    let chunk_count_str = format!("{}", terrain_chunks.iter().count());
+    let chunk_count_str = format!("{}", terrain.chunks.iter().count());
     let current_chunk_count: String = ui.get_terrain_chunk_count().into();
     if current_chunk_count != chunk_count_str {
         ui.set_terrain_chunk_count(chunk_count_str.into());
@@ -13016,6 +13101,44 @@ fn sync_load_progress_to_slint(
     }
 }
 
+/// Pushes Generate World progress to the Terrain panel: busy flag (disables
+/// the button) + phase text. Phase-coarse — the worldgen task itself is
+/// opaque, so it shows the task's status string while generating, then the
+/// chunk queue percentage while the already-registered
+/// `process_terrain_generation_queue` meshes the result. Mirrors
+/// `sync_load_progress_to_slint`.
+fn sync_worldgen_progress_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    worldgen: Option<Res<super::spawn_events::WorldgenTask>>,
+    queue: Option<Res<eustress_common::terrain::TerrainGenerationQueue>>,
+) {
+    let Some(ctx) = slint_context else { return };
+    let ui = &ctx.window;
+    let Some(worldgen) = worldgen else { return };
+
+    let busy = worldgen.is_busy();
+    if ui.get_worldgen_busy() != busy {
+        ui.set_worldgen_busy(busy);
+    }
+
+    let progress = if worldgen.task.is_some() {
+        worldgen.status.clone()
+    } else if worldgen.meshing {
+        match queue.as_deref() {
+            Some(q) if q.is_generating() => {
+                format!("Meshing terrain\u{2026} {:.0}%", q.progress() * 100.0)
+            }
+            _ => worldgen.status.clone(),
+        }
+    } else {
+        String::new()
+    };
+    let current: String = ui.get_worldgen_progress().into();
+    if current != progress {
+        ui.set_worldgen_progress(progress.into());
+    }
+}
+
 /// Watchdog: if the `SlintScene` entity ever disappears after setup, the UI
 /// render path (`render_slint_to_texture`) and the resize path both silently
 /// no-op — the editor UI freezes forever with zero log output. Nothing is
@@ -13047,9 +13170,10 @@ fn handle_window_resize(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut last_size: ResMut<LastWindowSize>,
     mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     slint_context: Option<NonSend<SlintUiState>>,
-    slint_scenes: Query<&SlintScene>,
+    mut slint_scenes: Query<&mut SlintScene>,
     mut overlay_quads: Query<&mut Mesh3d, With<SlintOverlaySprite>>,
     mut overlay_cameras: Query<(&mut Camera, &mut Projection), With<SlintOverlayCamera>>,
     mut staging: ResMut<SlintStagingBuffer>,
@@ -13084,17 +13208,47 @@ fn handle_window_resize(
     staging.width = new_width as usize;
     staging.height = new_height as usize;
     
-    // Resize the Slint texture to match physical framebuffer
-    if let Some(scene) = slint_scenes.iter().next() {
-        if let Some(mut image) = images.get_mut(&scene.image) {
-            let new_size = Extent3d {
-                width: new_width,
-                height: new_height,
-                depth_or_array_layers: 1,
-            };
-            image.texture_descriptor.size = new_size;
-            image.resize(new_size);
+    // Recreate the Slint texture as a FRESH asset at the new physical size,
+    // rather than mutating the existing one in place. An in-place
+    // `image.resize()` changes `texture_descriptor.size` on the CPU-side
+    // asset, but Bevy's GPU asset extraction for this exact overlay texture
+    // is already known to be unreliable about re-extracting on a mutation
+    // (see the `materials.get_mut()` workaround below citing bevy#17350,
+    // which forces re-upload of pixel DATA). A dimension change is a bigger
+    // ask than a data refresh — it requires the renderer to recreate the
+    // underlying wgpu::Texture at the new size, not just re-upload into the
+    // existing one — and when that doesn't happen, the quad keeps sampling
+    // a stale-sized GPU texture stretched over its new (resized) geometry:
+    // exactly a "blurry, doesn't maintain proper resolution" UI after any
+    // resize. A brand-new Handle can't be confused with stale GPU state —
+    // Bevy has no choice but to create the texture fresh.
+    if let Some(mut scene) = slint_scenes.iter_mut().next() {
+        let new_size = Extent3d {
+            width: new_width,
+            height: new_height,
+            depth_or_array_layers: 1,
+        };
+        let mut new_image = Image {
+            texture_descriptor: TextureDescriptor {
+                label: Some("SlintOverlay"),
+                size: new_size,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba8UnormSrgb,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            asset_usage: bevy::asset::RenderAssetUsages::MAIN_WORLD
+                | bevy::asset::RenderAssetUsages::RENDER_WORLD,
+            ..default()
+        };
+        new_image.resize(new_size);
+        let new_handle = images.add(new_image);
+        if let Some(mut material) = materials.get_mut(&scene.material) {
+            material.base_color_texture = Some(new_handle.clone());
         }
+        scene.image = new_handle;
     }
     
     // Resize the overlay quad mesh (physical pixels for orthographic projection)
@@ -13285,31 +13439,8 @@ fn sync_sim_clock_to_slint(
     }
 }
 
-/// Sync camera orientation axes to Slint for the axis gizmo widget.
-/// Projects world X/Y/Z axes into 2D camera-relative coordinates.
-fn sync_axis_gizmo_to_slint(
-    slint_context: Option<NonSend<SlintUiState>>,
-    camera_query: Query<&GlobalTransform, (With<Camera3d>, Without<SlintOverlayCamera>)>,
-) {
-    let Some(ref context) = slint_context else { return };
-    let Some(cam_transform) = camera_query.iter().next() else { return };
-    let ui = &context.window;
-
-    // Get camera's view matrix vectors
-    let right = cam_transform.right().as_vec3();
-    let up = cam_transform.up().as_vec3();
-
-    // Project each world axis into 2D screen space (dot product with camera right/up)
-    // X axis (1,0,0) projected onto camera plane
-    ui.set_gizmo_ax(Vec3::X.dot(right));
-    ui.set_gizmo_ay(-Vec3::X.dot(up));
-
-    ui.set_gizmo_bx(Vec3::Y.dot(right));
-    ui.set_gizmo_by(-Vec3::Y.dot(up));
-
-    ui.set_gizmo_cx(Vec3::Z.dot(right));
-    ui.set_gizmo_cy(-Vec3::Z.dot(up));
-}
+// `sync_axis_gizmo_to_slint` removed 2026-07-02 per user ask, together
+// with the bottom-right X/Y/Z axis widget in main.slint.
 
 /// Bridges viewport click selection → UnifiedExplorerState.
 ///
@@ -14005,8 +14136,15 @@ fn sync_unified_explorer_to_slint(
     {
         let space_root = &crate::space::default_space_root();
         let terrain_dir = space_root.join("Workspace").join("Terrain");
-        
-        if terrain_dir.exists() {
+
+        // The Workspace/Terrain DATA directory (R16 chunks, splatmaps,
+        // _terrain.toml) is engine-managed export data, not a user instance —
+        // the live terrain is already the "Terrain (Nm)" ENTITY node above.
+        // Suppress the duplicate filesystem folder node so the Explorer shows
+        // ONE terrain object. Opt back in (to browse the on-disk export) via
+        // EUSTRESS_SHOW_TERRAIN_FOLDER.
+        let show_terrain_folder = std::env::var("EUSTRESS_SHOW_TERRAIN_FOLDER").is_ok();
+        if terrain_dir.exists() && show_terrain_folder {
             // Terrain folder node (depth 1, child of Workspace)
             let terrain_folder_id = next_id;
             next_id += 1;

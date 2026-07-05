@@ -106,6 +106,10 @@ pub mod transform_space;
 pub mod default_scene;
 pub mod startup;
 pub mod terrain_plugin;
+// Disk-terrain auto-loader — legacy/disk Spaces hydrate `Workspace/Terrain/`
+// (worldgen export + heightmap import R16/toml format) on Space open.
+// UNGATED sibling of the world-db voxel loader below.
+pub mod terrain_disk_load;
 // Wave 9.C — imported-terrain voxel loader. `terrain_plugin` (compiled into
 // BOTH this lib and the bin) calls `crate::terrain_voxel_load::register`, so
 // the module must exist in the lib crate root too, not just `main.rs`.

@@ -186,7 +186,10 @@ pub fn spawn_terrain(
     const TERRAIN_TILE_WORLD_SIZE: f32 = 8.0;
     let tile_repeat = config.chunk_size / TERRAIN_TILE_WORLD_SIZE;
     let terrain_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.3, 0.5, 0.2),  // Default grass green
+        // White base so the mesh's per-vertex splat/height colours show
+        // through unmodified (StandardMaterial multiplies base_color × vertex
+        // colour). The mesh now carries real material colours per vertex.
+        base_color: Color::WHITE,
         perceptual_roughness: 0.9,
         metallic: 0.0,
         reflectance: 0.3,

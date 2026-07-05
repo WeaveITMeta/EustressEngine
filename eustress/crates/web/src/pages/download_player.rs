@@ -40,7 +40,7 @@ pub fn DownloadPlayerPage() -> impl IntoView {
                 // Version Info
                 <div class="version-info">
                     <span class="version-badge">"v0.16.1"</span>
-                    <span class="version-label">"Public Beta"</span>
+                    <span class="version-label">"Public Alpha"</span>
                 </div>
             </section>
 

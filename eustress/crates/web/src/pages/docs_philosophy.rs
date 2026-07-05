@@ -292,7 +292,7 @@ pub fn DocsPhilosophyPage() -> impl IntoView {
                                     <tr>
                                         <td>"Licensing"</td>
                                         <td>"Per-seat, royalties"</td>
-                                        <td>"Open source core"</td>
+                                        <td>"Free, source-available (PolyForm Shield)"</td>
                                     </tr>
                                 </tbody>
                             </table>
@@ -499,9 +499,9 @@ pub fn DocsPhilosophyPage() -> impl IntoView {
                                     </p>
                                 </div>
                                 <div class="ownership-card">
-                                    <h4>"📜 Open Source Core"</h4>
+                                    <h4>"📜 Source-Available Core"</h4>
                                     <p>
-                                        "The engine core is open source. Fork it, modify it, learn from 
+                                        "The engine core is source-available under PolyForm Shield. Fork it, modify it, learn from
                                         it. Your investment in learning Eustress is never wasted."
                                     </p>
                                 </div>

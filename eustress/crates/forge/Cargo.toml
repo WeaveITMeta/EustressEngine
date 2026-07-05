@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.75"
 description = "Eustress Forge - Game server orchestration built on forge-orchestration"
 authors = ["EustressEngine Contributors"]
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Shield-1.0.0"
 
 [dependencies]
 # Core orchestration platform

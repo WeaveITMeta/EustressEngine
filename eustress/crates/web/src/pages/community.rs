@@ -27,7 +27,8 @@ struct SearchUser {
     username: String,
     display_name: String,
     avatar_url: Option<String>,
-    bliss_balance: u64,
+    #[serde(default)]
+    bliss_balance: f64,
     is_verified: bool,
     follower_count: u64,
 }

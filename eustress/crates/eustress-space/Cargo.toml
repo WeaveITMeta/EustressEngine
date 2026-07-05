@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Headless open/inspect/verify/export tool for a .eustress space — opens world.fjalldb WITHOUT the engine (portability + serialization-correctness)."
 authors = ["EustressEngine Contributors"]
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Shield-1.0.0"
 
 [[bin]]
 name = "eustress-space"

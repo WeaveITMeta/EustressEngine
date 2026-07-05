@@ -25,7 +25,11 @@ pub struct User {
     pub email: Option<String>,
     pub avatar_url: Option<String>,
     pub discord_id: Option<String>,
-    pub bliss_balance: u64,
+    // Whole BLS, fractional. The witness ledger credits fractional BLS at
+    // each daily distribution, so this is f64, not u64. Every renderer
+    // (nav badge, /bliss wallet, dashboard) treats it as whole BLS.
+    #[serde(default)]
+    pub bliss_balance: f64,
     #[serde(default)]
     pub ticket_balance: u64,
     pub created_at: chrono::DateTime<chrono::Utc>,

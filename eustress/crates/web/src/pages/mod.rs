@@ -60,6 +60,9 @@ pub mod settings;
 pub mod terms;
 pub mod tickets;
 pub mod trust_registry;
+pub mod kyc;
+pub mod license;
+pub mod support;
 
 pub use about::AboutPage;
 pub use acts::ActsPage;
@@ -114,3 +117,6 @@ pub use settings::SettingsPage;
 pub use terms::TermsPage;
 pub use tickets::TicketsPage;
 pub use trust_registry::TrustRegistryPage;
+pub use kyc::KycPage;
+pub use license::LicensePage;
+pub use support::SupportPage;

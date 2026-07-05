@@ -1184,6 +1184,21 @@ pub fn spawn_directory_entry(
         return;
     }
 
+    // Skip the worldgen Terrain EXPORT directory (chunks/*.r16, splatmap/*.png,
+    // _terrain.toml, materials/*.mat.toml) — it has no `_instance.toml`, so
+    // without this check it falls through to the generic Folder-class default
+    // below and gets spawned as a real ECS entity named "Terrain", DUPLICATING
+    // the actual terrain mesh entity (which the disk-load / worldgen hydration
+    // path spawns separately, see terrain_disk_load.rs). This is asset/export
+    // storage exactly like `meshes/`, not a scene-hierarchy instance.
+    let terrain_toml_rel =
+        super::space_source::rel_from_root(space_path, &dir_meta.path.join("_terrain.toml"))
+            .unwrap_or_default();
+    if source.exists(&terrain_toml_rel) {
+        debug!("Skipping terrain export directory {:?} (asset storage, not an instance)", dir_meta.path);
+        return;
+    }
+
     // Check for service directory — either has _service.toml or is a well-known service name
     let service_toml_path = dir_meta.path.join("_service.toml");
     let service_toml_rel =

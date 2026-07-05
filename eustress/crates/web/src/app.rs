@@ -68,6 +68,9 @@ use crate::pages::{
     terms::TermsPage,
     tickets::TicketsPage,
     trust_registry::TrustRegistryPage,
+    kyc::KycPage,
+    license::LicensePage,
+    support::SupportPage,
 };
 use crate::state::AppState;
 
@@ -242,6 +245,11 @@ pub fn App() -> impl IntoView {
 
                 // Admin-only (server-side gated by requireAdmin)
                 <Route path=path!("/admin") view=AdminPage />
+
+                // Info pages
+                <Route path=path!("/license") view=LicensePage />
+                <Route path=path!("/kyc") view=KycPage />
+                <Route path=path!("/support") view=SupportPage />
             </Routes>
                         </Router>
                     }.into_any()

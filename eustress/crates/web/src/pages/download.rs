@@ -97,7 +97,7 @@ pub fn DownloadPage() -> impl IntoView {
                 // Version Info
                 <div class="version-info">
                     <span class="version-badge">{move || version.get()}</span>
-                    <span class="version-label">"Public Beta"</span>
+                    <span class="version-label">"Public Alpha"</span>
                     <Show when=move || !release_date.get().is_empty()>
                         <span class="version-date">{move || format!("Released {}", release_date.get())}</span>
                     </Show>

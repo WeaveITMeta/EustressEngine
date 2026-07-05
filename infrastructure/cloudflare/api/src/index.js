@@ -360,9 +360,14 @@ function buildMimeWithAttachment({
 }
 
 export default {
-  // Daily payout cron — runs at UTC midnight
+  // UTC-midnight cron: BLS emission distribution first (mints against
+  // yesterday's score snapshot), then the USD treasury drip payout
+  // (same snapshot). Sequential — both read the same day's scores.
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runDailyPayout(env));
+    ctx.waitUntil((async () => {
+      try { await runDailyDistribution(env); } catch (e) { console.error('distribution failed:', e); }
+      try { await runDailyPayout(env); } catch (e) { console.error('payout failed:', e); }
+    })());
   },
 
   async fetch(request, env, ctx) {
@@ -1311,6 +1316,25 @@ Screening rules:
 // CO-SIGN
 // ═══════════════════════════════════════════════════════════════════════════
 
+// SECURITY MODEL — READ BEFORE EDITING
+// ------------------------------------
+// The client self-reports contribution_type + duration. A user owns their
+// machine and their JWT, so ANY value here can be forged (the engine's
+// bliss_tracker.toml is just one way to feed this endpoint; curl is
+// another). Therefore the witness — not the client — is the sole trust
+// boundary, and it must bound what any single authenticated account can
+// earn regardless of what it claims. Four enforced invariants:
+//   1. contribution_type must be a known type (no silent 1.0 fallback).
+//   2. The Full-node +10% bonus is taken from server-OBSERVED heartbeat
+//      mode (node-mode:{user}), never the request body.
+//   3. ActiveTime credited for the day cannot exceed server-observed
+//      presence (presence:{date}:{user}, wall-clock bounded in the
+//      heartbeat handler). Fabricated idle time is dropped.
+//   4. Per-user daily score is capped at MAX_DAILY_SCORE (~16h of
+//      top-weighted work), bounding the blast radius of any forged claim.
+// These make the endpoint abuse-BOUNDED. They do NOT make forged
+// Development/Creation claims impossible — that needs server-verifiable
+// artifacts (attestation), tracked separately as step 4.
 async function handleCosign(request, env, cors) {
   const userId = await verifyAuth(request, env);
   if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
@@ -1321,43 +1345,111 @@ async function handleCosign(request, env, cors) {
   if (!contribution_type || !contribution_hash)
     return json({ error: 'contribution_type and contribution_hash required' }, 400, cors);
 
+  // (1) Contribution weights (from bliss-core/src/contribution.rs).
+  // Unknown types are REJECTED — no 1.0 fallback that would let an
+  // attacker smuggle an arbitrary string through as a valid claim.
+  const weights = {
+    ActiveTime: 1.0, Creation: 2.5, Collaboration: 2.0, Education: 2.2,
+    Development: 3.0, Moderation: 1.5, QualityAssurance: 1.8,
+    Optimization: 2.0, Documentation: 1.5, Custom: 1.0,
+  };
+  if (!Object.prototype.hasOwnProperty.call(weights, contribution_type))
+    return json({ error: `Unknown contribution_type: ${contribution_type}` }, 400, cors);
+  const weight = weights[contribution_type];
+
+  // Sanitize duration to a finite [1, 3600] second window.
+  let durSecs = Number(duration_secs);
+  if (!Number.isFinite(durSecs)) durSecs = 60;
+  durSecs = Math.max(1, Math.min(durSecs, 3600));
+
   // Rate limit: max 120 cosigns per hour per user
   const hourKey = `cosign-rate:${userId}:${new Date().toISOString().slice(0, 13)}`;
   const count = parseInt(await env.CHALLENGES.get(hourKey) || '0');
   if (count >= 120) return json({ error: 'Rate limit: 120 cosigns/hour' }, 429, cors);
   await env.CHALLENGES.put(hourKey, (count + 1).toString(), { expirationTtl: 3600 });
 
-  // Contribution weights (from bliss-core/src/contribution.rs)
-  const weights = {
-    ActiveTime: 1.0, Creation: 2.5, Collaboration: 2.0, Education: 2.2,
-    Development: 3.0, Moderation: 1.5, QualityAssurance: 1.8,
-    Optimization: 2.0, Documentation: 1.5, Custom: 1.0,
-  };
-  const weight = weights[contribution_type] || 1.0;
-  const score = weight * Math.max(1, Math.min(duration_secs || 60, 3600)) / 60; // weighted minutes
+  // Replay protection — the same contribution hash can only be
+  // co-signed once. The engine binds user, day, type, duration, and a
+  // monotonic chunk id into the hash, so re-submitting persisted work
+  // after a crash is safe (same hash → rejected, no double credit).
+  const dupeKey = `cosign-hash:${userId}:${contribution_hash}`;
+  if (await env.CHALLENGES.get(dupeKey))
+    return json({ error: 'Duplicate contribution hash' }, 409, cors);
+  await env.CHALLENGES.put(dupeKey, '1', { expirationTtl: 86400 * 2 });
 
-  // Accumulate on user record
+  const today = new Date().toISOString().split('T')[0];
+
+  // (2) Node bonus from SERVER-OBSERVED heartbeat mode, not the body.
+  const observedMode = await env.SOCIAL.get(`node-mode:${userId}`);
+  const nodeBonus = observedMode === 'Full' ? 1.1 : 1.0;
+
+  // Load the per-day record early — needed for the ActiveTime presence
+  // check and the daily ceiling. `by_seconds` tracks credited seconds
+  // per type (parallel to by_type's credited score) so the presence cap
+  // can compare against cumulative ActiveTime seconds already credited.
+  const dayKey = `contrib:${today}:${userId}`;
+  const dayData = await env.INVENTORY.get(dayKey);
+  const day = dayData
+    ? JSON.parse(dayData)
+    : { total_score: 0, by_type: {}, by_seconds: {}, count: 0 };
+  if (!day.by_seconds) day.by_seconds = {};
+
+  // (3) ActiveTime is bounded by server-observed presence. Credited
+  // ActiveTime seconds for the day can never exceed the wall-clock
+  // seconds the witness saw this user online.
+  let creditSecs = durSecs;
+  if (contribution_type === 'ActiveTime') {
+    const presRaw = await env.SOCIAL.get(`presence:${today}:${userId}`);
+    const presenceSecs = presRaw ? (JSON.parse(presRaw).seconds || 0) : 0;
+    const alreadyActive = day.by_seconds.ActiveTime || 0;
+    creditSecs = Math.max(0, Math.min(creditSecs, presenceSecs - alreadyActive));
+  }
+
+  let score = weight * nodeBonus * creditSecs / 60; // weighted minutes
+
+  // (4) Per-user daily score ceiling — clamp to remaining headroom.
+  const remaining = Math.max(0, MAX_DAILY_SCORE - (day.total_score || 0));
+  if (score > remaining) score = remaining;
+
   const userData = await env.USERS.get(`user:${userId}`);
   if (!userData) return json({ error: 'User not found' }, 404, cors);
   const user = JSON.parse(userData);
 
-  user.contribution_score = (user.contribution_score || 0) + score;
-  user.total_cosigns = (user.total_cosigns || 0) + 1;
-  user.last_contribution = new Date().toISOString();
-  await env.USERS.put(`user:${userId}`, JSON.stringify(user));
+  // Only mutate ledgers when there is real score to credit. A zero-credit
+  // cosign (capped out, or ActiveTime beyond presence) still consumed its
+  // dedupe + rate-limit slot above, so it can't be retried or spammed.
+  if (score > 0) {
+    user.contribution_score = (user.contribution_score || 0) + score;
+    user.total_cosigns = (user.total_cosigns || 0) + 1;
+    user.last_contribution = new Date().toISOString();
+    await env.USERS.put(`user:${userId}`, JSON.stringify(user));
+
+    day.total_score += score;
+    day.by_type[contribution_type] = (day.by_type[contribution_type] || 0) + score;
+    day.by_seconds[contribution_type] = (day.by_seconds[contribution_type] || 0) + creditSecs;
+    day.count += 1;
+    day.updated_at = new Date().toISOString();
+    await env.INVENTORY.put(dayKey, JSON.stringify(day), { expirationTtl: 86400 * 90 });
+  }
 
   // Generate co-signature (hash of contribution + user + timestamp)
   const payload = `cosign|${userId}|${contribution_hash}|${new Date().toISOString()}`;
   const sigBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload)));
   const signature = hexEncode(sigBytes);
 
+  // `capped` tells an honest client its claim was trimmed (daily ceiling
+  // or presence) so it can stop flushing instead of burning rate-limit.
+  const uncapped = weight * nodeBonus * durSecs / 60;
   return json({
     server_signature: signature,
     co_signed_at: new Date().toISOString(),
     contribution_type,
     weight,
+    node_bonus: nodeBonus,
     score_added: score,
-    total_score: user.contribution_score,
+    total_score: user.contribution_score || 0,
+    pending_today: day.total_score,
+    capped: score < uncapped - 1e-9,
   }, 200, cors);
 }
 
@@ -2490,7 +2582,12 @@ async function handleStripeWebhook(request, env) {
       const platformCut = amount - treasuryCut; // Remaining 50% to Eustress
 
       const currentTreasury = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
-      await env.PAYOUTS.put('treasury:total_usd', (currentTreasury + treasuryCut).toString());
+      const newTreasuryTotal = currentTreasury + treasuryCut;
+      await env.PAYOUTS.put('treasury:total_usd', newTreasuryTotal.toString());
+      // Deposits raise the high-water mark (scarcity self-heal —
+      // bliss-core Treasury::deposit).
+      const hwmT = parseFloat(await env.PAYOUTS.get('treasury:hwm') || '0');
+      if (newTreasuryTotal > hwmT) await env.PAYOUTS.put('treasury:hwm', newTreasuryTotal.toString());
 
       const currentPlatform = parseFloat(await env.PAYOUTS.get('platform:total_usd') || '0');
       await env.PAYOUTS.put('platform:total_usd', (currentPlatform + platformCut).toString());
@@ -2522,7 +2619,11 @@ async function handleStripeWebhook(request, env) {
       }));
 
       const currentTotal = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
-      await env.PAYOUTS.put('treasury:total_usd', (currentTotal + amount).toString());
+      const newTotal = currentTotal + amount;
+      await env.PAYOUTS.put('treasury:total_usd', newTotal.toString());
+      // Deposits raise the high-water mark (scarcity self-heal).
+      const hwmF = parseFloat(await env.PAYOUTS.get('treasury:hwm') || '0');
+      if (newTotal > hwmF) await env.PAYOUTS.put('treasury:hwm', newTotal.toString());
 
       const count = parseInt(await env.PAYOUTS.get('treasury:deposit_count') || '0');
       await env.PAYOUTS.put('treasury:deposit_count', (count + 1).toString());
@@ -2678,106 +2779,28 @@ async function syncKycDocsToStripe(userId, connectId, env) {
 // DAILY PAYOUTS — BLS → USD conversion + Stripe Connect transfers
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Trigger daily payout calculation (called by cron or admin)
+// Trigger the daily cycle manually (admin escape hatch). Runs the SAME
+// code path as the UTC-midnight cron: BLS emission distribution, then
+// USD treasury drip. Both are idempotent per score-date, so re-running
+// after a partial failure is safe.
 async function handleDailyPayout(request, env, cors) {
   const adminId = await requireAdmin(request, env);
   if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
 
-  if (!env.STRIPE_SECRET_KEY) return json({ error: 'Stripe not configured' }, 503, cors);
+  const distribution = await runDailyDistribution(env);
+  const payout = env.STRIPE_SECRET_KEY ? await runDailyPayout(env) : null;
 
-  // Get treasury balance
-  const treasuryUsd = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
-  if (treasuryUsd <= 0) return json({ error: 'Treasury is empty', treasury_usd: 0 }, 200, cors);
+  await auditLog(env, 'DAILY_PAYOUT', adminId, 'treasury', {
+    distribution_ran: !!distribution,
+    payout_ran: !!payout,
+    minted: distribution?.minted || 0,
+    total_paid_usd: payout?.total_paid_usd || 0,
+  });
 
-  // Daily drip rate: 0.276% of remaining balance (from economics.rs)
-  const dripRate = 0.00276;
-  const dailyDripUsd = treasuryUsd * dripRate;
-
-  if (dailyDripUsd < 0.50) {
-    return json({ message: 'Daily drip too small for payout', drip_usd: dailyDripUsd }, 200, cors);
-  }
-
-  // Get all users with contribution scores
-  const userList = await env.USERS.list({ prefix: 'user:', limit: 1000 });
-  const contributors = [];
-  let totalScore = 0;
-
-  for (const key of userList.keys) {
-    const data = await env.USERS.get(key.name);
-    if (!data) continue;
-    const user = JSON.parse(data);
-    const score = user.contribution_score || 0;
-    if (score > 0 && user.stripe_connect_id && !user.banned) {
-      contributors.push({ user_id: user.id, username: user.username, score, connect_id: user.stripe_connect_id });
-      totalScore += score;
-    }
-  }
-
-  if (totalScore <= 0 || contributors.length === 0) {
-    return json({
-      message: 'No eligible contributors with Connect accounts',
-      drip_usd: dailyDripUsd,
-      contributors: 0,
-    }, 200, cors);
-  }
-
-  // Calculate per-contributor payout
-  const payouts = [];
-  let totalPaid = 0;
-
-  for (const c of contributors) {
-    const share = c.score / totalScore;
-    const amountUsd = dailyDripUsd * share;
-    const amountCents = Math.floor(amountUsd * 100);
-
-    if (amountCents < 50) continue; // Stripe minimum: $0.50
-
-    // Create Stripe transfer to connected account
-    try {
-      const transfer = await stripeRequest('POST', '/transfers', {
-        'amount': amountCents.toString(),
-        'currency': 'usd',
-        'destination': c.connect_id,
-        'description': `Bliss daily payout - ${c.username}`,
-        'metadata[user_id]': c.user_id,
-        'metadata[date]': new Date().toISOString().split('T')[0],
-      }, env);
-
-      if (!transfer.error) {
-        payouts.push({
-          user_id: c.user_id,
-          username: c.username,
-          amount_usd: amountCents / 100,
-          transfer_id: transfer.id,
-        });
-        totalPaid += amountCents / 100;
-      }
-    } catch (e) {
-      // Skip failed transfers, continue with others
-    }
-  }
-
-  // Debit treasury
-  const newTreasury = treasuryUsd - totalPaid;
-  await env.PAYOUTS.put('treasury:total_usd', newTreasury.toString());
-
-  // Record payout
-  const payoutRecord = {
-    date: new Date().toISOString(),
-    drip_usd: dailyDripUsd,
-    total_paid_usd: totalPaid,
-    contributors_paid: payouts.length,
-    treasury_before: treasuryUsd,
-    treasury_after: newTreasury,
-    payouts,
-  };
-
-  const payoutKey = `payout:${new Date().toISOString().split('T')[0]}`;
-  await env.PAYOUTS.put(payoutKey, JSON.stringify(payoutRecord), { expirationTtl: 86400 * 365 * 5 });
-
-  await auditLog(env, 'DAILY_PAYOUT', adminId, 'treasury', payoutRecord);
-
-  return json(payoutRecord, 200, cors);
+  return json({
+    distribution: distribution || { message: 'Already distributed for this date (or no scores)' },
+    payout: payout || { message: 'Skipped (empty treasury, drip below $0.50, no eligible contributors, or already ran)' },
+  }, 200, cors);
 }
 
 // Get payout history
@@ -2806,14 +2829,23 @@ async function handlePayoutHistory(request, env, cors) {
   return json({ history, total_received: history.reduce((sum, p) => sum + p.amount_usd, 0) }, 200, cors);
 }
 
-// Get current BLS → USD exchange rate
+// Get current BLS → USD exchange rate + live emission/supply stats
 async function handlePayoutRate(env, cors) {
   const treasuryUsd = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
-  const dripRate = 0.00276; // daily drip rate
+  const hwm = parseFloat(await env.PAYOUTS.get('treasury:hwm') || '0');
+  const scarce = treasuryUsd > 0 && treasuryUsd <= hwm * TREASURY_SCARCITY_RATIO;
+  const dripRate = scarce ? TREASURY_SCARCITY_RATE : TREASURY_DRIP_RATE;
   const dailyDripUsd = treasuryUsd * dripRate;
 
-  // Daily BLS emission: 13,699 BLS (year 1)
-  const dailyBls = 13699;
+  // Live emission from the ledger (falls back to genesis defaults
+  // before the first distribution has run).
+  const supply = parseFloat(await env.PAYOUTS.get('bliss:current_supply') || String(BLISS_INITIAL_SUPPLY));
+  const genesis = await env.PAYOUTS.get('bliss:genesis_date');
+  const years = genesis
+    ? Math.max(0, Math.floor((Date.now() - Date.parse(genesis)) / (365 * 86400 * 1000)))
+    : 0;
+  const annualRate = blissEmissionRate(years);
+  const dailyBls = supply * annualRate / 365;
   const blsToUsd = dailyBls > 0 ? dailyDripUsd / dailyBls : 0;
 
   const platformUsd = parseFloat(await env.PAYOUTS.get('platform:total_usd') || '0');
@@ -2822,7 +2854,12 @@ async function handlePayoutRate(env, cors) {
     treasury_usd: treasuryUsd,
     platform_usd: platformUsd,
     daily_drip_usd: dailyDripUsd,
+    scarcity_active: scarce,
     daily_bls_emission: dailyBls,
+    annual_emission_rate: annualRate,
+    current_supply: supply,
+    total_distributed: parseFloat(await env.PAYOUTS.get('bliss:total_distributed') || '0'),
+    genesis_date: genesis || null,
     bls_to_usd_rate: blsToUsd,
     rate_display: blsToUsd > 0 ? `$${blsToUsd.toFixed(6)}/BLS` : 'No treasury funds',
     deposit_count: parseInt(await env.PAYOUTS.get('treasury:deposit_count') || '0'),
@@ -2983,6 +3020,28 @@ async function handleNodeHeartbeat(request, env, cors) {
     last_heartbeat: new Date().toISOString(),
   }), { expirationTtl: 120 }); // Expires in 2 min if no heartbeat
 
+  // Contribution-integrity signals (consumed by handleCosign):
+  //   • presence — wall-clock-bounded online seconds today. Driven by
+  //     real heartbeat arrival spacing, NOT the self-reported uptime_secs,
+  //     so it can't be inflated: a flood credits tiny deltas, a gap is
+  //     capped at PRESENCE_MAX_STEP. This is the ceiling on ActiveTime.
+  //   • node-mode — the mode we actually observed, so the cosign
+  //     Full-node bonus is server-derived, not client-claimed.
+  if (user_id) {
+    const nowMs = Date.now();
+    const dayStr = new Date().toISOString().split('T')[0];
+    const presKey = `presence:${dayStr}:${user_id}`;
+    const presRaw = await env.SOCIAL.get(presKey);
+    const pres = presRaw ? JSON.parse(presRaw) : { seconds: 0, last_ms: nowMs };
+    const deltaSecs = Math.max(0, (nowMs - (pres.last_ms || nowMs)) / 1000);
+    pres.seconds = (pres.seconds || 0) + Math.min(deltaSecs, PRESENCE_MAX_STEP);
+    pres.last_ms = nowMs;
+    await env.SOCIAL.put(presKey, JSON.stringify(pres), { expirationTtl: 86400 * 2 });
+
+    const normMode = (mode === 'Full' || mode === 'full') ? 'Full' : 'Light';
+    await env.SOCIAL.put(`node-mode:${user_id}`, normMode, { expirationTtl: 86400 * 2 });
+  }
+
   // Return current BLS balance if user_id provided (engine polls this)
   // Also accumulate session hours from uptime_secs
   let bliss_balance = 0;
@@ -3025,9 +3084,10 @@ async function handleNodeHeartbeat(request, env, cors) {
       user.last_active = now.toISOString();
       await env.USERS.put(`user:${user_id}`, JSON.stringify(user));
     }
-    // Check today's pending contributions
+    // Check today's pending contributions (written by handleCosign;
+    // date-first key so the distribution cron can prefix-scan a day)
     const today = new Date().toISOString().split('T')[0];
-    const pendingKey = `contrib:${user_id}:${today}`;
+    const pendingKey = `contrib:${today}:${user_id}`;
     const pendingData = await env.INVENTORY.get(pendingKey);
     if (pendingData) {
       const pending = JSON.parse(pendingData);
@@ -3573,43 +3633,212 @@ async function handleRecordCost(request, env, cors) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// BLISS ECONOMICS — canonical model, ported from bliss-core 0.1.1
+// (economics.rs). Two daily flows, both distributed by the SAME
+// day-score snapshot (contrib:{date}:{user}):
+//
+//   1. BLS emission  — tail emission: 5% of supply/year, halving every
+//      4 years, 0.5% floor forever. Minted at UTC midnight for the
+//      previous day's contributors. 100% to contributors.
+//   2. USD treasury drip — exponential decay: 0.276%/day of remaining
+//      balance (0.136%/day in scarcity mode: remaining ≤ 15% of the
+//      high-water mark; top-25% contributors get 2x weight while
+//      scarce). HWM decays 0.171%/day toward remaining. 100% of the
+//      drip to contributors via Stripe Connect.
+//
+// KV keys (PAYOUTS namespace):
+//   bliss:genesis_date       — ISO date of the first distribution
+//   bliss:current_supply     — total BLS supply (starts 100,000,000)
+//   bliss:total_distributed  — lifetime BLS minted to contributors
+//   distribution:{date}      — per-day emission record (idempotency)
+//   treasury:total_usd       — remaining treasury balance
+//   treasury:hwm             — treasury high-water mark
+//   payout:{date}            — per-day USD payout record
+//
+// Known deviations from bliss-core, both deliberate:
+//   • Stripe's $0.50 transfer minimum means sub-minimum shares are
+//     skipped; only actually-transferred USD is debited, so skipped
+//     shares stay in the treasury (favors future cycles).
+//   • Balances are f64 (KV JSON), not 18-decimal fixed-point — ~1e-7
+//     BLS precision at 100M scale, fine for the ledger's current stage.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const BLISS_INITIAL_SUPPLY = 100_000_000;
+const BLISS_INITIAL_RATE = 0.05;      // 5% year one
+const BLISS_HALVING_YEARS = 4;
+const BLISS_TAIL_RATE = 0.005;        // 0.5% floor, forever
+const TREASURY_DRIP_RATE = 0.00276;   // 0.276%/day (normal)
+const TREASURY_SCARCITY_RATE = 0.00136; // 0.136%/day (scarcity)
+const TREASURY_SCARCITY_RATIO = 0.15; // scarce when remaining ≤ 15% of HWM
+const TREASURY_TOP_BOOST = 2.0;       // top-contributor boost in scarcity
+const TREASURY_TOP_FRACTION = 0.25;   // "top" = top 25% by score
+const TREASURY_HWM_DECAY = 0.00171;   // 0.171%/day HWM decay
+
+// ── Contribution integrity (anti-abuse) ─────────────────────────────
+// The cosign endpoint accepts self-reported work, so the witness — not
+// the client — must bound what any single account can earn. See the
+// security notes above handleCosign.
+//
+// Per-user daily score ceiling. Score is weighted minutes
+// (weight × minutes × node bonus); the max legitimate day is a marathon
+// session at the top weight: 16h × 60 × 3.0 (Development) × 1.1 (Full)
+// ≈ 3,168. A real mixed session lands far below this, so the cap never
+// clips honest work — it only bounds a script hammering the endpoint,
+// shrinking the worst case from ~570k/day to this number.
+const MAX_DAILY_SCORE = 3200;
+// Max presence seconds credited per heartbeat. The engine beats every
+// ~90s; capping the per-beat credit means a heartbeat flood can't
+// inflate observed presence, and an offline gap can't over-credit when
+// the session resumes. Presence is thus wall-clock bounded.
+const PRESENCE_MAX_STEP = 150;
+
+/// Annual emission rate for a given year since genesis (tail emission).
+function blissEmissionRate(yearsSinceGenesis) {
+  const halvings = Math.floor(yearsSinceGenesis / BLISS_HALVING_YEARS);
+  return Math.max(BLISS_INITIAL_RATE / Math.pow(2, halvings), BLISS_TAIL_RATE);
+}
+
+/// Collect one day's contributors from the contrib:{date}:{user} records.
+/// Returns { entries: [{userId, score}], totalScore }.
+async function collectDayScores(env, date) {
+  const prefix = `contrib:${date}:`;
+  const list = await env.INVENTORY.list({ prefix, limit: 1000 });
+  const entries = [];
+  let totalScore = 0;
+  for (const key of list.keys) {
+    const data = await env.INVENTORY.get(key.name);
+    if (!data) continue;
+    const rec = JSON.parse(data);
+    const score = rec.total_score || 0;
+    if (score <= 0) continue;
+    entries.push({ userId: key.name.slice(prefix.length), score });
+    totalScore += score;
+  }
+  return { entries, totalScore };
+}
+
+/// Daily BLS emission distribution — mints the day's emission and
+/// credits each contributor's bliss_balance by score share.
+/// Idempotent per date (distribution:{date} record).
+async function runDailyDistribution(env) {
+  const yesterday = new Date(Date.now() - 86400 * 1000).toISOString().split('T')[0];
+  if (await env.PAYOUTS.get(`distribution:${yesterday}`)) return null; // already ran
+
+  // Genesis is stamped by the first distribution ever run.
+  let genesis = await env.PAYOUTS.get('bliss:genesis_date');
+  if (!genesis) {
+    genesis = yesterday;
+    await env.PAYOUTS.put('bliss:genesis_date', genesis);
+  }
+  const years = Math.max(0, Math.floor((Date.parse(yesterday) - Date.parse(genesis)) / (365 * 86400 * 1000)));
+  const supply = parseFloat(await env.PAYOUTS.get('bliss:current_supply') || String(BLISS_INITIAL_SUPPLY));
+  const rate = blissEmissionRate(years);
+  const dailyEmission = supply * rate / 365;
+
+  const { entries, totalScore } = await collectDayScores(env, yesterday);
+
+  const record = {
+    date: yesterday,
+    emission_pool: dailyEmission,
+    annual_rate: rate,
+    supply_before: supply,
+    total_score: totalScore,
+    recipients: [],
+    minted: 0,
+  };
+
+  if (totalScore > 0) {
+    let minted = 0;
+    for (const e of entries) {
+      const userData = await env.USERS.get(`user:${e.userId}`);
+      if (!userData) continue;
+      const user = JSON.parse(userData);
+      if (user.banned) continue;
+      const bls = dailyEmission * (e.score / totalScore);
+      user.bliss_balance = (user.bliss_balance || 0) + bls;
+      await env.USERS.put(`user:${e.userId}`, JSON.stringify(user));
+      record.recipients.push({ user_id: e.userId, score: e.score, bls });
+      minted += bls;
+    }
+    record.minted = minted;
+    // Only what was actually credited is minted — supply never inflates
+    // toward banned/deleted accounts or empty days.
+    await env.PAYOUTS.put('bliss:current_supply', (supply + minted).toString());
+    const distributed = parseFloat(await env.PAYOUTS.get('bliss:total_distributed') || '0');
+    await env.PAYOUTS.put('bliss:total_distributed', (distributed + minted).toString());
+  }
+
+  await env.PAYOUTS.put(`distribution:${yesterday}`, JSON.stringify(record), { expirationTtl: 86400 * 365 * 5 });
+  return record;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // CRON — Daily payout (called by scheduled trigger at UTC midnight)
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function runDailyPayout(env) {
-  if (!env.STRIPE_SECRET_KEY) return;
+  if (!env.STRIPE_SECRET_KEY) return null;
+
+  // Idempotent per score-date — a cron retry or manual re-run can't
+  // double-pay a day.
+  const scoreDate = new Date(Date.now() - 86400 * 1000).toISOString().split('T')[0];
+  if (await env.PAYOUTS.get(`payout:${scoreDate}`)) return null;
 
   const treasuryUsd = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
-  if (treasuryUsd <= 0) return;
+  if (treasuryUsd <= 0) return null;
 
-  const dripRate = 0.00276;
+  // ── Scarcity mode (canonical treasury, bliss-core economics.rs) ──
+  let hwm = parseFloat(await env.PAYOUTS.get('treasury:hwm') || '0');
+  if (treasuryUsd > hwm) hwm = treasuryUsd;
+  const scarce = treasuryUsd <= hwm * TREASURY_SCARCITY_RATIO;
+  const dripRate = scarce ? TREASURY_SCARCITY_RATE : TREASURY_DRIP_RATE;
   const dailyDripUsd = treasuryUsd * dripRate;
-  if (dailyDripUsd < 0.50) return;
 
-  const userList = await env.USERS.list({ prefix: 'user:', limit: 1000 });
+  // Decay the high-water mark toward remaining so a one-time large
+  // deposit can't pin the system in scarcity mode forever.
+  if (hwm > treasuryUsd) {
+    hwm = Math.max(treasuryUsd, hwm * (1 - TREASURY_HWM_DECAY));
+  }
+  await env.PAYOUTS.put('treasury:hwm', hwm.toString());
+
+  if (dailyDripUsd < 0.50) return null; // below Stripe's practical floor
+
+  // ── Same day-score snapshot the BLS emission uses ──
+  const yesterday = new Date(Date.now() - 86400 * 1000).toISOString().split('T')[0];
+  const { entries, totalScore } = await collectDayScores(env, yesterday);
+  if (totalScore <= 0 || entries.length === 0) return null;
+
+  // Resolve users; only Stripe-connected, non-banned users receive USD.
   const contributors = [];
-  let totalScore = 0;
-
-  for (const key of userList.keys) {
-    const data = await env.USERS.get(key.name);
+  for (const e of entries) {
+    const data = await env.USERS.get(`user:${e.userId}`);
     if (!data) continue;
     const user = JSON.parse(data);
-    const score = user.contribution_score || 0;
-    if (score > 0 && user.stripe_connect_id && !user.banned) {
-      contributors.push({ user_id: user.id, username: user.username, score, connect_id: user.stripe_connect_id });
-      totalScore += score;
-    }
+    if (user.banned || !user.stripe_connect_id) continue;
+    contributors.push({
+      user_id: e.userId, username: user.username,
+      score: e.score, connect_id: user.stripe_connect_id,
+    });
   }
+  if (contributors.length === 0) return null;
 
-  if (totalScore <= 0 || contributors.length === 0) return;
+  // Top-contributor boost while scarce: the people keeping the system
+  // alive are paid aggressively (bliss-core scarcity_top_boost).
+  contributors.sort((a, b) => b.score - a.score);
+  const topCount = scarce ? Math.max(1, Math.ceil(contributors.length * TREASURY_TOP_FRACTION)) : 0;
+  let weightTotal = 0;
+  contributors.forEach((c, i) => {
+    c.weight = c.score * (i < topCount ? TREASURY_TOP_BOOST : 1.0);
+    weightTotal += c.weight;
+  });
 
   let totalPaid = 0;
   const payouts = [];
 
   for (const c of contributors) {
-    const share = c.score / totalScore;
+    const share = c.weight / weightTotal;
     const amountCents = Math.floor(dailyDripUsd * share * 100);
-    if (amountCents < 50) continue;
+    if (amountCents < 50) continue; // Stripe minimum: $0.50
 
     try {
       const transfer = await stripeRequest('POST', '/transfers', {
@@ -3618,25 +3847,31 @@ async function runDailyPayout(env) {
         'destination': c.connect_id,
         'description': `Bliss daily payout - ${c.username}`,
         'metadata[user_id]': c.user_id,
-        'metadata[date]': new Date().toISOString().split('T')[0],
+        'metadata[date]': yesterday,
       }, env);
 
       if (!transfer.error) {
         payouts.push({ user_id: c.user_id, username: c.username, amount_usd: amountCents / 100, transfer_id: transfer.id });
         totalPaid += amountCents / 100;
       }
-    } catch (e) { /* skip */ }
+    } catch (e) { /* skip failed transfer, continue with others */ }
   }
 
-  // Debit treasury
+  // Debit only what was actually transferred (skipped sub-minimum
+  // shares stay in the treasury for future cycles).
   await env.PAYOUTS.put('treasury:total_usd', (treasuryUsd - totalPaid).toString());
+  const paidTotal = parseFloat(await env.PAYOUTS.get('payouts:total_paid') || '0');
+  await env.PAYOUTS.put('payouts:total_paid', (paidTotal + totalPaid).toString());
 
-  // Record
-  const payoutKey = `payout:${new Date().toISOString().split('T')[0]}`;
-  await env.PAYOUTS.put(payoutKey, JSON.stringify({
-    date: new Date().toISOString(), drip_usd: dailyDripUsd, total_paid_usd: totalPaid,
-    contributors_paid: payouts.length, treasury_before: treasuryUsd, treasury_after: treasuryUsd - totalPaid, payouts,
-  }), { expirationTtl: 86400 * 365 * 5 });
+  const record = {
+    date: new Date().toISOString(), score_date: yesterday,
+    drip_usd: dailyDripUsd, scarcity_active: scarce,
+    total_paid_usd: totalPaid, contributors_paid: payouts.length,
+    treasury_before: treasuryUsd, treasury_after: treasuryUsd - totalPaid,
+    payouts,
+  };
+  await env.PAYOUTS.put(`payout:${yesterday}`, JSON.stringify(record), { expirationTtl: 86400 * 365 * 5 });
+  return record;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

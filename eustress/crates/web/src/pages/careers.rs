@@ -24,7 +24,7 @@ pub fn CareersPage() -> impl IntoView {
                         <div class="header-line"></div>
                     </div>
                     <h1 class="careers-title">"Built by One, Powered by AI"</h1>
-                    <p class="careers-subtitle">"The future of game development, crafted differently"</p>
+                    <p class="careers-subtitle">"The future of simulation, crafted differently"</p>
                 </div>
                 
                 <section class="about-team">

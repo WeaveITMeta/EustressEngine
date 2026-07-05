@@ -24,6 +24,13 @@
 //! `TerrainData.height_cache` + `splat_cache`.
 
 pub mod noise;
+pub mod hydrology;
+pub mod erosion;
+pub mod climate;
+pub mod materials;
+pub mod pipeline;
+pub mod preview;
+pub mod export;
 
 /// Parameters for generating ONE region. World coordinates are in engine
 /// units (1 unit = 1 metre). A region is an axis-aligned rectangle of the
@@ -169,6 +176,11 @@ impl GeneratedRegion {
 /// (rolling) blended with ridged noise (mountains), mapped to metres. A
 /// pure function of `(seed, wx, wz)` only — so it is identical no matter
 /// which region samples it, which is exactly why region seams disappear.
+///
+/// NOTE: this is the STANDALONE single-region generator (and the terrain
+/// source for the pass-level unit tests). The world pipeline's base is
+/// [`pipeline::world_elevation`] — the continuous soft-MoE blend of basis
+/// landform fields — which supersedes per-region `ridge_blend` routing.
 pub fn base_elevation(p: &GenParams, wx: f64, wz: f64) -> f32 {
     let inv = 1.0 / p.feature_wavelength.max(1e-6);
 

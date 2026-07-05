@@ -45,6 +45,7 @@ pub fn Footer() -> impl IntoView {
                         <a href="/learn" class="footer-link">"Learn"</a>
                         <a href="/bliss" class="footer-link">"Bliss"</a>
                         <a href="/premium" class="footer-link">"Premium"</a>
+                        <a href="/license" class="footer-link">"License"</a>
                     </div>
                     <div class="footer-link-col">
                         <h5 class="footer-col-title">"Community"</h5>
@@ -52,6 +53,7 @@ pub fn Footer() -> impl IntoView {
                         <a href="https://discord.gg/DGP9my8DYN" class="footer-link">"Discord"</a>
                         <a href="https://x.com/search?q=%23EustressEngine" target="_blank" rel="noopener" class="footer-link">"X"</a>
                         <a href="https://x.com/simbuilder" target="_blank" rel="noopener" class="footer-link">"Forums"</a>
+                        <a href="/kyc" class="footer-link">"KYC"</a>
                     </div>
                     <div class="footer-link-col">
                         <h5 class="footer-col-title">"Company"</h5>
@@ -67,6 +69,7 @@ pub fn Footer() -> impl IntoView {
                         <a href="/privacy" class="footer-link">"Privacy"</a>
                         <a href="/cookies" class="footer-link">"Cookies"</a>
                         <a href="/acts" class="footer-link">"Acts"</a>
+                        <a href="/support" class="footer-link">"Support"</a>
                     </div>
                 </div>
             </div>

@@ -86,6 +86,12 @@ pub struct WindowFocusState {
     pub unfocused_since: Option<Instant>,
     /// Whether idle mode is enabled
     pub idle_detection_enabled: bool,
+    /// Consecutive frames observed at zero physical window size. A
+    /// snap-to-edge or cross-monitor DPI transition can report a transient
+    /// zero-size reading for a single frame without the window actually
+    /// being minimized; `handle_window_focus` requires a short streak of
+    /// this before committing to `PowerMode::Minimized` (see there).
+    zero_size_streak: u8,
 }
 
 impl Default for WindowFocusState {
@@ -97,6 +103,7 @@ impl Default for WindowFocusState {
             last_input_time: Some(Instant::now()),
             unfocused_since: None,
             idle_detection_enabled: true,
+            zero_size_streak: 0,
         }
     }
 }
@@ -243,30 +250,54 @@ fn handle_window_focus(
         }
     }
 
-    // Detect minimization via resize events (fired before the Window component
-    // updates, so this catches the zero-size surface one frame earlier).
+    // Detect minimization from resize events (fired before the Window
+    // component updates, catching the zero-size surface a frame earlier)
+    // AND the Window component itself (catches cases where no resize event
+    // fires). A single zero-size reading is NOT enough proof of a real
+    // minimize: a snap-to-edge gesture or a cross-monitor DPI transition can
+    // report a transient (0,0) mid-gesture on Windows even though the window
+    // settles at a normal size a frame later. Committing to `minimized` on
+    // that single glimpse previously dropped the engine straight into
+    // `PowerMode::Minimized`'s reactive wait — if the very next qualifying
+    // window event was slow to arrive, the editor sat looking frozen for
+    // however long that took. Require a short streak of consecutive
+    // zero-size frames before committing; genuine minimization stays at
+    // zero indefinitely, so this costs a couple of frames of latency and
+    // nothing else. Recovery stays immediate — any non-zero reading clears
+    // the streak and un-minimizes right away.
+    const MINIMIZE_CONFIRM_FRAMES: u8 = 3;
+
+    let mut saw_zero = false;
+    let mut saw_nonzero = false;
     for event in resize_events.read() {
-        let is_zero = event.width <= 0.0 || event.height <= 0.0;
-        if is_zero && !focus_state.minimized {
-            focus_state.minimized = true;
-            info!("📦 Window minimized (resize→0) - suspending rendering");
-        } else if !is_zero && focus_state.minimized {
-            focus_state.minimized = false;
-            info!("📦 Window restored - resuming rendering");
+        if event.width <= 0.0 || event.height <= 0.0 {
+            saw_zero = true;
+        } else {
+            saw_nonzero = true;
+        }
+    }
+    for window in windows.iter() {
+        if window.mode == WindowMode::Windowed && window.resolution.width() <= 0.0 {
+            saw_zero = true;
+        } else {
+            saw_nonzero = true;
         }
     }
 
-    // Secondary check via Window component (catches cases where no resize event fires)
-    for window in windows.iter() {
-        let is_minimized = window.mode == WindowMode::Windowed
-            && window.resolution.width() <= 0.0;
-        if focus_state.minimized != is_minimized {
-            focus_state.minimized = is_minimized;
-            if is_minimized {
-                info!("📦 Window minimized (size=0) - suspending rendering");
-            } else {
-                info!("📦 Window restored - resuming rendering");
-            }
+    if saw_nonzero {
+        focus_state.zero_size_streak = 0;
+        if focus_state.minimized {
+            focus_state.minimized = false;
+            info!("📦 Window restored - resuming rendering");
+        }
+    } else if saw_zero {
+        focus_state.zero_size_streak = focus_state.zero_size_streak.saturating_add(1);
+        if !focus_state.minimized && focus_state.zero_size_streak >= MINIMIZE_CONFIRM_FRAMES {
+            focus_state.minimized = true;
+            info!(
+                "📦 Window minimized (size=0 for {} consecutive frames) - suspending rendering",
+                MINIMIZE_CONFIRM_FRAMES
+            );
         }
     }
 }
@@ -364,10 +395,15 @@ fn apply_power_settings(
         }
         PowerMode::Minimized => {
             // When minimized the swap chain surface is zero-size on Windows.
-            // Submitting ANY render frame to it panics in wgpu's prepare_windows.
-            // Use a very long reactive wait so no frame is ever submitted while
-            // minimized; the main loop still wakes on user events (click to restore).
-            let suspend = Duration::from_secs(3600);
+            // Submitting ANY render frame to it panics in wgpu's prepare_windows,
+            // so this mode must never render. A short reactive wait (not an
+            // hour-long one) still fully avoids that: `minimized_update_ms`
+            // is ~1 FPS, which costs nothing while genuinely minimized, but
+            // bounds how long the editor can look frozen if `minimized` was
+            // ever set from a false-positive zero-size reading (see
+            // `handle_window_focus`'s debounce) — recovery no longer depends
+            // entirely on the next qualifying window event arriving promptly.
+            let suspend = Duration::from_millis(settings.minimized_update_ms);
             winit_settings.focused_mode = UpdateMode::reactive_low_power(suspend);
             winit_settings.unfocused_mode = UpdateMode::reactive_low_power(suspend);
         }

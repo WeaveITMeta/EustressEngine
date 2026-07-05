@@ -11,7 +11,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Eustress Content API Server — simulations, marketplace, projects"
 authors = ["WeaveSolutions <admin@weave.solutions>"]
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Shield-1.0.0"
 
 [[bin]]
 name = "eustress-api"

@@ -11,7 +11,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Eustress Engine Team"]
 description = "Mobile player runtime for Eustress games"
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Shield-1.0.0"
 
 [lib]
 crate-type = ["cdylib", "staticlib"]

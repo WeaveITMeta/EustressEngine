@@ -277,15 +277,6 @@ export component StudioWindow inherits Window {
     in-out property <[WatchpointData]> sim-watchpoints: [];
     in-out property <[SimOutputBinding]> sim-output-bindings: [];
     
-    // Camera orientation for axis gizmo (projected 2D endpoints)
-    // Each axis is projected from camera view: (dx, dy) normalized to -1..1
-    in-out property <float> gizmo-ax: 1.0;
-    in-out property <float> gizmo-ay: 0.0;
-    in-out property <float> gizmo-bx: 0.0;
-    in-out property <float> gizmo-by: -1.0;
-    in-out property <float> gizmo-cx: 0.5;
-    in-out property <float> gizmo-cy: 0.5;
-
     // Workshop Panel state (System 0: Ideation conversational interface)
     in-out property <[ChatMessage]> workshop-messages: [];
     in-out property <string> workshop-input-text: "";
@@ -362,6 +353,12 @@ export component StudioWindow inherits Window {
     in-out property <string> terrain-lod-levels: "5";
     in-out property <string> terrain-chunk-count: "0";
     in-out property <string> terrain-material: "Default";
+
+    // Generate World (worldgen pipeline) state
+    in-out property <string> worldgen-seed: "42";
+    in-out property <string> worldgen-preset: "medium";
+    in-out property <bool> worldgen-busy: false;
+    in-out property <string> worldgen-progress: "";
     
     // Network state
     in-out property <bool> server-running: false;
@@ -925,6 +922,7 @@ export component StudioWindow inherits Window {
     
     // Terrain
     callback generate-terrain(string); // "small", "medium", "large"
+    callback generate-world(string, string); // seed, preset — full worldgen pipeline
     callback toggle-terrain-edit-mode();
     callback set-terrain-brush(string);
     callback import-heightmap();
@@ -1518,8 +1516,13 @@ export component StudioWindow inherits Window {
                             terrain-lod-levels: root.terrain-lod-levels;
                             terrain-chunk-count: root.terrain-chunk-count;
                             terrain-material: root.terrain-material;
+                            worldgen-seed <=> root.worldgen-seed;
+                            worldgen-preset <=> root.worldgen-preset;
+                            worldgen-busy: root.worldgen-busy;
+                            worldgen-progress: root.worldgen-progress;
                             on-toggle-edit-mode() => { root.toggle-terrain-edit-mode(); }
                             on-generate-terrain(size) => { root.generate-terrain(size); }
+                            on-generate-world(seed, preset) => { root.generate-world(seed, preset); }
                             on-import-heightmap() => { root.import-heightmap(); }
                             on-export-heightmap() => { root.export-heightmap(); }
                         }
@@ -2320,74 +2323,11 @@ export component StudioWindow inherits Window {
                         // summary-*` properties for Rust-side telemetry
                         // consumers but nothing renders them.
 
-                        // Axis orientation gizmo (bottom-right of viewport)
-                        Rectangle {
-                            x: parent.width - self.width - 12px;
-                            y: parent.height - self.height - 12px;
-                            width: 80px;
-                            height: 80px;
-                            background: #00000040;
-                            border-radius: 6px;
-
-                            // X axis endpoint + label (red)
-                            Rectangle {
-                                x: (40 + root.gizmo-ax * 28 - 3) * 1px;
-                                y: (40 + root.gizmo-ay * 28 - 3) * 1px;
-                                width: 6px; height: 6px;
-                                border-radius: 3px;
-                                background: #ef5350;
-                            }
-                            Text {
-                                x: (40 + root.gizmo-ax * 28 + 4) * 1px;
-                                y: (40 + root.gizmo-ay * 28 - 6) * 1px;
-                                text: "X";
-                                color: #ef5350;
-                                font-size: 9px;
-                                font-weight: 700;
-                            }
-
-                            // Y axis endpoint + label (green)
-                            Rectangle {
-                                x: (40 + root.gizmo-bx * 28 - 3) * 1px;
-                                y: (40 + root.gizmo-by * 28 - 3) * 1px;
-                                width: 6px; height: 6px;
-                                border-radius: 3px;
-                                background: #66bb6a;
-                            }
-                            Text {
-                                x: (40 + root.gizmo-bx * 28 + 4) * 1px;
-                                y: (40 + root.gizmo-by * 28 - 6) * 1px;
-                                text: "Y";
-                                color: #66bb6a;
-                                font-size: 9px;
-                                font-weight: 700;
-                            }
-
-                            // Z axis endpoint + label (blue)
-                            Rectangle {
-                                x: (40 + root.gizmo-cx * 28 - 3) * 1px;
-                                y: (40 + root.gizmo-cy * 28 - 3) * 1px;
-                                width: 6px; height: 6px;
-                                border-radius: 3px;
-                                background: #42a5f5;
-                            }
-                            Text {
-                                x: (40 + root.gizmo-cx * 28 + 4) * 1px;
-                                y: (40 + root.gizmo-cy * 28 - 6) * 1px;
-                                text: "Z";
-                                color: #42a5f5;
-                                font-size: 9px;
-                                font-weight: 700;
-                            }
-
-                            // Center dot
-                            Rectangle {
-                                x: 38px; y: 38px;
-                                width: 4px; height: 4px;
-                                border-radius: 2px;
-                                background: #ffffff80;
-                            }
-                        }
+                        // Axis orientation gizmo removed 2026-07-02 per user
+                        // ask — the bottom-right X/Y/Z dot widget added
+                        // visual noise without earning its viewport space.
+                        // (`sync_axis_gizmo_to_slint` and the `gizmo-*`
+                        // properties were removed with it.)
 
                         // Snap status — hidden (accessible via keybinds 1/2/3)
                         

@@ -54,6 +54,13 @@ impl Plugin for EngineTerrainPlugin {
                 // terrain_paint_system is registered in common::terrain::TerrainPlugin
             ).run_if(resource_equals(TerrainMode::Editor)));
 
+        // Disk-terrain auto-loader — on Space open, when
+        // `Workspace/Terrain/_terrain.toml` exists (worldgen export or
+        // heightmap import), hydrate + spawn it once per Space. UNGATED:
+        // disk terrain is a default engine capability; migrated Spaces
+        // stand down at runtime (the voxel loader below owns those).
+        crate::terrain_disk_load::register(app);
+
         // Wave 9.C — imported-terrain voxel loader (migrated Spaces read
         // Fjall voxels → runtime heightfield, gated on `space_is_migrated`).
         // Feature-gated: only present when the Fjall WorldDb is compiled in.
@@ -122,30 +129,57 @@ pub struct BrushPreviewState {
 // ============================================================================
 
 /// Sync Terrain class component to terrain system
+///
+/// Do-not-fight guard: when the live Space has an on-disk terrain
+/// (`Workspace/Terrain/_terrain.toml` — worldgen export or heightmap
+/// import), an `Added<Terrain>` class instance re-spawns the DISK terrain
+/// instead of clobbering it with procedural noise. Migrated Spaces are the
+/// voxel loader's domain, so they keep the procedural fallback here.
 fn sync_terrain_class_to_system(
     mut commands: Commands,
     query: Query<(Entity, &Terrain), Added<Terrain>>,
     existing_terrain: Query<Entity, With<TerrainRoot>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
 ) {
     for (_entity, terrain_class) in query.iter() {
         for existing in existing_terrain.iter() {
             commands.entity(existing).despawn();
         }
-        
-        let config = terrain_class.to_config();
-        let data = TerrainData::procedural();
-        
-        let _terrain_entity = spawn_terrain(
+
+        // Prefer the Space's on-disk terrain over procedural regeneration.
+        let disk = space_root.as_ref().and_then(|sr| {
+            if crate::space::space_ops::space_is_migrated(&sr.0) {
+                return None;
+            }
+            let terrain_dir = sr.0.join("Workspace").join("Terrain");
+            if !terrain_dir.join("_terrain.toml").exists() {
+                return None;
+            }
+            crate::terrain_disk_load::hydrate_terrain_from_disk(&terrain_dir).ok()
+        });
+
+        let (config, data, from_disk) = match disk {
+            Some((config, data, _chunk_files)) => (config, data, true),
+            None => (terrain_class.to_config(), TerrainData::procedural(), false),
+        };
+
+        let terrain_entity = spawn_terrain(
             &mut commands,
             &mut meshes,
             &mut materials,
             config,
             data,
         );
-        
-        info!("🏔️ Engine terrain spawned from Terrain class");
+        if from_disk {
+            commands
+                .entity(terrain_entity)
+                .insert(crate::terrain_disk_load::DiskSourcedTerrain);
+            info!("🏔️ Engine terrain spawned from Terrain class (hydrated from Workspace/Terrain)");
+        } else {
+            info!("🏔️ Engine terrain spawned from Terrain class");
+        }
     }
 }
 

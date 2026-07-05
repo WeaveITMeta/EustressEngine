@@ -1,137 +1,159 @@
-Eustress Community License
-Version 1.0 — June 2026
+# PolyForm Shield License 1.0.0
 
-Copyright (c) 2026 Eustress LLC
+<https://polyformproject.org/licenses/shield/1.0.0>
 
-PREAMBLE
+Required Notice: Copyright (c) 2026 Eustress LLC (https://eustress.dev)
 
-Eustress is source-available and free to use. You may use, study, modify,
-fork, and distribute it at no cost, for any purpose, subject to the terms
-below. A paid commercial license is required only if your use of Eustress
-crosses the scale threshold defined in Section 3 — until then, Eustress
-costs you nothing. This License is modeled on community / source-available
-licenses such as Meta's Llama Community License: free for the overwhelming
-majority of users, with large-scale commercial users asked to support the
-project's continued development.
+Eustress is dual-licensed. This PolyForm Shield License governs all use of
+the source in this repository at no cost. A separate commercial license is
+available for uses the Shield license does not permit — see
+LICENSE-COMMERCIAL.md or contact licensing@eustress.dev.
 
-1. DEFINITIONS
+## Acceptance
 
-   "License" means this Eustress Community License.
-   "Licensor" means the copyright holder identified above.
-   "Eustress" or the "Materials" means the Eustress Engine source code,
-   assets, documentation, and any other materials distributed under this
-   License by the Licensor.
-   "You" or "Licensee" means the individual or legal entity exercising
-   rights under this License.
-   "Affiliate" means any entity that controls, is controlled by, or is
-   under common control with You.
-   "Derivative Work" means any work based on or incorporating the
-   Materials, including modifications, forks, and works that link to or
-   embed the Materials.
-   "Distribute" means to make available to any third party.
-   "Commercial Threshold" has the meaning given in Section 3.
+In order to get any license under these terms, you must agree
+to them as both strict obligations and conditions to all
+your licenses.
 
-2. LICENSE GRANT
+## Copyright License
 
-   Subject to the terms of this License, the Licensor grants You a
-   worldwide, non-exclusive, royalty-free, non-transferable license to:
-     (a) use, reproduce, and run the Materials for any purpose;
-     (b) modify the Materials and create Derivative Works; and
-     (c) Distribute the Materials and Your Derivative Works,
-   provided that You comply with Sections 3, 4, and 5.
+The licensor grants you a copyright license for the
+software to do everything you might do with the software
+that would otherwise infringe the licensor's copyright
+in it for any permitted purpose.  However, you may
+only distribute the software according to [Distribution
+License](#distribution-license) and make changes or new works
+based on the software according to [Changes and New Works
+License](#changes-and-new-works-license).
 
-3. COMMERCIAL THRESHOLD  (THE KEY TERM)
+## Distribution License
 
-   The grant in Section 2 is free of charge until You cross the Commercial
-   Threshold. You cross the Commercial Threshold if, in any trailing
-   twelve (12) month period, the products or services that You or Your
-   Affiliates make available and that use, embed, or are built with the
-   Materials, in the aggregate:
+The licensor grants you an additional copyright license
+to distribute copies of the software.  Your license
+to distribute covers distributing the software with
+changes and new works permitted by [Changes and New Works
+License](#changes-and-new-works-license).
 
-       (a) generate more than US $1,000,000 in gross revenue; OR
-       (b) reach more than 100,000 monthly active users in any single
-           calendar month.
+## Notices
 
-   If You cross the Commercial Threshold, You must obtain a commercial
-   license from the Licensor before continuing to use, embed, or
-   Distribute the Materials beyond that point. The Licensor may grant such
-   a license on terms to be agreed; nothing in this License obligates the
-   Licensor to grant it. Use below the Commercial Threshold remains free
-   under this License.
+You must ensure that anyone who gets a copy of any part of
+the software from you also gets a copy of these terms or the
+URL for them above, as well as copies of any plain-text lines
+beginning with `Required Notice:` that the licensor provided
+with the software.  For example:
 
-4. REDISTRIBUTION CONDITIONS
+> Required Notice: Copyright Yoyodyne, Inc. (http://example.com)
 
-   If You Distribute the Materials or any Derivative Work, You must:
-     (a) include a complete, unmodified copy of this License with the
-         distribution;
-     (b) retain all copyright, attribution, and notice text contained in
-         the Materials; and
-     (c) include a clearly visible notice stating "Built with Eustress"
-         (or, for a Derivative Work, "Based on Eustress") in your
-         product's documentation or "about" screen.
-   Derivative Works that You Distribute are licensed to recipients under
-   this License, including Section 3.
+## Changes and New Works License
 
-5. RESTRICTIONS
+The licensor grants you an additional copyright license to
+make changes and new works based on the software for any
+permitted purpose.
 
-   You may not:
-     (a) remove, obscure, or alter any notice required by this License;
-     (b) use the name "Eustress," the Licensor's name, or any related
-         marks, except as required for the attribution in Section 4(c) or
-         as permitted by Section 6; or
-     (c) represent that Your Derivative Work is endorsed by or affiliated
-         with the Licensor without the Licensor's prior written permission.
+## Patent License
 
-6. TRADEMARKS
+The licensor grants you a patent license for the software that
+covers patent claims the licensor can license, or becomes able
+to license, that you would infringe by using the software.
 
-   This License does not grant any rights to use the Licensor's
-   trademarks, service marks, or trade names, except for the descriptive
-   attribution required by Section 4(c).
+## Noncompete
 
-7. THIRD-PARTY COMPONENTS
+Any purpose is a permitted purpose, except for providing any
+product that competes with the software or any product the
+licensor or any of its affiliates provides using the software.
 
-   The Materials incorporate third-party components (including, without
-   limitation, the Bevy engine, the Slint UI toolkit, and other Rust
-   crates) that are licensed under their own terms, typically the MIT
-   and/or Apache License 2.0. Those components remain governed by their
-   respective licenses, and nothing in this License modifies them. This
-   License applies only to the original portions of the Materials authored
-   by or for the Licensor.
+## Competition
 
-8. DISCLAIMER OF WARRANTY
+Goods and services compete even when they provide functionality
+through different kinds of interfaces or for different technical
+platforms.  Applications can compete with services, libraries
+with plugins, frameworks with development tools, and so on,
+even if they're written in different programming languages
+or for different computer architectures.  Goods and services
+compete even when provided free of charge.  If you market a
+product as a practical substitute for the software or another
+product, it definitely competes.
 
-   THE MATERIALS ARE PROVIDED "AS IS," WITHOUT WARRANTY OF ANY KIND,
-   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
-   YOU BEAR THE ENTIRE RISK OF USING THE MATERIALS.
+## New Products
 
-9. LIMITATION OF LIABILITY
+If you are using the software to provide a product that does
+not compete, but the licensor or any of its affiliates brings
+your product into competition by providing a new product, you
+may continue using versions of the software available under
+these terms beginning when your product first competed, and
+other versions the licensor makes available under these terms,
+but not later versions.
 
-   TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE
-   LICENSOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-   EXEMPLARY, OR CONSEQUENTIAL DAMAGES ARISING OUT OF OR RELATED TO THIS
-   LICENSE OR THE MATERIALS, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
-   DAMAGES.
+## Discontinued Products
 
-10. TERM AND TERMINATION
+You may begin using the software to compete with a product
+or service that the licensor or any of its affiliates has
+stopped providing, unless the licensor includes a plain-text
+line beginning with `Discontinued Product:` with the software
+that mentions the product or service.  For example:
 
-   This License applies for as long as You comply with it. It terminates
-   automatically if You breach it and fail to cure the breach within
-   thirty (30) days of becoming aware of it, or if You cross the Commercial
-   Threshold without obtaining a commercial license. On termination You
-   must stop using and Distributing the Materials, except that copies
-   properly Distributed to third parties before termination remain
-   licensed to those third parties under this License.
+> Discontinued Product: YoyodyneCMS Content Management System (http://example.com/cms)
 
-11. GOVERNING LAW
+## Sales of Business
 
-   This License is governed by the laws of the State of Nevada, USA,
-   without regard to its conflict-of-laws rules.
+If the licensor or any of its affiliates sells a line of
+business developing the software or using the software to
+provide a product, the buyer can also enforce [Noncompete](#noncompete)
+for that product.
 
----------------------------------------------------------------------------
-NOTE: This License is modeled on Meta's Llama Community License and other
-source-available licenses. It is not legal advice — have it reviewed by a
-qualified attorney before relying on it. Relicensing previously-released
-code assumes the Licensor holds the copyright in it (or that contributors
-agree to the change).
----------------------------------------------------------------------------
+## Fair Use
+
+You may have "fair use" rights for the software under the
+law. These terms do not limit them.
+
+## No Other Rights
+
+These terms do not allow you to sublicense or transfer any of
+your licenses to anyone else, or prevent the licensor from
+granting licenses to anyone else.  These terms do not imply
+any other licenses.
+
+## Termination
+
+If you use the software in violation of these terms, such use
+is not licensed, and your licenses will automatically terminate.
+If the licensor provides you with a notice of your violation,
+and you cease all violation of this license no later than 32
+days after you receive that notice, your licenses will be
+reinstated retroactively.  However, if you violate these terms
+after such reinstatement, any additional violation of these
+terms will cause your licenses to terminate automatically and
+permanently.
+
+## No Liability
+
+***As far as the law allows, the software comes as is, without
+any warranty or condition, and the licensor will not be liable
+to you for any damages arising out of these terms or the use
+or nature of the software, under any kind of legal claim.***
+
+## Definitions
+
+The **licensor** is the individual or entity offering these
+terms, and the **software** is the software the licensor makes
+available under these terms.
+
+A **product** can be a good or service, or a combination
+of them.
+
+**You** refers to the individual or entity agreeing to these
+terms.
+
+**Your company** is any legal entity, sole proprietorship,
+or other kind of organization that you work for, plus all
+organizations that have control over, are under the control of,
+or are under common control with that organization.  **Control**
+means ownership of substantially all the assets of an entity,
+or the power to direct its management and policies by vote,
+contract, or otherwise.  Control can be direct or indirect.
+
+**Your licenses** are all the licenses granted to you for the
+software under these terms.
+
+**Use** means anything you do with the software requiring one
+of your licenses.

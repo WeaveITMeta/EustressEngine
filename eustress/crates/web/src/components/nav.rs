@@ -356,12 +356,18 @@ pub fn CentralNav(
 }
 
 /// Format Bliss balance for display.
-fn format_bliss(amount: u64) -> String {
-    if amount >= 1_000_000 {
-        format!("{:.1}M", amount as f64 / 1_000_000.0)
-    } else if amount >= 1_000 {
-        format!("{:.1}K", amount as f64 / 1_000.0)
+fn format_bliss(amount: f64) -> String {
+    if amount >= 1_000_000.0 {
+        format!("{:.1}M", amount / 1_000_000.0)
+    } else if amount >= 1_000.0 {
+        format!("{:.1}K", amount / 1_000.0)
+    } else if amount >= 1.0 {
+        format!("{:.0}", amount)
+    } else if amount > 0.0 {
+        // Sub-1 BLS balances (common before the first daily distribution)
+        // still deserve a visible number rather than a bare "0".
+        format!("{:.2}", amount)
     } else {
-        amount.to_string()
+        "0".to_string()
     }
 }

@@ -4,7 +4,7 @@
 // Brush tools and settings live in the Terrain ribbon tab toolbar only.
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, ScrollView, Slider, ComboBox } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ScrollView, Slider, ComboBox, LineEdit } from "std-widgets.slint";
 import { Theme, PanelHeader } from "theme.slint";
 
 // Collapsible section header with chevron
@@ -121,11 +121,18 @@ export component TerrainEditor inherits Rectangle {
     in property <string> terrain-lod-levels: "5";
     in property <string> terrain-chunk-count: "0";
     in property <string> terrain-material: "Default";
-    
+
+    // Generate World (worldgen pipeline) state
+    in-out property <string> worldgen-seed: "42";
+    in-out property <string> worldgen-preset: "medium"; // small=2x2, medium=3x3, large=4x4 regions @ 1024 m
+    in property <bool> worldgen-busy: false;
+    in property <string> worldgen-progress: "";
+
     // Section expand states
     in-out property <bool> section-properties-expanded: true;
     in-out property <bool> section-chunks-expanded: true;
     in-out property <bool> section-import-export-expanded: true;
+    in-out property <bool> section-worldgen-expanded: true;
     
     // Selected chunk index (-1 = none)
     in-out property <int> selected-chunk: -1;
@@ -136,6 +143,7 @@ export component TerrainEditor inherits Rectangle {
     callback on-import-heightmap();
     callback on-export-heightmap();
     callback on-select-chunk(int);
+    callback on-generate-world(string, string); // seed, preset
     
     background: Theme.panel-background;
     
@@ -243,7 +251,65 @@ export component TerrainEditor inherits Rectangle {
                 }
                 
                 Rectangle { height: 8px; }
-                
+
+                // ── Generate World (worldgen pipeline) ──
+                Text {
+                    text: "Or generate a full world (rivers, climate, materials)";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                }
+
+                HorizontalBox {
+                    spacing: 8px;
+                    alignment: center;
+
+                    LineEdit {
+                        width: 80px;
+                        height: 28px;
+                        placeholder-text: "Seed";
+                        text <=> root.worldgen-seed;
+                        enabled: !root.worldgen-busy;
+                    }
+
+                    ComboBox {
+                        width: 100px;
+                        height: 28px;
+                        model: ["small", "medium", "large"];
+                        current-value <=> root.worldgen-preset;
+                        enabled: !root.worldgen-busy;
+                    }
+
+                    Rectangle {
+                        width: 110px;
+                        height: 28px;
+                        background: root.worldgen-busy ? Theme.button-background : Theme.button-primary;
+                        border-radius: 4px;
+
+                        TouchArea {
+                            enabled: !root.worldgen-busy;
+                            clicked => { root.on-generate-world(root.worldgen-seed, root.worldgen-preset); }
+                        }
+
+                        Text {
+                            text: root.worldgen-busy ? "Generating…" : "Generate World";
+                            color: root.worldgen-busy ? Theme.text-secondary : white;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                if root.worldgen-progress != "": Text {
+                    text: root.worldgen-progress;
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                }
+
+                Rectangle { height: 8px; }
+
                 HorizontalBox {
                     alignment: center;
                     Rectangle {
@@ -251,11 +317,11 @@ export component TerrainEditor inherits Rectangle {
                         height: 32px;
                         background: Theme.button-background;
                         border-radius: 4px;
-                        
+
                         TouchArea {
                             clicked => { root.on-import-heightmap(); }
                         }
-                        
+
                         Text {
                             text: "Import Heightmap...";
                             color: Theme.text-primary;
@@ -450,6 +516,75 @@ export component TerrainEditor inherits Rectangle {
                     
                     Text {
                         text: "Supports: R16, PNG, RAW, HGT, ASC, TIFF";
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                    }
+                }
+
+                // Separator
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border-color;
+                }
+
+                // ── Generate World section ──
+                SectionRow {
+                    label: "GENERATE WORLD";
+                    expanded: root.section-worldgen-expanded;
+                    clicked => { root.section-worldgen-expanded = !root.section-worldgen-expanded; }
+                }
+
+                if root.section-worldgen-expanded: VerticalBox {
+                    padding: 8px;
+                    spacing: 8px;
+
+                    HorizontalBox {
+                        spacing: 8px;
+
+                        LineEdit {
+                            horizontal-stretch: 1;
+                            height: 28px;
+                            placeholder-text: "Seed";
+                            text <=> root.worldgen-seed;
+                            enabled: !root.worldgen-busy;
+                        }
+
+                        ComboBox {
+                            horizontal-stretch: 1;
+                            height: 28px;
+                            model: ["small", "medium", "large"];
+                            current-value <=> root.worldgen-preset;
+                            enabled: !root.worldgen-busy;
+                        }
+                    }
+
+                    Rectangle {
+                        height: 28px;
+                        background: root.worldgen-busy ? Theme.button-background : Theme.button-primary;
+                        border-radius: 4px;
+
+                        TouchArea {
+                            enabled: !root.worldgen-busy;
+                            clicked => { root.on-generate-world(root.worldgen-seed, root.worldgen-preset); }
+                        }
+
+                        Text {
+                            text: root.worldgen-busy ? "Generating…" : "Generate World";
+                            color: root.worldgen-busy ? Theme.text-secondary : white;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    if root.worldgen-progress != "": Text {
+                        text: root.worldgen-progress;
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                    }
+
+                    Text {
+                        text: "Replaces current terrain. Seed + size are deterministic.";
                         color: Theme.text-secondary;
                         font-size: 10px;
                     }

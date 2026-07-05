@@ -97,7 +97,7 @@ pub fn BlogIndieStudiosPage() -> impl IntoView {
                         </h1>
                         <p class="docs-subtitle">
                             <em>
-                                "A new simulation engine just went open source. It runs a full year of "
+                                "A new simulation engine just opened its source. It runs a full year of "
                                 "world simulation in one second, renders at AAA quality, and takes zero "
                                 "percent of your revenue. Here's why that matters more than any feature list."
                             </em>
@@ -220,12 +220,14 @@ pub fn BlogIndieStudiosPage() -> impl IntoView {
                             <p>"This is where Eustress comes in."</p>
                             <p>
                                 "Eustress is a universal world-model simulation engine written in "
-                                "Rust. Open source. Forkable. Yours."
+                                "Rust. Source-available. Forkable. Yours."
                             </p>
                             <p>
-                                "Not \"open source\" in the way some companies use that phrase to "
+                                "Not \"open\" in the way some companies use that word to "
                                 "mean \"you can read the code but good luck changing it.\" Actually "
-                                "forkable. If the project went dark tomorrow, you'd have everything "
+                                "forkable, under PolyForm Shield: build and sell anything with it, "
+                                "royalty-free — the one thing the license reserves is reselling the "
+                                "engine itself. If the project went dark tomorrow, you'd have everything "
                                 "you need to keep running, keep building, keep shipping. The source "
                                 "is yours. The fork is yours. The world you build inside it is yours."
                             </p>

@@ -255,10 +255,30 @@ impl Plugin for CameraControllerPlugin {
     }
 }
 
-/// Update the 3D camera viewport to fit within the Slint UI layout.
-/// Reads actual viewport bounds from the ViewportBounds resource (populated by Slint each frame).
-/// This constrains 3D rendering to only the visible viewport area, avoiding wasted GPU work
-/// behind opaque UI panels (ribbon, explorer, properties, output).
+/// Clips the 3D camera to a `ViewportBounds`-derived sub-rect so it renders
+/// only the area visible through the Slint overlay's transparent viewport
+/// hole. This is NOT just a GPU-cost optimization (a prior revision of this
+/// comment claimed that, and disabled the clip on that basis) — it's load-
+/// bearing for correctness: the camera's projection derives its ASPECT RATIO
+/// from its viewport rect (`Camera::logical_viewport_size()`), and the
+/// visible hole is narrower than the full window (Explorer + Properties
+/// panels eat into the width). Render the full window instead and the 3D
+/// scene's aspect ratio no longer matches the shape it's actually viewed
+/// through — it's permanently squished/stretched, not just after a resize.
+///
+/// History: this WAS briefly disabled after a real bug — after a window
+/// resize the 3D content showed as a smaller "box within a box" inside the
+/// Slint viewport hole, not filling it. That was mis-diagnosed as this
+/// function reading a stale/wrong `ViewportBounds`. The actual cause: the
+/// Slint overlay's GPU texture was being resized in-place
+/// (`Image::resize()`), which Bevy doesn't reliably re-extract to a new
+/// wgpu::Texture (same class of issue as the `materials.get_mut()` bevy#17350
+/// workaround in `render_slint_to_texture`) — so the transparent hole was
+/// painted from a stale, stretched texture while this function was already
+/// applying the CORRECT fresh rect underneath it. Fixed at the source in
+/// `handle_window_resize` (slint_ui.rs) by recreating the texture as a new
+/// asset on every resize instead of mutating it in place; this clip was
+/// never the bug and is restored.
 fn update_camera_viewport_for_ui(
     mut camera_query: Query<(&mut Camera, &bevy::camera::RenderTarget), (With<Camera3d>, Without<crate::ui::slint_ui::SlintOverlayCamera>)>,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
@@ -280,8 +300,7 @@ fn update_camera_viewport_for_ui(
         // Only the WINDOW camera gets the Slint-fitted viewport. Off-screen
         // image cameras (e.g. the AI camera) must render their FULL image — a
         // window-sized viewport overflows the image's bounds and panics the
-        // `set_scissor_rect` validation. Previously this took the first camera
-        // via `.next()`, which non-deterministically picked the AI camera.
+        // `set_scissor_rect` validation.
         if matches!(target, bevy::camera::RenderTarget::Image(_)) {
             continue;
         }
@@ -318,25 +337,18 @@ fn ensure_camera_exists(
         cam.pitch = -0.5;
         cam.enabled = true;
         
+        // Route through the ONE canonical bundle constructor (see its doc
+        // comment) instead of hand-rolling Camera3d/Tonemapping/Projection
+        // here: a second, independently-drifting camera build is exactly the
+        // mesh_view_bind_group hazard that function exists to prevent (this
+        // fallback previously used Tonemapping::AcesFitted + a different
+        // Projection far-plane than every other Studio camera).
         commands.spawn((
-            Camera3d::default(),
-            // ACES tone mapping — cinematic color response
-            bevy::core_pipeline::tonemapping::Tonemapping::AcesFitted,
-            Transform::from_xyz(10.0, 10.0, 15.0)
-                .looking_at(Vec3::ZERO, Vec3::Y),
-            Projection::Perspective(PerspectiveProjection {
-                fov: 70.0_f32.to_radians(),
-                ..default()
-            }),
+            crate::default_scene::studio_camera_bundle(
+                "Camera",
+                Transform::from_xyz(10.0, 10.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
+            ),
             cam,
-            crate::classes::Instance {
-                name: "Camera".to_string(),
-                class_name: crate::classes::ClassName::Camera,
-                archivable: true,
-                id: 0,
-                ..Default::default()
-            },
-            Name::new("Camera"),
         ));
     }
 }
@@ -693,25 +705,52 @@ fn eustress_camera_controls(
                   (mouse.pressed(MouseButton::Left) && shift);  // Only Shift+Left or Middle for pan
     
     let dollying = mouse.pressed(MouseButton::Right) && ctrl;
-    
-    // Right-click orbits (with or without Shift for precise mode)
-    let orbiting = (mouse.pressed(MouseButton::Right) || 
-                   (mouse.pressed(MouseButton::Left) && alt)) &&
-                   !ctrl;  // Only orbit if not dollying
-    
+
+    // Roblox-Studio-style split:
+    //  - Right-drag = LOOK IN PLACE (first-person): the camera position
+    //    stays fixed and only the view direction turns. Previously
+    //    right-drag ORBITED the pivot, so at large distances the camera
+    //    swung on a huge arc — the "ball on a track" feel.
+    //  - Alt+Left-drag = classic ORBIT around the pivot (kept for
+    //    inspect-an-object workflows).
+    let looking  = mouse.pressed(MouseButton::Right) && !ctrl;
+    let orbiting = mouse.pressed(MouseButton::Left) && alt && !ctrl;
+
+    /// Spherical offset from pivot to camera — MUST match
+    /// `update_eustress_camera_transform`'s position formula.
+    fn orbit_offset(yaw: f32, pitch: f32) -> Vec3 {
+        Vec3::new(
+            pitch.cos() * yaw.sin(),
+            pitch.sin(),
+            pitch.cos() * yaw.cos(),
+        )
+    }
+
     // Apply the appropriate camera control (mutually exclusive)
-    if orbiting && mouse_delta != Vec2::ZERO {
-        // Orbit (Right-drag or Alt+Left-drag)
+    if (looking || orbiting) && mouse_delta != Vec2::ZERO {
         // Shift slows down rotation for precise movements
         let sensitivity_mod = if shift { 0.25 } else { 1.0 };
         let sensitivity = cam.sensitivity * sensitivity_mod;
-        
+
+        // Capture the camera's world position BEFORE the angles change
+        // (from the TARGET angles — the transform system applies targets
+        // instantly, so they are the authoritative pose).
+        let cam_pos = cam.pivot + cam.distance * orbit_offset(cam.target_yaw, cam.target_pitch);
+
         // XZ plane (yaw) needs to be inverted for natural rotation
-        cam.target_yaw -= mouse_delta.x * sensitivity;  // Mouse right = orbit right around object
+        cam.target_yaw -= mouse_delta.x * sensitivity;  // Mouse right = look/orbit right
         cam.target_pitch += mouse_delta.y * sensitivity; // Mouse up = look up
         cam.target_pitch = cam.target_pitch.clamp(-FRAC_PI_2 + 0.01, FRAC_PI_2 - 0.01);
-        
-        // Mark as custom view when user manually orbits
+
+        if looking {
+            // First-person look: keep the camera where it is and swing the
+            // PIVOT to sit `distance` ahead along the new view direction.
+            // Zoom, F-focus, and orbit still have a sensible pivot ahead of
+            // the camera, but turning no longer translates the camera.
+            cam.pivot = cam_pos - cam.distance * orbit_offset(cam.target_yaw, cam.target_pitch);
+        }
+
+        // Mark as custom view when user manually rotates
         cam.current_view = CameraView::Custom;
         cam.animating = false; // Cancel any ongoing animation
     } else if panning && mouse_delta != Vec2::ZERO {
@@ -800,22 +839,27 @@ fn eustress_camera_controls(
     let speed_mod = if shift { 0.075 } else { 1.0 }; // Shift for PRECISE movement (slower)
     let move_speed = base_speed * speed_mod * dt;
     
-    // Project forward onto horizontal plane for intuitive ground movement
-    let forward_horizontal = Vec3::new(cam_forward.x, 0.0, cam_forward.z).normalize_or_zero();
-    let right_horizontal = Vec3::new(cam_right.x, 0.0, cam_right.z).normalize_or_zero();
-    
+    // Roblox-Studio-style fly: W/S move along the camera's ACTUAL look
+    // direction (including vertical — look down + W descends toward what
+    // you're looking at), A/D strafe along the camera's right vector
+    // (no roll, so it's already horizontal). The old code projected W/S
+    // onto the ground plane, which fought the "fly where I look" instinct
+    // and contributed to the tracked-ball feel.
+    let strafe_right = Vec3::new(cam_right.x, 0.0, cam_right.z).normalize_or_zero();
+
     // DIRECT pivot movement - NO velocity accumulation
-    if keys.pressed(KeyCode::KeyW) { 
-        cam.pivot += forward_horizontal * move_speed;
+    // (the camera position is derived from the pivot, so it moves 1:1)
+    if keys.pressed(KeyCode::KeyW) {
+        cam.pivot += *cam_forward * move_speed;
     }
-    if keys.pressed(KeyCode::KeyS) { 
-        cam.pivot -= forward_horizontal * move_speed;
+    if keys.pressed(KeyCode::KeyS) {
+        cam.pivot -= *cam_forward * move_speed;
     }
-    if keys.pressed(KeyCode::KeyA) { 
-        cam.pivot -= right_horizontal * move_speed;
+    if keys.pressed(KeyCode::KeyA) {
+        cam.pivot -= strafe_right * move_speed;
     }
-    if keys.pressed(KeyCode::KeyD) { 
-        cam.pivot += right_horizontal * move_speed;
+    if keys.pressed(KeyCode::KeyD) {
+        cam.pivot += strafe_right * move_speed;
     }
     if keys.pressed(KeyCode::KeyQ) {
         cam.pivot.y -= move_speed; // Down

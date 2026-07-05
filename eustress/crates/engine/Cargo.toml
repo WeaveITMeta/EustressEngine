@@ -109,6 +109,14 @@ bevy = { workspace = true, default-features = false, features = [
     "tonemapping_luts",
     "zstd_rust",
     "debug",
+    # Kept enabled only so the previous build's bevy artifacts are reused (a
+    # ~100-min bevy recompile otherwise). The photoreal camera components
+    # (Bloom/TAA/SSAO) were reverted out of studio_camera_bundle — they washed
+    # the editor viewport to flat grey — so DefaultPlugins registers these
+    # plugins but NO camera carries the components, i.e. they are inert. Drop
+    # both features (and accept the bevy rebuild) when doing a clean pass.
+    "bevy_anti_alias",
+    "bevy_post_process",
 ] }
 # bevy_ecs as a direct, NON-OPTIONAL dep. Two reasons it must NOT be optional:
 #   1. Merely naming `bevy_ecs` in this manifest makes Bevy's derive macros

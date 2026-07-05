@@ -526,6 +526,37 @@ pub struct ExportTerrainEvent {
     pub path: String,
 }
 
+/// Event: run the full worldgen pipeline (`generate_world` → `export_to_space`
+/// → disk hydrate → spawn) for the CURRENT Space. Fired from the Terrain
+/// panel's Generate World button (drain arm in `slint_ui.rs`).
+#[derive(Message)]
+pub struct GenerateWorldEvent {
+    pub spec: eustress_common::terrain::worldgen::pipeline::WorldSpec,
+}
+
+/// In-flight worldgen background task + coarse phase text for the panel.
+///
+/// LOOP-5: initialized in `SpawnEventsPlugin` (which the ACTIVE
+/// `SlintUiPlugin` adds) — never in the legacy `StudioUiPlugin`.
+#[derive(Resource, Default)]
+pub struct WorldgenTask {
+    /// The generation+export task running on `AsyncComputeTaskPool`.
+    /// `Ok` payload = the `Workspace/Terrain` dir it wrote + the summary.
+    pub task: Option<bevy::tasks::Task<Result<(std::path::PathBuf, eustress_common::terrain::worldgen::export::ExportSummary), String>>>,
+    /// Human-readable phase shown in the panel while the task runs.
+    pub status: String,
+    /// True from task completion until `TerrainGenerationQueue` drains —
+    /// the chunk-meshing tail of the busy window.
+    pub meshing: bool,
+}
+
+impl WorldgenTask {
+    /// The panel-level busy gate: generation OR the meshing tail.
+    pub fn is_busy(&self) -> bool {
+        self.task.is_some() || self.meshing
+    }
+}
+
 /// System to handle spawn terrain events
 pub fn handle_spawn_terrain_events(
     mut spawn_events: MessageReader<SpawnTerrainEvent>,
@@ -743,6 +774,141 @@ distances = {:?}
     }
 }
 
+/// System: kick off a Generate World request on the async compute pool.
+///
+/// The task runs `worldgen::pipeline::generate_world` (rayon inside,
+/// deterministic, engine-free) then `worldgen::export::export_to_space`
+/// into the LIVE Space's `Workspace/Terrain/` — NOT `default_space_root()`
+/// (`handle_import_terrain` has that bug; a Space switched in-session would
+/// write to the wrong Space). No ECS access inside the task.
+pub fn handle_generate_world(
+    mut request_events: MessageReader<GenerateWorldEvent>,
+    mut worldgen: ResMut<WorldgenTask>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    queue: Option<Res<eustress_common::terrain::TerrainGenerationQueue>>,
+    notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+) {
+    let mut notifications = notifications;
+    for event in request_events.read() {
+        // Single-flight gate: a running task, the meshing tail, OR any
+        // in-flight chunk queue (spawn_terrain would clobber
+        // TerrainGenerationQueue and orphan its pending chunks).
+        let queue_busy = queue.as_deref().map(|q| q.is_generating()).unwrap_or(false);
+        if worldgen.is_busy() || queue_busy {
+            if let Some(ref mut n) = notifications {
+                n.warning("Terrain generation already running — wait for it to finish");
+            }
+            continue;
+        }
+        let Some(ref sr) = space_root else {
+            if let Some(ref mut n) = notifications {
+                n.error("Generate World: no open Space");
+            }
+            continue;
+        };
+        let space_root_path = sr.0.clone();
+        let spec = event.spec.clone();
+        let seed = spec.seed;
+
+        worldgen.status = format!(
+            "Generating world (seed {}, {}\u{d7}{} regions)\u{2026}",
+            seed, spec.regions_x, spec.regions_z
+        );
+        worldgen.task = Some(bevy::tasks::AsyncComputeTaskPool::get().spawn(async move {
+            // Pure CPU work — both calls are engine-free and deterministic.
+            let world = eustress_common::terrain::worldgen::pipeline::generate_world(&spec);
+            let summary = eustress_common::terrain::worldgen::export::export_to_space(
+                &world,
+                &space_root_path,
+            )?;
+            Ok((space_root_path.join("Workspace").join("Terrain"), summary))
+        }));
+        if let Some(ref mut n) = notifications {
+            n.info(format!("Generating world (seed {seed})\u{2026}"));
+        }
+        info!("🌍 Worldgen started: seed {}, {}x{} regions", seed, event.spec.regions_x, event.spec.regions_z);
+    }
+}
+
+/// System: poll the worldgen task; on success hydrate the exported terrain
+/// from disk (SIGNED centered chunk coords via `toml_loader`) and spawn it
+/// through the SAME `spawn_terrain` path heightmap import uses. The
+/// already-registered `process_terrain_generation_queue` / `chunk_spawn_system`
+/// chain (EngineTerrainPlugin) meshes it over frames.
+pub fn poll_worldgen_task(
+    mut commands: Commands,
+    mut worldgen: ResMut<WorldgenTask>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    existing_terrain: Query<Entity, With<TerrainRoot>>,
+    queue: Option<Res<eustress_common::terrain::TerrainGenerationQueue>>,
+    notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+) {
+    use bevy::tasks::{block_on, futures_lite::future};
+    let mut notifications = notifications;
+
+    // Meshing tail: clear busy once the chunk queue drains.
+    if worldgen.task.is_none() && worldgen.meshing {
+        let still_meshing = queue.as_deref().map(|q| q.is_generating()).unwrap_or(false);
+        if !still_meshing {
+            worldgen.meshing = false;
+            worldgen.status.clear();
+        }
+        return;
+    }
+
+    let Some(task) = worldgen.task.as_mut() else { return };
+    let Some(result) = block_on(future::poll_once(task)) else { return };
+    worldgen.task = None;
+
+    match result {
+        Ok((terrain_dir, summary)) => {
+            // Hydrate exactly what export wrote (export.rs INTEGRATOR NOTE):
+            // toml → config → resize_cache → load_chunks_from_disk (signed
+            // centered [-N,+N] addressing, matching export by construction).
+            match crate::terrain_disk_load::hydrate_terrain_from_disk(&terrain_dir) {
+                Ok((config, data, chunk_files)) => {
+                    // Despawn existing terrain (any source) — single-rooted.
+                    for entity in existing_terrain.iter() {
+                        commands.entity(entity).despawn();
+                    }
+                    let entity = spawn_terrain(&mut commands, &mut meshes, &mut materials, config, data);
+                    // Disk-sourced: Space-switch cleanup + the auto-loader's
+                    // latch semantics treat it like any disk terrain.
+                    commands.entity(entity).insert(crate::terrain_disk_load::DiskSourcedTerrain);
+                    worldgen.meshing = true;
+                    worldgen.status = "Spawning terrain chunks\u{2026}".to_string();
+                    if let Some(ref mut n) = notifications {
+                        n.success(format!(
+                            "World generated: {} chunks written ({} splatmaps), meshing\u{2026}",
+                            summary.chunks_written, summary.splatmaps_written
+                        ));
+                    }
+                    info!(
+                        "🌍 Worldgen exported {} chunks / {} splatmaps ({} bytes), loaded {} chunk files from {:?}",
+                        summary.chunks_written, summary.splatmaps_written,
+                        summary.bytes_written, chunk_files, terrain_dir
+                    );
+                }
+                Err(e) => {
+                    worldgen.status.clear();
+                    if let Some(ref mut n) = notifications {
+                        n.error(format!("Generate World: export wrote but load failed: {e}"));
+                    }
+                    error!("Worldgen load-back failed for {:?}: {}", terrain_dir, e);
+                }
+            }
+        }
+        Err(e) => {
+            worldgen.status.clear();
+            if let Some(ref mut n) = notifications {
+                n.error(format!("Generate World failed: {e}"));
+            }
+            error!("Worldgen failed: {}", e);
+        }
+    }
+}
+
 // ============================================================================
 // Plugin
 // ============================================================================
@@ -763,11 +929,18 @@ impl Plugin for SpawnEventsPlugin {
             .add_message::<SetTerrainBrushEvent>()
             .add_message::<ImportTerrainEvent>()
             .add_message::<ExportTerrainEvent>()
+            // Worldgen (Generate World): message + single-flight task
+            // resource. LOOP-5: registered HERE (SpawnEventsPlugin is added
+            // by the ACTIVE SlintUiPlugin), never in the legacy StudioUiPlugin.
+            .add_message::<GenerateWorldEvent>()
+            .init_resource::<WorldgenTask>()
             .add_systems(Update, (
                 handle_spawn_terrain_events,
                 handle_toggle_terrain_edit,
                 handle_set_terrain_brush,
                 handle_import_terrain,
+                handle_generate_world,
+                poll_worldgen_task,
             ));
     }
 }

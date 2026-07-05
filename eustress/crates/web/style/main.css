@@ -4014,6 +4014,8 @@ p {
 .showcase-card.featured {
     grid-column: 1;
     grid-row: span 2;
+    display: flex;
+    flex-direction: column;
 }
 
 .card-visual {
@@ -4027,8 +4029,16 @@ p {
 }
 
 .showcase-card.featured .card-visual {
-    height: 100%;
+    /* Grow to fill the tall card, but never push .card-info (title/tag/text)
+       out of view. Using height:100% here made the visual claim the WHOLE
+       card height, clipping the info block via the parent's overflow:hidden. */
+    height: auto;
+    flex: 1;
     min-height: 200px;
+}
+
+.showcase-card.featured .card-info {
+    flex-shrink: 0;
 }
 
 .visual-icon {
@@ -20535,4 +20545,212 @@ a.experience-card {
     gap: var(--space-md, 1rem);
     padding: var(--space-xl, 2.5rem);
     text-align: center;
+}
+
+/* =============================================================================
+   Home: split comparison (simulation table first, then game engines)
+   ========================================================================== */
+.comparison-subtitle {
+    text-align: center;
+    font-size: 1.05rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #00bcd4;
+    margin: var(--space-xl, 2.5rem) 0 var(--space-md, 1rem);
+}
+.comparison-subtitle:first-of-type { margin-top: var(--space-lg, 1.5rem); }
+/* Data-platform reuses .power-section; nudge spacing so it reads as its own pillar */
+.data-platform-section { padding-top: var(--space-lg, 1.5rem); }
+
+/* Showcase button must not stretch full-width in the flex column */
+.showcase-btn {
+    align-self: center;
+    width: fit-content;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+/* Comparison logo chips: consistent sizing across both tables */
+.comparison-table .engine-logo {
+    width: 22px;
+    height: 22px;
+    vertical-align: middle;
+    margin-right: 6px;
+    border-radius: 5px;
+}
+
+/* =============================================================================
+   Open Source / GitHub section
+   ========================================================================== */
+.github-section {
+    position: relative;
+    padding: 80px var(--space-2xl, 2.5rem);
+    background: #0c0e14;
+    overflow: hidden;
+    text-align: center;
+}
+.github-bg { position: absolute; inset: 0; opacity: 0.4; pointer-events: none; }
+.github-grid-overlay {
+    position: absolute; inset: 0;
+    background-image: linear-gradient(rgba(0,188,212,0.06) 1px, transparent 1px),
+                      linear-gradient(90deg, rgba(0,188,212,0.06) 1px, transparent 1px);
+    background-size: 40px 40px;
+}
+.github-container {
+    position: relative;
+    max-width: 760px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-md, 1rem);
+}
+.github-lead {
+    font-size: 1.35rem;
+    font-weight: 700;
+    color: var(--color-text-primary, #f0f6fc);
+    margin-top: var(--space-sm, 0.6rem);
+}
+.github-beats { display: flex; flex-direction: column; gap: 0.5rem; max-width: 620px; }
+.github-beats p {
+    margin: 0;
+    color: var(--color-text-secondary, #c9d1d9);
+    font-size: 1.02rem;
+    line-height: 1.55;
+}
+.github-cta {
+    display: flex;
+    gap: var(--space-md, 1rem);
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-top: var(--space-md, 1rem);
+}
+.github-chips { display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: center; margin-top: var(--space-sm, 0.6rem); }
+.github-chip {
+    font-size: var(--text-xs, 0.78rem);
+    padding: 0.3rem 0.7rem;
+    border: 1px solid rgba(0, 188, 212, 0.4);
+    border-radius: 999px;
+    color: #00bcd4;
+    background: rgba(0, 188, 212, 0.06);
+}
+
+/* =============================================================================
+   Stunning Worlds (gaming pillar)
+   ========================================================================== */
+.worlds-section {
+    background: linear-gradient(180deg, #0a0c12 0%, #0e1118 100%);
+}
+.worlds-cta {
+    display: flex;
+    justify-content: center;
+    margin-top: var(--space-xl, 2rem);
+}
+
+/* Comparison: keep logos centered above the label, single-line verdict titles */
+.comparison-table .engine-col { text-align: center; vertical-align: bottom; }
+.comparison-table .engine-logo { display: block; margin: 0 auto 6px; }
+.verdict-card h3 {
+    white-space: nowrap;
+    font-size: clamp(0.9rem, 1.3vw, 1.1rem);
+}
+
+/* CTA checks stacked vertically */
+.cta-features {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+/* =============================================================================
+   GitHub section, A+ treatment (two-column + ladder + terminal)
+   ========================================================================== */
+.github-inner {
+    position: relative;
+    max-width: 1100px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 1.05fr 0.95fr;
+    gap: var(--space-2xl, 2.5rem);
+    align-items: center;
+}
+@media (max-width: 900px) {
+    .github-inner { grid-template-columns: 1fr; }
+}
+.github-copy {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-sm, 0.6rem);
+    text-align: left;
+}
+.github-copy .section-title-epic { text-align: left; margin: 0.2rem 0; }
+.github-lead {
+    font-size: 1.4rem;
+    font-weight: 800;
+    color: var(--color-text-primary, #f0f6fc);
+    line-height: 1.25;
+}
+.github-sub { color: var(--color-text-secondary, #c9d1d9); font-size: 1.02rem; line-height: 1.55; }
+
+.ladder { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin: 0.4rem 0; }
+.ladder-step {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.45rem 0.8rem;
+    background: rgba(0, 188, 212, 0.06);
+    border: 1px solid rgba(0, 188, 212, 0.3);
+    border-radius: 999px;
+}
+.ladder-num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border-radius: 50%;
+    background: #00bcd4; color: #06222a; font-weight: 800; font-size: 0.8rem;
+}
+.ladder-text { font-size: 0.9rem; color: var(--color-text-primary, #f0f6fc); font-weight: 600; white-space: nowrap; }
+.ladder-arrow { color: #00bcd4; font-weight: 800; }
+.github-copy .github-cta { margin-top: var(--space-md, 1rem); justify-content: flex-start; }
+
+.github-terminal {
+    background: #0d1117;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: var(--radius-lg, 14px);
+    overflow: hidden;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(0, 188, 212, 0.12);
+}
+.term-header {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.6rem 0.9rem;
+    background: #161b22;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.term-dots { display: inline-flex; gap: 6px; }
+.term-dots .dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+.term-dots .dot.red { background: #ff5f56; }
+.term-dots .dot.yellow { background: #ffbd2e; }
+.term-dots .dot.green { background: #27c93f; }
+.term-title { color: var(--color-text-muted, #8b949e); font-size: 0.8rem; font-family: monospace; }
+.term-body { padding: 1rem 1.1rem; font-family: 'JetBrains Mono', monospace; font-size: 0.86rem; line-height: 1.7; }
+.term-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #c9d1d9; }
+.term-prompt { color: #00bcd4; font-weight: 700; }
+.term-dim { color: #6e7681; }
+.term-ok { color: #3fb950; }
+.github-badges { display: flex; gap: 0.5rem; flex-wrap: wrap; padding: 0 1.1rem 1.1rem; }
+.gh-badge {
+    font-size: 0.72rem; padding: 0.25rem 0.6rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+    color: var(--color-text-secondary, #c9d1d9);
+    background: rgba(255, 255, 255, 0.03);
+    font-family: monospace;
+}
+
+/* Legal page CTA row: two buttons side by side with a real gap,
+   wrapping cleanly to a stacked layout on narrow screens instead of
+   relying on inline text-wrap spacing. */
+.legal-cta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-md, 1rem);
 }

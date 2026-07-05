@@ -23,8 +23,9 @@ pub struct BlissKpi {
     pub active_nodes: u64,
     pub total_contributors: u64,
     pub avg_bliss_earned: String,
-    pub network_hashrate: String,
-    pub blocks_mined: u64,
+    /// Annual emission rate, live from the ledger (e.g. "5.0% / yr").
+    /// Bliss is Proof-of-Contribution — there is no mining / hashrate.
+    pub emission_rate: String,
     pub daily_distribution: String,
 }
 
@@ -37,8 +38,7 @@ impl Default for BlissKpi {
             active_nodes: 0,
             total_contributors: 0,
             avg_bliss_earned: "Loading...".to_string(),
-            network_hashrate: "Loading...".to_string(),
-            blocks_mined: 0,
+            emission_rate: "Loading...".to_string(),
             daily_distribution: "Loading...".to_string(),
         }
     }
@@ -55,6 +55,79 @@ pub struct InvestmentTier {
 }
 
 // -----------------------------------------------------------------------------
+// Live KPI fetch
+// -----------------------------------------------------------------------------
+
+/// Group an integer-valued f64 with thousands separators (e.g. 100000000
+/// → "100,000,000"). Used for supply/emission/distribution displays.
+fn fmt_thousands(n: f64) -> String {
+    let rounded = n.round() as i64;
+    let digits = rounded.abs().to_string();
+    let mut out = String::new();
+    let len = digits.len();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if rounded < 0 { format!("-{out}") } else { out }
+}
+
+/// Pull the live Bliss KPIs from the witness and update the signal. Reads
+/// three endpoints — the economics/rate view, community stats, and node
+/// stats — and maps their authoritative fields onto the KPI cards. Any
+/// endpoint that fails leaves its prior value in place (no flicker to zero).
+async fn refresh_bliss_kpis(kpi: RwSignal<BlissKpi>) {
+    // Economics: treasury, live emission, supply, distributed, drip rate.
+    if let Ok(resp) = gloo_net::http::Request::get("https://api.eustress.dev/api/payouts/rate")
+        .send().await
+    {
+        if let Ok(data) = resp.json::<serde_json::Value>().await {
+            let num = |k: &str| data.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let treasury = num("treasury_usd");
+            let daily_emission = num("daily_bls_emission");
+            let current_supply = num("current_supply");
+            let total_distributed = num("total_distributed");
+            let annual_rate = num("annual_emission_rate");
+            let rate_display = data.get("rate_display")
+                .and_then(|v| v.as_str()).unwrap_or("—").to_string();
+
+            kpi.update(|k| {
+                k.treasury_balance = format!("${:.2} USD", treasury);
+                // Live emission (decays every 4 years), not a Year-1 constant.
+                k.daily_distribution = format!("{} BLS", fmt_thousands(daily_emission));
+                // Supply grows with each mint; circulating = minted-to-date.
+                k.total_supply = format!("{} BLS", fmt_thousands(current_supply));
+                k.circulating_supply = format!("{} BLS", fmt_thousands(total_distributed));
+                k.avg_bliss_earned = rate_display;
+                k.emission_rate = format!("{:.1}% / yr", annual_rate * 100.0);
+            });
+        }
+    }
+
+    // Community: contributor count.
+    if let Ok(resp) = gloo_net::http::Request::get("https://api.eustress.dev/api/community/stats")
+        .send().await
+    {
+        if let Ok(data) = resp.json::<serde_json::Value>().await {
+            let users = data.get("total_users").and_then(|v| v.as_u64()).unwrap_or(0);
+            kpi.update(|k| k.total_contributors = users);
+        }
+    }
+
+    // Nodes: live active-node count from heartbeats.
+    if let Ok(resp) = gloo_net::http::Request::get("https://api.eustress.dev/api/node/stats")
+        .send().await
+    {
+        if let Ok(data) = resp.json::<serde_json::Value>().await {
+            let nodes = data.get("active_nodes").and_then(|v| v.as_u64()).unwrap_or(0);
+            kpi.update(|k| k.active_nodes = nodes);
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Main Component
 // -----------------------------------------------------------------------------
 
@@ -67,49 +140,15 @@ pub fn BlissPage() -> impl IntoView {
     let selected_tier = RwSignal::new(Option::<usize>::None);
     let custom_amount = RwSignal::new(String::new());
 
-    // KPI data — fetched live from Cloudflare Worker
+    // KPI data — fetched live from the witness, auto-refreshed every 20s so
+    // the dashboard stays near-real-time without a websocket. Every value is
+    // authoritative ledger state; nothing on this page is hardcoded.
     let kpi = RwSignal::new(BlissKpi::default());
-
-    // Fetch real data on load
-    leptos::task::spawn_local(async move {
-        // Get treasury balance + payout rate
-        if let Ok(resp) = gloo_net::http::Request::get("https://api.eustress.dev/api/payouts/rate")
-            .send().await
-        {
-            if let Ok(data) = resp.json::<serde_json::Value>().await {
-                let treasury = data.get("treasury_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let daily_drip = data.get("daily_drip_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let deposits = data.get("deposit_count").and_then(|v| v.as_u64()).unwrap_or(0);
-
-                kpi.update(|k| {
-                    k.treasury_balance = format!("${:.2} USD", treasury);
-                    k.daily_distribution = format!("{:.0} BLS", 13699.0); // Year 1 emission constant
-                    if daily_drip > 0.0 {
-                        k.avg_bliss_earned = format!("${:.4}/BLS", daily_drip / 13699.0);
-                    } else {
-                        k.avg_bliss_earned = "—".to_string();
-                    }
-                });
-            }
-        }
-
-        // Get community stats (contributors count)
-        if let Ok(resp) = gloo_net::http::Request::get("https://api.eustress.dev/api/community/stats")
-            .send().await
-        {
-            if let Ok(data) = resp.json::<serde_json::Value>().await {
-                let users = data.get("total_users").and_then(|v| v.as_u64()).unwrap_or(0);
-                kpi.update(|k| {
-                    k.total_contributors = users;
-                    // Initial supply + emissions (Year 1: 5% of 100M = 5M new)
-                    k.total_supply = "100,000,000 BLS".to_string();
-                    k.circulating_supply = format!("{} BLS", users * 0); // No distribution yet
-                    k.active_nodes = 0; // No node heartbeat system yet
-                    k.blocks_mined = 0;
-                });
-            }
-        }
+    leptos::task::spawn_local(refresh_bliss_kpis(kpi));
+    let poll = gloo_timers::callback::Interval::new(20_000, move || {
+        leptos::task::spawn_local(refresh_bliss_kpis(kpi));
     });
+    poll.forget(); // keep polling for the life of the page
 
     // Payment mode: one-time or recurring (monthly)
     let is_recurring = RwSignal::new(false);
@@ -177,7 +216,10 @@ pub fn BlissPage() -> impl IntoView {
                 {move || {
                     match _app_state.auth.get() {
                         AuthState::Authenticated(user) => {
-                            let balance = format!("{:.8}", user.bliss_balance as f64 / 1e18);
+                            // bliss_balance is whole BLS (see state::User). Show 4
+                            // decimals — NOT divided by 1e18; the ledger stores
+                            // whole BLS, not base units.
+                            let balance = format!("{:.4}", user.bliss_balance);
                             view! {
                                 <div class="bliss-account-panel">
                                     // Balance + Payout side by side
@@ -300,8 +342,8 @@ pub fn BlissPage() -> impl IntoView {
                                 <span class="kpi-value">{k.avg_bliss_earned.clone()}</span>
                             </div>
                             <div class="kpi-card">
-                                <span class="kpi-label">"Blocks Mined"</span>
-                                <span class="kpi-value">{format!("{}", k.blocks_mined)}</span>
+                                <span class="kpi-label">"Emission Rate"</span>
+                                <span class="kpi-value">{k.emission_rate.clone()}</span>
                             </div>
                             <div class="kpi-card">
                                 <span class="kpi-label">"Daily Distribution"</span>
@@ -492,10 +534,10 @@ pub fn BlissPage() -> impl IntoView {
                         <div class="why-icon">
                             <img src="/assets/icons/code.svg" alt="Transparent" />
                         </div>
-                        <h3>"Fully Open Source"</h3>
+                        <h3>"Fully Auditable Source"</h3>
                         <p>
                             "Every line of the blockchain, wallet, and distribution system "
-                            "is open source. Anyone can audit the code, run a fork, or "
+                            "is source-available. Anyone can audit the code, run a fork, or "
                             "propose changes. No black-box tokenomics."
                         </p>
                     </div>

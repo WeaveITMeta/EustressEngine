@@ -1,6 +1,8 @@
 # Rust build artifacts
 target/
 **/target/
+target-web/
+**/target-web/
 
 # Cargo lock for libraries (keep for binaries)
 # Cargo.lock

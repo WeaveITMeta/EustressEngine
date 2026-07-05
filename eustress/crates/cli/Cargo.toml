@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Headless CLI tool for Eustress Engine — agent-in-the-loop via Apache Iggy datastreams"
 authors = ["EustressEngine Contributors"]
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Shield-1.0.0"
 
 [[bin]]
 name = "eustress"

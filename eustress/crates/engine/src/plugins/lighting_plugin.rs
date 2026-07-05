@@ -121,7 +121,12 @@ fn sun_shadow_distance() -> f32 {
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
             .filter(|v| *v > 0.0)
-            .unwrap_or(200.0)
+            // Terrain-scale default (was 200 m, street-scale): a generated
+            // world spans kilometres, so 200 m left almost the whole surface
+            // shadowless and flat-looking. 1000 m + 4 cascades keeps near
+            // shadows crisp while distant relief still casts. Dense part-heavy
+            // scenes can dial back via EUSTRESS_SHADOW_DISTANCE.
+            .unwrap_or(1000.0)
     })
 }
 
@@ -198,11 +203,11 @@ fn hydrate_lighting_entities(
         // cuts the per-cascade caster set dramatically.
         // Env-tunable: EUSTRESS_SHADOW_DISTANCE (meters, default 200).
         let cascade_shadow_config = CascadeShadowConfigBuilder {
-            num_cascades: 2,
+            num_cascades: 4,
             minimum_distance: 0.1,
             maximum_distance: sun_shadow_distance(),
-            first_cascade_far_bound: 40.0,
-            overlap_proportion: 0.3,
+            first_cascade_far_bound: 90.0,
+            overlap_proportion: 0.25,
             ..default()
         }
         .build();

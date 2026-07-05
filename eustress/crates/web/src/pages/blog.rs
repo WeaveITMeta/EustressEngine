@@ -22,7 +22,7 @@ fn get_posts() -> Vec<BlogPost> {
         BlogPost {
             slug: "indie-studios",
             title: "The Roblox Model Is a Trap — And Every Studio That Doesn't See It Yet Is Already Inside the Cage",
-            excerpt: "A new simulation engine just went open source. It runs a full year of world simulation in one second, renders at AAA quality, and takes zero percent of your revenue. Here's why that matters more than any feature list.",
+            excerpt: "A new simulation engine just opened its source. It runs a full year of world simulation in one second, renders at AAA quality, and takes zero percent of your revenue. Here's why that matters more than any feature list.",
             audience: "Indie Studios",
             read_minutes: 12,
         },

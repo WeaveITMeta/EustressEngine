@@ -364,7 +364,13 @@ pub fn load_chunks_from_disk(
     if data.height_cache.is_empty() {
         data.resize_cache(config);
     }
-    
+    // Ensure the splat cache is sized (RGBA material weights per cache pixel)
+    // so per-chunk splatmap PNGs can be decoded into it below.
+    let splat_len = (data.cache_width as usize) * (data.cache_height as usize) * 4;
+    if data.splat_cache.len() != splat_len {
+        data.splat_cache = vec![0.0; splat_len];
+    }
+
     let mut loaded_chunks = Vec::new();
     
     // Scan for R16 files matching the x{N}_z{N}.r16 pattern
@@ -403,6 +409,23 @@ pub fn load_chunks_from_disk(
                     IVec2::new(chunk_x, chunk_z),
                     &heights,
                 );
+                // Load the matching splatmap (material weights) if present, so
+                // the mesh renders real materials instead of a height fallback.
+                #[cfg(feature = "image")]
+                {
+                    let splat_path = chunk_splatmap_path(terrain_dir, chunk_x, chunk_z);
+                    if splat_path.exists() {
+                        match load_chunk_splat_png(&splat_path, config.chunk_resolution) {
+                            Ok(px) => {
+                                write_splat_to_cache(data, config, IVec2::new(chunk_x, chunk_z), &px);
+                                data.splat_dirty = true;
+                            }
+                            Err(error) => {
+                                tracing::warn!("Splatmap x{}_z{}: {}", chunk_x, chunk_z, error);
+                            }
+                        }
+                    }
+                }
                 loaded_chunks.push(IVec2::new(chunk_x, chunk_z));
             }
             Err(error) => {
@@ -447,6 +470,68 @@ pub fn write_chunk_to_cache(
         if src_start + resolution <= heights.len() && dst_start + resolution <= data.height_cache.len() {
             data.height_cache[dst_start..dst_start + resolution]
                 .copy_from_slice(&heights[src_start..src_start + resolution]);
+        }
+    }
+}
+
+/// Decode a chunk splatmap PNG into per-pixel RGBA weights `[grass, rock,
+/// dirt, snow]` (channels / 255). Expects a `resolution × resolution` image,
+/// row-major z-then-x — the exact form [`save_chunk_r16`]'s sibling exporter
+/// writes. Requires the `image` feature.
+#[cfg(feature = "image")]
+fn load_chunk_splat_png(path: &Path, resolution: u32) -> Result<Vec<[f32; 4]>, String> {
+    let img = image::open(path)
+        .map_err(|e| format!("open splat PNG {:?}: {}", path, e))?
+        .to_rgba8();
+    if img.width() != resolution || img.height() != resolution {
+        return Err(format!(
+            "splat PNG {:?} is {}×{}, expected {}×{}",
+            path, img.width(), img.height(), resolution, resolution
+        ));
+    }
+    Ok(img
+        .pixels()
+        .map(|p| {
+            [
+                p[0] as f32 / 255.0,
+                p[1] as f32 / 255.0,
+                p[2] as f32 / 255.0,
+                p[3] as f32 / 255.0,
+            ]
+        })
+        .collect())
+}
+
+/// Write a chunk's decoded splat weights into `TerrainData.splat_cache` using
+/// the EXACT centred offset math as [`write_chunk_to_cache`] (chunk
+/// `(cx,cz)` → cache offset `((chunk_pos + half) * resolution)`), so the
+/// splat layer lines up 1:1 with the heightfield the mesh samples. Layout is
+/// `splat_cache[pixel * 4 + channel]`.
+#[cfg(feature = "image")]
+fn write_splat_to_cache(
+    data: &mut super::TerrainData,
+    config: &super::TerrainConfig,
+    chunk_pos: bevy::math::IVec2,
+    pixels: &[[f32; 4]],
+) {
+    let resolution = config.chunk_resolution as usize;
+    let cache_width = data.cache_width as usize;
+    let half_x = config.chunks_x as i32;
+    let half_z = config.chunks_z as i32;
+    let offset_x = ((chunk_pos.x + half_x) as usize) * resolution;
+    let offset_z = ((chunk_pos.y + half_z) as usize) * resolution;
+
+    for row in 0..resolution {
+        for col in 0..resolution {
+            let src = row * resolution + col;
+            let dst_pixel = (offset_z + row) * cache_width + (offset_x + col);
+            let dst = dst_pixel * 4;
+            if src < pixels.len() && dst + 3 < data.splat_cache.len() {
+                data.splat_cache[dst] = pixels[src][0];
+                data.splat_cache[dst + 1] = pixels[src][1];
+                data.splat_cache[dst + 2] = pixels[src][2];
+                data.splat_cache[dst + 3] = pixels[src][3];
+            }
         }
     }
 }

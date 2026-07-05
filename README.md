@@ -1,7 +1,7 @@
 # Eustress Engine
 
 <p align="center">
-  <img alt="License: Eustress Community" src="https://img.shields.io/badge/License-Eustress_Community-blue.svg">
+  <img alt="License: PolyForm Shield 1.0.0" src="https://img.shields.io/badge/License-PolyForm_Shield_1.0.0-blue.svg">
   <img alt="Made with Rust" src="https://img.shields.io/badge/Made_with-Rust-orange.svg?logo=rust&logoColor=white">
   <img alt="Bevy 0.19" src="https://img.shields.io/badge/Bevy-0.19-232326.svg">
   <img alt="UI: Slint" src="https://img.shields.io/badge/UI-Slint-2379f4.svg">
@@ -40,7 +40,7 @@ Eustress is **not (only) a game engine.** It's a general-purpose **simulation an
 
 ## Principles (the non-negotiables)
 
-1. **Source-available & forkable.** Not a slogan, but a velocity thesis: an open community ships faster than any closed team, and closing the source would kill the moat. Eustress stays free to read, fork, and modify; a commercial license is required only at large scale (see [License](#license)).
+1. **Source-available & forkable.** Not a slogan, but a velocity thesis: an open community ships faster than any closed team, and closing the source would kill the moat. Eustress stays free to read, fork, modify, and build products with; the only restricted use is competing with the engine itself (see [License](#license)).
 2. **The gold-collar unlock.** Engineers and scientists can rewrite the engine's **kernel laws** (the physics, chemistry, and rules that govern a simulation) to validate their _own_ models inside a real-time, photoreal world. This is the unlock everything else serves.
 3. **The two-token wall.** Buyer-money and builder-money never share a denomination, and the split that funds builders is **constitutional, not a tunable cut**, the lever Roblox kept for itself and refused here by design.
 4. **Merit only.** Standing comes from contribution, not connections: a meritocracy, automated and open, not an oligarchy.
@@ -154,6 +154,11 @@ Eustress is source-available and merit-based; that is the velocity thesis, not a
 
 ## License
 
-**Source-available and free** under the **Eustress Community License** — use it, modify it, fork it, and ship it at no cost. A **commercial license is required only once your product crosses a scale threshold** (currently **US $1M annual revenue _or_ 100k monthly active users** — see the [LICENSE](LICENSE) for the exact terms). The engine stays free for individuals, teams, and the community; large-scale commercial users support its development.
+Eustress is **dual-licensed**:
+
+- **[PolyForm Shield License 1.0.0](LICENSE)** — free for everyone, forever. Use it, modify it, fork it, ship and **sell what you build with it** at no cost and with no royalty. The single restriction: you may not use Eustress to provide a product that **competes with Eustress itself** (e.g. reselling the engine, editor, or platform as your own).
+- **[Eustress Commercial License](LICENSE-COMMERCIAL.md)** — a paid, negotiated license for organizations that need rights beyond the Shield grant: competitive-use rights, perpetual version grants, warranties, indemnification, or support SLAs. Contact **licensing@eustress.dev**.
+
+If your product is built *with* Eustress rather than being a substitute *for* Eustress, the free license covers you completely.
 
 > Third-party dependencies (Bevy, Slint, and other crates) retain their own permissive licenses (MIT / Apache-2.0).

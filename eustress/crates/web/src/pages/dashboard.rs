@@ -57,8 +57,9 @@ pub fn DashboardPage() -> impl IntoView {
     
     let bliss_balance = move || {
         match auth.get() {
-            AuthState::Authenticated(user) => user.bliss_balance,
-            _ => 0,
+            // Whole BLS with 2 decimals (fractional after daily distribution).
+            AuthState::Authenticated(user) => format!("{:.2}", user.bliss_balance),
+            _ => "0.00".to_string(),
         }
     };
     

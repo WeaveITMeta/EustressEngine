@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "High-performance networking for Eustress Engine - Lightyear + QUIC"
 authors = ["EustressEngine Contributors"]
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Shield-1.0.0"
 
 [dependencies]
 # Core Bevy 0.17
