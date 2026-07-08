@@ -62,6 +62,15 @@ pub struct PartClickExtras<'w, 's> {
     /// Lives in this bundle so the parent system stays under Bevy's
     /// 16-param ceiling.
     pub aabb_q: Query<'w, 's, &'static bevy::camera::primitives::Aabb>,
+    /// Which entities have an Avian collider. The OBB hit-test pass runs for
+    /// EVERY selectable part now (not just when the physics raycast missed
+    /// entirely), so parts with NO collider — e.g. an imported part whose
+    /// mirrored/degenerate mesh scale made a valid collider impossible — are
+    /// still clickable even when a collider'd part sits behind them. Collider'd
+    /// parts are skipped in that pass because the physics raycast already hit
+    /// them precisely; re-testing their (looser) OBB could wrongly grab one in
+    /// front of the part the ray actually strikes.
+    pub collider_q: Query<'w, 's, (), With<avian3d::prelude::Collider>>,
 }
 
 /// Supports both PartEntity (legacy) and Instance (modern) components
@@ -412,11 +421,21 @@ pub fn part_selection_system(
         }
     }
 
-    // OBB fallback: if physics raycast missed (entity has no Collider),
-    // test all selectable entities with oriented bounding box intersection.
-    if closest_hit.is_none() {
+    // OBB pass: test every selectable part WITHOUT a collider against its
+    // oriented bounding box, and keep it if it's closer than any physics hit.
+    // This runs ALWAYS (not only when the physics raycast missed everything):
+    // in a dense scene the ray almost always strikes *some* collider, so the
+    // old `closest_hit.is_none()` guard left every collider-less part
+    // permanently unclickable — including parts whose mirrored/degenerate mesh
+    // scale legitimately has no collider. Collider'd parts are skipped here
+    // (the physics raycast already resolved them precisely); merging by nearest
+    // distance means a collider-less part in FRONT of a collider'd one still
+    // wins the click.
+    {
         for (entity, _pe, _pem, _inst, transform, _mesh, basepart, _child_of) in part_entities_query.iter() {
             if !entity_part_ids.contains_key(&entity) { continue; }
+            // Skip parts the physics raycast already handled precisely.
+            if click_extras.collider_q.get(entity).is_ok() { continue; }
             let t = transform.compute_transform();
             // Bounds priority: BasePart.size (Parts) → render Aabb
             // (Gaussian Splat clouds — bevy_gaussian_splatting inserts a

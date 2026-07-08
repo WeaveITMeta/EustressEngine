@@ -255,56 +255,42 @@ impl Plugin for CameraControllerPlugin {
     }
 }
 
-/// Clips the 3D camera to a `ViewportBounds`-derived sub-rect so it renders
-/// only the area visible through the Slint overlay's transparent viewport
-/// hole. This is NOT just a GPU-cost optimization (a prior revision of this
-/// comment claimed that, and disabled the clip on that basis) — it's load-
-/// bearing for correctness: the camera's projection derives its ASPECT RATIO
-/// from its viewport rect (`Camera::logical_viewport_size()`), and the
-/// visible hole is narrower than the full window (Explorer + Properties
-/// panels eat into the width). Render the full window instead and the 3D
-/// scene's aspect ratio no longer matches the shape it's actually viewed
-/// through — it's permanently squished/stretched, not just after a resize.
+/// Keeps the 3D editor camera UN-clipped (full window). It renders DIRECTLY
+/// to the window surface; the Slint overlay composites the chrome on top with
+/// a transparent viewport hole, so the hole simply shows a CROP of the
+/// full-window 3D render.
 ///
-/// History: this WAS briefly disabled after a real bug — after a window
-/// resize the 3D content showed as a smaller "box within a box" inside the
-/// Slint viewport hole, not filling it. That was mis-diagnosed as this
-/// function reading a stale/wrong `ViewportBounds`. The actual cause: the
-/// Slint overlay's GPU texture was being resized in-place
-/// (`Image::resize()`), which Bevy doesn't reliably re-extract to a new
-/// wgpu::Texture (same class of issue as the `materials.get_mut()` bevy#17350
-/// workaround in `render_slint_to_texture`) — so the transparent hole was
-/// painted from a stale, stretched texture while this function was already
-/// applying the CORRECT fresh rect underneath it. Fixed at the source in
-/// `handle_window_resize` (slint_ui.rs) by recreating the texture as a new
-/// asset on every resize instead of mutating it in place; this clip was
-/// never the bug and is restored.
+/// Why NOT clip the camera to the Slint hole: a crop does not distort — a
+/// sphere stays round whether you view the whole framebuffer or a sub-rect of
+/// it (proven by the fact that click-selection stays pixel-accurate through
+/// `viewport_to_world` with `viewport == None`). So clipping buys no aspect
+/// correctness; it only risks the "black boxes at the viewport edges" bug:
+/// the clip rect comes from `ViewportBounds` (`viewport-sizer.absolute-
+/// position`), and whenever that lags or disagrees with where the Slint hole
+/// actually renders, the hole's top/left EDGES fall OUTSIDE the clipped rect
+/// and expose the black clear-color. Un-clipped, every window pixel has 3D
+/// behind the chrome, so a transparent gap or a hole edge shows the scene,
+/// never black.
+///
+/// The genuine "box within a box" that once tempted us to clip was a STALE
+/// overlay-texture bug (in-place `Image::resize()` not re-extracting to a new
+/// wgpu::Texture) — fixed at the source in `handle_window_resize`, not here.
+///
+/// This system only clears any stale clip a previous build left on the window
+/// camera; off-screen image cameras (the AI camera) keep their own full-image
+/// target and are never touched.
 fn update_camera_viewport_for_ui(
     mut camera_query: Query<(&mut Camera, &bevy::camera::RenderTarget), (With<Camera3d>, Without<crate::ui::slint_ui::SlintOverlayCamera>)>,
-    viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
 ) {
-    let Some(vb) = viewport_bounds else { return };
-
-    // Only clip if Slint has reported valid viewport dimensions
-    if vb.width < 10.0 || vb.height < 10.0 {
-        return;
-    }
-
-    let vp = bevy::camera::Viewport {
-        physical_position: UVec2::new(vb.x.max(0.0) as u32, vb.y.max(0.0) as u32),
-        physical_size: UVec2::new(vb.width as u32, vb.height as u32),
-        ..default()
-    };
-
     for (mut camera, target) in camera_query.iter_mut() {
-        // Only the WINDOW camera gets the Slint-fitted viewport. Off-screen
-        // image cameras (e.g. the AI camera) must render their FULL image — a
-        // window-sized viewport overflows the image's bounds and panics the
-        // `set_scissor_rect` validation.
+        // Image-target cameras (e.g. the AI camera) manage their own full
+        // image and must not be forced to the window's None viewport.
         if matches!(target, bevy::camera::RenderTarget::Image(_)) {
             continue;
         }
-        camera.viewport = Some(vp.clone());
+        if camera.viewport.is_some() {
+            camera.viewport = None;
+        }
     }
 }
 
@@ -595,6 +581,7 @@ fn eustress_camera_controls(
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
     studio_state: Option<Res<crate::ui::StudioState>>,
     ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
+    select_state: Option<Res<crate::select_tool::SelectToolState>>,
 ) {
     let (mut cam, transform, camera, global_transform) = match cam_query.single_mut() {
         Ok(c) => c,
@@ -695,6 +682,16 @@ fn eustress_camera_controls(
         scroll_delta = 0.0;
     }
 
+    // Same neutralization, for the same reason, while a node is being
+    // dragged through empty space: `select_tool::handle_drag_distance_wheel`
+    // has its own MessageReader<MouseWheel> and reads these same notches to
+    // change the drag leash length instead. Without this, one scroll notch
+    // would both change the leash AND fly the camera forward/back.
+    let dragging_node = select_state.as_ref().is_some_and(|s| s.dragging && s.drag_started);
+    if dragging_node {
+        scroll_delta = 0.0;
+    }
+
     // LOCAL SPACE: Get camera's actual local axes for intuitive movement
     let cam_forward = transform.forward();
     let cam_right = transform.right();
@@ -776,52 +773,48 @@ fn eustress_camera_controls(
         scroll_delta = 0.0;
     }
     
-    // Zoom TOWARD the mouse cursor position (Blender-style)
+    // CONTINUOUS fly-zoom (mouse wheel) — translate the whole camera rig
+    // THROUGH the world, never a bounded orbit radius.
+    //
+    // Every prior version zoomed by changing `cam.distance` (the orbit radius),
+    // clamped to MIN/MAX_CAMERA_DISTANCE. That is inherently "min/max based":
+    // because `update_eustress_camera_transform` derives the camera position as
+    // `pivot + distance * offset` and always `look_at(pivot)`, shrinking
+    // `distance` only crawls the camera toward a FIXED pivot and slams into the
+    // MIN wall — you can never fly *through* what you're looking at. That is the
+    // "ball on a track / can't zoom further" feel. Making the per-step factor
+    // exponential (the last attempt) didn't change this — it still bottoms out
+    // at MIN_CAMERA_DISTANCE.
+    //
+    // The right model: scroll TRANSLATES `cam.pivot` along the view (the pivot
+    // moves through the world), holding `distance` constant. Since the camera
+    // position tracks `pivot + distance * offset`, the entire rig slides by the
+    // same vector — a genuine, unbounded dolly. Scroll in and you fly straight
+    // past objects; scroll out and you retreat forever. No clamp, no wall,
+    // continuous at any scale because the step is a constant FRACTION of the
+    // current view distance (so it feels identical at 1 m or 10 km).
     if scroll_delta != 0.0 {
-        // Get cursor position for zoom-toward-cursor
-        let cursor_pos = windows.single().ok().and_then(|w| w.cursor_position());
+        // Per-notch travel as a fraction of the current view distance. `1 - 0.9^n`
+        // ⇒ scroll-in (+) moves forward, scroll-out (−) moves back, symmetric and
+        // smooth across a burst of merged wheel events in one frame.
+        const ZOOM_STEP: f32 = 0.9; // ~10% of view distance per line at zoom_speed = 1.0
+        let travel = cam.distance * (1.0 - ZOOM_STEP.powf(scroll_delta * cam.zoom_speed));
 
-        // Truly exponential, uncapped step. Each scroll notch
-        // multiplies `distance` by a constant factor, so scrolling
-        // feels identical whether the camera is 1 m or 10 km from the
-        // pivot, and accumulated scroll in a single frame (Windows
-        // merges bursts of wheel events) scales smoothly with the
-        // burst size.
-        //
-        // The old formula was `(1.0 - scroll * 0.1 * zoom_speed)
-        // .max(0.5).min(2.0)` — linear in `scroll`, clamped to a 2×
-        // zoom per frame. Rapid spins flat-lined at that 2× cap, which
-        // is the "0-1 track / can't zoom further" feel the user
-        // reported. `MIN_CAMERA_DISTANCE`/`MAX_CAMERA_DISTANCE` still
-        // clamp the final distance so the camera can't go through the
-        // origin or outside the world, but the per-step factor is
-        // unbounded — fast scrolls now traverse the full allowed
-        // range in a few notches.
-        const ZOOM_STEP: f32 = 0.9; // 10% per line at zoom_speed = 1.0
-        let zoom_factor = ZOOM_STEP.powf(scroll_delta * cam.zoom_speed);
-        let old_distance = cam.distance;
-        let new_distance = (old_distance * zoom_factor).clamp(MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
-        
-        // Zoom toward cursor: move pivot toward the point under the cursor
-        if let Some(cursor) = cursor_pos {
-            // Get ray from camera through cursor
-            if let Ok(ray) = camera.viewport_to_world(global_transform, cursor) {
-                // Find a point along the ray at the current distance (approximate target point)
-                // This is the point we want to zoom toward
-                let zoom_target = ray.origin + *ray.direction * old_distance;
-                
-                // Calculate how much to move the pivot toward the zoom target
-                // When zooming in (new_distance < old_distance), move pivot toward target
-                // When zooming out (new_distance > old_distance), move pivot away from target
-                let zoom_amount = 1.0 - (new_distance / old_distance);
-                
-                // Move pivot toward the zoom target proportionally
-                let pivot_delta = (zoom_target - cam.pivot) * zoom_amount * 0.5;
-                cam.pivot += pivot_delta;
-            }
-        }
-        
-        cam.distance = new_distance;
+        // Fly along the cursor ray when we have one (keeps whatever is under the
+        // cursor roughly pinned on screen — the Blender/Unreal feel); otherwise
+        // straight along the view forward. `distance` is deliberately untouched,
+        // so orbit (Alt+drag) and pan keep a sensible radius after flying.
+        let dir = windows
+            .single()
+            .ok()
+            .and_then(|w| w.cursor_position())
+            .and_then(|cursor| camera.viewport_to_world(global_transform, cursor).ok())
+            .map(|ray| *ray.direction)
+            .unwrap_or(*cam_forward);
+
+        cam.pivot += dir * travel;
+        cam.current_view = CameraView::Custom;
+        cam.animating = false;
     }
 
     // Skip keyboard controls if UI wants keyboard input
@@ -861,11 +854,19 @@ fn eustress_camera_controls(
     if keys.pressed(KeyCode::KeyD) {
         cam.pivot += strafe_right * move_speed;
     }
+    // Q/E (+ Space) move along the CAMERA's up axis, not world-Y. So the
+    // vertical keys are relative to where you're looking: pitched level, E
+    // rises straight up; pitched fully down, the camera's up vector points
+    // forward, so E flies you forward toward the ground you're looking at
+    // (and Q backward/up), instead of always sliding straight up the world
+    // Y axis. `cam_up` (transform.up()) is already unit-length and is the
+    // same vector the middle-drag pan uses for its vertical, so the fly and
+    // pan verticals stay consistent.
     if keys.pressed(KeyCode::KeyQ) {
-        cam.pivot.y -= move_speed; // Down
+        cam.pivot -= *cam_up * move_speed; // Down (camera-relative)
     }
     if keys.pressed(KeyCode::KeyE) || keys.pressed(KeyCode::Space) {
-        cam.pivot.y += move_speed; // Up
+        cam.pivot += *cam_up * move_speed; // Up (camera-relative)
     }
     // `-` / `=` are intentionally NOT bound to camera vertical here.
     // Those keys belong to `Action::NudgeUp` / `Action::NudgeDown` —

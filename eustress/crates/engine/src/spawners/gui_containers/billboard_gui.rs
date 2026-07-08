@@ -84,6 +84,18 @@ impl ClassSpawner for BillboardGuiSpawner {
             gui.units_offset = [v.x, v.y, v.z];
         }
         if let Some(v) = props.get_i32("gui.z_index") { gui.z_index = v; }
+        // The billboard's actual canvas size (UDim2: Scale = studs for
+        // BillboardGui specifically, Offset = pixels). Without this,
+        // `gui.size` stays at `BillboardGui::default()`'s fixed value
+        // regardless of what was authored — see the `import_from_toml`
+        // comment on `size_scale` for the full story.
+        {
+            let scale = props.get_vec2("gui.size_scale").unwrap_or([0.0, 0.0]);
+            let offset = props.get_vec2("gui.size_offset").unwrap_or([0.0, 0.0]);
+            if scale != [0.0, 0.0] || offset != [0.0, 0.0] {
+                gui.size = eustress_common::ui_types::UDim2::new(scale[0], offset[0], scale[1], offset[1]);
+            }
+        }
 
         // Mirror spawn::spawn_billboard_gui: position offset from parent
         // comes from `units_offset`.
@@ -173,6 +185,13 @@ impl ClassSpawner for BillboardGuiSpawner {
                 if let Some(v) = props.get_f32("gui.brightness") { gui.brightness = v; }
                 if let Some(v) = props.get_f32("gui.light_influence") { gui.light_influence = v; }
                 if let Some(v) = props.get_i32("gui.z_index") { gui.z_index = v; }
+                let scale = props.get_vec2("gui.size_scale");
+                let offset = props.get_vec2("gui.size_offset");
+                if scale.is_some() || offset.is_some() {
+                    let [sx, sy] = scale.unwrap_or([gui.size.x.scale, gui.size.y.scale]);
+                    let [ox, oy] = offset.unwrap_or([gui.size.x.offset, gui.size.y.offset]);
+                    gui.size = eustress_common::ui_types::UDim2::new(sx, ox, sy, oy);
+                }
             }
         }
         false
@@ -254,6 +273,34 @@ impl ClassSpawner for BillboardGuiSpawner {
             if let Some(v) = gui.get("z_index").and_then(|v| v.as_integer()) {
                 bag.set("gui.z_index", PropertyValue::Int(v as i32));
             }
+            // `size_scale` / `size_offset` — the UDim2 that determines the
+            // billboard's canvas size. Was missing entirely: every imported
+            // BillboardGui silently fell back to the component's hardcoded
+            // default (a fixed 100x30 px, offset-only UDim2) regardless of
+            // its actually-authored size, because this read never existed.
+            // Since every billboard converged on the SAME wide/flat default
+            // shape no matter what it was meant to be, this is what produced
+            // the "text looks Y-axis-squished" report — different billboards
+            // with wildly different authored proportions (verified directly
+            // against two on-disk _instance.toml files: size_scale [8.0,
+            // 2.4] and [20.0, 6.0]) both rendered at the identical default
+            // size, not because of any X/Y-asymmetric math bug (the
+            // conversion pipeline itself proved fully proportional under
+            // tracing) but because the real per-entity value was never read.
+            if let Some(v) = gui.get("size_scale").and_then(|v| v.as_array()) {
+                if v.len() == 2 {
+                    let x = v[0].as_float().unwrap_or(0.0) as f32;
+                    let y = v[1].as_float().unwrap_or(0.0) as f32;
+                    bag.set("gui.size_scale", PropertyValue::Vector2([x, y]));
+                }
+            }
+            if let Some(v) = gui.get("size_offset").and_then(|v| v.as_array()) {
+                if v.len() == 2 {
+                    let x = v[0].as_float().unwrap_or(0.0) as f32;
+                    let y = v[1].as_float().unwrap_or(0.0) as f32;
+                    bag.set("gui.size_offset", PropertyValue::Vector2([x, y]));
+                }
+            }
         }
         bag
     }
@@ -291,6 +338,18 @@ impl ClassSpawner for BillboardGuiSpawner {
                         toml::Value::Float(v.x as f64),
                         toml::Value::Float(v.y as f64),
                         toml::Value::Float(v.z as f64),
+                    ]);
+                    target.insert(field.to_string(), arr);
+                }
+                // Was missing entirely — `gui.size_scale`/`gui.size_offset`
+                // (added alongside the import_from_toml fix) are Vector2,
+                // and without this arm the `_` catch-all would silently
+                // drop them from the written TOML even though export_bag
+                // now correctly populates them.
+                PropertyValue::Vector2(v) => {
+                    let arr = toml::Value::Array(vec![
+                        toml::Value::Float(v[0] as f64),
+                        toml::Value::Float(v[1] as f64),
                     ]);
                     target.insert(field.to_string(), arr);
                 }
@@ -337,6 +396,12 @@ fn export_bag(world: &World, entity: Entity) -> PropertyBag {
             )),
         );
         bag.set("gui.z_index", PropertyValue::Int(gui.z_index));
+        // MUST be written — without it, saving through this spawner drops
+        // the billboard's authored size on the next round-trip (the bag
+        // would omit it entirely, and the writer only emits keys present
+        // in the bag). See `import_from_toml`'s `size_scale` comment.
+        bag.set("gui.size_scale", PropertyValue::Vector2([gui.size.x.scale, gui.size.y.scale]));
+        bag.set("gui.size_offset", PropertyValue::Vector2([gui.size.x.offset, gui.size.y.offset]));
     }
     bag
 }

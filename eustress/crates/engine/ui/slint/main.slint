@@ -1641,6 +1641,15 @@ export component StudioWindow inherits Window {
                         y: 0px;
                         width: parent.width - 72px;
                         height: 35px;
+                        // Opaque tab-bar background. Without this the strip is
+                        // transparent, so the empty area to the right of the
+                        // tabs (and the gaps around the pinned tab / new-tab /
+                        // globe controls) composited to whatever is BEHIND the
+                        // Slint overlay there — the black window clear-color,
+                        // reading as "strange black boxes" along the top of the
+                        // viewport. This bar sits ABOVE the 3D viewport hole, so
+                        // it must be solid chrome like every other panel.
+                        background: Theme.background-secondary;
 
                     HorizontalLayout {
                         width: parent.width;

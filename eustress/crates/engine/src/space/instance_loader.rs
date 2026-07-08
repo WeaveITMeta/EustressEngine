@@ -168,6 +168,26 @@ fn safe_collider_from(
     if !r_len_sq.is_finite() || r_len_sq < 1e-8 {
         return None;
     }
+    // The Transform's OWN scale must be finite AND strictly positive on every
+    // axis. This is the entity's actual `Transform.scale` (pass the SAME
+    // transform the entity is spawned with — e.g. `render_transform`, which
+    // folds in a DataMesh `mesh_visual_scale` that a mirrored import can make
+    // NEGATIVE). Avian's `Collider` on-insert hook overwrites the collider's
+    // scale with the entity's `GlobalTransform.scale()`; a negative axis flips
+    // the collider's half-extents so its AABB has `min > max`, and Avian's
+    // broadphase `grow()` panics the instant the collider is inserted
+    // (`collider/mod.rs:512: b.min.cmple(b.max).all()`) — synchronously, in
+    // `drain_pending_spawns`'s command flush, before any Update-schedule
+    // safety-net can run. Returning `None` here skips physics for such a
+    // (mirrored / degenerate) part — it still spawns and renders, just without
+    // a collider — which is the only sane option since Avian cannot represent a
+    // negatively-scaled collider anyway.
+    let s = transform.scale;
+    if !s.x.is_finite() || !s.y.is_finite() || !s.z.is_finite()
+        || s.x <= 0.0 || s.y <= 0.0 || s.z <= 0.0
+    {
+        return None;
+    }
     // Every half-extent component must be finite AND strictly positive.
     let hx = if scale.x.is_finite() { (scale.x * 0.5).abs().max(MIN_HALF) } else { return None; };
     let hy = if scale.y.is_finite() { (scale.y * 0.5).abs().max(MIN_HALF) } else { return None; };
@@ -330,27 +350,47 @@ impl FiniteOr for f32 {
     }
 }
 
-/// Per-frame safety-net: walk every entity that has a `RigidBody`
-/// (i.e. is being tracked by Avian) and sanitize its `Transform` so
-/// no NaN/Inf component slips into Avian's `Position` /
-/// `Rotation` / `Collider` AABB math. Catches drag-handler bugs we
-/// haven't identified yet, plus any third-party plugin that writes
-/// a degenerate Transform.
+/// Per-frame safety-net: walk every LOADED SCENE entity (`Instance`) and
+/// sanitize its `Transform` so no NaN/Inf/negative component slips into
+/// Avian's `Position` / `Rotation` / `Collider` AABB math. Catches
+/// drag-handler bugs we haven't identified yet, plus degenerate imported
+/// data.
 ///
-/// Runs in `Update` — Avian's `assert_components_finite` runs in its
-/// physics schedule which kicks AFTER `Update`, so cleaning up here
-/// reaches the assertion with finite values.
+/// **Why `With<Instance>` and not `With<RigidBody>`.** Avian's `Collider`
+/// `on_insert` sets the collider scale from the entity's *world*
+/// `GlobalTransform.scale()`, and the broadphase then asserts the world
+/// AABB is valid (`min <= max`). A collider entity itself may be perfectly
+/// clean, yet inherit a degenerate world scale from a NON-collider ANCESTOR
+/// (an imported Model/Folder container) whose TOML transform was never
+/// sanitized — a negative axis (Roblox mirror) or a zero/NaN — flipping the
+/// child's world AABB and panicking Avian mid-load
+/// (`collider/mod.rs:512: b.min.cmple(b.max).all()`). A `RigidBody`-only
+/// scan can't see those ancestors, so it must cover the whole loaded
+/// hierarchy. `Instance` is the marker every loaded part/model/folder
+/// carries (superset of the rigid-body parts), so cleaning ancestors here
+/// keeps every child's propagated `GlobalTransform` finite + positive.
+///
+/// Runs in `Update` — the local fix lands before that frame's PostUpdate
+/// transform propagation, so the world transforms Avian consumes are clean.
+///
+/// **Repairs.** Non-finite translation → finite fallback; non-finite/near-
+/// zero rotation → identity; and scale: any non-finite, negative, or near-
+/// zero axis → `abs().max(min)`. Making a negative ancestor scale positive
+/// un-mirrors that (broken-for-physics-anyway) imported model — an
+/// acceptable cosmetic cost versus a hard crash. The aggressive
+/// `MAX_WORLD_EXTENT` position clamp stays gated to actual rigid bodies
+/// (`Has<RigidBody>`) so far-but-valid container/model positions in large
+/// worlds (extent can exceed 5000 studs) are never disturbed.
 ///
 /// **Read-then-fix split.** The hot path (no degenerate transforms)
 /// uses `Ref<Transform>` so iteration is strictly read-only. Only
 /// entities that need a fix are collected into a small buffer; the
-/// second query takes `&mut Transform` and patches them. This keeps
-/// the per-frame cost on a 50k-anchored-statics world a pure finite
-/// check with zero write-locking and zero change-tick activity for
-/// the common case where everything is already valid.
+/// second query takes `&mut Transform` and patches them. Combined with the
+/// `is_changed()` gate this keeps the per-frame cost a pure finite/sign
+/// check that is a no-op for every already-valid transform.
 pub fn sanitize_part_transforms_safety_net(
     mut params: ParamSet<(
-        Query<(Entity, Ref<Transform>), With<avian3d::prelude::RigidBody>>,
+        Query<(Entity, Ref<Transform>, Has<avian3d::prelude::RigidBody>), With<eustress_common::classes::Instance>>,
         Query<&mut Transform>,
     )>,
     // Throttle handle for the AGGREGATE summary log. We must NEVER log per
@@ -374,7 +414,7 @@ pub fn sanitize_part_transforms_safety_net(
 
     {
         let reader = params.p0();
-        for (entity, t) in reader.iter() {
+        for (entity, t, has_rb) in reader.iter() {
             // Only inspect transforms WRITTEN this frame. A value
             // cannot become NaN / out-of-range without the Transform
             // being changed; `Ref::is_changed()` is true on add (so a
@@ -388,10 +428,14 @@ pub fn sanitize_part_transforms_safety_net(
                 continue;
             }
             let pos = t.translation;
+            // Non-finite translation is always fatal (NaN propagates into the
+            // world AABB). The out-of-extent CLAMP, however, only applies to
+            // real rigid bodies — a valid container/model legitimately placed
+            // beyond MAX_WORLD_EXTENT in a large world must not be yanked back.
             let pos_bad = !pos.is_finite()
-                || pos.x.abs() > MAX_WORLD_EXTENT
-                || pos.y.abs() > MAX_WORLD_EXTENT
-                || pos.z.abs() > MAX_WORLD_EXTENT;
+                || (has_rb && (pos.x.abs() > MAX_WORLD_EXTENT
+                    || pos.y.abs() > MAX_WORLD_EXTENT
+                    || pos.z.abs() > MAX_WORLD_EXTENT));
             let new_translation = if pos_bad {
                 let clamped = safe_translation(pos, Vec3::ZERO);
                 if sample.is_none() {
@@ -416,10 +460,22 @@ pub fn sanitize_part_transforms_safety_net(
                 None
             };
 
+            // Scale must be finite AND strictly positive on every axis:
+            // Avian multiplies the collider by `GlobalTransform.scale()`, and a
+            // negative axis inverts the resulting AABB (min > max) → broadphase
+            // panic, while a zero/NaN axis collapses or NaNs it. Repair any bad
+            // axis to `abs().max(MIN)`; valid positive scales are left untouched
+            // (no-op), so normal parts are unaffected.
+            const MIN_SCALE: f32 = 1e-3;
             let scale = t.scale;
-            let new_scale = if !scale.is_finite() {
+            let scale_bad = !scale.is_finite()
+                || scale.x < MIN_SCALE
+                || scale.y < MIN_SCALE
+                || scale.z < MIN_SCALE;
+            let new_scale = if scale_bad {
                 scale_fixes += 1;
-                Some(Vec3::ONE)
+                let fix_axis = |v: f32| if v.is_finite() { v.abs().max(MIN_SCALE) } else { 1.0 };
+                Some(Vec3::new(fix_axis(scale.x), fix_axis(scale.y), fix_axis(scale.z)))
             } else {
                 None
             };
@@ -2209,14 +2265,19 @@ pub fn spawn_instance(
         // no-op (gate is false) for normal scenes and when `world-db` is off.
         let huge_scene = crate::space::active_db::streaming_active();
         if instance.properties.can_collide && !huge_scene {
-            if let Some(collider) = safe_collider_from(part_shape, scale, &transform) {
+            // Validate `render_transform` — the transform the ENTITY actually
+            // carries (and thus what Avian reads via GlobalTransform), NOT the
+            // unadjusted `transform`. `render_transform` folds in a possibly-
+            // negative `mesh_visual_scale`; validating it here is what catches
+            // the mirrored-mesh collider AABB panic.
+            if let Some(collider) = safe_collider_from(part_shape, scale, &render_transform) {
                 ec.insert((collider, RigidBody::Static));
                 // Imported PhysicalProperties → Avian physics material.
                 // Additive: no-op when `[properties.physics]` is absent.
                 apply_physics_material(&mut ec, instance.properties.physics.as_ref());
             } else {
-                warn!("Skipping collider for '{}' — non-finite transform/scale (scale={:?} pos={:?} rot={:?})",
-                    name, scale, transform.translation, transform.rotation);
+                warn!("Skipping collider for '{}' — non-finite/negative transform scale (size={:?} render_scale={:?})",
+                    name, scale, render_transform.scale);
             }
         }
 
@@ -2362,14 +2423,17 @@ pub fn spawn_instance(
     // PhysicalProperties are skipped along with the body they'd attach to.
     let huge_scene = crate::space::active_db::streaming_active();
     if instance.properties.can_collide && !huge_scene {
-        if let Some(collider) = safe_collider_from(part_shape, scale, &transform) {
+        // Validate `render_transform` (the entity's actual transform / what
+        // Avian reads), not the unadjusted `transform` — see the custom-mesh
+        // branch above for why a negative folded scale panics Avian at insert.
+        if let Some(collider) = safe_collider_from(part_shape, scale, &render_transform) {
             ec.insert((collider, RigidBody::Static));
             // Imported PhysicalProperties → Avian physics material.
             // Additive: no-op when `[properties.physics]` is absent.
             apply_physics_material(&mut ec, instance.properties.physics.as_ref());
         } else {
-            warn!("Skipping collider for '{}' — non-finite transform/scale (scale={:?} pos={:?} rot={:?})",
-                name, scale, transform.translation, transform.rotation);
+            warn!("Skipping collider for '{}' — non-finite/negative transform scale (size={:?} render_scale={:?})",
+                name, scale, render_transform.scale);
         }
     }
 

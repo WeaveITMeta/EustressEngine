@@ -1298,13 +1298,20 @@ fn spawn_text_label_element(
     let mut label = TextLabel::default();
     label.text = text_value;
     label.text_color3 = text_color3;
-    label.text_transparency = text_props.map(|t| 1.0 - t.text_color[3]).unwrap_or(0.0);
+    label.text_transparency = text_props.map(|t| t.text_transparency).unwrap_or(0.0);
     label.font = font;
     label.font_size = font_size;
     label.text_x_alignment = x_align;
     label.text_y_alignment = y_align;
     label.background_color3 = [gui.background_color[0], gui.background_color[1], gui.background_color[2]];
-    label.background_transparency = 1.0 - gui.background_color[3];
+    // Use the dedicated `background_transparency` field — NOT `background_color[3]`.
+    // Imported GUI colors are 3-element `[r,g,b]`, so the deserialized alpha is
+    // always 1.0; reading it here forced every label opaque (transparency 0.0),
+    // so a `background_transparency = 1.0` label rendered as an opaque white box
+    // over white text (invisible). The billboard sync systems propagate this
+    // class value straight into `GuiElementDisplay.bg_color`, so getting it right
+    // here is what actually reaches the renderer.
+    label.background_transparency = gui.background_transparency;
     label.border_color3 = [gui.border_color[0], gui.border_color[1], gui.border_color[2]];
     label.border_size_pixel = gui.border_size as i32;
     // Roblox-parity Position/Size as UDim2 — single source of truth on disk.

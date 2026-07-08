@@ -1961,8 +1961,8 @@ export component Ribbon inherits Rectangle {
                     label: "Edit";
                     IconButton { icon: @image-url("../../assets/icons/ui/group.svg"); label: "Group"; shortcut: root.shortcut-group; tooltip: "Group"; tint: #90caf9; clicked => { root.on-group(); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/ungroup.svg"); label: "Ungroup"; shortcut: root.shortcut-ungroup; tooltip: "Ungroup"; tint: #90caf9; clicked => { root.on-ungroup(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/lock.svg"); label: "Lock"; shortcut: root.shortcut-lock; tooltip: "Lock"; tint: #ffcc80; clicked => { root.on-menu-action("edit:lock"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/unlock.svg"); label: "Unlock"; shortcut: root.shortcut-unlock; tooltip: "Unlock"; tint: #ffcc80; clicked => { root.on-menu-action("edit:unlock"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/lock.svg"); label: "Lock"; shortcut: root.shortcut-lock; tooltip: "Lock — hover a part, click to toggle its locked state"; tint: #ffcc80; clicked => { root.on-menu-action("edit:lock"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/unlock.svg"); label: "Unlock All"; shortcut: root.shortcut-unlock; tooltip: "Unlock All — unlock every part in the Space"; tint: #ffcc80; clicked => { root.on-menu-action("edit:unlock"); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/anchor.svg"); label: "Anchor"; shortcut: root.shortcut-anchor; tooltip: "Toggle Anchor"; tint: #ce93d8; clicked => { root.on-menu-action("edit:anchor"); } }
                 }
                 

@@ -79,6 +79,15 @@ pub struct SelectToolState {
     // Debug visualization
     pub debug_hit_point: Option<Vec3>,
     pub debug_hit_normal: Option<Vec3>,
+    /// Camera-relative free-space drag: distance from the camera to the
+    /// grabbed entity, captured when the drag starts and adjustable by
+    /// mouse wheel while dragging (see `handle_drag_distance_wheel`).
+    /// Only used by the empty-space fallback (no surface under cursor) —
+    /// surface-follow dragging is unaffected. Recomputing the drag plane
+    /// from this distance and the CURRENT camera transform every frame
+    /// (not the grab-time transform) is what lets the dragged part follow
+    /// the camera through WASD movement and look-around mid-drag.
+    pub drag_camera_distance: f32,
 }
 
 impl Default for SelectToolState {
@@ -102,6 +111,7 @@ impl Default for SelectToolState {
             last_hit_entity: None,
             debug_hit_point: None,
             debug_hit_normal: None,
+            drag_camera_distance: 10.0,
         }
     }
 }
@@ -144,8 +154,11 @@ impl Plugin for SelectToolPlugin {
             .init_resource::<SelectToolState>()
             .init_resource::<BoxSelectionState>()
             .add_systems(Update, (
+                handle_drag_distance_wheel
+                    .before(handle_select_drag),
                 handle_select_drag
-                    .after(crate::ui::slint_ui::update_slint_ui_focus),
+                    .after(crate::ui::slint_ui::update_slint_ui_focus)
+                    .after(handle_drag_distance_wheel),
                 handle_box_selection
                     .after(handle_select_drag),
                 debug_drag_gizmos.after(handle_box_selection),
@@ -154,6 +167,44 @@ impl Plugin for SelectToolPlugin {
             // to avoid blocking the chain on main thread exclusivity
             .add_systems(Update, render_box_selection.after(handle_box_selection));
     }
+}
+
+/// While a node is being dragged through empty space (see the camera-relative
+/// fallback in `handle_select_drag`), the mouse wheel changes the LEASH
+/// LENGTH instead of zooming the camera — same pattern as
+/// `part_selection::hover_resize_system` repurposing the wheel for the
+/// Ctrl+Shift+Alt resize chord, just gated on drag state instead of a key
+/// chord. `eustress_camera_controls` separately zeroes its own scroll delta
+/// while `state.dragging` is true, so the same notch never ALSO zooms the
+/// camera.
+///
+/// Direction, as specified: scrolling down brings the part closer, scrolling
+/// up sends it farther — the opposite sign relationship from the camera's
+/// own fly-zoom (where positive/scroll-up moves the camera forward/closer).
+/// That inversion is deliberate, not a bug — flag it if it feels backwards.
+fn handle_drag_distance_wheel(
+    mut ev_wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    mut state: ResMut<SelectToolState>,
+) {
+    use bevy::input::mouse::MouseScrollUnit;
+
+    let mut scroll = 0.0_f32;
+    for ev in ev_wheel.read() {
+        scroll += if ev.unit == MouseScrollUnit::Line { ev.y } else { ev.y * 0.1 };
+    }
+    if scroll == 0.0 {
+        return;
+    }
+    if !(state.dragging && state.drag_started) {
+        return;
+    }
+
+    // Same exponential shape as the camera's fly-zoom (ZOOM_STEP = 0.9) for
+    // a consistent feel, sign flipped: scroll up (+) grows the leash,
+    // scroll down (-) shrinks it.
+    const LEASH_STEP: f32 = 0.9;
+    let multiplier = LEASH_STEP.powf(-scroll);
+    state.drag_camera_distance = (state.drag_camera_distance * multiplier).clamp(0.5, 5000.0);
 }
 
 /// Debug gizmos to visualize raycast hits and surface normals during drag
@@ -407,6 +458,11 @@ fn handle_select_drag(
                 state.initial_position = transform.translation;
                 state.initial_cursor_pos = cursor_pos; // Store initial cursor position
                 state.drag_offset = transform.translation - ray.origin;
+                // Lock the camera-relative drag distance at grab time — the
+                // empty-space fallback re-derives its plane from this distance
+                // and the LIVE camera transform every frame (see below), not
+                // from this grab-time position, so WASD/look mid-drag works.
+                state.drag_camera_distance = (transform.translation - camera_transform.translation()).length().max(0.1);
                 
                 // Store initial positions/rotations of ALL selected parts
                 state.initial_positions.clear();
@@ -577,36 +633,32 @@ fn handle_select_drag(
                     } else { target }
                 } else {
                     // ── No drop on empty space ───────────────────────────
-                    // Cursor is over the skybox. Roblox keeps the part at
-                    // its current height and slides it on the horizontal
-                    // plane through its initial Y. Don't fall to Y=0.
+                    // Cursor is over the skybox / nothing to land on.
                     //
-                    // The initial Y is the part's CURRENT height, NOT the
-                    // grid-snapped one — but the grid snap below WILL
-                    // round it to a clean Y (e.g. 1.755 → 2.0 with
-                    // snap_size=1). That's exactly what the user wants:
-                    // off-grid parts converge to the grid as soon as
-                    // they're dragged. Earlier code locked Y at the
-                    // initial value, blocking the snap from ever fixing
-                    // off-grid drift.
+                    // Camera-relative free-space drag: instead of a
+                    // world-locked horizontal plane (the old behavior —
+                    // fine for building on a baseplate, wrong for floating
+                    // mind-map nodes with nothing underneath them), hold
+                    // the part at a FIXED DISTANCE from the camera, like
+                    // leading it on a rope. The plane is rebuilt from the
+                    // camera's transform THIS FRAME (not the grab-time
+                    // transform), so WASD movement and look-around during
+                    // the drag naturally carry the part with you — it
+                    // falls out of recomputing every frame, no special
+                    // casing needed.
                     state.debug_hit_point = None;
                     state.debug_hit_normal = None;
 
-                    let plane_y = initial_leader_pos.y;
-                    if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction,
-                        Vec3::new(0.0, plane_y, 0.0), Vec3::Y)
-                    {
-                        let t = t.clamp(0.0, 2000.0);
+                    let cam_pos = camera_transform.translation();
+                    let cam_fwd = *camera_transform.forward();
+                    let plane_point = cam_pos + cam_fwd * state.drag_camera_distance;
+
+                    if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, plane_point, cam_fwd) {
                         let cursor_world = ray.origin + *ray.direction * t;
                         // Glue the grabbed point to the cursor on this
-                        // horizontal plane. Y stays at plane_y for now;
-                        // the world-frame grid snap below will lock it
-                        // to a clean grid Y on every frame.
-                        Vec3::new(
-                            cursor_world.x - grab_offset_world.x,
-                            plane_y,
-                            cursor_world.z - grab_offset_world.z,
-                        )
+                        // camera-facing plane — full 3D offset, unlike the
+                        // old horizontal plane which only tracked X/Z.
+                        cursor_world - grab_offset_world
                     } else {
                         initial_leader_pos
                     }

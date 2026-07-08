@@ -4,7 +4,7 @@
 use bevy::prelude::*;
 #[allow(unused_imports)]
 use bevy::render::RenderPlugin;
-use bevy::gltf::{GltfExtras, GltfSceneExtras, GltfMeshExtras, GltfMaterialExtras, GltfMeshName, GltfMaterialName};
+use bevy::gltf::{GltfExtras, GltfSceneExtras, GltfMeshExtras, GltfMaterialExtras, GltfSceneName, GltfMeshName, GltfMaterialName};
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin, EntityCountDiagnosticsPlugin};
 // Window icon: embedded in exe via winres (build.rs), runtime set in setup_slint_overlay
 use eustress_engine::plugins::lighting_plugin::LightingPlugin;
@@ -249,8 +249,14 @@ fn main() {
         // Aabb (frustum-culling bounds; moved to `bevy_camera` in Bevy 0.18) —
         // glb mesh entities carry it in the scene graph.
         .register_type::<bevy::camera::primitives::Aabb>()
-        // gltf naming components the loader stamps on mesh/material scene
-        // entities — the last category a static glb scene carries.
+        // gltf naming components the loader stamps on scene/mesh/material
+        // entities — the last category a static glb scene carries. All THREE
+        // of bevy_gltf's name types must be registered: `GltfSceneName` sits
+        // on the glb scene-graph ROOT, so loading any glb-backed Space (e.g.
+        // imported Roblox meshes) reflects it and the WorldAsset spawner
+        // panics ("unregistered type GltfSceneName") mid-load if it's absent —
+        // even though the deeper mesh/material names were registered.
+        .register_type::<GltfSceneName>()
         .register_type::<GltfMeshName>()
         .register_type::<GltfMaterialName>()
         // PlayerService for play mode character spawning

@@ -75,34 +75,44 @@ const PIXELS_PER_METER: f32 = 50.0;
 /// blocks line-of-sight" UX.
 const Z_INDEX_METRES_PER_UNIT: f32 = 0.5;
 
-/// Atlas tile pixel width. Sized to fit billboards up to ~5 m × 5 m
-/// world quads without aspect distortion (5 m × 50 px/m = 250 logical
-/// pixels, fits comfortably in 256). Oversized billboards are clamped
-/// at render time and a one-shot warn is emitted.
-const TILE_W: u32 = 256;
+/// Atlas tile pixel width. Sized to fit billboards up to ~2.5 m × 2.5 m
+/// world quads without aspect distortion (2.5 m × 50 px/m = 125 logical
+/// pixels, fits comfortably in 128). Oversized billboards are clamped
+/// at render time and a one-shot warn is emitted. Shrunk from 256: the
+/// vast majority of observed billboard content renders into a ~100×30 px
+/// rect (Roblox-authored TextLabel default), far smaller than even this
+/// tile — the extra headroom above ~130px was mostly wasted atlas space.
+const TILE_W: u32 = 128;
 /// Tile pixel height. Equal to `TILE_W` (square tiles) so vertical
-/// canvas dimensions up to ~5 m fit without clamping. Asymmetric tiles
-/// (e.g. `TILE_H = 128`) double slot count but stretch any billboard
-/// whose canvas exceeds the tile height — vertical text gets aspect-
-/// distorted by `canvas_h / TILE_H`, which makes `Size.Y.Scale > 2.56`
-/// (= 128 / 50) visibly ugly. Square tiles trade slot density for
-/// distortion-free rendering up to 5 studs per axis.
-const TILE_H: u32 = 256;
-/// Atlas columns. Fixed — `try_grow` only adds rows, so column count
-/// stays constant and every existing tile's `umin/umax` survives a grow
-/// untouched (only `vmin/vmax` need a refresh).
-const ATLAS_COLS: u32 = 16;
-/// Initial row count. 16 cols × 16 rows = 256 slots, 4096×4096 RGBA =
-/// 64 MiB CPU/GPU. Same memory footprint as a 16×32 × 256×128 atlas,
-/// just rebalanced toward taller tiles. `try_grow` doubles rows on
-/// demand (up to `MAX_ATLAS_DIM`), so hitting 256 slots isn't a hard
-/// ceiling.
-const INITIAL_ATLAS_ROWS: u32 = 16;
-/// Hard cap on atlas dimension in pixels. wgpu's per-device
-/// `max_texture_dimension_2d` is typically 8192 on integrated GPUs and
-/// 16384 on discrete. We pick the conservative limit so grow can't
-/// produce a texture the GPU rejects. Beyond this we refuse to spawn.
-const MAX_ATLAS_DIM: u32 = 8192;
+/// canvas dimensions up to ~2.5 m fit without clamping. Asymmetric tiles
+/// stretch any billboard whose canvas exceeds the tile height — vertical
+/// text gets aspect-distorted by `canvas_h / TILE_H`. Square tiles trade
+/// slot density for distortion-free rendering up to 2.5 studs per axis.
+const TILE_H: u32 = 128;
+/// Atlas columns — `cols` on [`BillboardAtlas`], NOT a constant. Fixed for
+/// the atlas's lifetime once chosen (`try_grow` only adds rows, so every
+/// existing tile's `umin/umax` survives a grow untouched — only `vmin/vmax`
+/// need a refresh), but the VALUE is decided once at startup from the
+/// actual GPU's `max_texture_dimension_2d` (see `init_billboard_atlas`),
+/// not hardcoded — a hardcoded value sized for a large atlas would make the
+/// very FIRST texture allocation exceed an integrated GPU's limit, since
+/// width (`cols * TILE_W`) is fixed at construction and never shrinks.
+///
+/// Initial row count. `cols` cols × 8 rows — `try_grow` doubles rows on
+/// demand up to `atlas.max_dim / TILE_H`, so the larger ceiling is only
+/// allocated when a dense scene actually needs it; normal (non-dense)
+/// scenes pay nothing extra for the higher cap.
+const INITIAL_ATLAS_ROWS: u32 = 8;
+/// ASPIRATIONAL ceiling on atlas dimension in pixels — the actual enforced
+/// limit is `BillboardAtlas.max_dim` (runtime, computed once in
+/// `init_billboard_atlas` as `min(MAX_ATLAS_DIM, device.limits().max_texture_dimension_2d)`).
+/// wgpu's per-device `max_texture_dimension_2d` is typically 8192 on
+/// integrated GPUs and 16384 on discrete — hardcoding 16384 would silently
+/// break atlas creation on integrated GPUs, so this constant is only a
+/// target; the real cap always respects what the actual device supports,
+/// falling back to the historically-safe 8192 if a device limit can't be
+/// read at all (should not happen once rendering is initialized).
+const MAX_ATLAS_DIM: u32 = 16384;
 
 // ── NonSend resources ──────────────────────────────────────────────────────
 
@@ -132,8 +142,19 @@ pub struct BillboardAtlas {
     /// Atlas Image asset shared by every billboard's bind group.
     pub texture: Handle<Image>,
     /// Current row count. Grows on demand (rows doubled) when
-    /// `free_slots` is exhausted, up to `MAX_ATLAS_DIM / TILE_H`.
+    /// `free_slots` is exhausted, up to `max_dim / TILE_H`.
     pub rows: u32,
+    /// Atlas column count. Fixed for the atlas's lifetime, chosen once at
+    /// construction from the actual device's texture limit (see
+    /// `init_billboard_atlas`) — NOT the `ATLAS_COLS` constant, which no
+    /// longer exists precisely so this can't silently drift out of sync
+    /// with `max_dim`.
+    pub cols: u32,
+    /// Enforced atlas dimension ceiling in pixels for THIS device, ≤
+    /// `MAX_ATLAS_DIM`. Computed once at construction from
+    /// `RenderDevice::limits().max_texture_dimension_2d` — see that
+    /// constant's doc comment for why this can't be a compile-time value.
+    pub max_dim: u32,
     /// CPU-side staging buffer (RGBA8, premultiplied).
     /// Length = `atlas_w_px() * atlas_h_px() * 4`.
     pub cpu_buf: Vec<u8>,
@@ -142,12 +163,30 @@ pub struct BillboardAtlas {
     /// True when at least one tile changed this frame; tells the upload
     /// system to copy the CPU buffer into the GPU image.
     pub dirty: bool,
+    /// `Entity -> slot` for every currently-tiled billboard, written the
+    /// instant `spawn_billboard_render_state` assigns a slot. `RemovedComponents`
+    /// only yields the entity ID, never the component's last value, so
+    /// `release_atlas_slots` needs this to know WHICH slot index to free.
+    /// Previously that lookup was a `Local` cache in `release_atlas_slots`
+    /// rebuilt each frame by scanning `Query<(Entity, &BillboardAtlasTile)>`
+    /// — an entity allocated and evicted between two runs of that scan (a
+    /// dense scene under eviction pressure churns exactly this fast) was
+    /// never observed WITH its tile, so its removal found no cached slot
+    /// and the index was silently lost — never freed, never reused. In a
+    /// scene with far more billboards than slots this leaked the entire
+    /// pool down to whatever small fraction happened to survive long
+    /// enough to be scanned, which is exactly the "slotted=196 of 1024,
+    /// free_slots=0" state that made nearby billboards never render.
+    /// Writing this map at the allocation site instead of reconstructing it
+    /// from a live scan closes the race: an entity cannot be evicted before
+    /// it is recorded, because recording happens at the moment of grant.
+    pub slot_of: std::collections::HashMap<Entity, u32>,
 }
 
 impl BillboardAtlas {
-    fn new(texture: Handle<Image>, rows: u32) -> Self {
-        let total_pixels = (Self::atlas_w_px_static() * Self::atlas_h_px_for_rows(rows)) as usize;
-        let mut free_slots: Vec<u32> = (0..(ATLAS_COLS * rows)).collect();
+    fn new(texture: Handle<Image>, rows: u32, cols: u32, max_dim: u32) -> Self {
+        let total_pixels = ((cols * TILE_W) * Self::atlas_h_px_for_rows(rows)) as usize;
+        let mut free_slots: Vec<u32> = (0..(cols * rows)).collect();
         // Reverse so `pop()` hands out slot 0 first (debugging convenience —
         // first billboard occupies the top-left tile, easy to find on a
         // texture dump).
@@ -155,26 +194,27 @@ impl BillboardAtlas {
         Self {
             texture,
             rows,
+            cols,
+            max_dim,
             cpu_buf: vec![0u8; total_pixels * 4],
             free_slots,
             dirty: true,
+            slot_of: std::collections::HashMap::new(),
         }
     }
 
-    #[inline] pub fn atlas_w_px_static() -> u32 { ATLAS_COLS * TILE_W }
     #[inline] pub fn atlas_h_px_for_rows(rows: u32) -> u32 { rows * TILE_H }
-    #[inline] pub fn atlas_w_px(&self) -> u32 { Self::atlas_w_px_static() }
+    #[inline] pub fn atlas_w_px(&self) -> u32 { self.cols * TILE_W }
     #[inline] pub fn atlas_h_px(&self) -> u32 { Self::atlas_h_px_for_rows(self.rows) }
-    #[inline] pub fn total_slots(&self) -> u32 { ATLAS_COLS * self.rows }
+    #[inline] pub fn total_slots(&self) -> u32 { self.cols * self.rows }
 
     /// Compute UV bounds in atlas-relative `[0,1]` for a tile slot.
-    /// Non-static because `vmin/vmax` depend on the current row count.
     fn slot_uv(&self, slot: u32) -> (Vec2, Vec2) {
-        let col = slot % ATLAS_COLS;
-        let row = slot / ATLAS_COLS;
-        let umin = col as f32 / ATLAS_COLS as f32;
+        let col = slot % self.cols;
+        let row = slot / self.cols;
+        let umin = col as f32 / self.cols as f32;
         let vmin = row as f32 / self.rows as f32;
-        let umax = (col + 1) as f32 / ATLAS_COLS as f32;
+        let umax = (col + 1) as f32 / self.cols as f32;
         let vmax = (row + 1) as f32 / self.rows as f32;
         (Vec2::new(umin, vmin), Vec2::new(umax, vmax))
     }
@@ -191,7 +231,7 @@ impl BillboardAtlas {
     fn try_grow(&mut self, images: &mut Assets<Image>) -> Option<u32> {
         let new_rows = self.rows.saturating_mul(2);
         let new_height_px = Self::atlas_h_px_for_rows(new_rows);
-        if new_height_px > MAX_ATLAS_DIM {
+        if new_height_px > self.max_dim {
             return None;
         }
 
@@ -203,7 +243,7 @@ impl BillboardAtlas {
             return None;
         };
         image.resize(bevy::render::render_resource::Extent3d {
-            width: Self::atlas_w_px_static(),
+            width: self.atlas_w_px(),
             height: new_height_px,
             depth_or_array_layers: 1,
         });
@@ -211,14 +251,13 @@ impl BillboardAtlas {
         // Grow our CPU staging buffer in lockstep. Same layout: linear
         // RGBA, atlas_w_px stride. New rows zero-init at the tail.
         let new_size_bytes =
-            (Self::atlas_w_px_static() as usize) * (new_height_px as usize) * 4;
+            (self.atlas_w_px() as usize) * (new_height_px as usize) * 4;
         self.cpu_buf.resize(new_size_bytes, 0);
 
         // Push the new slot indices. The old rows still hold their
-        // slots (0..ATLAS_COLS*old_rows); new range is
-        // (ATLAS_COLS*old_rows .. ATLAS_COLS*new_rows).
-        let old_slot_max = ATLAS_COLS * self.rows;
-        let new_slot_max = ATLAS_COLS * new_rows;
+        // slots (0..cols*old_rows); new range is (cols*old_rows .. cols*new_rows).
+        let old_slot_max = self.cols * self.rows;
+        let new_slot_max = self.cols * new_rows;
         // Reverse so lower-index new slots pop first.
         for slot in (old_slot_max..new_slot_max).rev() {
             self.free_slots.push(slot);
@@ -230,9 +269,9 @@ impl BillboardAtlas {
         info!(
             "🪧 atlas grew: {} rows → {} rows ({} → {} slots, {}×{} → {}×{} px)",
             old_rows, new_rows,
-            old_rows * ATLAS_COLS, new_slot_max,
-            Self::atlas_w_px_static(), Self::atlas_h_px_for_rows(old_rows),
-            Self::atlas_w_px_static(), new_height_px,
+            old_rows * self.cols, new_slot_max,
+            self.atlas_w_px(), Self::atlas_h_px_for_rows(old_rows),
+            self.atlas_w_px(), new_height_px,
         );
         Some(new_rows)
     }
@@ -457,30 +496,52 @@ fn spawn_billboard_render_state(
         .find(|(_, c)| c.order == 0)
         .map(|(gt, _)| gt.translation());
 
-    for (entity, marker, global_tf, mut transform) in &mut billboards {
-        // Distance gate (skip far billboards — they cost a slot we can't spare
-        // and would never be repainted anyway).
-        if let Some(cp) = cam_pos {
+    // NEAREST-FIRST allocation. Under pressure (more in-radius billboards than
+    // free atlas slots) the scarce slots MUST go to the billboards closest to
+    // the camera, not whatever the ECS happens to iterate first. Pass 1 gathers
+    // every in-radius un-slotted candidate with its squared distance (read-only),
+    // Pass 2 allocates in ascending-distance order so the nearest labels win.
+    // Paired with `recycle_offscreen_billboard_slots`'s farthest-first eviction,
+    // the labelled set tracks the N nearest as the camera moves — the "load
+    // nearest first" behaviour for a >slot-count label cluster.
+    let mut candidates: Vec<(Entity, f32)> = Vec::new();
+    for (entity, _m, global_tf, transform) in billboards.iter() {
+        let d = if let Some(cp) = cam_pos {
             let bb_pos = global_tf
                 .map(|g: &GlobalTransform| g.translation())
                 .unwrap_or_else(|| transform.translation);
-            if bb_pos.distance_squared(cp) > SPAWN_ALLOC_RADIUS_SQ {
+            let d = bb_pos.distance_squared(cp);
+            // Distance gate — far billboards cost a slot we can't spare and are
+            // never repainted anyway.
+            if d > SPAWN_ALLOC_RADIUS_SQ {
                 continue;
             }
-        }
+            d
+        } else {
+            0.0 // no camera yet (startup) — allocate ungated; order irrelevant
+        };
+        candidates.push((entity, d));
+    }
+    candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    for (cand_entity, _dist) in candidates {
+        let Ok((entity, marker, global_tf, mut transform)) = billboards.get_mut(cand_entity)
+        else {
+            continue;
+        };
         // Atlas exhausted? Stop scanning the rest of the (potentially huge)
         // orphan set this frame and warn exactly once. Without this, a scene
         // with more billboards than slots (Vehicle Sim: ~17K vs 512) emits one
         // `error!` per orphan per frame — ~16.5K log lines/frame, the bulk of
         // this system's 34 ms in a DEBUG build. A freed slot (despawn /
         // distance churn) re-arms allocation next frame.
-        if atlas.free_slots.is_empty() && atlas.rows >= MAX_ATLAS_DIM / TILE_H {
+        if atlas.free_slots.is_empty() && atlas.rows >= atlas.max_dim / TILE_H {
             if !*atlas_full_warned {
                 warn!(
                     "\u{1FAA7} billboard atlas full ({} slots, {} px max) \u{2014} \
                      near-camera billboards beyond capacity won't render until \
                      a slot frees; far billboards are deferred until in range",
-                    atlas.total_slots(), MAX_ATLAS_DIM,
+                    atlas.total_slots(), atlas.max_dim,
                 );
                 *atlas_full_warned = true;
             }
@@ -518,7 +579,7 @@ fn spawn_billboard_render_state(
                         // the grow. Apply the same half-texel inset as
                         // the initial spawn so no bilinear bleed at
                         // tile boundaries.
-                        let atlas_w_px = BillboardAtlas::atlas_w_px_static() as f32;
+                        let atlas_w_px = atlas.atlas_w_px() as f32;
                         let atlas_h_px = atlas.atlas_h_px() as f32;
                         let half_u = 0.5 / atlas_w_px;
                         let half_v = 0.5 / atlas_h_px;
@@ -543,8 +604,8 @@ fn spawn_billboard_render_state(
                         // a log line each.
                         if !*atlas_full_warned {
                             warn!(
-                                "\u{1FAA7} billboard {:?}: atlas at MAX_ATLAS_DIM ({} px), {} slots used \u{2014} not rendering",
-                                entity, MAX_ATLAS_DIM, atlas.total_slots(),
+                                "\u{1FAA7} billboard {:?}: atlas at max_dim ({} px), {} slots used \u{2014} not rendering",
+                                entity, atlas.max_dim, atlas.total_slots(),
                             );
                             *atlas_full_warned = true;
                         }
@@ -575,7 +636,7 @@ fn spawn_billboard_render_state(
         // inward by half a texel on each side guarantees every
         // bilinear sample's 4 neighbors are inside the canvas region.
         let (atlas_w_px, atlas_h_px) = (
-            BillboardAtlas::atlas_w_px_static() as f32,
+            atlas.atlas_w_px() as f32,
             atlas.atlas_h_px() as f32,
         );
         let half_texel_u = 0.5 / atlas_w_px;
@@ -607,6 +668,10 @@ fn spawn_billboard_render_state(
                 last_label_hash: 0,
             },
         ));
+        // Record the grant immediately — see `BillboardAtlas::slot_of` doc
+        // comment for why this must happen HERE, not be reconstructed later
+        // from a live component scan.
+        atlas.slot_of.insert(entity, slot);
         if !marker.face_camera {
             ec.insert(crate::billboard_pipeline::BillboardLockAxis {
                 y_axis: false,
@@ -622,36 +687,171 @@ fn spawn_billboard_render_state(
 /// Reclaim atlas slots from despawned billboards. We watch
 /// `RemovedComponents<BillboardAtlasTile>` so the slot returns to the free
 /// stack regardless of whether the entire entity went away or just the
-/// tile component was removed.
+/// tile component was removed. `RemovedComponents` only ever yields the
+/// entity ID (the component's last value is already gone by the time this
+/// runs), so the slot index comes from `atlas.slot_of` — written at grant
+/// time in `spawn_billboard_render_state`, not reconstructed here from a
+/// live scan (see that field's doc comment for the leak this replaces).
 fn release_atlas_slots(
     mut atlas: NonSendMut<BillboardAtlas>,
     mut removed: RemovedComponents<BillboardAtlasTile>,
-    // We can't read components on already-despawned entities, so the slot
-    // index needs to be cached BEFORE removal. We piggyback on the entity
-    // → slot map maintained as systems run.
-    mut slot_map: Local<HashMap<Entity, u32>>,
-    live: Query<(Entity, &BillboardAtlasTile)>,
 ) {
-    // Refresh the cache from the live query so newly-spawned tiles are
-    // tracked. Entity → slot is stable, so we never overwrite once set.
-    for (e, tile) in live.iter() {
-        slot_map.entry(e).or_insert(tile.slot);
-    }
     for entity in removed.read() {
-        if let Some(slot) = slot_map.remove(&entity) {
+        if let Some(slot) = atlas.slot_of.remove(&entity) {
             atlas.free_slots.push(slot);
             // Zero the tile so a future occupant doesn't see ghost pixels
             // before its first render.
-            let atlas_w_px = BillboardAtlas::atlas_w_px_static();
-            zero_tile_in_atlas(&mut atlas.cpu_buf, slot, atlas_w_px);
+            let atlas_w_px = atlas.atlas_w_px();
+            let cols = atlas.cols;
+            zero_tile_in_atlas(&mut atlas.cpu_buf, slot, atlas_w_px, cols);
             atlas.dirty = true;
         }
     }
 }
 
-fn zero_tile_in_atlas(cpu_buf: &mut [u8], slot: u32, atlas_w_px: u32) {
-    let col = slot % ATLAS_COLS;
-    let row = slot / ATLAS_COLS;
+/// Distance-based atlas-slot RECYCLING — the counterpart to
+/// `spawn_billboard_render_state`'s near-camera allocation gate.
+///
+/// The allocator only *gates* far billboards from initially taking a slot
+/// (300-stud radius); it never RECLAIMS one, and `cull_billboards_by_distance`
+/// only toggles `Visibility` by each billboard's own `MaxDistance`. So once the
+/// first `total_slots()` billboards come within range they hold every atlas
+/// slot PERMANENTLY (until the entity despawns). In a dense, label-heavy scene
+/// (a 100K+-part MindSpace) that starves every other billboard — the user sees
+/// "only some text shows." This frees a billboard's slot the moment it leaves
+/// the render neighbourhood so the scarce pool FOLLOWS the camera:
+///   • removing `BillboardAtlasTile` returns the slot via `release_atlas_slots`
+///     (which handles component-removal, not just despawn);
+///   • removing `BillboardRenderHandle` re-qualifies the entity for the
+///     allocator's `Without<BillboardRenderHandle>` query, so it re-allocates
+///     (and repaints — see the `last_label_hash == 0` exception in
+///     `update_and_render_billboards`) the instant it is back in range.
+///
+/// The evict radius (360) sits OUTSIDE the 300-stud alloc/repaint radius so a
+/// billboard hovering at the boundary can't thrash allocate↔evict every frame.
+fn recycle_offscreen_billboard_slots(
+    mut commands: Commands,
+    atlas: NonSend<BillboardAtlas>,
+    cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
+    slotted: Query<(Entity, &GlobalTransform), With<BillboardAtlasTile>>,
+    // Un-slotted billboards competing for the scarce slots — needed to compute
+    // the nearest-N cutoff so a moving camera hands slots to CLOSER labels.
+    unslotted: Query<
+        (&GlobalTransform, &BillboardGuiMarker),
+        Without<BillboardAtlasTile>,
+    >,
+    // Throttled diagnostic (~once/2s) so a "nearest billboards still don't
+    // render" report is diagnosable from one log capture instead of another
+    // round of guessing: are there simply MORE in-range candidates than
+    // slots (expected starvation), or is eviction failing to turn over the
+    // slotted set as the camera moves (a real bug)?
+    time: Res<Time>,
+    mut diag_timer: Local<f32>,
+) {
+    // No camera yet (startup) → keep whatever was allocated so first labels show.
+    let Some(cam_pos) = cameras
+        .iter()
+        .find(|(_, c)| c.order == 0)
+        .map(|(gt, _)| gt.translation())
+    else {
+        return;
+    };
+    const RENDER_RADIUS_SQ: f32 = 300.0 * 300.0;
+    // 360² — hysteresis band beyond the 300² alloc/render radius, so a billboard
+    // hovering at the boundary can't thrash allocate↔evict every frame.
+    const EVICT_RADIUS_SQ: f32 = 360.0 * 360.0;
+
+    let mut to_evict: Vec<Entity> = Vec::new();
+
+    // (1) Roaming recycle — free any slot whose billboard left the neighbourhood.
+    for (entity, gt) in &slotted {
+        if gt.translation().distance_squared(cam_pos) > EVICT_RADIUS_SQ {
+            to_evict.push(entity);
+        }
+    }
+
+    // (2) Nearest-first under pressure. When MORE billboards sit inside the
+    // render radius than the atlas has slots, keep only the N NEAREST: find the
+    // N-th nearest squared distance across every in-range candidate (slotted +
+    // un-slotted) and evict any slotted billboard beyond it. The distance-sorted
+    // allocator then refills the freed slots with the nearest un-slotted labels,
+    // so a dense cluster shows its CLOSEST labels rather than an arbitrary
+    // first-come subset — and the labelled set follows the camera.
+    let n = atlas.total_slots() as usize;
+    if n > 0 {
+        let evict_set: std::collections::HashSet<Entity> = to_evict.iter().copied().collect();
+        let mut dists: Vec<f32> = Vec::new();
+        for (entity, gt) in &slotted {
+            if evict_set.contains(&entity) {
+                continue;
+            }
+            let d = gt.translation().distance_squared(cam_pos);
+            if d <= RENDER_RADIUS_SQ {
+                dists.push(d);
+            }
+        }
+        for (gt, marker) in &unslotted {
+            if !marker.visible {
+                continue;
+            }
+            let d = gt.translation().distance_squared(cam_pos);
+            if d <= RENDER_RADIUS_SQ {
+                dists.push(d);
+            }
+        }
+        if dists.len() > n {
+            // Partition so the N nearest occupy [0..n); `dists[n-1]` is the
+            // N-th nearest = the keep/evict cutoff.
+            dists.select_nth_unstable_by(n - 1, |a, b| {
+                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let threshold = dists[n - 1];
+            for (entity, gt) in &slotted {
+                if evict_set.contains(&entity) {
+                    continue;
+                }
+                if gt.translation().distance_squared(cam_pos) > threshold {
+                    to_evict.push(entity);
+                }
+            }
+        }
+    }
+
+    *diag_timer += time.delta_secs();
+    if *diag_timer >= 2.0 {
+        *diag_timer = 0.0;
+        info!(
+            "🪧 recycle diag: slotted={} unslotted_visible_in_range={} evicting_this_frame={} free_slots={} total_slots={}",
+            slotted.iter().count(),
+            unslotted.iter().filter(|(gt, m)| m.visible
+                && gt.translation().distance_squared(cam_pos) <= RENDER_RADIUS_SQ).count(),
+            to_evict.len(),
+            atlas.free_slots.len(),
+            atlas.total_slots(),
+        );
+    }
+
+    for entity in to_evict {
+        // `remove` silently ignores components the entity doesn't have (e.g.
+        // `BillboardLockAxis` on a camera-facing billboard). Removing
+        // `BillboardAtlasTile` returns the slot via `release_atlas_slots`;
+        // removing `BillboardRenderHandle` re-qualifies it for the allocator.
+        commands.entity(entity).remove::<(
+            BillboardAtlasTile,
+            BillboardRenderHandle,
+            crate::billboard_pipeline::Billboard,
+            crate::billboard_pipeline::BillboardMesh,
+            crate::billboard_pipeline::BillboardAtlasTexture,
+            crate::billboard_pipeline::BillboardUv,
+            crate::billboard_pipeline::BillboardDepth,
+            crate::billboard_pipeline::BillboardLockAxis,
+        )>();
+    }
+}
+
+fn zero_tile_in_atlas(cpu_buf: &mut [u8], slot: u32, atlas_w_px: u32, cols: u32) {
+    let col = slot % cols;
+    let row = slot / cols;
     let ox = (col * TILE_W) as usize;
     let oy = (row * TILE_H) as usize;
     let stride = (atlas_w_px as usize) * 4;
@@ -750,7 +950,7 @@ fn sync_billboard_properties(
             // tile boundary pulls in the neighboring tile's content
             // and leaks fragments of unrelated billboards onto the
             // quad.
-            let atlas_w_px = BillboardAtlas::atlas_w_px_static() as f32;
+            let atlas_w_px = atlas.atlas_w_px() as f32;
             let atlas_h_px = atlas.atlas_h_px() as f32;
             let half_u = 0.5 / atlas_w_px;
             let half_v = 0.5 / atlas_h_px;
@@ -1009,7 +1209,15 @@ fn update_and_render_billboards(
         }
         // Up to date for the current epoch? (Covers both "painted" and
         // "verified-unchanged-by-hash" — either way the tile is current.)
-        if painted_at.get(&entity) == Some(&*epoch) {
+        // EXCEPTION: a freshly-(re)allocated tile has `last_label_hash == 0`
+        // and its atlas slot was just zeroed, so it MUST paint even if this
+        // entity's stale `painted_at` still matches the current epoch — which
+        // happens when `recycle_offscreen_billboard_slots` evicted this
+        // billboard and it re-entered range without any intervening GUI change
+        // (static scene + camera roam). Without this exception a recycled
+        // billboard would re-appear blank. Steady-state tiles have a non-zero
+        // hash so they still take the cheap epoch skip.
+        if handle.last_label_hash != 0 && painted_at.get(&entity) == Some(&*epoch) {
             continue;
         }
         let children_of =
@@ -1069,8 +1277,9 @@ fn update_and_render_billboards(
             render_element(&mut pixmap, &f.elem, f.abs_x, f.abs_y, f.clip_rect, &mut text_state);
         }
 
-        let atlas_w_px = BillboardAtlas::atlas_w_px_static();
-        blit_tile_into_atlas(&mut atlas.cpu_buf, &pixmap, tile.slot, atlas_w_px);
+        let atlas_w_px = atlas.atlas_w_px();
+        let cols = atlas.cols;
+        blit_tile_into_atlas(&mut atlas.cpu_buf, &pixmap, tile.slot, atlas_w_px, cols);
         atlas.dirty = true;
         let _ = entity;
     }
@@ -1078,9 +1287,9 @@ fn update_and_render_billboards(
 
 /// Copy the rendered tile pixmap into the atlas CPU buffer at the slot's
 /// pixel offset. Both buffers are RGBA8 row-major.
-fn blit_tile_into_atlas(cpu_buf: &mut [u8], tile_pixmap: &Pixmap, slot: u32, atlas_w_px: u32) {
-    let col = slot % ATLAS_COLS;
-    let row = slot / ATLAS_COLS;
+fn blit_tile_into_atlas(cpu_buf: &mut [u8], tile_pixmap: &Pixmap, slot: u32, atlas_w_px: u32, cols: u32) {
+    let col = slot % cols;
+    let row = slot / cols;
     let ox = (col * TILE_W) as usize;
     let oy = (row * TILE_H) as usize;
     let atlas_stride = (atlas_w_px as usize) * 4;
@@ -1514,8 +1723,8 @@ fn meters_from_pixels(size_px: [f32; 2]) -> (f32, f32) {
     (size_px[0] / PIXELS_PER_METER, size_px[1] / PIXELS_PER_METER)
 }
 
-fn create_atlas_image(images: &mut Assets<Image>, rows: u32) -> Handle<Image> {
-    let width = BillboardAtlas::atlas_w_px_static();
+fn create_atlas_image(images: &mut Assets<Image>, rows: u32, cols: u32) -> Handle<Image> {
+    let width = cols * TILE_W;
     let height = BillboardAtlas::atlas_h_px_for_rows(rows);
     let size = Extent3d {
         width,
@@ -2226,7 +2435,27 @@ impl Plugin for BillboardGuiPlugin {
                     // one before downstream systems run.
                     ensure_billboard_marker,
                     sync_billboard_class_to_marker.after(ensure_billboard_marker),
-                    spawn_billboard_render_state.after(sync_billboard_class_to_marker),
+                    // Free slots from billboards that left the camera
+                    // neighbourhood BEFORE reclaiming, so the pool recycles as
+                    // the camera roams a dense scene (see the fn doc). MUST
+                    // run before `spawn_billboard_render_state` — this pair
+                    // previously ran AFTER allocation (contradicting this very
+                    // comment), so a frame's evictions were never visible to
+                    // that same frame's allocation pass. In a scene where the
+                    // atlas sits permanently at capacity (a dense MindSpace:
+                    // 12K+ billboards vs. a 1024-slot ceiling), the slotted
+                    // set could only turn over if `recycle`'s OWN "roaming"
+                    // pass (evict anyone beyond 360 studs of the CURRENT
+                    // camera) fired — the "nearest-first under pressure" pass
+                    // never got a chance to hand a freed slot to a newly-near
+                    // candidate within the frame it was freed. Net effect: a
+                    // camera that jumped to a new, distant area could see
+                    // zero billboard text there indefinitely, because the
+                    // slotted set from the old area only released slots one
+                    // roaming-eviction-lag at a time instead of all at once.
+                    recycle_offscreen_billboard_slots.after(sync_billboard_class_to_marker),
+                    release_atlas_slots.after(recycle_offscreen_billboard_slots),
+                    spawn_billboard_render_state.after(release_atlas_slots),
                     sync_billboard_properties.after(spawn_billboard_render_state),
                     // Mirror UI-class property edits into the renderer's
                     // GuiElementDisplay cache so changes show up live.
@@ -2235,8 +2464,7 @@ impl Plugin for BillboardGuiPlugin {
                     sync_textbutton_to_display.after(sync_billboard_properties),
                     sync_textbox_to_display.after(sync_billboard_properties),
                     cull_billboards_by_distance.after(sync_textlabel_to_display),
-                    release_atlas_slots.after(cull_billboards_by_distance),
-                    update_and_render_billboards.after(release_atlas_slots),
+                    update_and_render_billboards.after(cull_billboards_by_distance),
                     upload_atlas_to_gpu.after(update_and_render_billboards),
                 ),
             )
@@ -2534,9 +2762,28 @@ fn process_billboard_edit_keyboard(
 }
 
 fn init_billboard_atlas(world: &mut World) {
+    // The atlas's column count (and therefore its pixel WIDTH) is fixed for
+    // its entire lifetime — `try_grow` only ever adds rows — so it must be
+    // sized correctly for the ACTUAL device from this very first frame, not
+    // just capped later. Query the real `max_texture_dimension_2d` rather
+    // than assuming a hardcoded value: hardcoding our 16384 target would
+    // make the FIRST texture allocation exceed an integrated GPU's limit
+    // outright; falling back to the historically-safe 8192 (the previous
+    // hardcoded constant) if the device resource isn't available for some
+    // reason keeps this at least as safe as before.
+    let device_limit = world
+        .get_resource::<bevy::render::renderer::RenderDevice>()
+        .map(|d| d.limits().max_texture_dimension_2d);
+    let max_dim = device_limit.unwrap_or(8192).min(MAX_ATLAS_DIM);
+    let cols = max_dim / TILE_W;
+    info!(
+        "🪧 billboard atlas sized for this device: max_dim={max_dim}px (device reported {:?}, target {MAX_ATLAS_DIM}px) → {cols} cols, {} slots at full growth",
+        device_limit,
+        cols * (max_dim / TILE_H),
+    );
     let texture = {
         let mut images = world.resource_mut::<Assets<Image>>();
-        create_atlas_image(&mut images, INITIAL_ATLAS_ROWS)
+        create_atlas_image(&mut images, INITIAL_ATLAS_ROWS, cols)
     };
-    world.insert_non_send_resource(BillboardAtlas::new(texture, INITIAL_ATLAS_ROWS));
+    world.insert_non_send_resource(BillboardAtlas::new(texture, INITIAL_ATLAS_ROWS, cols, max_dim));
 }

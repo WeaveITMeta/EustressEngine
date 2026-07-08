@@ -2407,6 +2407,16 @@ fn sync_gui_elements_to_slint(
     gui_query: Query<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay, Option<&ChildOf>)>,
     billboard_q: Query<(), With<eustress_common::gui::billboard_renderer::BillboardGuiMarker>>,
     parent_q: Query<&ChildOf>,
+    // Service ancestry: a `ScreenGui` only paints to the screen when it lives
+    // under `StarterGui` (Roblox: StarterGui → each player's PlayerGui). A
+    // ScreenGui sitting in `Workspace` (common in imported places, where GUIs
+    // are scattered through models) must stay INERT. `LoadedFromFile.service`
+    // carries the owning service on every disk-loaded entity (the same field
+    // the 2D-Bevy-UI path `spawn_bevy_gui_from_loaded_entities` gates on, set
+    // reliably at load with no ChildOf spawn-order race); `ServiceComponent` is
+    // the fallback when walking up to the service entity itself.
+    loaded_q: Query<&crate::space::LoadedFromFile>,
+    service_q: Query<&crate::space::service_loader::ServiceComponent>,
     changed: Query<(), Changed<eustress_common::gui::billboard_renderer::GuiElementDisplay>>,
     added: Query<(), Added<eustress_common::gui::billboard_renderer::GuiElementDisplay>>,
     mut last_count: Local<usize>,
@@ -2512,6 +2522,37 @@ fn sync_gui_elements_to_slint(
         }
     }
 
+    // Roblox parity: a screen-space GUI renders only when its top-level SERVICE
+    // is `StarterGui` (previewed in edit; cloned to PlayerGui in play). Walk the
+    // ChildOf chain to the nearest service ancestor and accept only StarterGui /
+    // PlayerGui — a ScreenGui under Workspace (or any other service) stays inert
+    // instead of leaking onto the screen. No service ancestor at all → reject
+    // (safer default: don't paint stray GUIs).
+    fn is_under_starter_gui(
+        entity: Entity,
+        parent_q: &Query<&ChildOf>,
+        loaded_q: &Query<&crate::space::LoadedFromFile>,
+        service_q: &Query<&crate::space::service_loader::ServiceComponent>,
+    ) -> bool {
+        let is_surface = |name: &str| name == "StarterGui" || name == "PlayerGui";
+        let mut cur = entity;
+        loop {
+            // `LoadedFromFile.service` names the owning service directly — the
+            // first ancestor (usually the element itself) that carries it wins.
+            if let Ok(l) = loaded_q.get(cur) {
+                return is_surface(&l.service);
+            }
+            // Fallback: the service entity itself carries a ServiceComponent.
+            if let Ok(sc) = service_q.get(cur) {
+                return is_surface(&sc.class_name);
+            }
+            match parent_q.get(cur) {
+                Ok(p) => cur = p.parent(),
+                Err(_) => return false,
+            }
+        }
+    }
+
     // Collect, filter hidden ScreenGui descendants + billboard children, sort.
     // Diagnostic: log filter funnel ONCE per scene structural change so the
     // user can grep why ghost entities slip through. Throttled by `last_count`.
@@ -2536,6 +2577,11 @@ fn sync_gui_elements_to_slint(
                 // kills the fixed-screen-position mindmap ghost.
                 if !has_screen_gui_ancestor(*e, &gui_query, &parent_q) { return false; }
                 funnel.4 += 1;
+                // SERVICE gate — the ScreenGui must live under StarterGui (or
+                // PlayerGui in play). A ScreenGui in Workspace is inert; without
+                // this, imported places with GUIs scattered through Workspace
+                // models paint every one of them onto the screen.
+                if !is_under_starter_gui(*e, &parent_q, &loaded_q, &service_q) { return false; }
                 funnel.5 += 1;
                 leaked.push((*e, d.class_type.clone(), d.x, d.y));
                 true
