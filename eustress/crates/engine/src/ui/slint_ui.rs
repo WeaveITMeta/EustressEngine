@@ -1304,6 +1304,10 @@ impl Plugin for SlintUiPlugin {
             // bodies (Weld/Hinge/Motor6D/… ) to real part entities each
             // frame in play mode, so welds/motors/hinges actually bind.
             crate::physics::JointResolverPlugin,
+            // Perf QW5 follow-up — streams colliders onto huge-scene
+            // `DeferredCollider` parts near physics activity (see
+            // `crate::physics::collider_streaming` module docs).
+            crate::physics::ColliderStreamingPlugin,
             crate::interaction::InteractionPlugin,
         ));
 

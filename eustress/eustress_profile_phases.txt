@@ -1,9 +1,9 @@
-Eustress phase profile — window = 60 frame(s), mean frame = 13.4 ms (74.88 FPS)
+Eustress phase profile — window = 60 frame(s), mean frame = 44.1 ms (22.67 FPS)
 phase                       ms/frame    %frame
 -----                       --------    ------
-03_Update                        6.1    45.3%
-06_render+present+wait           3.5    25.9%
-04_PostUpdate                    1.9    14.3%
-02_PreUpdate                     1.7    12.8%
-01_First                         0.2     1.4%
-05_Last                          0.0     0.2%
+06_render+present+wait          28.1    63.7%
+03_Update                        9.2    20.8%
+04_PostUpdate                    4.0     9.2%
+02_PreUpdate                     2.6     5.9%
+01_First                         0.2     0.4%
+05_Last                          0.0     0.0%

@@ -8,13 +8,11 @@
 //! - `http(s)://...` — a direct URL (deprecated but appears in old
 //!   `.rbxl`s).
 //!
-//! ## Two resolution modes
+//! ## Three resolution modes
 //!
 //! - **Placeholder (no network)** — [`resolve`] with no fetcher emits a
 //!   placeholder local path `assets/_unresolved/<scheme>/<id-or-path>`
-//!   plus an [`crate::import_report::AssetWarning`] per occurrence. This
-//!   is the behaviour for every non-mesh asset (textures / sounds) in
-//!   Wave F2 — those are deferred to a later wave.
+//!   plus an [`crate::import_report::AssetWarning`] per occurrence.
 //! - **Mesh fetch (Wave F2)** — when an [`AssetFetcher`] is supplied AND
 //!   the reference is a *mesh* property, [`resolve`] fetches the asset
 //!   bytes, and if they are a Roblox `.mesh` blob, decodes them through
@@ -23,6 +21,13 @@
 //!   [`ResolvedAsset::asset_path`] is then relative to the instance
 //!   folder (the same `../meshes/...` convention V-Cell parts use; the
 //!   engine resolves it via the `space://` asset source).
+//! - **Media fetch (Wave F3)** — with a fetcher present, every OTHER
+//!   asset reference with a numeric id (textures / decals / images /
+//!   sounds) is fetched and content-sniffed: image bytes are written to
+//!   `<space_root>/assets/textures/rbx-<id>.<ext>`, audio to
+//!   `assets/sounds/`, and a `.mesh` blob arriving through a generic
+//!   `Content` property decodes to a `.glb` like the mesh path.
+//!   Unrecognised bytes (rbxm models, error pages) keep the placeholder.
 //!
 //! The fetcher itself (network + local mirror) lives in the separate
 //! `eustress-roblox-assets` crate so this importer stays engine-free and
@@ -163,9 +168,10 @@ pub struct ResolvedAsset {
 ///   under `<space_root>/assets/meshes/` so the engine's `space://` source
 ///   (registered at the Space root) can serve them.
 /// - `is_mesh` — true when this reference is a mesh property
-///   (`MeshId` / `SpecialMesh.Content` / …). Only mesh refs are fetched +
-///   decoded in Wave F2; everything else takes the placeholder path so
-///   textures / sounds defer to a later wave.
+///   (`MeshId` / `SpecialMesh.Content` / …). Mesh refs REQUIRE a Roblox
+///   `.mesh` blob and land under `assets/meshes/`; non-mesh refs are
+///   content-sniffed into `assets/textures/` or `assets/sounds/`
+///   (Wave F3), with unrecognised bytes keeping the placeholder.
 /// - `instance_dir` — the instance's on-disk folder. Used to compute the
 ///   relative `[asset].mesh` path from the instance to the written `.glb`.
 ///
@@ -201,6 +207,28 @@ pub fn resolve(
                     return placeholder(&parsed, raw_uri, Some(reason));
                 }
             }
+        }
+    }
+
+    // Media fetch path (Wave F3 — textures / decals / images / sounds).
+    // Same gate as the mesh path: a fetcher plus a resolvable numeric id.
+    // The content KIND is sniffed from the fetched bytes rather than the
+    // property name — image bytes land under `assets/textures/`, audio
+    // under `assets/sounds/`, and a Roblox `.mesh` arriving through a
+    // generic `Content` property still decodes to a `.glb`. Unrecognised
+    // bytes (rbxm models, HTML error pages, …) keep the placeholder so
+    // nothing bogus lands in the Space.
+    if let (Some(f), Some(id)) = (fetcher, parsed.asset_id()) {
+        match fetch_media(f, id, space_root, instance_dir) {
+            Ok(rel) => {
+                return ResolvedAsset {
+                    asset_path: rel,
+                    resolved: true,
+                    reason: None,
+                    original_uri: raw_uri.to_string(),
+                };
+            }
+            Err(reason) => return placeholder(&parsed, raw_uri, Some(reason)),
         }
     }
 
@@ -245,6 +273,99 @@ fn fetch_and_decode_mesh(
         .map_err(|e| format!("write {}: {e}", glb_abs.display()))?;
 
     Ok(relative_path(instance_dir, &glb_abs))
+}
+
+/// A sniffed media kind: the `assets/` subdirectory it belongs in plus the
+/// file extension to write.
+struct MediaKind {
+    dir: &'static str,
+    ext: &'static str,
+}
+
+/// Sniff the media kind from magic bytes. Returns `None` for anything that
+/// isn't a recognised image or audio container (rbxm models, HTML error
+/// pages, truncated blobs) so the caller keeps the placeholder.
+fn sniff_media(bytes: &[u8]) -> Option<MediaKind> {
+    const TEX: &str = "textures";
+    const SND: &str = "sounds";
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some(MediaKind { dir: TEX, ext: "png" });
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some(MediaKind { dir: TEX, ext: "jpg" });
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some(MediaKind { dir: TEX, ext: "webp" });
+    }
+    if bytes.starts_with(b"GIF8") {
+        return Some(MediaKind { dir: TEX, ext: "gif" });
+    }
+    if bytes.starts_with(b"BM") {
+        return Some(MediaKind { dir: TEX, ext: "bmp" });
+    }
+    if bytes.starts_with(b"DDS ") {
+        return Some(MediaKind { dir: TEX, ext: "dds" });
+    }
+    if bytes.starts_with(b"OggS") {
+        return Some(MediaKind { dir: SND, ext: "ogg" });
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WAVE" {
+        return Some(MediaKind { dir: SND, ext: "wav" });
+    }
+    // MP3: ID3 tag, or a bare MPEG frame-sync (0xFF 0xEx). The frame-sync
+    // heuristic is deliberately checked LAST — it is the loosest match.
+    if bytes.starts_with(b"ID3")
+        || (bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0)
+    {
+        return Some(MediaKind { dir: SND, ext: "mp3" });
+    }
+    None
+}
+
+/// Fetch asset `id` and write it as media under `<space_root>/assets/…`:
+/// images → `textures/rbx-<id>.<ext>`, audio → `sounds/rbx-<id>.<ext>`,
+/// and a Roblox `.mesh` blob (arriving via a generic `Content` property)
+/// through the same decode-to-`.glb` path meshes use. Returns the path
+/// RELATIVE to `instance_dir` (the `../assets/...` convention), or
+/// `Err(reason)` so the caller keeps the placeholder.
+fn fetch_media(
+    fetcher: &dyn AssetFetcher,
+    id: u64,
+    space_root: &Path,
+    instance_dir: &Path,
+) -> Result<PathBuf, String> {
+    let bytes = fetcher.fetch(id)?;
+
+    if crate::roblox_mesh::looks_like_roblox_mesh(&bytes) {
+        let mesh = crate::roblox_mesh::decode_mesh(&bytes)
+            .map_err(|e| format!("rbxassetid://{id} .mesh decode failed: {e}"))?;
+        if mesh.is_empty() {
+            return Err(format!("rbxassetid://{id} .mesh decoded to an empty mesh"));
+        }
+        let meshes_dir = space_root.join("assets").join("meshes");
+        std::fs::create_dir_all(&meshes_dir)
+            .map_err(|e| format!("create {}: {e}", meshes_dir.display()))?;
+        let glb_abs = meshes_dir.join(format!("rbx-{id}.glb"));
+        crate::csg::write_glb(&glb_abs, &mesh)
+            .map_err(|e| format!("write {}: {e}", glb_abs.display()))?;
+        return Ok(relative_path(instance_dir, &glb_abs));
+    }
+
+    let kind = sniff_media(&bytes).ok_or_else(|| {
+        format!(
+            "rbxassetid://{id} fetched ({} bytes) but content type unrecognised \
+             (not image/audio/mesh — rbxm models and packages are not extractable yet)",
+            bytes.len()
+        )
+    })?;
+    let dir = space_root.join("assets").join(kind.dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let abs = dir.join(format!("rbx-{id}.{}", kind.ext));
+    // Idempotent across instances sharing an asset: first writer wins.
+    if !abs.is_file() {
+        std::fs::write(&abs, &bytes).map_err(|e| format!("write {}: {e}", abs.display()))?;
+    }
+    Ok(relative_path(instance_dir, &abs))
 }
 
 /// Build the no-network placeholder result. `extra_reason` (when set)
@@ -495,22 +616,87 @@ mod tests {
         let _ = std::fs::remove_dir_all(&space);
     }
 
-    /// A non-mesh property never fetches even with a fetcher present.
+    /// Wave F3: a non-mesh property WITH a fetcher content-sniffs the
+    /// bytes and writes an image under `assets/textures/`.
     #[test]
-    fn non_mesh_property_keeps_placeholder() {
-        struct Boom;
-        impl AssetFetcher for Boom {
+    fn non_mesh_property_fetches_image_media() {
+        struct FakePng;
+        impl AssetFetcher for FakePng {
             fn fetch(&self, _id: u64) -> Result<Vec<u8>, String> {
-                panic!("must not fetch for a non-mesh property");
+                // PNG magic + a little padding — sniffable, not decodable
+                // (we only store bytes, never decode images here).
+                let mut b = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+                b.extend_from_slice(&[0u8; 16]);
+                Ok(b)
+            }
+        }
+        let space = std::env::temp_dir().join(format!(
+            "rbx_resolve_media_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let inst_dir = space.join("Workspace").join("Sign");
+        std::fs::create_dir_all(&inst_dir).unwrap();
+
+        let out = resolve("rbxassetid://42", Some(&FakePng), &space, false, &inst_dir);
+        assert!(out.resolved, "image should resolve: {:?}", out.reason);
+        assert!(space.join("assets/textures/rbx-42.png").is_file());
+        let rel = out.asset_path.to_string_lossy().replace('\\', "/");
+        assert!(rel.ends_with("assets/textures/rbx-42.png"), "got {rel}");
+        let _ = std::fs::remove_dir_all(&space);
+    }
+
+    /// Wave F3: audio bytes route to `assets/sounds/`.
+    #[test]
+    fn non_mesh_property_fetches_audio_media() {
+        struct FakeOgg;
+        impl AssetFetcher for FakeOgg {
+            fn fetch(&self, _id: u64) -> Result<Vec<u8>, String> {
+                Ok(b"OggS\x00\x02rest-of-stream".to_vec())
+            }
+        }
+        let space = std::env::temp_dir().join(format!(
+            "rbx_resolve_audio_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let inst_dir = space.join("Workspace").join("Speaker");
+        std::fs::create_dir_all(&inst_dir).unwrap();
+
+        let out = resolve("rbxassetid://77", Some(&FakeOgg), &space, false, &inst_dir);
+        assert!(out.resolved, "audio should resolve: {:?}", out.reason);
+        assert!(space.join("assets/sounds/rbx-77.ogg").is_file());
+        let _ = std::fs::remove_dir_all(&space);
+    }
+
+    /// Wave F3: unrecognised bytes (an rbxm model, an HTML error page)
+    /// keep the placeholder with an explanatory reason.
+    #[test]
+    fn unrecognised_media_keeps_placeholder() {
+        struct FakeRbxm;
+        impl AssetFetcher for FakeRbxm {
+            fn fetch(&self, _id: u64) -> Result<Vec<u8>, String> {
+                Ok(b"<roblox!binary-model-bytes".to_vec())
             }
         }
         let out = resolve(
-            "rbxassetid://42",
-            Some(&Boom),
-            Path::new("/space"),
+            "rbxassetid://43",
+            Some(&FakeRbxm),
+            Path::new("/nonexistent-space"),
             false,
-            Path::new("/space/Workspace/E"),
+            Path::new("/nonexistent-space/Workspace/E"),
         );
         assert!(!out.resolved);
+        assert!(
+            out.reason.as_deref().unwrap_or("").contains("unrecognised"),
+            "reason should explain the sniff failure: {:?}",
+            out.reason
+        );
     }
 }

@@ -756,7 +756,9 @@ fn handle_file_modified(
                                         // is `units_offset`, matching cold-load).
                                         if let Ok(gui_def) = super::gui_loader::load_gui_definition(&event.path) {
                                             if gui_def.metadata.class_name == "BillboardGui" {
-                                                let bb_class = super::gui_loader::billboard_class_from_props(&gui_def.gui);
+                                                let mut gui_props = gui_def.gui.clone();
+                                                gui_props.size = gui_props.resolved_size();
+                                                let bb_class = super::gui_loader::billboard_class_from_props(&gui_props);
                                                 if let Ok(mut ec) = commands.get_entity(entity) {
                                                     ec.insert(bb_class);
                                                 }
@@ -1032,10 +1034,8 @@ fn handle_file_created(
                     .unwrap_or("Label")
                     .to_string();
 
-                // Strict UDim2 schema — no legacy fallback for `size` /
-                // `position` shapes. The class default fills in for
-                // missing fields when the TOML doesn't yet declare
-                // them.
+                // The class default fills in for missing fields when the
+                // TOML doesn't yet declare them.
                 let mut bb_class = eustress_common::classes::BillboardGui::default();
                 let bb_max_distance: f32;
                 let bb_always_on_top: bool;
@@ -1044,7 +1044,7 @@ fn handle_file_created(
                 if let Ok(gui_def) = super::gui_loader::load_gui_definition(&event.path) {
                     bb_tags = gui_def.tags.clone();
                     let g = &gui_def.gui;
-                    bb_class.size = g.size;
+                    bb_class.size = g.resolved_size();
                     bb_class.max_distance = g.max_distance.unwrap_or(bb_class.max_distance);
                     bb_class.always_on_top = g.always_on_top.unwrap_or(bb_class.always_on_top);
                     if let Some(v) = g.units_offset { bb_class.units_offset = v; }

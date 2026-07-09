@@ -143,7 +143,7 @@ fn sanitize_rot(q: Quat) -> Quat {
 /// `transform` is also validated because Avian's `Add<Collider>`
 /// observer reads `Position` + `Rotation` (both synced from Transform)
 /// and passes them into `grow()`, which panics on any non-finite input.
-fn safe_collider_from(
+pub(crate) fn safe_collider_from(
     part_shape: eustress_common::classes::PartType,
     scale: Vec3,
     transform: &Transform,
@@ -212,7 +212,7 @@ fn safe_collider_from(
 /// `friction_static` and `friction_kinetic` from it, and Avian's
 /// `Friction::new(static).with_dynamic_coefficient(kinetic)` carries the
 /// pair. `restitution` ← Roblox `elasticity()`. `density` → `ColliderDensity`.
-fn apply_physics_material(
+pub(crate) fn apply_physics_material(
     ec: &mut bevy::ecs::system::EntityCommands,
     physics: Option<&PhysicsProperties>,
 ) {
@@ -2258,19 +2258,32 @@ pub fn spawn_instance(
         // GLB meshes are unit meshes ([-0.5, 0.5]), so Transform.scale = part size in studs.
         // Avian3D colliders take HALF-extents for cuboid and HALF-height for cylinder.
         //
-        // Perf QW5 — same huge-scene gate as the primitive branch below: on a
-        // "huge" Space (`streaming_active()` true) skip the Static body +
-        // Collider for these anchored decorative custom-mesh parts so a 387K+
-        // import doesn't flood Avian's broadphase. Reversible + scoped:
-        // no-op (gate is false) for normal scenes and when `world-db` is off.
+        // Perf QW5 → collider-streaming tier (same huge-scene gate as the
+        // primitive branch below): on a "huge" Space (`streaming_active()`
+        // true) don't attach the Static body + Collider to these anchored
+        // decorative custom-mesh parts up front — a 387K+ import would flood
+        // Avian's broadphase. Instead stash a `DeferredCollider` descriptor;
+        // `crate::physics::collider_streaming` materializes the real
+        // Collider + RigidBody::Static only while the part is near physics
+        // activity (an awake dynamic body, the player, or the camera),
+        // keeping the resident collider count bounded regardless of scene
+        // size. Reversible + scoped: no-op (gate is false) for normal scenes
+        // and when `world-db` is off — those keep the eager path unchanged.
         let huge_scene = crate::space::active_db::streaming_active();
-        if instance.properties.can_collide && !huge_scene {
-            // Validate `render_transform` — the transform the ENTITY actually
-            // carries (and thus what Avian reads via GlobalTransform), NOT the
-            // unadjusted `transform`. `render_transform` folds in a possibly-
-            // negative `mesh_visual_scale`; validating it here is what catches
-            // the mirrored-mesh collider AABB panic.
-            if let Some(collider) = safe_collider_from(part_shape, scale, &render_transform) {
+        if instance.properties.can_collide {
+            if huge_scene {
+                ec.insert(crate::physics::collider_streaming::DeferredCollider {
+                    part_shape,
+                    size: scale,
+                    is_static: true,
+                    physics: instance.properties.physics.clone(),
+                });
+            } else if let Some(collider) = safe_collider_from(part_shape, scale, &render_transform) {
+                // Validate `render_transform` — the transform the ENTITY actually
+                // carries (and thus what Avian reads via GlobalTransform), NOT the
+                // unadjusted `transform`. `render_transform` folds in a possibly-
+                // negative `mesh_visual_scale`; validating it here is what catches
+                // the mirrored-mesh collider AABB panic.
                 ec.insert((collider, RigidBody::Static));
                 // Imported PhysicalProperties → Avian physics material.
                 // Additive: no-op when `[properties.physics]` is absent.
@@ -2410,23 +2423,36 @@ pub fn spawn_instance(
     // overhead for thousands of static decorative parts.
     // Avian3D colliders take HALF-extents for cuboid and HALF-height for cylinder.
     //
-    // Perf QW5 — huge-scene gate. Every part spawned here is anchored
-    // (`RigidBody::Static`), i.e. decorative collision geometry. On a "huge"
-    // Space (the residency boot-load flipped `streaming_active()` true for a
-    // large binary-ECS / streamed place — e.g. a 387K-part Roblox import),
-    // attaching a Static body + Collider to hundreds of thousands of parts
-    // floods Avian's broadphase and the per-frame rigid-body transform walk
-    // for no gameplay benefit, so we SKIP it. The gate is reversible and
-    // scoped: `streaming_active()` is `false` for normal-sized scenes and
-    // whenever the `world-db` feature is off, so non-huge worlds attach
-    // colliders exactly as before (zero behavior change). Authored
-    // PhysicalProperties are skipped along with the body they'd attach to.
+    // Perf QW5 → collider-streaming tier. Every part spawned here is
+    // anchored (`RigidBody::Static`), i.e. decorative collision geometry. On
+    // a "huge" Space (the residency boot-load flipped `streaming_active()`
+    // true for a large binary-ECS / streamed place — e.g. a 387K-part
+    // Roblox import), eagerly attaching a Static body + Collider to hundreds
+    // of thousands of parts floods Avian's broadphase and the per-frame
+    // rigid-body transform walk for no gameplay benefit most of the time.
+    // Instead of skipping physics for these parts entirely (the old
+    // all-or-nothing gate), stash a `DeferredCollider` descriptor —
+    // `crate::physics::collider_streaming` materializes the real collider
+    // only while the part is near physics activity (an awake dynamic body,
+    // the player, or the camera) and dematerializes it once it drifts far
+    // away, keeping the resident collider count bounded (~10K) regardless
+    // of scene size. The gate is reversible and scoped: `streaming_active()`
+    // is `false` for normal-sized scenes and whenever the `world-db` feature
+    // is off, so non-huge worlds attach colliders exactly as before (zero
+    // behavior change).
     let huge_scene = crate::space::active_db::streaming_active();
-    if instance.properties.can_collide && !huge_scene {
-        // Validate `render_transform` (the entity's actual transform / what
-        // Avian reads), not the unadjusted `transform` — see the custom-mesh
-        // branch above for why a negative folded scale panics Avian at insert.
-        if let Some(collider) = safe_collider_from(part_shape, scale, &render_transform) {
+    if instance.properties.can_collide {
+        if huge_scene {
+            ec.insert(crate::physics::collider_streaming::DeferredCollider {
+                part_shape,
+                size: scale,
+                is_static: true,
+                physics: instance.properties.physics.clone(),
+            });
+        } else if let Some(collider) = safe_collider_from(part_shape, scale, &render_transform) {
+            // Validate `render_transform` (the entity's actual transform / what
+            // Avian reads), not the unadjusted `transform` — see the custom-mesh
+            // branch above for why a negative folded scale panics Avian at insert.
             ec.insert((collider, RigidBody::Static));
             // Imported PhysicalProperties → Avian physics material.
             // Additive: no-op when `[properties.physics]` is absent.

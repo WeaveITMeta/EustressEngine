@@ -1127,12 +1127,12 @@ impl<'dom> Materializer<'dom> {
             self.pending_refs
                 .push((created.toml_path.clone(), prop, target_ref));
         }
-        // Asset refs → resolver. For MESH properties with a fetcher
-        // (Wave F2) the resolver fetches + decodes the Roblox `.mesh` into
-        // a real `.glb` under `<space>/assets/meshes/` and returns a path
-        // relative to this instance's folder; everything else (textures /
-        // sounds, or any fetch/decode failure) stays on the placeholder
-        // path with a warning.
+        // Asset refs → resolver. With a fetcher present, MESH properties
+        // (Wave F2) fetch + decode the Roblox `.mesh` into a real `.glb`
+        // under `<space>/assets/meshes/`, and every other id-bearing ref
+        // (Wave F3) is content-sniffed into `assets/textures/` or
+        // `assets/sounds/`. Fetch/decode/sniff failures stay on the
+        // placeholder path with a warning.
         for (prop, uri) in bag.asset_refs {
             let prop_is_mesh = is_mesh_property(&prop, eustress_class);
             let resolved = asset_resolver::resolve(

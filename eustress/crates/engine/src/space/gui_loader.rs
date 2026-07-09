@@ -163,6 +163,12 @@ pub struct GuiTomlProperties {
     /// makes Scale meaningless for `SizeOffset`).
     #[serde(default, deserialize_with = "deserialize_size_offset_lenient", skip_serializing_if = "Option::is_none")]
     pub size_offset: Option<[f32; 2]>,
+    /// The `Scale` component of `Size` (a UDim2). The importer writes
+    /// `size_scale` + `size_offset` as a pair instead of a combined `size`
+    /// key, so `size` on its own always fell back to its 100x30px default.
+    /// Use `resolved_size()` to get the real, combined value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_scale: Option<[f32; 2]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extents_offset: Option<[f32; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -179,6 +185,22 @@ pub struct GuiTomlProperties {
     // Adornee — instance name reference; resolved to entity at load time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adornee: Option<String>,
+}
+
+impl GuiTomlProperties {
+    /// Combines `size_scale` + `size_offset` into the real `size` UDim2.
+    /// The importer never writes a combined `size` key, so `size` on its
+    /// own is always the 100x30px serde default — callers that need the
+    /// authored size must go through this instead of reading `size` directly.
+    pub fn resolved_size(&self) -> eustress_common::ui_types::UDim2 {
+        if self.size_scale.is_some() || self.size_offset.is_some() {
+            let [sx, sy] = self.size_scale.unwrap_or([0.0, 0.0]);
+            let [ox, oy] = self.size_offset.unwrap_or([0.0, 0.0]);
+            eustress_common::ui_types::UDim2::new(sx, ox, sy, oy)
+        } else {
+            self.size
+        }
+    }
 }
 
 /// [text] section — text-specific properties for TextLabel, TextButton, TextBox
@@ -767,30 +789,30 @@ pub fn spawn_gui_element(
     // and are intentionally NOT converted. `extents_offset` /
     // `extents_offset_world_space` are in part-size multipliers (ratio,
     // not length) so they're also skipped.
-    #[cfg(feature = "units_v1")]
     let gui_owned: GuiTomlProperties = {
         let mut g = gui_def.gui.clone();
-        let to_unit = eustress_common::units::ENGINE_NATIVE_UNIT;
-        if parsed_unit != to_unit {
-            if let Some(v) = g.units_offset {
-                g.units_offset = Some(eustress_common::units::convert_vec3_f32(v, parsed_unit, to_unit));
-            }
-            if let Some(v) = g.units_offset_world_space {
-                g.units_offset_world_space = Some(eustress_common::units::convert_vec3_f32(v, parsed_unit, to_unit));
-            }
-            for f in [&mut g.max_distance, &mut g.distance_lower_limit,
-                      &mut g.distance_upper_limit, &mut g.distance_step] {
-                if let Some(v) = *f {
-                    *f = Some(eustress_common::units::convert_f32(v, parsed_unit, to_unit));
+        g.size = g.resolved_size();
+        #[cfg(feature = "units_v1")]
+        {
+            let to_unit = eustress_common::units::ENGINE_NATIVE_UNIT;
+            if parsed_unit != to_unit {
+                if let Some(v) = g.units_offset {
+                    g.units_offset = Some(eustress_common::units::convert_vec3_f32(v, parsed_unit, to_unit));
+                }
+                if let Some(v) = g.units_offset_world_space {
+                    g.units_offset_world_space = Some(eustress_common::units::convert_vec3_f32(v, parsed_unit, to_unit));
+                }
+                for f in [&mut g.max_distance, &mut g.distance_lower_limit,
+                          &mut g.distance_upper_limit, &mut g.distance_step] {
+                    if let Some(v) = *f {
+                        *f = Some(eustress_common::units::convert_f32(v, parsed_unit, to_unit));
+                    }
                 }
             }
         }
         g
     };
-    #[cfg(feature = "units_v1")]
     let gui = &gui_owned;
-    #[cfg(not(feature = "units_v1"))]
-    let gui = &gui_def.gui;
     let class_name = match gui_type {
         "ScreenGui" => eustress_common::classes::ClassName::ScreenGui,
         "TextLabel" => eustress_common::classes::ClassName::TextLabel,

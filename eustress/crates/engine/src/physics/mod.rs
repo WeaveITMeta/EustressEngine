@@ -17,8 +17,10 @@
 //! Add [`movers::MoversPlugin`] to the app (alongside the spawner
 //! plugins). It gates all its systems to `PlayModeState::Playing`.
 
+pub mod collider_streaming;
 pub mod joint_resolver;
 pub mod movers;
 
+pub use collider_streaming::ColliderStreamingPlugin;
 pub use joint_resolver::JointResolverPlugin;
 pub use movers::MoversPlugin;

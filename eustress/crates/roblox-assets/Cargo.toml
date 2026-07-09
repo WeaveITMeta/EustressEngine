@@ -8,7 +8,10 @@
 # references. No Bevy, no tokio — blocking I/O only, runs on a worker thread.
 #
 # Spec: docs/architecture/ROBLOX_IMPORT_SPEC.md §11 / §19.3.
-# Wave: F2 (MESHES) — meshes only; textures/sounds resolve later.
+# Waves: F2 (meshes → .glb) + F3 (textures/sounds content-sniffed into
+# assets/). Also hosts the `rbx_import` batch-import bin — it needs these
+# fetchers, and a bin inside the importer crate could not depend on this
+# crate without a cycle.
 # =============================================================================
 
 [package]
@@ -30,3 +33,6 @@ ureq = "2"
 
 # Logging — workspace standard. Never logs the .ROBLOSECURITY cookie.
 tracing = "0.1"
+
+# `rbx_import` batch bin: per-place + aggregate import reports as JSON.
+serde_json = { workspace = true }

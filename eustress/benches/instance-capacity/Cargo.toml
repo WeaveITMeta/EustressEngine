@@ -8,6 +8,10 @@ description = "Benchmark: full-stack instance capacity — TOML → binary cache
 name = "instance-capacity"
 path = "src/main.rs"
 
+[[bin]]
+name = "avian-physics-bench"
+path = "src/bin/avian_physics_bench.rs"
+
 [dependencies]
 # ── TOML (canonical Eustress source format) ──────────────────────────────────
 toml  = "0.8"
@@ -47,8 +51,8 @@ avian3d = { version = "0.7", default-features = false, features = [
 # ── Byte casting (GPU buffer alignment) ──────────────────────────────────────
 bytemuck = { version = "1.14", features = ["derive"] }
 
-# ── wgpu direct — GPU-driven indirect draw bench (matches Bevy 0.18 version) ─
-wgpu = { version = "27.0.1", default-features = false, features = ["wgsl", "vulkan", "dx12"] }
+# ── wgpu direct — GPU-driven indirect draw bench (matches Bevy 0.19 / wgpu 29) ─
+wgpu = { version = "29", default-features = false, features = ["wgsl", "vulkan", "dx12"] }
 
 # ── pollster — minimal async executor for wgpu block_on calls ─────────────────
 pollster = "0.3"

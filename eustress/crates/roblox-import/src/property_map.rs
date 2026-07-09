@@ -305,15 +305,16 @@ fn apply_variant(bag: &mut PropertyBag, target_class: ClassName, key: &str, vari
         return;
     }
     if let Variant::Attributes(attrs) = variant {
-        // `Attributes` is opaque in rbx_types; we lift the serialised
-        // form into `properties.attributes`. The wire form is a sequence
-        // of (name, value) pairs; we approximate by serialising the
-        // whole blob as a JSON-via-debug-string so the field survives
-        // the round-trip without losing data. Wave-3 first-class
-        // promotion will deserialise these into per-key TOML values.
-        let dbg = format!("{:?}", attrs);
-        bag.attributes
-            .insert("_raw_debug".to_string(), toml::Value::String(dbg));
+        // First-class attribute promotion: every (name, value) pair
+        // becomes a typed `[attributes]` TOML key (bool / number / string /
+        // Vector3 / Color3 / …) via the same `variant_to_toml` encoder the
+        // extras path uses — so `GetAttribute`/`SetAttribute` bindings
+        // survive the import with real values instead of an opaque
+        // debug-string blob.
+        for (name, value) in attrs.iter() {
+            let v = variant_to_toml(value, bag);
+            bag.attributes.insert(name.to_string(), v);
+        }
         return;
     }
 

@@ -3,6 +3,8 @@ target/
 **/target/
 target-web/
 **/target-web/
+target-bench/
+**/target-bench/
 
 # Cargo lock for libraries (keep for binaries)
 # Cargo.lock

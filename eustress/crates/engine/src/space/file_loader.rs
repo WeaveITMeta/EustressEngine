@@ -1480,8 +1480,8 @@ pub fn spawn_directory_entry(
             bb_tags = gui_def.tags.clone();
             let g = &gui_def.gui;
 
-            // Geometry — strict UDim2 from the schema, no legacy fallback.
-            bb_class.size = g.size;
+            // Geometry
+            bb_class.size = g.resolved_size();
             if let Some(v) = g.size_offset { bb_class.size_offset = v; }
             if let Some(v) = g.extents_offset { bb_class.extents_offset = v; }
             if let Some(v) = g.extents_offset_world_space { bb_class.extents_offset_world_space = v; }
