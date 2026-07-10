@@ -13988,10 +13988,6 @@ fn sync_unified_explorer_to_slint(
                     .unwrap_or(false)
             {
                 load_service_icon("wrench")
-            } else if instance.name.eq_ignore_ascii_case("DataService") {
-                // DataService synthesizes as a plain Folder (no ServiceComponent),
-                // so give it the data-platform atom icon by name.
-                load_service_icon("dataservice")
             } else {
                 load_class_icon(&instance.class_name)
             };

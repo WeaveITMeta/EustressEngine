@@ -5,7 +5,7 @@
 
 [service]
 class_name = "DataService"
-icon = "folder"
+icon = "dataservice"
 description = "Container for Data Platform datasets, series, columns, and runs"
 can_have_children = true
 
