@@ -110,6 +110,20 @@ pub struct SimOrchestrationChannel {
 #[derive(Resource, Default)]
 pub struct SimPlacedCells(pub HashSet<CellCoord>);
 
+/// Session ledger of gang-placement outcomes, appended by
+/// [`sys_drain_results`] and read over the engine bridge (`sim.bindings`)
+/// so an external orchestrator (MCP client) can SEE forge's real placement
+/// state alongside the `scene.overview` cell digest — same `sim-cell-…`
+/// ids, so the two surfaces join on cell identity. Bounded (oldest rows
+/// dropped past [`Self::CAP`]) — a session places each cell once, so the
+/// cap is a defensive bound, not an expected ceiling.
+#[derive(Resource, Default)]
+pub struct SimBindingsLedger(pub Vec<PlacementResult>);
+
+impl SimBindingsLedger {
+    pub const CAP: usize = 4_096;
+}
+
 /// The Phase-6 sim-orchestration plugin. DISTINCT from
 /// [`crate::forge::ForgePlugin`].
 pub struct SimOrchestrationPlugin;
@@ -117,6 +131,7 @@ pub struct SimOrchestrationPlugin;
 impl Plugin for SimOrchestrationPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SimPlacedCells>()
+            .init_resource::<SimBindingsLedger>()
             // The new set runs AFTER the residency load/mirror/evict chain so
             // the resident-cell snapshot it reads is this frame's. This adds
             // ONLY the ordering edge; it does not touch the chain's internals.
@@ -304,13 +319,19 @@ fn sys_detect_resident_cells(
     }
 }
 
-/// Drain worker results on the main thread. The worker already logs each
-/// outcome; this keeps the channel from filling and is the hook where a future
-/// UI/telemetry surface would consume [`PlacementResult`]s.
-fn sys_drain_results(channel: Res<SimOrchestrationChannel>) {
-    while let Ok(_res) = channel.results.try_recv() {
-        // Intentionally a drain-only sink for the thin driver: the worker has
-        // already emitted the LAUNCH log line. A later phase consumes `_res`
-        // for the timeline/telemetry panel.
+/// Drain worker results on the main thread into the [`SimBindingsLedger`].
+/// The worker already logs each outcome; this keeps the channel from filling
+/// AND makes every placement outcome readable over the engine bridge
+/// (`sim.bindings`) for external orchestrators.
+fn sys_drain_results(
+    channel: Res<SimOrchestrationChannel>,
+    mut ledger: ResMut<SimBindingsLedger>,
+) {
+    while let Ok(res) = channel.results.try_recv() {
+        ledger.0.push(res);
+        if ledger.0.len() > SimBindingsLedger::CAP {
+            let overflow = ledger.0.len() - SimBindingsLedger::CAP;
+            ledger.0.drain(..overflow);
+        }
     }
 }

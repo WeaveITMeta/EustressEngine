@@ -311,12 +311,12 @@ impl Default for KeyBindings {
         bindings.insert(Action::Delete, KeyBinding::new(KeyCode::Delete));
         bindings.insert(Action::SelectAll, KeyBinding::new(KeyCode::KeyA).with_ctrl());
         // Hierarchy selection (Maya / Blender parity):
-        //   Ctrl+Shift+C → Select Children (one level)
+        //   Ctrl+Shift+V → Select Children (one level)
         //   Ctrl+Shift+D → Select Descendants (recursive)
         //   Ctrl+Shift+U → Select Parent (up one level)
         //   Ctrl+Shift+S → Select Siblings
         //   Ctrl+I       → Invert Selection
-        bindings.insert(Action::SelectChildren, KeyBinding::new(KeyCode::KeyC).with_ctrl().with_shift());
+        bindings.insert(Action::SelectChildren, KeyBinding::new(KeyCode::KeyV).with_ctrl().with_shift());
         bindings.insert(Action::SelectDescendants, KeyBinding::new(KeyCode::KeyD).with_ctrl().with_shift());
         bindings.insert(Action::SelectParent, KeyBinding::new(KeyCode::KeyU).with_ctrl().with_shift());
         bindings.insert(Action::SelectSiblings, KeyBinding::new(KeyCode::KeyS).with_ctrl().with_shift());
@@ -1385,95 +1385,15 @@ fn handle_menu_action_events(
                 });
             }
 
-            // ── Boolean (CSG) ribbon group ─────────────────────────
-            //
-            // truck-shapeops 0.4 exports `or` (union) and `and`
-            // (intersect) but NOT `not` (difference). For now, the
-            // ribbon buttons log selection info + emit an Output-panel
-            // entry so users get immediate feedback instead of a
-            // silent no-op (the "buttons don't work" regression
-            // reported 2026-04-23). Wiring the Bevy-mesh → truck
-            // `Solid` → Bevy-mesh round-trip is tracked in
-            // `eustress-cad::eval::boolean_*`; once that round-trip
-            // exposes a `fn apply_csg_to_selection` helper these arms
-            // call into it directly.
-            //
-            // `CSGSeparate` DOES work today: unparent all children of
-            // any selected Model / CSG-union entity so each sub-body
-            // becomes an independent selectable again. No mesh-edit
-            // needed.
-            Action::CSGUnion => {
-                let n = selected_count(&selection_manager);
-                if n < 2 {
-                    warn!("🔨 CSG Union needs ≥2 selected bodies (have {}). Select both parts first.", n);
-                } else {
-                    info!("🔨 CSG Union: {} bodies selected — truck-shapeops wiring pending (v0.2). \
-                           Use Model grouping as a non-destructive placeholder in the meantime.", n);
-                }
-            }
-            Action::CSGNegate => {
-                let n = selected_count(&selection_manager);
-                if n < 2 {
-                    warn!("🔨 CSG Subtract needs ≥2 selected bodies (first = target, others = cutters). Have {}.", n);
-                } else {
-                    warn!("🔨 CSG Subtract: truck-shapeops 0.4 doesn't export `not` — feature lands \
-                           with the upcoming shapeops release. {} bodies selected.", n);
-                }
-            }
-            Action::CSGIntersect => {
-                let n = selected_count(&selection_manager);
-                if n < 2 {
-                    warn!("🔨 CSG Intersect needs ≥2 selected bodies (have {}). Select both parts first.", n);
-                } else {
-                    info!("🔨 CSG Intersect: {} bodies selected — truck-shapeops wiring pending (v0.2).", n);
-                }
-            }
-            Action::CSGSeparate => {
-                // Selection-level ungroup — strip `ChildOf` from
-                // every child of a selected Model / Folder so each
-                // sub-entity becomes an independent selectable
-                // again. Mirror of the standard Ungroup (Ctrl+U)
-                // but scoped to the Boolean-group metaphor.
-                let selected_ids: std::collections::HashSet<String> = selection_manager
-                    .as_ref()
-                    .map(|sm| sm.0.read().get_selected().into_iter().collect())
-                    .unwrap_or_default();
-                let mut separated = 0u32;
-                for (entity, _tf, _bp) in entity_query.iter() {
-                    let id = format!("{}v{}", entity.index(), entity.generation());
-                    if !selected_ids.contains(&id) { continue; }
-                    // Only containers (Model / Folder) have children
-                    // worth separating. Plain Parts get a no-op.
-                    if !matches!(
-                        instance_query.get(entity).map(|i| i.class_name),
-                        Ok(eustress_common::classes::ClassName::Model)
-                        | Ok(eustress_common::classes::ClassName::Folder),
-                    ) { continue; }
-                    commands.entity(entity).remove::<bevy::prelude::Children>();
-                    separated += 1;
-                }
-                if separated > 0 {
-                    info!("🔨 CSG Separate: detached children of {} container(s).", separated);
-                } else {
-                    warn!("🔨 CSG Separate: select a Model or Folder to separate its children.");
-                }
-            }
+            // Boolean (CSG) ribbon group — handled by `csg::CsgPlugin`
+            // (MenuActionEvent reader). Leave these arms empty so we
+            // don't double-fire; the plugin owns toasts + real ops.
+            Action::CSGUnion | Action::CSGNegate | Action::CSGIntersect | Action::CSGSeparate => {}
 
             // Other actions are consumed by their respective systems
             _ => {}
         }
     }
-}
-
-/// Cheap helper for the CSG action arms — returns how many entities
-/// are currently selected via `SelectionSyncManager`. `0` when the
-/// manager resource isn't available (e.g. during startup).
-fn selected_count(
-    sm: &Option<Res<crate::selection_sync::SelectionSyncManager>>,
-) -> usize {
-    sm.as_ref()
-        .map(|m| m.0.read().get_selected().len())
-        .unwrap_or(0)
 }
 
 // ============================================================================

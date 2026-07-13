@@ -150,12 +150,25 @@ pub enum FileEvent {
     /// Source path is the user-picked absolute path on the host
     /// filesystem. See `docs/architecture/ROBLOX_IMPORT_SPEC.md` §11.
     ImportRobloxPlace(PathBuf),
+    /// User picked a Gaussian-Splatting radiance-field file (`.ply`) to
+    /// import. Handler copies the file into
+    /// `Universe/assets/splats/`, creates a `GaussianSplats` instance under
+    /// the active Space's `Workspace` (`[gaussian_splats].path` points at the
+    /// copied file), and the file watcher spawns the splat cloud. Source path
+    /// is the user-picked absolute path on the host filesystem.
+    ImportGaussianSplat(PathBuf),
 }
 
 /// Roblox place / model file extensions accepted by the importer. Shared
 /// by the file-picker filter and the picker-result router so the
 /// whitelist stays in one place.
 pub const ROBLOX_IMPORT_EXTENSIONS: &[&str] = &["rbxl", "rbxlx", "rbxm", "rbxmx"];
+
+/// Gaussian-Splatting radiance-field file extensions accepted by the
+/// importer. `.ply` only — `bevy_gaussian_splatting` does not support `.spz`
+/// (see docs/architecture/GAUSSIAN_SPLATTING.md). Shared by the file-picker
+/// filter and the picker-result router.
+pub const GAUSSIAN_SPLAT_IMPORT_EXTENSIONS: &[&str] = &["ply"];
 
 /// True when `path`'s extension is one of [`ROBLOX_IMPORT_EXTENSIONS`]
 /// (case-insensitive). Used to route a picked / dropped file to
@@ -166,6 +179,20 @@ pub fn is_roblox_place_file(path: &std::path::Path) -> bool {
         .map(|e| {
             let e = e.to_ascii_lowercase();
             ROBLOX_IMPORT_EXTENSIONS.contains(&e.as_str())
+        })
+        .unwrap_or(false)
+}
+
+/// True when `path`'s extension is one of
+/// [`GAUSSIAN_SPLAT_IMPORT_EXTENSIONS`] (case-insensitive). Used to route a
+/// picked file to `FileEvent::ImportGaussianSplat` instead of
+/// `FileEvent::ImportAsset`.
+pub fn is_gaussian_splat_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let e = e.to_ascii_lowercase();
+            GAUSSIAN_SPLAT_IMPORT_EXTENSIONS.contains(&e.as_str())
         })
         .unwrap_or(false)
 }

@@ -98,7 +98,6 @@ impl Plugin for LuauPlugin {
             sync_luau_input.before(drive_luau_frame),
             process_remote_events,
             process_bindable_events,
-            hot_reload_luau_scripts,
         ));
 
         info!("LuauPlugin initialized — Roblox Luau scripting ready");
@@ -317,10 +316,10 @@ fn process_bindable_events(
     }
 }
 
-/// Hot-reload Luau scripts when source files change
-fn hot_reload_luau_scripts(
-    _state: Res<LuauRuntimeState>,
-) {
-    // TODO: Watch .luau/.lua files for changes and re-execute
-    // Integration with notify crate for filesystem watching
-}
+// The real Luau hot-reload lives in `engine::soul::rune_api::
+// hot_reload_dirty_luau_scripts` (Space-local Soul Scripts, driven by
+// `SpaceFileWatcher`) — this was a same-named, scheduled-every-frame no-op
+// stub that could confuse anyone looking for "the" Luau hot-reload system.
+// Removed rather than left as dead weight now that a real plugin host
+// (`engine::script_plugin_host`) landed nearby with its own reload path
+// (the "Reload Plugins" button, not a file watcher, per Phase 2 scope).

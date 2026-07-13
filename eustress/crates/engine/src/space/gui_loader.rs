@@ -110,8 +110,15 @@ pub struct GuiTomlProperties {
     pub anchor_point: [f32; 2],
     #[serde(default = "default_bg_color", deserialize_with = "de_color_rgb_or_rgba")]
     pub background_color: [f32; 4],
-    #[serde(default)]
-    pub background_transparency: f32,
+    /// `None` when the TOML has no explicit `background_transparency` key.
+    /// Distinguishing that from an authored `0.0` matters: some content
+    /// (hand-authored or AI-generated, not Roblox-imported) puts the
+    /// intended transparency in `background_color`'s 4th channel instead
+    /// of this dedicated field. Use `resolved_background_transparency()`
+    /// to fall back to that alpha channel; reading this field directly
+    /// silently treats such content as fully opaque.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_transparency: Option<f32>,
     #[serde(default)]
     pub border_size: f32,
     #[serde(default = "default_border_color", deserialize_with = "de_color_rgb_or_rgba")]
@@ -188,18 +195,44 @@ pub struct GuiTomlProperties {
 }
 
 impl GuiTomlProperties {
-    /// Combines `size_scale` + `size_offset` into the real `size` UDim2.
-    /// The importer never writes a combined `size` key, so `size` on its
-    /// own is always the 100x30px serde default — callers that need the
-    /// authored size must go through this instead of reading `size` directly.
+    /// Resolves the real size across the two conventions this data set
+    /// mixes: the Roblox importer's split `size_scale` + `size_offset`
+    /// pair (never a combined `size` key), and content that computes and
+    /// writes the combined `size` 4-tuple directly, leaving `size_scale`/
+    /// `size_offset` as stale zero/placeholder leftovers from an earlier
+    /// generation pass. Priority:
+    ///   1. `size_scale` is non-zero — a real scale signal, the importer's
+    ///      convention. Pair it with `size_offset` (defaulting to zero).
+    ///   2. `size` differs from the hard default — explicitly authored,
+    ///      even though `size_scale` had nothing to say.
+    ///   3. Only `size_offset` was ever recorded — pure pixel-offset
+    ///      content (Roblox parity: Scale is meaningless for SizeOffset).
+    ///   4. Nothing — the hard default.
     pub fn resolved_size(&self) -> eustress_common::ui_types::UDim2 {
-        if self.size_scale.is_some() || self.size_offset.is_some() {
-            let [sx, sy] = self.size_scale.unwrap_or([0.0, 0.0]);
-            let [ox, oy] = self.size_offset.unwrap_or([0.0, 0.0]);
-            eustress_common::ui_types::UDim2::new(sx, ox, sy, oy)
-        } else {
-            self.size
+        if let Some(scale) = self.size_scale {
+            if scale != [0.0, 0.0] {
+                let [ox, oy] = self.size_offset.unwrap_or([0.0, 0.0]);
+                return eustress_common::ui_types::UDim2::new(scale[0], ox, scale[1], oy);
+            }
         }
+        if self.size != default_size_udim2() {
+            return self.size;
+        }
+        if let Some([ox, oy]) = self.size_offset {
+            return eustress_common::ui_types::UDim2::new(0.0, ox, 0.0, oy);
+        }
+        self.size
+    }
+
+    /// The real transparency: the explicit field if set, else derived from
+    /// `background_color`'s alpha channel. Roblox-imported content always
+    /// has alpha=1.0 here (3-element RGB padded opaque by `de_color_rgb_or_rgba`),
+    /// so this is a no-op for the common case — it only changes behavior
+    /// for content that authored a 4-element RGBA color without also
+    /// setting `background_transparency`.
+    pub fn resolved_background_transparency(&self) -> f32 {
+        self.background_transparency
+            .unwrap_or_else(|| (1.0 - self.background_color[3]).clamp(0.0, 1.0))
     }
 }
 
@@ -988,7 +1021,7 @@ pub fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTo
             gui.background_color[0],
             gui.background_color[1],
             gui.background_color[2],
-            (1.0 - gui.background_transparency).clamp(0.0, 1.0),
+            (1.0 - gui.resolved_background_transparency()).clamp(0.0, 1.0),
         ],
         border_size: gui.border_size,
         border_color: gui.border_color,
@@ -1326,14 +1359,11 @@ fn spawn_text_label_element(
     label.text_x_alignment = x_align;
     label.text_y_alignment = y_align;
     label.background_color3 = [gui.background_color[0], gui.background_color[1], gui.background_color[2]];
-    // Use the dedicated `background_transparency` field — NOT `background_color[3]`.
-    // Imported GUI colors are 3-element `[r,g,b]`, so the deserialized alpha is
-    // always 1.0; reading it here forced every label opaque (transparency 0.0),
-    // so a `background_transparency = 1.0` label rendered as an opaque white box
-    // over white text (invisible). The billboard sync systems propagate this
-    // class value straight into `GuiElementDisplay.bg_color`, so getting it right
-    // here is what actually reaches the renderer.
-    label.background_transparency = gui.background_transparency;
+    // `resolved_background_transparency()` — see its doc comment. The
+    // billboard sync systems propagate this class value straight into
+    // `GuiElementDisplay.bg_color`, so getting it right here is what
+    // actually reaches the renderer.
+    label.background_transparency = gui.resolved_background_transparency();
     label.border_color3 = [gui.border_color[0], gui.border_color[1], gui.border_color[2]];
     label.border_size_pixel = gui.border_size as i32;
     // Roblox-parity Position/Size as UDim2 — single source of truth on disk.

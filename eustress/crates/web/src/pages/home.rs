@@ -113,203 +113,11 @@ pub fn HomePage() -> impl IntoView {
             </section>
 
             // ═══════════════════════════════════════════════════════════════
-            // STUNNING WORLDS - gaming pillar (it is also a killer game engine)
+            // WHAT'S INSIDE - consolidated tabbed panel (Worlds / Systems / Data / Superpowers)
+            // Auto-carousels every 30s; a click jumps immediately and the timer
+            // keeps advancing from wherever the user leaves it.
             // ═══════════════════════════════════════════════════════════════
-            <section class="power-section worlds-section">
-                <div class="section-header">
-                    <span class="section-tag">"GAMES & WORLDS"</span>
-                    <h2 class="section-title-epic">"Stunning Worlds, Out of the Box"</h2>
-                    <p class="section-desc">"A simulation core does not mean it looks like one. Eustress ships a gorgeous, fast, multiplayer game engine in the same box. You do not have to choose."</p>
-                </div>
-
-                <div class="power-grid">
-                    <div class="power-card">
-                        <div class="power-icon">"🌄"</div>
-                        <h3>"Photoreal Rendering"</h3>
-                        <p>"Bevy's PBR pipeline. Real-time lighting, shadows, atmosphere, reflections. Worlds that look shipped, not prototyped."</p>
-                    </div>
-                    <div class="power-card">
-                        <div class="power-icon">"🗺️"</div>
-                        <h3>"Massive Open Worlds"</h3>
-                        <p>"Procedural terrain and seamless streaming. Walk for hours and never hit a loading screen."</p>
-                    </div>
-                    <div class="power-card">
-                        <div class="power-icon">"🌐"</div>
-                        <h3>"Real-Time Multiplayer"</h3>
-                        <p>"QUIC networking, server-authoritative, low latency. Built in, not bolted on."</p>
-                    </div>
-                    <div class="power-card">
-                        <div class="power-icon">"🥽"</div>
-                        <h3>"VR and XR Native"</h3>
-                        <p>"OpenXR out of the box. Quest, PSVR2, and desktop XR from one project."</p>
-                    </div>
-                    <div class="power-card">
-                        <div class="power-icon">"💥"</div>
-                        <h3>"Physics and Destruction"</h3>
-                        <p>"Avian physics with soft bodies, ragdolls, and things that break the way they should."</p>
-                    </div>
-                    <div class="power-card">
-                        <div class="power-icon">"🚀"</div>
-                        <h3>"Ship Anywhere"</h3>
-                        <p>"One project, every screen. Windows, Mac, Linux, mobile, web, and headset."</p>
-                    </div>
-                    <div class="power-card">
-                        <div class="power-icon">"🔊"</div>
-                        <h3>"Spatial Audio"</h3>
-                        <p>"Sound that lives in the world, not just the speakers. 3D positional audio, occlusion, and reverb that track the geometry."</p>
-                    </div>
-                    <div class="power-card">
-                        <div class="power-icon">"🎆"</div>
-                        <h3>"Particles and VFX"</h3>
-                        <p>"Fire, smoke, sparks, and spells. GPU particle systems that hold their frame rate when the screen gets loud."</p>
-                    </div>
-                </div>
-
-                <div class="worlds-cta">
-                    <a href="/gallery" class="btn-secondary-steel">
-                        "See the Gallery"
-                        <span class="btn-icon">"→"</span>
-                    </a>
-                </div>
-            </section>
-
-            // ═══════════════════════════════════════════════════════════════
-            // SYSTEMS THAT MATTER - the simulation thesis
-            // ═══════════════════════════════════════════════════════════════
-            <section class="systems-section">
-                <div class="systems-bg">
-                    <div class="systems-grid-overlay"></div>
-                </div>
-
-                <div class="section-header">
-                    <span class="section-tag">"SYSTEMS THAT MATTER"</span>
-                    <h2 class="section-title-epic">"From Mental Models to Working Simulations"</h2>
-                    <p class="section-desc">"The hardest problems are simulation problems. The tools to solve them should belong to everyone, not to a license you rent."</p>
-                </div>
-
-                <div class="systems-grid">
-                    <div class="systems-card">
-                        <div class="systems-icon">"⚛️"</div>
-                        <h3>"Simulate Reality"</h3>
-                        <p>"Every material has real properties. Every force follows real physics. Model a single battery cell or a city's power grid; energy, emergency response, economies, supply chains. Realism is the foundation, not a setting."</p>
-                    </div>
-
-                    <div class="systems-card">
-                        <div class="systems-icon">"📊"</div>
-                        <h3>"Drive It With Data"</h3>
-                        <p>"Load millions of real rows. Query them. Feed them straight into a live model. Here, weather and economies run on data, not on timers and mocked ticks. The simulation does not fake it."</p>
-                    </div>
-
-                    <div class="systems-card">
-                        <div class="systems-icon">"🌍"</div>
-                        <h3>"Source-Available, Free Forever"</h3>
-                        <p>"The most powerful simulation platform on Earth should not sit behind a paywall. Eustress ships under PolyForm Shield. Read it, fork it, ship what you build with it, keep every dollar. Climate, public safety, the systems we all live inside: those belong to everyone."</p>
-                    </div>
-                </div>
-
-                <div class="systems-cta">
-                    <p class="systems-urgency">"Every day without an accurate model is a day of decisions made on a guess. Build the model. Test the theory. Ship the solution."</p>
-                    <a href="/download" class="btn-primary-glow">"Start Building Solutions →"</a>
-                </div>
-            </section>
-
-            // ═══════════════════════════════════════════════════════════════
-            // DATA PLATFORM - the missing pillar
-            // ═══════════════════════════════════════════════════════════════
-            <section class="power-section data-platform-section">
-                <div class="section-header">
-                    <span class="section-tag">"DATA PLATFORM"</span>
-                    <h2 class="section-title-epic">"Not Just a Renderer. A Data Platform."</h2>
-                    <p class="section-desc">"Datasets are a first-class noun. Load them, query them, visualize them, and bind them to a running simulation. One engine, not five tools."</p>
-                </div>
-
-                <div class="power-grid">
-                    <div class="power-card">
-                        <div class="power-icon">"🗃️"</div>
-                        <h3>"Datasets as a Noun"</h3>
-                        <p>"Apache Arrow and Polars, in the engine. Load, filter, and join millions of rows from Parquet, CSV, or a live feed, right next to your 3D scene."</p>
-                    </div>
-
-                    <div class="power-card">
-                        <div class="power-icon">"📈"</div>
-                        <h3>"GPU-Accelerated Charts"</h3>
-                        <p>"Plot data at scene scale on the GPU. Hover for the exact value. Read the fit. Charts that keep up with millions of points."</p>
-                    </div>
-
-                    <div class="power-card">
-                        <div class="power-icon">"🧩"</div>
-                        <h3>"Domain-General"</h3>
-                        <p>"One pipeline, any domain. The system does not care whether the rows are energy, supply chain, finance, or sensor streams. One inspector renders a Dataset the way it renders a Part."</p>
-                    </div>
-
-                    <div class="power-card">
-                        <div class="power-icon">"🔗"</div>
-                        <h3>"Query, Then Simulate"</h3>
-                        <p>"Bind a column to a parameter and real numbers drive real physics. The gap between your spreadsheet and your simulation closes."</p>
-                    </div>
-                </div>
-            </section>
-
-            // ═══════════════════════════════════════════════════════════════
-            // POWER FEATURES
-            // ═══════════════════════════════════════════════════════════════
-            <section class="power-section">
-                <div class="section-header">
-                    <span class="section-tag">"SUPERPOWERS"</span>
-                    <h2 class="section-title-epic">"Built Different. Built Better."</h2>
-                    <p class="section-desc">"Engineered for fidelity, scale, and speed."</p>
-                </div>
-
-                <div class="power-grid">
-                    <div class="power-card">
-                        <div class="power-icon">"🦀"</div>
-                        <h3>"100% Rust"</h3>
-                        <p>"Memory-safe, fast, fearless concurrency. No garbage-collection pauses. A whole class of crash never compiles."</p>
-                    </div>
-
-                    <div class="power-card">
-                        <div class="power-icon">"⏱️"</div>
-                        <h3>"Time Compression"</h3>
-                        <p>"Simulated time is not wall-clock time. Built to compress a year of simulation into a second. Age a battery a decade before lunch."</p>
-                    </div>
-
-                    <div class="power-card">
-                        <div class="power-icon">"🌐"</div>
-                        <h3>"Massive Scale"</h3>
-                        <p>"Persistence beyond live memory. Millions of entities, streamed by locality, culled on the GPU, stored in an LSM-tree world."</p>
-                    </div>
-
-                    <div class="power-card">
-                        <div class="power-icon">"🎯"</div>
-                        <h3>"Avian Physics"</h3>
-                        <p>"ECS-native, deterministic physics. Soft bodies, ragdolls, constraints, destruction. Same inputs, same result, every run."</p>
-                    </div>
-
-                    <div class="power-card">
-                        <div class="power-icon">"🤖"</div>
-                        <h3>"AI-Native Bridge"</h3>
-                        <p>"Drive the live engine over MCP. Inspect it, build in it, run simulations through it. Think Playwright, for a 3D world."</p>
-                    </div>
-
-                    <div class="power-card">
-                        <div class="power-icon">"✨"</div>
-                        <h3>"Soul Language"</h3>
-                        <p>"Write logic in plain Markdown. Soul compiles your intent to native Rust. Rune and Luau are there when you want the wheel."</p>
-                    </div>
-
-                    <div class="power-card">
-                        <div class="power-icon">"🎨"</div>
-                        <h3>"Bevy Rendering"</h3>
-                        <p>"Bevy's modern renderer. PBR, GPU-driven, clustered lighting, WebGPU-ready. 60+ FPS on real scenes."</p>
-                    </div>
-
-                    <div class="power-card">
-                        <div class="power-icon">"📦"</div>
-                        <h3>"Data Pipeline"</h3>
-                        <p>"Import anything. Mesh (GLTF, FBX), point clouds (PCD), CAD, and tables (Parquet, Arrow). One pipeline, every format."</p>
-                    </div>
-                </div>
-            </section>
+            <WhatsInsideTabs />
 
             // ═══════════════════════════════════════════════════════════════
             // COMPARISON - simulation software FIRST, then game engines
@@ -716,5 +524,209 @@ pub fn HomePage() -> impl IntoView {
 
             <Footer />
         </div>
+    }
+}
+
+// -----------------------------------------------------------------------------
+// "What's Inside" tabbed panel: consolidates Games & Worlds, Systems That
+// Matter, Data Platform, and Superpowers into one standardized component.
+// Every tab renders the exact same power-grid / power-card visual so
+// switching tabs never jumps style. Auto-advances every 30s.
+// -----------------------------------------------------------------------------
+
+#[component]
+fn WhatsInsideTabs() -> impl IntoView {
+    let active = RwSignal::new(0usize);
+
+    // Auto-carousel: advance to the next tab every 30 seconds. A manual click
+    // (below) jumps immediately; the timer just keeps advancing from there.
+    let timer = gloo_timers::callback::Interval::new(30_000, move || {
+        active.update(|i| *i = (*i + 1) % 4);
+    });
+    timer.forget();
+
+    let tab_label = |i: usize| match i {
+        0 => "Games & Worlds",
+        1 => "Systems That Matter",
+        2 => "Data Platform",
+        _ => "Superpowers",
+    };
+
+    view! {
+        <section class="power-section tabs-section">
+            <div class="section-header">
+                <span class="section-tag">"WHAT'S INSIDE"</span>
+                <h2 class="section-title-epic">"One Engine. Every Angle."</h2>
+                <p class="section-desc">"Games, simulation, data, and the internals: same engine, same cards, one panel."</p>
+            </div>
+
+            <div class="tabs-bar" role="tablist">
+                {(0..4).map(|i| {
+                    let is_active = move || active.get() == i;
+                    view! {
+                        <button
+                            class="tab-btn"
+                            class:active=is_active
+                            role="tab"
+                            aria-selected=move || is_active().to_string()
+                            on:click=move |_| active.set(i)
+                        >
+                            {tab_label(i)}
+                        </button>
+                    }
+                }).collect_view()}
+            </div>
+
+            <div class="tabs-panel">
+                {move || match active.get() {
+                    0 => view! {
+                        <div>
+                            <div class="power-grid">
+                                <div class="power-card">
+                                    <div class="power-icon">"🌄"</div>
+                                    <h3>"Photoreal Rendering"</h3>
+                                    <p>"Bevy's PBR pipeline. Real-time lighting, shadows, atmosphere, reflections. Worlds that look shipped, not prototyped."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"🗺️"</div>
+                                    <h3>"Massive Open Worlds"</h3>
+                                    <p>"Procedural terrain and seamless streaming. Walk for hours and never hit a loading screen."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"🌐"</div>
+                                    <h3>"Real-Time Multiplayer"</h3>
+                                    <p>"QUIC networking, server-authoritative, low latency. Built in, not bolted on."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"🥽"</div>
+                                    <h3>"VR and XR Native"</h3>
+                                    <p>"OpenXR out of the box. Quest, PSVR2, and desktop XR from one project."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"💥"</div>
+                                    <h3>"Physics and Destruction"</h3>
+                                    <p>"Avian physics with soft bodies, ragdolls, and things that break the way they should."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"🚀"</div>
+                                    <h3>"Ship Anywhere"</h3>
+                                    <p>"One project, every screen. Windows, Mac, Linux, mobile, web, and headset."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"🔊"</div>
+                                    <h3>"Spatial Audio"</h3>
+                                    <p>"Sound that lives in the world, not just the speakers. 3D positional audio, occlusion, and reverb that track the geometry."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"🎆"</div>
+                                    <h3>"Particles and VFX"</h3>
+                                    <p>"Fire, smoke, sparks, and spells. GPU particle systems that hold their frame rate when the screen gets loud."</p>
+                                </div>
+                            </div>
+                            <div class="systems-cta">
+                                <a href="/gallery" class="btn-primary-glow">"See the Gallery →"</a>
+                            </div>
+                        </div>
+                    }.into_any(),
+                    1 => view! {
+                        <div>
+                            <div class="power-grid">
+                                <div class="power-card">
+                                    <div class="power-icon">"⚛️"</div>
+                                    <h3>"Simulate Reality"</h3>
+                                    <p>"Every material has real properties. Every force follows real physics. Model a single battery cell or a city's power grid; energy, emergency response, economies, supply chains. Realism is the foundation, not a setting."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"📊"</div>
+                                    <h3>"Drive It With Data"</h3>
+                                    <p>"Load millions of real rows. Query them. Feed them straight into a live model. Here, weather and economies run on data, not on timers and mocked ticks. The simulation does not fake it."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"🌍"</div>
+                                    <h3>"Source-Available, Free Forever"</h3>
+                                    <p>"The most powerful simulation platform on Earth should not sit behind a paywall. Eustress ships under PolyForm Shield. Read it, fork it, ship what you build with it, keep every dollar. Climate, public safety, the systems we all live inside: those belong to everyone."</p>
+                                </div>
+                            </div>
+                            <div class="systems-cta">
+                                <p class="systems-urgency">"Every day without an accurate model is a day of decisions made on a guess. Build the model. Test the theory. Ship the solution."</p>
+                                <a href="/download" class="btn-primary-glow">"Start Building Solutions →"</a>
+                            </div>
+                        </div>
+                    }.into_any(),
+                    2 => view! {
+                        <div>
+                            <div class="power-grid">
+                                <div class="power-card">
+                                    <div class="power-icon">"🗃️"</div>
+                                    <h3>"Datasets as a Noun"</h3>
+                                    <p>"Apache Arrow and Polars, in the engine. Load, filter, and join millions of rows from Parquet, CSV, or a live feed, right next to your 3D scene."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"📈"</div>
+                                    <h3>"GPU-Accelerated Charts"</h3>
+                                    <p>"Plot data at scene scale on the GPU. Hover for the exact value. Read the fit. Charts that keep up with millions of points."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"🧩"</div>
+                                    <h3>"Domain-General"</h3>
+                                    <p>"One pipeline, any domain. The system does not care whether the rows are energy, supply chain, finance, or sensor streams. One inspector renders a Dataset the way it renders a Part."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"🔗"</div>
+                                    <h3>"Query, Then Simulate"</h3>
+                                    <p>"Bind a column to a parameter and real numbers drive real physics. The gap between your spreadsheet and your simulation closes."</p>
+                                </div>
+                            </div>
+                        </div>
+                    }.into_any(),
+                    _ => view! {
+                        <div>
+                            <div class="power-grid">
+                                <div class="power-card">
+                                    <div class="power-icon">"🦀"</div>
+                                    <h3>"100% Rust"</h3>
+                                    <p>"Memory-safe, fast, fearless concurrency. No garbage-collection pauses. A whole class of crash never compiles."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"⏱️"</div>
+                                    <h3>"Time Compression"</h3>
+                                    <p>"Simulated time is not wall-clock time. Built to compress a year of simulation into a second. Age a battery a decade before lunch."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"🌐"</div>
+                                    <h3>"Massive Scale"</h3>
+                                    <p>"Persistence beyond live memory. Millions of entities, streamed by locality, culled on the GPU, stored in an LSM-tree world."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"🎯"</div>
+                                    <h3>"Avian Physics"</h3>
+                                    <p>"ECS-native, deterministic physics. Soft bodies, ragdolls, constraints, destruction. Same inputs, same result, every run."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"🤖"</div>
+                                    <h3>"AI-Native Bridge"</h3>
+                                    <p>"Drive the live engine over MCP. Inspect it, build in it, run simulations through it. Think Playwright, for a 3D world."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"✨"</div>
+                                    <h3>"Soul Language"</h3>
+                                    <p>"Write logic in plain Markdown. Soul compiles your intent to native Rust. Rune and Luau are there when you want the wheel."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"🎨"</div>
+                                    <h3>"Bevy Rendering"</h3>
+                                    <p>"Bevy's modern renderer. PBR, GPU-driven, clustered lighting, WebGPU-ready. 60+ FPS on real scenes."</p>
+                                </div>
+                                <div class="power-card">
+                                    <div class="power-icon">"📦"</div>
+                                    <h3>"Data Pipeline"</h3>
+                                    <p>"Import anything. Mesh (GLTF, FBX), point clouds (PCD), CAD, and tables (Parquet, Arrow). One pipeline, every format."</p>
+                                </div>
+                            </div>
+                        </div>
+                    }.into_any(),
+                }}
+            </div>
+        </section>
     }
 }

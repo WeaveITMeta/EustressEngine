@@ -66,6 +66,8 @@ arboard = { version = "3", optional = true }
 eustress-common = { path = "../common", features = ["physics", "realism", "realism-scripting", "luau", "gui"] }
 eustress-bliss = { path = "../bliss" }
 eustress-stream-node = { path = "../stream-node" }
+# Parametric BRep + Studio Boolean (Drafting tab CSG)
+eustress-cad = { path = "../cad" }
 # Shared tool registry — single source of truth for MCP tool
 # definitions + handlers. The engine enables the `bevy` feature so
 # `ToolRegistry` derives `Resource`; the MCP server depends on this
@@ -158,6 +160,15 @@ tiny-skia = "0.11"
 cosmic-text = "0.12"
 zstd = "0.13"
 tar = "0.4"
+# Already resolved at 8.6.0 in Cargo.lock (pulled in via candle-core, an
+# optional dep behind common/spatial-llm's generation-candle/local features
+# engine doesn't enable) — pinning "8" reuses that exact locked version
+# rather than re-resolving. Used by updater.rs to extract the Windows
+# in-app-update .zip (candle-core itself never compiles in a default build).
+zip = { version = "8", default-features = false, features = ["deflate"] }
+# Already resolved at 1.1.9 (a direct dep of eustress-common). Paired with
+# the existing `tar` dep above to read the Linux update .tar.gz in updater.rs.
+flate2 = "1.0"
 ureq = { version = "2", features = ["json"] }
 sha2 = "0.10"
 ed25519-dalek = { version = "2", features = ["std"] }
@@ -166,6 +177,14 @@ base64 = "0.22"
 urlencoding = "2"
 open = "5"
 rune = "0.14"
+# Luau (mlua) — the engine crate's OWN plugin host (script_plugin_host.rs)
+# writes `mlua::RegistryKey` directly, so mlua must be a direct dependency
+# here too: `eustress-common`'s `luau` feature (enabled above) only makes
+# mlua resolvable inside common's own source, not engine's. Mirrors the
+# `rune` line right above — both scripting runtimes are optional in
+# common but unconditional, direct deps here since engine's own code
+# names them.
+mlua = { workspace = true }
 rand = "0.8"
 rayon = "1.10"
 crossbeam = "0.8"
@@ -402,11 +421,13 @@ world-db = ["dep:eustress-worlddb", "eustress-roblox-import/binary-sink"]
 # `SimOrchestrationPlugin` is DISTINCT from the connect-only `ForgePlugin`
 # (SDK game-server deployment) — they share no code.
 sim-orchestration = ["dep:eustress-forge", "world-db"]
-# Data Platform columnar substrate (DATA_PLATFORM_PLAN.md P0). OPT-IN, NOT in
-# `core`/`default`: pulls the `eustress-data` leaf (arrow-rs + parquet), which
-# must stay out of the everyday editor build. Activate with
-# `cargo run -p eustress-engine --features data`. The `data-graph-purity` CI
-# guard fails the build if this ever leaks into the default feature graph.
+# Data Platform columnar substrate (DATA_PLATFORM_PLAN.md P0). ON BY DEFAULT
+# since 2026-06-23 (see the `default`/`core` comment above) — pulls the
+# `eustress-data` leaf (arrow-rs + parquet) into the everyday editor build.
+# Build with `--no-default-features` (+ a trimmed feature set) to exclude
+# it. The `data-graph-default` CI guard asserts the leaf IS present in the
+# default graph (inverted from the old off-by-default assertion this
+# comment used to describe).
 data = ["dep:eustress-data", "eustress-data/parquet", "eustress-data/import", "eustress-data/spectral", "dep:eustress-data-store"]
 # Gaussian Splatting / radiance-field rendering (GAUSSIAN_SPLATTING_BATTLE_PLAN.md
 # Phase 0). OPT-IN, NOT in `core`/`default`: pulls `eustress-radiance` →
@@ -441,3 +462,12 @@ debug = ["bevy/bevy_debug_stepping"]
 profiling = ["dep:inferno"]
 # CEF webview support (macOS only currently)
 cef = ["bevy_cef"]
+
+# Job-Object handle for `lsp_launcher.rs`: guarantees the `eustress-lsp`
+# child process is killed by the KERNEL when this process terminates for
+# ANY reason (crash, Task Manager, `Stop-Process -Force`) — not just on a
+# graceful `AppExit`/`Drop`. `windows-sys` is ABI-only bindings (no
+# semantic layer), so it can't collide with the higher-level `windows`
+# crate version cpal/rodio pin — see the `bevy_audio` note above.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects"] }

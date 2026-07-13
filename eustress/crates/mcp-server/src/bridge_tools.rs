@@ -60,12 +60,16 @@ impl ToolHandler for InspectSceneTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "inspect_scene",
-            description: "Inspect the LIVE running engine's scene over the engine bridge. Returns per-entity class/mesh/material/color/transform/visibility/physics flags/parent/on-disk source plus current FPS — far richer than query_entities (which only reads files on disk). Use this to debug what the engine is ACTUALLY rendering right now (e.g. a wrong mesh asset). Requires the engine to be running. Read-only.",
+            description: "Inspect the LIVE running engine's scene over the engine bridge. Returns per-entity class/mesh/material/color/transform/visibility/physics flags/parent/on-disk source plus current FPS — far richer than query_entities (which only reads files on disk). Use this to debug what the engine is ACTUALLY rendering right now (e.g. a wrong mesh asset). For LARGE scenes, scope the query spatially: pass `cell` (a sim-cell-… id from scene_overview / partition_scene) or `region` ({min,max} AABB) so you page through one spatial cell at a time instead of the whole flat list. Requires the engine to be running. Read-only.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "class":         { "type": "string",  "description": "Filter to an exact class name (e.g. \"Part\", \"Model\")." },
                     "name_contains": { "type": "string",  "description": "Case-insensitive substring filter on entity name." },
+                    "cell":          { "type": "string",  "description": "Scope to one 256-stud Morton cell by its sim-cell-XXXXXXX-YYYYYYY-ZZZZZZZ id (get ids from scene_overview or partition_scene). Wins over region if both given." },
+                    "region":        { "type": "object",  "description": "Scope to a world-space AABB: {min:[x,y,z], max:[x,y,z]}. Entities without a position never match.",
+                                       "properties": { "min": { "type": "array", "items": { "type": "number" } },
+                                                       "max": { "type": "array", "items": { "type": "number" } } } },
                     "offset":        { "type": "integer", "description": "Pagination offset (default 0)." },
                     "limit":         { "type": "integer", "description": "Max entities to return (default 200, engine caps at 5000)." }
                 }
@@ -80,7 +84,7 @@ impl ToolHandler for InspectSceneTool {
         // Pass through only the params the bridge understands; omit any
         // the caller didn't supply so engine-side defaults apply.
         let mut params = serde_json::Map::new();
-        for key in ["class", "name_contains", "offset", "limit"] {
+        for key in ["class", "name_contains", "cell", "region", "offset", "limit"] {
             if let Some(v) = input.get(key) {
                 if !v.is_null() {
                     params.insert(key.to_string(), v.clone());
@@ -124,6 +128,299 @@ impl ToolHandler for InspectSceneTool {
                 ok("inspect_scene", summary, result)
             }
             Err(e) => fail("inspect_scene", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// scene_overview  ->  scene.overview
+// ---------------------------------------------------------------------------
+
+pub struct SceneOverviewTool;
+
+impl ToolHandler for SceneOverviewTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "scene_overview",
+            description: "Region-organized structured summary of the LIVE scene: entities bucketed into 256-stud Morton cells (the same grid the engine's streaming/HLOD/forge-SimCell systems share). Each cell has a stable sim-cell-… id, world bounds, entity count, and a class histogram, plus scene-wide totals/bounds. THIS is how to approach a large scene (10K+ entities): call this first to see WHERE things are, then drill into individual cells with inspect_scene {cell: <id>} — never page an unscoped list. Cells are sorted densest-first. Requires the engine to be running. Read-only.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "region":          { "type": "object",  "description": "Restrict the overview to a world-space AABB: {min:[x,y,z], max:[x,y,z]}.",
+                                         "properties": { "min": { "type": "array", "items": { "type": "number" } },
+                                                         "max": { "type": "array", "items": { "type": "number" } } } },
+                    "max_cells":       { "type": "integer", "description": "Max cells to return (default 512, cap 4096); sparsest cells are dropped first." },
+                    "classes_per_cell":{ "type": "integer", "description": "Histogram entries per cell (default 8)." }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = serde_json::Map::new();
+        for key in ["region", "max_cells", "classes_per_cell"] {
+            if let Some(v) = input.get(key) {
+                if !v.is_null() {
+                    params.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+
+        match call_engine(&ctx.universe_root, "scene.overview", Value::Object(params)) {
+            Ok(result) => {
+                let total = result.get("total_entities").and_then(|v| v.as_u64()).unwrap_or(0);
+                let cells_total = result.get("cells_total").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mut lines: Vec<String> = Vec::new();
+                if let Some(arr) = result.get("cells").and_then(|v| v.as_array()) {
+                    for c in arr.iter().take(15) {
+                        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                        let count = c.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let top_class = c
+                            .get("classes")
+                            .and_then(|v| v.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|e| e.get("class"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        lines.push(format!("  - {id}: {count} entities (mostly {top_class})"));
+                    }
+                    if arr.len() > 15 {
+                        lines.push(format!("  … and {} more cells (see structured_data)", arr.len() - 15));
+                    }
+                }
+                let summary = format!(
+                    "{total} entities across {cells_total} occupied cells\n{}",
+                    lines.join("\n")
+                );
+                ok("scene_overview", summary, result)
+            }
+            Err(e) => fail("scene_overview", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// partition_scene  ->  scene.overview + client-side Morton-order bin-packing
+// ---------------------------------------------------------------------------
+
+pub struct PartitionSceneTool;
+
+impl ToolHandler for PartitionSceneTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "partition_scene",
+            description: "Divide the LIVE scene into K spatially-contiguous, entity-balanced work units for multi-agent processing. Fetches the scene_overview cell digest, orders cells by Morton code (so each unit is a coherent spatial neighborhood, not scattered), and greedy-fills units to an even entity budget. Each unit lists its cell ids — hand ONE unit to each parallel agent, which then pages through its cells via inspect_scene {cell: <id>}. Unit cell ids are forge SimCell-compatible (sim-cell-…). Requires the engine to be running. Read-only.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "units":                 { "type": "integer", "description": "Target number of work units / agents (default 4, cap 64). Ignored if max_entities_per_unit is set." },
+                    "max_entities_per_unit": { "type": "integer", "description": "Alternative sizing: cap each unit's entity count and emit as many units as needed." },
+                    "region":                { "type": "object",  "description": "Restrict partitioning to a world-space AABB: {min:[x,y,z], max:[x,y,z]}.",
+                                               "properties": { "min": { "type": "array", "items": { "type": "number" } },
+                                                               "max": { "type": "array", "items": { "type": "number" } } } }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        // One engine round-trip: the full cell digest (engine cap 4096
+        // cells). Everything after is pure JSON math in this process.
+        let mut params = serde_json::Map::new();
+        params.insert("max_cells".to_string(), serde_json::json!(4096));
+        if let Some(r) = input.get("region") {
+            if !r.is_null() {
+                params.insert("region".to_string(), r.clone());
+            }
+        }
+        let overview = match call_engine(&ctx.universe_root, "scene.overview", Value::Object(params)) {
+            Ok(v) => v,
+            Err(e) => return fail("partition_scene", e),
+        };
+
+        let cells: Vec<&Value> = overview
+            .get("cells")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().collect())
+            .unwrap_or_default();
+        let total_entities: u64 = cells
+            .iter()
+            .map(|c| c.get("count").and_then(|v| v.as_u64()).unwrap_or(0))
+            .sum();
+        if cells.is_empty() {
+            return fail(
+                "partition_scene",
+                "scene has no positioned entities to partition (0 occupied cells)".to_string(),
+            );
+        }
+
+        // Budget per unit: explicit cap, or total/K rounded up.
+        let units_requested = input
+            .get("units")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(4)
+            .clamp(1, 64);
+        let budget = input
+            .get("max_entities_per_unit")
+            .and_then(|v| v.as_u64())
+            .filter(|&b| b > 0)
+            .unwrap_or_else(|| total_entities.div_ceil(units_requested).max(1));
+
+        // Morton order = spatial contiguity: consecutive cells in this
+        // order are near each other in the world, so a greedy fill yields
+        // compact neighborhoods. The engine already computed each cell's
+        // morton code — no coordinate math here.
+        let mut ordered = cells;
+        ordered.sort_by_key(|c| c.get("morton").and_then(|v| v.as_u64()).unwrap_or(0));
+
+        let mut units: Vec<Value> = Vec::new();
+        let mut current_cells: Vec<&Value> = Vec::new();
+        let mut current_count: u64 = 0;
+        let flush = |unit_cells: &[&Value], idx: usize, count: u64| -> Value {
+            let mut min = [f64::INFINITY; 3];
+            let mut max = [f64::NEG_INFINITY; 3];
+            let mut classes: std::collections::HashMap<String, u64> = Default::default();
+            let mut ids: Vec<&str> = Vec::new();
+            for c in unit_cells {
+                if let Some(id) = c.get("id").and_then(|v| v.as_str()) {
+                    ids.push(id);
+                }
+                for (axis, key) in ["min", "max"].iter().enumerate() {
+                    if let Some(a) = c.get(*key).and_then(|v| v.as_array()) {
+                        for (i, v) in a.iter().take(3).enumerate() {
+                            let f = v.as_f64().unwrap_or(0.0);
+                            if axis == 0 { min[i] = min[i].min(f); } else { max[i] = max[i].max(f); }
+                        }
+                    }
+                }
+                if let Some(hist) = c.get("classes").and_then(|v| v.as_array()) {
+                    for e in hist {
+                        if let (Some(class), Some(n)) = (
+                            e.get("class").and_then(|v| v.as_str()),
+                            e.get("count").and_then(|v| v.as_u64()),
+                        ) {
+                            *classes.entry(class.to_string()).or_default() += n;
+                        }
+                    }
+                }
+            }
+            let mut class_pairs: Vec<(String, u64)> = classes.into_iter().collect();
+            class_pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let classes_json: Vec<Value> = class_pairs
+                .into_iter()
+                .take(10)
+                .map(|(class, count)| serde_json::json!({ "class": class, "count": count }))
+                .collect();
+            serde_json::json!({
+                "unit_id":      format!("unit-{idx:02}"),
+                "cell_ids":     ids,
+                "cell_count":   unit_cells.len(),
+                "entity_count": count,
+                "bounds":       { "min": min, "max": max },
+                "classes":      classes_json,
+                "next_step":    "for each cell id, call inspect_scene {cell: <id>} and page with offset/limit",
+            })
+        };
+        for c in ordered {
+            let n = c.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+            if !current_cells.is_empty() && current_count + n > budget {
+                units.push(flush(&current_cells, units.len(), current_count));
+                current_cells.clear();
+                current_count = 0;
+            }
+            current_cells.push(c);
+            current_count += n;
+        }
+        if !current_cells.is_empty() {
+            units.push(flush(&current_cells, units.len(), current_count));
+        }
+
+        let lines: Vec<String> = units
+            .iter()
+            .map(|u| {
+                format!(
+                    "  - {}: {} entities in {} cell(s)",
+                    u.get("unit_id").and_then(|v| v.as_str()).unwrap_or("?"),
+                    u.get("entity_count").and_then(|v| v.as_u64()).unwrap_or(0),
+                    u.get("cell_count").and_then(|v| v.as_u64()).unwrap_or(0),
+                )
+            })
+            .collect();
+        let summary = format!(
+            "{} work units over {} entities (budget ≈{} per unit)\n{}",
+            units.len(),
+            total_entities,
+            budget,
+            lines.join("\n")
+        );
+        let cells_truncated = overview
+            .get("has_more")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        ok(
+            "partition_scene",
+            summary,
+            serde_json::json!({
+                "units":           units,
+                "total_entities":  total_entities,
+                "budget_per_unit": budget,
+                // Honest coverage marker: true means the engine's 4096-cell
+                // digest cap truncated the overview and some sparse cells
+                // are NOT in any unit — narrow with `region` in that case.
+                "cells_truncated": cells_truncated,
+                "cell_size":       overview.get("cell_size").cloned().unwrap_or(Value::Null),
+            }),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// sim_bindings  ->  sim.bindings
+// ---------------------------------------------------------------------------
+
+pub struct SimBindingsTool;
+
+impl ToolHandler for SimBindingsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "sim_bindings",
+            description: "Forge gang-placement outcomes for this engine session's resident cells (SimOrchestrationPlugin ledger): cell id, members placed, whole-gang committed flag. Cell ids match scene_overview/partition_scene ids, so you can join placement state onto your spatial partition. Requires an engine built with the sim-orchestration feature (not in the default build) — errors gracefully otherwise. Read-only.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
+        match call_engine(&ctx.universe_root, "sim.bindings", serde_json::json!({})) {
+            Ok(result) => {
+                let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mut lines: Vec<String> = Vec::new();
+                if let Some(arr) = result.get("bindings").and_then(|v| v.as_array()) {
+                    for b in arr.iter().take(15) {
+                        let id = b.get("cell_id").and_then(|v| v.as_str()).unwrap_or("?");
+                        let members = b.get("placed_members").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let complete = b.get("complete").and_then(|v| v.as_bool()).unwrap_or(false);
+                        lines.push(format!(
+                            "  - {id}: {members} member(s), gang {}",
+                            if complete { "COMMITTED" } else { "incomplete" }
+                        ));
+                    }
+                }
+                ok(
+                    "sim_bindings",
+                    format!("{count} placement record(s)\n{}", lines.join("\n")),
+                    result,
+                )
+            }
+            Err(e) => fail("sim_bindings", e),
         }
     }
 }

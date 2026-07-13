@@ -42,8 +42,6 @@ pub mod registry;
 #[allow(dead_code)]
 pub mod builtin;
 #[allow(dead_code)]
-pub mod rune_api;
-#[allow(dead_code)]
 pub mod tab_api;
 #[allow(dead_code)]
 pub mod script_plugin;
@@ -66,18 +64,7 @@ pub mod prelude {
     };
     pub use super::manager::PluginManager;
     pub use super::registry::PluginRegistry;
-    
-    // Rune API exports
-    pub use super::rune_api::{
-        RuneContext, RuneValue, BillboardOptions, BillboardRequest,
-        ScreenUIElement, ScreenButton, ScreenSlider, HotReloadWatcher,
-        // Layer 1-4 API types
-        MenuRegistration, MenuItem,
-        TabRegistration, TabSectionDef, TabButtonDef,
-        PanelRequest,
-        ScreenGuiRequest, ScreenGuiElementDef,
-    };
-    
+
     // Tab API exports
     pub use super::tab_api::{
         TabRegistry, PluginTab, TabSection, TabButton, TabButtonSize,
@@ -135,7 +122,14 @@ pub struct StudioPluginSystem;
 impl Plugin for StudioPluginSystem {
     fn build(&self, app: &mut App) {
         app
-            .init_resource::<PluginManager>()
+            // NOT `.init_resource()` — that calls `PluginManager::default()`
+            // (the derive), which leaves `plugins_dir: None` and never runs
+            // `new()`'s directory-computing + create_dir_all logic. Confirmed
+            // latent bug: `plugins_dir()` returned `None` in every actual
+            // build before this fix, silently disabling the one thing
+            // `PluginManager` exists to provide — needed now that script
+            // plugin discovery (`script_plugin_host.rs`) depends on it.
+            .insert_resource(PluginManager::new())
             .init_resource::<PluginRegistry>()
             .init_resource::<TabRegistry>()
             .init_resource::<SimClock>()
@@ -203,17 +197,31 @@ fn advance_sim_clock(
 
 /// Setup built-in plugins
 fn setup_builtin_plugins(
-    _manager: ResMut<PluginManager>,
-    registry: ResMut<PluginRegistry>,
+    mut manager: ResMut<PluginManager>,
+    mut registry: ResMut<PluginRegistry>,
     tab_registry: ResMut<TabRegistry>,
 ) {
-    // Register built-in plugins
     info!("🔌 Initializing Studio Plugin System");
-    
-    // Plugins are loaded from Rune scripts in the plugins/ directory
-    // The ScriptPluginManager handles loading and enabling script plugins
-    
-    info!("🔌 Plugin system ready. {} plugins loaded, {} custom tabs.", 
+
+    // Road Builder — the first real, working `StudioPlugin`: registers a
+    // tab via `PluginApi`, which `sync_plugin_tabs` (below in this file)
+    // pushes into `TabRegistry`, which the Slint ribbon renders. Register
+    // AND enable (register alone just stores it — on_enable, which is what
+    // actually populates the tab, only runs on enable).
+    registry.register(crate::road_tool::RoadToolPlugin::default());
+    if let Err(e) = manager.enable_plugin(&mut registry, "road-tool") {
+        warn!("🔌 Failed to enable road-tool plugin: {}", e);
+    }
+
+    // Plugin Host Controls — native "Reload Plugins" button (Phase 2:
+    // script-authored Luau plugins, see `script_plugin_host.rs`). Native,
+    // not script, so it exists even with zero .lua plugins installed.
+    registry.register(crate::script_plugin_host::PluginHostControlsPlugin::default());
+    if let Err(e) = manager.enable_plugin(&mut registry, "plugin-host-controls") {
+        warn!("🔌 Failed to enable plugin-host-controls plugin: {}", e);
+    }
+
+    info!("🔌 Plugin system ready. {} plugins loaded, {} custom tabs.",
           registry.count(), tab_registry.tabs.len());
 }
 

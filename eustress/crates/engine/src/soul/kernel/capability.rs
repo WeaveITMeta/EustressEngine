@@ -255,6 +255,15 @@ impl CapabilityCatalog {
             Capability::new("gui_set_position", Gui),
             Capability::new("gui_set_size", Gui),
             Capability::new("gui_set_font_size", Gui),
+            // --- Studio plugin API (Rune half of the unified plugin bridge) ---
+            // Only enforced in the authoring (`build_pipeline`) path today —
+            // `rune_runtime.rs`'s plugin loader trusts local files you
+            // installed, same as Phase 2's Luau host. Catalogued anyway so a
+            // future authoring-assist flow doesn't hit a mystery rejection.
+            Capability::new("plugin_add_section", Gui),
+            Capability::new("plugin_add_button", Gui),
+            Capability::new("plugin_notify", Diagnostic),
+            Capability::new("plugin_get_selection", ReadSim),
         ];
 
         let mut by_name = HashMap::with_capacity(entries.len());
@@ -309,5 +318,39 @@ impl CapabilityCatalog {
         // TODO: when create_ecs_module exposes its registered symbols, assert
         //       set-equality here. For now this is a placeholder the test suite
         //       can flesh out once the introspection seam exists.
+    }
+}
+
+#[cfg(test)]
+mod plugin_capability_tests {
+    use super::CapabilityCatalog;
+
+    /// Hand-maintained mirror of `rune_ecs_module::create_ecs_module`'s
+    /// `plugin_*` registrations (see the "Studio plugin API" section
+    /// there) — the same manual-sync discipline `assert_in_sync_with_module`'s
+    /// own TODO describes for the whole catalog, applied to just the four
+    /// functions this Phase 3 change added. Real introspection is blocked
+    /// on rune 0.14 not exposing a `Module`'s registered symbols; until it
+    /// does, this is what keeps a future `plugin_*` addition from
+    /// silently missing its catalog entry (an unmet entry means the
+    /// Kernel L12 authoring-path validator rejects it as an unknown
+    /// capability).
+    const EXPECTED_PLUGIN_CAPABILITIES: &[&str] = &[
+        "plugin_add_section",
+        "plugin_add_button",
+        "plugin_notify",
+        "plugin_get_selection",
+    ];
+
+    #[test]
+    fn plugin_capabilities_are_catalogued() {
+        let catalog = CapabilityCatalog::eustress_core();
+        for name in EXPECTED_PLUGIN_CAPABILITIES {
+            assert!(
+                catalog.lookup(name).is_some(),
+                "capability catalog missing '{name}' — add it to CapabilityCatalog::eustress_core() \
+                 to match rune_ecs_module::create_ecs_module"
+            );
+        }
     }
 }

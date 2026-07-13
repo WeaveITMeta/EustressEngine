@@ -291,6 +291,7 @@ mod tests {
                 material: "Plastic".into(),
                 locked: false,
                 physics: None,
+                respect_gltf_materials: false,
             },
             metadata: InstanceMetadata {
                 class_name: "Part".into(),

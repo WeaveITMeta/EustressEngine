@@ -72,21 +72,15 @@ The headline good news: the simulation core is **not inherently render-coupled**
 
 ---
 
-## 4. The TypeId constraint (this dictates the factoring)
+## 4. The TypeId constraint — resolved
 
-The engine crate compiles its modules **twice**: once into the library (`eustress_engine::simulation`, `::space`, `::soul`, `::play_mode`, … — all `pub mod` in [`lib.rs`](../../eustress/crates/engine/src/lib.rs)) and once **bin-local** via `mod` declarations in [`main.rs`](../../eustress/crates/engine/src/main.rs). These are **distinct compilations with distinct `TypeId`s.**
+The engine crate used to compile its modules **twice**: once into the library (`eustress_engine::simulation`, `::space`, `::soul`, `::play_mode`, …) and once more **bin-local** via ~104 `mod X;` declarations in [`main.rs`](../../eustress/crates/engine/src/main.rs). Two distinct compilations meant two distinct `TypeId`s per type — a lib-added system could never see a resource the bin inserted, and vice versa. That is why [`engine_bridge`](../../eustress/crates/engine/src/engine_bridge/mod.rs) was originally kept bin-local: its handlers read live resources (`StudioState`, `SpaceRoot`) and had to match whichever copy the editor actually populated.
 
-This is why [`engine_bridge`](../../eustress/crates/engine/src/engine_bridge/mod.rs) is bin-local (the note at [`main.rs:91`](../../eustress/crates/engine/src/main.rs)): its handlers read live resources (`StudioState`, `SpaceRoot`) and query bin-spawned components. A bridge added from the **lib** copy would look up the **lib** `TypeId` of `SpaceRoot`, never match the **bin** copy the editor actually inserted, and silently see `None` for every resource.
+**Resolved in commit `f10298b3` (2026-07-02): "untangle lib/bin dual-compilation — thin bin, one TypeId universe."** `main.rs`'s 108-line `mod` block collapsed to a single `use eustress_engine::{...}` import; every plugin the bin adds now comes from the lib's one compilation. `engine_bridge` — along with `history_stream`, `light_sync`, `photoreal`, `soul_script_migration` — was promoted to `pub mod` in [`lib.rs`](../../eustress/crates/engine/src/lib.rs) in the same change. `lib.rs` calls out the reason directly, right above `pub mod engine_bridge;`: promoting it is this plan's keystone, because a future `eustress-headless` bin needs lib-side bridge `TypeId`s.
 
-**The rule that follows:** within a single binary, every type the bridge touches must come from **one** compilation. So a second binary (`eustress-headless`) cannot just `add_plugins(eustress_engine::simulation::SimulationPlugin)` while *also* using a bin-local bridge — it would re-introduce the exact split.
+**What this means for headless:** the hard constraint is gone. A future `eustress-headless` bin can `use eustress_engine::engine_bridge::EngineBridgePlugin;` — the same lib copy the editor uses, the same `TypeId`s, zero risk of the silent `None`-resource failure mode. The remaining factoring in §5 is now purely organizational: grouping `main.rs`'s ~100 `add_plugins` calls into a reusable `add_core_sim_plugins` / `add_editor_plugins` split, not a TypeId fix.
 
-**The fix (chosen direction): promote the core to the lib; make both bins thin.**
-- Move the headless-safe modules' *registration* into a lib entry point: `eustress_engine::app_core::add_core_sim_plugins(&mut App)`.
-- Move `engine_bridge` into the lib too, referencing the **lib** copies of `SpaceRoot` et al.
-- Both bins — editor `main.rs` and new `eustress-headless` — call the lib functions and **stop declaring duplicate bin-local `mod`s** for the core modules.
-- Result: one lib-copy of each core type per binary → `TypeId`s match within each binary → the bridge works in **both** shells, and the old "bin-local because the bin duplicates the type" reason dissolves because the bin no longer duplicates it.
-
-> **Alternative considered and rejected:** keep modules bin-local and share the tier functions into `src/bin/headless.rs` via `#[path]` re-`mod` declarations. This re-compiles every module a third time, multiplies the `mod` wall, and is fragile. Promotion to the lib is the correct end-state and also the biggest single lever on the monolithic-build complaint.
+> One stale artifact survives the refactor: the comment above `.add_plugins(engine_bridge::EngineBridgePlugin)` in `main.rs` (~line 303) still reads "Bin-local... so its handlers share the bin's TypeIds — see the `mod engine_bridge` note above," describing the pre-refactor world (there is no such note above it anymore). Harmless — the code is correct — but worth a follow-up comment fix.
 
 ---
 
@@ -132,7 +126,7 @@ Everything from §3 marked ✅, in dependency order. Verbatim list to lift from 
 - `EngineSoulPlugin`, `RunePhysicsBridgePlugin`, `RuneECSBindingsPlugin` (the GUI bridge is editor-only — audit), services (`PlayerService`, `DataStorePlugin`, `TeleportPlugin`, `MarketplacePlugin`, `TeamServicePlugin`, `GamepadServicePlugin` — gamepad is a no-op headless).
 - `HistoryStreamPlugin`, op-log producer, `soul_script_migration`, `attribute_tag_migration`.
 - **`PlayModeCorePlugin`** (new — see §5.3).
-- `EngineBridgePlugin` (moved to lib per §4).
+- `EngineBridgePlugin` — already lib-resident (§4); just needs including in the composition function.
 - `#[cfg(streaming)]` `StreamNodePlugin` + `SimWriterResource` setup.
 
 ### 5.2 `add_editor_plugins(app)` — render/UI only
@@ -266,15 +260,16 @@ This makes a space a pure function: `(space, inputs, ticks) → recording.json +
 
 | Phase | Work | Effort | Status |
 |---|---|---|---|
+| **P0** | Untangle lib/bin dual-compilation, one `TypeId` universe, promote `engine_bridge`/`history_stream`/`light_sync`/`photoreal`/`soul_script_migration` to the lib | L | **`done`** — commit `f10298b3`, 2026-07-02 |
 | **P1** | Split `PlayModePlugin` → `PlayModeCorePlugin` + `PlayModeUiPlugin` | M | `new` |
-| **P2** | `app_core::add_core_sim_plugins` / `app_editor::add_editor_plugins`; move `engine_bridge` to lib; thin out editor `main.rs`; stop duplicating bin-local `mod`s | L | `new` |
+| **P2** | `app_core::add_core_sim_plugins` / `app_editor::add_editor_plugins` — group `main.rs`'s ~100 `add_plugins` calls into a composition function the headless bin can share | S | `new` |
 | **P3** | `eustress-headless` bin (`MinimalPlugins` + core + autoplay + `TickLimitPlugin`) | S | `new` |
 | **P4** | Lift `bridge_client` to shared crate; un-stub CLI; add `sim`/`ecs`/`raycast`/`run` verbs | M | `extend` |
 | **P5** | `eustress run` batch runner + recording dump + breakpoint exit code | S | `extend` |
 | **P6** | `--render gpu` tier (windowless `DefaultPlugins`) for `ai_camera` capture | M | `new` |
 | **P7** | Retire dead `--server` flag; fold `eustress-server` onto `add_core_sim_plugins` (one sim path) or document it as multiplayer-only | S | `extend` |
 
-**P1 → P2 → P3** is the spine that delivers "run spaces apart from visualization." P4/P5 make it *usable*. P6 is the observation upgrade. P2 is the only L — and it pays twice (headless **and** the monolithic-build contention named in the roadmap).
+**P1 → P2 → P3** is the spine that delivers "run spaces apart from visualization." With P0 already done, P1 and P2 are both small — P1 is a mechanical plugin split with no TypeId risk, and P2 is pure reorganization (grouping existing `add_plugins` calls, not fixing a bug). P4/P5 make the spine *usable*; P6 is the observation upgrade.
 
 ---
 
@@ -307,8 +302,8 @@ A phase is "done" only when the gate passes — not when it compiles.
 | [`engine/src/play_mode.rs`](../../eustress/crates/engine/src/play_mode.rs) | Split plugin into `PlayModeCorePlugin` (lib) + `PlayModeUiPlugin` (editor) |
 | `engine/src/app_core.rs` *(new)* | `add_core_sim_plugins(&mut App)` |
 | `engine/src/app_editor.rs` *(new)* | `add_editor_plugins(&mut App)` |
-| [`engine/src/lib.rs`](../../eustress/crates/engine/src/lib.rs) | `pub mod app_core; pub mod app_editor;`; promote `engine_bridge` to lib |
-| [`engine/src/main.rs`](../../eustress/crates/engine/src/main.rs) | Reduce to `add_core_sim_plugins` + `add_editor_plugins` + run; drop duplicate bin-local `mod`s for core modules |
+| [`engine/src/lib.rs`](../../eustress/crates/engine/src/lib.rs) | `pub mod app_core; pub mod app_editor;` (`engine_bridge` already promoted — P0, done) |
+| [`engine/src/main.rs`](../../eustress/crates/engine/src/main.rs) | Reduce the inline `add_plugins` chain to `add_core_sim_plugins(&mut app)` + `add_editor_plugins(&mut app)` + run |
 | `engine/src/bin/headless.rs` *(new)* | The `eustress-headless` binary (§6) |
 | `engine/src/tick_limit.rs` *(new)* | `TickLimitPlugin(n)` → stop + export + `AppExit` |
 | [`engine/Cargo.toml`](../../eustress/crates/engine/Cargo.toml) | `[[bin]] eustress-headless`, `required-features = ["world-db"]` |

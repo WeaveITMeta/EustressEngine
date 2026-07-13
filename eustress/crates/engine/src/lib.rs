@@ -98,6 +98,9 @@ pub mod timeline_animation;
 pub mod attribute_tag_migration;
 pub mod accessibility;
 pub mod tools_smart;
+pub mod cad_plugin;
+pub mod cad_assembly;
+pub mod cad_mate_tool;
 pub mod part_selection;
 pub mod material_sync;
 pub mod lock_tool;
@@ -125,6 +128,12 @@ pub mod clipboard;
 pub mod grouping;
 pub mod embedded_client;
 pub mod studio_plugins;
+/// Road-builder Studio plugin — the first real consumer of `studio_plugins`
+/// (spline S-curve nodes, terrain conform, ribbon mesh + collider).
+pub mod road_tool;
+/// Phase 2 of the Studio plugin system — Luau (`.lua`) script-authored
+/// plugins, no Rust recompile. See its module docs for the architecture.
+pub mod script_plugin_host;
 pub mod grid_snapping;
 pub mod collision_snapping;
 pub mod mesh_optimizer;

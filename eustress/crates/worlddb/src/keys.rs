@@ -239,6 +239,57 @@ pub fn world_to_cell(coord: f32, chunk_size: f32) -> u32 {
     cell.clamp(0, 0x1f_ffff) as u32
 }
 
+/// Inverse of [`world_to_cell`] per axis: biased cell coordinate → the
+/// world-space MIN edge of that cell (`(cell - 2^20) * chunk_size`).
+pub fn cell_to_world_min(cell: u32, chunk_size: f32) -> f32 {
+    ((cell as i64 - (1 << 20)) as f32) * chunk_size
+}
+
+/// A cell's world-space axis-aligned bounding box `(min, max)` — the
+/// region an external agent should pass back into a spatial query to
+/// see exactly this cell's contents. Inverse of applying
+/// [`world_to_cell`] on each axis.
+pub fn cell_world_aabb(cell: (u32, u32, u32), chunk_size: f32) -> ([f32; 3], [f32; 3]) {
+    let min = [
+        cell_to_world_min(cell.0, chunk_size),
+        cell_to_world_min(cell.1, chunk_size),
+        cell_to_world_min(cell.2, chunk_size),
+    ];
+    (
+        min,
+        [min[0] + chunk_size, min[1] + chunk_size, min[2] + chunk_size],
+    )
+}
+
+// ── Stable, reversible cell-id strings ───────────────────────────────
+//
+// `sim-cell-{x:07}-{y:07}-{z:07}` — zero-padded to 7 digits so lexical
+// order matches numeric order within an axis (21-bit max is 2_097_151 =
+// 7 digits). This is the SHARED cell-identity vocabulary: forge's sim
+// module (`eustress_forge::sim::cell`) delegates here so a SimCell id,
+// an engine-bridge `scene.overview` cell id, and an MCP work-unit id
+// are all the same string for the same 256-stud residency cell — an
+// external orchestrator can hand a cell id from one surface to another
+// without any coordinate math of its own.
+
+/// Build the stable cell id for a (biased, 21-bit) Morton cell coord.
+pub fn cell_id(c: (u32, u32, u32)) -> String {
+    format!("sim-cell-{:07}-{:07}-{:07}", c.0, c.1, c.2)
+}
+
+/// Inverse of [`cell_id`]. `None` on a malformed / foreign id.
+pub fn parse_cell_id(s: &str) -> Option<(u32, u32, u32)> {
+    let rest = s.strip_prefix("sim-cell-")?;
+    let mut it = rest.split('-');
+    let x = it.next()?.parse::<u32>().ok()?;
+    let y = it.next()?.parse::<u32>().ok()?;
+    let z = it.next()?.parse::<u32>().ok()?;
+    if it.next().is_some() {
+        return None; // trailing garbage
+    }
+    Some((x, y, z))
+}
+
 // ── Voxel-chunk keys — Wave 9.A (terrain in Fjall) ───────────────────
 //
 // Terrain lives in the same one-handle streaming DB as entities via a
@@ -648,6 +699,43 @@ mod morton_tests {
         let (e, c) = enc.decode_component(&k).unwrap();
         assert_eq!(e, EntityId(42));
         assert_eq!(c, ComponentTypeId::TRANSFORM);
+    }
+
+    #[test]
+    fn cell_id_roundtrips() {
+        for c in [(0, 0, 0), (1, 2, 3), (1_048_576, 7, 99), (2_097_151, 0, 2_097_151)] {
+            let id = cell_id(c);
+            assert_eq!(parse_cell_id(&id), Some(c), "roundtrip {c:?}");
+        }
+    }
+
+    #[test]
+    fn parse_cell_id_rejects_foreign() {
+        assert_eq!(parse_cell_id("forge/jobs/x"), None);
+        assert_eq!(parse_cell_id("sim-cell-1-2"), None); // too few
+        assert_eq!(parse_cell_id("sim-cell-1-2-3-4"), None); // too many
+        assert_eq!(parse_cell_id("sim-cell-a-b-c"), None); // non-numeric
+    }
+
+    #[test]
+    fn cell_world_aabb_inverts_world_to_cell() {
+        let chunk = 256.0f32;
+        // Points on either side of the origin, plus a far one — each must
+        // land inside the AABB of the cell that world_to_cell maps it to.
+        for p in [(0.5f32, 10.0f32, -300.0f32), (-1.0, -1.0, -1.0), (10_000.0, 0.0, -10_000.0)] {
+            let cell = (
+                world_to_cell(p.0, chunk),
+                world_to_cell(p.1, chunk),
+                world_to_cell(p.2, chunk),
+            );
+            let (min, max) = cell_world_aabb(cell, chunk);
+            assert!(p.0 >= min[0] && p.0 < max[0], "{p:?} x in {min:?}..{max:?}");
+            assert!(p.1 >= min[1] && p.1 < max[1], "{p:?} y in {min:?}..{max:?}");
+            assert!(p.2 >= min[2] && p.2 < max[2], "{p:?} z in {min:?}..{max:?}");
+        }
+        // The biased origin cell's min corner sits exactly at world 0.
+        let origin_cell = 1u32 << 20;
+        assert_eq!(cell_to_world_min(origin_cell, chunk), 0.0);
     }
 
     #[test]

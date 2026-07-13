@@ -224,7 +224,7 @@ mod tests {
 
         let entity = {
             let (mut commands, asset_server, class_schema, mut meshes, mut mats, mut images, registry) =
-                state.get_mut(world);
+                state.get_mut(world).unwrap();
 
             let spawner = registry
                 .get(ClassName::StringValue)

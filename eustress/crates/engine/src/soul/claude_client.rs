@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use eustress_common::soul::{ClaudeConfig, ModelTier, SoulAST};
 use super::scope::{ScriptLocation, SystemPromptBuilder};
+use super::workshop_model::WorkshopModel;
 
 // ============================================================================
 // API Types
@@ -1004,21 +1005,25 @@ Generate a complete, compilable Rust module with a Plugin implementation."#,
     /// Make a single Claude API call with tools. Returns the parsed response
     /// containing text and/or tool_use blocks. The caller is responsible for
     /// the multi-turn loop (execute tools → send results → call again).
+    ///
+    /// `model` selects which Anthropic model answers — Workshop's user-picked
+    /// executor or advisor, NOT the complexity-derived `ModelTier` the Soul
+    /// build pipeline uses (see `workshop_model` module doc).
     pub fn call_with_tools(
         &self,
         messages: &[serde_json::Value],
         tools: &[ClaudeTool],
         system_prompt: Option<&str>,
+        model: &WorkshopModel,
     ) -> Result<AgenticResponse, ClaudeError> {
         let api_key = self.config.api_key.as_ref()
             .ok_or(ClaudeError::NoApiKey)?;
 
-        let model = self.config.model_for_tier(ModelTier::Sonnet);
-        let timeout = Duration::from_secs(ModelTier::Sonnet.timeout_secs());
+        let timeout = Duration::from_secs(model.timeout_secs());
 
         let request = ClaudeRequestWithTools {
-            model: model.to_string(),
-            max_tokens: 16384,
+            model: model.api_id().to_string(),
+            max_tokens: model.max_tokens(),
             system: system_prompt.map(|s| s.to_string()),
             messages: messages.to_vec(),
             tools: tools.to_vec(),

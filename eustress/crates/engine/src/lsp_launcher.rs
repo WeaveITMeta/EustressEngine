@@ -31,6 +31,20 @@
 //! * Missing binary = no child = no error. This is the expected case
 //!   on a cargo-run of the bare engine without the `lsp` feature bin
 //!   built; we surface it once at info level and move on.
+//!
+//! ## Surviving a non-graceful engine exit (Windows)
+//!
+//! `AppExit`/`Drop` only run when the engine shuts down through Bevy's
+//! normal exit path. A crash, a hung window force-closed from Task
+//! Manager, or `Stop-Process -Force` skips both — the `eustress-lsp`
+//! child is orphaned, keeps its TCP port bound, and the NEXT engine
+//! launch's spawn attempt on that same port file can get confused by a
+//! stale, still-alive server. `win_job` assigns the child to a Windows
+//! Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` — a KERNEL
+//! guarantee, not a userspace hook, so the child dies the moment this
+//! process's handles close for any reason. Belt-and-braces alongside
+//! (not a replacement for) the graceful `AppExit`/`Drop` paths, which
+//! still fire first on a normal exit.
 
 use bevy::app::{App, AppExit, Plugin, Startup};
 use bevy::ecs::resource::Resource;
@@ -38,6 +52,79 @@ use bevy::log::{info, warn};
 use bevy::prelude::*;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+
+#[cfg(windows)]
+mod win_job {
+    use bevy::log::warn;
+    use std::sync::atomic::{AtomicPtr, Ordering};
+    use std::sync::Once;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    /// `HANDLE` is `*mut c_void` in windows-sys — a raw pointer, so it's
+    /// `!Send + !Sync` and can't live directly in a `OnceLock` `static`
+    /// (statics require `Sync`). `AtomicPtr` stores the same bit pattern
+    /// but IS `Sync`, so it's the right container here; `Once` guards
+    /// one-time creation the way `OnceLock::get_or_init` would have.
+    /// Created once and reused across Universe-switch respawns — a Job
+    /// Object can hold more than one process over its lifetime, so a
+    /// fresh child just needs `AssignProcessToJobObject` again, not a new
+    /// job. A null stored pointer means creation failed (logged once);
+    /// callers treat that as "no job-object safety net" and fall back to
+    /// the existing graceful-exit-only cleanup.
+    static JOB_PTR: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+    static JOB_INIT: Once = Once::new();
+
+    fn job_handle() -> Option<HANDLE> {
+        JOB_INIT.call_once(|| unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                warn!("LSP launcher: CreateJobObjectW failed — eustress-lsp won't survive a force-killed engine");
+                return;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                warn!("LSP launcher: SetInformationJobObject failed — eustress-lsp won't survive a force-killed engine");
+                return;
+            }
+            JOB_PTR.store(job, Ordering::SeqCst);
+        });
+        let ptr = JOB_PTR.load(Ordering::SeqCst);
+        if ptr.is_null() { None } else { Some(ptr) }
+    }
+
+    /// Assign a freshly-spawned child to the kill-on-close job. Best-effort:
+    /// a failure here just means the graceful-exit-only cleanup still
+    /// applies, so it's logged, not propagated.
+    pub fn guard(child: &std::process::Child) {
+        use std::os::windows::io::AsRawHandle;
+        let Some(job) = job_handle() else { return };
+        let process_handle = child.as_raw_handle() as HANDLE;
+        let ok = unsafe { AssignProcessToJobObject(job, process_handle) };
+        if ok == 0 {
+            warn!("LSP launcher: AssignProcessToJobObject failed for pid={} — eustress-lsp won't survive a force-killed engine", child.id());
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod win_job {
+    /// No-op on non-Windows: `posix_spawn`'s `PDEATHSIG`-equivalent is a
+    /// per-platform concern of its own and this launcher only ships for
+    /// Windows today (see the binary-resolution doc comment above).
+    pub fn guard(_child: &std::process::Child) {}
+}
 
 /// Tracks the spawned `eustress-lsp` child process + its sentinel file
 /// so the shutdown system can clean both up. Stored as a Bevy resource
@@ -248,6 +335,12 @@ fn maybe_spawn_lsp_child(
     match cmd.spawn() {
         Ok(child) => {
             let pid = child.id();
+            // Kernel-level safety net — see the module doc comment's
+            // "Surviving a non-graceful engine exit" section. Must happen
+            // before the child is stored/used further so there's no
+            // window where a crash between spawn and this call leaves it
+            // unguarded (best-effort either way; not worth a retry loop).
+            win_job::guard(&child);
             info!(
                 "LSP launcher: spawned eustress-lsp pid={} ({}), port-file={}",
                 pid, binary.display(), port_file.display(),

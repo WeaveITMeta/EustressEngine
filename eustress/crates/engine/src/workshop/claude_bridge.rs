@@ -31,6 +31,7 @@ use super::tools::ToolRegistry;
 use eustress_tools::registry::{LuauCreatedEntity, LuauExecutionResult, LuauExecutor};
 use super::modes::ActiveModes;
 use crate::soul::claude_client::{AgenticResponse, ClaudeClient, ClaudeTool};
+use crate::soul::{Provider, WorkshopModel, XaiClient, XaiConfig};
 
 // ============================================================================
 // 1. WorkshopClaudeTask — in-flight request state
@@ -67,6 +68,19 @@ impl InFlightRequest {
 #[derive(Debug)]
 pub(super) struct AgenticInFlight {
     pub(super) result: Arc<Mutex<Option<Result<AgenticResponse, String>>>>,
+    /// Which model this turn was dispatched to — used to stamp
+    /// `ChatMessage::model_used` and to price the turn's cost correctly
+    /// once it resolves.
+    pub(super) model: WorkshopModel,
+}
+
+/// An in-flight `consult_advisor` call. Resolves into the `tool_result` of
+/// the `Mcp` card at `message_id` — text-only (the advisor gets no tools),
+/// so no `AgenticResponse`/tool-loop machinery needed here.
+#[derive(Debug)]
+pub(super) struct AdvisorInFlight {
+    pub(super) message_id: u32,
+    pub(super) result: Arc<Mutex<Option<Result<String, String>>>>,
 }
 
 /// Resource tracking all in-flight Claude requests for the Workshop
@@ -76,6 +90,10 @@ pub struct WorkshopClaudeTasks {
     pub(super) in_flight: Vec<InFlightRequest>,
     /// Agentic tool-use requests (the conversational chat loop)
     pub(super) agentic_in_flight: Vec<AgenticInFlight>,
+    /// Pending `consult_advisor` calls — resolved asynchronously, same
+    /// thread+poll shape as `agentic_in_flight`, tracked separately so
+    /// `dispatch_chat_request` can block redispatch while any are pending.
+    pub(super) advisor_in_flight: Vec<AdvisorInFlight>,
     /// Whether a conversational response is pending (prevent duplicate sends)
     pub chat_pending: bool,
 }
@@ -126,8 +144,19 @@ pub fn dispatch_chat_request(
     // Only dispatch in the conversing state, only when we're not already
     // waiting, and only when the user has not gated us behind a tool
     // approval that hasn't been resolved yet.
+    //
+    // `!tasks.advisor_in_flight.is_empty()` blocks redispatch the same way
+    // `chat_pending` does — not folded into `ready_to_dispatch` below,
+    // because that walk-back only inspects the MOST RECENT Claude-relevant
+    // message. If a turn emits `[consult_advisor, run_bash]`, `run_bash`
+    // resolves synchronously and becomes the most-recent-with-a-result
+    // message while the advisor is still pending, which would otherwise
+    // make `ready_to_dispatch` true and redispatch before the advisor's
+    // `tool_result` exists — producing a `tool_use` with no matching
+    // `tool_result` and an API 400.
     if pipeline.state != IdeationState::Conversing
         || tasks.chat_pending
+        || !tasks.advisor_in_flight.is_empty()
         || pipeline.awaiting_tool_approval
     {
         return;
@@ -162,19 +191,37 @@ pub fn dispatch_chat_request(
         .unwrap_or(false);
     if !ready_to_dispatch { return; }
 
-    // Get API key
-    let api_key = match (&global_settings, &space_settings) {
-        (Some(global), Some(space)) => {
-            let key = space.effective_api_key(global);
-            if key.is_empty() {
+    // Resolve which model executes this turn, then fetch the matching
+    // provider's key. Model choice is a global UI preference (see
+    // `GlobalSoulSettings::workshop_model`), not a per-space setting.
+    let model = global_settings
+        .as_ref()
+        .map(|g| g.effective_workshop_model())
+        .unwrap_or_default();
+
+    let api_key = match model.provider() {
+        Provider::Anthropic => match (&global_settings, &space_settings) {
+            (Some(global), Some(space)) => {
+                let key = space.effective_api_key(global);
+                if key.is_empty() {
+                    pipeline.add_error_message(
+                        "No API key configured. Open Soul Settings to add your BYOK key.".to_string()
+                    );
+                    return;
+                }
+                key
+            }
+            _ => return,
+        },
+        Provider::Xai => match global_settings.as_ref().and_then(|g| g.effective_xai_api_key()) {
+            Some(key) => key,
+            None => {
                 pipeline.add_error_message(
-                    "No API key configured. Open Soul Settings to add your BYOK key.".to_string()
+                    "No xAI API key configured. Open Soul Settings to add your Grok API key.".to_string()
                 );
                 return;
             }
-            key
-        }
-        _ => return,
+        },
     };
 
     // Assemble Claude-API-shaped messages from the pipeline's chat log.
@@ -211,10 +258,27 @@ pub fn dispatch_chat_request(
     // `ToolRegistry` is the shared one from `eustress-tools`; the
     // Claude-shape conversion stays engine-side via
     // `tools::claude_tools_for` because `ClaudeTool` is engine-only.
-    let tools: Vec<ClaudeTool> = tool_registry
+    let mut tools: Vec<ClaudeTool> = tool_registry
         .as_ref()
         .map(|r| super::tools::claude_tools_for(r, eustress_tools::modes::WorkshopMode::ALL))
         .unwrap_or_default();
+
+    // Bridge-local advisor tool — Sonnet 5 or Grok 4.5 (as executor) can
+    // consult Fable 5 on hard architecture/design calls, mirroring the
+    // user's own Sonnet<->Fable pairing. Deliberately NOT in the shared
+    // `eustress-tools` registry: keeps the out-of-process MCP server's tool
+    // surface untouched, and — like an Agent-tool advisor — it's a harness
+    // construct, not a registry tool. Omitted when the executor IS Fable 5
+    // (consulting itself is degenerate) or no Anthropic key is configured
+    // (the advisor always targets Anthropic, regardless of the executor's
+    // own provider).
+    let advisor_available = model != WorkshopModel::Fable5
+        && global_settings.as_ref().zip(space_settings.as_ref())
+            .map(|(g, s)| !s.effective_api_key(g).is_empty())
+            .unwrap_or(false);
+    if advisor_available {
+        tools.push(consult_advisor_tool());
+    }
 
     let tool_count = tools.len();
     let message_count = messages.len();
@@ -224,16 +288,23 @@ pub fn dispatch_chat_request(
         Arc::new(Mutex::new(None));
     let result_clone = result_container.clone();
 
-    let config = ClaudeConfig {
-        api_key: Some(api_key),
-        ..ClaudeConfig::default()
-    };
+    let provider = model.provider();
 
     std::thread::spawn(move || {
-        let client = ClaudeClient::new(config);
-        let result = client
-            .call_with_tools(&messages, &tools, Some(&system_prompt))
-            .map_err(|e| e.to_string());
+        let result = match provider {
+            Provider::Anthropic => {
+                let config = ClaudeConfig { api_key: Some(api_key), ..ClaudeConfig::default() };
+                ClaudeClient::new(config)
+                    .call_with_tools(&messages, &tools, Some(&system_prompt), &model)
+                    .map_err(|e| e.to_string())
+            }
+            Provider::Xai => {
+                let config = XaiConfig { api_key: Some(api_key) };
+                XaiClient::new(config)
+                    .call_with_tools(&messages, &tools, Some(&system_prompt), &model)
+                    .map_err(|e| e.to_string())
+            }
+        };
 
         match result_clone.lock() {
             Ok(mut lock) => *lock = Some(result),
@@ -244,15 +315,48 @@ pub fn dispatch_chat_request(
         }
     });
 
-    tasks.agentic_in_flight.push(AgenticInFlight { result: result_container });
+    tasks.agentic_in_flight.push(AgenticInFlight { result: result_container, model });
     tasks.chat_pending = true;
 
     info!(
-        "Workshop: Dispatched agentic Claude request ({} messages, {} tools, modes: {})",
+        "Workshop: Dispatched agentic {:?} request on {} ({} messages, {} tools, modes: {})",
+        provider,
+        model.display_name(),
         message_count,
         tool_count,
         pipeline.active_modes.badges_text()
     );
+}
+
+/// Bridge-local `consult_advisor` tool definition — see the doc comment at
+/// its call site in `dispatch_chat_request` for why this isn't in the
+/// shared `eustress-tools` registry.
+fn consult_advisor_tool() -> ClaudeTool {
+    ClaudeTool {
+        name: "consult_advisor".to_string(),
+        description: "Consult Fable 5 as an on-demand advisor before committing to a decision \
+            that's genuinely hard, high-stakes, or ambiguous — architecture/design calls, tricky \
+            bugs with more than one plausible cause, plans with real tradeoffs. Brief it with \
+            full self-contained context (it has no memory of this conversation) and a specific \
+            question, then weigh its answer against your own judgment. You make the final call \
+            and do the work either way — the advisor never executes or edits anything. Skip this \
+            for routine work: mechanical edits, straightforward lookups, anything with one \
+            obvious right answer.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The specific question to ask the advisor."
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Full self-contained background for the advisor — it has no memory of this conversation."
+                }
+            },
+            "required": ["question", "context"]
+        }),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -616,28 +720,40 @@ pub fn poll_agentic_responses(
     space_root: Option<Res<crate::space::SpaceRoot>>,
     auth: Option<Res<crate::auth::AuthState>>,
     display_unit: Option<Res<eustress_common::units::DisplayUnit>>,
+    global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
+    space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
 ) {
     let mut completed_indices = Vec::new();
 
-    for (i, req) in tasks.agentic_in_flight.iter().enumerate() {
+    // Destructure into disjoint field borrows: the loop below iterates
+    // `agentic_in_flight` immutably for its whole duration, while
+    // `consult_advisor` handling needs to push onto `advisor_in_flight` —
+    // borrowing `&mut tasks` (the whole struct) inside the loop would
+    // conflict with the still-live `agentic_in_flight.iter()` borrow.
+    let WorkshopClaudeTasks { agentic_in_flight, advisor_in_flight, chat_pending, .. } = &mut *tasks;
+
+    for (i, req) in agentic_in_flight.iter().enumerate() {
         let result = {
             let lock = req.result.lock().ok();
             lock.and_then(|mut g| g.take())
         };
         let Some(result) = result else { continue };
         completed_indices.push(i);
+        let model = req.model;
 
         match result {
             Ok(agentic) => {
-                // Estimate cost from token usage (Sonnet tier).
-                let input_cost = (agentic.input_tokens as f64) / 1_000_000.0 * 3.0;
-                let output_cost = (agentic.output_tokens as f64) / 1_000_000.0 * 15.0;
-                let cost = input_cost + output_cost;
+                // Estimate cost from token usage at the model that actually
+                // answered — Sonnet 5, Fable 5, and Grok 4.5 have distinct
+                // per-token pricing (see `WorkshopModel::estimate_cost`).
+                let cost = model.estimate_cost(agentic.input_tokens, agentic.output_tokens);
                 pipeline.total_cost += cost;
 
-                // 1. Emit the assistant's text reply if any.
+                // 1. Emit the assistant's text reply if any, stamping which
+                //    model produced it (provenance + accurate per-message cost).
                 if !agentic.text.trim().is_empty() {
-                    pipeline.add_system_message(agentic.text.clone(), cost);
+                    let msg_id = pipeline.add_system_message(agentic.text.clone(), cost);
+                    pipeline.set_message_model(msg_id, model.api_id());
                 }
 
                 // 2. Emit each tool_use as an Mcp card. Auto-execute when
@@ -646,6 +762,54 @@ pub fn poll_agentic_responses(
                 let mut any_awaiting_approval = false;
 
                 for tool_use in &agentic.tool_uses {
+                    // `consult_advisor` is intercepted here, before the
+                    // registry lookup below — it's bridge-local (see
+                    // `consult_advisor_tool`), not in `ToolRegistry`, so
+                    // falling through to that lookup would hit the "unknown
+                    // tool" path and dispatch it synchronously into an
+                    // error. Instead: create the card with no `tool_result`,
+                    // spawn the Fable 5 call async, and let
+                    // `poll_advisor_responses` fill in the result — the
+                    // `advisor_in_flight` guard in `dispatch_chat_request`
+                    // blocks redispatch until it does.
+                    if tool_use.name == "consult_advisor" {
+                        let question = tool_use.input.get("question")
+                            .and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                        let context = tool_use.input.get("context")
+                            .and_then(|v| v.as_str()).unwrap_or_default().to_string();
+
+                        let card_content = format!("consult_advisor({})", compact_input_preview(&tool_use.input));
+                        let msg_id = pipeline.add_mcp_command(
+                            card_content,
+                            "consult_advisor".to_string(),
+                            "tool_use".to_string(),
+                            0.0,
+                        );
+                        if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == msg_id) {
+                            msg.tool_use_id = Some(tool_use.id.clone());
+                            msg.tool_input = Some(tool_use.input.clone());
+                            msg.is_assistant_turn = true;
+                        }
+                        pipeline.update_mcp_status(msg_id, McpCommandStatus::Running);
+
+                        let advisor_key = global_settings.as_ref().zip(space_settings.as_ref())
+                            .map(|(g, s)| s.effective_api_key(g))
+                            .filter(|k| !k.is_empty());
+                        match advisor_key {
+                            Some(api_key) => spawn_advisor_call(advisor_in_flight, msg_id, api_key, question, context),
+                            None => {
+                                // Shouldn't normally happen — the tool is omitted
+                                // from `tools` when no key is configured — but
+                                // never leave the turn wedged if it does.
+                                if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == msg_id) {
+                                    msg.tool_result = Some("Advisor unavailable: no Anthropic API key configured.".to_string());
+                                }
+                                pipeline.update_mcp_status(msg_id, McpCommandStatus::Error);
+                            }
+                        }
+                        continue;
+                    }
+
                     // Look up the tool's approval requirement against the
                     // FULL catalogue (`all_tools`), not the active-mode
                     // subset. Claude is given every tool up-front
@@ -726,10 +890,103 @@ pub fn poll_agentic_responses(
     }
 
     for i in completed_indices.into_iter().rev() {
-        tasks.agentic_in_flight.remove(i);
+        agentic_in_flight.remove(i);
     }
-    if tasks.agentic_in_flight.is_empty() {
-        tasks.chat_pending = false;
+    if agentic_in_flight.is_empty() {
+        *chat_pending = false;
+    }
+}
+
+// ============================================================================
+// 4b. Advisor — async `consult_advisor` dispatch + poll
+// ============================================================================
+
+/// System prompt for the Fable 5 advisor call. Deliberately distinct from
+/// Workshop's own executor prompt (`BASE_SYSTEM_PROMPT`) — the advisor
+/// answers one briefed question, it isn't a Workshop agent itself, and it
+/// gets no tools.
+const ADVISOR_SYSTEM_PROMPT: &str = "You are an advisor consulted by another AI (the \"executor\") \
+    working inside Eustress Engine's Workshop panel. The executor has briefed you with full \
+    context and a specific question below. Give your best judgment and reasoning — the executor \
+    weighs your answer against its own and makes the final call regardless; you have no tools and \
+    cannot take any action yourself. Be direct and concrete.";
+
+/// Spawn the background thread for one `consult_advisor` call (always
+/// Fable 5, always text-only) and register it so `poll_advisor_responses`
+/// picks up the result. Same `std::thread::spawn` + `Arc<Mutex<Option<...>>>`
+/// shape as `dispatch_chat_request`'s own thread — an LLM call is exactly
+/// the kind of slow operation that shape exists for.
+fn spawn_advisor_call(
+    advisor_in_flight: &mut Vec<AdvisorInFlight>,
+    message_id: u32,
+    api_key: String,
+    question: String,
+    context: String,
+) {
+    let result_container: Arc<Mutex<Option<Result<String, String>>>> = Arc::new(Mutex::new(None));
+    let result_clone = result_container.clone();
+
+    std::thread::spawn(move || {
+        let config = ClaudeConfig { api_key: Some(api_key), ..ClaudeConfig::default() };
+        let messages = vec![json!({
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": format!("Context:\n{}\n\nQuestion:\n{}", context, question),
+            }]
+        })];
+        // No tools for the advisor — it's advisory only, never executes.
+        let result = ClaudeClient::new(config)
+            .call_with_tools(&messages, &[], Some(ADVISOR_SYSTEM_PROMPT), &WorkshopModel::Fable5)
+            .map(|resp| resp.text)
+            .map_err(|e| e.to_string());
+
+        match result_clone.lock() {
+            Ok(mut lock) => *lock = Some(result),
+            Err(poisoned) => {
+                tracing::error!("Workshop: Mutex poisoned in advisor thread, recovering");
+                *poisoned.into_inner() = Some(Err("Internal error: thread lock poisoned".to_string()));
+            }
+        }
+    });
+
+    advisor_in_flight.push(AdvisorInFlight { message_id, result: result_container });
+}
+
+/// Polls in-flight `consult_advisor` calls. On completion, writes the
+/// advisor's text — or a graceful error string on failure/timeout — into
+/// the `tool_result` of the Mcp card at `message_id`. Never leaves a card
+/// unresolved: since `dispatch_chat_request` now blocks redispatch while
+/// `advisor_in_flight` is non-empty, an unresolved card would wedge the
+/// turn forever rather than just degrading gracefully.
+pub fn poll_advisor_responses(
+    mut tasks: ResMut<WorkshopClaudeTasks>,
+    mut pipeline: ResMut<IdeationPipeline>,
+) {
+    let mut completed_indices = Vec::new();
+
+    for (i, req) in tasks.advisor_in_flight.iter().enumerate() {
+        let result = {
+            let lock = req.result.lock().ok();
+            lock.and_then(|mut g| g.take())
+        };
+        let Some(result) = result else { continue };
+        completed_indices.push(i);
+
+        let (advice, status) = match result {
+            Ok(text) if !text.trim().is_empty() => (text, McpCommandStatus::Done),
+            Ok(_) => ("Advisor returned an empty response.".to_string(), McpCommandStatus::Done),
+            Err(err) => (format!("Advisor unavailable: {}", err), McpCommandStatus::Error),
+        };
+
+        if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == req.message_id) {
+            msg.tool_result = Some(advice);
+        }
+        pipeline.update_mcp_status(req.message_id, status);
+    }
+
+    for i in completed_indices.into_iter().rev() {
+        tasks.advisor_in_flight.remove(i);
     }
 }
 

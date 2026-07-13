@@ -607,6 +607,15 @@ export component WorkshopPanel inherits Rectangle {
     // Available mode names (populated once at startup).
     in property <[string]> available-modes: ["General", "Simulation", "Manufacturing", "Fabrication", "Finance", "Shopping", "Travel", "Supply Chain", "Warehousing", "Universe"];
 
+    // ── Model selector ───────────────────────────────────────────────────
+    // Which model powers this conversation's executor (e.g. "Sonnet 5").
+    // Rust keeps this in sync with GlobalSoulSettings::workshop_model.
+    in-out property <string> active-model-name: "Sonnet 5";
+    // Fires when the user picks a different model from the dropdown.
+    callback on-model-changed(string);
+    // Available model names — one global list, not mode-specific.
+    in property <[string]> available-models: ["Sonnet 5", "Fable 5", "Grok 4.5"];
+
     /// Scan `input-text` for a trailing `@prefix` token; if found, open
     /// the popup and emit a query. Called from the input field's `edited`
     /// hook every keystroke. Cursor position isn't directly exposed by
@@ -1425,6 +1434,86 @@ export component WorkshopPanel inherits Rectangle {
                                             x: 8px;
                                             text: m;
                                             color: m == root.active-mode-name ? Theme.accent-blue : Theme.text-primary;
+                                            font-size: 11px;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Model dropdown pill
+                    Rectangle {
+                        width: model-label.preferred-width + 28px;
+                        height: 24px;
+                        background: model-touch.has-hover ? Theme.background-tertiary : transparent;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+
+                        model-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { model-popup.show(); }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 4px;
+                            spacing: 4px;
+                            alignment: center;
+
+                            model-label := Text {
+                                text: root.active-model-name;
+                                color: Theme.text-secondary;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: "▾";
+                                color: Theme.text-secondary;
+                                font-size: 9px;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        model-popup := PopupWindow {
+                            x: 0px;
+                            y: -min(root.available-models.length * 24px, 200px) - 4px;
+                            width: 160px;
+                            height: min(root.available-models.length * 24px + 8px, 208px);
+
+                            Rectangle {
+                                background: Theme.background-secondary;
+                                border-radius: 6px;
+                                border-width: 1px;
+                                border-color: Theme.border-color;
+                                drop-shadow-blur: 8px;
+                                drop-shadow-color: #00000066;
+
+                                VerticalLayout {
+                                    padding: 4px;
+                                    spacing: 0px;
+
+                                    for m in root.available-models: Rectangle {
+                                        height: 24px;
+                                        border-radius: 4px;
+                                        background: mm-touch.has-hover ? #0078d422 : transparent;
+
+                                        mm-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.active-model-name = m;
+                                                root.on-model-changed(m);
+                                                model-popup.close();
+                                            }
+                                        }
+
+                                        Text {
+                                            x: 8px;
+                                            text: m;
+                                            color: m == root.active-model-name ? Theme.accent-blue : Theme.text-primary;
                                             font-size: 11px;
                                             vertical-alignment: center;
                                         }

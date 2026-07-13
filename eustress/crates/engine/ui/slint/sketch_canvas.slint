@@ -1,0 +1,191 @@
+// ============================================================================
+// Sketch Canvas — lightweight 2D sketch inspector + constraint actions
+// ============================================================================
+// Full Fusion-grade freehand draw lands next; v0 exposes the solver surface:
+// entity list, constraint/dimension status, Solve / add-constraint shortcuts.
+// Bound from main when a CadPart is selected (optional floating panel).
+
+import { Theme } from "theme.slint";
+import { VerticalBox, HorizontalBox, ScrollView, Button } from "std-widgets.slint";
+
+export struct SketchEntityRow {
+    index: int,
+    kind: string,
+    summary: string,
+}
+
+export struct SketchConstraintRow {
+    index: int,
+    kind: string,
+    detail: string,
+}
+
+export component SketchCanvasPanel inherits Rectangle {
+    in property <bool> visible-when: false;
+    in property <string> part-name: "";
+    in property <string> sketch-name: "";
+    in property <string> solve-status: "";
+    in property <[SketchEntityRow]> entities: [];
+    in property <[SketchConstraintRow]> constraints: [];
+    in property <int> selected-a: -1;
+    in property <int> selected-b: -1;
+
+    callback solve();
+    callback add-horizontal();
+    callback add-vertical();
+    callback add-perpendicular();
+    callback add-coincident();
+    callback select-entity(int);
+    callback close();
+
+    width: 280px;
+    height: 380px;
+    visible: root.visible-when;
+    background: Theme.panel-glass;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    drop-shadow-blur: 16px;
+    drop-shadow-color: Theme.shadow-float;
+
+    // 1px top hairline — the same depth cue every sibling floating
+    // panel carries (ToolOptionsBar / ToolPanel / toasts).
+    Rectangle {
+        y: 0;
+        height: 1px;
+        width: parent.width;
+        background: Theme.border-highlight;
+    }
+
+    VerticalBox {
+        padding: 10px;
+        spacing: 8px;
+
+        HorizontalBox {
+            Text {
+                text: "Sketch · " + root.sketch-name;
+                color: Theme.text-primary;
+                font-size: 13px;
+                font-weight: 600;
+                horizontal-stretch: 1;
+            }
+            // Standard close: 28px hit box, 18px glyph, red hover —
+            // matches ToolPanel/ToolOptionsBar (DRAFTING_UX.md Law 1).
+            Rectangle {
+                width: 28px; height: 28px;
+                background: close-touch.has-hover
+                    ? Theme.accent-red.with-alpha(0.2)
+                    : transparent;
+                border-radius: Theme.radius-sm;
+                Text {
+                    text: "×";
+                    color: close-touch.has-hover ? Theme.accent-red : Theme.text-secondary;
+                    font-size: 18px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                close-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.close(); }
+                }
+            }
+        }
+
+        Text {
+            text: root.part-name;
+            color: Theme.text-secondary;
+            font-size: 10px;
+        }
+
+        Text {
+            text: root.solve-status;
+            color: Theme.accent-cyan;
+            font-size: 10px;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: "Entities — click to pick A (1st) / B (2nd) for a constraint";
+            color: Theme.text-secondary;
+            font-size: 10px;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+
+        ScrollView {
+            height: 100px;
+            VerticalBox {
+                spacing: 2px;
+                for e in root.entities: Rectangle {
+                    height: 18px;
+                    background: e.index == root.selected-a
+                        ? Theme.accent-cyan.with-alpha(0.35)
+                        : e.index == root.selected-b
+                            ? Theme.accent-cyan.with-alpha(0.18)
+                            : transparent;
+                    border-radius: 3px;
+                    TouchArea {
+                        clicked => { root.select-entity(e.index); }
+                        HorizontalBox {
+                            padding: 0px;
+                            Text {
+                                text: e.index + "  " + e.kind;
+                                color: Theme.text-primary;
+                                font-size: 10px;
+                                min-width: 70px;
+                            }
+                            Text {
+                                text: e.summary;
+                                color: Theme.text-secondary;
+                                font-size: 10px;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: "A: " + (root.selected-a >= 0 ? root.selected-a : "—")
+                + "   B: " + (root.selected-b >= 0 ? root.selected-b : "—")
+                + "   (click a row again to clear it)";
+            color: Theme.accent-cyan;
+            font-size: 9px;
+        }
+
+        Text {
+            text: "Constraints";
+            color: Theme.text-secondary;
+            font-size: 10px;
+            font-weight: 600;
+        }
+
+        ScrollView {
+            height: 80px;
+            VerticalBox {
+                spacing: 2px;
+                for c in root.constraints: Text {
+                    text: c.kind + "  " + c.detail;
+                    color: Theme.text-primary;
+                    font-size: 10px;
+                }
+            }
+        }
+
+        HorizontalBox {
+            spacing: 4px;
+            Button { text: "H"; clicked => { root.add-horizontal(); } }
+            Button { text: "V"; clicked => { root.add-vertical(); } }
+            Button { text: "⊥"; clicked => { root.add-perpendicular(); } }
+            Button { text: "⊙"; clicked => { root.add-coincident(); } }
+        }
+
+        Button {
+            text: "Solve Sketch";
+            primary: true;
+            clicked => { root.solve(); }
+        }
+    }
+}

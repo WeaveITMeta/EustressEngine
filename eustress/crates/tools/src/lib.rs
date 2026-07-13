@@ -41,6 +41,7 @@ pub use registry::{
 
 // Tool implementation modules. Each hosts a family of related tools;
 // see the struct docs in the individual files for the full surface.
+pub mod cad_tools;
 pub mod diff_tools;
 pub mod embedvec_tools;
 pub mod entity_tools;
@@ -66,6 +67,11 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(entity_tools::QueryEntitiesTool);
     registry.register(entity_tools::UpdateEntityTool);
     registry.register(entity_tools::DeleteEntityTool);
+
+    // Parametric CAD (feature-tree CadPart).
+    registry.register(cad_tools::CadCreatePartTool);
+    registry.register(cad_tools::CadSetVariableTool);
+    registry.register(cad_tools::CadExportGlbTool);
 
     // File I/O.
     registry.register(file_tools::ReadFileTool);
@@ -155,6 +161,13 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(universe_tools::CreateScriptTool);
     registry.register(universe_tools::SetDefaultUniverseTool);
     registry.register(universe_tools::GetConversationTool);
+
+    // Universe / Space lifecycle — create and rename, matching the
+    // Studio "New Universe" / "New Space" / rename flows on disk.
+    registry.register(universe_tools::NewUniverseTool);
+    registry.register(universe_tools::NewSpaceTool);
+    registry.register(universe_tools::RenameSpaceTool);
+    registry.register(universe_tools::RenameUniverseTool);
 
     // Embedvec-backed AI tools — unblock AI Select Similar,
     // Part Swap template suggestion, contextual edit suggestions,

@@ -585,9 +585,22 @@ fn scan_dir_entries(
             // nothing. Drop the probe; record 0. (The source trait exposes
             // no metadata-only stat, and the value is cosmetic anyway.)
             let size = 0u64;
-            let name = path.file_stem()
-                .and_then(|n| n.to_str())
-                .unwrap_or("Unknown")
+            // `Path::file_stem()` only strips the LAST extension component,
+            // so a compound-extension instance file like `Sky.instance.toml`
+            // stems to `Sky.instance`, not `Sky` — leaving `Sky.instance` as
+            // this entry's `name` while a sibling `Sky/` folder entry (see
+            // the `is_dir` branch above) is named plain `Sky`. That mismatch
+            // is exactly what let the folder-vs-flat de-dup pass below
+            // silently no-op (`"Sky.instance" != "Sky"`, so it never saw
+            // them as the same instance). Strip each known compound suffix
+            // explicitly so `name` matches the folder-form convention.
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("Unknown");
+            let name = ["instance.toml", "part.toml", "glb.toml", "model.toml"]
+                .iter()
+                .find_map(|suffix| file_name.strip_suffix(suffix)?.strip_suffix('.'))
+                .unwrap_or_else(|| {
+                    path.file_stem().and_then(|n| n.to_str()).unwrap_or("Unknown")
+                })
                 .to_string();
             entries.push(FileMetadata {
                 path,
@@ -600,6 +613,32 @@ fn scan_dir_entries(
             });
         }
     }
+
+    // De-dup folder-form vs. flat-form: a `<Name>/` directory (holding
+    // `_instance.toml`) and a sibling flat `<Name>.instance.toml` file are
+    // two on-disk conventions for the SAME logical instance, not two
+    // instances — an incomplete migration from the old flat form to the
+    // newer folder form can leave both on disk (observed: Lighting/Sky/
+    // + Lighting/Sky.instance.toml both present), and without this pass
+    // every such instance silently double-spawns: two live entities, two
+    // Sky/Atmosphere/etc. components each contributing to rendering, and
+    // roughly double the per-frame system cost. The folder form wins
+    // (it's the current EEP-compliant convention); the flat duplicate is
+    // dropped from THIS SCAN only — the stale file itself is left alone
+    // (not deleted) since cleaning it up is a separate, deliberate step.
+    // Owned `String`s, not `&str` borrows into `entries` — `retain` below
+    // needs `&mut entries`, which can't coexist with a live immutable
+    // borrow still referencing its contents.
+    let dir_names: std::collections::HashSet<String> = entries.iter()
+        .filter(|e| e.file_type == FileType::Directory)
+        .map(|e| e.name.clone())
+        .collect();
+    if !dir_names.is_empty() {
+        entries.retain(|e| {
+            e.file_type == FileType::Directory || !dir_names.contains(e.name.as_str())
+        });
+    }
+
     entries
 }
 

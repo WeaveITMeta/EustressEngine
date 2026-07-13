@@ -1,0 +1,40 @@
+// Hello From Rune — an example Studio plugin, authored in Rune, no Rust
+// recompile required. Drop this file (or a copy) into
+// %LOCALAPPDATA%/Eustress/Plugins/ and it appears on the Plugins tab next
+// to the built-in Road Builder section and the Luau "Selection Counter"
+// example, proving the unified plugin bridge serves both languages.
+//
+// Rune has no implicit top-to-bottom script execution the way Luau does —
+// every Rune plugin needs a `pub fn register()`; the engine calls it once
+// at discovery time (and again on every "Reload Plugins" click).
+
+// NOTE on the shape of plugin_add_button: rune 0.14's #[rune::function]
+// only supports up to 5 arguments (verified against the vendored source —
+// the by-value/Ref/Mut permutation macro backing it stops there to avoid
+// a combinatorial blowup). So unlike Luau's AddButton, this drops tab id
+// (there's only ever one "plugins" tab), action id (auto-derived from the
+// plugin + button id), icon, and size — all fast-followable later.
+
+use eustress::{plugin_add_section, plugin_add_button, plugin_notify, plugin_get_selection};
+
+pub fn register() {
+    plugin_add_section("hello-rune", "Hello From Rune");
+
+    plugin_add_button(
+        "hello-rune",            // section id, matching plugin_add_section above
+        "count-selection-rune",  // button id (unique within this section)
+        "Count Selected (Rune)", // label
+        "Show how many entities are currently selected, from a Rune plugin",
+        || {
+            let selected = plugin_get_selection();
+            let n = selected.len();
+            if n == 0 {
+                plugin_notify("info", "Nothing selected.");
+            } else if n == 1 {
+                plugin_notify("success", "1 entity selected.");
+            } else {
+                plugin_notify("success", "Multiple entities selected.");
+            }
+        },
+    );
+}

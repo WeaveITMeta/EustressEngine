@@ -44,23 +44,22 @@ pub fn cell_cover_radius() -> f32 {
 // matches numeric order (21-bit max is 2_097_151 = 7 digits). Reversible via
 // [`parse_cell_id`] so a returned [`super::SimBinding::cell_id`] round-trips
 // back to the residency cell that produced it.
+//
+// The format LIVES in `eustress_worlddb::keys` (next to `world_to_cell`,
+// the encoder that defines the coordinate system) and is delegated to
+// here — the engine bridge's `scene.overview` and the MCP orchestration
+// layer emit the SAME ids, so a SimCell id and an MCP work-unit id are
+// interchangeable for the same residency cell. These thin wrappers keep
+// forge's public API stable; the tests below now guard the delegation.
 
 /// Build the stable SimCell id for a residency cell.
 pub fn cell_id(c: CellCoord) -> String {
-    format!("sim-cell-{:07}-{:07}-{:07}", c.0, c.1, c.2)
+    eustress_worlddb::keys::cell_id(c)
 }
 
 /// Inverse of [`cell_id`]. `None` on a malformed / foreign id.
 pub fn parse_cell_id(s: &str) -> Option<CellCoord> {
-    let rest = s.strip_prefix("sim-cell-")?;
-    let mut it = rest.split('-');
-    let x = it.next()?.parse::<u32>().ok()?;
-    let y = it.next()?.parse::<u32>().ok()?;
-    let z = it.next()?.parse::<u32>().ok()?;
-    if it.next().is_some() {
-        return None; // trailing garbage
-    }
-    Some((x, y, z))
+    eustress_worlddb::keys::parse_cell_id(s)
 }
 
 // ── Tick cadence ──────────────────────────────────────────────────────────

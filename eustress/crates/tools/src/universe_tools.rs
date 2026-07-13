@@ -686,8 +686,581 @@ impl ToolHandler for GetConversationTool {
 }
 
 // ---------------------------------------------------------------------------
+// New Universe
+// ---------------------------------------------------------------------------
+
+pub struct NewUniverseTool;
+
+impl ToolHandler for NewUniverseTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "new_universe",
+            description: "Create a brand-new Universe folder (with its `Spaces/` subdirectory and `.eustress/` asset dirs) under the Eustress documents root. Fails if the target already exists — never overwrites.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Universe folder name (e.g. 'Universe2')." },
+                    "parent_path": { "type": "string", "description": "Optional path, relative to the Eustress documents root, under which to create the Universe. Defaults to the Eustress root itself. No `..` allowed." }
+                },
+                "required": ["name"]
+            }),
+            modes: &[WorkshopMode::General, WorkshopMode::UniverseBrowsing],
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        const TOOL: &str = "new_universe";
+        let Some(name) = input.get("name").and_then(|v| v.as_str()) else {
+            return err_result(TOOL, "Missing 'name'".into());
+        };
+        if let Err(e) = validate_path_component(name) {
+            return err_result(TOOL, e);
+        }
+
+        let eustress_root = ctx
+            .universe_root
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(default_eustress_root);
+
+        let parent_dir = match input.get("parent_path").and_then(|v| v.as_str()) {
+            Some(p) if !p.trim().is_empty() => {
+                let cleaned = p.replace('\\', "/");
+                if cleaned.contains("..") {
+                    return err_result(TOOL, "Invalid parent_path: '..' is not allowed.".into());
+                }
+                let resolved = eustress_root.join(&cleaned);
+                if !resolved.starts_with(&eustress_root) {
+                    return err_result(TOOL, "Invalid parent_path: escapes the Eustress root.".into());
+                }
+                resolved
+            }
+            _ => eustress_root.clone(),
+        };
+
+        let universe_root = parent_dir.join(name);
+        if universe_root.exists() {
+            return err_result(TOOL, format!("Universe '{}' already exists at {}", name, universe_root.display()));
+        }
+
+        if let Err(e) = std::fs::create_dir_all(&universe_root) {
+            return err_result(TOOL, format!("Failed to create Universe directory: {}", e));
+        }
+        for dir in [
+            universe_root.join("Spaces"),
+            universe_root.join(".eustress").join("assets").join("parts"),
+            universe_root.join(".eustress").join("assets").join("meshes"),
+            universe_root.join(".eustress").join("knowledge"),
+        ] {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return err_result(TOOL, format!("Failed to create {}: {}", dir.display(), e));
+            }
+        }
+
+        ToolResult {
+            tool_name: TOOL.to_string(), tool_use_id: String::new(),
+            success: true,
+            content: format!("Created Universe '{}' at {}", name, universe_root.display()),
+            structured_data: Some(serde_json::json!({
+                "universe": name,
+                "path": universe_root.to_string_lossy(),
+            })),
+            stream_topic: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// New Space
+// ---------------------------------------------------------------------------
+
+pub struct NewSpaceTool;
+
+impl ToolHandler for NewSpaceTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "new_space",
+            description: "Create a brand-new Space inside `<universe>/Spaces/<name>/`, scaffolded with the same folder + TOML structure the Studio 'New Space' flow produces (service folders, space.toml, simulation.toml, .eustress manifests, Baseplate + WelcomeCube parts, and Lighting children). Fails if the Space already exists.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "universe": { "type": "string", "description": "Universe folder name the Space is created inside." },
+                    "name": { "type": "string", "description": "Space folder name (e.g. 'Space2')." }
+                },
+                "required": ["universe", "name"]
+            }),
+            modes: &[WorkshopMode::General, WorkshopMode::UniverseBrowsing],
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        const TOOL: &str = "new_space";
+        let Some(universe) = input.get("universe").and_then(|v| v.as_str()) else {
+            return err_result(TOOL, "Missing 'universe'".into());
+        };
+        let Some(name) = input.get("name").and_then(|v| v.as_str()) else {
+            return err_result(TOOL, "Missing 'name'".into());
+        };
+        if let Err(e) = validate_path_component(universe) {
+            return err_result(TOOL, e);
+        }
+        if let Err(e) = validate_path_component(name) {
+            return err_result(TOOL, e);
+        }
+
+        let eustress_root = ctx
+            .universe_root
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(default_eustress_root);
+        let universe_root = eustress_root.join(universe);
+        if !universe_root.exists() {
+            return err_result(TOOL, format!("Universe '{}' not found at {}", universe, universe_root.display()));
+        }
+
+        let spaces_dir = universe_root.join("Spaces");
+        let space_root = spaces_dir.join(name);
+        if space_root.exists() {
+            return err_result(TOOL, format!("Space '{}' already exists at {}", name, space_root.display()));
+        }
+
+        let author = ctx.username.clone().unwrap_or_else(|| "Eustress User".to_string());
+        match scaffold_new_space(&spaces_dir, name, &author) {
+            Ok(created) => ToolResult {
+                tool_name: TOOL.to_string(), tool_use_id: String::new(),
+                success: true,
+                content: format!("Created Space '{}' in Universe '{}' at {}", name, universe, created.display()),
+                structured_data: Some(serde_json::json!({
+                    "universe": universe,
+                    "space": name,
+                    "path": created.to_string_lossy(),
+                })),
+                stream_topic: None,
+            },
+            Err(e) => err_result(TOOL, format!("Failed to scaffold Space: {}", e)),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rename Space
+// ---------------------------------------------------------------------------
+
+pub struct RenameSpaceTool;
+
+impl ToolHandler for RenameSpaceTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "rename_space",
+            description: "Rename `<universe>/Spaces/<old_name>/` to `<universe>/Spaces/<new_name>/` on disk (plain filesystem rename — no git operation). If the Space is open in a running engine (locked WorldDb / file handles), the rename fails atomically and this reports that clearly instead of a raw OS error. Also updates the `name` self-reference inside the renamed Space's space.toml and .eustress/project.toml.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "universe": { "type": "string", "description": "Universe folder name." },
+                    "old_name": { "type": "string", "description": "Current Space folder name." },
+                    "new_name": { "type": "string", "description": "New Space folder name." }
+                },
+                "required": ["universe", "old_name", "new_name"]
+            }),
+            modes: &[WorkshopMode::General, WorkshopMode::UniverseBrowsing],
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        const TOOL: &str = "rename_space";
+        let Some(universe) = input.get("universe").and_then(|v| v.as_str()) else {
+            return err_result(TOOL, "Missing 'universe'".into());
+        };
+        let Some(old_name) = input.get("old_name").and_then(|v| v.as_str()) else {
+            return err_result(TOOL, "Missing 'old_name'".into());
+        };
+        let Some(new_name) = input.get("new_name").and_then(|v| v.as_str()) else {
+            return err_result(TOOL, "Missing 'new_name'".into());
+        };
+        for component in [universe, old_name, new_name] {
+            if let Err(e) = validate_path_component(component) {
+                return err_result(TOOL, e);
+            }
+        }
+
+        let eustress_root = ctx
+            .universe_root
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(default_eustress_root);
+        let spaces_dir = eustress_root.join(universe).join("Spaces");
+        let old_path = spaces_dir.join(old_name);
+        let new_path = spaces_dir.join(new_name);
+
+        if !old_path.exists() {
+            return err_result(TOOL, format!("Space '{}' not found at {}", old_name, old_path.display()));
+        }
+        if new_path.exists() {
+            return err_result(TOOL, format!("A Space named '{}' already exists — refusing to overwrite.", new_name));
+        }
+
+        if let Err(e) = std::fs::rename(&old_path, &new_path) {
+            return err_result(
+                TOOL,
+                format!(
+                    "Rename failed ({e}). The Space appears to be open in a running engine \
+                     (a locked WorldDb file or other open handle inside {}) — close it and retry.",
+                    old_path.display()
+                ),
+            );
+        }
+
+        let mut patched = Vec::new();
+        if patch_toml_name_field(&new_path.join("space.toml"), "space", old_name, new_name) {
+            patched.push("space.toml".to_string());
+        }
+        if patch_toml_name_field(&new_path.join(".eustress").join("project.toml"), "project", old_name, new_name) {
+            patched.push(".eustress/project.toml".to_string());
+        }
+
+        ToolResult {
+            tool_name: TOOL.to_string(), tool_use_id: String::new(),
+            success: true,
+            content: format!(
+                "Renamed Space '{}' → '{}' in Universe '{}'. Updated self-references in: {}",
+                old_name, new_name, universe,
+                if patched.is_empty() { "(none found)".to_string() } else { patched.join(", ") }
+            ),
+            structured_data: Some(serde_json::json!({
+                "universe": universe,
+                "old_name": old_name,
+                "new_name": new_name,
+                "path": new_path.to_string_lossy(),
+                "patched_files": patched,
+            })),
+            stream_topic: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rename Universe
+// ---------------------------------------------------------------------------
+
+pub struct RenameUniverseTool;
+
+impl ToolHandler for RenameUniverseTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "rename_universe",
+            description: "Rename a Universe folder on disk (plain filesystem rename — no git operation). If the Universe is open in a running engine, the rename fails atomically and this reports that clearly instead of a raw OS error. Also updates the `.default_universe` next-launch sentinel if it pointed at the old name.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "old_name": { "type": "string", "description": "Current Universe folder name." },
+                    "new_name": { "type": "string", "description": "New Universe folder name." }
+                },
+                "required": ["old_name", "new_name"]
+            }),
+            modes: &[WorkshopMode::General, WorkshopMode::UniverseBrowsing],
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        const TOOL: &str = "rename_universe";
+        let Some(old_name) = input.get("old_name").and_then(|v| v.as_str()) else {
+            return err_result(TOOL, "Missing 'old_name'".into());
+        };
+        let Some(new_name) = input.get("new_name").and_then(|v| v.as_str()) else {
+            return err_result(TOOL, "Missing 'new_name'".into());
+        };
+        for component in [old_name, new_name] {
+            if let Err(e) = validate_path_component(component) {
+                return err_result(TOOL, e);
+            }
+        }
+
+        let eustress_root = ctx
+            .universe_root
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(default_eustress_root);
+        let old_path = eustress_root.join(old_name);
+        let new_path = eustress_root.join(new_name);
+
+        if !old_path.exists() {
+            return err_result(TOOL, format!("Universe '{}' not found at {}", old_name, old_path.display()));
+        }
+        if new_path.exists() {
+            return err_result(TOOL, format!("A Universe named '{}' already exists — refusing to overwrite.", new_name));
+        }
+
+        if let Err(e) = std::fs::rename(&old_path, &new_path) {
+            return err_result(
+                TOOL,
+                format!(
+                    "Rename failed ({e}). The Universe appears to be open in a running engine \
+                     (a locked WorldDb file or other open handle inside {}) — close it and retry.",
+                    old_path.display()
+                ),
+            );
+        }
+
+        // The only on-disk "last opened Universe" state found in the codebase
+        // is the `.default_universe` next-launch sentinel written by
+        // `SetDefaultUniverseTool` / the engine's own picker (see
+        // `eustress-engine/src/space/mod.rs` and `engine_bridge/port_file.rs`).
+        // Per-user MRU state (`workshop/mention.rs`) lives *inside* each
+        // Space's `.eustress/` tree, so it moves with the rename automatically
+        // and needs no separate patch.
+        let sentinel = eustress_root.join(".default_universe");
+        let mut sentinel_updated = false;
+        if let Ok(content) = std::fs::read_to_string(&sentinel) {
+            if content.trim() == old_name {
+                if std::fs::write(&sentinel, new_name).is_ok() {
+                    sentinel_updated = true;
+                }
+            }
+        }
+
+        ToolResult {
+            tool_name: TOOL.to_string(), tool_use_id: String::new(),
+            success: true,
+            content: format!(
+                "Renamed Universe '{}' → '{}'.{}",
+                old_name, new_name,
+                if sentinel_updated {
+                    " Updated .default_universe next-launch sentinel.".to_string()
+                } else {
+                    String::new()
+                }
+            ),
+            structured_data: Some(serde_json::json!({
+                "old_name": old_name,
+                "new_name": new_name,
+                "path": new_path.to_string_lossy(),
+                "sentinel_updated": sentinel_updated,
+            })),
+            stream_topic: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn err_result(tool: &str, msg: String) -> ToolResult {
+    ToolResult {
+        tool_name: tool.to_string(), tool_use_id: String::new(),
+        success: false, content: msg, structured_data: None, stream_topic: None,
+    }
+}
+
+/// Validate a single path component (Universe name, Space name, …):
+/// non-empty, no path separators, and no `..` traversal. Mirrors the
+/// `.contains("..")` convention used by `file_tools`/`entity_tools`/
+/// `spatial_tools`, extended to also reject embedded separators since
+/// these names must stay single path components.
+fn validate_path_component(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Name cannot be empty".to_string());
+    }
+    if trimmed.contains("..") || trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(format!("Invalid name '{}': must be a single path component (no '..', '/', or '\\\\').", name));
+    }
+    if eustress_common::instance_create::is_eep_reserved_name(trimmed) {
+        return Err(format!("'{}' is a reserved EEP name and cannot be used.", trimmed));
+    }
+    Ok(())
+}
+
+/// Rewrite `[<table>].name` in a TOML file at `path` from `old_name` to
+/// `new_name`, but only when it currently equals `old_name` — never
+/// clobbers a name the user already customized independently. Returns
+/// `true` if the file was patched.
+fn patch_toml_name_field(path: &std::path::Path, table: &str, old_name: &str, new_name: &str) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else { return false };
+    let Ok(mut doc) = raw.parse::<toml::Value>() else { return false };
+    let Some(root) = doc.as_table_mut() else { return false };
+    let Some(section) = root.get_mut(table).and_then(|v| v.as_table_mut()) else { return false };
+    let matches_old = section.get("name").and_then(|v| v.as_str()) == Some(old_name);
+    if !matches_old {
+        return false;
+    }
+    section.insert("name".to_string(), toml::Value::String(new_name.to_string()));
+    let Ok(out) = toml::to_string_pretty(&doc) else { return false };
+    std::fs::write(path, out).is_ok()
+}
+
+/// Service folder names + class every new Space receives. Mirrors
+/// `eustress-engine::space::space_ops::SERVICE_FOLDERS` — kept as a
+/// separate copy here because the tools crate (used by the MCP server
+/// and the Workshop agent) cannot depend on the engine crate (the
+/// engine depends on `eustress-tools`, not the other way around).
+const SERVICE_FOLDERS: &[(&str, &str)] = &[
+    ("Workspace", "Workspace"),
+    ("Lighting", "Lighting"),
+    ("Players", "Players"),
+    ("StarterGui", "StarterGui"),
+    ("StarterPack", "StarterPack"),
+    ("StarterPlayerScripts", "StarterPlayerScripts"),
+    ("StarterCharacterScripts", "StarterCharacterScripts"),
+    ("ReplicatedStorage", "ReplicatedStorage"),
+    ("ServerStorage", "ServerStorage"),
+    ("ServerScriptService", "ServerScriptService"),
+    ("SoulService", "SoulService"),
+    ("MaterialService", "MaterialService"),
+    ("SoundService", "SoundService"),
+    ("AdornmentService", "AdornmentService"),
+    ("DataService", "DataService"),
+    ("Teams", "Teams"),
+    ("Chat", "Chat"),
+];
+
+const SIMULATION_TOML_CONTENT: &str = "# Simulation configuration -- SIMULATION_SYSTEM.md\n\
+# Controls tick-based time compression for physics and product simulations.\n\
+\n\
+[simulation]\n\
+tick_rate_hz = 60.0\n\
+time_scale = 1.0\n\
+max_ticks_per_frame = 10\n\
+auto_start = false\n\
+\n\
+[simulation.recording]\n\
+enabled = false\n\
+output_dir = \".eustress/knowledge/recordings\"\n\
+format = \"both\"\n\
+auto_export = false\n";
+
+const GITIGNORE: &str = "# Eustress — gitignore\n\
+.eustress/local/\n\
+.DS_Store\n\
+Thumbs.db\n\
+desktop.ini\n\
+target/\n";
+
+/// Scaffold a brand-new Space at `parent_dir/<space_name>/`, matching the
+/// folder + TOML structure `eustress-engine::space::space_ops::scaffold_new_space`
+/// produces for the Studio "New Space" flow: `.eustress/` manifests, every
+/// service folder (`_service.toml` copied from the shared
+/// `common/assets/service_templates/`), `space.toml`, `simulation.toml`,
+/// `.gitignore`, a Baseplate + WelcomeCube Part (via the canonical
+/// `instance_create::create_instance` pipeline — same one `CreateScriptTool`
+/// and `create_entity` use), and Lighting children (Atmosphere/Moon/Sky/Sun,
+/// also via `create_instance` — classes without an authored `class_schema`
+/// template synthesize a minimal generic instance, which is the same
+/// intentional fallback `create_instance` already uses everywhere else).
+///
+/// Returns the new Space's root path on success.
+fn scaffold_new_space(parent_dir: &std::path::Path, space_name: &str, author: &str) -> Result<std::path::PathBuf, String> {
+    use eustress_common::{
+        AssetIndexManifest, PackageIndexManifest, ProjectManifest, ProjectSettingsManifest,
+        PublishJournalManifest, PublishManifest, SyncManifest, save_toml_file,
+    };
+
+    let space_root = parent_dir.join(space_name);
+    if space_root.exists() {
+        return Err(format!("Space '{}' already exists at {:?}", space_name, space_root));
+    }
+
+    std::fs::create_dir_all(&space_root).map_err(|e| format!("create {:?}: {}", space_root, e))?;
+    std::fs::create_dir_all(space_root.join(".eustress").join("local")).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(space_root.join(".eustress").join("knowledge")).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(space_root.join("src")).map_err(|e| e.to_string())?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    save_toml_file(&ProjectManifest::new(space_name, author, &now), &space_root.join(".eustress").join("project.toml"))
+        .map_err(|e| format!("write project.toml: {}", e))?;
+    save_toml_file(&ProjectSettingsManifest::default(), &space_root.join(".eustress").join("settings.toml"))
+        .map_err(|e| format!("write settings.toml: {}", e))?;
+    save_toml_file(&SyncManifest::default(), &space_root.join(".eustress").join("sync.toml"))
+        .map_err(|e| format!("write sync.toml: {}", e))?;
+    save_toml_file(&AssetIndexManifest::default(), &space_root.join(".eustress").join("asset-index.toml"))
+        .map_err(|e| format!("write asset-index.toml: {}", e))?;
+    save_toml_file(&PackageIndexManifest::default(), &space_root.join(".eustress").join("package-index.toml"))
+        .map_err(|e| format!("write package-index.toml: {}", e))?;
+    save_toml_file(&PublishManifest::default(), &space_root.join(".eustress").join("publish.toml"))
+        .map_err(|e| format!("write publish.toml: {}", e))?;
+    save_toml_file(&PublishJournalManifest::new(&now), &space_root.join(".eustress").join("publish-journal.toml"))
+        .map_err(|e| format!("write publish-journal.toml: {}", e))?;
+
+    std::fs::write(space_root.join(".gitignore"), GITIGNORE).map_err(|e| e.to_string())?;
+    std::fs::write(
+        space_root.join("space.toml"),
+        format!(
+            "# EEP Space metadata\n[space]\nname = \"{}\"\nauthor = \"{}\"\nversion = \"0.1.0\"\ncreated_with = \"Eustress Engine\"\n\n[metadata]\ncreated = \"{}\"\nlast_modified = \"{}\"\n",
+            space_name, author, now, now,
+        ),
+    ).map_err(|e| e.to_string())?;
+    std::fs::write(space_root.join("simulation.toml"), SIMULATION_TOML_CONTENT).map_err(|e| e.to_string())?;
+
+    // Service folders — _service.toml copied from the shared templates.
+    let svc_template_dir = eustress_common::service_templates_dir();
+    for (name, class) in SERVICE_FOLDERS {
+        let svc_dir = space_root.join(name);
+        std::fs::create_dir_all(&svc_dir).map_err(|e| e.to_string())?;
+        let template_path = svc_template_dir.join(name).join("_service.toml");
+        if let Ok(content) = std::fs::read_to_string(&template_path) {
+            std::fs::write(svc_dir.join("_service.toml"), content).map_err(|e| e.to_string())?;
+        } else {
+            let toml = format!(
+                "# EEP _service.toml — marks this folder as a Service container.\n[service]\nclass_name = \"{class}\"\ncan_have_children = true\n\n[metadata]\nid = \"{id}-service\"\ncreated = \"{now}\"\nlast_modified = \"{now}\"\n",
+                class = class, id = class.to_lowercase(), now = now,
+            );
+            std::fs::write(svc_dir.join("_service.toml"), toml).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Baseplate + WelcomeCube via the canonical create-instance pipeline.
+    let workspace_dir = space_root.join("Workspace");
+    eustress_common::instance_create::create_instance(
+        &workspace_dir, "Part", Some("Baseplate"),
+        eustress_common::instance_create::InstanceOverrides {
+            position: Some([0.0, -0.5, 0.0]),
+            scale: Some([512.0, 1.0, 512.0]),
+            color_rgba: Some([0.388, 0.373, 0.384, 1.0]),
+            reflectance: Some(0.1),
+            anchored: Some(true),
+            can_collide: Some(true),
+            asset_mesh: Some("parts/block.glb".to_string()),
+            ..Default::default()
+        },
+    ).map_err(|e| format!("create Baseplate: {}", e))?;
+    eustress_common::instance_create::create_instance(
+        &workspace_dir, "Part", Some("WelcomeCube"),
+        eustress_common::instance_create::InstanceOverrides {
+            position: Some([0.0, 2.0, 0.0]),
+            scale: Some([4.0, 4.0, 4.0]),
+            color_rgba: Some([0.388, 0.706, 1.0, 1.0]),
+            reflectance: Some(0.2),
+            anchored: Some(true),
+            can_collide: Some(true),
+            asset_mesh: Some("parts/block.glb".to_string()),
+            ..Default::default()
+        },
+    ).map_err(|e| format!("create WelcomeCube: {}", e))?;
+
+    // Lighting children — Atmosphere/Moon/Sky have authored class_schema
+    // templates; Sun does not, so create_instance synthesizes a minimal
+    // generic instance for it (the same fallback the pipeline already
+    // uses for any class without a template).
+    let lighting_dir = space_root.join("Lighting");
+    for class in ["Atmosphere", "Moon", "Sky", "Sun"] {
+        eustress_common::instance_create::create_instance(
+            &lighting_dir, class, Some(class),
+            eustress_common::instance_create::InstanceOverrides::default(),
+        ).map_err(|e| format!("create Lighting/{}: {}", class, e))?;
+    }
+
+    tracing::info!("new_space: scaffolded '{}' at {:?}", space_name, space_root);
+    Ok(space_root)
+}
 
 fn default_eustress_root() -> std::path::PathBuf {
     if let Ok(env_path) = std::env::var("EUSTRESS_ROOT") {

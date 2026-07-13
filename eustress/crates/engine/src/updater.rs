@@ -301,7 +301,69 @@ fn download_and_verify(
     Ok(download_path)
 }
 
+/// Extract a zip archive's entries into `install_dir`, preserving its
+/// internal directory structure (the release zip's root already IS the
+/// install layout: `eustress-engine.exe` + `assets/**` at the top level —
+/// see `.github/workflows/release.yml`'s Windows Package step). Rejects
+/// unsafe entries (path traversal / absolute paths) via `enclosed_name()`.
+#[cfg(target_os = "windows")]
+fn extract_zip_into(zip_path: &std::path::Path, install_dir: &std::path::Path) -> Result<(), String> {
+    let file = std::fs::File::open(zip_path).map_err(|e| format!("Failed to open update zip: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Failed to read update zip: {e}"))?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("Failed to read zip entry {i}: {e}"))?;
+        let Some(rel_path) = entry.enclosed_name() else {
+            continue; // unsafe entry (traversal/absolute) — skip rather than fail the whole update
+        };
+        let dest = install_dir.join(&rel_path);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&dest).map_err(|e| format!("Failed to create dir {dest:?}: {e}"))?;
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir {parent:?}: {e}"))?;
+        }
+        let mut out = std::fs::File::create(&dest).map_err(|e| format!("Failed to create {dest:?}: {e}"))?;
+        std::io::copy(&mut entry, &mut out).map_err(|e| format!("Failed to write {dest:?}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Extract a `.tar.gz` archive's entries into `install_dir`. `unpack_in`
+/// (not the less-safe `unpack`) rejects path-traversal entries per-entry
+/// and creates intermediate directories as needed.
+#[cfg(target_os = "linux")]
+fn extract_targz_into(archive_path: &std::path::Path, install_dir: &std::path::Path) -> Result<(), String> {
+    let file = std::fs::File::open(archive_path).map_err(|e| format!("Failed to open update archive: {e}"))?;
+    let gz = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(gz);
+    for entry in archive
+        .entries()
+        .map_err(|e| format!("Failed to read update archive: {e}"))?
+    {
+        let mut entry = entry.map_err(|e| format!("Failed to read archive entry: {e}"))?;
+        entry
+            .unpack_in(install_dir)
+            .map_err(|e| format!("Failed to extract archive entry: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Replace current binary and restart. Called when user clicks "Restart to update".
+///
+/// SAFETY NOTE — this is not fully correct today: `std::process::exit(0)`
+/// below skips every Rust destructor, so a Drop-based flush (e.g.
+/// `FjallWorldDb`'s checkpoint/persist-on-drop for a currently-open Space)
+/// does NOT run before the process actually exits. A properly correct
+/// restart should fire Bevy's `AppExit` and let the app shut down normally
+/// — including its DB handles — before handing off to the new binary. That
+/// requires this function to run as (or signal) a Bevy system rather than
+/// a plain free function called from a Slint callback, which is out of
+/// scope for this fix. Today, clicking "Restart to update" while a Space
+/// with unsaved changes is open is not guaranteed safe.
 pub fn apply_update_and_restart(state: &UpdateState) {
     let download_path = if let Ok(s) = state.async_state.lock() {
         s.download_path.clone()
@@ -326,7 +388,8 @@ pub fn apply_update_and_restart(state: &UpdateState) {
 
     #[cfg(target_os = "windows")]
     {
-        // Windows: rename current to .old, extract new, restart
+        // Rename current exe out of the way first so the archive's own
+        // eustress-engine.exe entry can be written to that exact path.
         let old_exe = current_exe.with_extension("exe.old");
         let _ = std::fs::remove_file(&old_exe); // Remove previous .old
         if let Err(e) = std::fs::rename(&current_exe, &old_exe) {
@@ -334,45 +397,86 @@ pub fn apply_update_and_restart(state: &UpdateState) {
             return;
         }
 
-        // Extract zip (the download is a zip containing eustress-engine.exe)
-        // For now, if it's a direct binary, just copy
-        if download_path.extension().map(|e| e == "zip").unwrap_or(false) {
-            // TODO: unzip
-            info!("ZIP extraction not yet implemented — please extract manually");
+        let install_dir = current_exe.parent().map(|p| p.to_path_buf());
+        let apply_result = match install_dir {
+            None => Err("Could not determine install directory".to_string()),
+            Some(install_dir) => {
+                if download_path.extension().map(|e| e == "zip").unwrap_or(false) {
+                    extract_zip_into(&download_path, &install_dir)
+                } else {
+                    // Not a zip — legacy/manual path: treat as a raw binary drop-in.
+                    std::fs::copy(&download_path, &current_exe)
+                        .map(|_| ())
+                        .map_err(|e| format!("Failed to copy new binary: {e}"))
+                }
+            }
+        };
+
+        if let Err(e) = apply_result {
+            error!("Update apply failed: {}", e);
             let _ = std::fs::rename(&old_exe, &current_exe); // Restore
             return;
-        } else {
-            if let Err(e) = std::fs::copy(&download_path, &current_exe) {
-                error!("Failed to copy new binary: {}", e);
-                let _ = std::fs::rename(&old_exe, &current_exe); // Restore
-                return;
-            }
         }
 
-        // Restart
         let _ = std::process::Command::new(&current_exe).spawn();
         std::process::exit(0);
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        // Unix: atomic rename, set permissions, exec into new process
-        if let Err(e) = std::fs::copy(&download_path, &current_exe) {
-            error!("Failed to replace binary: {}", e);
+        let old_exe = current_exe.with_extension("old");
+        let _ = std::fs::remove_file(&old_exe);
+        if let Err(e) = std::fs::rename(&current_exe, &old_exe) {
+            error!("Failed to rename current exe: {}", e);
             return;
         }
 
-        // Ensure executable permission
+        let install_dir = current_exe.parent().map(|p| p.to_path_buf());
+        let is_archive = download_path.to_string_lossy().ends_with(".tar.gz")
+            || download_path.extension().map(|e| e == "gz").unwrap_or(false);
+        let apply_result = match install_dir {
+            None => Err("Could not determine install directory".to_string()),
+            Some(install_dir) if is_archive => extract_targz_into(&download_path, &install_dir),
+            Some(_) => std::fs::copy(&download_path, &current_exe)
+                .map(|_| ())
+                .map_err(|e| format!("Failed to replace binary: {e}")),
+        };
+
+        if let Err(e) = apply_result {
+            error!("Update apply failed: {}", e);
+            let _ = std::fs::rename(&old_exe, &current_exe); // Restore
+            return;
+        }
+
+        // Extraction (unpack_in) does not preserve the executable bit reliably
+        // across all tar/gzip producers — ensure it explicitly.
         if let Ok(metadata) = std::fs::metadata(&current_exe) {
             let mut perms = metadata.permissions();
             perms.set_mode(0o755);
             let _ = std::fs::set_permissions(&current_exe, perms);
         }
 
-        // Restart via exec
         let _ = std::process::Command::new(&current_exe).spawn();
         std::process::exit(0);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // The download is a `.dmg` — an Apple compressed disk-image format
+        // with no lightweight pure-Rust reader, and self-replacing a running
+        // .app bundle from inside a mounted DMG is architecturally unusual
+        // (Gatekeeper/notarization implications too). The previous code
+        // here did `std::fs::copy(&download_path, &current_exe)`, which
+        // would have overwritten the executable WITH THE RAW DMG BYTES —
+        // silent corruption of the install. Do not attempt in-place
+        // replacement; leave the verified download on disk and let the
+        // user open it and reinstall manually.
+        info!(
+            "Update downloaded and verified at {:?} — macOS auto-apply is not supported. \
+             Please open the .dmg and reinstall manually.",
+            download_path
+        );
     }
 }

@@ -187,6 +187,18 @@ pub struct EustressCamera {
     pub anim_target_pitch: f32,
     pub anim_progress: f32,
     pub anim_duration: f32,
+    /// Set by F (`handle_frame_selection`) whenever it snaps `distance` to
+    /// fit a selection's bounds. Cleared — resetting `distance` back to the
+    /// default orbit radius — the next time the SELECTION changes (see
+    /// `reset_focus_distance_on_selection_change`). Without this, Alt+Left
+    /// orbit (which swings the camera around `pivot` at `distance` without
+    /// re-deriving either from the camera's current pose — unlike right-
+    /// drag look, which re-tethers `pivot` every frame) keeps using
+    /// whatever radius the last F-focused object happened to fit, so
+    /// orbiting after selecting something unrelated feels like a giant
+    /// sweep (radius fit to a building) or a tight pirouette (radius fit to
+    /// a bolt) instead of the normal default orbit feel.
+    pub focus_anchored: bool,
 }
 
 impl Default for EustressCamera {
@@ -224,6 +236,7 @@ impl Default for EustressCamera {
             anim_target_pitch: 0.0,
             anim_progress: 0.0,
             anim_duration: 0.2, // 200ms transition
+            focus_anchored: false,
         }
     }
 }
@@ -247,6 +260,7 @@ impl Plugin for CameraControllerPlugin {
                 handle_snap_to_view,
                 handle_toggle_projection,
                 handle_frame_selection,
+                reset_focus_distance_on_selection_change,
                 handle_go_to_camera,
                 animate_view_transition,
                 eustress_camera_controls,
@@ -504,11 +518,15 @@ fn handle_frame_selection(
         for mut cam in query.iter_mut() {
             // Move pivot to center of bounds
             cam.pivot = center;
-            
+
             // Set distance to fit the extent (with some padding)
             // For perspective: distance = extent / (2 * tan(fov/2))
             // Simplified: distance ≈ extent * 1.5
             cam.distance = (extent * 1.5).max(MIN_CAMERA_DISTANCE).min(MAX_CAMERA_DISTANCE);
+            // Marks this fit-distance as selection-specific — see the field
+            // doc comment. Cleared (resetting `distance`, not `pivot` — no
+            // camera jump) the next time the selection changes.
+            cam.focus_anchored = true;
             
             // Update ortho scale if in orthographic mode
             if cam.projection_mode == ProjectionMode::Orthographic {
@@ -517,6 +535,63 @@ fn handle_frame_selection(
             
             info!("📷 Camera: Framed to bounds (center: {:?}, extent: {:.1})", center, extent);
         }
+    }
+}
+
+/// Spherical offset from pivot to camera — MUST match
+/// `update_eustress_camera_transform`'s position formula. Module-level (not
+/// nested in `eustress_camera_controls`) since `reset_focus_distance_on_selection_change`
+/// needs it too.
+fn orbit_offset(yaw: f32, pitch: f32) -> Vec3 {
+    Vec3::new(
+        pitch.cos() * yaw.sin(),
+        pitch.sin(),
+        pitch.cos() * yaw.cos(),
+    )
+}
+
+/// Clears a lingering F-focus fit-distance once the SELECTION moves on —
+/// see `EustressCamera::focus_anchored`'s doc comment for why this only
+/// matters for Alt+Left orbit (right-drag look re-tethers `pivot` every
+/// frame regardless, so it never goes stale).
+///
+/// Resets `distance` back to the default orbit radius WITHOUT moving the
+/// camera: back-solve the camera's current world position from
+/// `pivot + distance*orbit_offset(yaw, pitch)` (the same relation
+/// `update_eustress_camera_transform` renders from), then re-derive `pivot`
+/// at the new default `distance` so `camera_pos` — and therefore what's
+/// on screen — doesn't jump. Only the invisible orbit radius changes.
+fn reset_focus_distance_on_selection_change(
+    mut query: Query<&mut EustressCamera, With<Camera3d>>,
+    selection_manager: Option<Res<crate::selection_sync::SelectionSyncManager>>,
+    mut last_selection: Local<Option<std::collections::HashSet<String>>>,
+) {
+    let current: std::collections::HashSet<String> = selection_manager
+        .as_ref()
+        .map(|sm| sm.0.read().get_selected().into_iter().collect())
+        .unwrap_or_default();
+
+    let changed = last_selection.as_ref() != Some(&current);
+    *last_selection = Some(current);
+    if !changed {
+        return;
+    }
+
+    for mut cam in query.iter_mut() {
+        if !cam.focus_anchored {
+            continue;
+        }
+        cam.focus_anchored = false;
+
+        let default_distance = EustressCamera::default().distance;
+        if (cam.distance - default_distance).abs() < f32::EPSILON {
+            continue; // Already at default — nothing to reset.
+        }
+
+        let offset = orbit_offset(cam.target_yaw, cam.target_pitch);
+        let cam_pos = cam.pivot + cam.distance * offset;
+        cam.distance = default_distance;
+        cam.pivot = cam_pos - cam.distance * offset;
     }
 }
 
@@ -682,13 +757,19 @@ fn eustress_camera_controls(
         scroll_delta = 0.0;
     }
 
-    // Same neutralization, for the same reason, while a node is being
-    // dragged through empty space: `select_tool::handle_drag_distance_wheel`
+    // Same neutralization, for the same reason, while a billboard node is
+    // being dragged through empty space: `select_tool::handle_drag_distance_wheel`
     // has its own MessageReader<MouseWheel> and reads these same notches to
     // change the drag leash length instead. Without this, one scroll notch
-    // would both change the leash AND fly the camera forward/back.
-    let dragging_node = select_state.as_ref().is_some_and(|s| s.dragging && s.drag_started);
-    if dragging_node {
+    // would both change the leash AND fly the camera forward/back. Gated on
+    // entity type (drag_is_billboard_node), not a modifier key — Shift is
+    // reserved for box-select-additive, see SelectToolState's doc comment.
+    // Dragging an ordinary Part is untouched surface-snap, which has no
+    // "leash" concept, so the wheel should zoom normally there.
+    let dragging_billboard_node = select_state
+        .as_ref()
+        .is_some_and(|s| s.drag_is_billboard_node && s.dragging && s.drag_started);
+    if dragging_billboard_node {
         scroll_delta = 0.0;
     }
 
@@ -698,9 +779,11 @@ fn eustress_camera_controls(
     let cam_up = transform.up();
 
     // Determine which mouse mode is active (mutually exclusive)
-    let panning = mouse.pressed(MouseButton::Middle) || 
-                  (mouse.pressed(MouseButton::Left) && shift);  // Only Shift+Left or Middle for pan
-    
+    // Shift+Left used to pan too, but that collided with Shift+Left now
+    // meaning "camera-relative node drag" in select_tool.rs — Middle-drag
+    // is the only remaining pan gesture.
+    let panning = mouse.pressed(MouseButton::Middle);
+
     let dollying = mouse.pressed(MouseButton::Right) && ctrl;
 
     // Roblox-Studio-style split:
@@ -712,16 +795,6 @@ fn eustress_camera_controls(
     //    inspect-an-object workflows).
     let looking  = mouse.pressed(MouseButton::Right) && !ctrl;
     let orbiting = mouse.pressed(MouseButton::Left) && alt && !ctrl;
-
-    /// Spherical offset from pivot to camera — MUST match
-    /// `update_eustress_camera_transform`'s position formula.
-    fn orbit_offset(yaw: f32, pitch: f32) -> Vec3 {
-        Vec3::new(
-            pitch.cos() * yaw.sin(),
-            pitch.sin(),
-            pitch.cos() * yaw.cos(),
-        )
-    }
 
     // Apply the appropriate camera control (mutually exclusive)
     if (looking || orbiting) && mouse_delta != Vec2::ZERO {

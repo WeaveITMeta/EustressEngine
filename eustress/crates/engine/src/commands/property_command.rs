@@ -48,6 +48,53 @@ impl PropertyCommand {
         self.set_property(world, self.old_value.clone())
     }
     
+    /// Read the CURRENT value of `property_name` on `entity`, trying the
+    /// same component types (in the same order) that `set_property`
+    /// writes through. Used to capture a real `old_value` before a write
+    /// is applied — e.g. by the Rune `Instance:Set()` bridge in
+    /// `slint_ui.rs` — so `PropertyCommand` (and anything built from it,
+    /// like `crate::undo::Action::ChangeProperty`) gets a genuine prior
+    /// value instead of a same-as-new placeholder. Read-only: takes `&World`,
+    /// not `&mut World`.
+    pub fn read_property(world: &World, entity: Entity, property_name: &str) -> Option<PropertyValue> {
+        use crate::classes::*;
+        macro_rules! try_read {
+            ($ty:ty) => {
+                if let Some(c) = world.get::<$ty>(entity) {
+                    if let Some(v) = c.get_property(property_name) {
+                        return Some(v);
+                    }
+                }
+            };
+        }
+        try_read!(Instance);
+        try_read!(BasePart);
+        try_read!(Part);
+        try_read!(Model);
+        try_read!(Humanoid);
+        try_read!(crate::classes::EustressCamera);
+        try_read!(crate::classes::EustressPointLight);
+        try_read!(crate::classes::EustressSpotLight);
+        try_read!(SurfaceLight);
+        try_read!(Sound);
+        try_read!(Attachment);
+        try_read!(WeldConstraint);
+        try_read!(Motor6D);
+        try_read!(ParticleEmitter);
+        try_read!(Beam);
+        try_read!(SpecialMesh);
+        try_read!(Decal);
+        try_read!(Animator);
+        try_read!(KeyframeSequence);
+        try_read!(Terrain);
+        try_read!(Sky);
+        try_read!(UnionOperation);
+        try_read!(BillboardGui);
+        try_read!(TextLabel);
+        try_read!(Folder);
+        None
+    }
+
     /// Helper to set property on any component type
     fn set_property(&self, world: &mut World, value: PropertyValue) -> Result<(), String> {
         // Try each component type that supports PropertyAccess

@@ -33,7 +33,8 @@ use eustress_common::sim_stream::SimStreamWriter;
 // HEADLESS_RUNTIME plan's keystone.
 #[allow(unused_imports)]
 use eustress_engine::{
-    accessibility, adornment_renderer, ai_camera, align_distribute, array_tools,
+    accessibility, adornment_renderer, ai_camera, align_distribute, array_tools, cad_assembly,
+    cad_mate_tool, cad_plugin, csg,
     attachment_editor_tool, attribute_tag_migration, auth, bliss_tracker, camera,
     camera_controller, class_registry, classes, clipboard, commands, commit_flash,
     constraint_editor_tool, cursor_badge, default_scene, duplicate_place_tool,
@@ -44,8 +45,9 @@ use eustress_engine::{
     measure_tool, mesh_import, mirror_link, modal_tool, move_handles, move_tool,
     network_benchmark, notifications, numeric_input, part_selection, part_to_terrain,
     parts, photoreal, physics, pivot_mode, play_mode, play_mode_runtime, play_server,
-    plugins, profiler, properties, rendering, rotate_handles, rotate_tool,
+    plugins, profiler, properties, rendering, road_tool, rotate_handles, rotate_tool,
     rune_tool_sandbox, runtime, saved_viewpoints, scale_handles, scale_tool, scenes,
+    script_plugin_host,
     seats, select_tool, selection_box, selection_sets, selection_sync, serialization,
     shaders, simulation, smart_guides, soul, soul_script_migration, space,
     spatial_query_bridge, spawn, spawners, startup, studio_plugins, telemetry,
@@ -193,7 +195,32 @@ fn main() {
                 ..default()
             })
             .set(AssetPlugin {
-                file_path: "assets".to_string(),
+                file_path: {
+                    // Prefer the exe-adjacent `assets/` (the packaged/release
+                    // layout — assets ship next to the binary). Falls back to
+                    // the dev source tree (`crates/engine/assets`, resolved
+                    // via CARGO_MANIFEST_DIR — same pattern as the `bundled`
+                    // asset source registered above) so `cargo run` keeps
+                    // resolving exactly as it does today. A bare relative
+                    // "assets" only resolves when the process CWD happens to
+                    // be the crate dir; launching the built .exe directly (or
+                    // a packaged build) resolves it against the exe's own
+                    // dir instead, where no assets/ exists — every
+                    // asset-loaded entity (part meshes, Gaussian-splat
+                    // clouds) then silently fails to load while procedural
+                    // content (terrain) keeps working, which reads as
+                    // "missing geometry" with no error pointing at the cause.
+                    let exe_adjacent = std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(|d| d.join("assets")));
+                    match exe_adjacent {
+                        Some(p) if p.is_dir() => p.to_string_lossy().to_string(),
+                        _ => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("assets")
+                            .to_string_lossy()
+                            .to_string(),
+                    }
+                },
                 ..default()
             })
             // Per-system frame micro-profiler hook (feature `profiling`).
@@ -530,6 +557,16 @@ fn main() {
         // Part Swap, Model Reflect). Each registers its factory with
         // ModalToolRegistry.
         .add_plugins(tools_smart::SmartToolsPlugin)
+        // Drafting Boolean (Union / Subtract / Intersect / Separate) —
+        // real truck CSG via eustress-cad, Model-group fallback.
+        .add_plugins(csg::CsgPlugin)
+        // Parametric CadPart (feature-tree → mesh). Drafting tab
+        // Plate / Box / Cylinder inserts + variable regen.
+        .add_plugins(cad_plugin::CadPlugin)
+        // Assembly mates → live Avian joints.
+        .add_plugins(cad_assembly::CadAssemblyPlugin)
+        // Viewport mate pick tool (anchors = hit points).
+        .add_plugins(cad_mate_tool::MateToolPlugin)
         // Selection sync
         .add_plugins(SelectionSyncPlugin {
             selection_manager: selection_manager.clone(),
@@ -614,6 +651,8 @@ fn main() {
         .add_systems(Update, update_window_title)
         // Studio plugins
         .add_plugins(studio_plugins::StudioPluginSystem)
+        .add_plugins(road_tool::RoadToolEnginePlugin)
+        .add_plugins(script_plugin_host::ScriptPluginHostPlugin)
         // Frame diagnostics to identify stutters
         .add_plugins(frame_diagnostics::FrameDiagnosticsPlugin)
         // Opt-in per-system frame micro-profiler. Empty plugin unless the

@@ -2050,6 +2050,17 @@ pub fn spawn_instance(
         // land here. Attaches the typed component from [particle]/[beam] so
         // Properties + scripts see live data (renderers are still stubs).
         attach_vfx_component(&mut commands.entity(entity), class_name, &instance.extra);
+        // GaussianSplats: attach the real radiance-field rendering components
+        // (splats have no [asset], so they land in this no-mesh branch too).
+        #[cfg(feature = "gaussian-splatting")]
+        if matches!(class_name, eustress_common::classes::ClassName::GaussianSplats) {
+            attach_gaussian_splat_component(
+                &mut commands.entity(entity),
+                asset_server,
+                &toml_path,
+                &instance.extra,
+            );
+        }
         // DEBUG: per-entity; an INFO here is a log-I/O stall at scale.
         debug!("🌅 Spawned non-visual instance '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
         return entity;
@@ -2872,6 +2883,38 @@ fn attach_decal_mesh_component(
         }
         _ => {}
     }
+}
+
+/// Attach the actual radiance-field rendering components to a
+/// `GaussianSplats` entity. Reads the Universe-relative splat path from the
+/// importer's `[gaussian_splats].path` section (see
+/// `file_event_handler::do_import_gaussian_splat` for why this is a
+/// dedicated section rather than the generic `[asset]`/`AssetReference` —
+/// `AssetReference.mesh` is required, so a path-only `[asset]` table would
+/// fail to deserialize). `GaussianSplats` has no `[asset]`, so it hits the
+/// same no-mesh branch as ParticleEmitter/Beam above; this is that branch's
+/// twin, attaching REAL rendering (not stub data).
+#[cfg(feature = "gaussian-splatting")]
+fn attach_gaussian_splat_component(
+    ec: &mut bevy::ecs::system::EntityCommands,
+    asset_server: &AssetServer,
+    toml_path: &Path,
+    extra: &std::collections::HashMap<String, toml::Value>,
+) {
+    let Some(rel_path) = extra
+        .get("gaussian_splats")
+        .and_then(|v| v.get("path"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let Some(universe_root) = crate::space::universe_root_for_path(toml_path) else {
+        warn!("gaussian_splats: could not resolve Universe root for {:?}", toml_path);
+        return;
+    };
+    let abs_path = universe_root.join(rel_path);
+    eustress_radiance::attach_splat_cloud(ec, asset_server, abs_path.to_string_lossy().to_string());
 }
 
 /// Attach the data-only ParticleEmitter / Beam component from the

@@ -14,9 +14,36 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────
+  # Gate: the tagged commit must actually be on Core. release.yml triggers
+  # on any `v*` tag push, but RELEASE.md's whole promotion model (manual
+  # pre-release checklist → fast-forward Core → tag) assumes releases only
+  # ever ship from Core. This makes that assumption enforced, not just
+  # documented.
+  # ─────────────────────────────────────────────────────────────────────
+  verify-core:
+    name: Verify tag is reachable from Core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch Core
+        run: git fetch origin Core:refs/remotes/origin/Core
+
+      - name: Assert tagged commit is on Core
+        run: |
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/Core; then
+            echo "::error::Tag ${GITHUB_REF_NAME} (commit ${GITHUB_SHA}) is not reachable from origin/Core. Releases must be tagged on Core (see RELEASE.md) — a tag pushed to main or any other branch is refused here rather than silently shipped to users."
+            exit 1
+          fi
+          echo "OK: ${GITHUB_SHA} is on Core."
+
+  # ─────────────────────────────────────────────────────────────────────
   # Windows x64
   # ─────────────────────────────────────────────────────────────────────
   build-windows:
+    needs: verify-core
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
@@ -39,6 +66,25 @@ jobs:
         working-directory: eustress
         run: cargo build --release --package eustress-engine
 
+      - name: Smoke test (best-effort startup check)
+        shell: pwsh
+        run: |
+          # Catches an immediate startup panic/crash (missing DLL, unwrap-on-
+          # None, config parse failure) before a broken binary ever gets
+          # packaged. NOT a rendering-correctness test: windows-latest has no
+          # real GPU, so wgpu may fall back to a software adapter or fail to
+          # find one — a graceful exit for that reason isn't distinguished
+          # from success here. Treat this as a floor, not a full guarantee.
+          $exe = "eustress\target\release\eustress-engine.exe"
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 8
+          if ($p.HasExited) {
+            Write-Error "eustress-engine.exe exited within 8s of startup (exit code $($p.ExitCode)) — treating as a startup crash."
+            exit 1
+          }
+          Stop-Process -Id $p.Id -Force
+          Write-Output "OK: process was still running after 8s (no immediate startup crash)."
+
       - name: Package
         shell: bash
         run: |
@@ -54,10 +100,24 @@ jobs:
           name: windows-x64
           path: eustress-engine-*-windows-x64.zip
 
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $Version = "${env:GITHUB_REF_NAME}" -replace '^v',''
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            /DMyAppVersion=$Version `
+            installer\windows\eustress-engine.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/windows/EustressEngine-Setup.exe
+
   # ─────────────────────────────────────────────────────────────────────
   # macOS ARM64 (Apple Silicon)
   # ─────────────────────────────────────────────────────────────────────
   build-macos-arm64:
+    needs: verify-core
     runs-on: macos-14
     timeout-minutes: 90
     steps:
@@ -81,6 +141,24 @@ jobs:
       - name: Build
         working-directory: eustress
         run: cargo build --release --package eustress-engine --target aarch64-apple-darwin
+
+      - name: Smoke test (best-effort startup check)
+        shell: bash
+        run: |
+          # See the Windows job's smoke-test step for the same caveat: this
+          # catches an immediate startup panic, not rendering correctness
+          # (though macos-14 runners do have real Metal/GPU support, unlike
+          # the Linux/Windows hosted runners).
+          eustress/target/aarch64-apple-darwin/release/eustress-engine &
+          PID=$!
+          sleep 8
+          if ! kill -0 "$PID" 2>/dev/null; then
+            wait "$PID"; STATUS=$?
+            echo "::error::eustress-engine exited within 8s of startup (exit code $STATUS) — treating as a startup crash."
+            exit 1
+          fi
+          kill "$PID"
+          echo "OK: process was still running after 8s (no immediate startup crash)."
 
       - name: Package DMG
         run: |
@@ -116,6 +194,7 @@ jobs:
   # Linux x64
   # ─────────────────────────────────────────────────────────────────────
   build-linux:
+    needs: verify-core
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -131,7 +210,7 @@ jobs:
           sudo apt-get install -y \
             libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
             libvulkan-dev libx11-dev libxi-dev libxcursor-dev \
-            imagemagick mold clang
+            imagemagick mold clang xvfb
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -148,6 +227,26 @@ jobs:
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
+      - name: Smoke test (best-effort startup check)
+        shell: bash
+        run: |
+          # See the Windows job's smoke-test step for the same caveat: this
+          # catches an immediate startup panic, not rendering correctness.
+          # ubuntu-latest has no real GPU; xvfb gives it a display to attach
+          # to so window/surface creation doesn't hard-fail purely for lack
+          # of one — a software rasterizer fallback still exercises real
+          # engine startup code, unlike running with no display at all.
+          xvfb-run --auto-servernum eustress/target/release/eustress-engine &
+          PID=$!
+          sleep 8
+          if ! kill -0 "$PID" 2>/dev/null; then
+            wait "$PID"; STATUS=$?
+            echo "::error::eustress-engine exited within 8s of startup (exit code $STATUS) — treating as a startup crash."
+            exit 1
+          fi
+          kill "$PID" 2>/dev/null || true
+          echo "OK: process was still running after 8s (no immediate startup crash)."
 
       - name: Generate icons
         run: bash eustress/crates/engine/assets/linux/generate-icons.sh
@@ -186,7 +285,7 @@ jobs:
 
       - name: Compute checksums
         run: |
-          sha256sum eustress-engine-*.zip eustress-engine-*.dmg eustress-engine-*.tar.gz > checksums.txt
+          sha256sum eustress-engine-*.zip eustress-engine-*.dmg eustress-engine-*.tar.gz EustressEngine-Setup.exe > checksums.txt
           cat checksums.txt
 
       - name: Generate latest.json
@@ -202,6 +301,9 @@ jobs:
 
           LIN_SHA=$(grep linux-x64.tar.gz checksums.txt | awk '{print $1}')
           LIN_SIZE=$(stat -c%s eustress-engine-*-linux-x64.tar.gz)
+
+          SETUP_SHA=$(grep EustressEngine-Setup.exe checksums.txt | awk '{print $1}')
+          SETUP_SIZE=$(stat -c%s EustressEngine-Setup.exe)
 
           BASE="https://releases.eustress.dev/${VERSION}"
 
@@ -231,6 +333,12 @@ jobs:
                 "sha256": "${LIN_SHA}",
                 "size_bytes": ${LIN_SIZE},
                 "installer": false
+              },
+              "windows-x64-installer": {
+                "url": "${BASE}/EustressEngine-Setup.exe",
+                "sha256": "${SETUP_SHA}",
+                "size_bytes": ${SETUP_SIZE},
+                "installer": true
               }
             }
           }
@@ -259,6 +367,9 @@ jobs:
           aws s3 cp eustress-engine-${VERSION}-linux-x64.tar.gz \
             s3://eustress-releases/${VERSION}/eustress-engine-${VERSION}-linux-x64.tar.gz
 
+          aws s3 cp EustressEngine-Setup.exe \
+            s3://eustress-releases/${VERSION}/EustressEngine-Setup.exe
+
           # Upload manifest (short cache for quick propagation)
           aws s3 cp latest.json s3://eustress-releases/latest.json \
             --cache-control "max-age=300"
@@ -273,6 +384,7 @@ jobs:
             eustress-engine-*-windows-x64.zip
             eustress-engine-*-macos-arm64.dmg
             eustress-engine-*-linux-x64.tar.gz
+            EustressEngine-Setup.exe
             checksums.txt
             latest.json
           generate_release_notes: true

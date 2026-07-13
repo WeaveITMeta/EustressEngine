@@ -106,6 +106,24 @@ pub struct ResizePartEvent {
     pub new_size: Vec3,
 }
 
+/// Peripheral `handle_scale_interaction` params bundled behind one
+/// field — bare-fn systems cap out at 16 `SystemParam`s in Bevy, and
+/// the CadPart resize bridge pushed the unbundled param list past it.
+#[derive(bevy::ecs::system::SystemParam)]
+struct ScaleToolExtras<'w, 's> {
+    viewport_bounds: Option<Res<'w, crate::ui::ViewportBounds>>,
+    studio_state: Option<Res<'w, crate::ui::StudioState>>,
+    instance_files: Query<'w, 's, &'static crate::space::instance_loader::InstanceFile>,
+    auth: Option<Res<'w, crate::auth::AuthState>>,
+    // CadPart entities must never reach the drag-release primitive-mesh
+    // bake: `part.shape` is hardcoded `Block` for every CadPart
+    // (spawn_cad_entity), so baking would silently replace the real
+    // tessellated CAD mesh (cylinder, plate-with-hole, …) with a plain
+    // box. Route the release size through the feature tree instead.
+    cad_parts: Query<'w, 's, &'static crate::cad_plugin::CadPart>,
+    cad_set_variable: MessageWriter<'w, crate::cad_plugin::CadSetVariableEvent>,
+}
+
 impl Plugin for ScaleToolPlugin {
     fn build(&self, app: &mut App) {
         // Gizmo drawing moved to `scale_handles::ScaleHandlesPlugin`
@@ -183,8 +201,37 @@ fn handle_resize_part_events(
         Option<&mut Mesh3d>,
         Option<&crate::spawn::MeshSource>,
     )>,
+    // Closes a multi-select gap: the Properties-panel Size handler
+    // only checks the PRIMARY selected entity before deciding whether
+    // to route through the feature tree — a CadPart riding along in a
+    // mixed multi-selection can still reach this generic path, which
+    // must not be allowed to bake a Block mesh over it.
+    cad_parts: Query<&crate::cad_plugin::CadPart>,
+    mut cad_set_variable: MessageWriter<crate::cad_plugin::CadSetVariableEvent>,
 ) {
     for event in events.read() {
+        if let Ok(cad) = cad_parts.get(event.entity) {
+            let axes = crate::cad_plugin::size_axis_variables(&cad.tree_toml);
+            let arr = [event.new_size.x, event.new_size.y, event.new_size.z];
+            let mut writes: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+            for (axis_val, axis_var) in arr.into_iter().zip(axes) {
+                if let Some(name) = axis_var {
+                    writes.insert(name, axis_val.max(1.0e-4));
+                }
+            }
+            for (name, value) in writes {
+                let q = if name == "radius" { value * 0.5 } else { value };
+                cad_set_variable.write(crate::cad_plugin::CadSetVariableEvent {
+                    entity: event.entity,
+                    name,
+                    value: format!("{q} m"),
+                });
+            }
+            if let Ok((mut transform, ..)) = entities.get_mut(event.entity) {
+                transform.scale = Vec3::ONE;
+            }
+            continue;
+        }
         let Ok((mut transform, base_part, part, mesh, mesh_source)) = entities.get_mut(event.entity)
         else { continue };
         let has_mesh_source = mesh_source.is_some();
@@ -325,10 +372,7 @@ fn handle_scale_interaction(
     mut meshes: ResMut<Assets<Mesh>>,
     parent_query: Query<&ChildOf>,
     mut undo_stack: ResMut<crate::undo::UndoStack>,
-    viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
-    studio_state: Option<Res<crate::ui::StudioState>>,
-    instance_files: Query<&crate::space::instance_loader::InstanceFile>,
-    auth: Option<Res<crate::auth::AuthState>>,
+    mut extras: ScaleToolExtras,
 ) {
     if !state.active {
         // Clear stale hover state so the gizmo doesn't briefly flash a
@@ -344,7 +388,7 @@ fn handle_scale_interaction(
     // world (World mode) or rotated to match the active entity (Local).
     // Hit test must use the same rotation as `scale_handles::sync_scale_handle_root`
     // renders — otherwise clicking the rotated Local-mode cube misses.
-    let transform_mode = studio_state
+    let transform_mode = extras.studio_state
         .as_ref()
         .map(|s| s.transform_mode)
         .unwrap_or(crate::ui::TransformMode::World);
@@ -382,7 +426,7 @@ fn handle_scale_interaction(
     // ViewportBounds is physical px, cursor_pos is logical — go through
     // contains_logical so DPI-scaled displays don't reject every click.
     if state.dragged_axis.is_none() {
-        if let Some(vb) = viewport_bounds.as_deref() {
+        if let Some(vb) = extras.viewport_bounds.as_deref() {
             let scale = window.scale_factor() as f32;
             if !vb.contains_logical(cursor_pos, scale) { return; }
         }
@@ -620,6 +664,40 @@ fn handle_scale_interaction(
                 let final_pos  = transform.translation;
                 let size_changed = (initial_size - final_size).length() > 0.001;
                 if !size_changed { continue; }
+
+                if let Ok(cad) = extras.cad_parts.get(entity) {
+                    // Feature-tree path: fire a variable write per
+                    // mapped axis and let `regenerate_cad_parts`
+                    // rebuild the real mesh + reset scale=ONE next
+                    // frame. Skip `apply_size_to_entity` entirely —
+                    // its regen branch has no CAD awareness and would
+                    // bake a generic Block primitive over the drag.
+                    let axes = crate::cad_plugin::size_axis_variables(&cad.tree_toml);
+                    let final_arr = [final_size.x, final_size.y, final_size.z];
+                    let mut writes: std::collections::HashMap<String, f32> =
+                        std::collections::HashMap::new();
+                    for (axis_val, axis_var) in final_arr.into_iter().zip(axes) {
+                        if let Some(name) = axis_var {
+                            writes.insert(name, axis_val.max(1.0e-4));
+                        }
+                    }
+                    for (name, value) in writes {
+                        let q = if name == "radius" { value * 0.5 } else { value };
+                        extras.cad_set_variable.write(crate::cad_plugin::CadSetVariableEvent {
+                            entity,
+                            name,
+                            value: format!("{q} m"),
+                        });
+                    }
+                    // Defensive reset even when no axis is mapped (e.g.
+                    // dragging X on a Z-only template) — otherwise the
+                    // mid-drag preview scale would stick permanently
+                    // with no regen to clear it.
+                    transform.scale = Vec3::ONE;
+                    transform.translation = final_pos;
+                    continue;
+                }
+
                 apply_size_to_entity(
                     &mut *transform, basepart_opt, part_opt, mesh_opt,
                     &mut meshes, final_size, final_pos, has_mesh_source,
@@ -628,6 +706,11 @@ fn handle_scale_interaction(
             }
 
             for (entity, _, transform, basepart_opt, _, _, _) in query.iter() {
+                // CadParts record their resize as a CadTreeEdit (via the
+                // variable events fired above) — a ScaleEntities entry
+                // here would be a second, conflicting undo step whose
+                // undo writes BasePart.size without touching the tree.
+                if extras.cad_parts.get(entity).is_ok() { continue; }
                 if let (Some(initial_pos), Some(initial_size)) = (
                     state.initial_positions.get(&entity),
                     state.initial_scales.get(&entity),
@@ -648,15 +731,19 @@ fn handle_scale_interaction(
 
             // Persist the final size + position to each entity's TOML file.
             // This mirrors the move-tool path: load → patch → write.
-            let stamp = auth.as_deref().and_then(crate::space::instance_loader::current_stamp);
+            // CadParts persist through `handle_cad_set_variable`'s own
+            // features.toml write (fired above) — this generic writer
+            // would stamp a stale/meaningless scale into `_instance.toml`.
+            let stamp = extras.auth.as_deref().and_then(crate::space::instance_loader::current_stamp);
             for (entity, _, transform, basepart_opt, _, _, _) in query.iter() {
+                if extras.cad_parts.get(entity).is_ok() { continue; }
                 let Some(initial_size) = state.initial_scales.get(&entity).copied() else { continue };
                 let new_size = basepart_opt.as_ref().map(|bp| bp.size).unwrap_or(initial_size);
                 let size_changed = (initial_size - new_size).length() > 0.001;
                 let initial_pos  = state.initial_positions.get(&entity).copied().unwrap_or(transform.translation);
                 let pos_changed  = (initial_pos - transform.translation).length() > 0.001;
                 if !size_changed && !pos_changed { continue; }
-                if let Ok(inst_file) = instance_files.get(entity) {
+                if let Ok(inst_file) = extras.instance_files.get(entity) {
                     if let Ok(mut def) = crate::space::instance_loader::load_instance_definition(&inst_file.toml_path) {
                         def.transform.position = transform.translation.to_array();
                         def.transform.rotation = [
@@ -708,6 +795,12 @@ fn finalize_numeric_input_on_scale(
     mut undo_stack: ResMut<crate::undo::UndoStack>,
     instance_files: Query<&crate::space::instance_loader::InstanceFile>,
     auth: Option<Res<crate::auth::AuthState>>,
+    // Same rationale as `handle_scale_interaction`: a CadPart's
+    // Transform.scale must stay ONE (size lives in the tessellated
+    // mesh, not a scale factor) and its size must round-trip through
+    // features.toml, not `_instance.toml`.
+    cad_parts: Query<&crate::cad_plugin::CadPart>,
+    mut cad_set_variable: MessageWriter<crate::cad_plugin::CadSetVariableEvent>,
 ) {
     use crate::numeric_input::NumericInputOwner;
 
@@ -772,21 +865,52 @@ fn finalize_numeric_input_on_scale(
             let world_offset = state.drag_rotation * gizmo_offset;
             let new_pos = initial_pos + world_offset;
 
-            // Record undo BEFORE we mutate.
+            // Record undo BEFORE we mutate. CadParts are excluded —
+            // their CadSetVariableEvent (below) records a CadTreeEdit,
+            // and a ScaleEntities entry would conflict with it.
             let size_changed = (initial_size - new_size).length() > 0.001;
             let pos_changed  = (initial_pos - new_pos).length() > 0.001;
-            if size_changed || pos_changed {
+            if (size_changed || pos_changed) && cad_parts.get(entity).is_err() {
                 old_states.push((entity.to_bits(), initial_pos.to_array(), initial_size.to_array()));
                 new_states.push((entity.to_bits(), new_pos.to_array(),     new_size.to_array()));
+            }
+
+            // Sanitize: any NaN/inf reaching Transform.translation
+            // panics Avian's Position validator on the next physics step.
+            let new_pos = sane_translation(new_pos);
+            let new_size = sane_size(new_size);
+
+            if let Ok(cad) = cad_parts.get(entity) {
+                // `transform.scale = new_size` assumes a unit-scale
+                // mesh (true for file-system GLBs) — a CadPart's mesh
+                // is already baked at its real size, so this would
+                // double-scale it. Route through the feature tree and
+                // let `regenerate_cad_parts` own scale/size instead.
+                let axes = crate::cad_plugin::size_axis_variables(&cad.tree_toml);
+                let new_arr = [new_size.x, new_size.y, new_size.z];
+                let mut writes: std::collections::HashMap<String, f32> =
+                    std::collections::HashMap::new();
+                for (axis_val, axis_var) in new_arr.into_iter().zip(axes) {
+                    if let Some(name) = axis_var {
+                        writes.insert(name, axis_val.max(1.0e-4));
+                    }
+                }
+                for (name, value) in writes {
+                    let q = if name == "radius" { value * 0.5 } else { value };
+                    cad_set_variable.write(crate::cad_plugin::CadSetVariableEvent {
+                        entity,
+                        name,
+                        value: format!("{q} m"),
+                    });
+                }
+                transform.translation = new_pos;
+                transform.scale = Vec3::ONE;
+                continue;
             }
 
             // Apply — file-system-first parts are unit-scale GLBs so
             // size lands on Transform.scale. BasePart.size + cframe
             // stay the authoritative source the TOML writer reads.
-            // Sanitize: any NaN/inf reaching Transform.translation
-            // panics Avian's Position validator on the next physics step.
-            let new_pos = sane_translation(new_pos);
-            let new_size = sane_size(new_size);
             transform.translation = new_pos;
             transform.scale = new_size;
             if let Some(mut bp) = basepart_opt {
@@ -800,8 +924,13 @@ fn finalize_numeric_input_on_scale(
         }
 
         // Persist the committed size + position for each entity.
+        // CadParts persist through `handle_cad_set_variable`'s own
+        // features.toml write (fired above) — skip them here so this
+        // generic writer doesn't stamp a stale/meaningless scale into
+        // `_instance.toml`.
         let stamp = auth.as_deref().and_then(crate::space::instance_loader::current_stamp);
         for (entity, transform, basepart_opt) in query.iter() {
+            if cad_parts.get(entity).is_ok() { continue; }
             let Some(initial_size) = state.initial_scales.get(&entity).copied() else { continue };
             let new_size = basepart_opt.as_ref().map(|bp| bp.size).unwrap_or(initial_size);
             let initial_pos = state.initial_positions.get(&entity).copied().unwrap_or(transform.translation);

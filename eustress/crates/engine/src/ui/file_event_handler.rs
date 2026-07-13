@@ -82,6 +82,10 @@ pub enum FileAction {
     /// `.rbxm` / `.rbxmx`). Source is the user-picked / dropped absolute
     /// path. Handler parses + materialises into the active Space root.
     ImportRobloxPlace(PathBuf),
+    /// Import a Gaussian-Splatting radiance-field file (`.ply`). Source is
+    /// the user-picked absolute path. Handler copies it into the Universe
+    /// asset tree and materialises a `GaussianSplats` instance under Workspace.
+    ImportGaussianSplat(PathBuf),
 }
 
 // ============================================================================
@@ -107,6 +111,7 @@ pub fn drain_file_events(
             FileEvent::Publish(request) => FileAction::Publish(request.clone()),
             FileEvent::ImportAsset(path) => FileAction::ImportAsset(path.clone()),
             FileEvent::ImportRobloxPlace(path) => FileAction::ImportRobloxPlace(path.clone()),
+            FileEvent::ImportGaussianSplat(path) => FileAction::ImportGaussianSplat(path.clone()),
         };
         pending.actions.push(action);
     }
@@ -142,6 +147,7 @@ pub fn execute_file_actions(world: &mut World) {
             FileAction::Publish(request) => do_publish(world, &request),
             FileAction::ImportAsset(path) => do_import_asset(world, path),
             FileAction::ImportRobloxPlace(path) => do_import_roblox_place(world, path),
+            FileAction::ImportGaussianSplat(path) => do_import_gaussian_splat(world, path),
         }
     }
 }
@@ -314,6 +320,7 @@ fn do_save_space(world: &mut World) {
     }
 
     space_ops::save_space(world);
+    save_terrain_to_disk(world);
 
     // Snapshot the identity on the main thread so the background commit
     // attributes to the logged-in user even if a logout races with the
@@ -354,6 +361,46 @@ fn do_save_space(world: &mut World) {
     // Provide feedback
     if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
         n.success("Space saved. All TOML files up to date.");
+    }
+}
+
+/// Persist the active terrain's height data to `Workspace/Terrain/*.r16`.
+///
+/// `toml_loader::save_chunks_to_disk` has existed since terrain export
+/// shipped but had ZERO call sites anywhere in the codebase (confirmed by
+/// repo-wide grep) — every brush edit and, without this, every road-tool
+/// terrain conform would be silently lost on the next Space reload, because
+/// nothing ever wrote `height_cache` back to the `.r16` files
+/// `hydrate_terrain_from_disk` reads on open. Manual Save is not a hot path,
+/// so this saves the FULL chunk span (not a dirty-tracked subset) — simpler
+/// and can't miss a chunk whose mesh-regen `dirty` flag was already cleared
+/// by the time Save runs. Splat (material paint) is not yet round-tripped —
+/// only height; `save_chunks_to_disk` has no splat counterpart today.
+fn save_terrain_to_disk(world: &mut World) {
+    let Some(space_root) = world.get_resource::<crate::space::SpaceRoot>().map(|r| r.0.clone()) else {
+        return;
+    };
+    let mut query = world.query_filtered::<(
+        &eustress_common::terrain::TerrainConfig,
+        &eustress_common::terrain::TerrainData,
+    ), With<eustress_common::terrain::TerrainRoot>>();
+    let Ok((config, data)) = query.single(world) else {
+        return; // No active terrain this Space — nothing to persist.
+    };
+
+    let terrain_dir = space_root.join("Workspace").join("Terrain");
+    if let Err(e) = std::fs::create_dir_all(&terrain_dir) {
+        warn!("save_terrain_to_disk: could not create {:?}: {}", terrain_dir, e);
+        return;
+    }
+
+    let chunk_positions: Vec<IVec2> = (-(config.chunks_x as i32)..=config.chunks_x as i32)
+        .flat_map(|gx| (-(config.chunks_z as i32)..=config.chunks_z as i32).map(move |gz| IVec2::new(gx, gz)))
+        .collect();
+
+    match eustress_common::terrain::toml_loader::save_chunks_to_disk(&terrain_dir, config, data, &chunk_positions) {
+        Ok(saved) => info!("💾 Terrain: saved {} chunk heightmaps to {:?}", saved, terrain_dir),
+        Err(e) => warn!("save_terrain_to_disk: {}", e),
     }
 }
 
@@ -1137,6 +1184,127 @@ fn do_import_asset(world: &mut World, source: PathBuf) {
     info!(
         "📥 Imported {:?} as {} class entity '{}' (asset: {})",
         source, kind.label(), created.folder_name, universe_rel_asset,
+    );
+}
+
+// ============================================================================
+// 9a-2. Import Gaussian Splat — .ply → GaussianSplats instance under Workspace
+// ============================================================================
+
+/// Import a Gaussian-Splatting radiance-field file (`.ply`) picked from the
+/// frontend Import button. Mirrors [`do_import_asset`]'s copy + materialise
+/// shape, but targets `Workspace` (a 3D world object, not a GUI asset) and a
+/// DEDICATED `[gaussian_splats]` TOML section rather than the generic
+/// `[asset]`/`AssetReference` used by Image/Video — `AssetReference.mesh` is
+/// a REQUIRED field, so an `[asset]` table holding only `path` (no `mesh`)
+/// cannot deserialize into `InstanceDefinition`. `[gaussian_splats]` is not a
+/// field `InstanceDefinition` recognises, so it lands safely in the generic
+/// `extra` catch-all with zero parse risk — the spawn-side reader
+/// (`instance_loader::attach_gaussian_splat_component`) reads it back from
+/// there. See docs/architecture/GAUSSIAN_SPLATTING.md.
+fn do_import_gaussian_splat(world: &mut World, source: PathBuf) {
+    let is_ply = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.eq_ignore_ascii_case("ply"))
+        .unwrap_or(false);
+    if !is_ply {
+        notify_err(
+            world,
+            format!(
+                "Cannot import: unsupported Gaussian Splat extension ({}). Only .ply is supported.",
+                source.display()
+            ),
+        );
+        return;
+    }
+
+    let space_root = match world.get_resource::<crate::space::SpaceRoot>() {
+        Some(sr) => sr.0.clone(),
+        None => {
+            notify_err(world, "Cannot import: no Space loaded".to_string());
+            return;
+        }
+    };
+    let universe_root = space_root
+        .ancestors()
+        .nth(2)
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| space_root.clone());
+
+    // 1. Copy the source .ply into <Universe>/assets/splats/.
+    let assets_dir = universe_root.join("assets").join("splats");
+    if let Err(e) = std::fs::create_dir_all(&assets_dir) {
+        notify_err(world, format!("Could not create assets dir {:?}: {}", assets_dir, e));
+        return;
+    }
+    let file_name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("imported.ply")
+        .to_string();
+    let safe_file_name = sanitize_file_name(&file_name);
+    let dest = unique_dest_path(&assets_dir, &safe_file_name);
+    if let Err(e) = std::fs::copy(&source, &dest) {
+        notify_err(world, format!("Failed to copy asset to {:?}: {}", dest, e));
+        return;
+    }
+    let universe_rel_asset = format!(
+        "assets/splats/{}",
+        dest.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+    );
+
+    // 2. Entity-folder name from the file stem, materialised under Workspace
+    //    (a splat cloud is 3D world content, not a StarterGui media asset).
+    let stem = dest
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("SplatCloud")
+        .to_string();
+    let entity_name = sanitize_entity_name(&stem);
+    let workspace_dir = space_root.join("Workspace");
+
+    let overrides = eustress_common::instance_create::InstanceOverrides {
+        display_name: Some(entity_name.clone()),
+        position: Some([0.0, 2.0, 0.0]),
+        ..Default::default()
+    };
+    let created = match eustress_common::instance_create::create_instance(
+        &workspace_dir,
+        "GaussianSplats",
+        Some(&entity_name),
+        overrides,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            notify_err(world, format!("Failed to materialise GaussianSplats entity: {}", e));
+            return;
+        }
+    };
+
+    // 3. Stamp the dedicated [gaussian_splats] section (post-process — see
+    //    the fn doc for why this bypasses the generic asset_path override).
+    let write_result = (|| -> Result<(), String> {
+        let raw = std::fs::read_to_string(&created.toml_path).map_err(|e| e.to_string())?;
+        let mut doc: toml::Value = raw.parse().map_err(|e: toml::de::Error| e.to_string())?;
+        let table = doc.as_table_mut().ok_or_else(|| "instance toml has no root table".to_string())?;
+        let mut section = toml::value::Table::new();
+        section.insert("path".to_string(), toml::Value::String(universe_rel_asset.clone()));
+        table.insert("gaussian_splats".to_string(), toml::Value::Table(section));
+        let out = toml::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+        std::fs::write(&created.toml_path, out).map_err(|e| e.to_string())
+    })();
+    if let Err(e) = write_result {
+        notify_err(world, format!("Failed to stamp [gaussian_splats] section: {}", e));
+        return;
+    }
+
+    if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+        n.success(format!("[GS] imported '{}' as {}", file_name, created.folder_name));
+    }
+    info!(
+        "📥 Imported Gaussian Splat {:?} as entity '{}' (asset: {})",
+        source, created.folder_name, universe_rel_asset,
     );
 }
 

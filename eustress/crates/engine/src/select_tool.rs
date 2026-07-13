@@ -81,13 +81,32 @@ pub struct SelectToolState {
     pub debug_hit_normal: Option<Vec3>,
     /// Camera-relative free-space drag: distance from the camera to the
     /// grabbed entity, captured when the drag starts and adjustable by
-    /// mouse wheel while dragging (see `handle_drag_distance_wheel`).
-    /// Only used by the empty-space fallback (no surface under cursor) —
-    /// surface-follow dragging is unaffected. Recomputing the drag plane
-    /// from this distance and the CURRENT camera transform every frame
-    /// (not the grab-time transform) is what lets the dragged part follow
-    /// the camera through WASD movement and look-around mid-drag.
+    /// mouse wheel while dragging a billboard node (see
+    /// `handle_drag_distance_wheel`). Recomputing the drag plane from this
+    /// distance and the CURRENT camera transform every frame (not the
+    /// grab-time transform) is what lets the dragged part follow the
+    /// camera through WASD movement and look-around mid-drag.
     pub drag_camera_distance: f32,
+    /// Obsidian-style force-directed drift: rest length (distance from the
+    /// dragged node) captured the first frame each direct Beam-connected
+    /// neighbor is seen during THIS drag (see `sync_neighbor_drift`).
+    /// Cleared whenever a billboard-node drag isn't active, so it never
+    /// carries a stale entry into the next drag.
+    pub drag_neighbor_rest_lengths: std::collections::HashMap<Entity, f32>,
+    /// Whether the CURRENTLY dragged entity has a BillboardGui child —
+    /// checked once at grab time and cached here so every dependent system
+    /// (wheel-leash, camera-zoom suppression, neighbor drift) reads one
+    /// value instead of re-querying children each frame.
+    ///
+    /// This — NOT a modifier key — is what selects camera-relative
+    /// free-space dragging. Shift was tried first and reverted: Shift+drag
+    /// is already the fixed, permanent gesture for adding to a box
+    /// selection (`box_state.additive = shift_held`, see
+    /// `handle_box_selection`), so it can't also mean "move this node."
+    /// Keying off entity type instead — mind-map nodes carry a Billboard
+    /// label, ordinary building Parts don't — needs no modifier at all and
+    /// can't collide with selection.
+    pub drag_is_billboard_node: bool,
 }
 
 impl Default for SelectToolState {
@@ -112,6 +131,8 @@ impl Default for SelectToolState {
             debug_hit_point: None,
             debug_hit_normal: None,
             drag_camera_distance: 10.0,
+            drag_neighbor_rest_lengths: std::collections::HashMap::new(),
+            drag_is_billboard_node: false,
         }
     }
 }
@@ -159,8 +180,9 @@ impl Plugin for SelectToolPlugin {
                 handle_select_drag
                     .after(crate::ui::slint_ui::update_slint_ui_focus)
                     .after(handle_drag_distance_wheel),
+                sync_neighbor_drift.after(handle_select_drag),
                 handle_box_selection
-                    .after(handle_select_drag),
+                    .after(sync_neighbor_drift),
                 debug_drag_gizmos.after(handle_box_selection),
             ))
             // render_box_selection uses NonSend<SlintUiState> — must run separately
@@ -169,14 +191,16 @@ impl Plugin for SelectToolPlugin {
     }
 }
 
-/// While a node is being dragged through empty space (see the camera-relative
-/// fallback in `handle_select_drag`), the mouse wheel changes the LEASH
-/// LENGTH instead of zooming the camera — same pattern as
-/// `part_selection::hover_resize_system` repurposing the wheel for the
-/// Ctrl+Shift+Alt resize chord, just gated on drag state instead of a key
-/// chord. `eustress_camera_controls` separately zeroes its own scroll delta
-/// while `state.dragging` is true, so the same notch never ALSO zooms the
-/// camera.
+/// While dragging a billboard node (see the camera-relative branch in
+/// `handle_select_drag` — triggered by entity type, not a modifier key),
+/// the mouse wheel changes the LEASH LENGTH instead of zooming the camera —
+/// same pattern as `part_selection::hover_resize_system` repurposing the
+/// wheel for the Ctrl+Shift+Alt resize chord, just gated on
+/// `drag_is_billboard_node` instead of a key chord.
+/// `eustress_camera_controls` separately zeroes its own scroll delta under
+/// the same condition, so the same notch never ALSO zooms the camera.
+/// Dragging an ordinary (non-billboard) Part is untouched — the wheel
+/// zooms normally.
 ///
 /// Direction, as specified: scrolling down brings the part closer, scrolling
 /// up sends it farther — the opposite sign relationship from the camera's
@@ -195,7 +219,10 @@ fn handle_drag_distance_wheel(
     if scroll == 0.0 {
         return;
     }
-    if !(state.dragging && state.drag_started) {
+    // Only while dragging a billboard node (the camera-relative free-space
+    // mode) — plain-Part dragging is the untouched surface-snap path,
+    // which has no "leash" for the wheel to change.
+    if !(state.drag_is_billboard_node && state.dragging && state.drag_started) {
         return;
     }
 
@@ -205,6 +232,79 @@ fn handle_drag_distance_wheel(
     const LEASH_STEP: f32 = 0.9;
     let multiplier = LEASH_STEP.powf(-scroll);
     state.drag_camera_distance = (state.drag_camera_distance * multiplier).clamp(0.5, 5000.0);
+}
+
+/// Obsidian-style force-directed drift: while dragging a billboard node,
+/// its DIRECT Beam-connected neighbors gently drift to keep roughly their
+/// original distance from it, instead of staying rigidly put. Scoped to
+/// 1-hop neighbors only (not a full graph-wide physics sim) — a deliberate
+/// first-pass scope, not an oversight; ripple depth / multi-hop falloff is
+/// a natural follow-up if 1-hop isn't enough.
+///
+/// Each neighbor's rest length is captured the first time it's seen during
+/// THIS drag (`state.drag_neighbor_rest_lengths`, keyed by Entity) and the
+/// neighbor is lerped toward maintaining that distance from the dragged
+/// node's CURRENT position — a soft spring, not a rigid parent-child
+/// follow, so it feels like drift, not a teleport.
+fn sync_neighbor_drift(
+    mut state: ResMut<SelectToolState>,
+    time: Res<Time>,
+    instances: Query<(Entity, &Instance)>,
+    links: Query<&crate::spawners::audio_vfx::BeamSegmentLink>,
+    mut transforms: Query<&mut Transform>,
+) {
+    let active = state.drag_is_billboard_node && state.dragging && state.drag_started;
+    if !active {
+        if !state.drag_neighbor_rest_lengths.is_empty() {
+            state.drag_neighbor_rest_lengths.clear();
+        }
+        return;
+    }
+    let Some(dragged_entity) = state.dragged_entity else { return };
+    let Ok((_, dragged_instance)) = instances.get(dragged_entity) else { return };
+    let dragged_uuid = dragged_instance.uuid.clone();
+    if dragged_uuid.is_empty() {
+        return;
+    }
+    let Ok(dragged_transform) = transforms.get(dragged_entity) else { return };
+    let dragged_pos = dragged_transform.translation;
+
+    // Direct Beam-connected neighbors of the dragged node, by UUID.
+    let mut neighbor_uuids: Vec<&str> = Vec::new();
+    for link in &links {
+        match (link.attachment0_uuid.as_deref(), link.attachment1_uuid.as_deref()) {
+            (Some(a), Some(b)) if a == dragged_uuid.as_str() => neighbor_uuids.push(b),
+            (Some(a), Some(b)) if b == dragged_uuid.as_str() => neighbor_uuids.push(a),
+            _ => {}
+        }
+    }
+    if neighbor_uuids.is_empty() {
+        return;
+    }
+
+    // Higher = snappier follow, lower = softer/lazier drift.
+    const SPRING_RATE: f32 = 6.0;
+    let dt = time.delta_secs();
+
+    for (entity, instance) in &instances {
+        if !neighbor_uuids.contains(&instance.uuid.as_str()) {
+            continue;
+        }
+        let Ok(mut t) = transforms.get_mut(entity) else { continue };
+        let current = t.translation;
+        let rest_length = *state
+            .drag_neighbor_rest_lengths
+            .entry(entity)
+            .or_insert_with(|| (current - dragged_pos).length().max(0.01));
+
+        let offset = current - dragged_pos;
+        let dist = offset.length();
+        if dist < 1e-4 {
+            continue;
+        }
+        let desired = dragged_pos + (offset / dist) * rest_length;
+        t.translation = current.lerp(desired, (SPRING_RATE * dt).min(1.0));
+    }
 }
 
 /// Debug gizmos to visualize raycast hits and surface normals during drag
@@ -257,6 +357,11 @@ fn handle_select_drag(
     all_parts_query: Query<(Entity, &GlobalTransform, &Mesh3d, Option<&PartEntity>, Option<&Instance>, Option<&BasePart>), Without<Selected>>,
     // Query for children of selected entities (for Model support)
     hierarchy_queries: (Query<&Children>, Query<&ChildOf>),
+    // Detects "is the dragged entity a mind-map/annotation node" — has a
+    // BillboardGui child — which selects camera-relative free-space
+    // dragging. See `SelectToolState.drag_is_billboard_node` for why this
+    // replaced a modifier-key trigger.
+    billboard_query: Query<&crate::classes::BillboardGui>,
     _spatial_query: SpatialQuery,
     settings_and_undo: (Res<crate::editor_settings::EditorSettings>, ResMut<crate::undo::UndoStack>),
     // Tool states to check if clicking on handles
@@ -294,7 +399,7 @@ fn handle_select_drag(
     let Some(cursor_pos) = window.cursor_position() else { return; };
     let Some((camera, camera_transform, projection)) = cameras.iter().find(|(c, _, _)| c.order == 0) else { return; };
     let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) else { return; };
-    
+
     if mouse.just_pressed(MouseButton::Left) {
         // Check Move tool handles FIRST (before blanket return)
         // This allows clicking on unselected objects while Move tool is active
@@ -459,10 +564,17 @@ fn handle_select_drag(
                 state.initial_cursor_pos = cursor_pos; // Store initial cursor position
                 state.drag_offset = transform.translation - ray.origin;
                 // Lock the camera-relative drag distance at grab time — the
-                // empty-space fallback re-derives its plane from this distance
+                // billboard-node branch re-derives its plane from this distance
                 // and the LIVE camera transform every frame (see below), not
                 // from this grab-time position, so WASD/look mid-drag works.
                 state.drag_camera_distance = (transform.translation - camera_transform.translation()).length().max(0.1);
+                // Does the grabbed entity carry a Billboard label — a
+                // mind-map/annotation node, not an ordinary building Part?
+                // Cached once here so every dependent system this drag
+                // reads one value instead of re-querying children per frame.
+                state.drag_is_billboard_node = children_query.get(entity)
+                    .map(|kids| kids.iter().any(|k| billboard_query.get(k).is_ok()))
+                    .unwrap_or(false);
                 
                 // Store initial positions/rotations of ALL selected parts
                 state.initial_positions.clear();
@@ -564,8 +676,19 @@ fn handle_select_drag(
                 //    sizing can never corrupt where a dragged part lands.
                 //    `find_surface_with_normal` uses ray_obb_entry, which skips
                 //    any box the camera is inside (no teleport-to-camera).
-                let surface_hit = math_find_surface_with_normal(&ray, &all_parts_query, &excluded_entities)
-                    .map(|(pt, norm, ent)| (pt, norm, Some(ent)));
+                // Dragging a billboard node is an implicit "ignore surfaces,
+                // move freely" mode — forcing `surface_hit` to None here
+                // (instead of adding a third branch below) means the
+                // existing surface-follow / fallback split is untouched for
+                // ordinary Parts, which still behave exactly as before.
+                // Billboard nodes always fall into the `else` branch, where
+                // the camera-relative plane is selected below.
+                let surface_hit = if state.drag_is_billboard_node {
+                    None
+                } else {
+                    math_find_surface_with_normal(&ray, &all_parts_query, &excluded_entities)
+                        .map(|(pt, norm, ent)| (pt, norm, Some(ent)))
+                };
 
                 // The grab pivot rotated into the current world frame.
                 // Drag math: the cursor's surface hit point should land on
@@ -632,35 +755,70 @@ fn handle_select_drag(
                         } else { target }
                     } else { target }
                 } else {
-                    // ── No drop on empty space ───────────────────────────
-                    // Cursor is over the skybox / nothing to land on.
-                    //
-                    // Camera-relative free-space drag: instead of a
-                    // world-locked horizontal plane (the old behavior —
-                    // fine for building on a baseplate, wrong for floating
-                    // mind-map nodes with nothing underneath them), hold
-                    // the part at a FIXED DISTANCE from the camera, like
-                    // leading it on a rope. The plane is rebuilt from the
-                    // camera's transform THIS FRAME (not the grab-time
-                    // transform), so WASD movement and look-around during
-                    // the drag naturally carry the part with you — it
-                    // falls out of recomputing every frame, no special
-                    // casing needed.
+                    // Reached either because dragging a billboard node
+                    // forced surface_hit to None (free-space drag,
+                    // deliberate), or because a plain Part drag genuinely
+                    // found nothing under the cursor (the original "over
+                    // the skybox" case).
                     state.debug_hit_point = None;
                     state.debug_hit_normal = None;
 
-                    let cam_pos = camera_transform.translation();
-                    let cam_fwd = *camera_transform.forward();
-                    let plane_point = cam_pos + cam_fwd * state.drag_camera_distance;
+                    if state.drag_is_billboard_node {
+                        // ── Camera-relative free-space drag ──────────────
+                        // Hold the part at a FIXED DISTANCE from the camera,
+                        // like leading it on a rope. The plane is rebuilt
+                        // from the camera's transform THIS FRAME (not the
+                        // grab-time transform), so WASD movement and
+                        // look-around during the drag naturally carry the
+                        // part with you — it falls out of recomputing every
+                        // frame, no special casing needed.
+                        let cam_pos = camera_transform.translation();
+                        let cam_fwd = *camera_transform.forward();
+                        let plane_point = cam_pos + cam_fwd * state.drag_camera_distance;
 
-                    if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, plane_point, cam_fwd) {
-                        let cursor_world = ray.origin + *ray.direction * t;
-                        // Glue the grabbed point to the cursor on this
-                        // camera-facing plane — full 3D offset, unlike the
-                        // old horizontal plane which only tracked X/Z.
-                        cursor_world - grab_offset_world
+                        if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, plane_point, cam_fwd) {
+                            let cursor_world = ray.origin + *ray.direction * t;
+                            // Glue the grabbed point to the cursor on this
+                            // camera-facing plane — full 3D offset, unlike
+                            // the horizontal-plane fallback below, which
+                            // only ever tracked X/Z.
+                            cursor_world - grab_offset_world
+                        } else {
+                            initial_leader_pos
+                        }
                     } else {
-                        initial_leader_pos
+                        // ── No drop on empty space (original behavior) ───
+                        // Cursor is over the skybox. Roblox keeps the part
+                        // at its current height and slides it on the
+                        // horizontal plane through its initial Y. Don't
+                        // fall to Y=0.
+                        //
+                        // The initial Y is the part's CURRENT height, NOT
+                        // the grid-snapped one — but the grid snap below
+                        // WILL round it to a clean Y (e.g. 1.755 → 2.0 with
+                        // snap_size=1). That's exactly what the user wants:
+                        // off-grid parts converge to the grid as soon as
+                        // they're dragged. Locking Y at the initial value
+                        // would block the snap from ever fixing off-grid
+                        // drift.
+                        let plane_y = initial_leader_pos.y;
+                        if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction,
+                            Vec3::new(0.0, plane_y, 0.0), Vec3::Y)
+                        {
+                            let t = t.clamp(0.0, 2000.0);
+                            let cursor_world = ray.origin + *ray.direction * t;
+                            // Glue the grabbed point to the cursor on this
+                            // horizontal plane. Y stays at plane_y for now;
+                            // the world-frame grid snap below will lock it
+                            // to a clean grid Y on every frame.
+                            Vec3::new(
+                                cursor_world.x - grab_offset_world.x,
+                                plane_y,
+                                cursor_world.z - grab_offset_world.z,
+                            )
+                        } else {
+                            initial_leader_pos
+                        }
                     }
                 };
 

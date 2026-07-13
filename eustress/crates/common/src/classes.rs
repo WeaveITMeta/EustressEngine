@@ -947,6 +947,7 @@ impl ClassName {
             "Material" => Ok(ClassName::Material),
             "Image" => Ok(ClassName::Image),
             "Video" => Ok(ClassName::Video),
+            "GaussianSplats" => Ok(ClassName::GaussianSplats),
             // ValueObjects (Wave 6.A)
             "StringValue" => Ok(ClassName::StringValue),
             "IntValue" => Ok(ClassName::IntValue),

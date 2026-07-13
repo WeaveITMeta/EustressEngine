@@ -449,8 +449,8 @@ mod tests {
         let cs = grid.cell_size_or(32.0);
         assert_eq!(cs, 32.0);
 
-        let near = Entity::from_raw(1);
-        let far = Entity::from_raw(2);
+        let near = Entity::from_raw_u32(1).unwrap();
+        let far = Entity::from_raw_u32(2).unwrap();
         grid.cells
             .entry(cell_of(Vec3::new(10.0, 0.0, 0.0), cs))
             .or_default()

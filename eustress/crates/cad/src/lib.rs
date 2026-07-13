@@ -51,6 +51,10 @@ pub mod sketch;
 pub mod feature;
 pub mod eval;
 pub mod error;
+pub mod parts_csg;
+pub mod export_glb;
+pub mod solver;
+pub mod templates;
 
 pub use quantity::{Quantity, Unit, LengthUnit, AngleUnit};
 pub use feature_tree::{FeatureTree, FeatureEntry};
@@ -62,11 +66,15 @@ pub use feature::{
     // or the `eval.rs` match arms fail to resolve them.
     PatternKind, BooleanOp, EndCondition,
 };
+// Re-export for engine CSG consumers (already in feature:: above).
 pub use error::{CadError, CadResult};
 pub use eval::{
     evaluate_tree, tessellate_solid,
     EvalOutput, EvalMesh, EntryStatus, DEFAULT_MESH_TOLERANCE,
 };
+pub use parts_csg::{boolean_oriented_solids, OrientedShape, OrientedSolid};
+pub use export_glb::{encode_glb, write_glb};
+pub use solver::{apply_solve, solve_or_err, solve_sketch, SolveReport, SolveStatus};
 
 /// Parse a feature tree from a TOML string. This is the primary entry
 /// point — feature trees live as TOML documents in the WorldDb tree

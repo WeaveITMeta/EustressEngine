@@ -298,6 +298,17 @@ pub enum SlintAction {
     ToastUndoClicked,
     ToastUndoDismissed,
 
+    /// Sketch canvas dock — Solve / add constraint / close.
+    SketchCanvasSolve,
+    SketchCanvasAddHorizontal,
+    SketchCanvasAddVertical,
+    SketchCanvasAddPerpendicular,
+    SketchCanvasAddCoincident,
+    /// Row click in the entity list — toggles it into/out of the A/B
+    /// pick used by the constraint buttons above.
+    SketchCanvasSelectEntity(usize),
+    SketchCanvasClose,
+
     /// Status-bar display unit dropdown picked a new symbol.
     /// Carries the canonical symbol ("m" / "cm" / "mm" / "ft" / "in" /
     /// "studs"); the drain handler validates it via `Unit::from_symbol`
@@ -558,6 +569,9 @@ pub enum SlintAction {
     WorkshopClearImage,
     /// User picked a different mode from the dropdown.
     WorkshopModeChanged(String),
+    /// User picked a different model from the dropdown — the display name
+    /// (e.g. "Fable 5"), resolved to a `WorkshopModel` in the handler.
+    WorkshopModelChanged(String),
 
     // Problems panel — VS Code-style diagnostic list
     /// Click a row → jump the editor to that file/line/column.
@@ -1378,6 +1392,7 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_tool_options_bar_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_numeric_input_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_toast_undo_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, sync_sketch_canvas_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_commit_flash_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_display_unit_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, push_brick_color_honeycombs.after(SlintSystems::Drain))
@@ -1457,6 +1472,10 @@ impl Plugin for SlintUiPlugin {
             // Runs after Drain (like the other one-shot Slint feeds) and
             // self-gates until the ClassRegistry is populated.
             .add_systems(Update, init_insert_classes_to_slint.after(SlintSystems::Drain))
+            .init_resource::<PluginTabSignature>()
+            // Plugins tab: re-checks (cheap) every frame, only pushes to
+            // Slint on an actual content change — see `PluginTabSignature`.
+            .add_systems(Update, sync_plugin_tabs_to_slint.after(SlintSystems::Drain))
             // Data Grid: feed generic columns/rows from the selected Dataset's
             // CSV (selection-driven; re-reads only when the Dataset changes).
             .add_systems(Update, sync_data_grid_to_selection.after(SlintSystems::Drain))
@@ -1671,6 +1690,22 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_toast_undo_clicked(move || q.push(SlintAction::ToastUndoClicked));
     let q = queue.clone();
     ui.on_toast_undo_dismissed(move || q.push(SlintAction::ToastUndoDismissed));
+    let q = queue.clone();
+    ui.on_sketch_canvas_solve(move || q.push(SlintAction::SketchCanvasSolve));
+    let q = queue.clone();
+    ui.on_sketch_canvas_add_horizontal(move || q.push(SlintAction::SketchCanvasAddHorizontal));
+    let q = queue.clone();
+    ui.on_sketch_canvas_add_vertical(move || q.push(SlintAction::SketchCanvasAddVertical));
+    let q = queue.clone();
+    ui.on_sketch_canvas_add_perpendicular(move || q.push(SlintAction::SketchCanvasAddPerpendicular));
+    let q = queue.clone();
+    ui.on_sketch_canvas_add_coincident(move || q.push(SlintAction::SketchCanvasAddCoincident));
+    let q = queue.clone();
+    ui.on_sketch_canvas_select_entity(move |idx| {
+        q.push(SlintAction::SketchCanvasSelectEntity(idx.max(0) as usize));
+    });
+    let q = queue.clone();
+    ui.on_sketch_canvas_close(move || q.push(SlintAction::SketchCanvasClose));
     let q = queue.clone();
     ui.on_toggle_snap(move || q.push(SlintAction::ToggleSnap));
     let q = queue.clone();
@@ -2104,6 +2139,8 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_workshop_clear_image(move || q.push(SlintAction::WorkshopClearImage));
     let q = queue.clone();
     ui.on_workshop_mode_changed(move |m| q.push(SlintAction::WorkshopModeChanged(m.to_string())));
+    let q = queue.clone();
+    ui.on_workshop_model_changed(move |m| q.push(SlintAction::WorkshopModelChanged(m.to_string())));
     let q = queue.clone();
     ui.on_workshop_mention_query_changed(move |text| q.push(SlintAction::WorkshopMentionQueryChanged(text.to_string())));
     let q = queue.clone();
@@ -3185,6 +3222,15 @@ struct DrainEventWriters<'w> {
     // Align & Distribute — ribbon menu-action strings route here.
     align_events: MessageWriter<'w, crate::align_distribute::AlignEntitiesEvent>,
     distribute_events: MessageWriter<'w, crate::align_distribute::DistributeEntitiesEvent>,
+    // Parametric CadPart inserts (Drafting tab Plate / Box / Cylinder).
+    cad_insert: MessageWriter<'w, crate::cad_plugin::CadInsertTemplateEvent>,
+    cad_set_variable: MessageWriter<'w, crate::cad_plugin::CadSetVariableEvent>,
+    cad_export_glb: MessageWriter<'w, crate::cad_plugin::CadExportGlbEvent>,
+    cad_tree_op: MessageWriter<'w, crate::cad_plugin::CadTreeOpEvent>,
+    cad_solve_sketch: MessageWriter<'w, crate::cad_plugin::CadSolveSketchEvent>,
+    cad_add_constraint: MessageWriter<'w, crate::cad_plugin::CadAddConstraintEvent>,
+    cad_sketch_canvas_visible: MessageWriter<'w, crate::cad_plugin::CadSketchCanvasSetVisibleEvent>,
+    cad_create_mate: MessageWriter<'w, crate::cad_assembly::CadCreateMateEvent>,
     // Toast Undo — Slint callbacks route here.
     toast_undo_clicked: MessageWriter<'w, crate::toast_undo::ToastUndoClickedEvent>,
     toast_undo_dismissed: MessageWriter<'w, crate::toast_undo::ToastUndoDismissedEvent>,
@@ -3273,6 +3319,10 @@ struct DrainResources<'w> {
     lighting: Option<ResMut<'w, eustress_common::services::LightingService>>,
     /// Stage 5 — user-selected display unit (set by status-bar dropdown).
     display_unit: Option<ResMut<'w, eustress_common::units::DisplayUnit>>,
+    /// Sketch canvas projection (selected CadPart first sketch). Mut
+    /// so entity-row clicks can toggle `selected_a`/`selected_b`
+    /// in-place without a Message round-trip.
+    cad_sketch_ui: Option<ResMut<'w, crate::cad_plugin::CadSketchUiState>>,
     /// API Reference filter state (search, category, language, status)
     api_filter: Option<ResMut<'w, ApiFilterState>>,
     /// Toast notification queue (dismiss/push from drain handlers)
@@ -3576,12 +3626,21 @@ struct DrainActionQueries<'w, 's> {
     instances: Query<'w, 's, (Entity, &'static mut eustress_common::classes::Instance)>,
     transforms: Query<'w, 's, &'static mut Transform>,
     base_parts: Query<'w, 's, &'static mut eustress_common::classes::BasePart>,
+    /// Presence + tree_toml check for the Size→variable write-back —
+    /// a CadPart is a `Part`, so `Transform.Size` must reach the
+    /// feature tree for these entities instead of `ResizePartEvent`.
+    cad_parts: Query<'w, 's, &'static crate::cad_plugin::CadPart>,
     instance_files: Query<'w, 's, &'static mut crate::space::instance_loader::InstanceFile>,
     loaded_from_file: Query<'w, 's, (Entity, &'static mut crate::space::LoadedFromFile)>,
     service_components: Query<'w, 's, &'static mut crate::space::service_loader::ServiceComponent>,
     terrain_roots: Query<'w, 's, Entity, With<eustress_common::terrain::TerrainRoot>>,
     terrain_chunks: Query<'w, 's, Entity, With<eustress_common::terrain::Chunk>>,
     camera_query: Query<'w, 's, (&'static Camera, &'static GlobalTransform)>,
+    /// Mutable `Projection` access for the Camera class's FieldOfView /
+    /// NearClipPlane / FarClipPlane edits — see `PropertyExtraQueries::projection`
+    /// (read side) for why this writes straight to the live component instead
+    /// of a parallel data field.
+    projections: Query<'w, 's, &'static mut Projection>,
     gui_displays: Query<'w, 's, &'static mut eustress_common::gui::billboard_renderer::GuiElementDisplay>,
     /// All selected entities — used to broadcast boolean physics props to the whole selection.
     selected_entities: Query<'w, 's, Entity, With<crate::selection_box::Selected>>,
@@ -3614,6 +3673,12 @@ struct DrainActionQueries<'w, 's> {
     /// it to TOML. Tags are set via `commands.insert(Tags(..))` instead — a
     /// `&mut Tags` query here would alias the read-only `entity_tags` above.
     attributes: Query<'w, 's, &'static mut eustress_common::attributes::Attributes>,
+    /// Bevy's built-in parent link — read-only. Used to build the
+    /// hierarchy snapshot handed to Rune one-shot scripts (see
+    /// `rune_ecs_module::seed_instance_snapshot`) so `Instance.Parent` /
+    /// `GetChildren()` resolve against the REAL scene tree, not just
+    /// entities the script itself created.
+    hierarchy_parents: Query<'w, 's, &'static ChildOf>,
 }
 
 /// Snapshot the CURRENT value of a canonical undo property for an entity,
@@ -3671,6 +3736,18 @@ fn snapshot_panel_property(
             .get(entity)
             .ok()
             .map(|bp| S::Float(bp.transparency)),
+        "FieldOfView" => queries.projections.get(entity).ok().and_then(|p| match p {
+            Projection::Perspective(persp) => Some(S::Float(persp.fov.to_degrees())),
+            _ => None,
+        }),
+        "NearClipPlane" => queries.projections.get(entity).ok().and_then(|p| match p {
+            Projection::Perspective(persp) => Some(S::Float(persp.near)),
+            _ => None,
+        }),
+        "FarClipPlane" => queries.projections.get(entity).ok().and_then(|p| match p {
+            Projection::Perspective(persp) => Some(S::Float(persp.far)),
+            _ => None,
+        }),
         "Reflectance" => queries
             .base_parts
             .get(entity)
@@ -3714,6 +3791,9 @@ fn canonical_undo_property(key: &str) -> Option<&'static str> {
         "Anchored" => Some("Anchored"),
         "CanCollide" => Some("CanCollide"),
         "Locked" => Some("Locked"),
+        "FieldOfView" => Some("FieldOfView"),
+        "NearClipPlane" => Some("NearClipPlane"),
+        "FarClipPlane" => Some("FarClipPlane"),
         _ => None,
     }
 }
@@ -4140,6 +4220,75 @@ fn do_reparent_node(
     }
 }
 
+/// Resolve the CadPart entity for sketch-canvas actions.
+fn resolve_sketch_canvas_entity(res: &DrainResources) -> Option<Entity> {
+    res.cad_sketch_ui
+        .as_ref()
+        .and_then(|s| s.part_entity)
+        .or_else(|| {
+            res.explorer_state.as_ref().and_then(|es| match &es.selected {
+                SelectedItem::Entity(e) => Some(*e),
+                _ => None,
+            })
+        })
+}
+
+fn sketch_canvas_add_constraint(
+    res: &mut DrainResources,
+    events: &mut DrainEventWriters,
+    kind: eustress_cad::ConstraintKind,
+    e1: usize,
+    e2: Option<usize>,
+) {
+    let Some(entity) = resolve_sketch_canvas_entity(res) else {
+        if let Some(ref mut out) = res.output {
+            out.warn("Add constraint: select a CadPart first");
+        }
+        return;
+    };
+    events.cad_add_constraint.write(crate::cad_plugin::CadAddConstraintEvent {
+        entity,
+        kind,
+        e1,
+        e2,
+    });
+}
+
+/// H / V — needs only the panel's "A" pick (`selected_a`).
+fn sketch_canvas_add_unary_constraint(
+    res: &mut DrainResources,
+    events: &mut DrainEventWriters,
+    kind: eustress_cad::ConstraintKind,
+) {
+    let Some(e1) = res.cad_sketch_ui.as_ref().and_then(|s| s.selected_a) else {
+        if let Some(ref mut out) = res.output {
+            out.warn("Click an entity in the list first (sets A)");
+        }
+        return;
+    };
+    sketch_canvas_add_constraint(res, events, kind, e1, None);
+}
+
+/// ⊥ / ⊙ — needs both the panel's "A" and "B" picks.
+fn sketch_canvas_add_binary_constraint(
+    res: &mut DrainResources,
+    events: &mut DrainEventWriters,
+    kind: eustress_cad::ConstraintKind,
+) {
+    let (Some(e1), Some(e2)) = res
+        .cad_sketch_ui
+        .as_ref()
+        .map(|s| (s.selected_a, s.selected_b))
+        .unwrap_or((None, None))
+    else {
+        if let Some(ref mut out) = res.output {
+            out.warn("Click two entities in the list first (sets A and B)");
+        }
+        return;
+    };
+    sketch_canvas_add_constraint(res, events, kind, e1, Some(e2));
+}
+
 /// Drains the SlintActionQueue each frame and dispatches to Bevy events/state.
 /// This is the Slint→Bevy direction: UI button clicks become Bevy state changes and events.
 #[inline(never)]
@@ -4187,20 +4336,24 @@ fn drain_slint_actions(
                     .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tga"])
                     .add_filter("Videos", &["mp4", "webm", "mov", "mkv"])
                     .add_filter("Roblox Place / Model", super::file_dialogs::ROBLOX_IMPORT_EXTENSIONS)
+                    .add_filter("Gaussian Splat", super::file_dialogs::GAUSSIAN_SPLAT_IMPORT_EXTENSIONS)
                     .add_filter("All Importable", &[
                         "png", "jpg", "jpeg", "webp", "bmp", "gif", "tga",
                         "mp4", "webm", "mov", "mkv",
                         "rbxl", "rbxlx", "rbxm", "rbxmx",
+                        "ply",
                     ])
-                    .set_title("Import Image / Video / Roblox Place")
+                    .set_title("Import Image / Video / Roblox Place / Gaussian Splat")
                     .pick_file();
                 match picked {
                     Some(path) => {
-                        // Extension whitelist routes Roblox files to the
-                        // dedicated importer; everything else to the
-                        // image/video asset path.
+                        // Extension whitelist routes Roblox / Gaussian-Splat
+                        // files to their dedicated importers; everything
+                        // else to the image/video asset path.
                         if super::file_dialogs::is_roblox_place_file(&path) {
                             events.file_events.write(FileEvent::ImportRobloxPlace(path));
+                        } else if super::file_dialogs::is_gaussian_splat_file(&path) {
+                            events.file_events.write(FileEvent::ImportGaussianSplat(path));
                         } else {
                             events.file_events.write(FileEvent::ImportAsset(path));
                         }
@@ -4321,6 +4474,70 @@ fn drain_slint_actions(
             }
             SlintAction::ToastUndoDismissed => {
                 events.toast_undo_dismissed.write(crate::toast_undo::ToastUndoDismissedEvent);
+            }
+
+            SlintAction::SketchCanvasClose => {
+                events.cad_sketch_canvas_visible.write(
+                    crate::cad_plugin::CadSketchCanvasSetVisibleEvent { visible: false },
+                );
+            }
+            SlintAction::SketchCanvasSolve => {
+                let sketch_entity = resolve_sketch_canvas_entity(&res);
+                if let Some(entity) = sketch_entity {
+                    events.cad_solve_sketch.write(
+                        crate::cad_plugin::CadSolveSketchEvent { entity },
+                    );
+                } else if let Some(ref mut out) = res.output {
+                    out.warn("Solve Sketch: select a CadPart first");
+                }
+            }
+            SlintAction::SketchCanvasAddHorizontal => {
+                sketch_canvas_add_unary_constraint(
+                    &mut res,
+                    &mut events,
+                    eustress_cad::ConstraintKind::Horizontal,
+                );
+            }
+            SlintAction::SketchCanvasAddVertical => {
+                sketch_canvas_add_unary_constraint(
+                    &mut res,
+                    &mut events,
+                    eustress_cad::ConstraintKind::Vertical,
+                );
+            }
+            SlintAction::SketchCanvasAddPerpendicular => {
+                sketch_canvas_add_binary_constraint(
+                    &mut res,
+                    &mut events,
+                    eustress_cad::ConstraintKind::Perpendicular,
+                );
+            }
+            SlintAction::SketchCanvasAddCoincident => {
+                sketch_canvas_add_binary_constraint(
+                    &mut res,
+                    &mut events,
+                    eustress_cad::ConstraintKind::Coincident,
+                );
+            }
+            SlintAction::SketchCanvasSelectEntity(idx) => {
+                if let Some(ref mut ui) = res.cad_sketch_ui {
+                    if ui.selected_a == Some(idx) {
+                        // Clicking A again clears it and promotes B → A,
+                        // so the "first" slot never sits empty while a
+                        // second pick is still held.
+                        ui.selected_a = ui.selected_b.take();
+                    } else if ui.selected_b == Some(idx) {
+                        ui.selected_b = None;
+                    } else if ui.selected_a.is_none() {
+                        ui.selected_a = Some(idx);
+                    } else if ui.selected_b.is_none() {
+                        ui.selected_b = Some(idx);
+                    } else {
+                        // Both slots full — rolling window, most recent
+                        // pick replaces B.
+                        ui.selected_b = Some(idx);
+                    }
+                }
             }
 
             SlintAction::SetDisplayUnit(sym) => {
@@ -5094,18 +5311,45 @@ fn drain_slint_actions(
                     if ui.get_notifications_mute_warning() { settings.muted_levels.insert("warning".into()); }
                 }
             }
+            SlintAction::WorkshopModelChanged(display_name) => {
+                // Resolve the picked display name back to a model, persist
+                // its API id globally (mirrors SoulApiKeySaved just below),
+                // and mirror it into the UI immediately rather than waiting
+                // for sync_workshop_to_slint's next change-detected pass.
+                if let Some(model) = crate::soul::WorkshopModel::from_display_name(&display_name) {
+                    if let Some(ui) = ui {
+                        ui.set_workshop_active_model_name(model.display_name().into());
+                    }
+                    if let Some(ref mut gs) = res.global_soul_settings {
+                        gs.workshop_model = model.api_id().to_string();
+                        if let Err(e) = gs.save() {
+                            if let Some(ref mut out) = res.output {
+                                out.warn(format!("Workshop: failed to persist model selection: {}", e));
+                            }
+                        }
+                    }
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Workshop model set to {}", model.display_name()));
+                    }
+                }
+            }
             SlintAction::SoulApiKeySaved => {
-                // Pull the typed key out of Slint and commit it to both the
-                // space-level and global Soul Settings resources so Workshop +
-                // Soul panels observe it immediately. Also persist globally to
-                // disk so the key survives restarts.
+                // Pull both typed keys out of Slint and commit them. The
+                // Anthropic key goes to both the space-level and global Soul
+                // Settings resources so Workshop + Soul panels observe it
+                // immediately; the xAI key is global-only (no per-space
+                // override — see GlobalSoulSettings::global_xai_api_key).
+                // Both persist to disk in the same save so the Settings
+                // dialog's single Save button covers both providers.
                 if let Some(ui) = ui {
                     let key: String = ui.get_soul_api_key().to_string().trim().to_string();
+                    let xai_key: String = ui.get_soul_xai_api_key().to_string().trim().to_string();
                     if let Some(ref mut ss) = res.soul_settings {
                         ss.claude_api_key = key.clone();
                     }
                     if let Some(ref mut gs) = res.global_soul_settings {
                         gs.global_api_key = key.clone();
+                        gs.global_xai_api_key = xai_key.clone();
                         if let Err(e) = gs.save() {
                             if let Some(ref mut out) = res.output {
                                 out.warn(format!("Soul: failed to persist API key: {}", e));
@@ -6583,6 +6827,87 @@ fn drain_slint_actions(
                     queue.push(SlintAction::PropertyChanged("Color".to_string(), rgb));
                     continue;
                 }
+                // Parametric CadPart variables — "Var.height" → CadSetVariableEvent.
+                if let Some(var_name) = key.strip_prefix("Var.") {
+                    let entity = res.explorer_state.as_ref().and_then(|es| {
+                        match &es.selected {
+                            SelectedItem::Entity(e) => Some(*e),
+                            _ => None,
+                        }
+                    });
+                    if let Some(entity) = entity {
+                        events.cad_set_variable.write(crate::cad_plugin::CadSetVariableEvent {
+                            entity,
+                            name: var_name.to_string(),
+                            value: raw_val.clone(),
+                        });
+                        // Force Properties rebuild so Status updates after regen.
+                        if let Some(ref mut s) = res.state {
+                            s.last_properties_hash = 0;
+                            s.frames_since_selection_change = 0;
+                        }
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("CAD {} = {}", var_name, raw_val));
+                        }
+                    }
+                    continue;
+                }
+                // Feature tree ops — Tree.N.suppress / Tree.move / Tree.N.delete
+                if key.starts_with("Tree.") {
+                    let entity = res.explorer_state.as_ref().and_then(|es| {
+                        match &es.selected {
+                            SelectedItem::Entity(e) => Some(*e),
+                            _ => None,
+                        }
+                    });
+                    if let Some(entity) = entity {
+                        if key == "Tree.move" {
+                            let parts: Vec<_> = raw_val.split(',').collect();
+                            if parts.len() == 2 {
+                                if let (Ok(from), Ok(to)) = (
+                                    parts[0].trim().parse::<usize>(),
+                                    parts[1].trim().parse::<usize>(),
+                                ) {
+                                    events.cad_tree_op.write(crate::cad_plugin::CadTreeOpEvent {
+                                        entity,
+                                        op: crate::cad_plugin::CadTreeOp::Reorder { from, to },
+                                    });
+                                }
+                            }
+                        } else if let Some(rest) = key.strip_prefix("Tree.") {
+                            let mut segs = rest.split('.');
+                            if let (Some(idx_s), Some(action)) = (segs.next(), segs.next()) {
+                                if let Ok(index) = idx_s.parse::<usize>() {
+                                    let op = match action {
+                                        "suppress" => {
+                                            let suppress = raw_val == "true" || raw_val == "1";
+                                            if suppress {
+                                                crate::cad_plugin::CadTreeOp::Suppress { index }
+                                            } else {
+                                                crate::cad_plugin::CadTreeOp::Unsuppress { index }
+                                            }
+                                        }
+                                        "delete" if raw_val == "true" || raw_val == "1" => {
+                                            crate::cad_plugin::CadTreeOp::Delete { index }
+                                        }
+                                        _ => {
+                                            continue;
+                                        }
+                                    };
+                                    events.cad_tree_op.write(crate::cad_plugin::CadTreeOpEvent {
+                                        entity,
+                                        op,
+                                    });
+                                }
+                            }
+                        }
+                        if let Some(ref mut s) = res.state {
+                            s.last_properties_hash = 0;
+                            s.frames_since_selection_change = 0;
+                        }
+                    }
+                    continue;
+                }
                 // Decode rotation step protocol: "step:axis:+1:x,y,z" or "step:axis:-1:x,y,z"
                 // Emitted by RotationVec3Row +/- buttons to avoid Slint float-to-string conversion.
                 let val: String = if raw_val.starts_with("step:") {
@@ -7085,6 +7410,38 @@ fn drain_slint_actions(
                                 }
                             }
                         }
+                        // Camera FOV / clip planes — write straight to the
+                        // live `Projection` component (same one the renderer
+                        // reads every frame) so the change is visible in the
+                        // viewport immediately, matching Position/Rotation's
+                        // direct-Transform-write convention above.
+                        "FieldOfView" => {
+                            if let Some(deg) = parse_finite(val.trim()) {
+                                if let Ok(mut proj) = queries.projections.get_mut(entity) {
+                                    if let Projection::Perspective(p) = proj.as_mut() {
+                                        p.fov = deg.clamp(1.0, 170.0).to_radians();
+                                    }
+                                }
+                            }
+                        }
+                        "NearClipPlane" => {
+                            if let Some(v) = parse_finite(val.trim()) {
+                                if let Ok(mut proj) = queries.projections.get_mut(entity) {
+                                    if let Projection::Perspective(p) = proj.as_mut() {
+                                        p.near = v.clamp(0.001, 100.0);
+                                    }
+                                }
+                            }
+                        }
+                        "FarClipPlane" => {
+                            if let Some(v) = parse_finite(val.trim()) {
+                                if let Ok(mut proj) = queries.projections.get_mut(entity) {
+                                    if let Projection::Perspective(p) = proj.as_mut() {
+                                        p.far = v.clamp(100.0, 1_000_000.0);
+                                    }
+                                }
+                            }
+                        }
                         "Scale" => {
                             let parts: Vec<f32> = val.split(',')
                                 .filter_map(|s| parse_finite(s.trim()))
@@ -7176,6 +7533,71 @@ fn drain_slint_actions(
                             if parts.len() >= 2 {
                                 if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
                                     bg.size_offset = [parts[0], parts[1]];
+                                }
+                            }
+                        }
+                        "Size" if queries.cad_parts.get(entity).is_ok() => {
+                            // A CadPart is a `Part` — Transform.Size is
+                            // the SAME field every Part shows, not a
+                            // parallel "Var.height" concept. Route the
+                            // edit into the feature tree via whichever
+                            // variable(s) `size_axis_variables` maps to
+                            // each axis, instead of `ResizePartEvent`
+                            // (which would regen a primitive mesh and
+                            // orphan the CAD kernel's own result — Size
+                            // there is a RESULT of evaluation, not an
+                            // input).
+                            let parts: Vec<f32> = val.split(',')
+                                .filter_map(|s| parse_finite(s.trim()))
+                                .collect();
+                            if parts.len() >= 3 {
+                                if let Ok(cad) = queries.cad_parts.get(entity) {
+                                    let from = res.display_unit.as_deref()
+                                        .map(|d| d.0)
+                                        .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+                                    let m = eustress_common::units::convert_vec3_f32(
+                                        [parts[0], parts[1], parts[2]],
+                                        from, eustress_common::units::ENGINE_NATIVE_UNIT,
+                                    );
+                                    let axes = crate::cad_plugin::size_axis_variables(&cad.tree_toml);
+                                    // Later axis wins if two axes share a
+                                    // variable (Box's uniform "size" maps
+                                    // all three) — a HashMap insert per
+                                    // axis in X,Y,Z order gives exactly
+                                    // that "last write wins" semantics.
+                                    let mut writes: std::collections::HashMap<String, f32> =
+                                        std::collections::HashMap::new();
+                                    for (axis_val, axis_var) in
+                                        [m[0], m[1], m[2]].into_iter().zip(axes)
+                                    {
+                                        if let Some(name) = axis_var {
+                                            writes.insert(name, axis_val.max(1.0e-4));
+                                        }
+                                    }
+                                    if writes.is_empty() {
+                                        if let Some(ref mut out) = res.output {
+                                            out.warn(
+                                                "This CadPart's dimensions aren't Size-editable yet — use the sketch or Var.* fields",
+                                            );
+                                        }
+                                    }
+                                    for (name, value) in writes {
+                                        // `radius`-driven axes store a
+                                        // half-extent; Size is a full
+                                        // extent like every other Part.
+                                        let q = if name == "radius" { value * 0.5 } else { value };
+                                        events.cad_set_variable.write(
+                                            crate::cad_plugin::CadSetVariableEvent {
+                                                entity,
+                                                name,
+                                                value: format!("{q} m"),
+                                            },
+                                        );
+                                    }
+                                    if let Some(ref mut s) = res.state {
+                                        s.last_properties_hash = 0;
+                                        s.frames_since_selection_change = 0;
+                                    }
                                 }
                             }
                         }
@@ -8119,6 +8541,25 @@ fn drain_slint_actions(
                     map
                 };
 
+                // Same idea, but for the full Instance hierarchy: a snapshot
+                // of every live entity's (name, class, parent) so Rune's
+                // `Instance` handles resolve against the REAL scene tree
+                // (`GetChildren`/`Parent`/`FindFirstChild`), not just
+                // entities the script itself creates. See
+                // `rune_ecs_module::seed_instance_snapshot` for the
+                // consumer side and why this is a snapshot rather than
+                // live `World` access.
+                #[cfg(feature = "realism-scripting")]
+                let instance_snapshot: Vec<crate::soul::rune_ecs_module::InstanceSnapshotEntry> =
+                    queries.instances.iter().map(|(entity, inst)| {
+                        crate::soul::rune_ecs_module::InstanceSnapshotEntry {
+                            entity,
+                            name: inst.name.clone(),
+                            class_name: inst.class_name.as_str().to_string(),
+                            parent: queries.hierarchy_parents.get(entity).ok().map(|c| c.0),
+                        }
+                    }).collect();
+
                 // Execute the script
                 let (result, created_instances) = if language == "luau" {
                     match eustress_common::luau::runtime::LuauRuntime::new() {
@@ -8140,9 +8581,13 @@ fn drain_slint_actions(
                     // leaking across runs.
                     #[cfg(feature = "realism-scripting")]
                     crate::soul::rune_ecs_module::seed_existing_tags(tag_snapshot.clone());
+                    #[cfg(feature = "realism-scripting")]
+                    crate::soul::rune_ecs_module::seed_instance_snapshot(instance_snapshot);
                     let r = crate::soul::rune_ecs_module::execute_rune_oneshot(&script);
                     #[cfg(feature = "realism-scripting")]
                     crate::soul::rune_ecs_module::clear_existing_tags();
+                    #[cfg(feature = "realism-scripting")]
+                    crate::soul::rune_ecs_module::clear_instance_snapshot();
                     match r {
                         Ok(instances) => (Ok(()), instances),
                         Err(e) => (Err(e), Vec::new()),
@@ -8546,6 +8991,293 @@ fn drain_slint_actions(
                         if let Some(ref mut out) = res.output {
                             out.info(format!("✓ Spawned {} '{}'", inst.class_name, inst.name));
                         }
+                    }
+                }
+
+                // Bridge: destroy real ECS entities requested via
+                // `Instance:Destroy()` this run. `rune_ecs_module` has no
+                // filesystem/Commands access (see its module doc comment
+                // on `InstanceRune`), so it only QUEUES the ids; this is
+                // where the actual trash-move (never a hard delete — same
+                // reversible-destruction convention as the Delete key
+                // handler in `keybindings.rs`) + despawn happens.
+                #[cfg(feature = "realism-scripting")]
+                {
+                    let destroyed_ids = crate::soul::rune_ecs_module::drain_pending_destroys();
+                    if !destroyed_ids.is_empty() {
+                        let trash_root = res.space_root.as_ref()
+                            .map(|sr| sr.0.join(".eustress").join("trash"))
+                            .unwrap_or_else(|| crate::space::default_space_root().join(".eustress").join("trash"));
+
+                        for id in destroyed_ids {
+                            let entity = Entity::from_bits(id as u64);
+                            if queries.instances.get(entity).is_err() {
+                                // Already gone (e.g. despawned elsewhere
+                                // mid-script) — nothing to trash or despawn.
+                                continue;
+                            }
+
+                            // Locate the on-disk source: folder-based
+                            // instances (`InstanceFile`/`LoadedFromFile`)
+                            // get trashed; pure-runtime entities with no
+                            // backing file are just despawned — there is
+                            // nothing on disk to preserve.
+                            let source_path: Option<std::path::PathBuf> = queries.loaded_from_file
+                                .get(entity)
+                                .ok()
+                                .map(|(_, lff)| lff.path.clone())
+                                .or_else(|| queries.instance_files
+                                    .get(entity)
+                                    .ok()
+                                    .map(|f| f.toml_path.parent()
+                                        .map(|p| p.to_path_buf())
+                                        .unwrap_or_else(|| f.toml_path.clone())));
+
+                            if let Some(src) = source_path {
+                                if src.exists() {
+                                    if let Err(e) = std::fs::create_dir_all(&trash_root) {
+                                        if let Some(ref mut out) = res.output {
+                                            out.error(format!("Instance:Destroy() — failed to create trash dir: {}", e));
+                                        }
+                                    } else {
+                                        let stem = src.file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| "instance".to_string());
+                                        let mut dest = trash_root.join(&stem);
+                                        if dest.exists() {
+                                            let ts = std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .map(|d| d.as_millis())
+                                                .unwrap_or(0);
+                                            dest = trash_root.join(format!("{}-{:x}", stem, ts));
+                                        }
+                                        match std::fs::rename(&src, &dest) {
+                                            Ok(()) => {
+                                                if let Some(ref mut out) = res.output {
+                                                    out.info(format!("🗑️ Instance:Destroy() moved {:?} to trash", src));
+                                                }
+                                                if let Some(ref mut registry) = res.file_registry {
+                                                    registry.unregister_file(&src);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                if let Some(ref mut out) = res.output {
+                                                    out.error(format!("Instance:Destroy() — failed to trash {:?}: {}", src, e));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            commands.entity(entity).despawn();
+                        }
+                    }
+                }
+
+                // Bridge: apply property writes queued via
+                // `Instance:Set()` against Live entities this run.
+                // `rune_ecs_module` has no `&mut World` access (see its
+                // module doc comment), so it only queues
+                // `(entity_id, property_name, PropertyValue)` triples —
+                // this is where they're actually applied, through the
+                // same `PropertyCommand`/`PropertyAccess` dispatch the
+                // Properties panel's undo path was built for but (per
+                // `property_command.rs`) never actually called before
+                // now — this Rune bridge is `PropertyCommand`'s first
+                // real caller. Deferred via `commands.queue` because
+                // `PropertyCommand::execute` needs `&mut World`, which
+                // this system's `Commands` alone doesn't give it.
+                //
+                // Phase 2 adds real old-value capture, undo integration,
+                // and disk persistence (all explicitly deferred by Phase
+                // 1 — see its history for the prior "old_value = clone of
+                // new_value" placeholder). Undo deliberately does NOT go
+                // through `commands::CommandHistory`/`Command::Property`,
+                // despite `PropertyCommand` living in that module: reading
+                // `commands/history.rs::process_history_events` shows its
+                // Ctrl+Z handler only ever re-applies `Command::Selection`
+                // — every other `Command` variant (including `Property`)
+                // just has its stack index decremented with a log line,
+                // no `&mut World`, no actual mutation. `PropertyCommand`
+                // has no other call site pushing into `CommandHistory`
+                // either, so that stack is dead for property edits, not a
+                // proven live pattern. The Properties panel's REAL Ctrl+Z
+                // path — confirmed by its `PropertyChanged` handler further
+                // up this match arm — is `crate::undo::UndoStack` +
+                // `Action::ChangeProperty`, applied with full `&mut World`
+                // access by `crate::undo::handle_undo_events`. We mirror
+                // that here so Ctrl+Z genuinely reverts a Rune-driven
+                // property edit, the same way it reverts a panel edit.
+                #[cfg(feature = "realism-scripting")]
+                {
+                    let property_writes = crate::soul::rune_ecs_module::drain_pending_property_writes();
+                    if !property_writes.is_empty() {
+                        commands.queue(move |world: &mut World| {
+                            for write in property_writes {
+                                let entity = Entity::from_bits(write.entity_id as u64);
+                                if world.get_entity(entity).is_err() {
+                                    warn!("[Rune Script] Instance:Set(\"{}\", ...) — entity no longer exists", write.property_name);
+                                    continue;
+                                }
+
+                                // Real old-value capture, read through the
+                                // same PropertyAccess chain `execute` writes
+                                // through — falls back to new_value only if
+                                // the property genuinely isn't readable yet
+                                // (e.g. entity doesn't carry that component).
+                                let old_value = crate::commands::PropertyCommand::read_property(
+                                    world, entity, &write.property_name,
+                                ).unwrap_or_else(|| write.new_value.clone());
+
+                                let cmd = crate::commands::PropertyCommand::new(
+                                    entity,
+                                    write.property_name.clone(),
+                                    old_value.clone(),
+                                    write.new_value.clone(),
+                                );
+                                if let Err(e) = cmd.execute(world) {
+                                    warn!("[Rune Script] Instance:Set(\"{}\", ...) failed: {}", cmd.property_name, e);
+                                    continue;
+                                }
+
+                                // `Position`/`Orientation` write through
+                                // BasePart.cframe only (BasePart's
+                                // PropertyAccess impl) — every other live
+                                // mutation site in this codebase
+                                // (move_tool.rs, rotate_tool.rs,
+                                // scale_tool.rs, align_distribute.rs,
+                                // undo.rs's own apply functions) keeps
+                                // `Transform` in lockstep by hand, because
+                                // no system syncs BasePart.cframe → Transform
+                                // automatically. Without this, a script's
+                                // Position/Orientation write would persist
+                                // and undo correctly but never actually
+                                // move the entity on screen. Mirror that
+                                // convention here. `Size`/`Scale` are
+                                // intentionally NOT synced — the live
+                                // mesh-regen story there branches on
+                                // MeshSource (see `ScaleEntities` in
+                                // undo.rs) and is a bigger lift than this
+                                // phase's scope; BasePart.size still
+                                // updates and still persists correctly,
+                                // it just won't visually resize until the
+                                // entity reloads.
+                                if write.property_name == "Position" {
+                                    if let eustress_common::classes::PropertyValue::Vector3(v) = &write.new_value {
+                                        let v = *v;
+                                        if let Some(mut t) = world.get_mut::<Transform>(entity) {
+                                            t.translation = v;
+                                        }
+                                    }
+                                } else if write.property_name == "Orientation" {
+                                    if let Some(bp) = world.get::<eustress_common::classes::BasePart>(entity) {
+                                        let rot = bp.cframe.rotation;
+                                        if let Some(mut t) = world.get_mut::<Transform>(entity) {
+                                            t.rotation = rot;
+                                        }
+                                    }
+                                }
+
+                                // Undo integration — see the module-level
+                                // comment above for why this targets
+                                // `crate::undo::UndoStack` rather than
+                                // `commands::CommandHistory`. Only pushed
+                                // for property names the panel's own undo
+                                // apply table understands
+                                // (`is_undo_wired_property`); anything
+                                // else (BillboardGui's UDim2 `Size`, etc.)
+                                // isn't undo-wired for the panel either,
+                                // so skipping here matches existing
+                                // behavior instead of introducing a new
+                                // asymmetry.
+                                if is_undo_wired_property(&write.property_name) {
+                                    if let (Some(old_snap), Some(new_snap)) = (
+                                        property_value_to_undo_snapshot(&write.property_name, &old_value),
+                                        property_value_to_undo_snapshot(&write.property_name, &write.new_value),
+                                    ) {
+                                        if old_snap != new_snap {
+                                            let inst_id = world
+                                                .get::<eustress_common::classes::Instance>(entity)
+                                                .map(|i| i.id);
+                                            if let Some(id) = inst_id {
+                                                if let Some(mut stack) =
+                                                    world.get_resource_mut::<crate::undo::UndoStack>()
+                                                {
+                                                    stack.push(crate::undo::Action::ChangeProperty {
+                                                        id,
+                                                        property: write.property_name.clone(),
+                                                        old_value: old_snap,
+                                                        new_value: new_snap,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Disk persistence — routes through the
+                                // SAME writer the Properties panel uses
+                                // (`apply_property_to_toml_value` /
+                                // `route_property`), so a Rune-driven edit
+                                // survives a reload exactly like a panel
+                                // edit; no second TOML writer. Only
+                                // entities with an `InstanceFile` component
+                                // (file-system-first, pre-existing on
+                                // disk) persist here — this queue only
+                                // ever carries Live (pre-existing) writes
+                                // in the first place (Pending, this-run
+                                // `Instance::new()` entities write straight
+                                // into the InstanceRegistry's property bag
+                                // instead — see `InstanceRune::set`), so
+                                // there is no "just-created, not yet on
+                                // disk" case to special-case here.
+                                if let Some(instance_file) = world
+                                    .get::<crate::space::instance_loader::InstanceFile>(entity)
+                                {
+                                    let toml_path = instance_file.toml_path.clone();
+                                    let current_transform = world.get::<Transform>(entity).map(|t| (
+                                        [t.translation.x, t.translation.y, t.translation.z],
+                                        [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
+                                        [t.scale.x, t.scale.y, t.scale.z],
+                                    ));
+                                    if let Some(val_str) = property_value_to_toml_string(&write.new_value) {
+                                        match apply_property_to_toml_value(
+                                            &toml_path, &write.property_name, &val_str, current_transform,
+                                        ) {
+                                            Ok(true) => {
+                                                if let Some(mut out) =
+                                                    world.get_resource_mut::<OutputConsole>()
+                                                {
+                                                    out.info(format!(
+                                                        "💾 [Rune Script] Saved {} to {:?}",
+                                                        write.property_name,
+                                                        toml_path.file_name().unwrap_or_default(),
+                                                    ));
+                                                }
+                                            }
+                                            Ok(false) => {
+                                                // Key not in route_property's
+                                                // table — the live ECS write
+                                                // already happened; nothing
+                                                // more to do (mirrors the
+                                                // panel's Ok(false) arm).
+                                            }
+                                            Err(e) => {
+                                                if let Some(mut out) =
+                                                    world.get_resource_mut::<OutputConsole>()
+                                                {
+                                                    out.error(format!(
+                                                        "[Rune Script] Save {} failed: {}",
+                                                        write.property_name, e,
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
                     }
                 }
             }
@@ -9833,6 +10565,114 @@ fn drain_slint_actions(
                 // to the corresponding keybinding Actions so keyboard +
                 // ribbon share one code path.
                 match action {
+                    // Parametric CadPart templates (Drafting → Parametric).
+                    "insert:cad_plate" => {
+                        events.cad_insert.write(crate::cad_plugin::CadInsertTemplateEvent {
+                            template: crate::cad_plugin::CadTemplate::Plate,
+                            position: None,
+                        });
+                        continue;
+                    }
+                    "insert:cad_box" => {
+                        events.cad_insert.write(crate::cad_plugin::CadInsertTemplateEvent {
+                            template: crate::cad_plugin::CadTemplate::Box,
+                            position: None,
+                        });
+                        continue;
+                    }
+                    "insert:cad_cylinder" => {
+                        events.cad_insert.write(crate::cad_plugin::CadInsertTemplateEvent {
+                            template: crate::cad_plugin::CadTemplate::Cylinder,
+                            position: None,
+                        });
+                        continue;
+                    }
+                    "insert:cad_plate_hole" => {
+                        events.cad_insert.write(crate::cad_plugin::CadInsertTemplateEvent {
+                            template: crate::cad_plugin::CadTemplate::PlateWithHole,
+                            position: None,
+                        });
+                        continue;
+                    }
+                    "insert:cad_lbracket" => {
+                        events.cad_insert.write(crate::cad_plugin::CadInsertTemplateEvent {
+                            template: crate::cad_plugin::CadTemplate::LBracket,
+                            position: None,
+                        });
+                        continue;
+                    }
+                    "insert:cad_frame" => {
+                        events.cad_insert.write(crate::cad_plugin::CadInsertTemplateEvent {
+                            template: crate::cad_plugin::CadTemplate::ConstrainedFrame,
+                            position: None,
+                        });
+                        continue;
+                    }
+                    "insert:cad_shell" => {
+                        events.cad_insert.write(crate::cad_plugin::CadInsertTemplateEvent {
+                            template: crate::cad_plugin::CadTemplate::ShelledBox,
+                            position: None,
+                        });
+                        continue;
+                    }
+                    "cad:export_glb" => {
+                        let entity = res.explorer_state.as_ref().and_then(|es| {
+                            match &es.selected {
+                                SelectedItem::Entity(e) => Some(*e),
+                                _ => None,
+                            }
+                        });
+                        if let Some(entity) = entity {
+                            events.cad_export_glb.write(crate::cad_plugin::CadExportGlbEvent {
+                                entity,
+                                path: None,
+                            });
+                        } else if let Some(ref mut out) = res.output {
+                            out.warn("Export GLB: select a CadPart first");
+                        }
+                        continue;
+                    }
+                    "cad:solve_sketch" => {
+                        let entity = res.explorer_state.as_ref().and_then(|es| {
+                            match &es.selected {
+                                SelectedItem::Entity(e) => Some(*e),
+                                _ => None,
+                            }
+                        });
+                        if let Some(entity) = entity {
+                            events.cad_solve_sketch.write(crate::cad_plugin::CadSolveSketchEvent {
+                                entity,
+                            });
+                        } else if let Some(ref mut out) = res.output {
+                            out.warn("Solve Sketch: select a CadPart first");
+                        }
+                        continue;
+                    }
+                    "cad:mate_coincident" | "cad:mate_revolute" | "cad:mate_prismatic"
+                    | "cad:mate_ball" | "cad:mate_distance" => {
+                        use crate::cad_assembly::MateKind;
+                        let kind = match action {
+                            "cad:mate_coincident" => MateKind::Coincident,
+                            "cad:mate_revolute" => MateKind::Revolute,
+                            "cad:mate_prismatic" => MateKind::Prismatic,
+                            "cad:mate_ball" => MateKind::Ball,
+                            _ => MateKind::Distance,
+                        };
+                        // Prefer viewport anchor pick tool when available.
+                        let tool_id = match kind {
+                            crate::cad_assembly::MateKind::Coincident => "mate_coincident",
+                            crate::cad_assembly::MateKind::Revolute => "mate_revolute",
+                            crate::cad_assembly::MateKind::Prismatic => "mate_prismatic",
+                            crate::cad_assembly::MateKind::Ball => "mate_ball",
+                            crate::cad_assembly::MateKind::Distance => "mate_distance",
+                        };
+                        events.modal_tool_activate.write(
+                            crate::modal_tool::ActivateModalToolEvent {
+                                tool_id: tool_id.to_string(),
+                            },
+                        );
+                        continue;
+                    }
                     "csg:union" => {
                         events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::CSGUnion));
                         continue;
@@ -11295,6 +12135,68 @@ fn sync_selection_summary_to_slint(
     }
 }
 
+/// Reflect `CadSketchUiState` onto the docked SketchCanvasPanel.
+fn sync_sketch_canvas_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    state: Option<Res<crate::cad_plugin::CadSketchUiState>>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let Some(state) = state else { return };
+    let ui = &slint_context.window;
+
+    let cur_vis = ui.get_sketch_canvas_visible();
+    if cur_vis != state.visible {
+        ui.set_sketch_canvas_visible(state.visible);
+    }
+    if !state.visible {
+        return;
+    }
+
+    let cur_part: String = ui.get_sketch_canvas_part_name().into();
+    if cur_part != state.part_name {
+        ui.set_sketch_canvas_part_name(state.part_name.as_str().into());
+    }
+    let cur_sk: String = ui.get_sketch_canvas_sketch_name().into();
+    if cur_sk != state.sketch_name {
+        ui.set_sketch_canvas_sketch_name(state.sketch_name.as_str().into());
+    }
+    let cur_status: String = ui.get_sketch_canvas_solve_status().into();
+    if cur_status != state.solve_status {
+        ui.set_sketch_canvas_solve_status(state.solve_status.as_str().into());
+    }
+
+    let entities: Vec<SketchEntityRow> = state
+        .entities
+        .iter()
+        .map(|(i, kind, summary)| SketchEntityRow {
+            index: *i as i32,
+            kind: kind.as_str().into(),
+            summary: summary.as_str().into(),
+        })
+        .collect();
+    ui.set_sketch_canvas_entities(slint::ModelRc::new(slint::VecModel::from(entities)));
+
+    let constraints: Vec<SketchConstraintRow> = state
+        .constraints
+        .iter()
+        .map(|(i, kind, detail)| SketchConstraintRow {
+            index: *i as i32,
+            kind: kind.as_str().into(),
+            detail: detail.as_str().into(),
+        })
+        .collect();
+    ui.set_sketch_canvas_constraints(slint::ModelRc::new(slint::VecModel::from(constraints)));
+
+    let a = state.selected_a.map(|i| i as i32).unwrap_or(-1);
+    if ui.get_sketch_canvas_selected_a() != a {
+        ui.set_sketch_canvas_selected_a(a);
+    }
+    let b = state.selected_b.map(|i| i as i32).unwrap_or(-1);
+    if ui.get_sketch_canvas_selected_b() != b {
+        ui.set_sketch_canvas_selected_b(b);
+    }
+}
+
 /// Reflect `NumericInputState` to the Slint `numeric-input-*` properties.
 /// Pure read-out — all keyboard handling happens in Bevy's
 /// `handle_numeric_input_keys`.
@@ -11931,6 +12833,10 @@ fn sync_workshop_to_slint(
     let ui = &slint_context.window;
 
     ui.set_workshop_api_key_valid(api_key_valid);
+    let model_name = global_settings.as_ref()
+        .map(|g| g.effective_workshop_model().display_name())
+        .unwrap_or_else(|| crate::soul::WorkshopModel::default().display_name());
+    ui.set_workshop_active_model_name(model_name.into());
     ui.set_workshop_pipeline_state(pipeline.state_string().into());
     ui.set_workshop_product_name(pipeline.product_name.as_str().into());
     ui.set_workshop_total_artifacts(pipeline.artifacts.len() as i32);
@@ -12753,6 +13659,84 @@ fn init_insert_classes_to_slint(
          filtered to those with a creatable class_schema template)",
         listed_count, registry_count,
     );
+}
+
+/// Last-pushed button count for the Plugins tab, so `sync_plugin_tabs_to_slint`
+/// only touches the Slint model when the content actually changed (cheap
+/// per-frame check; avoids marking Slint dirty every frame for a static
+/// list). Unlike `InsertClassesInitialized` this ISN'T a one-shot latch —
+/// `TabRegistry` is genuinely mutable at runtime once a script-authored
+/// plugin host (Phase 2, not yet built) can enable/disable plugins after
+/// startup; a length comparison keeps this system forward-compatible with
+/// that without extra work now.
+/// A signature of everything currently on the "plugins" tab, not just a
+/// button COUNT — a Reload that swaps one button for a different one of
+/// the same total count would leave a raw count unchanged and silently
+/// skip the repush. Joining every button/section id is cheap (this tab
+/// realistically has a handful of entries) and catches swaps, not just
+/// growth/shrink.
+#[derive(Resource, Default, PartialEq)]
+struct PluginTabSignature(String);
+
+/// Push the "plugins" `TabRegistry` entry (populated by `sync_plugin_tabs`
+/// in `studio_plugins/mod.rs` from real `StudioPlugin`s via `PluginApi` —
+/// see `road_tool.rs` for the first one) to the Slint ribbon's
+/// `plugin-sections`/`plugin-buttons` list-properties. Mirrors
+/// `init_insert_classes_to_slint`'s flatten-and-push shape; unlike that
+/// one-shot system this re-checks every frame (see `PluginTabSignature`).
+fn sync_plugin_tabs_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    tab_registry: Option<Res<crate::studio_plugins::tab_api::TabRegistry>>,
+    mut pushed: ResMut<PluginTabSignature>,
+) {
+    let Some(ref ctx) = slint_context else { return };
+    let Some(tab_registry) = tab_registry else { return };
+
+    let Some(plugins_tab) = tab_registry.tabs.iter().find(|t| t.id == "plugins") else {
+        return; // No plugin has registered the "plugins" tab yet.
+    };
+
+    let mut signature = String::new();
+    for section in &plugins_tab.sections {
+        signature.push_str(&section.id);
+        signature.push(';');
+        for button in &section.buttons {
+            signature.push_str(&button.id);
+            signature.push(',');
+            signature.push_str(&button.label);
+            signature.push(',');
+            signature.push_str(&button.action_id);
+            signature.push('|');
+        }
+    }
+    let signature = PluginTabSignature(signature);
+    if signature == *pushed {
+        return; // Unchanged since last push — skip marking Slint dirty.
+    }
+    *pushed = signature;
+
+    let mut sections: Vec<PluginSectionData> = Vec::new();
+    let mut buttons: Vec<PluginButtonData> = Vec::new();
+    for section in &plugins_tab.sections {
+        sections.push(PluginSectionData {
+            tab_id: plugins_tab.id.clone().into(),
+            section_id: section.id.clone().into(),
+            label: section.label.clone().into(),
+        });
+        for button in &section.buttons {
+            buttons.push(PluginButtonData {
+                tab_id: plugins_tab.id.clone().into(),
+                section_id: section.id.clone().into(),
+                label: button.label.clone().into(),
+                tooltip: button.tooltip.clone().unwrap_or_default().into(),
+                action_id: button.action_id.clone().into(),
+            });
+        }
+    }
+
+    info!("🔌 Plugins tab: {} sections, {} buttons pushed to Slint", sections.len(), buttons.len());
+    ctx.window.set_plugin_sections(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(sections))));
+    ctx.window.set_plugin_buttons(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(buttons))));
 }
 
 /// Tracks which Dataset entity the Data Grid was last built for, so the CSV is
@@ -13988,6 +14972,10 @@ fn sync_unified_explorer_to_slint(
                     .unwrap_or(false)
             {
                 load_service_icon("wrench")
+            } else if instance.name.eq_ignore_ascii_case("DataService") {
+                // DataService synthesizes as a plain Folder (no ServiceComponent),
+                // so give it the data-platform atom icon by name.
+                load_service_icon("dataservice")
             } else {
                 load_class_icon(&instance.class_name)
             };
@@ -15423,6 +16411,16 @@ struct PropertyExtraQueries<'w, 's> {
     loaded_from_file: Query<'w, 's, &'static crate::space::LoadedFromFile>,
     /// Parent link — a child Series/Column resolves its parent Dataset's CSV here.
     child_of: Query<'w, 's, &'static bevy::prelude::ChildOf>,
+    /// Parametric CadPart feature tree + last eval status.
+    cad_part: Query<'w, 's, (
+        &'static crate::cad_plugin::CadPart,
+        Option<&'static crate::cad_plugin::CadPartStatus>,
+    )>,
+    /// Live Bevy `Projection` — the Camera class's FieldOfView/clip-plane
+    /// rows read straight from this (the single source of truth the
+    /// renderer itself consumes) rather than a parallel data component,
+    /// so the panel always shows what's actually being rendered.
+    projection: Query<'w, 's, &'static Projection>,
 }
 
 /// Syncs the selected entity's properties to the Slint properties panel.
@@ -15456,6 +16454,7 @@ fn sync_properties_to_slint(
         Query<&eustress_common::classes::BillboardGui>,
         Query<&eustress_common::classes::ScreenGui>,
         Query<&eustress_common::classes::SurfaceGui>,
+        Query<&eustress_common::classes::Beam>,
     )>,
     // EustressStream change-detection dirty flag
     mut panel_dirty: Option<ResMut<eustress_common::change_queue::PanelDirtyFlags>>,
@@ -15758,7 +16757,10 @@ fn sync_properties_to_slint(
                 CN::TextLabel | CN::TextButton | CN::TextBox |
                 CN::Frame     | CN::ImageLabel | CN::ImageButton |
                 CN::ScrollingFrame |
-                CN::BillboardGui | CN::ScreenGui | CN::SurfaceGui
+                CN::BillboardGui | CN::ScreenGui | CN::SurfaceGui |
+                // Beam's placement comes from Attachment0/Attachment1, not
+                // its own Transform — same reasoning as the UI classes above.
+                CN::Beam
             );
 
             // Read from the LIVE ECS Transform / BasePart, not the
@@ -15831,6 +16833,23 @@ fn sync_properties_to_slint(
                 let _ = live_size;
             }
             
+            // ── Camera properties (FieldOfView + clip planes) ───────────────────
+            // Reads straight from the entity's live `Projection` — the same
+            // component the renderer consumes every frame — so a Properties-
+            // panel edit is visible in the viewport with no extra sync step
+            // and the panel can never drift from what's actually rendered.
+            // Default (70°) matches `default_scene::studio_camera_bundle`'s
+            // spawn-time FOV for entities that haven't been resolved yet.
+            if instance.class_name == eustress_common::classes::ClassName::Camera {
+                let (fov_deg, near, far) = match extra_q.projection.get(selected_entity) {
+                    Ok(Projection::Perspective(p)) => (p.fov.to_degrees(), p.near, p.far),
+                    _ => (70.0, 0.1, 10000.0),
+                };
+                add_prop("Camera", "FieldOfView", format!("{:.1}", fov_deg), "float", true);
+                add_prop("Camera", "NearClipPlane", format!("{:.3}", near), "float", true);
+                add_prop("Camera", "FarClipPlane", format!("{:.1}", far), "float", true);
+            }
+
             // ── UI class properties (TextLabel, TextButton, Frame, etc.) ────────
             // If the entity carries a UI ECS component, emit all its properties
             // via PropertyAccess.  Skip the BasePart Appearance/Physics sections
@@ -15848,7 +16867,8 @@ fn sync_properties_to_slint(
                 ClassName::TextLabel | ClassName::TextButton | ClassName::TextBox |
                 ClassName::Frame     | ClassName::ImageLabel | ClassName::ImageButton |
                 ClassName::ScrollingFrame |
-                ClassName::BillboardGui | ClassName::ScreenGui | ClassName::SurfaceGui
+                ClassName::BillboardGui | ClassName::ScreenGui | ClassName::SurfaceGui |
+                ClassName::Beam
             );
             if is_ui_class {
                 // Emit all properties from the live ECS component so edits are
@@ -15867,6 +16887,7 @@ fn sync_properties_to_slint(
                     else if let Ok(c) = ui_queries_3d.p0().get(selected_entity)   { Some(c.list_properties()) }
                     else if let Ok(c) = ui_queries_3d.p1().get(selected_entity)   { Some(c.list_properties()) }
                     else if let Ok(c) = ui_queries_3d.p2().get(selected_entity)   { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries_3d.p3().get(selected_entity)   { Some(c.list_properties()) }
                     else { None };
 
                 if let Some(descriptors) = ui_props {
@@ -15881,7 +16902,8 @@ fn sync_properties_to_slint(
                             .or_else(|| ui_queries_flat.p6().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
                             .or_else(|| ui_queries_3d.p0().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
                             .or_else(|| ui_queries_3d.p1().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
-                            .or_else(|| ui_queries_3d.p2().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)));
+                            .or_else(|| ui_queries_3d.p2().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
+                            .or_else(|| ui_queries_3d.p3().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)));
                         if let Some(val) = val_opt {
                             let (mut val_str, prop_type) = property_value_to_display(&val);
                             // UI-class length-typed properties (BillboardGui's
@@ -16200,7 +17222,24 @@ fn sync_properties_to_slint(
                     "vec3", true);
             }
         }
-        
+
+        // Camera properties (FieldOfView + clip planes) — see the identical
+        // block in the InstanceFile-backed branch above for the rationale.
+        // The Studio editor camera (`default_scene::studio_camera_bundle`)
+        // has no InstanceFile/ServiceComponent/GuiElementDisplay, so it
+        // ALWAYS takes this fallback branch, not the one above — without
+        // this duplicate, FieldOfView silently never appeared for the one
+        // Camera entity most users actually select (the live editor camera).
+        if instance.class_name == eustress_common::classes::ClassName::Camera {
+            let (fov_deg, near, far) = match extra_q.projection.get(selected_entity) {
+                Ok(Projection::Perspective(p)) => (p.fov.to_degrees(), p.near, p.far),
+                _ => (70.0, 0.1, 10000.0),
+            };
+            add_prop("Camera", "FieldOfView", format!("{:.1}", fov_deg), "float", true);
+            add_prop("Camera", "NearClipPlane", format!("{:.3}", near), "float", true);
+            add_prop("Camera", "FarClipPlane", format!("{:.1}", far), "float", true);
+        }
+
         // BasePart properties
         use eustress_common::classes::PropertyAccess;
         let transform_props = ["Position", "Orientation", "Size", "Rotation", "Scale"];
@@ -16214,6 +17253,13 @@ fn sync_properties_to_slint(
             }
         }
     }
+
+    // A CadPart's Properties surface is intentionally IDENTICAL to a
+    // plain Part's — no separate "CAD" / "FeatureTree" category. Size
+    // (Transform → Size, above) is the one CAD-aware write-back;
+    // status/kernel/feature-row/secondary-variable inspection has no
+    // Properties-panel surface for now (candidate for a dedicated
+    // panel later, not a parallel property taxonomy).
 
     // ── Tags + Attributes — class-agnostic, sourced from live ECS components ──
     //
@@ -17285,6 +18331,85 @@ fn fmt_udim_n(v: f32) -> String {
     } else {
         format!("{}", v)
     }
+}
+
+/// Format a `classes::PropertyValue` the way the Properties-panel Slint
+/// fields format their edits — comma-joined numeric tuples, `"true"`/
+/// `"false"` for bools, bare strings — so it can be handed to
+/// `apply_property_to_toml_value`/`route_property` unchanged. Used by the
+/// Rune `Instance:Set()` bridge to persist a live-entity write through the
+/// SAME writer the panel uses, rather than a second TOML-writing path.
+/// Values already come out of `PropertyAccess` in engine-native units
+/// (meters), matching what the panel passes after its DisplayUnit→meters
+/// conversion — no extra unit conversion needed here.
+/// Returns `None` for shapes `route_property` has no routing table entry
+/// for (`Transform`) — same as an unroutable panel key, the live ECS
+/// write already happened; only the disk mirror is skipped.
+fn property_value_to_toml_string(value: &eustress_common::classes::PropertyValue) -> Option<String> {
+    use eustress_common::classes::PropertyValue as PV;
+    match value {
+        PV::Bool(b) => Some(b.to_string()),
+        PV::Int(i) => Some(i.to_string()),
+        PV::Float(f) => Some(f.to_string()),
+        PV::String(s) => Some(s.clone()),
+        PV::Enum(s) => Some(s.clone()),
+        PV::Vector2(v) => Some(format!("{},{}", v[0], v[1])),
+        PV::Vector3(v) => Some(format!("{},{},{}", v.x, v.y, v.z)),
+        PV::Color3(c) => Some(format!("{},{},{}", c[0] * 255.0, c[1] * 255.0, c[2] * 255.0)),
+        PV::Color(c) => {
+            let s = c.to_srgba();
+            Some(format!("{},{},{},{}", s.red * 255.0, s.green * 255.0, s.blue * 255.0, s.alpha * 255.0))
+        }
+        PV::UDim2(u) => Some(format!("{},{},{},{}", u.x.scale, u.x.offset, u.y.scale, u.y.offset)),
+        PV::Material(m) => Some(format!("{:?}", m)),
+        PV::Transform(_) => None,
+    }
+}
+
+/// Convert a `classes::PropertyValue` into `undo::PropertyValueSnapshot`
+/// — the shape `crate::undo::apply_property_value_to_entity` restores on
+/// Ctrl+Z. `property_name` disambiguates `PropertyValue::Enum` (Material
+/// vs. e.g. ZIndexBehavior both use it) — only `"Material"` maps to a
+/// snapshot the undo apply table actually understands.
+/// Returns `None` for shapes `PropertyValueSnapshot` has no variant for
+/// (`UDim2`, `Vector2`, `Int`, `Transform`, non-Material `Enum`) — those
+/// properties aren't undo-wired via the Properties panel either
+/// (`canonical_undo_property` maps them to `None` too — see its doc
+/// comment), so skipping the push here matches existing behavior.
+fn property_value_to_undo_snapshot(
+    property_name: &str,
+    value: &eustress_common::classes::PropertyValue,
+) -> Option<crate::undo::PropertyValueSnapshot> {
+    use eustress_common::classes::PropertyValue as PV;
+    use crate::undo::PropertyValueSnapshot as S;
+    match (property_name, value) {
+        ("Material", PV::Enum(s)) => Some(S::Material(s.clone())),
+        (_, PV::Bool(b)) => Some(S::Bool(*b)),
+        (_, PV::Float(f)) => Some(S::Float(*f)),
+        (_, PV::String(s)) => Some(S::String(s.clone())),
+        (_, PV::Vector3(v)) => Some(S::Vector3(v.to_array())),
+        (_, PV::Color3(c)) => Some(S::Color([c[0], c[1], c[2], 1.0])),
+        (_, PV::Color(c)) => {
+            let s = c.to_srgba();
+            Some(S::Color([s.red, s.green, s.blue, s.alpha]))
+        }
+        _ => None,
+    }
+}
+
+/// Property names `crate::undo::apply_property_value_to_entity` actually
+/// restores on undo/redo — mirrors that function's match arms exactly
+/// (see `undo.rs`). Rune-driven writes only push onto `UndoStack` for
+/// names in this set; anything else (BillboardGui's UDim2 `Size`, etc.)
+/// is left un-undo-wired, same as the Properties panel today.
+fn is_undo_wired_property(name: &str) -> bool {
+    matches!(
+        name,
+        "Name" | "Position" | "Orientation" | "Size" | "Scale" | "Color"
+            | "Material" | "Transparency" | "Reflectance" | "Anchored"
+            | "CanCollide" | "CanTouch" | "Locked"
+            | "FieldOfView" | "NearClipPlane" | "FarClipPlane"
+    )
 }
 
 // Removed in the 2026-05-13 properties-write unification:

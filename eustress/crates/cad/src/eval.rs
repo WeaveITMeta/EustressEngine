@@ -13,11 +13,12 @@
 //! | Split     | ✅ working | Plane cut → boolean with slab                   |
 //! | Hole      | ✅ working | Decomposes to circular extrude-cut              |
 //! | Boolean   | ✅ working | truck-shapeops `and_solid` / `or_solid` / `not_solid` |
-//! | Fillet    | 🚧 blocked | truck-shapeops fillet API is upstream WIP       |
-//! | Chamfer   | 🚧 blocked | Same as Fillet                                  |
-//! | Shell     | 🚧 blocked | truck-modeling lacks a shell operation          |
-//! | Sweep     | 🚧 pending | Path-profile sketch resolver needed             |
+//! | Fillet    | 🟡 mesh    | Mesh crease soften interim (BRep fillet later)  |
+//! | Chamfer   | 🟡 mesh    | Same mesh soften path as Fillet                 |
+//! | Shell     | ✅ approx  | Open-top inner cut (enclosed cavities need offset surfaces) |
+//! | Sweep     | ✅ working | Profile along path polyline (segment chain)     |
 //! | Loft      | 🚧 pending | Profile interpolation + guide curves            |
+//! | Solver    | ✅ working | Gauss-Newton on sketch constraints/dimensions   |
 //!
 //! ## Combine-mode semantics
 //!
@@ -159,24 +160,148 @@ fn solid_bbox_diagonal(s: &Solid) -> f64 {
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
-/// Highest z over the solid's topological vertices — used by the Hole
-/// arm to detect when a cut reaches the far face (a through hole).
-/// v0 holes always cut along +z of the sketch plane, so z is the
-/// right axis until sketch-plane transforms land.
-fn solid_z_max(s: &Solid) -> f64 {
+/// Axis-aligned bounds over the solid's topological vertices.
+fn solid_bbox(s: &Solid) -> Option<(Point3, Point3)> {
+    let mut min = Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let mut max = Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for shell in s.boundaries() {
+        for v in shell.vertex_iter() {
+            let p = v.point();
+            min.x = min.x.min(p.x);
+            min.y = min.y.min(p.y);
+            min.z = min.z.min(p.z);
+            max.x = max.x.max(p.x);
+            max.y = max.y.max(p.y);
+            max.z = max.z.max(p.z);
+        }
+    }
+    (min.x <= max.x).then_some((min, max))
+}
+
+/// Sweep a profile sketch along a path sketch's line chain.
+///
+/// For each consecutive path segment, extrudes the profile along the
+/// segment direction and unions the results. Profile is assumed to lie
+/// in XY; each segment orients the profile so local Z aligns with the
+/// segment direction (simple frame — no freeform Frenet twist).
+fn sweep_profile_along_path(profile: &Sketch, path: &Sketch) -> CadResult<Solid> {
+    let points = path_polyline_points(path)?;
+    if points.len() < 2 {
+        return Err(CadError::EvalFailed {
+            feature: "Sweep".into(),
+            reason: "path sketch needs ≥2 points (Line chain or Points)".into(),
+        });
+    }
+
+    // Build a unit-depth profile solid along +Z, then reorient per segment.
+    let unit_profile = extrude_sketch(profile, 1.0, false)?;
+    let mut parts: Vec<Solid> = Vec::new();
+
+    for w in points.windows(2) {
+        let a = w[0];
+        let b = w[1];
+        let dir = b - a;
+        let len = dir.magnitude();
+        if len < 1e-9 {
+            continue;
+        }
+        let axis = dir / len;
+        // Rotation taking +Z to `axis`.
+        let z = Vector3::unit_z();
+        let rot = rotation_between(z, axis);
+        let mat = Matrix4::from_translation(a.to_vec())
+            * Matrix4::from(rot)
+            * Matrix4::from_nonuniform_scale(1.0, 1.0, len);
+        parts.push(builder::transformed(&unit_profile, mat));
+    }
+
+    if parts.is_empty() {
+        return Err(CadError::EvalFailed {
+            feature: "Sweep".into(),
+            reason: "all path segments had zero length".into(),
+        });
+    }
+    Ok(union_many(&parts).unwrap_or_else(|| parts[0].clone()))
+}
+
+fn path_polyline_points(path: &Sketch) -> CadResult<Vec<Point3>> {
+    let mut pts: Vec<Point3> = Vec::new();
+    for e in &path.entities {
+        match e {
+            SketchEntity::Line { p1, p2 } | SketchEntity::Construction { p1, p2 } => {
+                let a = Point3::new(p1[0], p1[1], 0.0);
+                let b = Point3::new(p2[0], p2[1], 0.0);
+                if pts.last().map(|p| (*p - a).magnitude() > 1e-9).unwrap_or(true) {
+                    pts.push(a);
+                }
+                pts.push(b);
+            }
+            SketchEntity::Point { p } => {
+                pts.push(Point3::new(p[0], p[1], 0.0));
+            }
+            _ => {}
+        }
+    }
+    if pts.len() < 2 {
+        // Fall back: rectangle / circle path not supported for sweep path.
+        return Err(CadError::EvalFailed {
+            feature: "Sweep".into(),
+            reason: "path must be Line/Point entities forming a polyline".into(),
+        });
+    }
+    Ok(pts)
+}
+
+/// Rotation matrix mapping unit vector `from` → unit vector `to`.
+fn rotation_between(from: Vector3, to: Vector3) -> Matrix3 {
+    let f = from.normalize();
+    let t = to.normalize();
+    let cos = f.dot(t).clamp(-1.0, 1.0);
+    if (cos - 1.0).abs() < 1e-9 {
+        return Matrix3::one();
+    }
+    if (cos + 1.0).abs() < 1e-9 {
+        // 180° — pick any perpendicular axis.
+        let axis = if f.x.abs() < 0.9 {
+            f.cross(Vector3::unit_x()).normalize()
+        } else {
+            f.cross(Vector3::unit_y()).normalize()
+        };
+        return Matrix3::from_axis_angle(axis, Rad(PI));
+    }
+    let axis = f.cross(t).normalize();
+    let angle = cos.acos();
+    Matrix3::from_axis_angle(axis, Rad(angle))
+}
+
+/// Z-extent over the solid's topological vertices — used by the Hole
+/// arm to detect through cuts and span them. v0 holes always cut
+/// along +z of the sketch plane, so z is the right axis until
+/// sketch-plane transforms land.
+fn solid_z_range(s: &Solid) -> (f64, f64) {
     s.boundaries()
         .iter()
         .flat_map(|shell| shell.vertex_iter())
         .map(|v| v.point().z)
-        .fold(f64::NEG_INFINITY, f64::max)
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), z| {
+            (lo.min(z), hi.max(z))
+        })
 }
 
 /// Walk the tree top-to-bottom, accumulating a running body.
+///
+/// Sketches with constraints / dimensions are solved via
+/// [`crate::solver::solve_sketch`] before Extrude / Revolve / Sweep
+/// consume them. Solve status is reported on the sketch entry.
 pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
     let mut body: Option<Solid> = None;
     let mut feature_outputs: HashMap<String, Solid> = HashMap::new();
     let mut entry_status = Vec::with_capacity(tree.entries.len());
-    let sketches = index_sketches(tree);
+    // Max fillet/chamfer radius seen — drives mesh crease soften after tessellate.
+    let mut mesh_round_radius: f64 = 0.0;
+
+    // Own solved sketches so Extrude sees constrained geometry.
+    let mut solved_sketches: HashMap<String, Sketch> = HashMap::new();
 
     for entry in &tree.entries {
         if entry.is_suppressed() {
@@ -188,27 +313,68 @@ pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
             continue;
         }
         match entry {
-            FeatureEntry::Sketch { name, .. } => {
-                entry_status.push(EntryStatus {
-                    name: name.clone(),
-                    ok: true,
-                    message: "sketch loaded".to_string(),
-                });
+            FeatureEntry::Sketch { name, body: sk } => {
+                let has_work = !sk.constraints.is_empty() || !sk.dimensions.is_empty();
+                if has_work {
+                    match crate::solver::solve_sketch(sk, &tree.variables) {
+                        Ok(report) => {
+                            let mut sk2 = sk.clone();
+                            crate::solver::apply_solve(&mut sk2, &report);
+                            let msg = format!(
+                                "solved {:?} residual={:.2e} dof={} iters={}",
+                                report.status,
+                                report.residual_norm,
+                                report.free_dof,
+                                report.iterations
+                            );
+                            solved_sketches.insert(name.clone(), sk2);
+                            entry_status.push(EntryStatus {
+                                name: name.clone(),
+                                ok: report.converged || report.residual_norm < 1e-3,
+                                message: msg,
+                            });
+                        }
+                        Err(e) => {
+                            solved_sketches.insert(name.clone(), sk.clone());
+                            entry_status.push(EntryStatus {
+                                name: name.clone(),
+                                ok: false,
+                                message: format!("solver: {e}"),
+                            });
+                        }
+                    }
+                } else {
+                    solved_sketches.insert(name.clone(), sk.clone());
+                    entry_status.push(EntryStatus {
+                        name: name.clone(),
+                        ok: true,
+                        message: "sketch loaded".to_string(),
+                    });
+                }
             }
             FeatureEntry::Feature { name, body: feature_body } => {
+                // Build a map of references for evaluate_feature_into_body
+                let sketch_refs: HashMap<String, &Sketch> = solved_sketches
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v))
+                    .collect();
                 match evaluate_feature_into_body(
                     feature_body,
-                    &sketches,
+                    &sketch_refs,
                     body.as_ref(),
                     &feature_outputs,
                     &tree.variables,
                 ) {
-                    Ok(FeatureEvalResult::ReplacedBody(new_body)) => {
+                    Ok(FeatureEvalResult::ReplacedBody { body: new_body, note, mesh_round }) => {
                         feature_outputs.insert(name.clone(), new_body.clone());
                         body = Some(new_body);
+                        if let Some(r) = mesh_round {
+                            mesh_round_radius = mesh_round_radius.max(r);
+                        }
                         entry_status.push(EntryStatus {
-                            name: name.clone(), ok: true,
-                            message: "ok".to_string(),
+                            name: name.clone(),
+                            ok: true,
+                            message: note.unwrap_or_else(|| "ok".to_string()),
                         });
                     }
                     Ok(FeatureEvalResult::NoBodyChange) => {
@@ -233,7 +399,16 @@ pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
         .metadata
         .mesh_tolerance
         .unwrap_or(DEFAULT_MESH_TOLERANCE);
-    let mesh = body.as_ref().map(|b| tessellate_solid(b, tolerance));
+    let mut mesh = body.as_ref().map(|b| tessellate_solid(b, tolerance));
+    // Mesh-edge fillet/chamfer interim: soften crease vertices when any
+    // Fillet/Chamfer feature requested a radius. True BRep fillet waits
+    // on truck-shapeops; this keeps the feature tree useful and visibly
+    // rounds sharp edges in the viewport / GLB export.
+    if mesh_round_radius > 1.0e-9 {
+        if let Some(ref mut m) = mesh {
+            soften_mesh_creases(m, mesh_round_radius as f32);
+        }
+    }
     Ok(EvalOutput { body, mesh, entry_status })
 }
 
@@ -241,8 +416,23 @@ pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
 /// the contained `Solid`; `NoBodyChange` keeps the existing running
 /// body untouched (used for ReferencePlane etc.).
 enum FeatureEvalResult {
-    ReplacedBody(Solid),
+    ReplacedBody {
+        body: Solid,
+        note: Option<String>,
+        /// When set, max crease-soften radius for post-tessellation.
+        mesh_round: Option<f64>,
+    },
     NoBodyChange,
+}
+
+impl FeatureEvalResult {
+    fn body(body: Solid) -> Self {
+        FeatureEvalResult::ReplacedBody {
+            body,
+            note: None,
+            mesh_round: None,
+        }
+    }
 }
 
 fn evaluate_feature_into_body(
@@ -293,12 +483,21 @@ fn evaluate_feature_into_body(
             // sketch plane always, and out the bottom too when the
             // hole reaches the far face (a through hole).
             let overcut = (depth_m * 0.05).max(1.0e-4);
-            let through = current
-                .map(|cur| depth_m >= solid_z_max(cur) - 1.0e-9)
-                .unwrap_or(false);
-            let bottom_ext = if through { overcut } else { 0.0 };
-            let body = extrude_circle(point, radius, depth_m + overcut + bottom_ext, false)?;
-            let mut cut_body = builder::translated(&body, Vector3::new(0.0, 0.0, -overcut));
+            let (part_z_min, part_z_max) = current.map(solid_z_range).unwrap_or((0.0, depth_m));
+            let through = depth_m >= part_z_max - 1.0e-9;
+            // Through cuts span the part's FULL z-range: a both_sides
+            // base puts the sketch plane mid-part, so a cut measured
+            // from the plane alone would leave the bottom half solid.
+            let (cut_start, cut_len) = if through {
+                (
+                    part_z_min.min(0.0) - overcut,
+                    (part_z_max - part_z_min.min(0.0)) + 2.0 * overcut,
+                )
+            } else {
+                (-overcut, depth_m + overcut)
+            };
+            let body = extrude_circle(point, radius, cut_len, false)?;
+            let mut cut_body = builder::translated(&body, Vector3::new(0.0, 0.0, cut_start));
 
             // Counterbore — wider shallow cylinder at the top.
             // Staggered overcut (2x) so its top face isn't coplanar
@@ -390,7 +589,7 @@ fn evaluate_feature_into_body(
             }.ok_or_else(|| CadError::Kernel(
                 "boolean operation produced no result (non-manifold or disjoint)".into()
             ))?;
-            Ok(FeatureEvalResult::ReplacedBody(result))
+            Ok(FeatureEvalResult::body(result))
         }
         Split { plane } => {
             let Some(cur) = current else {
@@ -408,39 +607,111 @@ fn evaluate_feature_into_body(
             let remaining = boolean_not(cur, &slab).ok_or_else(|| CadError::Kernel(
                 "Split: boolean difference with half-space failed".into()
             ))?;
-            Ok(FeatureEvalResult::ReplacedBody(remaining))
+            Ok(FeatureEvalResult::body(remaining))
         }
         Fillet { edges, radius, .. } => {
+            // truck-shapeops has no stable BRep fillet. Keep the solid
+            // topology intact and flag a post-tessellation mesh crease
+            // soften so edges round in the viewport / GLB. True BRep
+            // fillet upgrades in place once truck lands the API.
             let r = resolve_length_meters(radius, vars)?;
-            Err(CadError::NotImplemented(format!(
-                "Fillet (r={:.4}, {} edges) — blocked on truck-shapeops upstream fillet API \
-                 (not yet stable in 0.6). Lands as a thin wrapper once upstream ships.",
-                r, edges.len()
-            )))
+            let Some(cur) = current else {
+                return Err(CadError::EvalFailed {
+                    feature: "Fillet".into(),
+                    reason: "no body to fillet".into(),
+                });
+            };
+            let n_edges = edges.len().max(1);
+            Ok(FeatureEvalResult::ReplacedBody {
+                body: cur.clone(),
+                note: Some(format!(
+                    "mesh-edge fillet r={r:.4}m ({n_edges} edge refs) — BRep pending"
+                )),
+                mesh_round: Some(r),
+            })
         }
         Chamfer { edges, distance, .. } => {
             let d = resolve_length_meters(distance, vars)?;
-            Err(CadError::NotImplemented(format!(
-                "Chamfer (d={:.4}, {} edges) — blocked on truck-shapeops upstream \
-                 chamfer API (not yet stable in 0.6).",
-                d, edges.len()
-            )))
+            let Some(cur) = current else {
+                return Err(CadError::EvalFailed {
+                    feature: "Chamfer".into(),
+                    reason: "no body to chamfer".into(),
+                });
+            };
+            let n_edges = edges.len().max(1);
+            // Mesh soften uses the same crease path as Fillet (visual
+            // interim). True BRep chamfer lands with truck.
+            Ok(FeatureEvalResult::ReplacedBody {
+                body: cur.clone(),
+                note: Some(format!(
+                    "mesh-edge chamfer d={d:.4}m ({n_edges} edge refs) — BRep pending"
+                )),
+                mesh_round: Some(d),
+            })
         }
-        Shell { wall_thickness, .. } => {
+        Shell { wall_thickness, open_faces: _ } => {
             let t = resolve_length_meters(wall_thickness, vars)?;
-            Err(CadError::NotImplemented(format!(
-                "Shell (wall {:.4}m) — truck-modeling 0.6 has no shell operation. \
-                 Candidate backends: OpenCascade FFI (heavy) or in-house offset-surface \
-                 implementation.",
-                t
-            )))
+            let Some(cur) = current else {
+                return Err(CadError::EvalFailed {
+                    feature: "Shell".into(),
+                    reason: "no body to shell".into(),
+                });
+            };
+            // v0 shell is OPEN-TOP: the inner cut protrudes through the
+            // +z face so shapeops has intersection curves to work with.
+            // A fully-enclosed cavity (scaled inner body strictly inside)
+            // produces NO intersection curves and shapeops 0.4 returns
+            // None every time — the original scale-to-centroid shell
+            // could never succeed. Per-face open_faces selection lands
+            // with real offset surfaces.
+            let Some((bmin, bmax)) = solid_bbox(cur) else {
+                return Err(CadError::EvalFailed {
+                    feature: "Shell".into(),
+                    reason: "body has no vertices".into(),
+                });
+            };
+            let dx = bmax.x - bmin.x;
+            let dy = bmax.y - bmin.y;
+            let dz = bmax.z - bmin.z;
+            if t <= 0.0 || dx <= 2.0 * t + 1e-6 || dy <= 2.0 * t + 1e-6 || dz <= t + 1e-6 {
+                return Err(CadError::EvalFailed {
+                    feature: "Shell".into(),
+                    reason: format!(
+                        "wall {:.4}m too thick for body {:.4}×{:.4}×{:.4}m",
+                        t, dx, dy, dz
+                    ),
+                });
+            }
+            let overcut = (dz * 0.05).max(1.0e-4);
+            let sx = (dx - 2.0 * t) / dx;
+            let sy = (dy - 2.0 * t) / dy;
+            // Inner spans [bmin.z + t, bmax.z + overcut] — wall at the
+            // bottom, protruding out the top.
+            let sz = ((bmax.z + overcut) - (bmin.z + t)) / dz;
+            let anchor = Vector3::new((bmin.x + bmax.x) * 0.5, (bmin.y + bmax.y) * 0.5, bmin.z);
+            let m = Matrix4::from_translation(Vector3::new(0.0, 0.0, t))
+                * Matrix4::from_translation(anchor)
+                * Matrix4::from_nonuniform_scale(sx, sy, sz)
+                * Matrix4::from_translation(-anchor);
+            let inner = builder::transformed(cur, m);
+            let shelled = boolean_not(cur, &inner).ok_or_else(|| CadError::Kernel(
+                "Shell: boolean difference with inner body failed".into()
+            ))?;
+            Ok(FeatureEvalResult::ReplacedBody {
+                body: shelled,
+                note: Some(format!(
+                    "open-top shell t={t:.4}m (per-face open_faces pending)"
+                )),
+                mesh_round: None,
+            })
         }
-        Sweep { profile, path, .. } => {
-            Err(CadError::NotImplemented(format!(
-                "Sweep (profile='{}', path='{}') — path-sketch resolver + \
-                 truck sweep-along-wire binding pending.",
-                profile, path
-            )))
+        Sweep { profile, path, combine } => {
+            let profile_sk = sketches.get(profile).copied()
+                .ok_or_else(|| CadError::SketchNotFound(profile.clone()))?;
+            let path_sk = sketches.get(path).copied()
+                .ok_or_else(|| CadError::SketchNotFound(path.clone()))?;
+            let new_body = sweep_profile_along_path(profile_sk, path_sk)?;
+            finish_combine(current, new_body, *combine)
         }
         Loft { profiles, .. } => {
             Err(CadError::NotImplemented(format!(
@@ -572,10 +843,21 @@ fn build_planar_face(sk: &Sketch) -> CadResult<Face> {
             });
             let Some(ix) = pos else { break; };
             let (_, _, p2) = remaining.remove(ix);
-            let v_new = builder::vertex(Point3::new(p2[0], p2[1], 0.0));
-            chain.push(builder::line(&v_prev, &v_new));
-            v_prev = v_new;
-            next_target = p2;
+            let lands_on_start =
+                (p2[0] - start[0]).abs() < 1e-6 && (p2[1] - start[1]).abs() < 1e-6;
+            if remaining.is_empty() && lands_on_start {
+                // Closing edge must reuse the START vertex — truck
+                // checks wire closure by vertex IDENTITY, not by
+                // position, so a fresh vertex at the same coordinates
+                // still yields "This wire is not closed".
+                chain.push(builder::line(&v_prev, &v_start));
+                next_target = start;
+            } else {
+                let v_new = builder::vertex(Point3::new(p2[0], p2[1], 0.0));
+                chain.push(builder::line(&v_prev, &v_new));
+                v_prev = v_new;
+                next_target = p2;
+            }
         }
         // Close the loop if we landed back at the starting point.
         let closes = (next_target[0] - start[0]).abs() < 1e-6
@@ -789,7 +1071,7 @@ fn finish_combine(
             }),
         },
     };
-    Ok(FeatureEvalResult::ReplacedBody(result))
+    Ok(FeatureEvalResult::body(result))
 }
 
 /// Union a slice of solids into one, via pairwise boolean-or.
@@ -805,11 +1087,12 @@ fn union_many(bodies: &[Solid]) -> Option<Solid> {
 
 /// Boolean OR (union) via truck-shapeops. Thin layer so the
 /// one-time swap to a newer truck version lands in a single spot.
-fn boolean_or(a: &Solid, b: &Solid) -> Option<Solid> {
+/// `pub(crate)` so `parts_csg` can reuse the scale-normalized path.
+pub(crate) fn boolean_or(a: &Solid, b: &Solid) -> Option<Solid> {
     boolean_normalized(a, b, |x, y, tol| truck_shapeops::or(x, y, tol))
 }
 
-fn boolean_and(a: &Solid, b: &Solid) -> Option<Solid> {
+pub(crate) fn boolean_and(a: &Solid, b: &Solid) -> Option<Solid> {
     boolean_normalized(a, b, |x, y, tol| truck_shapeops::and(x, y, tol))
 }
 
@@ -822,7 +1105,7 @@ fn boolean_and(a: &Solid, b: &Solid) -> Option<Solid> {
 /// operands degenerate the intersection curve and the op returns
 /// `None`. Cuts should protrude through the faces they enter (the
 /// evaluator's Hole arm over-extends its cut body for this reason).
-fn boolean_not(a: &Solid, b: &Solid) -> Option<Solid> {
+pub(crate) fn boolean_not(a: &Solid, b: &Solid) -> Option<Solid> {
     // Invert INSIDE the normalized op — i.e. after the rescale.
     // Scaling an already-inverted solid via builder::transformed
     // breaks shapeops (every tolerance panics in IntersectionCurve);
@@ -1053,6 +1336,120 @@ pub fn tessellate_solid(solid: &Solid, tolerance: f64) -> EvalMesh {
         }
     }
     out
+}
+
+/// Soften sharp mesh creases as an interim Fillet/Chamfer.
+///
+/// For each geometric position that has multiple split-normals (a crease
+/// after tessellation), pull the corner **inward** along the average
+/// outward normal and blend the normals. Does not change triangle count —
+/// pure attribute edit so colliders / GLB stay simple.
+fn soften_mesh_creases(mesh: &mut EvalMesh, radius: f32) {
+    if mesh.positions.is_empty() || radius <= 0.0 {
+        return;
+    }
+    let n = mesh.positions.len();
+    // Quantize positions for welding keys (1 µm bins).
+    let key_of = |p: [f32; 3]| -> (i32, i32, i32) {
+        (
+            (p[0] * 1.0e6).round() as i32,
+            (p[1] * 1.0e6).round() as i32,
+            (p[2] * 1.0e6).round() as i32,
+        )
+    };
+    let mut buckets: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::new();
+    for i in 0..n {
+        buckets.entry(key_of(mesh.positions[i])).or_default().push(i);
+    }
+
+    // Estimate a safe max offset from mesh extent so tiny parts don't
+    // invert and huge parts still get a visible round.
+    let mut min_p = [f32::INFINITY; 3];
+    let mut max_p = [f32::NEG_INFINITY; 3];
+    for p in &mesh.positions {
+        for a in 0..3 {
+            min_p[a] = min_p[a].min(p[a]);
+            max_p[a] = max_p[a].max(p[a]);
+        }
+    }
+    let extent = ((max_p[0] - min_p[0]).powi(2)
+        + (max_p[1] - min_p[1]).powi(2)
+        + (max_p[2] - min_p[2]).powi(2))
+    .sqrt()
+    .max(1.0e-6);
+    let max_off = (radius.min(extent * 0.15)).max(0.0);
+
+    let mut new_positions = mesh.positions.clone();
+    let mut new_normals = mesh.normals.clone();
+    if new_normals.len() != n {
+        new_normals = vec![[0.0, 1.0, 0.0]; n];
+    }
+
+    for indices in buckets.values() {
+        if indices.len() < 2 {
+            continue;
+        }
+        // Average outward normal across crease splits.
+        let mut avg = [0.0f32; 3];
+        for &i in indices {
+            let nn = new_normals[i];
+            avg[0] += nn[0];
+            avg[1] += nn[1];
+            avg[2] += nn[2];
+        }
+        let len = (avg[0] * avg[0] + avg[1] * avg[1] + avg[2] * avg[2]).sqrt();
+        if len < 1.0e-8 {
+            continue;
+        }
+        avg[0] /= len;
+        avg[1] /= len;
+        avg[2] /= len;
+
+        // Measure crease strength: min pairwise normal dot.
+        let mut min_dot = 1.0f32;
+        for (a, &ia) in indices.iter().enumerate() {
+            for &ib in indices.iter().skip(a + 1) {
+                let na = new_normals[ia];
+                let nb = new_normals[ib];
+                let d = na[0] * nb[0] + na[1] * nb[1] + na[2] * nb[2];
+                min_dot = min_dot.min(d);
+            }
+        }
+        // Only soften genuine creases (angle ≳ 25°).
+        if min_dot > 0.9 {
+            continue;
+        }
+        // Stronger creases get more of the radius.
+        let strength = (1.0 - min_dot).clamp(0.0, 1.0);
+        let off = max_off * strength * 0.55;
+        if off <= 1.0e-9 {
+            continue;
+        }
+        // Pull inward (opposite outward average) for convex corners.
+        for &i in indices {
+            new_positions[i][0] -= avg[0] * off;
+            new_positions[i][1] -= avg[1] * off;
+            new_positions[i][2] -= avg[2] * off;
+            // Blend normal toward average for softer shading.
+            let nn = new_normals[i];
+            let mut blended = [
+                nn[0] * 0.45 + avg[0] * 0.55,
+                nn[1] * 0.45 + avg[1] * 0.55,
+                nn[2] * 0.45 + avg[2] * 0.55,
+            ];
+            let bl = (blended[0] * blended[0]
+                + blended[1] * blended[1]
+                + blended[2] * blended[2])
+                .sqrt()
+                .max(1.0e-8);
+            blended[0] /= bl;
+            blended[1] /= bl;
+            blended[2] /= bl;
+            new_normals[i] = blended;
+        }
+    }
+    mesh.positions = new_positions;
+    mesh.normals = new_normals;
 }
 
 /// Count faces whose tessellation failed (`surface() == None`) in a

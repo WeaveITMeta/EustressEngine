@@ -37,6 +37,9 @@ toml = "0.8"
 # the disk shape of an MCP-created entity matches every other surface
 # (Insert menu, Toolbox, Model ribbon).
 eustress-common = { path = "../common" }
+# Parametric CAD kernel — cad_create_part / cad_export_glb evaluate
+# feature trees and write .glb without a live Studio.
+eustress-cad = { path = "../cad" }
 
 # Base64 — `script_tools::ImageToCodeTool` encodes images for Claude's
 # vision API. Kept here so the tool works identically out-of-process.

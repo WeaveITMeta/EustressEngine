@@ -140,9 +140,27 @@ jobs:
           # `-e normal,build` excludes dev-dependencies (the `cargo run` graph,
           # not the test graph). No feature flags are passed, so default features
           # are used.
-          tree="$(cargo tree -p eustress-engine -e normal,build)"
+          #
+          # NOTE: this job silently failed on every push since 2026-06-25
+          # (18+ consecutive runs) with the misleading "eustress-data is
+          # missing" message below, even though the feature wiring in
+          # Cargo.toml is correct and a local `cargo tree` reproduces the
+          # leaf fine. `cargo tree` itself was never checked for its own
+          # exit code, so a resolution failure on a clean CI checkout (no
+          # committed Cargo.lock — see .gitignore) would produce empty/
+          # partial `$tree` and get blamed on the data feature instead of
+          # whatever actually failed. Surface that honestly.
+          set +e
+          tree="$(cargo tree -p eustress-engine -e normal,build 2>tree-stderr.log)"
+          tree_exit=$?
+          set -e
+          if [ "$tree_exit" -ne 0 ]; then
+            echo "::error::cargo tree itself failed (exit $tree_exit) — this is a dependency-resolution failure, NOT evidence eustress-data is missing from the feature graph. stderr:"
+            cat tree-stderr.log
+            exit 1
+          fi
           if ! printf '%s\n' "$tree" | grep -Eiq ' eustress-data v[0-9]'; then
-            echo "::error::eustress-data is missing from the default eustress-engine graph; the default 'data' feature wiring is broken."
+            echo "::error::eustress-data is missing from the default eustress-engine graph (cargo tree itself succeeded); the default 'data' feature wiring is broken."
             exit 1
           fi
           echo "OK: default engine graph includes eustress-data (Data Platform on by default)."

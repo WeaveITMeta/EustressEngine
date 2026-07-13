@@ -882,7 +882,7 @@ mod tests {
         ));
         assert!(matches!(
             route_file_to_tab_type(Path::new("script.soul")),
-            CenterTabType::SoulScript
+            CenterTabType::SoulScript { .. }
         ));
         assert!(matches!(
             route_file_to_tab_type(Path::new("image.png")),

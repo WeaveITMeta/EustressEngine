@@ -508,11 +508,14 @@ fn activate_modal_tool_system(
     mut active: ResMut<ActiveModalTool>,
     mut studio_state: Option<ResMut<StudioState>>,
     mut commands: Commands,
+    mut notifications: Option<ResMut<crate::notifications::NotificationManager>>,
 ) {
     for event in events.read() {
         match registry.spawn(&event.tool_id) {
             Some(tool) => {
                 let id = tool.id();
+                let name = tool.name().to_string();
+                let step = tool.step_label();
                 active.activate(tool, &mut commands);
                 // Non-modal tools key off StudioState.current_tool to
                 // decide whether to run their interaction systems. Kick
@@ -521,10 +524,18 @@ fn activate_modal_tool_system(
                 if let Some(ref mut state) = studio_state {
                     state.current_tool = Tool::Select;
                 }
+                // Immediate toast so Drafting tools never feel "dead" —
+                // users know the tool is armed and what to click next.
+                if let Some(ref mut n) = notifications {
+                    n.info(format!("{name}: {step}  (Esc to cancel)"));
+                }
                 info!("🔧 Modal tool activated: {}", id);
             }
             None => {
                 warn!("⚠ Unknown modal tool id: '{}' — not in ModalToolRegistry", event.tool_id);
+                if let Some(ref mut n) = notifications {
+                    n.warning(format!("Unknown tool '{}'", event.tool_id));
+                }
             }
         }
     }
@@ -536,6 +547,7 @@ fn cancel_modal_tool_system(
     mouse: Res<ButtonInput<MouseButton>>,
     mut active: ResMut<ActiveModalTool>,
     mut commands: Commands,
+    ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
 ) {
     // Cancel triggers: Escape OR an explicit `CancelModalToolEvent`
     // (fired by the × button on the Tool Options Bar, the viewport
@@ -545,7 +557,17 @@ fn cancel_modal_tool_system(
     // cancel was a prior mis-wire that users called out 2026-04-23:
     // "right click makes the tool disappear". The explicit-event
     // path still covers intentional cancels from UI chrome.
-    let esc = keys.just_pressed(KeyCode::Escape);
+    //
+    // Esc while a text field is focused must only blur the field —
+    // without this guard, pressing Esc inside a ToolOptionsBar
+    // NumericField also cancelled the whole tool session, discarding
+    // the in-progress pick sequence (DRAFTING_UX.md Law 1: one owner
+    // per keypress, innermost first).
+    let text_focused = ui_focus
+        .as_ref()
+        .map(|f| f.text_input_focused)
+        .unwrap_or(false);
+    let esc = keys.just_pressed(KeyCode::Escape) && !text_focused;
     let explicit = events.read().next().is_some();
     // Prevent `mouse` from being unused while we keep the reference
     // around — some call sites still read the button state upstream

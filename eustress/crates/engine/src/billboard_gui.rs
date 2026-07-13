@@ -75,20 +75,73 @@ const PIXELS_PER_METER: f32 = 50.0;
 /// blocks line-of-sight" UX.
 const Z_INDEX_METRES_PER_UNIT: f32 = 0.5;
 
-/// Atlas tile pixel width. Sized to fit billboards up to ~2.5 m × 2.5 m
-/// world quads without aspect distortion (2.5 m × 50 px/m = 125 logical
-/// pixels, fits comfortably in 128). Oversized billboards are clamped
-/// at render time and a one-shot warn is emitted. Shrunk from 256: the
-/// vast majority of observed billboard content renders into a ~100×30 px
-/// rect (Roblox-authored TextLabel default), far smaller than even this
-/// tile — the extra headroom above ~130px was mostly wasted atlas space.
-const TILE_W: u32 = 128;
+/// Atlas tile pixel width. 128 previously looked sufficient because most
+/// observed billboards were collapsing to a ~100×30 px fallback rect from
+/// an unrelated bug (`GuiTomlProperties.size` never reading the imported
+/// `size_scale`/`size_offset` pair) — once that's fixed, authored sizes
+/// range far larger (e.g. 20×6 studs = 1000×300 px at 50 px/stud), so no
+/// fixed tile size avoids clamping for signage-scale content. 192 trades
+/// some of the slot-count gain from the 128 shrink back for legibility —
+/// text (especially `TextScaled` content, which stretches to fill
+/// whatever pixels it's given) reads clearly at this size where it didn't
+/// at 128. Oversized billboards are still clamped at render time with a
+/// one-shot warn.
+const TILE_W: u32 = 192;
 /// Tile pixel height. Equal to `TILE_W` (square tiles) so vertical
-/// canvas dimensions up to ~2.5 m fit without clamping. Asymmetric tiles
-/// stretch any billboard whose canvas exceeds the tile height — vertical
-/// text gets aspect-distorted by `canvas_h / TILE_H`. Square tiles trade
-/// slot density for distortion-free rendering up to 2.5 studs per axis.
-const TILE_H: u32 = 128;
+/// canvas dimensions fit without clamping up to the same size as
+/// horizontal. Asymmetric tiles stretch any billboard whose canvas
+/// exceeds the tile height — vertical text gets aspect-distorted by
+/// `canvas_h / TILE_H`.
+const TILE_H: u32 = 192;
+
+/// Uniform shrink factor that fits a `raw_w_px × raw_h_px` canvas inside a
+/// `TILE_W × TILE_H` tile. `1.0` when the canvas already fits (the common
+/// case — most authored billboards are well under 192 px/stud-equivalent).
+///
+/// **Why uniform, not per-axis.** The tile clamp used to be two independent
+/// `.min()`s — `w.min(TILE_W)`, `h.min(TILE_H)` — which squashes a wide,
+/// short billboard (e.g. a 16×4.8-stud sign, aspect 3.33:1) into a SQUARE
+/// 192×192 canvas. `collect_subtree` then lays out children (including
+/// `TextScaled` auto-fit) against that square canvas, and the UV mapping in
+/// `sync_billboard_properties`/`spawn_billboard_render_state` stretches
+/// whatever fills it back out to the billboard's true (unclamped) world
+/// quad — non-uniformly, since the two axes were clamped by different
+/// ratios. A single scalar keeps both axes clamped by the SAME ratio, so
+/// the rendered content's aspect ratio always matches the world quad's.
+///
+/// **Why this alone doesn't fix oversized text.** Layout must ALSO run in
+/// TRUE (unclamped) pixel space — see `update_and_render_billboards`. If
+/// `collect_subtree` resolved child sizes against the CLAMPED canvas, a
+/// `TextScaled` label would auto-fit to "fill 100% of the shrunken canvas"
+/// well before its 72-px ceiling ever binds (a giant billboard's canvas
+/// shrinks so much that 100%-width text needs far fewer than 72 px), and
+/// that near-100%-filled shrunken canvas then UV-stretches back out to
+/// fill nearly the ENTIRE (large) world quad — text that should have been
+/// capped at ~1.44 studs (72 px ÷ 50 px/stud) instead grows to fill the
+/// whole sign. Doing layout unclamped and applying this scale ONLY at the
+/// final raster step (in `render_element` / `render_text`) keeps the true
+/// 72-px ceiling meaningful in world terms regardless of tile budget —
+/// oversized billboards render their (correctly-proportioned, correctly-
+/// sized-relative-to-the-billboard) content smaller/blurrier instead of
+/// magnified past their true footprint.
+fn tile_content_scale(raw_w_px: f32, raw_h_px: f32) -> f32 {
+    (TILE_W as f32 / raw_w_px.max(1.0))
+        .min(TILE_H as f32 / raw_h_px.max(1.0))
+        .min(1.0)
+}
+
+/// Canvas pixel dimensions actually rasterized into the atlas tile, plus
+/// the [`tile_content_scale`] used to get there. `raw_w_px × raw_h_px`
+/// scaled uniformly and rounded, clamped to `[1, TILE_W]` / `[1, TILE_H]`
+/// so degenerate (near-zero) input never produces a zero-size `Pixmap`
+/// region.
+fn clamped_canvas_size(raw_w_px: f32, raw_h_px: f32) -> (u32, u32, f32) {
+    let scale = tile_content_scale(raw_w_px, raw_h_px);
+    let w = ((raw_w_px * scale).round() as u32).clamp(1, TILE_W);
+    let h = ((raw_h_px * scale).round() as u32).clamp(1, TILE_H);
+    (w, h, scale)
+}
+
 /// Atlas columns — `cols` on [`BillboardAtlas`], NOT a constant. Fixed for
 /// the atlas's lifetime once chosen (`try_grow` only adds rows, so every
 /// existing tile's `umin/umax` survives a grow untouched — only `vmin/vmax`
@@ -291,6 +344,12 @@ pub struct BillboardAtlasTile {
 pub struct BillboardRenderHandle {
     pub width: u32,
     pub height: u32,
+    /// [`tile_content_scale`] for this billboard's current size — `1.0`
+    /// unless the canvas exceeds the tile budget. Layout in
+    /// `update_and_render_billboards` runs in TRUE (unclamped) pixel space
+    /// and `render_element` / `render_text` apply this factor only at the
+    /// final raster step; see `tile_content_scale`'s doc comment.
+    pub content_scale: f32,
     pub last_label_hash: u64,
 }
 
@@ -548,18 +607,17 @@ fn spawn_billboard_render_state(
             break;
         }
 
-        let raw_w = marker.size[0].max(1.0) as u32;
-        let raw_h = marker.size[1].max(1.0) as u32;
-        // Clamp to tile size — oversized content gets cropped, but the
-        // billboard still spawns. Wide billboards beyond TILE_W get
-        // cropped on the right; tall billboards beyond TILE_H get
-        // cropped on the bottom.
-        let w = raw_w.min(TILE_W);
-        let h = raw_h.min(TILE_H);
-        if raw_w > TILE_W || raw_h > TILE_H {
+        let raw_w_px = marker.size[0].max(1.0);
+        let raw_h_px = marker.size[1].max(1.0);
+        // Uniform clamp to tile size — see `tile_content_scale` doc
+        // comment. Oversized content renders smaller/blurrier (scaled by
+        // `content_scale` at raster time) rather than cropped or
+        // magnified; the billboard still spawns at its correct world size.
+        let (w, h, content_scale) = clamped_canvas_size(raw_w_px, raw_h_px);
+        if content_scale < 1.0 {
             warn!(
-                "🪧 billboard {:?}: size {}×{} exceeds tile {}×{} — clamped",
-                entity, raw_w, raw_h, TILE_W, TILE_H,
+                "🪧 billboard {:?}: size {:.0}×{:.0}px exceeds tile {}×{} — content scaled to {:.1}%",
+                entity, raw_w_px, raw_h_px, TILE_W, TILE_H, content_scale * 100.0,
             );
         }
 
@@ -665,6 +723,7 @@ fn spawn_billboard_render_state(
             BillboardRenderHandle {
                 width: w,
                 height: h,
+                content_scale,
                 last_label_hash: 0,
             },
         ));
@@ -903,17 +962,21 @@ fn sync_billboard_properties(
         //               billboard regardless of atlas tile dimensions.
         //
         //   canvas_w / canvas_h = the actual pixel region inside the
-        //               atlas tile. Capped at TILE_W/H because the
-        //               atlas slot is fixed-size; oversized canvases
-        //               render their content scaled down or cropped.
+        //               atlas tile. Capped at TILE_W/H (uniformly — see
+        //               `tile_content_scale`) because the atlas slot is
+        //               fixed-size; oversized canvases render their
+        //               content scaled down via `content_scale`, applied
+        //               only at the final raster step in
+        //               `update_and_render_billboards`/`render_text` so
+        //               layout (incl. TextScaled auto-fit) still runs
+        //               against the TRUE unclamped size below.
         //
         // Previously the world scale ALSO used the clamped value, which
         // made `Scale = 10` produce a 5.12-stud billboard (TILE_W / 50)
         // instead of 10 — visibly indistinguishable from `Scale = 5`.
         let raw_w_px = marker.size[0].max(1.0);
         let raw_h_px = marker.size[1].max(1.0);
-        let canvas_w = (raw_w_px as u32).min(TILE_W);
-        let canvas_h = (raw_h_px as u32).min(TILE_H);
+        let (canvas_w, canvas_h, content_scale) = clamped_canvas_size(raw_w_px, raw_h_px);
 
         // World scale derived from UNCLAMPED size every frame — without
         // the comparison guard we always reflect the latest UDim2 edit
@@ -940,6 +1003,7 @@ fn sync_billboard_properties(
         if canvas_w != handle.width || canvas_h != handle.height {
             handle.width = canvas_w;
             handle.height = canvas_h;
+            handle.content_scale = content_scale;
             handle.last_label_hash = 0; // force re-render
 
             let (uv_min, uv_max) = atlas.slot_uv(tile.slot);
@@ -957,11 +1021,12 @@ fn sync_billboard_properties(
             uv.uv_min = Vec2::new(uv_min.x + half_u, uv_min.y + half_v);
             uv.uv_max = Vec2::new(effective_umax - half_u, effective_vmax - half_v);
 
-            if (raw_w_px as u32) > TILE_W || (raw_h_px as u32) > TILE_H {
+            if content_scale < 1.0 {
                 warn!(
-                    "🪧 billboard {:?}: canvas {}×{} px capped at tile {}×{}; world quad still {:.2}×{:.2} m",
-                    entity, raw_w_px as u32, raw_h_px as u32, TILE_W, TILE_H,
-                    target_world.x, target_world.y,
+                    "🪧 billboard {:?}: canvas {:.0}×{:.0}px capped at tile {}×{} \
+                     (content scaled to {:.1}%); world quad still {:.2}×{:.2} m",
+                    entity, raw_w_px, raw_h_px, TILE_W, TILE_H,
+                    content_scale * 100.0, target_world.x, target_world.y,
                 );
             }
         }
@@ -1153,7 +1218,7 @@ fn collect_subtree(
 fn update_and_render_billboards(
     mut text_state: NonSendMut<BillboardTextState>,
     mut atlas: NonSendMut<BillboardAtlas>,
-    mut billboards: Query<(Entity, &mut BillboardRenderHandle, &BillboardAtlasTile, &GlobalTransform)>,
+    mut billboards: Query<(Entity, &mut BillboardRenderHandle, &BillboardAtlasTile, &GlobalTransform, &BillboardGuiMarker)>,
     cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
     gui_elements: Query<(Entity, &GuiElementDisplay, &ChildOf)>,
     // Billboards typically host children (TextLabel, Frame, …) that
@@ -1201,7 +1266,7 @@ fn update_and_render_billboards(
     // per-node full scan of every GuiElementDisplay — the 120 ms/frame).
     let mut child_index: Option<GuiChildIndex<'_>> = None;
 
-    for (entity, mut handle, tile, bb_tf) in &mut billboards {
+    for (entity, mut handle, tile, bb_tf, marker) in &mut billboards {
         if let Some(cp) = cam_pos {
             if bb_tf.translation().distance_squared(cp) > BILLBOARD_CULL_RADIUS_SQ {
                 continue;
@@ -1223,14 +1288,20 @@ fn update_and_render_billboards(
         let children_of =
             child_index.get_or_insert_with(|| build_gui_child_index(&gui_elements));
         let mut flat: Vec<FlatElem> = Vec::new();
-        // Root parent rect = the billboard's resolved canvas, so a
-        // child with `Size = UDim2(1, 0, 1, 0)` fills the billboard's
-        // pixel canvas exactly. Without this, root children would
-        // resolve `Scale` against 0 width/height and collapse to their
-        // Offset alone — which is why a `(1, 0, 1, 0)` TextLabel
-        // disappeared.
-        let parent_w = handle.width as f32;
-        let parent_h = handle.height as f32;
+        // Root parent rect = the billboard's TRUE (unclamped) pixel size,
+        // NOT the raster canvas (`handle.width`/`height`, which may be
+        // scaled down by `handle.content_scale` to fit the atlas tile —
+        // see `tile_content_scale`). Laying out (and auto-fitting
+        // `TextScaled` text) against the unclamped size keeps a child's
+        // `Size = UDim2(1, 0, 1, 0)` filling the billboard's true pixel
+        // canvas exactly and keeps the 72-px `TextScaled` ceiling meaningful
+        // in world terms (72px ÷ 50px/stud) regardless of tile budget.
+        // `render_element`/`render_text` apply `content_scale` at the final
+        // raster step so oversized billboards still fit inside their
+        // (possibly much smaller) atlas tile.
+        let parent_w = marker.size[0].max(1.0);
+        let parent_h = marker.size[1].max(1.0);
+        let content_scale = handle.content_scale;
         // Root: the billboard's own GuiElementDisplay if it has one.
         // Walking from `entity` covers descendants; this handles the
         // childless-but-self-displaying case.
@@ -1274,7 +1345,7 @@ fn update_and_render_billboards(
             if !f.elem.visible {
                 continue;
             }
-            render_element(&mut pixmap, &f.elem, f.abs_x, f.abs_y, f.clip_rect, &mut text_state);
+            render_element(&mut pixmap, &f.elem, f.abs_x, f.abs_y, f.clip_rect, content_scale, &mut text_state);
         }
 
         let atlas_w_px = atlas.atlas_w_px();
@@ -1344,15 +1415,28 @@ fn render_element(
     abs_x: f32,
     abs_y: f32,
     clip_rect: Option<[f32; 4]>,
+    content_scale: f32,
     text_state: &mut BillboardTextState,
 ) {
-    let x = abs_x;
-    let y = abs_y;
-    let w = elem.width.max(1.0);
-    let h = elem.height.max(1.0);
-    let r = elem.corner_radius;
+    // `abs_x`/`abs_y`/`elem.width`/`elem.height`/`clip_rect` all arrive in
+    // TRUE (unclamped) pixel space — see `tile_content_scale` doc comment.
+    // Scale to raster space HERE, at the last possible moment, so every
+    // draw call below lands inside the (possibly much smaller) `pixmap`.
+    // `render_text` (below) gets the ORIGINAL unscaled `clip_rect` — it
+    // does its own scaling internally, alongside the font size and fit-box,
+    // so every value it touches stays in one consistent space rather than
+    // mixing a pre-scaled clip against unscaled `elem.width`/`height`.
+    let x = abs_x * content_scale;
+    let y = abs_y * content_scale;
+    let w = (elem.width * content_scale).max(1.0);
+    let h = (elem.height * content_scale).max(1.0);
+    let r = elem.corner_radius * content_scale;
 
-    let mask = clip_rect.and_then(|c| build_clip_mask(pixmap.width(), pixmap.height(), c));
+    let raster_clip = clip_rect.map(|c| [
+        c[0] * content_scale, c[1] * content_scale,
+        c[2] * content_scale, c[3] * content_scale,
+    ]);
+    let mask = raster_clip.and_then(|c| build_clip_mask(pixmap.width(), pixmap.height(), c));
     let mask_ref = mask.as_ref();
 
     // Background fill
@@ -1381,7 +1465,7 @@ fn render_element(
         );
         paint.anti_alias = true;
         let mut stroke = Stroke::default();
-        stroke.width = elem.border_size;
+        stroke.width = (elem.border_size * content_scale).max(0.1);
 
         let path = rounded_rect_path(x, y, w, h, r);
         pixmap.stroke_path(&path, &paint, &stroke, TsTransform::identity(), mask_ref);
@@ -1408,9 +1492,13 @@ fn render_element(
         pixmap.stroke_path(&path, &stroke_paint, &stroke, TsTransform::identity(), mask_ref);
     }
 
-    // Text
+    // Text — `render_text` takes the TRUE-space `abs_x`/`abs_y`/`clip_rect`
+    // (matching `elem.width`/`elem.height`, which it also reads unscaled
+    // for the auto-fit test) plus `content_scale`, and scales position,
+    // font size, fit-box, and clip itself so every value it touches stays
+    // in one consistent space.
     if !elem.text.is_empty() && elem.text_color[3] > 0.0 {
-        render_text(pixmap, elem, abs_x, abs_y, clip_rect, text_state);
+        render_text(pixmap, elem, abs_x, abs_y, clip_rect, content_scale, text_state);
     }
 }
 
@@ -1420,8 +1508,18 @@ fn render_text(
     abs_x: f32,
     abs_y: f32,
     clip_rect: Option<[f32; 4]>,
+    content_scale: f32,
     text_state: &mut BillboardTextState,
 ) {
+    // `abs_x`/`abs_y`/`clip_rect` and `elem.width`/`elem.height` are all
+    // TRUE (unclamped) pixel space here — see `tile_content_scale`'s doc
+    // comment. The auto-fit search below MUST run against the unclamped
+    // `elem.width`/`elem.height`: that's what keeps the `72`-px ceiling
+    // meaning "~1.44 studs" regardless of how small the atlas tile forces
+    // the actual raster to be. `content_scale` is applied once, further
+    // down, to convert the chosen (TRUE-space) font size and the fit-box
+    // into the raster-space values cosmic-text actually shapes/draws with.
+    //
     // Resolve font size — either the user-specified `font_size` or, when
     // `TextScaled` is on, the largest size that fits inside the
     // element's rect via binary-search. The search shape-tests at each
@@ -1512,6 +1610,23 @@ fn render_text(
         }
     }
 
+    // Convert the TRUE-space font size and fit-box to raster space — the
+    // only place in this function that applies `content_scale`. Floored at
+    // 1 px so a heavily-oversized billboard (canvas shrunk far below its
+    // true size) still shapes a valid, if tiny/blurry, glyph run instead of
+    // a degenerate zero/negative-size request to cosmic-text.
+    let font_size = (font_size * content_scale).max(1.0);
+    let fit_w = (elem.width * content_scale).max(1.0);
+    let fit_h = (elem.height * content_scale).max(1.0);
+    // Both glyph-blit passes below compare integer pixel coordinates
+    // derived from `origin_x`/`origin_y` (raster-space, scaled further
+    // down) against this clip rect — it must be raster-space too, or the
+    // comparison silently mixes units and clips at the wrong boundary.
+    let clip_rect = clip_rect.map(|c| [
+        c[0] * content_scale, c[1] * content_scale,
+        c[2] * content_scale, c[3] * content_scale,
+    ]);
+
     // 1.4x line-height: tighter than typical 1.5 but more readable than the
     // 1.2 cosmic-text default at small sizes.
     let metrics = Metrics::new(font_size, font_size * 1.4);
@@ -1519,8 +1634,8 @@ fn render_text(
     let mut buffer = TextBuffer::new(&mut text_state.font_system, metrics);
     buffer.set_size(
         &mut text_state.font_system,
-        Some(elem.width),
-        Some(elem.height),
+        Some(fit_w),
+        Some(fit_h),
     );
     // Explicit word-wrap. Default depends on cosmic-text version — pin
     // it so long text on a narrow canvas (e.g. a mindmap node label)
@@ -1573,20 +1688,24 @@ fn render_text(
         .layout_runs()
         .map(|run| run.line_height)
         .sum();
+    // `total_text_h` came out of a buffer shaped at the RASTER-space
+    // `font_size`, so it must be compared against `fit_h` (raster-space),
+    // not the TRUE-space `elem.height` — mixing them here would offset
+    // vertical alignment by the same clamp ratio as the original bug.
     let y_align_lower = elem.text_y_align.to_ascii_lowercase();
-    let y_align_offset = if total_text_h <= 0.0 || elem.height <= 0.0 {
+    let y_align_offset = if total_text_h <= 0.0 || fit_h <= 0.0 {
         0.0
     } else {
         match y_align_lower.as_str() {
             "top" => 0.0,
-            "bottom" => (elem.height - total_text_h).max(0.0),
+            "bottom" => (fit_h - total_text_h).max(0.0),
             // Default + "center": centred vertically.
-            _ => ((elem.height - total_text_h) * 0.5).max(0.0),
+            _ => ((fit_h - total_text_h) * 0.5).max(0.0),
         }
     };
 
-    let origin_x = abs_x as i32;
-    let origin_y = (abs_y + y_align_offset) as i32;
+    let origin_x = (abs_x * content_scale) as i32;
+    let origin_y = (abs_y * content_scale + y_align_offset) as i32;
 
     // Text-stroke halo. Roblox `TextStrokeColor3` + `TextStrokeTransparency`
     // draws a 1-px outline around glyphs so labels stay legible against

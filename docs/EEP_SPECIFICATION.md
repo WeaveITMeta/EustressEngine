@@ -1,14 +1,16 @@
-# Eustress Export Protocol (EEP) v2.0 Specification
+# Eustress Export Protocol (EEP) v3.0 Specification
 
-**Version**: 2.0  
-**Date**: March 2, 2026  
-**Status**: Active
+**Version**: 3.0  
+**Date**: 2026-07-12 (§16 added; other sections unchanged from v2.0, March 2, 2026)  
+**Status**: File-format spec (§1–§15) Active — implemented, referenced by real engine code · §16 AI Training Dataset Export is a Draft Proposal, not yet implemented (see status box in §16)
 
 ## Overview
 
-The Eustress Export Protocol (EEP) v2.0 is a **file-system-first** protocol for serializing all Eustress class instances to human-readable TOML files. AI models access project data directly via MCP file APIs — no proprietary database, no binary project files.
+The Eustress Export Protocol (EEP) is a **file-system-first** protocol for serializing all Eustress class instances to human-readable TOML files. AI models access project data directly via MCP file APIs — no proprietary database, no binary project files.
 
-### Key Changes from v1.0
+As of v3.0, EEP also specifies an optional, higher-level capability — exporting *converged simulation trajectories* as AI training datasets (§16) — built on top of the same TOML + MCP substrate defined elsewhere in this document. The per-instance TOML schema is unchanged; **`eep_version` in `project.toml` stays `"2.0"`** until §16 actually ships (see [Versioning](#versioning)). v3.0 is a document version, not yet a shipped format version.
+
+### Key Changes from v1.0 → v2.0
 
 | v1.0 | v2.0 |
 |------|------|
@@ -16,6 +18,10 @@ The Eustress Export Protocol (EEP) v2.0 is a **file-system-first** protocol for 
 | Only `glb.toml` for BaseParts | TOML schemas for **all 60+ class types** |
 | Binary scene format | glTF 2.0 + EXT_eustress (JSON, git-diffable) |
 | Push-based export | Pull-based file access |
+
+### What v3.0 Adds
+
+A new §16, **AI Training Dataset Export**, specifying how *converged simulation trajectories* (not just static instance state) can be packaged as Parquet/Hugging Face datasets for training external AI models — a different concern from this document's per-instance TOML format, layered on top of it. See the status box at the start of §16 before treating any of it as current behavior.
 
 ---
 
@@ -47,8 +53,9 @@ The Eustress Export Protocol (EEP) v2.0 is a **file-system-first** protocol for 
 13. [Versioning](#versioning)
 14. [Security Considerations](#security-considerations)
 15. [Implementation Checklist](#implementation-checklist)
-16. [References](#references)
-17. [Changelog](#changelog)
+16. [AI Training Dataset Export](#ai-training-dataset-export) ← v3.0, Draft Proposal, not yet implemented
+17. [References](#references)
+18. [Changelog](#changelog)
 
 ---
 
@@ -1355,6 +1362,8 @@ interpolate = true
 
 ## Export and Access Patterns
 
+> **Note**: the patterns below export current *instance state* (what a Space looks like right now). To export *converged simulation trajectories* — time-series runs packaged as AI training datasets — see [§16 AI Training Dataset Export](#ai-training-dataset-export), a different, v3.0 capability layered on top of this same file substrate.
+
 ### Primary Pattern: MCP File Access
 
 In EEP v2.0, the primary access pattern is **pull-based file access**:
@@ -1542,11 +1551,13 @@ def validate_instance(data: dict) -> list[str]:
 - **Major**: Breaking changes to TOML schema
 - **Minor**: Additive changes (new optional fields)
 
-Current version: `eep_v2.0`
+This document is currently at **v3.0** — but that is the *document's* version, not necessarily the *shipped format's* version. §1–§17 (the TOML instance format) are unchanged since v2.0 and remain what real Spaces implement. §16 (AI Training Dataset Export) is new in v3.0 as a draft proposal with zero engine implementation. **The two are allowed to diverge**: a Space's own declared format version should reflect what that Space's TOML actually conforms to, not how far ahead the specification document has been written.
+
+Current shipped format version: `eep_v2.0` (unchanged by this document being at v3.0). Do not bump the format version written by `scaffold_new_space`/`create_universe_folder` to `"3.0"` until §16 has a real implementation to justify it — it's a live field, checked into every real Space's `project.toml`, not just documentation.
 
 ### Version Detection
 
-Check `.eustress/project.toml` for EEP version:
+Check `.eustress/project.toml` for the *shipped format* version (independent of this document's own version above):
 
 ```toml
 [project]
@@ -1606,6 +1617,167 @@ def is_safe_path(project_root: str, file_path: str) -> bool:
 
 ---
 
+## AI Training Dataset Export
+
+> **STATUS (2026-07-12): DRAFT PROPOSAL — not implemented.** Everything in this section (the `eep_exporter` crate, the `export_converged_space` MCP tool, the `eustress export` CLI command, the Convergence Judge, the Critic stage) is a design proposal, not current engine behavior. No code in this repo implements any of it (verified: no `eep_exporter`, no `export_converged_space`, no `run_simulations` MCP primitive as described here). It does not affect §1–§17, which remain Active and unchanged. Originally drafted as a standalone "EEP v1.0" proposal by Simbuilder (McKale Olson) with Grok collaborative refinement, 2026-07-12; integrated here as EEP v3.0 §16 and renamed internally (below) to stop colliding with this document's own "EEP" identity, which already means the file-format protocol in §1–§17.
+
+### Overview
+
+This section specifies a protocol for exporting *converged simulation trajectories* — not static instance snapshots, but time-series runs that have passed quality gates — as production-grade training data for external AI models (world models, agents, physics-informed networks, digital twins). Where §1–§17 answer "how does a live AI model read a Space's current state," this section answers "how do we package a *finished, verified simulation run* as a dataset for training a model elsewhere."
+
+It is designed around a closed-loop architecture: state evolves toward an attractor of user intent + functional completeness, and only artifacts that pass rigorous quality gates are eligible for export. It leans on Eustress-native strengths already specified elsewhere in this document and in related docs: ECS attributes and Parameters (§9), realism physics, file-system-first provenance (§1–§8), and Spatial Vortex geometric-semantic representations ([`RECURSIVE_FEEDBACK_LOOP.md`](development/RECURSIVE_FEEDBACK_LOOP.md), [`KERNEL_LAW_SYSTEM.md`](development/KERNEL_LAW_SYSTEM.md), [`RUNE_VM_INTEGRATION.md`](development/RUNE_VM_INTEGRATION.md)).
+
+### Purpose & Goals
+
+**Primary goals:**
+1. **Quality over volume** — export only converged, high-signal data, never noisy single-shot generations.
+2. **Eustress differentiation** — richly encode every native property (stress tensors, Spatial Vortex flux matrices, entity attributes, run provenance).
+3. **Scalability** — efficient columnar storage suitable for trillion-parameter training pipelines.
+4. **Interoperability** — align with the Hugging Face Datasets ecosystem while extending it for simulation-specific needs.
+5. **Reproducibility & provenance** — full lineage from prompt → generation → repair iterations → execution feedback.
+
+**Non-goals (this proposal, as drafted):**
+- Real-time streaming exports.
+- Encrypted / private datasets (open/scientific use cases only, for now).
+- Automatic dataset card generation (tooling would come later).
+
+### Core Concepts
+
+| Term | Definition |
+|------|------------|
+| **Space** | A git-diffable project folder representing one simulation workspace (same `Space` as §1–§17) |
+| **Trajectory** | Time-series evolution of entity states under kernel laws |
+| **Convergence** | State where `Δ ≈ 0` — no stubs, LSP/API clean, metrics within tolerance, no regression |
+| **Spatial Vortex** | Geometric-semantic encoding layer (flux matrix, 3-6-9 anchors, sacred geometry mappings) |
+| **MCP** | Model Context Protocol — same bridge §5 already specifies, extended here with a proposed export tool |
+| **`run_simulations`** | Proposed MCP primitive that executes a Space and returns structured telemetry + state diffs |
+| **Training Export Artifact** | A versioned, self-describing package containing one or more converged simulation exports (renamed from the original draft's "EEP Artifact" to avoid colliding with this document's own name) |
+
+### Architecture (Closed-Loop Integration)
+
+This is proposed as the **output stage** of a closed-loop system, not a standalone dump format:
+
+```
+User Intent Prompt
+        ↓
+State Generator (LLM) → Rune + Luau scripts + Scene
+        ↓
+Critic (AST + LSP + API surface + Spatial Vortex invariants)
+        ↓
+Execution Verifier (MCP run_simulations + kernel laws)
+        ↓
+Reflection + Targeted Repair (bounded context)
+        ↓
+Convergence Judge (Δ ≈ 0 + metrics pass)
+        ↓
+Trajectory Exporter → Hugging Face Dataset (or local artifact)
+```
+
+Only artifacts that reach the Convergence Judge successfully would be eligible for export.
+
+### Data Model & Schema (proposed)
+
+**Recommended storage format:**
+- **Primary**: Apache Arrow / Parquet (columnar, compression-friendly, streaming) — same leaf the Data Platform already uses for Datasets (§10's TOML instance model is unrelated to this; this is bulk trajectory data, not per-instance state).
+- **Metadata**: embedded Parquet metadata + sidecar `manifest.json`.
+- **Sharding**: by time-step, entity class, or Spatial Vortex region for large trajectories.
+
+**Top-level schema:**
+
+```json
+{
+  "export_schema_version": "1.0",
+  "space_id": "string",
+  "branch": "string",
+  "convergence_id": "string (uuid or git commit)",
+  "export_timestamp": "ISO8601",
+  "provenance": { "...": "..." },
+  "spatial_vortex": { "...": "..." },
+  "entities": { "...": "..." },
+  "trajectories": { "...": "..." },
+  "physics": { "...": "..." },
+  "scripts": { "...": "..." },
+  "metrics": { "...": "..." }
+}
+```
+
+(Named `export_schema_version` here, not `eep_version` — that field already means the §1–§17 file-format version in `project.toml` and must not be conflated with this schema's own version.)
+
+**Section detail:**
+
+- **`provenance`** — original user prompt/intent, generation model + temperature + seed, full repair trajectory (iteration count, error types fixed), MCP tool calls and responses, git commit/branch at export time, engine version + realism feature flags.
+- **`spatial_vortex`** — flux matrix configuration, 3-6-9 anchor positions, semantic-geometric encodings per entity/region, bi-directional inference seeds (if used).
+- **`entities` + attributes + parameters** — full ECS snapshot: entity IDs + class, all registered Attributes/Parameters (per §9's *actual* current shape — a flat untyped `[parameters]` map, not the superseded 3-tier design), transform/rendering/physics bodies, custom components.
+- **`trajectories`** (sharded time-series) — position/velocity/rotation/scale over time, stress/strain tensors, material state changes, collision/fracture events, custom telemetry channels.
+- **`physics`** (realism extension) — stress tensors (Hooke's law, von Mises, etc.), strain fields, fracture mechanics state, SPH fluid particles (if enabled), thermodynamics/electrochemistry state.
+- **`scripts`** — Rune source + compiled module, Luau source + `.d.luau` type definitions (LSP clean), API surface compliance report, optional bytecode/VM state snapshot.
+- **`metrics`** (convergence signals) — stub count over iterations, LSP/type error count, simulation metric deltas (stress error, spatial deviation, FPS stability), user-intent alignment score (if defined), final convergence status (`converged`, `max_iterations`, `diverged`).
+
+### Quality & Convergence Gates (proposed, mandatory for export)
+
+An artifact would need to satisfy **all** of the following before export is allowed:
+
+1. **Syntactic completeness** — zero `TODO`/`FIXME`/`pass`/`...`/`NotImplemented` in scripts; full Rune + Luau parsing success.
+2. **LSP & API compliance** — zero diagnostics from `luau-lsp` (or equivalent); all exposed engine APIs correctly typed in `.d.luau`.
+3. **Execution validation** — `run_simulations` completed without fatal errors; kernel laws respected (no NaN/inf in physics where invalid).
+4. **Metric convergence** — `Δ` (state change between last two iterations) below threshold; no regression vs. previous best on branch.
+5. **Spatial Vortex consistency** (optional but recommended) — geometric-semantic invariants hold.
+
+### Hugging Face Integration (proposed)
+
+**Dataset naming**: `eustress/<domain>-<use-case>-v<export-schema-version>` — e.g. `eustress/battery-digital-twins-v1.0`.
+
+**Dataset card should include**: export schema version used, convergence criteria applied, Spatial Vortex configuration, realism physics modules enabled, provenance summary, example usage code (loading with `datasets` + Polars).
+
+**Upload strategy**: `datasets` library with `push_to_hub`; prefer incremental commits for long-running simulations; store large trajectory shards as separate configs or Git LFS where appropriate.
+
+### Implementation Notes (proposed engine-side work)
+
+**New components (not yet built):**
+- `eep_exporter` crate or module (name TBD to avoid the same collision this integration fixed above — consider `trajectory_exporter` or `training_export`).
+- A trajectory-exporter resource/system.
+- Integration point in `RunPlugin` or a dedicated `ExportPlugin`.
+
+**Proposed MCP extension:**
+```rust
+pub async fn export_converged_trajectory(
+    space_path: PathBuf,
+    convergence_id: Option<String>,
+    hf_repo: Option<String>,
+) -> Result<ExportResult, ExportError>
+```
+(renamed from the original draft's `export_converged_space` — this exports a *trajectory*, not the Space's instance state, which §5's existing MCP file-access tools already cover.)
+
+**Proposed CLI:**
+```bash
+eustress export-trajectory --space ./MyBatteryTwin --converged-only --push-to-hf eustress/battery-v1
+```
+(renamed from the original draft's `eustress export`, which collides with the real `eustress pack` archive command already specified in §10.)
+
+### Open Questions & Future Work
+
+- Differential/delta exports for very long trajectories.
+- On-demand lazy generation via MCP ("dataset as a service").
+- Encrypted/access-controlled datasets.
+- Automated high-quality dataset card generation.
+- Integration with Spatial Vortex for semantic search over exported trajectories.
+- Standardized benchmarks for export quality (stress accuracy, intent alignment, etc.).
+- Reconcile the `entities`/`physics`/`scripts` schema above against §9's actual current Parameters shape (flat untyped map) before implementation, not the superseded 3-tier design.
+
+### References (this section)
+
+- [Recursive Feedback Loop](development/RECURSIVE_FEEDBACK_LOOP.md)
+- [File-System-First Architecture](development/FILE_SYSTEM_FIRST.md)
+- [Kernel Law System](development/KERNEL_LAW_SYSTEM.md)
+- [Rune VM Integration](development/RUNE_VM_INTEGRATION.md)
+- MCP Protocol — proposed, not yet written
+- Hugging Face Datasets documentation
+- Apache Arrow / Parquet specification
+- SWE-agent / OpenDevin-style agent-computer interfaces (MCP inspiration)
+- Closed-loop self-repair literature (iterative LLM code repair with execution feedback)
+
+---
+
 ## References
 
 - [File-System-First Architecture](development/FILE_SYSTEM_FIRST.md)
@@ -1616,6 +1788,12 @@ def is_safe_path(project_root: str, file_path: str) -> bool:
 ---
 
 ## Changelog
+
+### v3.0 (2026-07-12)
+
+- **New**: §16 AI Training Dataset Export — a proposal for exporting *converged simulation trajectories* as Parquet/Hugging Face training datasets, distinct from §1–§17's per-instance TOML state format. **Status: Draft Proposal, not implemented** — see the status box at the top of §16.
+- **Non-breaking**: §1–§17 (the actual TOML file format) are unchanged. The shipped `eep_version` field in `project.toml` stays `"2.0"` — this document advancing to v3.0 does not change what real Spaces conform to.
+- **Integrated from**: a standalone "EEP v1.0" proposal drafted by Simbuilder (McKale Olson) with Grok collaborative refinement (2026-07-12). Renamed several of the original draft's self-referential terms (`EEP Artifact` → `Training Export Artifact`, `eep_version` in the export schema → `export_schema_version`, `export_converged_space` → `export_converged_trajectory`, the `eustress export` CLI verb → `eustress export-trajectory`) because the original draft independently reused the name "EEP" for an unrelated concept, colliding with this document's own identity and with the real `eustress pack` command already specified in §10.
 
 ### v2.0 (2026-03-02)
 

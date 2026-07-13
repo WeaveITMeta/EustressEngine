@@ -77,6 +77,17 @@ export global Theme {
     out property <color> accent-red: #e74856;           // Error, over-constrained
     out property <color> accent-yellow: #f9c74f;
 
+    // Semantic ribbon-tint categories — docs/design/DRAFTING_UX.md Law 3.
+    // A button's tint says what KIND of thing it does; new buttons pick
+    // an existing token, never a fresh hex. Red stays reserved for
+    // destructive actions (accent-red); accent-cyan stays reserved for
+    // armed/selected state.
+    out property <color> cat-parts: #64b5f6;        // Creates geometry (primitives + parametric)
+    out property <color> cat-structure: #81c784;    // Containers / organization
+    out property <color> cat-constraint: #ffb74d;   // Relationships between things
+    out property <color> cat-modify: #ba68c8;       // Patterns / arrays / bulk edits
+    out property <color> cat-data: #4dd0e1;         // Import / export / IO
+
     // Floating-overlay surface treatments — see TOOLSET_UX.md §6.1
     out property <color> panel-glass: #121212e8;        // Frosted-glass backdrop for ToolOptionsBar / toasts / popups
     out property <color> border-highlight: #ffffff10;   // 1px top hairline (macOS depth trick)
@@ -515,10 +526,6 @@ export component TreeItem inherits Rectangle {
     callback drag-moved(length, length);         // abs-x, abs-y
     callback drag-ended();
 
-    // Modifier key state — set by parent FocusScope key tracking
-    in property <bool> ctrl-held: false;
-    in property <bool> shift-held: false;
-
     // Inline rename — toggled from ExplorerPanel via renaming property
     in property <bool> renaming: false;
     callback rename-committed(string);
@@ -542,7 +549,7 @@ export component TreeItem inherits Rectangle {
     row-touch := TouchArea {
         clicked => {
             if !root.drag-started-flag {
-                root.clicked(root.pe-ctrl || root.ctrl-held, root.pe-shift || root.shift-held);
+                root.clicked(root.pe-ctrl, root.pe-shift);
             }
             root.pe-ctrl = false;
             root.pe-shift = false;

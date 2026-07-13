@@ -184,6 +184,18 @@ pub enum MethodName {
     /// Cast a world-space ray against live Avian colliders — the POMDP "sense"
     /// primitive. Returns hits (entity / name / distance / point), nearest first.
     Raycast,
+    /// Region-organized structured summary of the live scene: entities
+    /// bucketed into the SAME 256-stud Morton cells the residency/HLOD/
+    /// forge-SimCell systems share, each cell carrying a count + class
+    /// histogram + world AABB + the forge-compatible `sim-cell-…` id.
+    /// The map a multi-agent orchestrator partitions before fanning out
+    /// region-scoped `ecs.inspect` calls. Read-only.
+    SceneOverview,
+    /// Forge gang-placement outcomes for this session's resident cells
+    /// (the `SimOrchestrationPlugin` ledger) — cell id, members placed,
+    /// whole-gang committed flag. Only meaningful in a build with the
+    /// `sim-orchestration` feature; errors gracefully otherwise. Read-only.
+    SimBindings,
     Unknown(String),
 }
 
@@ -220,6 +232,8 @@ where
         "oplog.tail" => MethodName::OplogTail,
         "sim.step" => MethodName::SimStep,
         "scene.raycast" => MethodName::Raycast,
+        "scene.overview" => MethodName::SceneOverview,
+        "sim.bindings" => MethodName::SimBindings,
         _ => MethodName::Unknown(s),
     })
 }
@@ -1497,8 +1511,12 @@ pub mod handlers {
     /// top-level frame stats (`fps`) so perf regressions show too.
     ///
     /// Params (all optional): `class` (exact class filter),
-    /// `name_contains` (case-insensitive substring), `offset`, `limit`
-    /// (default 200, max 5000). Read-only.
+    /// `name_contains` (case-insensitive substring), `region`
+    /// (`{min:[x,y,z], max:[x,y,z]}` world-space AABB on the entity's
+    /// Transform position), `cell` (a `sim-cell-…` id from
+    /// `scene.overview` / forge — resolved through the shared worlddb
+    /// cell math to that cell's AABB), `offset`, `limit` (default 200,
+    /// max 5000). Read-only.
     pub fn ecs_inspect(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
         use bevy::prelude::{ChildOf, Transform, Visibility};
 
@@ -1520,6 +1538,60 @@ pub mod handlers {
             .map(|l| l as usize)
             .unwrap_or(200)
             .min(5_000);
+
+        // Spatial predicates — the multi-agent orchestration loop's scoping
+        // mechanism (overview → partition → per-cell inspect). An entity
+        // matches when its Transform position lies inside the AABB;
+        // entities WITHOUT a Transform never match a spatial predicate.
+        // `cell` and `region` are alternatives; `cell` wins if both given.
+        let mut region_filter: Option<([f32; 3], [f32; 3])> = None;
+        if let Some(r) = req.params.get("region") {
+            let parse3 = |v: &serde_json::Value| -> Option<[f32; 3]> {
+                let a = v.as_array()?;
+                Some([
+                    a.first()?.as_f64()? as f32,
+                    a.get(1)?.as_f64()? as f32,
+                    a.get(2)?.as_f64()? as f32,
+                ])
+            };
+            match (r.get("min").and_then(parse3), r.get("max").and_then(parse3)) {
+                (Some(min), Some(max)) => region_filter = Some((min, max)),
+                _ => {
+                    return BridgeResponse::error(
+                        req.id.clone(),
+                        BridgeError::invalid_params(
+                            "region must be {min:[x,y,z], max:[x,y,z]}",
+                        ),
+                    );
+                }
+            }
+        }
+        if let Some(cell_str) = req.params.get("cell").and_then(|v| v.as_str()) {
+            #[cfg(feature = "world-db")]
+            {
+                let Some(coord) = eustress_worlddb::keys::parse_cell_id(cell_str) else {
+                    return BridgeResponse::error(
+                        req.id.clone(),
+                        BridgeError::invalid_params(format!(
+                            "cell must be a sim-cell-XXXXXXX-YYYYYYY-ZZZZZZZ id, got '{cell_str}'"
+                        )),
+                    );
+                };
+                let chunk =
+                    eustress_worlddb::keys::MortonKeyEncoder::default().chunk_size;
+                region_filter =
+                    Some(eustress_worlddb::keys::cell_world_aabb(coord, chunk));
+            }
+            #[cfg(not(feature = "world-db"))]
+            {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::internal(format!(
+                        "ecs.inspect cell='{cell_str}': world-db feature disabled — use region instead"
+                    )),
+                );
+            }
+        }
 
         // Cloned out of the World before the query borrow so we can turn
         // absolute InstanceFile paths into Space-relative ones.
@@ -1581,6 +1653,16 @@ pub mod handlers {
                 let name_s = name.as_str().to_string();
                 if let Some(ref want) = name_filter {
                     if !name_s.to_lowercase().contains(want) {
+                        return None;
+                    }
+                }
+                if let Some((min, max)) = region_filter {
+                    let Some(t) = tf else { return None };
+                    let p = t.translation;
+                    if p.x < min[0] || p.x >= max[0]
+                        || p.y < min[1] || p.y >= max[1]
+                        || p.z < min[2] || p.z >= max[2]
+                    {
                         return None;
                     }
                 }
@@ -1676,6 +1758,242 @@ pub mod handlers {
                 "material_dedup": material_dedup,
             }),
         )
+    }
+
+    /// `scene.overview` — region-organized structured summary of the live
+    /// scene: entities bucketed into the SAME 256-stud Morton cells the
+    /// residency / HLOD / forge-SimCell systems share. Each cell carries
+    /// the forge-compatible `sim-cell-…` id, its raw Morton code (so a
+    /// client can re-sort cells into spatial-contiguity order with no
+    /// Morton math of its own), a world AABB, an entity count, and a
+    /// per-cell class histogram. This is the map a multi-agent
+    /// orchestrator partitions before fanning out region-scoped
+    /// `ecs.inspect {cell}` calls — the answer to "how do I organize a
+    /// 118K-entity list" is "you don't page it flat, you take the cell
+    /// digest and divide".
+    ///
+    /// Params (all optional): `region {min,max}` (restrict to an AABB),
+    /// `max_cells` (default 512, cap 4096 — cells are sorted by entity
+    /// count DESC, so truncation drops the sparsest cells first),
+    /// `classes_per_cell` (default 8 histogram entries per cell).
+    /// Read-only; one O(entities) pass.
+    pub fn scene_overview(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        #[cfg(not(feature = "world-db"))]
+        {
+            let _ = world;
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal(
+                    "scene.overview: world-db feature disabled (the Morton cell math lives in eustress-worlddb)",
+                ),
+            );
+        }
+        #[cfg(feature = "world-db")]
+        {
+            use bevy::prelude::Transform;
+            use eustress_worlddb::keys::{
+                cell_id, cell_world_aabb, morton3_encode, world_to_cell, MortonKeyEncoder,
+            };
+            use std::collections::HashMap;
+
+            let chunk = MortonKeyEncoder::default().chunk_size;
+
+            let max_cells = req
+                .params
+                .get("max_cells")
+                .and_then(|v| v.as_u64())
+                .map(|l| l as usize)
+                .unwrap_or(512)
+                .min(4_096);
+            let classes_per_cell = req
+                .params
+                .get("classes_per_cell")
+                .and_then(|v| v.as_u64())
+                .map(|l| l as usize)
+                .unwrap_or(8);
+
+            let mut region_filter: Option<([f32; 3], [f32; 3])> = None;
+            if let Some(r) = req.params.get("region") {
+                let parse3 = |v: &serde_json::Value| -> Option<[f32; 3]> {
+                    let a = v.as_array()?;
+                    Some([
+                        a.first()?.as_f64()? as f32,
+                        a.get(1)?.as_f64()? as f32,
+                        a.get(2)?.as_f64()? as f32,
+                    ])
+                };
+                match (r.get("min").and_then(parse3), r.get("max").and_then(parse3)) {
+                    (Some(min), Some(max)) => region_filter = Some((min, max)),
+                    _ => {
+                        return BridgeResponse::error(
+                            req.id.clone(),
+                            BridgeError::invalid_params(
+                                "region must be {min:[x,y,z], max:[x,y,z]}",
+                            ),
+                        );
+                    }
+                }
+            }
+
+            #[derive(Default)]
+            struct CellAgg {
+                count: u64,
+                classes: HashMap<String, u64>,
+            }
+
+            // Same entity population `ecs.inspect` reports (named entities),
+            // so an overview count and a per-cell inspect page reconcile.
+            let mut q = world.query::<(
+                &bevy::prelude::Name,
+                Option<&eustress_common::classes::Instance>,
+                Option<&Transform>,
+            )>();
+
+            let mut cells: HashMap<(u32, u32, u32), CellAgg> = HashMap::new();
+            let mut class_totals: HashMap<String, u64> = HashMap::new();
+            let mut total_entities: u64 = 0;
+            let mut no_position: u64 = 0;
+            let mut scene_min = [f32::INFINITY; 3];
+            let mut scene_max = [f32::NEG_INFINITY; 3];
+
+            for (_name, inst, tf) in q.iter(world) {
+                let class = inst
+                    .map(|i| i.class_name.as_str().to_string())
+                    .unwrap_or_else(|| "(unclassed)".to_string());
+                let Some(t) = tf else {
+                    // Named but unplaceable (no Transform) — counted, never
+                    // bucketed; a spatial partition can't route it anyway.
+                    total_entities += 1;
+                    no_position += 1;
+                    *class_totals.entry(class).or_default() += 1;
+                    continue;
+                };
+                let p = t.translation;
+                if let Some((min, max)) = region_filter {
+                    if p.x < min[0] || p.x >= max[0]
+                        || p.y < min[1] || p.y >= max[1]
+                        || p.z < min[2] || p.z >= max[2]
+                    {
+                        continue;
+                    }
+                }
+                total_entities += 1;
+                *class_totals.entry(class.clone()).or_default() += 1;
+                for (axis, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+                    scene_min[axis] = scene_min[axis].min(v);
+                    scene_max[axis] = scene_max[axis].max(v);
+                }
+                let coord = (
+                    world_to_cell(p.x, chunk),
+                    world_to_cell(p.y, chunk),
+                    world_to_cell(p.z, chunk),
+                );
+                let agg = cells.entry(coord).or_default();
+                agg.count += 1;
+                *agg.classes.entry(class).or_default() += 1;
+            }
+
+            // Top-N helper: histogram map → sorted (class, count) pairs.
+            let top_n = |m: &HashMap<String, u64>, n: usize| -> Vec<serde_json::Value> {
+                let mut pairs: Vec<(&String, &u64)> = m.iter().collect();
+                pairs.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+                pairs
+                    .into_iter()
+                    .take(n)
+                    .map(|(class, count)| serde_json::json!({ "class": class, "count": count }))
+                    .collect()
+            };
+
+            let cells_total = cells.len();
+            let mut cell_list: Vec<((u32, u32, u32), CellAgg)> = cells.into_iter().collect();
+            cell_list.sort_by(|a, b| b.1.count.cmp(&a.1.count).then_with(|| a.0.cmp(&b.0)));
+            let cells_json: Vec<serde_json::Value> = cell_list
+                .iter()
+                .take(max_cells)
+                .map(|(coord, agg)| {
+                    let (min, max) = cell_world_aabb(*coord, chunk);
+                    serde_json::json!({
+                        "id":      cell_id(*coord),
+                        "coord":   [coord.0, coord.1, coord.2],
+                        "morton":  morton3_encode(coord.0, coord.1, coord.2),
+                        "min":     min,
+                        "max":     max,
+                        "count":   agg.count,
+                        "classes": top_n(&agg.classes, classes_per_cell),
+                    })
+                })
+                .collect();
+            let cells_returned = cells_json.len();
+
+            let scene_bounds = if scene_min[0].is_finite() {
+                serde_json::json!({ "min": scene_min, "max": scene_max })
+            } else {
+                serde_json::Value::Null
+            };
+
+            BridgeResponse::ok(
+                req.id.clone(),
+                serde_json::json!({
+                    "cell_size":       chunk,
+                    "total_entities":  total_entities,
+                    "no_position":     no_position,
+                    "scene_bounds":    scene_bounds,
+                    "class_totals":    top_n(&class_totals, 20),
+                    "cells":           cells_json,
+                    "cells_total":     cells_total,
+                    "cells_returned":  cells_returned,
+                    "has_more":        cells_returned < cells_total,
+                }),
+            )
+        }
+    }
+
+    /// `sim.bindings` — forge gang-placement outcomes for this session,
+    /// from the `SimOrchestrationPlugin` ledger. Rows carry the SAME
+    /// `sim-cell-…` ids `scene.overview` emits, so an orchestrator can
+    /// join placement state onto its cell digest. No params. Read-only.
+    /// Graceful error when the `sim-orchestration` feature is off (it is
+    /// not in the default build — it links openraft/quinn).
+    pub fn sim_bindings(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        #[cfg(not(feature = "sim-orchestration"))]
+        {
+            let _ = world;
+            BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal(
+                    "sim.bindings: sim-orchestration feature disabled (build the engine with --features sim-orchestration)",
+                ),
+            )
+        }
+        #[cfg(feature = "sim-orchestration")]
+        {
+            let Some(ledger) =
+                world.get_resource::<crate::space::sim_orchestration::SimBindingsLedger>()
+            else {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::internal("sim.bindings: ledger resource missing"),
+                );
+            };
+            let rows: Vec<serde_json::Value> = ledger
+                .0
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "cell_id":        eustress_worlddb::keys::cell_id(r.cell),
+                        "coord":          [r.cell.0, r.cell.1, r.cell.2],
+                        "sim_scheduled":  r.sim_scheduled,
+                        "placed_members": r.placed_members,
+                        "complete":       r.complete,
+                        "error":          r.error,
+                    })
+                })
+                .collect();
+            BridgeResponse::ok(
+                req.id.clone(),
+                serde_json::json!({ "count": rows.len(), "bindings": rows }),
+            )
+        }
     }
 
     /// `tool.equip` — set the active editor tool. Param `tool`:

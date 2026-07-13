@@ -21,7 +21,7 @@ pub use eustress_common::events::{set_event_bus_for_rune, clear_event_bus_for_ru
 use eustress_common::events::event_bus_rune_module;
 
 #[cfg(feature = "realism-scripting")]
-use rune::{Module, ContextError, runtime::Function};
+use rune::{Module, ContextError, runtime::{Function, Value}};
 
 #[cfg(feature = "realism-scripting")]
 use crate::ui::rune_ecs_bindings::ECSBindings;
@@ -159,21 +159,61 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     module.function_meta(units_from_meters)?;
     module.function_meta(units_to_meters)?;
     
-    // Data types — Roblox-compatible
+    // Data types — Roblox-compatible.
+    //
+    // `Vector3::new`/`Color3::new` are the CONSTRUCTORS — without
+    // registering these, scripts have no way to build a value to pass
+    // into `Instance:Set()` at all (`module.ty::<T>()?` alone only
+    // installs the `#[rune(get, set)]` FIELD protocol on already-built
+    // values; it does not pull in a type's `impl` methods — see the note
+    // on the Instance API block below). Found and fixed while wiring
+    // `Instance:Set()`'s Vector3/Color3 argument construction; the same
+    // math methods on these types (`.dot()`, `.cross()`, `.add()`, …)
+    // have the identical gap but are out of this phase's scope — flagged
+    // for a follow-up pass over the whole file.
     module.ty::<Vector3>()?;
+    module.function_meta(Vector3::new)?;
     module.ty::<Color3>()?;
+    module.function_meta(Color3::new)?;
     module.ty::<CFrame>()?;
-    
+
     // Raycasting — workspace:Raycast equivalent for Rune
     module.ty::<RaycastResultRune>()?;
     module.ty::<RaycastParamsRune>()?;
     module.function_meta(workspace_raycast)?;
     module.function_meta(workspace_raycast_all)?;
-    
-    // Instance API — Roblox-compatible instance manipulation
+
+    // Instance API — Roblox-compatible instance manipulation.
+    //
+    // Every method below except `instance_new` was previously MISSING
+    // from this registration list — `#[rune::function(instance)]` only
+    // generates a `FunctionMeta`-returning fn; nothing auto-collects it
+    // into the module the way `#[rune(get, set)]` FIELD access is
+    // auto-installed via the `Any` derive's `install_with` hook (compare
+    // rune's own `modules/option.rs`, which explicitly registers every
+    // instance method of its `Option` type the same way). So `.name()`,
+    // `.get_children()`, `.destroy()`, etc. were unreachable from Rune
+    // scripts at runtime despite the crate compiling fine. Fixed here
+    // because none of this phase's `get`/`set`/`get_descendants`/
+    // `find_first_descendant` work is exercisable without it.
     module.ty::<InstanceRune>()?;
     module.function_meta(InstanceRune::instance_new)?;
-    
+    module.function_meta(InstanceRune::id)?;
+    module.function_meta(InstanceRune::name)?;
+    module.function_meta(InstanceRune::set_name)?;
+    module.function_meta(InstanceRune::class_name)?;
+    module.function_meta(InstanceRune::is_a)?;
+    module.function_meta(InstanceRune::parent)?;
+    module.function_meta(InstanceRune::get_children)?;
+    module.function_meta(InstanceRune::find_first_child)?;
+    module.function_meta(InstanceRune::find_first_child_of_class)?;
+    module.function_meta(InstanceRune::get_descendants)?;
+    module.function_meta(InstanceRune::find_first_descendant)?;
+    module.function_meta(InstanceRune::get)?;
+    module.function_meta(InstanceRune::set)?;
+    module.function_meta(InstanceRune::destroy)?;
+    module.function_meta(InstanceRune::clone_instance)?;
+
     // TweenService API — Property animation
     module.ty::<TweenInfoRune>()?;
     module.ty::<TweenRune>()?;
@@ -195,10 +235,16 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     module.function_meta(get_mouse_location)?;
     module.function_meta(get_mouse_delta)?;
     
-    // UDim/UDim2 types — UI dimensions
+    // UDim/UDim2 types — UI dimensions. Constructors registered for the
+    // same reason as `Vector3::new`/`Color3::new` above — `UDim2` is what
+    // `Instance:Set("Size", …)` on a BillboardGui/GuiObject expects.
     module.ty::<UDim>()?;
+    module.function_meta(UDim::new)?;
     module.ty::<UDim2>()?;
-    
+    module.function_meta(UDim2::new)?;
+    module.function_meta(UDim2::from_scale)?;
+    module.function_meta(UDim2::from_offset)?;
+
     // P2: DataStoreService API
     module.ty::<DataStoreRune>()?;
     module.ty::<OrderedDataStoreRune>()?;
@@ -300,6 +346,17 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     module.function_meta(gui_set_position)?;
     module.function_meta(gui_set_size)?;
     module.function_meta(gui_set_font_size)?;
+
+    // Studio plugin API — Rune half of the unified plugin bridge (see
+    // `common::script_plugins`). Mirrors the Luau `plugin:AddSection`/
+    // `AddButton`/`Notify`/`GetSelection` binding shape exactly; only the
+    // callback storage differs (`CallbackHandle::Rune` vs `::Lua`). KEEP
+    // IN SYNC with `kernel::capability::CapabilityCatalog::eustress_core`
+    // (see `plugin_capability_tests` at the bottom of that file).
+    module.function_meta(plugin_add_section)?;
+    module.function_meta(plugin_add_button)?;
+    module.function_meta(plugin_notify)?;
+    module.function_meta(plugin_get_selection)?;
 
     Ok(module)
 }
@@ -1313,10 +1370,217 @@ fn workspace_raycast_all(
 }
 
 // ============================================================================
-// Instance API — Rune wrappers for shared InstanceRegistry
+// Instance API — Rune handles over the REAL live World + this-run pending
+// creations
 // ============================================================================
+//
+// ## Why two backing stores (read this before touching anything below)
+//
+// `execute_rune_oneshot` runs synchronously inside `drain_slint_actions`
+// (`engine/src/ui/slint_ui.rs`) — an ordinary (non-exclusive) Bevy system
+// that only has typed `Query`/`Commands` params, never `&mut World`. A
+// Rune script therefore cannot be handed live, synchronously-mutable World
+// access during its own run; giving it one would mean turning that system
+// exclusive, which is a much bigger change than this pass (it already
+// bundles a couple dozen queries into `DrainActionQueries` to stay under
+// Bevy's 16-param ceiling). So `InstanceRune` handles resolve against TWO
+// thread-local stores, picked purely by the *magnitude* of the numeric id
+// (see `PENDING_ID_CEILING` / `resolve_instance`):
+//
+//   1. **Live** (id >= 2^32) — a read-only SNAPSHOT of the real World's
+//      `Instance` + `ChildOf` hierarchy, captured by `drain_slint_actions`
+//      immediately before calling `execute_rune_oneshot` and fed in via
+//      `seed_instance_snapshot` (mirrors the pre-existing `tag_snapshot` →
+//      `seed_existing_tags` pattern next to it). At ~100K entities this is
+//      a few MB — cheap to rebuild per script run. The id IS the real
+//      Bevy `Entity`'s bits (`entity.to_bits()`), the SAME i64 encoding
+//      already used everywhere else in this file for real entities
+//      (`EXISTING_TAGS`, `RaycastResultRune.entity_id`) — not a new
+//      scheme. (`entity.to_bits()` and the tool-facing `"{index}v{gen}"`
+//      string — see `crate::entity_utils` — encode the exact same two
+//      numbers; `id()` below exposes the string form for callers that
+//      want to cross-reference MCP/clipboard-style tooling.)
+//   2. **Pending** (id < 2^32) — the legacy in-memory `InstanceRegistry`
+//      (unchanged), which only knows about instances created via
+//      `Instance::new()` earlier in THIS SAME script run and not yet
+//      materialized into the World. Real `Entity::to_bits()` values are
+//      always >= 2^32 because Bevy generations are non-zero
+//      (`to_bits = (generation << 32) | index`), so the registry's small
+//      sequential counter (starting at 1, see
+//      `InstanceRegistry::next_entity_id`) can never collide with a real
+//      entity id — the magnitude split is exact, not a heuristic.
+//
+// `Instance::new()` stays on the Pending store rather than calling
+// `eustress_common::instance_create::create_instance`: that function is
+// file-system-only (writes a template TOML under `Workspace/`) and is
+// NOT synchronously reachable either — it's the same function MCP's
+// `create_entity` tool uses, and that tool's entity only becomes real
+// once the engine's file-watcher picks the TOML up on a LATER frame.
+// There is no synchronous "create a real entity right now" primitive
+// anywhere in this engine to call into. Real materialization for
+// `Instance::new()` results still happens exactly as before — the
+// `LuauCreatedInstance` drain at the end of `execute_rune_oneshot`,
+// spawned by the caller in `slint_ui.rs` after the script returns.
+//
+// Generic `get(name)`/`set(name, value)` property access (`Instance::get`
+// / `Instance::set` below) bridges through
+// `eustress_common::classes::PropertyAccess`, the same trait the
+// Properties panel and `PropertyCommand::set_property`
+// (`engine/src/commands/property_command.rs`) already use via a
+// `world.get_mut::<T>(entity)` dispatch chain. `get()` runs synchronously
+// (no `&mut World` needed to READ); `set()` on a Live entity can't touch
+// `&mut World` from here, so it QUEUES a `(entity_id, property_name,
+// PropertyValue)` write via `queue_live_property_write` — mirroring
+// `destroy()`'s `queue_live_destroy` exactly — for the caller
+// (`drain_slint_actions` in `slint_ui.rs`) to apply via
+// `PropertyCommand::execute` after the script returns. Undo/
+// `CommandHistory` integration and disk persistence are NOT wired up yet
+// — that's still a later phase; this one only gets the write reaching
+// the live World. See `rune_value_to_live_property_value` /
+// `rune_value_to_pending_property_value` for the value-shape bridge.
 
-/// Thread-local holder for the InstanceRegistry.
+/// One entity captured into the pre-script hierarchy snapshot. Built by
+/// the calling system (`drain_slint_actions`) from its live `Instance` +
+/// `ChildOf` queries — this module has no query access of its own.
+#[cfg(feature = "realism-scripting")]
+#[derive(Debug, Clone)]
+pub struct InstanceSnapshotEntry {
+    pub entity: Entity,
+    pub name: String,
+    pub class_name: String,
+    pub parent: Option<Entity>,
+}
+
+#[cfg(feature = "realism-scripting")]
+#[derive(Debug, Clone, Default)]
+struct SnapshotNode {
+    name: String,
+    class_name: String,
+    parent: Option<Entity>,
+    children: Vec<Entity>,
+}
+
+/// Thread-local hierarchy snapshot of the LIVE World, seeded before each
+/// script run. See the module doc comment above for why this exists
+/// instead of direct `World` access.
+#[cfg(feature = "realism-scripting")]
+thread_local! {
+    static HIERARCHY_SNAPSHOT: std::cell::RefCell<Option<std::collections::HashMap<Entity, SnapshotNode>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Seed the live-world snapshot for the current thread before Rune
+/// execution. Call from the same system that calls `execute_rune_oneshot`
+/// (mirrors `seed_existing_tags`).
+#[cfg(feature = "realism-scripting")]
+pub fn seed_instance_snapshot(entries: Vec<InstanceSnapshotEntry>) {
+    let mut map: std::collections::HashMap<Entity, SnapshotNode> =
+        std::collections::HashMap::with_capacity(entries.len());
+    for e in &entries {
+        map.insert(e.entity, SnapshotNode {
+            name: e.name.clone(),
+            class_name: e.class_name.clone(),
+            parent: e.parent,
+            children: Vec::new(),
+        });
+    }
+    // Second pass: populate children lists now that every node is present.
+    for e in &entries {
+        if let Some(parent) = e.parent {
+            if let Some(parent_node) = map.get_mut(&parent) {
+                parent_node.children.push(e.entity);
+            }
+        }
+    }
+    HIERARCHY_SNAPSHOT.with(|cell| *cell.borrow_mut() = Some(map));
+}
+
+/// Clear the live-world snapshot after Rune execution completes.
+#[cfg(feature = "realism-scripting")]
+pub fn clear_instance_snapshot() {
+    HIERARCHY_SNAPSHOT.with(|cell| *cell.borrow_mut() = None);
+}
+
+#[cfg(feature = "realism-scripting")]
+fn with_instance_snapshot<F, R>(fallback: R, f: F) -> R
+where
+    F: FnOnce(&std::collections::HashMap<Entity, SnapshotNode>) -> R,
+{
+    HIERARCHY_SNAPSHOT.with(|cell| {
+        match cell.borrow().as_ref() {
+            Some(map) => f(map),
+            None => {
+                warn!("[Rune Script] Live-world instance snapshot not available");
+                fallback
+            }
+        }
+    })
+}
+
+/// Live entities the script asked to destroy this run
+/// (`InstanceRune::destroy`). `execute_rune_oneshot`'s caller drains this
+/// via `drain_pending_destroys` AFTER the script returns and performs the
+/// actual trash-move + despawn — this module never touches the
+/// filesystem or `Commands` directly (see the module doc comment above).
+#[cfg(feature = "realism-scripting")]
+thread_local! {
+    static PENDING_DESTROY: std::cell::RefCell<Vec<i64>> = std::cell::RefCell::new(Vec::new());
+}
+
+#[cfg(feature = "realism-scripting")]
+fn queue_live_destroy(entity_id: i64) {
+    PENDING_DESTROY.with(|cell| cell.borrow_mut().push(entity_id));
+}
+
+/// Drain entities queued for destruction via `Instance:Destroy()` this
+/// run. Ids are `entity.to_bits() as i64` — resolve with
+/// `Entity::from_bits(id as u64)`.
+#[cfg(feature = "realism-scripting")]
+pub fn drain_pending_destroys() -> Vec<i64> {
+    PENDING_DESTROY.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+}
+
+/// One property write a script queued via `Instance:Set()` against a
+/// LIVE (pre-existing) World entity this run. Mirrors `PENDING_DESTROY`
+/// exactly, for the same reason: this module has no `&mut World`, so the
+/// actual `PropertyCommand::execute()` call happens in the caller
+/// (`drain_slint_actions` in `slint_ui.rs`) after the script returns. See
+/// `drain_pending_property_writes`.
+///
+/// `entity_id` here is the raw `Entity::to_bits()` value (same convention
+/// as `PENDING_DESTROY`'s ids) — `Instance:Set()` only ever queues for
+/// Live entities; Pending (this-run, not-yet-materialized) writes apply
+/// immediately to the registry's property bag instead (see
+/// `InstanceRune::set`), so they never end up in this queue.
+#[cfg(feature = "realism-scripting")]
+pub struct PendingPropertyWrite {
+    pub entity_id: i64,
+    pub property_name: String,
+    pub new_value: eustress_common::classes::PropertyValue,
+}
+
+#[cfg(feature = "realism-scripting")]
+thread_local! {
+    static PENDING_PROPERTY_WRITES: std::cell::RefCell<Vec<PendingPropertyWrite>> = std::cell::RefCell::new(Vec::new());
+}
+
+#[cfg(feature = "realism-scripting")]
+fn queue_live_property_write(entity_id: i64, property_name: String, new_value: eustress_common::classes::PropertyValue) {
+    PENDING_PROPERTY_WRITES.with(|cell| cell.borrow_mut().push(PendingPropertyWrite { entity_id, property_name, new_value }));
+}
+
+/// Drain property writes queued via `Instance:Set()` against Live
+/// entities this run. Ids are `entity.to_bits() as i64`, same as
+/// `drain_pending_destroys` — resolve with `Entity::from_bits(id as
+/// u64)`. The caller applies each write via `PropertyCommand::execute`
+/// (needs `&mut World`, which this module never has — see the module doc
+/// comment).
+#[cfg(feature = "realism-scripting")]
+pub fn drain_pending_property_writes() -> Vec<PendingPropertyWrite> {
+    PENDING_PROPERTY_WRITES.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+}
+
+/// Thread-local holder for the (Pending-store) InstanceRegistry.
 /// Set before Rune script execution, cleared after.
 #[cfg(feature = "realism-scripting")]
 thread_local! {
@@ -1357,12 +1621,69 @@ where
     })
 }
 
-/// Rune-compatible Instance reference.
+/// Threshold separating "live" ids (real `Entity::to_bits()`, always
+/// `>= 2^32` because Bevy generations are non-zero) from "pending" ids
+/// (the legacy `InstanceRegistry`'s small sequential counter, starting at
+/// 1). See the module doc comment above.
+#[cfg(feature = "realism-scripting")]
+const PENDING_ID_CEILING: i64 = 1i64 << 32;
+
+/// Uniform identity + hierarchy view over an `Instance` handle, resolved
+/// against whichever backing store the id's magnitude selects.
+#[cfg(feature = "realism-scripting")]
+struct ResolvedInstance {
+    name: String,
+    class_name: String,
+    parent: Option<i64>,
+    children: Vec<i64>,
+}
+
+/// Resolve an `InstanceRune.entity_id` against the live-world snapshot
+/// (id >= `PENDING_ID_CEILING`) or the this-run Pending registry
+/// (id < `PENDING_ID_CEILING`). Returns `None` if the id isn't known to
+/// either store (e.g. the entity was despawned elsewhere mid-script, or
+/// fell outside the snapshot captured at script start).
+///
+#[cfg(feature = "realism-scripting")]
+fn resolve_instance(entity_id: i64) -> Option<ResolvedInstance> {
+    if entity_id >= PENDING_ID_CEILING {
+        let entity = Entity::from_bits(entity_id as u64);
+        with_instance_snapshot(None, |snapshot| {
+            snapshot.get(&entity).map(|node| ResolvedInstance {
+                name: node.name.clone(),
+                class_name: node.class_name.clone(),
+                parent: node.parent.map(|p| p.to_bits() as i64),
+                children: node.children.iter().map(|c| c.to_bits() as i64).collect(),
+            })
+        })
+    } else {
+        with_instance_registry(None, |registry| {
+            let reg = registry.read().unwrap();
+            reg.get(entity_id as u64).map(|inst| ResolvedInstance {
+                name: inst.name.clone(),
+                class_name: inst.class_name.clone(),
+                parent: if inst.parent_id != 0 { Some(inst.parent_id as i64) } else { None },
+                children: inst.children.iter().map(|&c| c as i64).collect(),
+            })
+        })
+    }
+}
+
+/// Rune-compatible Instance reference — a lightweight, lazily-resolved
+/// HANDLE, not a data snapshot. `entity_id` is its only state; every
+/// method below re-resolves against the live snapshot or Pending
+/// registry (via `resolve_instance`) on every call, so a handle can't go
+/// stale mid-script even if the underlying data changes.
 /// Exposed to Rune as `Instance` (not `InstanceRune`).
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, rune::Any)]
 #[rune(name = Instance)]
 pub struct InstanceRune {
+    /// `entity.to_bits() as i64` for a real World entity (Live), or the
+    /// legacy `InstanceRegistry` counter id (Pending) for an instance
+    /// created via `Instance::new()` earlier in this run and not yet
+    /// materialized. See the module doc comment for the magnitude-based
+    /// split and why two id spaces exist.
     #[rune(get)]
     pub entity_id: i64,
 }
@@ -1371,6 +1692,128 @@ pub struct InstanceRune {
 impl rune::alloc::clone::TryClone for InstanceRune {
     fn try_clone(&self) -> Result<Self, rune::alloc::Error> {
         Ok(self.clone())
+    }
+}
+
+// ── Generic property get/set — Rune-value ↔ PropertyValue bridge ───────
+//
+// `Instance:Set()` takes a `rune::runtime::Value` (Rune's own dynamic
+// value type — the same thing every Rune value is boxed as, including
+// primitives) rather than one setter per data type. That's the
+// deliberate difference from the removed `set_vector3`/`set_color3`/…
+// methods the comment above `InstanceRune::destroy` used to describe:
+// those were per-type AND only ever wrote into the Pending registry.
+// This is one generic entry point that dispatches on the VALUE's runtime
+// kind and routes to the correct backing store (Live vs Pending) based
+// on the HANDLE's id, same as every other `InstanceRune` method.
+//
+// Two separate `PropertyValue` enums exist in this codebase and neither
+// converts into the other for free:
+//   - `eustress_common::classes::PropertyValue` — what `PropertyAccess`
+//     (real ECS components) and `PropertyCommand` operate on. Backed by
+//     bevy's `Vec3` etc.
+//   - `eustress_common::scripting::PropertyValue` — what the Pending
+//     `InstanceRegistry`'s property bag stores. Backed by its own
+//     `scripting::Vector3`/`scripting::Color3` (same field shapes, a
+//     different type). `execute_rune_oneshot` already reads this one
+//     when spawning `Instance::new()` results (see `PV::Vector3` etc.
+//     above).
+// Hence two conversion functions below instead of one.
+
+/// Convert a Rune script value into `eustress_common::classes::PropertyValue`
+/// for a LIVE World entity's queued write. Tried in a fixed order — bool →
+/// int → float → string → the three registered external types that
+/// round-trip cleanly (`Vector3`, `Color3`, `UDim2`) — each of which fails
+/// fast (`Err`, not a silent wrong-kind coercion) via `Value::as_*`/
+/// `downcast` when the value isn't that kind, so probing in sequence is
+/// safe. Anything else (another `Instance` handle, a `Vec`, a Rune
+/// closure, …) is rejected with a message the caller logs.
+#[cfg(feature = "realism-scripting")]
+fn rune_value_to_live_property_value(value: &Value) -> Result<eustress_common::classes::PropertyValue, String> {
+    use eustress_common::classes::PropertyValue as CPV;
+    if let Ok(b) = value.as_bool() {
+        return Ok(CPV::Bool(b));
+    }
+    if let Ok(i) = value.as_signed() {
+        return Ok(CPV::Int(i as i32));
+    }
+    if let Ok(f) = value.as_float() {
+        return Ok(CPV::Float(f as f32));
+    }
+    if let Ok(s) = value.borrow_string_ref() {
+        return Ok(CPV::String(s.to_string()));
+    }
+    if let Ok(v) = value.clone().downcast::<Vector3>() {
+        return Ok(CPV::Vector3(Vec3::new(v.x as f32, v.y as f32, v.z as f32)));
+    }
+    if let Ok(c) = value.clone().downcast::<Color3>() {
+        return Ok(CPV::Color3([c.r as f32, c.g as f32, c.b as f32]));
+    }
+    if let Ok(u) = value.clone().downcast::<UDim2>() {
+        return Ok(CPV::UDim2(eustress_common::ui_types::UDim2::new(
+            u.x_scale as f32, u.x_offset as f32, u.y_scale as f32, u.y_offset as f32,
+        )));
+    }
+    Err(format!(
+        "unsupported value type {} — expected bool/int/float/string/Vector3/Color3/UDim2",
+        value.type_info(),
+    ))
+}
+
+/// Same probing order as `rune_value_to_live_property_value`, but into
+/// the Pending store's OWN `PropertyValue`
+/// (`eustress_common::scripting::PropertyValue`) — see the block comment
+/// above for why the two stores don't share a representation. `UDim2`
+/// isn't a variant of this enum (the Pending property bag predates
+/// `UDim2` — see `InstanceData::properties`), so it's rejected here even
+/// though it's accepted on the Live side.
+#[cfg(feature = "realism-scripting")]
+fn rune_value_to_pending_property_value(value: &Value) -> Result<eustress_common::scripting::PropertyValue, String> {
+    use eustress_common::scripting::PropertyValue as SPV;
+    if let Ok(b) = value.as_bool() {
+        return Ok(SPV::Bool(b));
+    }
+    if let Ok(i) = value.as_signed() {
+        return Ok(SPV::Int(i));
+    }
+    if let Ok(f) = value.as_float() {
+        return Ok(SPV::Float(f));
+    }
+    if let Ok(s) = value.borrow_string_ref() {
+        return Ok(SPV::String(s.to_string()));
+    }
+    if let Ok(v) = value.clone().downcast::<Vector3>() {
+        return Ok(SPV::Vector3(eustress_common::scripting::Vector3 { x: v.x, y: v.y, z: v.z }));
+    }
+    if let Ok(c) = value.clone().downcast::<Color3>() {
+        return Ok(SPV::Color3(eustress_common::scripting::Color3 { r: c.r, g: c.g, b: c.b }));
+    }
+    Err(format!(
+        "unsupported value type {} — expected bool/int/float/string/Vector3/Color3",
+        value.type_info(),
+    ))
+}
+
+/// Inverse of `rune_value_to_pending_property_value` — hands
+/// `Instance:Get()` back whatever's stored in the Pending registry's
+/// property bag as a Rune value. `CFrame`/`EntityRef`/`EnumValue` aren't
+/// bridged yet (no Rune-exposed CFrame type or Instance-ref
+/// reconstruction from a raw id in this module) — `None` for those
+/// rather than a lossy guess; `PropertyValue::None` (the "never set")
+/// case also reads as `None`, same as an absent key.
+#[cfg(feature = "realism-scripting")]
+fn pending_property_value_to_rune_value(value: &eustress_common::scripting::PropertyValue) -> Option<Value> {
+    use eustress_common::scripting::PropertyValue as SPV;
+    match value {
+        SPV::None => None,
+        SPV::Bool(b) => rune::to_value(*b).ok(),
+        SPV::Int(i) => rune::to_value(*i).ok(),
+        SPV::Float(f) => rune::to_value(*f).ok(),
+        SPV::String(s) => rune::to_value(s.clone()).ok(),
+        SPV::Vector3(v) => rune::to_value(Vector3 { x: v.x, y: v.y, z: v.z }).ok(),
+        SPV::Color3(c) => rune::to_value(Color3 { r: c.r, g: c.g, b: c.b }).ok(),
+        SPV::CFrame(_) | SPV::EntityRef(_) => None,
+        SPV::EnumValue(_, v) => rune::to_value(v.clone()).ok(),
     }
 }
 
@@ -1387,20 +1830,39 @@ impl InstanceRune {
         })
     }
 
-    /// Get the instance name
+    /// Tool-facing stable id string, matching the `"{index}v{generation}"`
+    /// convention used for real entities everywhere else in this codebase
+    /// (`crate::entity_utils::entity_to_id_string`; see also
+    /// `clipboard.rs` / `keybindings.rs` / the MCP tools). Pending
+    /// (not-yet-materialized) instances have no real `Entity` yet, so
+    /// they get a distinguishable `"pending:{n}"` placeholder instead —
+    /// never a value that could be mistaken for a real entity id.
     #[rune::function(instance)]
-    pub fn name(&self) -> String {
-        with_instance_registry(String::new(), |registry| {
-            let reg = registry.read().unwrap();
-            reg.get(self.entity_id as u64)
-                .map(|i| i.name.clone())
-                .unwrap_or_default()
-        })
+    pub fn id(&self) -> String {
+        if self.entity_id >= PENDING_ID_CEILING {
+            crate::entity_utils::entity_to_id_string(Entity::from_bits(self.entity_id as u64))
+        } else {
+            format!("pending:{}", self.entity_id)
+        }
     }
 
-    /// Set the instance name
+    /// Get the instance name.
+    #[rune::function(instance)]
+    pub fn name(&self) -> String {
+        resolve_instance(self.entity_id).map(|r| r.name).unwrap_or_default()
+    }
+
+    /// Set the instance name. Only supported for Pending (this-run,
+    /// not-yet-materialized) instances today — renaming a live World
+    /// entity needs the generic property-write path (`PropertyAccess` +
+    /// undo), which is a later phase; no-op + warning on a live entity
+    /// rather than silently claiming success.
     #[rune::function(instance)]
     pub fn set_name(&self, name: String) {
+        if self.entity_id >= PENDING_ID_CEILING {
+            warn!("[Rune Script] Instance:SetName() on a pre-existing world entity isn't implemented yet (needs generic property write) — ignored");
+            return;
+        }
         with_instance_registry((), |registry| {
             let mut reg = registry.write().unwrap();
             if let Some(instance) = reg.get_mut(self.entity_id as u64) {
@@ -1409,179 +1871,194 @@ impl InstanceRune {
         });
     }
 
-    /// Get the class name
+    /// Get the class name.
     #[rune::function(instance)]
     pub fn class_name(&self) -> String {
-        with_instance_registry(String::new(), |registry| {
-            let reg = registry.read().unwrap();
-            reg.get(self.entity_id as u64)
-                .map(|i| i.class_name.clone())
-                .unwrap_or_default()
-        })
+        resolve_instance(self.entity_id).map(|r| r.class_name).unwrap_or_default()
     }
 
-    /// Check if instance is of a specific class
+    /// Check if instance is of a specific class (same simplified
+    /// inheritance chain as before — full `ClassName` inheritance
+    /// metadata isn't exposed generically yet).
     #[rune::function(instance)]
     pub fn is_a(&self, class_name: &str) -> bool {
-        with_instance_registry(false, |registry| {
-            let reg = registry.read().unwrap();
-            if let Some(instance) = reg.get(self.entity_id as u64) {
-                if instance.class_name == class_name {
-                    return true;
-                }
-                // Check inheritance
-                match class_name {
-                    "Instance" => true,
-                    "BasePart" => matches!(instance.class_name.as_str(), 
-                        "Part" | "MeshPart" | "WedgePart" | "SpawnLocation"),
-                    "PVInstance" => matches!(instance.class_name.as_str(),
-                        "Part" | "MeshPart" | "Model"),
-                    _ => false,
-                }
-            } else {
-                false
-            }
-        })
+        let Some(resolved) = resolve_instance(self.entity_id) else { return false };
+        if resolved.class_name == class_name {
+            return true;
+        }
+        // Check inheritance
+        match class_name {
+            "Instance" => true,
+            "BasePart" => matches!(resolved.class_name.as_str(),
+                "Part" | "MeshPart" | "WedgePart" | "SpawnLocation"),
+            "PVInstance" => matches!(resolved.class_name.as_str(),
+                "Part" | "MeshPart" | "Model"),
+            _ => false,
+        }
     }
 
-    /// Get parent instance
+    /// Get parent instance.
     #[rune::function(instance)]
     pub fn parent(&self) -> Option<InstanceRune> {
-        with_instance_registry(None, |registry| {
-            let reg = registry.read().unwrap();
-            reg.get(self.entity_id as u64)
-                .and_then(|i| {
-                    if i.parent_id != 0 {
-                        Some(InstanceRune { entity_id: i.parent_id as i64 })
-                    } else {
-                        None
-                    }
-                })
-        })
+        resolve_instance(self.entity_id)
+            .and_then(|r| r.parent)
+            .map(|entity_id| InstanceRune { entity_id })
     }
 
-    /// Get children
+    /// Get children.
     #[rune::function(instance)]
     pub fn get_children(&self) -> Vec<InstanceRune> {
-        with_instance_registry(Vec::new(), |registry| {
-            let reg = registry.read().unwrap();
-            reg.get(self.entity_id as u64)
-                .map(|i| {
-                    i.children.iter()
-                        .map(|&id| InstanceRune { entity_id: id as i64 })
-                        .collect()
-                })
-                .unwrap_or_default()
-        })
+        resolve_instance(self.entity_id)
+            .map(|r| r.children.into_iter().map(|entity_id| InstanceRune { entity_id }).collect())
+            .unwrap_or_default()
     }
 
-    /// Find first child with name
+    /// Find first child with name.
     #[rune::function(instance)]
     pub fn find_first_child(&self, name: &str) -> Option<InstanceRune> {
-        with_instance_registry(None, |registry| {
-            let reg = registry.read().unwrap();
-            if let Some(instance) = reg.get(self.entity_id as u64) {
-                for &child_id in &instance.children {
-                    if let Some(child) = reg.get(child_id) {
-                        if child.name == name {
-                            return Some(InstanceRune { entity_id: child_id as i64 });
-                        }
-                    }
-                }
-            }
-            None
-        })
+        let resolved = resolve_instance(self.entity_id)?;
+        resolved.children.into_iter()
+            .find(|&child_id| resolve_instance(child_id).map(|c| c.name == name).unwrap_or(false))
+            .map(|entity_id| InstanceRune { entity_id })
     }
 
-    /// Find first child of class
+    /// Find first child of class.
     #[rune::function(instance)]
     pub fn find_first_child_of_class(&self, class_name: &str) -> Option<InstanceRune> {
+        let resolved = resolve_instance(self.entity_id)?;
+        resolved.children.into_iter()
+            .find(|&child_id| resolve_instance(child_id).map(|c| c.class_name == class_name).unwrap_or(false))
+            .map(|entity_id| InstanceRune { entity_id })
+    }
+
+    /// Full recursive subtree — Roblox's `Instance:GetDescendants()`.
+    /// `get_children` only returns direct children; this walks the whole
+    /// tree via repeated `resolve_instance` calls. Purely a read over the
+    /// same snapshot/registry data `get_children` reads, so — unlike
+    /// `destroy`/`set` — nothing here needs queuing; it can run fully
+    /// synchronously.
+    #[rune::function(instance)]
+    pub fn get_descendants(&self) -> Vec<InstanceRune> {
+        let mut out = Vec::new();
+        // Guards against an ill-formed hierarchy looping forever — real
+        // ECS/Pending-registry parent/child data should never cycle, but
+        // a corrupted registry entry shouldn't be able to hang the
+        // command bar on an infinite walk.
+        let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut stack: Vec<i64> = resolve_instance(self.entity_id)
+            .map(|r| r.children)
+            .unwrap_or_default();
+        while let Some(id) = stack.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            if let Some(resolved) = resolve_instance(id) {
+                stack.extend(resolved.children.iter().copied());
+            }
+            out.push(InstanceRune { entity_id: id });
+        }
+        out
+    }
+
+    /// Recursive name search — Roblox's `Instance:FindFirstChild(name,
+    /// true)`. Built on `get_descendants`'s walk; fine at command-bar
+    /// scale, not optimized for huge subtrees (no early-exit short
+    /// circuit inside the walk itself).
+    #[rune::function(instance)]
+    pub fn find_first_descendant(&self, name: &str) -> Option<InstanceRune> {
+        self.__rune_fn__get_descendants()
+            .into_iter()
+            .find(|d| resolve_instance(d.entity_id).map(|r| r.name == name).unwrap_or(false))
+    }
+
+    /// Get a property by name. See the block comment above this `impl`
+    /// for the value-shape bridge and why Live vs Pending need separate
+    /// conversions.
+    ///
+    /// Pending (this-run) instances read straight from the registry's
+    /// property bag. Live (pre-existing) entities always return `None`
+    /// for now: the pre-script `HIERARCHY_SNAPSHOT` this module resolves
+    /// against only carries name/class/parent/children (see
+    /// `SnapshotNode` above), not property VALUES — extending it would
+    /// mean walking every live entity's full `PropertyAccess` surface
+    /// before every script run just in case a `Get()` call shows up, a
+    /// real per-run cost the `set()`-only use case this phase was built
+    /// for (reposition existing BillboardGuis) never needs. A later
+    /// phase can add a lazy, on-demand Live read (queued the same way
+    /// `set()` queues a write) if a real read-then-write need shows up.
+    #[rune::function(instance)]
+    pub fn get(&self, name: &str) -> Option<Value> {
+        if self.entity_id >= PENDING_ID_CEILING {
+            warn!("[Rune Script] Instance:Get(\"{}\") on a pre-existing world entity isn't implemented yet (needs a property-carrying snapshot) — returning nil", name);
+            return None;
+        }
         with_instance_registry(None, |registry| {
             let reg = registry.read().unwrap();
-            if let Some(instance) = reg.get(self.entity_id as u64) {
-                for &child_id in &instance.children {
-                    if let Some(child) = reg.get(child_id) {
-                        if child.class_name == class_name {
-                            return Some(InstanceRune { entity_id: child_id as i64 });
-                        }
-                    }
-                }
-            }
-            None
+            reg.get(self.entity_id as u64)
+                .and_then(|inst| inst.properties.get(name))
+                .and_then(pending_property_value_to_rune_value)
         })
     }
 
-    /// Set a Vector3 property (Position, Size)
+    /// Set a property by name — the generic bridge the removed per-type
+    /// `set_vector3`/`set_color3`/… methods used to stand in for (see the
+    /// block comment above this `impl`). Pending instances write straight
+    /// into the registry's property bag, applied immediately. Live
+    /// entities can't be touched from here (no `&mut World`), so the
+    /// write is QUEUED via `queue_live_property_write` and applied by the
+    /// caller (`drain_slint_actions` in `slint_ui.rs`) through
+    /// `PropertyCommand::execute`, mirroring `destroy()`'s
+    /// `queue_live_destroy` / `drain_pending_destroys` pattern exactly.
     #[rune::function(instance)]
-    pub fn set_vector3(&self, key: String, value: Vector3) {
-        with_instance_registry((), |registry| {
-            let mut reg = registry.write().unwrap();
-            if let Some(inst) = reg.get_mut(self.entity_id as u64) {
-                inst.properties.insert(key, eustress_common::scripting::PropertyValue::Vector3(
-                    eustress_common::scripting::types::Vector3 { x: value.x, y: value.y, z: value.z }
-                ));
+    pub fn set(&self, name: &str, value: Value) {
+        if self.entity_id >= PENDING_ID_CEILING {
+            match rune_value_to_live_property_value(&value) {
+                Ok(pv) => queue_live_property_write(self.entity_id, name.to_string(), pv),
+                Err(msg) => warn!("[Rune Script] Instance:Set(\"{}\", ...) — {}", name, msg),
             }
-        });
+            return;
+        }
+        match rune_value_to_pending_property_value(&value) {
+            Ok(pv) => with_instance_registry((), |registry| {
+                let mut reg = registry.write().unwrap();
+                if let Some(instance) = reg.get_mut(self.entity_id as u64) {
+                    instance.properties.insert(name.to_string(), pv);
+                }
+            }),
+            Err(msg) => warn!("[Rune Script] Instance:Set(\"{}\", ...) — {}", name, msg),
+        }
     }
 
-    /// Set a Color3 property (Color)
-    #[rune::function(instance)]
-    pub fn set_color3(&self, key: String, value: Color3) {
-        with_instance_registry((), |registry| {
-            let mut reg = registry.write().unwrap();
-            if let Some(inst) = reg.get_mut(self.entity_id as u64) {
-                inst.properties.insert(key, eustress_common::scripting::PropertyValue::Color3(
-                    eustress_common::scripting::types::Color3 { r: value.r, g: value.g, b: value.b }
-                ));
-            }
-        });
-    }
-
-    /// Set a string property (Material)
-    #[rune::function(instance)]
-    pub fn set_string(&self, key: String, value: String) {
-        with_instance_registry((), |registry| {
-            let mut reg = registry.write().unwrap();
-            if let Some(inst) = reg.get_mut(self.entity_id as u64) {
-                inst.properties.insert(key, eustress_common::scripting::PropertyValue::String(value));
-            }
-        });
-    }
-
-    /// Set a bool property (Anchored, CanCollide)
-    #[rune::function(instance)]
-    pub fn set_bool(&self, key: String, value: bool) {
-        with_instance_registry((), |registry| {
-            let mut reg = registry.write().unwrap();
-            if let Some(inst) = reg.get_mut(self.entity_id as u64) {
-                inst.properties.insert(key, eustress_common::scripting::PropertyValue::Bool(value));
-            }
-        });
-    }
-
-    /// Set a float property (Transparency, Reflectance)
-    #[rune::function(instance)]
-    pub fn set_float(&self, key: String, value: f64) {
-        with_instance_registry((), |registry| {
-            let mut reg = registry.write().unwrap();
-            if let Some(inst) = reg.get_mut(self.entity_id as u64) {
-                inst.properties.insert(key, eustress_common::scripting::PropertyValue::Float(value));
-            }
-        });
-    }
-
-    /// Destroy the instance
+    /// Destroy the instance. Pending instances (created this run, not
+    /// yet materialized) are simply dropped from the registry — nothing
+    /// was ever written to disk. Live instances are queued; the caller
+    /// (`drain_slint_actions` in `slint_ui.rs`) trash-moves the backing
+    /// file (never a hard delete — same reversible-destruction
+    /// convention as the Delete-key handler in `keybindings.rs`) and
+    /// despawns the entity after this script returns. See
+    /// `drain_pending_destroys`.
     #[rune::function(instance)]
     pub fn destroy(&self) {
-        with_instance_registry((), |registry| {
-            let mut reg = registry.write().unwrap();
-            reg.remove(self.entity_id as u64);
-        });
+        if self.entity_id >= PENDING_ID_CEILING {
+            queue_live_destroy(self.entity_id);
+        } else {
+            with_instance_registry((), |registry| {
+                let mut reg = registry.write().unwrap();
+                reg.remove(self.entity_id as u64);
+            });
+        }
     }
 
-    /// Clone the instance
+    /// Clone the instance. Only supported for Pending instances today —
+    /// cloning a Live World entity needs the same file-duplication +
+    /// spawn path `Instance::new()` would need (see the module doc
+    /// comment), which isn't reachable synchronously here.
     #[rune::function(instance, path = Self::clone_instance)]
     pub fn clone_instance(&self) -> Option<InstanceRune> {
+        if self.entity_id >= PENDING_ID_CEILING {
+            warn!("[Rune Script] Instance:Clone() on a pre-existing world entity isn't implemented yet (needs file duplication) — returning nil");
+            return None;
+        }
         with_instance_registry(None, |registry| {
             let mut reg = registry.write().unwrap();
             let source_data = reg.get(self.entity_id as u64).map(|s| {
@@ -3736,6 +4213,221 @@ fn gui_set_font_size(name: &str, size: f64) {
         name: name.to_string(),
         size: size as f32,
     });
+}
+
+// ============================================================================
+// Studio plugin API — Rune half of the unified plugin bridge
+// ============================================================================
+//
+// Luau isolates each plugin via its own `Chunk::set_environment` table, so
+// a plugin's `plugin:AddSection(...)` call is only ever reachable from
+// that plugin's own script. Rune has no equivalent: `create_ecs_module`
+// installs ONE `Module` into the ONE shared `Context` every Rune
+// execution uses (Soul Scripts, MCP `execute_rune`, AND plugins), so
+// `plugin_add_section` etc. are technically callable from anywhere. The
+// functions below are captureless (mirroring `SPACE_ROOT`/`SIM_VALUES`
+// elsewhere in this file — no `#[rune::function]` here can close over
+// engine state) and instead read AMBIENT identity from a thread-local
+// stack. Called with no plugin context active (e.g. from an ordinary Soul
+// Script), they harmlessly no-op — exactly how `write_space_file` no-ops
+// when `SPACE_ROOT` is unset, rather than panicking.
+
+/// Ambient identity for the Rune plugin currently registering or handling
+/// a button click — the Rune equivalent of Luau's per-plugin environment
+/// table. Cloning is cheap (a `String` + two `Arc<Mutex<_>>`s).
+#[cfg(feature = "realism-scripting")]
+#[derive(Clone)]
+struct PluginRuneContext {
+    plugin_id: String,
+    bridge: eustress_common::script_plugins::PluginBridge,
+    selection: eustress_common::script_plugins::SelectionCache,
+}
+
+#[cfg(feature = "realism-scripting")]
+thread_local! {
+    /// A STACK, not a single cell: needed at BOTH discovery-time top-level
+    /// script execution AND at callback dispatch (a callback that itself
+    /// calls `plugin_add_button` mid-click must still self-attribute
+    /// correctly), and a stack is correct-by-construction against
+    /// reentrancy and against identity "sticking" after an error/panic
+    /// unwind — each push is paired with an RAII pop via
+    /// `PluginContextGuard`, so an early return or panic during a
+    /// callback still unwinds the guard.
+    static PLUGIN_CONTEXT_STACK: std::cell::RefCell<Vec<PluginRuneContext>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+/// RAII guard pushing a plugin's identity onto the thread-local stack for
+/// the duration of a scope (top-level discovery execution, or one
+/// button-callback dispatch) and popping on `Drop` — including on early
+/// return or panic unwind, unlike a manual set/clear pair. See
+/// `engine::script_plugin_host` for both call sites.
+#[cfg(feature = "realism-scripting")]
+pub struct PluginContextGuard;
+
+#[cfg(feature = "realism-scripting")]
+impl PluginContextGuard {
+    pub fn new(
+        plugin_id: String,
+        bridge: eustress_common::script_plugins::PluginBridge,
+        selection: eustress_common::script_plugins::SelectionCache,
+    ) -> Self {
+        PLUGIN_CONTEXT_STACK.with(|s| {
+            s.borrow_mut().push(PluginRuneContext { plugin_id, bridge, selection });
+        });
+        PluginContextGuard
+    }
+}
+
+#[cfg(feature = "realism-scripting")]
+impl Drop for PluginContextGuard {
+    fn drop(&mut self) {
+        PLUGIN_CONTEXT_STACK.with(|s| {
+            s.borrow_mut().pop();
+        });
+    }
+}
+
+/// Read the top of the plugin-identity stack (cloning it and releasing
+/// the borrow immediately, so `callback` is free to touch the SAME
+/// thread-local itself — e.g. a button callback registering another
+/// button mid-click — without a `RefCell` double-borrow panic).
+#[cfg(feature = "realism-scripting")]
+fn with_plugin_context<F, R>(fallback: R, callback: F) -> R
+where
+    F: FnOnce(&PluginRuneContext) -> R,
+{
+    let ctx = PLUGIN_CONTEXT_STACK.with(|s| s.borrow().last().cloned());
+    match ctx {
+        Some(ctx) => callback(&ctx),
+        None => {
+            warn!("[Rune plugin API] called outside a plugin registration/callback context — ignored");
+            fallback
+        }
+    }
+}
+
+/// The one shared ribbon tab every plugin (native or script) contributes
+/// to — see `engine::script_plugin_host::PLUGINS_TAB_ID`. Hardcoded here
+/// (not a parameter) for the same reason `action_id` is auto-derived
+/// below: rune 0.14's `#[rune::function]` only generates a `Function`
+/// trait impl for UP TO 5 ARGUMENTS (verified against the vendored
+/// source's `permute!` macro in `function/macros.rs` — it exhaustively
+/// permutes by-value/`Ref`/`Mut` for every argument position, so it stops
+/// at 5 to avoid a combinatorial blowup) — there is no dedicated
+/// multi-arg-Rune-function escape hatch the way Lua's tuple-unpacking
+/// closures get one, so every parameter here has to earn its slot.
+const PLUGIN_TAB_ID: &str = "plugins";
+
+/// Add a section to the shared "plugins" tab. Mirrors Luau's
+/// `plugin:AddSection(tab_id, section_id, label)` minus the redundant
+/// `tab_id` (see `PLUGIN_TAB_ID`) — lands on the SAME `PluginBridge`
+/// queue Luau plugins use.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn plugin_add_section(section_id: &str, label: &str) {
+    with_plugin_context((), |ctx| {
+        let Ok(mut bridge) = ctx.bridge.lock() else { return };
+        bridge.push(eustress_common::script_plugins::PendingPluginRegistration::Section {
+            plugin_id: ctx.plugin_id.clone(),
+            tab_id: PLUGIN_TAB_ID.to_string(),
+            section_id: section_id.to_string(),
+            label: label.to_string(),
+        });
+    })
+}
+
+/// Add a button to a section — 5 parameters (the rune 0.14 ceiling, see
+/// `PLUGIN_TAB_ID`), so unlike Luau's `AddButton` this drops `tab_id`
+/// (hardcoded), `action_id` (auto-derived as `"{plugin_id}:{button_id}"`
+/// — button ids are already unique within a plugin, so this needs no
+/// author input and can't drift from `button_id` the way a
+/// separately-typed id could), `icon` (always `None` for v1 — a Rune
+/// plugin button just has no icon yet), and `size` (always "normal" for
+/// v1). All four are fast-followable later behind a Rune-side
+/// `#[derive(Any)]` options struct, once one exists in this codebase, in
+/// a way that keeps this call under 5 arguments.
+///
+/// `callback` arrives as a raw `Value` (NOT `rune::runtime::Function` —
+/// that type has no `FromValue` impl in rune 0.14, only `SyncFunction`
+/// does, and `SyncFunction::from_value` itself just does
+/// `value.downcast::<Function>()?.into_sync()`
+/// infallibly-from-the-macro's-perspective). Taking `Value` and doing the
+/// downcast + `into_sync()` HERE, manually, means a capture failure (a
+/// closure that captured a non-const engine object can't be made
+/// `Send`+`Sync`) is catchable: it's reported as a plugin-attributed
+/// error Notify and the button is not registered, instead of aborting
+/// the whole registration call with an opaque VM error. Returns `true` on
+/// success, `false` otherwise (mirrors `datastore_set`'s bool-result
+/// convention elsewhere in this module).
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn plugin_add_button(
+    section_id: &str,
+    button_id: &str,
+    label: &str,
+    tooltip: &str,
+    callback: rune::runtime::Value,
+) -> bool {
+    with_plugin_context(false, |ctx| {
+        let action_id = format!("{}:{}", ctx.plugin_id, button_id);
+        let sync_callback = match callback.downcast::<rune::runtime::Function>().and_then(|f| f.into_sync()) {
+            Ok(f) => f,
+            Err(e) => {
+                if let Ok(mut bridge) = ctx.bridge.lock() {
+                    bridge.push(eustress_common::script_plugins::PendingPluginRegistration::Notify {
+                        plugin_id: ctx.plugin_id.clone(),
+                        level: "error".to_string(),
+                        message: format!(
+                            "AddButton '{action_id}': button callbacks must not capture engine objects — call the API from inside the callback body instead ({e})"
+                        ),
+                    });
+                }
+                return false;
+            }
+        };
+        let Ok(mut bridge) = ctx.bridge.lock() else { return false };
+        bridge.push(eustress_common::script_plugins::PendingPluginRegistration::Button {
+            plugin_id: ctx.plugin_id.clone(),
+            tab_id: PLUGIN_TAB_ID.to_string(),
+            section_id: section_id.to_string(),
+            button_id: button_id.to_string(),
+            label: label.to_string(),
+            icon: None,
+            tooltip: tooltip.to_string(),
+            action_id,
+            size: "normal".to_string(),
+            callback: eustress_common::script_plugins::CallbackHandle::Rune(sync_callback),
+        });
+        true
+    })
+}
+
+/// Post a Notify-level message, attributed to this plugin. Mirrors Luau's
+/// `plugin:Notify(level, message)`.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn plugin_notify(level: &str, message: &str) {
+    with_plugin_context((), |ctx| {
+        let Ok(mut bridge) = ctx.bridge.lock() else { return };
+        bridge.push(eustress_common::script_plugins::PendingPluginRegistration::Notify {
+            plugin_id: ctx.plugin_id.clone(),
+            level: level.to_string(),
+            message: message.to_string(),
+        });
+    })
+}
+
+/// Currently-selected entity ids, as `"{index}v{generation}"` strings —
+/// the same format used at every other Entity<->external boundary in
+/// this engine (MCP, MindSpace link-source). Mirrors Luau's
+/// `plugin:GetSelection()`.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn plugin_get_selection() -> Vec<String> {
+    with_plugin_context(Vec::new(), |ctx| {
+        ctx.selection.lock().map(|s| s.clone()).unwrap_or_default()
+    })
 }
 
 /// Stub module when feature is disabled

@@ -103,6 +103,63 @@ impl FeatureEntry {
     pub fn is_suppressed(&self) -> bool {
         matches!(self, FeatureEntry::Suppressed { .. })
     }
+
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            FeatureEntry::Sketch { .. } => "sketch",
+            FeatureEntry::Feature { body, .. } => body.op_label(),
+            FeatureEntry::Suppressed { .. } => "suppressed",
+        }
+    }
+}
+
+impl FeatureTree {
+    /// Reorder entry at `from` to index `to` (clamped).
+    pub fn reorder(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.entries.len() {
+            return false;
+        }
+        let entry = self.entries.remove(from);
+        let to = to.min(self.entries.len());
+        self.entries.insert(to, entry);
+        true
+    }
+
+    /// Suppress entry `index` (Feature/Sketch → Suppressed). Idempotent.
+    pub fn suppress(&mut self, index: usize) -> Result<(), String> {
+        let entry = self.entries.get(index).cloned().ok_or("index out of range")?;
+        if entry.is_suppressed() {
+            return Ok(());
+        }
+        let name = entry.name().to_string();
+        // Store the full tagged entry so unsuppress is lossless.
+        let body = toml::Value::try_from(entry).map_err(|e| format!("serialize: {e}"))?;
+        self.entries[index] = FeatureEntry::Suppressed { name, body };
+        Ok(())
+    }
+
+    /// Un-suppress: rehydrate from stored TOML value.
+    pub fn unsuppress(&mut self, index: usize) -> Result<(), String> {
+        let body = match self.entries.get(index) {
+            Some(FeatureEntry::Suppressed { body, .. }) => body.clone(),
+            Some(_) => return Ok(()),
+            None => return Err("index out of range".into()),
+        };
+        let restored: FeatureEntry = body
+            .try_into()
+            .map_err(|e: toml::de::Error| format!("deserialize: {e}"))?;
+        self.entries[index] = restored;
+        Ok(())
+    }
+
+    /// Delete entry at index.
+    pub fn delete(&mut self, index: usize) -> bool {
+        if index >= self.entries.len() {
+            return false;
+        }
+        self.entries.remove(index);
+        true
+    }
 }
 
 /// Resolve a variable reference or literal quantity string to a

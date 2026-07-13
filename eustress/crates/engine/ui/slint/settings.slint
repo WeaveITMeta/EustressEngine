@@ -86,9 +86,11 @@ export component SettingsDialog inherits Rectangle {
     // Soul settings
     in-out property <string> soul-api-key: "";
     in-out property <bool> soul-use-global-key: true;
-    in-out property <string> soul-model: "claude-sonnet-4-6-20250514";
     in property <bool> soul-api-key-valid: false;
     in property <string> soul-error-message: "";
+    // xAI (Grok) key — global-only, no per-space override, so no
+    // corresponding "use global key" toggle like the Anthropic key has.
+    in-out property <string> soul-xai-api-key: "";
 
     // Callbacks
     callback on-close();
@@ -605,29 +607,43 @@ export component SettingsDialog inherits Rectangle {
                             Text { text: "API key validated"; color: Theme.accent-green; font-size: 10px; vertical-alignment: center; }
                         }
 
-                        Rectangle { height: 8px; }
-                        SettingsSection { title: "MODEL"; }
+                        Rectangle { height: 12px; }
+                        SettingsSection { title: "XAI (GROK) API KEY"; }
 
-                        Rectangle {
+                        HorizontalBox {
+                            spacing: 8px;
                             height: 28px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 148px;
-                                    text: "Model";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                                ComboBox {
-                                    width: 260px;
-                                    model: ["claude-sonnet-4-6-20250514", "claude-opus-4-6-20250514", "claude-haiku-4-5-20251001"];
-                                    current-value <=> root.soul-model;
+
+                            Text {
+                                width: 148px;
+                                text: "API Key";
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 26px;
+                                background: Theme.input-background;
+                                border-radius: 3px;
+                                border-width: 1px;
+                                border-color: Theme.input-border;
+
+                                LineEdit {
+                                    width: 100%; height: 100%;
+                                    text <=> root.soul-xai-api-key;
+                                    input-type: password;
+                                    font-size: 12px;
                                 }
                             }
                         }
 
-                        SettingsHint { text: "Sonnet 4.6 is recommended for speed and cost. Opus 4.6 produces higher quality at ~5x the cost. Haiku 4.5 is fastest and cheapest."; }
+                        SettingsHint { text: "Your BYOK xAI (Grok) API key — used when Workshop's model picker is set to Grok 4.5. Stored locally, never transmitted to Eustress servers."; }
+
+                        // Model selection: Workshop panel toolbar, next to
+                        // the Mode pill — not here, to keep a single writer
+                        // to GlobalSoulSettings::workshop_model.
 
                         if root.soul-error-message != "": Rectangle {
                             height: 28px;

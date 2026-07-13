@@ -494,6 +494,157 @@ impl LuauRuntime {
     }
 
     // ========================================================================
+    // Script-plugin environment — Phase 2 of the Studio plugin system
+    //
+    // A script plugin is loaded with its OWN environment table instead of
+    // the shared global table every other chunk (Soul Scripts, the command
+    // bar) runs against. `sandbox(true)` does NOT give per-chunk write
+    // isolation on its own — a plain `execute_chunk` call's top-level global
+    // writes land in the one shared `lua.globals()`, so two plugins (or a
+    // plugin and a Soul Script) could collide. `Chunk::set_environment`
+    // fixes this per-plugin: the environment table holds a `plugin` identity
+    // object (this plugin's registration methods) and falls through to the
+    // REAL globals via an `__index` metatable for everything else (`print`,
+    // `Instance`, `task`, `workspace`, ...), so the script still sees the
+    // full engine API — it just can't stomp on another plugin's globals.
+    // ========================================================================
+
+    /// Build a fresh per-plugin environment table: `env.plugin` is this
+    /// plugin's registration object (`RegisterTab`/`AddSection`/
+    /// `AddButton`/`Notify`/`GetSelection`), and `env`'s metatable falls
+    /// through to the real shared globals for everything else. Every
+    /// registration call self-attributes to `plugin_id` by pushing onto
+    /// `bridge` (see `crate::script_plugins` module docs for why a closure
+    /// can't reach `TabRegistry` directly).
+    #[cfg(feature = "luau")]
+    pub fn build_plugin_environment(
+        &self,
+        bridge: crate::script_plugins::PluginBridge,
+        selection: crate::script_plugins::SelectionCache,
+        plugin_id: String,
+    ) -> Result<mlua::Table, String> {
+        use crate::script_plugins::PendingPluginRegistration as Pending;
+        use crate::script_plugins::CallbackHandle;
+
+        let lua = &self.lua;
+        let plugin_table = lua.create_table().map_err(|e| format!("create plugin table: {e}"))?;
+
+        {
+            let bridge = bridge.clone();
+            let plugin_id = plugin_id.clone();
+            // No `RegisterTab` — there is only ever one "plugins" tab
+            // (registered natively at Startup); `tab_id` here is always
+            // "plugins" in practice, but kept as a parameter rather than
+            // hardcoded so the API reads the same shape as the native
+            // `PluginApi::add_tab_section`.
+            // Leading `mlua::Value` absorbs the implicit `self` Lua's
+            // colon-call sugar passes (`plugin:AddSection(...)` desugars to
+            // `plugin.AddSection(plugin, ...)`) — discarded; the closure
+            // already has `plugin_id` via its own capture, not this table.
+            let f = lua.create_function(move |_, (_self, tab_id, section_id, label): (mlua::Value, String, String, String)| {
+                bridge.lock().map_err(|_| mlua::Error::RuntimeError("plugin bridge poisoned".to_string()))?.push(Pending::Section {
+                    plugin_id: plugin_id.clone(), tab_id, section_id, label,
+                });
+                Ok(())
+            }).map_err(|e| format!("create AddSection: {e}"))?;
+            plugin_table.set("AddSection", f).map_err(|e| format!("set AddSection: {e}"))?;
+        }
+        {
+            let bridge = bridge.clone();
+            let plugin_id = plugin_id.clone();
+            let f = lua.create_function(move |lua, (_self, tab_id, section_id, button_id, label, icon, tooltip, action_id, size, callback):
+                (mlua::Value, String, String, String, String, Option<String>, String, String, Option<String>, mlua::Function)| {
+                let key = lua.create_registry_value(callback)?;
+                bridge.lock().map_err(|_| mlua::Error::RuntimeError("plugin bridge poisoned".to_string()))?.push(Pending::Button {
+                    plugin_id: plugin_id.clone(), tab_id, section_id, button_id, label, icon, tooltip, action_id,
+                    size: size.unwrap_or_else(|| "normal".to_string()),
+                    callback: CallbackHandle::Lua(key),
+                });
+                Ok(())
+            }).map_err(|e| format!("create AddButton: {e}"))?;
+            plugin_table.set("AddButton", f).map_err(|e| format!("set AddButton: {e}"))?;
+        }
+        {
+            let bridge = bridge.clone();
+            let plugin_id = plugin_id.clone();
+            let f = lua.create_function(move |_, (_self, level, message): (mlua::Value, String, String)| {
+                bridge.lock().map_err(|_| mlua::Error::RuntimeError("plugin bridge poisoned".to_string()))?.push(Pending::Notify {
+                    plugin_id: plugin_id.clone(), level, message,
+                });
+                Ok(())
+            }).map_err(|e| format!("create Notify: {e}"))?;
+            plugin_table.set("Notify", f).map_err(|e| format!("set Notify: {e}"))?;
+        }
+        {
+            let f = lua.create_function(move |lua, _self: mlua::Value| {
+                let t = lua.create_table()?;
+                let selected = selection.lock().map_err(|_| mlua::Error::RuntimeError("selection cache poisoned".to_string()))?;
+                for (i, id) in selected.iter().enumerate() {
+                    t.set(i + 1, id.clone())?;
+                }
+                Ok(t)
+            }).map_err(|e| format!("create GetSelection: {e}"))?;
+            plugin_table.set("GetSelection", f).map_err(|e| format!("set GetSelection: {e}"))?;
+        }
+        plugin_table.set("Id", plugin_id).map_err(|e| format!("set plugin.Id: {e}"))?;
+
+        // The environment: `plugin` is this script's own identity object;
+        // everything else falls through to the real shared globals via
+        // `__index`, so the script still sees `print`/`Instance`/`task`/etc.
+        let env = lua.create_table().map_err(|e| format!("create plugin env: {e}"))?;
+        env.set("plugin", plugin_table).map_err(|e| format!("set env.plugin: {e}"))?;
+        let meta = lua.create_table().map_err(|e| format!("create env metatable: {e}"))?;
+        meta.set("__index", lua.globals()).map_err(|e| format!("set __index: {e}"))?;
+        env.set_metatable(Some(meta)); // returns () in mlua 0.10, not Result
+
+        Ok(env)
+    }
+
+    /// Execute a chunk against a CUSTOM environment (a script plugin's own
+    /// `env` from [`build_plugin_environment`]) instead of the shared
+    /// globals every other `execute_chunk` call uses.
+    #[cfg(feature = "luau")]
+    pub fn execute_chunk_with_env(&mut self, source: &str, chunk_name: &str, env: mlua::Table) -> Result<(), String> {
+        let start = std::time::Instant::now();
+        self.stats.chunks_executed += 1;
+
+        let result = self.lua.load(source)
+            .set_name(chunk_name)
+            .set_environment(env)
+            .exec()
+            .map_err(|error| format!("Luau execution error in '{}': {}", chunk_name, error));
+
+        let elapsed = start.elapsed().as_micros() as u64;
+        self.stats.total_time_us += elapsed;
+
+        match &result {
+            Ok(()) => self.stats.successful += 1,
+            Err(_) => self.stats.failed += 1,
+        }
+
+        result
+    }
+
+    /// Remove a plugin's stored Lua callback from the registry (a leaked
+    /// `RegistryKey` in a long-lived shared VM is a genuine, permanent leak
+    /// — this is called for every stored button callback on plugin reload).
+    #[cfg(feature = "luau")]
+    pub fn remove_registry_value(&self, key: mlua::RegistryKey) -> Result<(), String> {
+        self.lua.remove_registry_value(key).map_err(|e| format!("remove_registry_value: {e}"))
+    }
+
+    /// Call a stored plugin-button callback by its `RegistryKey`, wrapped in
+    /// `pcall` semantics (errors are returned, not propagated as a panic —
+    /// one broken plugin button must never take down the engine or another
+    /// plugin's buttons).
+    #[cfg(feature = "luau")]
+    pub fn call_plugin_callback(&self, key: &mlua::RegistryKey) -> Result<(), String> {
+        let callback: mlua::Function = self.lua.registry_value(key)
+            .map_err(|e| format!("stale plugin callback: {e}"))?;
+        callback.call::<()>(()).map_err(|e| format!("{e}"))
+    }
+
+    // ========================================================================
     // Live runtime — host-driven scheduler entry points
     //
     // These turn the VM from "run once, top-to-bottom" into a persistent,

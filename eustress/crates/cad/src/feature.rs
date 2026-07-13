@@ -172,6 +172,27 @@ pub enum Feature {
     },
 }
 
+impl Feature {
+    /// Short label for feature-tree UI rows.
+    pub fn op_label(&self) -> &'static str {
+        match self {
+            Feature::Extrude { .. } => "extrude",
+            Feature::Revolve { .. } => "revolve",
+            Feature::Fillet { .. } => "fillet",
+            Feature::Chamfer { .. } => "chamfer",
+            Feature::Shell { .. } => "shell",
+            Feature::Sweep { .. } => "sweep",
+            Feature::Loft { .. } => "loft",
+            Feature::Hole { .. } => "hole",
+            Feature::Mirror { .. } => "mirror",
+            Feature::Pattern { .. } => "pattern",
+            Feature::ReferencePlane { .. } => "plane",
+            Feature::Boolean { .. } => "boolean",
+            Feature::Split { .. } => "split",
+        }
+    }
+}
+
 /// How a feature's output combines with the running part body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

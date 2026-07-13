@@ -92,6 +92,10 @@ pub mod services;
 pub mod soul;
 #[cfg(feature = "luau")]
 pub mod luau;
+/// Shared (language-agnostic) script-plugin data types — used by both the
+/// `luau` and `realism-scripting` backends, so it stays unconditional
+/// (its own types are per-variant `#[cfg]`-gated internally instead).
+pub mod script_plugins;
 pub mod scripting;
 pub mod terrain;
 #[cfg(feature = "gui")]

@@ -309,6 +309,8 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::OplogTail => protocol::handlers::oplog_tail(&pending.request),
             MethodName::SimStep => protocol::handlers::sim_step(world, &pending.request),
             MethodName::Raycast => protocol::handlers::raycast(world, &pending.request),
+            MethodName::SceneOverview => protocol::handlers::scene_overview(world, &pending.request),
+            MethodName::SimBindings => protocol::handlers::sim_bindings(world, &pending.request),
             MethodName::Unknown(ref name) => {
                 // Unknown method — return a JSON-RPC "method not found"
                 // error rather than crashing the handler.

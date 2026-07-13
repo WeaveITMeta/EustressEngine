@@ -13,22 +13,29 @@
 //! `PrimitiveMeshCache`, `Assets<ForwardDecalMaterial<...>>`, and any
 //! future runtime caches — cannot be named there.
 //!
-//! Common solves this with a type-erased `Option<&mut dyn Any>` field.
-//! When the engine-side helper builds a `SpawnCtx`, it packs the engine
-//! borrows into an [`EngineSpawnExtras`] and stuffs a `&mut dyn Any`
-//! pointing at it into that slot. Spawners that need engine state call
-//! `ctx.extra_as::<EngineSpawnExtras>()` to recover the typed borrows.
+//! Common solves generic-vs-engine-specific extras with a type-erased
+//! `Option<&mut dyn Any>` field — but that slot requires `T: 'static`
+//! to downcast (`Any`'s bound), and [`EngineSpawnExtras`] borrows
+//! `ResMut`-sourced engine resources for the duration of one spawn call,
+//! so its `'w` is never `'static`. A type with a live non-`'static`
+//! lifetime parameter can never implement `Any`, so it cannot be packed
+//! into `SpawnCtx::extra` — that would only type-check for genuinely
+//! `'static` data, which spawn-time resource borrows aren't. Wave 3
+//! spawn-site helpers instead pass `&mut EngineSpawnExtras<'_>` as a
+//! direct argument to engine-registered spawners, alongside (not inside)
+//! `SpawnCtx`. `SpawnCtx::extra` remains available for genuinely
+//! `'static` payloads.
 //!
 //! ## Wave 2.3 scope
 //!
-//! - Defines [`EngineSpawnExtras`] — the struct that lives behind
-//!   `dyn Any` for downcasting.
+//! - Defines [`EngineSpawnExtras`] — the bundle of engine-specific
+//!   `ResMut`-sourced borrows a spawn site holds.
 //! - Provides a constructor that takes the engine's `ResMut<...>`
 //!   handles directly (Wave 3 spawn-site helpers build it).
-//! - Does NOT construct or use the ctx anywhere yet. The legacy spawn
+//! - Does NOT construct or use `SpawnCtx` anywhere yet. The legacy spawn
 //!   paths (`instance_loader::spawn_instance`, `gui_loader::spawn_gui_element`,
 //!   `spawn.rs::spawn_*`) keep their existing argument lists; Wave 3
-//!   plugs in the bridge per class.
+//!   plugs this in as a direct parameter per engine-registered spawner.
 //!
 //! Per spec §3 + LOOP-5 lesson: this file owns the extras shape but
 //! never touches the drain or any existing spawn arm.
@@ -39,13 +46,15 @@ use bevy::prelude::*;
 use crate::space::instance_loader::PrimitiveMeshCache;
 use crate::space::material_loader::MaterialRegistry;
 
-/// Engine-specific resources packed behind the [`dyn Any`][std::any::Any]
-/// `extra` slot on [`eustress_common::class_registry::SpawnCtx`].
+/// Engine-specific resources a Wave-3 engine-registered spawner needs
+/// alongside [`eustress_common::class_registry::SpawnCtx`].
 ///
-/// A spawner calls `ctx.extra_as::<EngineSpawnExtras>()` to recover the
-/// typed borrows. The borrows themselves live on the caller's stack
-/// frame — same pattern as common's `SpawnCtx` lifetimes: `'w` is the
-/// world borrow, no boxing or per-spawn allocation.
+/// Passed as a direct `&mut EngineSpawnExtras<'_>` argument, NOT through
+/// `SpawnCtx::extra` — see the module doc for why the `dyn Any` slot
+/// can't carry it (that needs `'static`; this borrows for one spawn
+/// call). The borrows themselves live on the caller's stack frame — same
+/// pattern as common's `SpawnCtx` lifetimes: `'w` is the world borrow,
+/// no boxing or per-spawn allocation.
 ///
 /// ## Lifetime
 ///
@@ -103,41 +112,30 @@ impl<'w> EngineSpawnExtras<'w> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::any::Any;
 
-    /// Confirms the downcast pattern works as designed — packing
-    /// `&mut EngineSpawnExtras` into `&mut dyn Any` and unpacking via
-    /// `downcast_mut` recovers the same struct. This is the exact dance
-    /// common's `SpawnCtx::extra_as::<EngineSpawnExtras>()` performs.
+    /// Confirms `EngineSpawnExtras` constructs from three independently
+    /// `ResMut`-sourced borrows — the shape a Wave 3 spawn-site helper
+    /// builds every spawn call. Successful compilation is itself part of
+    /// the assertion: the borrow checker proves the three fields are
+    /// disjoint (no aliasing) at the construction site.
     ///
-    /// If this stops compiling, the `extra` slot's type contract has
-    /// drifted and the Wave 3 spawners that downcast will silently
-    /// receive `None`.
+    /// This does NOT (and per the module doc, cannot) round-trip through
+    /// `dyn Any` — `EngineSpawnExtras<'w>` is never `'static`, so it can
+    /// never implement `Any`. An earlier version of this test asserted
+    /// that erasure, which cannot compile for real spawn-time borrows;
+    /// see the module doc's "not routed through `SpawnCtx::extra`" note.
     #[test]
-    fn engine_spawn_extras_downcasts_through_dyn_any() {
-        // Build the underlying resources on the stack so the test
-        // doesn't need a full Bevy app.
+    fn engine_spawn_extras_constructs_from_disjoint_borrows() {
         let mut material_registry = MaterialRegistry::default();
         let mut mesh_cache = PrimitiveMeshCache::default();
         let mut decal_materials =
             Assets::<ForwardDecalMaterial<StandardMaterial>>::default();
 
-        let mut extras = EngineSpawnExtras::new(
+        let extras = EngineSpawnExtras::new(
             &mut material_registry,
             &mut mesh_cache,
             &mut decal_materials,
         );
-
-        // Pack into `&mut dyn Any` exactly like the engine-side helper
-        // would for common's `SpawnCtx::extra`.
-        let erased: &mut dyn Any = &mut extras;
-
-        // Unpack — mirrors `SpawnCtx::extra_as::<EngineSpawnExtras>()`.
-        let recovered = erased.downcast_mut::<EngineSpawnExtras>();
-        assert!(
-            recovered.is_some(),
-            "downcast back to EngineSpawnExtras must succeed — \
-             Wave 3 spawners depend on this contract"
-        );
+        drop(extras);
     }
 }

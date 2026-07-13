@@ -123,3 +123,5 @@ eustress/.patches/wgpu-fresh/
 .claude/
 .default_universe
 .trunk-web-target/
+target-verify/
+**/target-verify/

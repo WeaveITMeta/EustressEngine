@@ -30,6 +30,17 @@ fn registry() -> &'static ToolRegistry {
         // baseline so they flow through `tools/list` + `tools/call`
         // exactly like the filesystem tools.
         r.register(crate::bridge_tools::InspectSceneTool);
+        // Large-scene orchestration surface: the Morton-cell digest an
+        // orchestrator reads first, and the partitioner that turns it
+        // into balanced per-agent work units (cell ids are forge
+        // SimCell-compatible). Detail-paging stays in inspect_scene via
+        // its new `cell`/`region` params — one query tool, spatially
+        // scoped, not a parallel one.
+        r.register(crate::bridge_tools::SceneOverviewTool);
+        r.register(crate::bridge_tools::PartitionSceneTool);
+        // Forge gang-placement visibility (engine must be built with
+        // sim-orchestration; the bridge errors gracefully otherwise).
+        r.register(crate::bridge_tools::SimBindingsTool);
         r.register(crate::bridge_tools::EquipToolTool);
         r.register(crate::bridge_tools::SelectEntityTool);
         r.register(crate::bridge_tools::GetEditorStateTool);
@@ -84,6 +95,9 @@ fn registry() -> &'static ToolRegistry {
 /// [`crate::universe::find_live_engine_universe`] for these tools only.
 pub const BRIDGE_TOOL_NAMES: &[&str] = &[
     "inspect_scene",
+    "scene_overview",
+    "partition_scene",
+    "sim_bindings",
     "equip_tool",
     "select_entity",
     "get_editor_state",

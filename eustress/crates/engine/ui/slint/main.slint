@@ -4,7 +4,7 @@
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, TabWidget, Button, ComboBox, LineEdit, ScrollView, StandardListView, CheckBox, Slider, GridBox, GroupBox, SpinBox, TextEdit } from "std-widgets.slint";
-import { Ribbon, SavedIdentityData, InsertClassData } from "ribbon.slint";
+import { Ribbon, SavedIdentityData, InsertClassData, PluginSectionData, PluginButtonData } from "ribbon.slint";
 import { ExplorerPanel, TreeNode } from "explorer.slint";
 import { PropertiesPanel, PropertyData, HoneycombCell } from "properties.slint";
 import { TagChip, TagSuggestion } from "tags_editor.slint";
@@ -31,6 +31,7 @@ import { LayoutPresetSelector, LayoutDropdownMenu, AdvancedTabBar, PerformanceOv
 import { ToolOptionsBar, ToolOptionControlData } from "tool_options_bar.slint";
 import { ToolPanel } from "tool_panel.slint";
 import { FloatingNumericInput } from "floating_numeric_input.slint";
+import { SketchCanvasPanel, SketchEntityRow, SketchConstraintRow } from "sketch_canvas.slint";
 import { ToastUndo } from "toast_undo.slint";
 import { TimelinePanel, TimelineTrackData, TimelineMarkerData, TimelineFilterChipData } from "timeline_panel.slint";
 import { TimelineFilterModal, TimelineTagRow } from "timeline_filter_modal.slint";
@@ -290,6 +291,7 @@ export component StudioWindow inherits Window {
     in-out property <int> workshop-tool-count: 0;
     in-out property <string> workshop-active-tool: "";
     in-out property <string> workshop-active-mode-name: "General";
+    in-out property <string> workshop-active-model-name: "Sonnet 5";
     in-out property <image>  workshop-attached-image;
     in-out property <bool>   workshop-has-attached-image: false;
 
@@ -315,6 +317,14 @@ export component StudioWindow inherits Window {
     // by category. Fed from Rust via `set_insert_classes` off the live
     // ClassRegistry; bound down into the Ribbon's Insert dropdown.
     in property <[InsertClassData]> insert-classes: [];
+
+    // Plugins ribbon tab — fed from Rust via `set_plugin_sections`/
+    // `set_plugin_buttons` off `TabRegistry`; bound down into the Ribbon's
+    // "Plugins" tab content below. Same forwarding shape as insert-classes
+    // above (a sub-component's `in property` isn't reachable from Rust
+    // unless the root component re-declares it and binds it down).
+    in property <[PluginSectionData]> plugin-sections: [];
+    in property <[PluginButtonData]> plugin-buttons: [];
 
     // API Reference Panel (browsable scripting API catalog — opens as center tab)
     in property <[ApiEntryData]> api-entries: [];
@@ -502,6 +512,9 @@ export component StudioWindow inherits Window {
     in-out property <string> soul-api-key: "";
     in-out property <bool> soul-api-key-valid: false;
     callback soul-api-key-saved();
+    // xAI (Grok) key — same save button/callback as the Anthropic key
+    // above; both get committed together on "on-save".
+    in-out property <string> soul-xai-api-key: "";
     in-out property <int> soul-rune-count: 0;
     in-out property <int> soul-luau-server-count: 0;
     in-out property <int> soul-luau-client-count: 0;
@@ -638,6 +651,27 @@ export component StudioWindow inherits Window {
     // on commit, then tweens to 0 over 150ms. The ToolOptionsBar
     // renders an `accent-green-bright` border pulse scaled by this.
     in-out property <float> commit-flash-progress: 0.0;
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Sketch canvas — floating inspector for the selected CadPart's first
+    // sketch. Rust fills entity/constraint rows + solve status; Slint
+    // fires constraint-add + solve/close callbacks.
+    // ──────────────────────────────────────────────────────────────────────
+    in-out property <bool>   sketch-canvas-visible: false;
+    in-out property <string> sketch-canvas-part-name: "";
+    in-out property <string> sketch-canvas-sketch-name: "";
+    in-out property <string> sketch-canvas-solve-status: "";
+    in-out property <[SketchEntityRow]> sketch-canvas-entities: [];
+    in-out property <[SketchConstraintRow]> sketch-canvas-constraints: [];
+    in-out property <int> sketch-canvas-selected-a: -1;
+    in-out property <int> sketch-canvas-selected-b: -1;
+    callback sketch-canvas-solve();
+    callback sketch-canvas-add-horizontal();
+    callback sketch-canvas-add-vertical();
+    callback sketch-canvas-add-perpendicular();
+    callback sketch-canvas-add-coincident();
+    callback sketch-canvas-select-entity(int);
+    callback sketch-canvas-close();
 
     // ──────────────────────────────────────────────────────────────────────
     // Bottom-panel mode + Timeline data — shared slot between Output and
@@ -988,6 +1022,7 @@ export component StudioWindow inherits Window {
     callback workshop-attach-image();       // Ctrl+V or attach button — Rust reads clipboard
     callback workshop-clear-image();        // × on preview strip
     callback workshop-mode-changed(string); // user picked a different mode
+    callback workshop-model-changed(string); // user picked a different model
     /// Close a session tab in the Workshop panel. Host removes the
     /// session from the in-memory list and optionally deletes the
     /// folder under SoulService/Workshop/ (policy TBD — for now
@@ -1035,6 +1070,9 @@ export component StudioWindow inherits Window {
             current-tool: root.current-tool;
             // Data-driven Insert-menu catalog (ClassRegistry → grouped list).
             insert-classes: root.insert-classes;
+            // Plugins tab content (TabRegistry → grouped section/button list).
+            plugin-sections: root.plugin-sections;
+            plugin-buttons: root.plugin-buttons;
             // Active modal tool (Smart Edit / Pattern / Mirror) — empty
             // when only a primary tool (Select/Move/etc) is active.
             // Drives the ribbon's per-button highlight on the CAD tab.
@@ -1454,7 +1492,7 @@ export component StudioWindow inherits Window {
                                     // commands. Items match the keybindings wired
                                     // to MenuActionEvent in handle_menu_action_events.
                                     root.context-menu-items = [
-                                        { id: "select_children",    label: "Select Children",     shortcut: "Ctrl+Shift+C", icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true,  separator-after: false },
+                                        { id: "select_children",    label: "Select Children",     shortcut: "Ctrl+Shift+V", icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true,  separator-after: false },
                                         { id: "select_descendants", label: "Select Descendants",  shortcut: "Ctrl+Shift+D", icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true,  separator-after: false },
                                         { id: "select_parent",      label: "Select Parent",       shortcut: "Ctrl+Shift+U", icon: @image-url("../../assets/icons/ui/chevron-up.svg"),    enabled: true,  separator-after: false },
                                         { id: "select_siblings",    label: "Select Siblings",     shortcut: "Ctrl+Shift+S", icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true,  separator-after: false },
@@ -2257,6 +2295,28 @@ export component StudioWindow inherits Window {
                             unit:       root.numeric-input-unit;
                         }
 
+                        // Sketch canvas — bottom-left of viewport when a
+                        // CadPart with sketches is selected (or forced open).
+                        SketchCanvasPanel {
+                            x: 12px;
+                            y: parent.height - self.height - 12px;
+                            visible-when: root.sketch-canvas-visible;
+                            part-name: root.sketch-canvas-part-name;
+                            sketch-name: root.sketch-canvas-sketch-name;
+                            solve-status: root.sketch-canvas-solve-status;
+                            entities: root.sketch-canvas-entities;
+                            constraints: root.sketch-canvas-constraints;
+                            selected-a: root.sketch-canvas-selected-a;
+                            selected-b: root.sketch-canvas-selected-b;
+                            solve => { root.sketch-canvas-solve(); }
+                            add-horizontal => { root.sketch-canvas-add-horizontal(); }
+                            add-vertical => { root.sketch-canvas-add-vertical(); }
+                            add-perpendicular => { root.sketch-canvas-add-perpendicular(); }
+                            add-coincident => { root.sketch-canvas-add-coincident(); }
+                            select-entity(idx) => { root.sketch-canvas-select-entity(idx); }
+                            close => { root.sketch-canvas-close(); }
+                        }
+
                         // Toast Undo — top-center commit confirmation
                         // with inline Undo action. Rust drives visibility
                         // + progress (auto-dismiss fade).
@@ -3003,6 +3063,10 @@ export component StudioWindow inherits Window {
                             // Mode selector
                             active-mode-name <=> root.workshop-active-mode-name;
                             on-mode-changed(m) => { root.workshop-mode-changed(m); }
+
+                            // Model selector
+                            active-model-name <=> root.workshop-active-model-name;
+                            on-model-changed(m) => { root.workshop-model-changed(m); }
                         }
 
                         if root.right-tab-index == 4: ProblemsPanel {
@@ -3298,6 +3362,7 @@ export component StudioWindow inherits Window {
         help-opens-in-tab <=> root.help-opens-in-tab;
         soul-api-key <=> root.soul-api-key;
         soul-api-key-valid: root.soul-api-key-valid;
+        soul-xai-api-key <=> root.soul-xai-api-key;
         notifications-enabled <=> root.notifications-enabled;
         notifications-show-dismiss <=> root.notifications-show-dismiss;
         notifications-mute-file <=> root.notifications-mute-file;
@@ -3313,9 +3378,10 @@ export component StudioWindow inherits Window {
         on-help-opens-in-tab-changed(val) => { root.help-opens-in-tab-changed(val); }
         on-notifications-changed => { root.notification-settings-changed(); }
         on-save => {
-            // Commit the typed API key to Bevy so Soul/Workshop panels stop
-            // showing the Configure banner. Settings dialog already wrote
-            // root.soul-api-key via two-way binding.
+            // Commit the typed Anthropic + xAI keys to Bevy so Soul/Workshop
+            // panels stop showing the Configure banner. Settings dialog
+            // already wrote root.soul-api-key / root.soul-xai-api-key via
+            // two-way binding.
             root.soul-api-key-saved();
             root.show-settings-dialog = false;
         }

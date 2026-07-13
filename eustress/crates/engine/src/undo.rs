@@ -215,6 +215,28 @@ pub enum Action {
         stored_id: u64,
         def_json: String,
     },
+
+    /// Feature-tree edit on a CadPart — variable change (including the
+    /// Size-driven resize path), constraint add, sketch solve, and
+    /// suppress / reorder / delete-feature tree ops. Undo/redo swap
+    /// the whole tree TOML: mesh regeneration rides the same
+    /// `Changed<CadPart>` path as live edits, and features.toml is
+    /// rewritten so the disk mirror never fights the in-memory tree.
+    CadTreeEdit {
+        entity_bits: u64,
+        old_toml: String,
+        new_toml: String,
+        /// History verb ("Set length", "Suppress Extrude1", …).
+        verb: String,
+    },
+
+    /// Assembly mate creation (in-memory Avian joint entity). Undo
+    /// despawns the joint — located by matching the spec rather than a
+    /// stored entity id, so undo→redo→undo cycles survive id churn.
+    /// Redo re-fires `CadCreateMateEvent` with undo-recording off.
+    CadMateCreate {
+        spec_json: String,
+    },
 }
 
 /// Snapshot of a property value for undo/redo
@@ -262,6 +284,8 @@ impl Action {
             Action::TrashEntities { .. }          => "delete",
             Action::SpawnFolders { .. }           => "create",
             Action::CreateBinaryInstance { .. }   => "create",
+            Action::CadTreeEdit { .. }            => "cad",
+            Action::CadMateCreate { .. }          => "create",
         }
     }
 
@@ -299,6 +323,8 @@ impl Action {
             Action::TrashEntities { paths, .. } => format!("Delete {} objects", paths.len()),
             Action::SpawnFolders { folders, .. } => format!("Spawn {} objects", folders.len()),
             Action::CreateBinaryInstance { .. } => "Create object".to_string(),
+            Action::CadTreeEdit { verb, .. } => verb.clone(),
+            Action::CadMateCreate { .. } => "Create mate".to_string(),
         }
     }
 }
@@ -942,8 +968,54 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
                 }
             }
         }
+        Action::CadTreeEdit { entity_bits, old_toml, .. } => {
+            apply_cad_tree_toml(world, *entity_bits, old_toml);
+        }
+        Action::CadMateCreate { spec_json } => {
+            // Undo create = despawn the joint entity matching the spec.
+            // Matched by content, not stored id — redo recreates the
+            // joint under a fresh entity id.
+            if let Ok(spec) = serde_json::from_str::<crate::cad_assembly::MateSpec>(spec_json) {
+                let mut q = world.query::<(Entity, &crate::cad_assembly::CadMate)>();
+                let target = q
+                    .iter(world)
+                    .find(|(_, m)| {
+                        m.kind == spec.kind
+                            && m.part_a.to_bits() == spec.part_a
+                            && m.part_b.to_bits() == spec.part_b
+                    })
+                    .map(|(e, _)| e);
+                if let Some(e) = target {
+                    world.despawn(e);
+                    info!("↶ Undo mate: despawned {:?} joint", spec.kind);
+                } else {
+                    warn!("↶ Undo mate: no matching {:?} joint found", spec.kind);
+                }
+            }
+        }
         _ => {
             warn!("Undo not yet implemented for: {}", action.description());
+        }
+    }
+}
+
+/// Swap a CadPart's feature tree and mirror it to features.toml —
+/// shared by `CadTreeEdit` undo/redo. Setting `tree_toml` trips
+/// `Changed<CadPart>` so the regenerate system rebuilds the mesh,
+/// collider, and `BasePart.size` exactly as a live edit would.
+fn apply_cad_tree_toml(world: &mut World, entity_bits: u64, toml: &str) {
+    let entity = Entity::from_bits(entity_bits);
+    let Some(mut cad) = world.get_mut::<crate::cad_plugin::CadPart>(entity) else {
+        warn!("CadTreeEdit: entity {entity_bits:#x} has no CadPart (deleted?)");
+        return;
+    };
+    cad.tree_toml = toml.to_string();
+    let feat_path = world
+        .get::<crate::space::instance_loader::InstanceFile>(entity)
+        .and_then(|f| f.toml_path.parent().map(|p| p.join("features.toml")));
+    if let Some(path) = feat_path {
+        if let Err(e) = std::fs::write(&path, toml) {
+            warn!("CadTreeEdit: failed to write {:?}: {e}", path);
         }
     }
 }
@@ -1132,6 +1204,17 @@ fn apply_redo_ecs(action: &Action, world: &mut World) {
                     .push(def_json.clone());
             }
         }
+        Action::CadTreeEdit { entity_bits, new_toml, .. } => {
+            apply_cad_tree_toml(world, *entity_bits, new_toml);
+        }
+        Action::CadMateCreate { spec_json } => {
+            // Redo create = re-fire the creation event with recording
+            // off, so `handle_create_mate` doesn't push a duplicate
+            // undo entry for a mate the stack already owns.
+            if let Ok(spec) = serde_json::from_str::<crate::cad_assembly::MateSpec>(spec_json) {
+                world.write_message(spec.to_event(false));
+            }
+        }
         _ => {
             warn!("Redo not yet implemented for: {}", action.description());
         }
@@ -1259,6 +1342,27 @@ fn apply_property_value_to_entity(id: u32, property: &str, value: &PropertyValue
         ("Locked", PropertyValueSnapshot::Bool(l)) => {
             if let Some(mut bp) = world.get_mut::<BasePart>(entity) {
                 bp.locked = *l;
+            }
+        }
+        ("FieldOfView", PropertyValueSnapshot::Float(deg)) => {
+            if let Some(mut proj) = world.get_mut::<Projection>(entity) {
+                if let Projection::Perspective(p) = proj.as_mut() {
+                    p.fov = deg.clamp(1.0, 170.0).to_radians();
+                }
+            }
+        }
+        ("NearClipPlane", PropertyValueSnapshot::Float(v)) => {
+            if let Some(mut proj) = world.get_mut::<Projection>(entity) {
+                if let Projection::Perspective(p) = proj.as_mut() {
+                    p.near = v.clamp(0.001, 100.0);
+                }
+            }
+        }
+        ("FarClipPlane", PropertyValueSnapshot::Float(v)) => {
+            if let Some(mut proj) = world.get_mut::<Projection>(entity) {
+                if let Projection::Perspective(p) = proj.as_mut() {
+                    p.far = v.clamp(100.0, 1_000_000.0);
+                }
             }
         }
         _ => {

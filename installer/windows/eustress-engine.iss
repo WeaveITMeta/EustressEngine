@@ -6,7 +6,9 @@
 ; =============================================================================
 
 #define MyAppName "Eustress Engine"
-#define MyAppVersion "0.1.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.1.0"
+#endif
 #define MyAppPublisher "Eustress"
 #define MyAppURL "https://eustress.dev"
 #define MyAppExeName "eustress-engine.exe"
@@ -22,8 +24,13 @@ AppUpdatesURL={#MyAppURL}/download
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
-; Output to downloads folder
-OutputDir=..\..\downloads\windows
+SetupIconFile=..\..\eustress\crates\engine\assets\icon.ico
+; dist\windows matches the CI Package step's existing output convention
+; (release.yml already `mkdir -p dist` for the zip artifact). NOT
+; downloads\windows — that path mirrors the LIVE downloads.eustress.dev
+; R2 bucket contents (a different, already-in-use release channel) and
+; writing local build output there would be confusing at best.
+OutputDir=..\..\dist\windows
 OutputBaseFilename=EustressEngine-Setup
 ; Installer settings
 Compression=lzma2/ultra64
@@ -45,7 +52,6 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; OnlyBelowVersion: 6.1; Check: not IsAdminInstallMode
 
 [Files]
 ; Main executable
@@ -54,18 +60,26 @@ Source: "..\..\eustress\target\release\eustress-engine.exe"; DestDir: "{app}"; F
 ; Rune LSP server — ships alongside the engine so external IDEs (Windsurf,
 ; VS Code, Cursor) get Rune intelligence without a second download. The
 ; engine launches this binary on startup from the install directory.
-Source: "..\..\eustress\target\release\eustress-lsp.exe"; DestDir: "{app}"; Flags: ignoreversion
+; `skipifsourcedoesntexist`: it IS a [[bin]] in the eustress-engine package
+; gated by the `lsp` feature (on by default via `core`), so plain
+; `cargo build --release --package eustress-engine` should already produce
+; it alongside eustress-engine.exe — but the CI Windows job has never been
+; verified to package it, so this stays a safety net rather than a hard
+; requirement until that's confirmed.
+Source: "..\..\eustress\target\release\eustress-lsp.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 ; MCP server — exposes the Universe (Spaces, scripts, entities, assets,
 ; conversations) to any MCP-compatible AI client (Windsurf, Cursor,
-; Claude Desktop). Pure Rust; `cargo build --release --bin eustress-mcp`
-; produces it alongside `eustress-engine.exe` and `eustress-lsp.exe`. No
-; Node.js, no bun runtime, just a small native executable. Users configure
-; their IDE via Help → Setup MCP in Eustress Studio.
-Source: "..\..\eustress\target\release\eustress-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Claude Desktop). Lives in a SEPARATE package (eustress-mcp-server, bin
+; eustress-mcp) that the CI Windows job's `--package eustress-engine`
+; build does NOT produce today — `skipifsourcedoesntexist` keeps this
+; installer buildable now; wire a build step for it into release.yml
+; separately when the MCP binary is meant to ship in the installer.
+Source: "..\..\eustress\target\release\eustress-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
-; Assets folder (if exists)
-; Source: "..\..\eustress\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: DirExists(ExpandConstant('..\..\eustress\assets'))
+; Assets folder — shaders, monaco, parts, lighting_templates, icons,
+; characters. Excludes the Linux-only install-script subtree.
+Source: "..\..\eustress\crates\engine\assets\*"; DestDir: "{app}\assets"; Excludes: "\linux\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

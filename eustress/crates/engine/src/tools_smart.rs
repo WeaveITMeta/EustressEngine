@@ -177,17 +177,21 @@ pub fn spawn_new_part_with_toml(
     // treatment, etc.).
     let entity = spawn_instance_from_world(world, &toml_path, instance)?;
 
-    // Register the new folder in the SpaceFileRegistry so hot-reload
-    // and file-watcher systems know about it. Registration path is the
-    // folder (not the TOML inside) because downstream watchers key off
-    // the directory for child-file tracking.
+    // Register the `_instance.toml` path — NOT the bare folder — so the
+    // file watcher doesn't spawn a duplicate of the entity we just
+    // created. The watcher's `handle_file_created` guard checks
+    // `registry.is_loaded(&event.path)` against the exact FILE path it
+    // saw change (the TOML), not the parent directory; registering only
+    // the folder is a no-op against that guard, so a second entity got
+    // spawned for every Smart Build Tool insert once the watcher noticed
+    // the new `_instance.toml` on disk.
     let modified = std::fs::metadata(&instance_dir)
         .and_then(|m| m.modified())
         .unwrap_or_else(|_| std::time::SystemTime::now());
     if let Some(mut registry) = world.get_resource_mut::<crate::space::SpaceFileRegistry>() {
         let metadata = crate::space::file_loader::FileMetadata {
-            path: instance_dir.clone(),
-            file_type: crate::space::file_loader::FileType::Directory,
+            path: toml_path.clone(),
+            file_type: crate::space::file_loader::FileType::Toml,
             service: descriptor.parent_rel
                 .iter().next()
                 .and_then(|s| s.to_str())
@@ -198,7 +202,7 @@ pub fn spawn_new_part_with_toml(
             modified,
             children: Vec::new(),
         };
-        registry.register(instance_dir.clone(), entity, metadata);
+        registry.register(toml_path.clone(), entity, metadata);
     }
 
     // Record an Undo entry so Ctrl+Z removes the spawned part. Reserve

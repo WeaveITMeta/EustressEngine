@@ -178,17 +178,17 @@ impl ModalTool for LinearArray {
             },
             ToolOptionControl {
                 id: "step_x".into(), label: "Step X".into(),
-                kind: ToolOptionKind::Number { value: self.step_x, min: -100.0, max: 100.0, step: 0.1, unit: "studs".into() },
+                kind: ToolOptionKind::Number { value: self.step_x, min: -100.0, max: 100.0, step: 0.1, unit: "m".into() },
                 advanced: false,
             },
             ToolOptionControl {
                 id: "step_y".into(), label: "Step Y".into(),
-                kind: ToolOptionKind::Number { value: self.step_y, min: -100.0, max: 100.0, step: 0.1, unit: "studs".into() },
+                kind: ToolOptionKind::Number { value: self.step_y, min: -100.0, max: 100.0, step: 0.1, unit: "m".into() },
                 advanced: false,
             },
             ToolOptionControl {
                 id: "step_z".into(), label: "Step Z".into(),
-                kind: ToolOptionKind::Number { value: self.step_z, min: -100.0, max: 100.0, step: 0.1, unit: "studs".into() },
+                kind: ToolOptionKind::Number { value: self.step_z, min: -100.0, max: 100.0, step: 0.1, unit: "m".into() },
                 advanced: false,
             },
             ToolOptionControl {
@@ -323,17 +323,17 @@ impl ModalTool for RadialArray {
             },
             ToolOptionControl {
                 id: "pivot_x".into(), label: "Pivot X".into(),
-                kind: ToolOptionKind::Number { value: self.pivot_x, min: -1000.0, max: 1000.0, step: 0.1, unit: "studs".into() },
+                kind: ToolOptionKind::Number { value: self.pivot_x, min: -1000.0, max: 1000.0, step: 0.1, unit: "m".into() },
                 advanced: true,
             },
             ToolOptionControl {
                 id: "pivot_y".into(), label: "Pivot Y".into(),
-                kind: ToolOptionKind::Number { value: self.pivot_y, min: -1000.0, max: 1000.0, step: 0.1, unit: "studs".into() },
+                kind: ToolOptionKind::Number { value: self.pivot_y, min: -1000.0, max: 1000.0, step: 0.1, unit: "m".into() },
                 advanced: true,
             },
             ToolOptionControl {
                 id: "pivot_z".into(), label: "Pivot Z".into(),
-                kind: ToolOptionKind::Number { value: self.pivot_z, min: -1000.0, max: 1000.0, step: 0.1, unit: "studs".into() },
+                kind: ToolOptionKind::Number { value: self.pivot_z, min: -1000.0, max: 1000.0, step: 0.1, unit: "m".into() },
                 advanced: true,
             },
             ToolOptionControl {
@@ -500,17 +500,17 @@ impl ModalTool for GridArray {
             },
             ToolOptionControl {
                 id: "step_x".into(), label: "Step X".into(),
-                kind: ToolOptionKind::Number { value: self.step_x, min: 0.1, max: 100.0, step: 0.1, unit: "studs".into() },
+                kind: ToolOptionKind::Number { value: self.step_x, min: 0.1, max: 100.0, step: 0.1, unit: "m".into() },
                 advanced: false,
             },
             ToolOptionControl {
                 id: "step_y".into(), label: "Step Y".into(),
-                kind: ToolOptionKind::Number { value: self.step_y, min: 0.1, max: 100.0, step: 0.1, unit: "studs".into() },
+                kind: ToolOptionKind::Number { value: self.step_y, min: 0.1, max: 100.0, step: 0.1, unit: "m".into() },
                 advanced: false,
             },
             ToolOptionControl {
                 id: "step_z".into(), label: "Step Z".into(),
-                kind: ToolOptionKind::Number { value: self.step_z, min: 0.1, max: 100.0, step: 0.1, unit: "studs".into() },
+                kind: ToolOptionKind::Number { value: self.step_z, min: 0.1, max: 100.0, step: 0.1, unit: "m".into() },
                 advanced: false,
             },
             ToolOptionControl {

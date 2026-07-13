@@ -19,6 +19,8 @@ pub mod codegen;
 pub mod validator;
 pub mod audit_log;
 pub mod claude_client;
+pub mod xai_client;
+pub mod workshop_model;
 pub mod hot_compile;
 pub mod build_pipeline;
 pub mod scope;
@@ -39,6 +41,8 @@ pub use cache::*;
 pub use codegen::*;
 pub use validator::*;
 pub use claude_client::{ClaudeClient, ClaudeError, GenerationResult};
+pub use xai_client::{XaiClient, XaiConfig};
+pub use workshop_model::{Provider, WorkshopModel};
 pub use hot_compile::{HotCompiler, HotCompileConfig, CompileResult, HotCompilePlugin};
 pub use build_pipeline::{SoulBuildPipeline, BuildStage, BuildRequest, PipelineResult, SoulBuildPipelinePlugin, TriggerBuildEvent, CommandBarBuildEvent, CommandBarBuildState, CommandBarResult};
 pub use scope::{ScriptLocation, ScriptScope, AvailableEvents, SystemPromptBuilder};
@@ -68,6 +72,21 @@ pub struct GlobalSoulSettings {
     pub api_key_valid: Option<bool>,
     /// Auto-fill new spaces with global API key
     pub use_global_for_new_spaces: bool,
+    /// Which model powers Workshop's conversational loop — the exact API id
+    /// (see `WorkshopModel::api_id`). `#[serde(default)]` is required: a
+    /// settings file saved before this field existed must still deserialize
+    /// cleanly, since `load()` falls back to `Self::default()` (silently
+    /// wiping the saved API key) on ANY parse failure.
+    #[serde(default = "default_workshop_model")]
+    pub workshop_model: String,
+    /// Global xAI (Grok) API key. Sibling to `global_api_key`, global-only —
+    /// no per-space override in v1.
+    #[serde(default)]
+    pub global_xai_api_key: String,
+}
+
+fn default_workshop_model() -> String {
+    WorkshopModel::default().api_id().to_string()
 }
 
 impl Default for GlobalSoulSettings {
@@ -76,6 +95,8 @@ impl Default for GlobalSoulSettings {
             global_api_key: String::new(),
             api_key_valid: None,
             use_global_for_new_spaces: true,
+            workshop_model: default_workshop_model(),
+            global_xai_api_key: String::new(),
         }
     }
 }
@@ -147,6 +168,18 @@ impl GlobalSoulSettings {
     /// Check if the global API key is set
     pub fn has_api_key(&self) -> bool {
         !self.global_api_key.trim().is_empty()
+    }
+
+    /// Resolve `workshop_model` to a `WorkshopModel`, falling back to the
+    /// default (Sonnet 5) for an empty/unrecognized stored value.
+    pub fn effective_workshop_model(&self) -> WorkshopModel {
+        WorkshopModel::from_api_id(&self.workshop_model).unwrap_or_default()
+    }
+
+    /// Trimmed xAI API key, or `None` if unset.
+    pub fn effective_xai_api_key(&self) -> Option<String> {
+        let key = self.global_xai_api_key.trim();
+        if key.is_empty() { None } else { Some(key.to_string()) }
     }
 }
 

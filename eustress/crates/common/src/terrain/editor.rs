@@ -206,15 +206,13 @@ pub fn terrain_paint_system(
     
     // Raycast from cursor to terrain
     let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) else { return };
-    
-    // Simple ground plane intersection (Y = 0)
-    // TODO: Proper terrain raycast
-    let t = -ray.origin.y / ray.direction.y;
-    if t < 0.0 {
-        return;  // Ray pointing away from ground
-    }
-    
-    let hit_point = ray.origin + ray.direction * t;
+
+    // Heightfield raymarch against the REAL surface (`height_query`), not a
+    // flat Y=0 plane — a plane hit-test picks the wrong point on any sloped
+    // ground, badly wrong on a mountain.
+    let Some(hit_point) = super::height_query::raycast_terrain(config, &data, ray, 2000.0, 2.0) else {
+        return; // Ray never crosses the surface within range
+    };
     
     // Find affected chunks
     for (entity, mut chunk, transform) in chunk_query.iter_mut() {

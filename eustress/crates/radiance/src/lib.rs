@@ -171,3 +171,23 @@ pub fn spawn_splat_cloud(
         ))
         .id()
 }
+
+/// Attach the radiance-field rendering components to an ALREADY-SPAWNED
+/// entity (`Transform`/`Name`/`Instance` already attached by the caller — the
+/// instance-loader's generic no-mesh bundle). `PlanarGaussian3dHandle` and
+/// `CloudSettings` are re-exported from `bevy_gaussian_splatting` but their
+/// constructors/fields are private outside that crate, so only code IN this
+/// crate can build them — this is the entity-attach twin of
+/// [`spawn_splat_cloud`] (which spawns a brand-new entity instead).
+pub fn attach_splat_cloud(
+    ec: &mut bevy::ecs::system::EntityCommands,
+    asset_server: &AssetServer,
+    path: impl Into<String>,
+) {
+    let path = path.into();
+    ec.insert((
+        PlanarGaussian3dHandle(asset_server.load(path.clone())),
+        CloudSettings::default(),
+        SplatCloud { source: path },
+    ));
+}

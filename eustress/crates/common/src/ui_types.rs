@@ -11,9 +11,12 @@
 //! Scale-as-studs to make the card grow with the world rather than the
 //! screen. The offset stays in canvas pixels.
 //!
-//! On-disk TOML form is strictly the 4-tuple
-//! `[x_scale, x_offset, y_scale, y_offset]`. Legacy 2-tuple support has
-//! been removed — every Position / Size in a TOML file MUST be a UDim2.
+//! On-disk TOML form is the 4-tuple `[x_scale, x_offset, y_scale, y_offset]`
+//! — always written in this shape (see `Serialize` below) — but reads
+//! also accept the natural `{ x = {scale,offset}, y = {scale,offset} }`
+//! table form for older files that predate the array convention. Legacy
+//! 2-tuple `[w, h]` support has been removed — every Position / Size in a
+//! TOML file MUST be a UDim2 in one of the two accepted shapes.
 
 use bevy::reflect::Reflect;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -88,11 +91,23 @@ impl Serialize for UDim2 {
 
 impl<'de> Deserialize<'de> for UDim2 {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        // Strict 4-float canonical form. We reject anything else loudly
-        // so old 2-tuple `[w, h]` files surface an error at load instead
-        // of silently round-tripping through a Scale=0 wrapper that
-        // hides the schema drift.
-        let v: [f32; 4] = <[f32; 4]>::deserialize(d)?;
-        Ok(UDim2::new(v[0], v[1], v[2], v[3]))
+        // Canonical 4-float array form, plus the natural table form
+        // (`{ x = { scale, offset }, y = { scale, offset } }`) some
+        // on-disk files predate the array convention and still use —
+        // never re-saved since because a file that fails to parse never
+        // gets a chance to be re-written in the new shape either. A bare
+        // 2-tuple `[w, h]` still isn't accepted: neither variant below
+        // matches it, so that genuinely-stale shape still surfaces a
+        // loud error at load instead of silently becoming Scale=0.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Array([f32; 4]),
+            Table { x: UDim, y: UDim },
+        }
+        Ok(match Repr::deserialize(d)? {
+            Repr::Array(v) => UDim2::new(v[0], v[1], v[2], v[3]),
+            Repr::Table { x, y } => UDim2 { x, y },
+        })
     }
 }

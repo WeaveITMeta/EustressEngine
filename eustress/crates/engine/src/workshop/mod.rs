@@ -90,6 +90,11 @@ pub struct ChatMessage {
     /// Actual cost after completion (in USD, if known)
     #[serde(default)]
     pub actual_cost: Option<f64>,
+    /// Which model produced this turn (API id, e.g. `"claude-fable-5"`) —
+    /// provenance for the model picker, not itself a setting. `None` for
+    /// non-assistant rows (user/artifact/error/etc).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_used: Option<String>,
 
     // ── Agentic tool-use fields (new) ──────────────────────────────────
     // Populated when the message represents a Claude `tool_use` block or
@@ -869,6 +874,15 @@ impl IdeationPipeline {
         });
         self.dirty = true;
         id
+    }
+
+    /// Stamp which model produced a message — provenance for cost accounting
+    /// and multi-model sessions. Call with the id `add_system_message`
+    /// returned, right after adding an assistant/advisor turn.
+    pub fn set_message_model(&mut self, message_id: u32, model_api_id: &str) {
+        if let Some(msg) = self.messages.iter_mut().find(|m| m.id == message_id) {
+            msg.model_used = Some(model_api_id.to_string());
+        }
     }
 
     /// Update the status of an MCP command by message ID
@@ -1774,6 +1788,7 @@ impl Plugin for WorkshopPlugin {
                 claude_bridge::dispatch_normalize_request,
                 claude_bridge::poll_claude_responses,
                 claude_bridge::poll_agentic_responses,
+                claude_bridge::poll_advisor_responses,
             ).after(WorkshopCoreSystems))
             // Artifact generation: dispatch per-step requests + handle completions
             .add_systems(Update, (

@@ -40,6 +40,18 @@ pub mod brushes;
 pub mod compute;
 pub mod toml_loader;
 pub mod water;
+/// Shared world-space height query/write helpers — the single place that
+/// encodes the `height_cache` normalization + chunk-local index math, so a
+/// third caller (the road tool) doesn't hand-roll it a third time. See its
+/// module docs for the two existing hand-rolled call sites this factors out.
+pub mod height_query;
+/// Spline path + terrain-conform core for the road-builder Studio plugin
+/// (Catmull-Rom path, smoothed elevation profile, closest-approach corridor
+/// stamp, ribbon-mesh generation). Pure math + `TerrainData` read/write, no
+/// ECS. Referenced via the explicit `road::` path (NOT glob-re-exported) —
+/// matches the `worldgen`/`voxel_extract` convention for newer, domain-
+/// specific modules, avoiding name collisions with the editor/brush modules.
+pub mod road;
 /// Wave 9.C — imported-terrain voxel decode + multi-span column extractor +
 /// `TerrainData` cache fill. Engine-free (no worlddb dep); the engine-side
 /// loader reads Fjall voxels and calls into this. Referenced via the
@@ -64,6 +76,7 @@ pub use history::*;
 pub use brushes::*;
 pub use compute::*;
 pub use water::*;
+pub use height_query::*;
 
 use bevy::prelude::*;
 use tracing::info;

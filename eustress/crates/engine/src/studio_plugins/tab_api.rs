@@ -20,7 +20,16 @@ pub struct TabRegistry {
 }
 
 impl TabRegistry {
+    /// Get-or-insert by `tab.id` — NOT an unconditional push. More than one
+    /// `StudioPlugin` legitimately wants to ensure the shared "plugins" tab
+    /// exists (`RoadToolPlugin`, `PluginHostControlsPlugin`, any future
+    /// script plugin's discovery) without knowing which of them runs
+    /// first; an always-push here would silently create duplicate tab
+    /// entries with the same id the moment a second plugin registered one.
     pub fn register_tab(&mut self, tab: PluginTab) {
+        if self.tabs.iter().any(|t| t.id == tab.id) {
+            return;
+        }
         self.tabs.push(tab);
     }
     
@@ -42,6 +51,27 @@ impl TabRegistry {
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
             if let Some(section) = tab.sections.iter_mut().find(|s| s.name == section_name) {
                 section.buttons.push(button);
+            }
+        }
+    }
+
+    /// Remove one section (by id) from a tab — used to tear down a script
+    /// plugin's own contributions on reload without touching the tab
+    /// itself or any OTHER plugin's sections sharing it (e.g. the native
+    /// Road Builder section on the same "plugins" tab).
+    pub fn remove_section(&mut self, tab_id: &str, section_id: &str) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.sections.retain(|s| s.id != section_id);
+        }
+    }
+
+    /// Remove one button (by id) from a section — for a script plugin that
+    /// adds buttons to an EXISTING section (its own or, in principle,
+    /// another plugin's) rather than always creating a fresh section.
+    pub fn remove_button(&mut self, tab_id: &str, section_id: &str, button_id: &str) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            if let Some(section) = tab.sections.iter_mut().find(|s| s.id == section_id) {
+                section.buttons.retain(|b| b.id != button_id);
             }
         }
     }
@@ -107,9 +137,11 @@ pub trait TabApi {
 
 impl TabApi for TabRegistry {
     fn register_tab(&mut self, tab: PluginTab) {
-        self.tabs.push(tab);
+        // Delegates to the inherent method — see its doc comment for why
+        // this must be get-or-insert, not an unconditional push.
+        TabRegistry::register_tab(self, tab);
     }
-    
+
     fn unregister_tab(&mut self, id: &str) {
         self.tabs.retain(|t| t.id != id);
     }

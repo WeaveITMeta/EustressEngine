@@ -26,6 +26,28 @@ export struct InsertClassData {
     show-header: bool,
 }
 
+// A plugin-contributed section (button group) on the "Plugins" tab, and a
+// button within one. Fed from Rust (`TabRegistry`, populated by real
+// `StudioPlugin`s via `PluginApi::add_tab_section`/`add_tab_button`) —
+// mirrors `InsertClassData`'s flat-scalars-only shape (Slint's nested-
+// models-in-structs support is uneven; two parallel flat lists, each button
+// carrying its owning section/tab id, sidesteps that entirely). Every
+// button routes through the SAME `on-plugin-action` callback the Insert
+// dropdown and other hardcoded plugin buttons already use — clicking fires
+// a `PluginActionEvent` on the Rust side, no per-button callback needed.
+export struct PluginSectionData {
+    tab-id: string,
+    section-id: string,
+    label: string,
+}
+export struct PluginButtonData {
+    tab-id: string,
+    section-id: string,
+    label: string,
+    tooltip: string,
+    action-id: string,
+}
+
 // Floating brush settings modal that appears beneath toolbar buttons
 component BrushSettingsModal inherits PopupWindow {
     in property <string> brush-name: "";
@@ -310,6 +332,12 @@ export component Ribbon inherits Rectangle {
     /// grouped by category, fed from Rust (`set_insert_classes`). Drives
     /// the dynamic section of the Insert dropdown below the pinned items.
     in property <[InsertClassData]> insert-classes: [];
+    /// Plugins ribbon tab content — flattened section/button lists fed from
+    /// `TabRegistry` each sync tick (mirrors `insert-classes` above). See
+    /// `PluginSectionData`/`PluginButtonData` for why this is two flat
+    /// lists instead of a nested model.
+    in property <[PluginSectionData]> plugin-sections: [];
+    in property <[PluginButtonData]> plugin-buttons: [];
     /// Stable ID of the currently-active modal tool (Smart Edit / Pattern /
     /// Mirror). Empty when no modal tool is running. Drives the per-button
     /// `selected:` highlight on the CAD tab so users can see which tool is
@@ -759,10 +787,6 @@ export component Ribbon inherits Rectangle {
                                 
                                 DropdownItem { label: "Group"; shortcut: "Ctrl+G"; clicked => { root.on-group(); } }
                                 DropdownItem { label: "Ungroup"; shortcut: "Ctrl+U"; clicked => { root.on-ungroup(); } }
-                                DropdownSeparator {}
-                                DropdownItem { label: "Union"; clicked => { root.on-menu-action("model:union"); } }
-                                DropdownItem { label: "Negate"; clicked => { root.on-menu-action("model:negate"); } }
-                                DropdownItem { label: "Separate"; clicked => { root.on-menu-action("model:separate"); } }
                             }
                         }
                     }
@@ -1834,6 +1858,7 @@ export component Ribbon inherits Rectangle {
                     { name: "Terrain",   id: "terrain",   color: #3cb371 },
                     { name: "Test",      id: "test",      color: #ff8c00 },
                     { name: "MindSpace", id: "mindspace", color: #0ACED6 },
+                    { name: "Plugins",   id: "plugins",   color: #9c27b0 },
                 ] : Rectangle {
                     width: tab-text.preferred-width + 16px;
                     height: 20px;
@@ -1961,8 +1986,8 @@ export component Ribbon inherits Rectangle {
                     label: "Edit";
                     IconButton { icon: @image-url("../../assets/icons/ui/group.svg"); label: "Group"; shortcut: root.shortcut-group; tooltip: "Group"; tint: #90caf9; clicked => { root.on-group(); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/ungroup.svg"); label: "Ungroup"; shortcut: root.shortcut-ungroup; tooltip: "Ungroup"; tint: #90caf9; clicked => { root.on-ungroup(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/lock.svg"); label: "Lock"; shortcut: root.shortcut-lock; tooltip: "Lock — hover a part, click to toggle its locked state"; tint: #ffcc80; clicked => { root.on-menu-action("edit:lock"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/unlock.svg"); label: "Unlock All"; shortcut: root.shortcut-unlock; tooltip: "Unlock All — unlock every part in the Space"; tint: #ffcc80; clicked => { root.on-menu-action("edit:unlock"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/lock.svg"); label: "Lock"; shortcut: root.shortcut-lock; tooltip: "Lock"; tint: #ffcc80; clicked => { root.on-menu-action("edit:lock"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/unlock.svg"); label: "Unlock All"; shortcut: root.shortcut-unlock; tooltip: "Unlock All"; tint: #ffcc80; clicked => { root.on-menu-action("edit:unlock"); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/anchor.svg"); label: "Anchor"; shortcut: root.shortcut-anchor; tooltip: "Toggle Anchor"; tint: #ce93d8; clicked => { root.on-menu-action("edit:anchor"); } }
                 }
                 
@@ -1978,9 +2003,10 @@ export component Ribbon inherits Rectangle {
             }
             
             // ════════════════════════════════════════════════════════════
-            // CAD TAB — Smart Build Tools, Align, Boolean
-            // Parametric Sketch/Features/Modify/Pattern groups land as
-            // they're implemented (TOOLSET_CAD.md Phase 0).
+            // DRAFTING TAB — Smart Edit · Align · Pattern · Boolean
+            // All buttons are live. Modal tools (Smart Edit / Pattern)
+            // arm on click → pick in viewport → toast confirms step.
+            // Align / Boolean act on the current selection immediately.
             // ════════════════════════════════════════════════════════════
             if root.ribbon-tab == "cad": HorizontalLayout {
                 padding-left: 6px;
@@ -1988,115 +2014,107 @@ export component Ribbon inherits Rectangle {
                 spacing: 6px;
                 alignment: center;
 
-                // ── SMART EDIT group — stravant-tier productivity tools
-                // backed by the ModalTool framework. Each button fires
-                // ActivateModalToolEvent{tool_id}.
+                // ── SMART EDIT — click tool → pick parts in viewport
                 ToolGroup {
                     label: "Smart Edit";
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/gap-fill.svg");
                         label: "Gap Fill"; shortcut: "Ctrl+Alt+G";
-                        tooltip: "Fill the gap between two parts with a bridging block";
-                        tint: #00bcd4;
+                        tooltip: "Gap Fill";
+                        tint: Theme.accent-cyan;
                         selected: root.active-modal-tool-id == "gap_fill";
                         clicked => { root.on-activate-modal-tool("gap_fill"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/resize-align.svg");
-                        label: "Resize Align"; shortcut: "Ctrl+Alt+A";
-                        tooltip: "Resize source part until its face meets target's face";
-                        tint: #00bcd4;
+                        label: "Resize"; shortcut: "Ctrl+Alt+A";
+                        tooltip: "Resize Align";
+                        tint: Theme.accent-cyan;
                         selected: root.active-modal-tool-id == "resize_align";
                         clicked => { root.on-activate-modal-tool("resize_align"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/edge-align.svg");
-                        label: "Edge Align"; shortcut: "";
-                        tooltip: "Translate source so its edge coincides with target's edge";
-                        tint: #00bcd4;
+                        label: "Edge"; shortcut: "Ctrl+Alt+E";
+                        tooltip: "Edge Align";
+                        tint: Theme.accent-cyan;
                         selected: root.active-modal-tool-id == "edge_align";
                         clicked => { root.on-activate-modal-tool("edge_align"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/part-swap.svg");
-                        label: "Part Swap"; shortcut: "Ctrl+Alt+P";
-                        tooltip: "Swap positions between two parts";
-                        tint: #00bcd4;
+                        label: "Swap"; shortcut: "Ctrl+Alt+P";
+                        tooltip: "Part Swap";
+                        tint: Theme.accent-cyan;
                         selected: root.active-modal-tool-id == "part_swap_positions";
                         clicked => { root.on-activate-modal-tool("part_swap_positions"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/mirror.svg");
                         label: "Mirror"; shortcut: "Ctrl+Alt+M";
-                        tooltip: "Reflect selection across a plane";
-                        tint: #00bcd4;
+                        tooltip: "Mirror";
+                        tint: Theme.accent-cyan;
                         selected: root.active-modal-tool-id == "model_reflect";
                         clicked => { root.on-activate-modal-tool("model_reflect"); }
                     }
                 }
                 GroupDivider {}
 
-                // ── ALIGN group — last Phase-0 tool feature
-                // (TOOLSET.md §4.4 + §4.13.8). Center-align + distribute
-                // on each world axis. Min/Max align + align-to-active
-                // available via keybinding follow-up.
+                // ── ALIGN — requires multi-selection first
                 ToolGroup {
                     label: "Align";
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/align-center.svg");
-                        label: "Align X"; shortcut: "";
-                        tooltip: "Align selection centers along the X axis";
+                        label: "X"; shortcut: "";
+                        tooltip: "Align centers on X";
                         tint: #ffb74d;
                         clicked => { root.on-menu-action("align:center:x"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/align-center.svg");
-                        label: "Align Y"; shortcut: "";
-                        tooltip: "Align selection centers along the Y axis";
+                        label: "Y"; shortcut: "";
+                        tooltip: "Align centers on Y";
                         tint: #ffb74d;
                         clicked => { root.on-menu-action("align:center:y"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/align-center.svg");
-                        label: "Align Z"; shortcut: "";
-                        tooltip: "Align selection centers along the Z axis";
+                        label: "Z"; shortcut: "";
+                        tooltip: "Align centers on Z";
                         tint: #ffb74d;
                         clicked => { root.on-menu-action("align:center:z"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/distribute.svg");
-                        label: "Dist. X"; shortcut: "";
-                        tooltip: "Distribute selection evenly along the X axis (≥ 3 parts)";
+                        label: "Dist X"; shortcut: "";
+                        tooltip: "Distribute evenly on X";
                         tint: #ffb74d;
                         clicked => { root.on-menu-action("distribute:x"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/distribute.svg");
-                        label: "Dist. Y"; shortcut: "";
-                        tooltip: "Distribute selection evenly along the Y axis (≥ 3 parts)";
+                        label: "Dist Y"; shortcut: "";
+                        tooltip: "Distribute evenly on Y";
                         tint: #ffb74d;
                         clicked => { root.on-menu-action("distribute:y"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/distribute.svg");
-                        label: "Dist. Z"; shortcut: "";
-                        tooltip: "Distribute selection evenly along the Z axis (≥ 3 parts)";
+                        label: "Dist Z"; shortcut: "";
+                        tooltip: "Distribute evenly on Z";
                         tint: #ffb74d;
                         clicked => { root.on-menu-action("distribute:z"); }
                     }
                 }
                 GroupDivider {}
 
-                // ── PATTERN group (Phase 1) — Linear / Radial / Grid
-                // array ModalTool implementations. Users pick parameters
-                // in the Tool Options Bar, click Apply → N copies spawn
-                // as TOML-backed folders.
+                // ── PATTERN — ModalTool with options panel (Apply)
                 ToolGroup {
                     label: "Pattern";
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/array-linear.svg");
                         label: "Linear"; shortcut: "Ctrl+Alt+L";
-                        tooltip: "Linear array — N copies along a step vector";
+                        tooltip: "Linear Array";
                         tint: #ba68c8;
                         selected: root.active-modal-tool-id == "linear_array";
                         clicked => { root.on-activate-modal-tool("linear_array"); }
@@ -2104,7 +2122,7 @@ export component Ribbon inherits Rectangle {
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/array-radial.svg");
                         label: "Radial"; shortcut: "Ctrl+Alt+R";
-                        tooltip: "Radial array — N copies around a pivot axis";
+                        tooltip: "Radial Array";
                         tint: #ba68c8;
                         selected: root.active-modal-tool-id == "radial_array";
                         clicked => { root.on-activate-modal-tool("radial_array"); }
@@ -2112,7 +2130,7 @@ export component Ribbon inherits Rectangle {
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/array-grid.svg");
                         label: "Grid"; shortcut: "";
-                        tooltip: "Grid array — Nx × Ny × Nz 3D pattern";
+                        tooltip: "Grid Array";
                         tint: #ba68c8;
                         selected: root.active-modal-tool-id == "grid_array";
                         clicked => { root.on-activate-modal-tool("grid_array"); }
@@ -2120,62 +2138,36 @@ export component Ribbon inherits Rectangle {
                 }
                 GroupDivider {}
 
-                // ── BOOLEAN group — CSG operations on selected parts.
+                // ── BOOLEAN — real truck CSG (Block/Ball/Cylinder)
                 ToolGroup {
                     label: "Boolean";
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/csg-union.svg");
                         label: "Union"; shortcut: "";
-                        tooltip: "Combine selected parts into a single solid (CSG Union)";
+                        tooltip: "Union";
                         tint: #64b5f6;
                         clicked => { root.on-menu-action("csg:union"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/csg-subtract.svg");
                         label: "Subtract"; shortcut: "";
-                        tooltip: "Subtract second selection from first (CSG Difference)";
+                        tooltip: "Subtract";
                         tint: #64b5f6;
                         clicked => { root.on-menu-action("csg:negate"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/csg-intersect.svg");
                         label: "Intersect"; shortcut: "";
-                        tooltip: "Keep only the overlap of selected parts (CSG Intersection)";
+                        tooltip: "Intersect";
                         tint: #64b5f6;
                         clicked => { root.on-menu-action("csg:intersect"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/csg-separate.svg");
                         label: "Separate"; shortcut: "";
-                        tooltip: "Break a union back into its components";
+                        tooltip: "Separate";
                         tint: #64b5f6;
                         clicked => { root.on-menu-action("csg:separate"); }
-                    }
-                }
-                GroupDivider {}
-
-                // ── Placeholder for upcoming parametric groups.
-                // Rendered as a dim label so users know the tab is
-                // scaffolded — prevents "empty tab" confusion while
-                // Sketch / Features / Modify / Pattern ship.
-                Rectangle {
-                    width: 240px; height: 64px;
-                    background: transparent;
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 2px;
-                        Text {
-                            text: "Sketch · Features · Modify";
-                            color: Theme.text-disabled;
-                            font-size: 10px;
-                            horizontal-alignment: center;
-                        }
-                        Text {
-                            text: "coming soon — see TOOLSET_CAD.md";
-                            color: Theme.text-disabled;
-                            font-size: 9px;
-                            horizontal-alignment: center;
-                        }
                     }
                 }
             }
@@ -2195,6 +2187,71 @@ export component Ribbon inherits Rectangle {
                     IconButton { icon: @image-url("../../assets/icons/unionoperation.svg"); label: "Union"; tooltip: "Insert Union"; tint: #64b5f6; clicked => { root.on-menu-action("insert:unionoperation"); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/seat.svg"); label: "Seat"; tooltip: "Insert Seat"; tint: #64b5f6; clicked => { root.on-menu-action("insert:seat"); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/vehicle.svg"); label: "Vehicle"; tooltip: "Insert VehicleSeat"; tint: #64b5f6; clicked => { root.on-menu-action("insert:vehicleseat"); } }
+
+                    // ── Parametric — feature-tree CadPart (eustress-cad)
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/block.svg");
+                        label: "Plate"; shortcut: "";
+                        tooltip: "Parametric plate";
+                        tint: Theme.cat-parts;
+                        clicked => { root.on-menu-action("insert:cad_plate"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/block.svg");
+                        label: "Box"; shortcut: "";
+                        tooltip: "Parametric cube";
+                        tint: Theme.cat-parts;
+                        clicked => { root.on-menu-action("insert:cad_box"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/cylinder.svg");
+                        label: "Cylinder"; shortcut: "";
+                        tooltip: "Parametric cylinder";
+                        tint: Theme.cat-parts;
+                        clicked => { root.on-menu-action("insert:cad_cylinder"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/csg-subtract.svg");
+                        label: "Hole"; shortcut: "";
+                        tooltip: "Plate + through-hole";
+                        tint: Theme.cat-parts;
+                        clicked => { root.on-menu-action("insert:cad_plate_hole"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/corner.svg");
+                        label: "L-Bracket"; shortcut: "";
+                        tooltip: "L-bracket polyline extrude";
+                        tint: Theme.cat-parts;
+                        clicked => { root.on-menu-action("insert:cad_lbracket"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/cad-frame.svg");
+                        label: "Frame"; shortcut: "";
+                        tooltip: "Constrained frame sketch";
+                        tint: Theme.cat-parts;
+                        clicked => { root.on-menu-action("insert:cad_frame"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/block.svg");
+                        label: "Shell"; shortcut: "";
+                        tooltip: "Shelled box";
+                        tint: Theme.cat-parts;
+                        clicked => { root.on-menu-action("insert:cad_shell"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/export.svg");
+                        label: "GLB"; shortcut: "";
+                        tooltip: "Export selected CadPart to .glb (self-describing extras with variables)";
+                        tint: Theme.accent-yellow;
+                        clicked => { root.on-menu-action("cad:export_glb"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/cad-solve.svg");
+                        label: "Solve"; shortcut: "";
+                        tooltip: "Run 2D constraint solver on all sketches in the selected CadPart";
+                        tint: Theme.accent-green;
+                        clicked => { root.on-menu-action("cad:solve_sketch"); }
+                    }
                 }
                 GroupDivider {}
                 
@@ -2210,28 +2267,47 @@ export component Ribbon inherits Rectangle {
                     label: "Constraints";
                     IconButton { icon: @image-url("../../assets/icons/attachment.svg"); label: "Attach"; tooltip: "Insert Attachment"; tint: #ffb74d; clicked => { root.on-menu-action("insert:attachment"); } }
                     IconButton { icon: @image-url("../../assets/icons/weldconstraint.svg"); label: "Weld"; tooltip: "Insert Weld"; tint: #ffb74d; clicked => { root.on-menu-action("insert:weldconstraint"); } }
+
+                    // ── Assembly mates — live Avian joints (eustress-cad).
+                    // Coincident is covered by "Weld" above (same practical
+                    // effect — two parts locked rigid), so there is no
+                    // separate "Fixed" button here. Same amber tint as
+                    // Attach/Weld/Motor — one constraint family.
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/hinge.svg");
+                        label: "Hinge"; shortcut: "";
+                        tooltip: "Revolute mate";
+                        tint: #ffb74d;
+                        clicked => { root.on-menu-action("cad:mate_revolute"); }
+                    }
                     IconButton { icon: @image-url("../../assets/icons/motor6d.svg"); label: "Motor"; tooltip: "Insert Motor6D"; tint: #ffb74d; clicked => { root.on-menu-action("insert:motor6d"); } }
-                    IconButton { icon: @image-url("../../assets/icons/beam.svg"); label: "Beam"; tooltip: "Insert Beam"; tint: #ffb74d; clicked => { root.on-menu-action("insert:beam"); } }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/cad-slide.svg");
+                        label: "Slide"; shortcut: "";
+                        tooltip: "Prismatic mate";
+                        tint: #ffb74d;
+                        clicked => { root.on-menu-action("cad:mate_prismatic"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/cad-ball.svg");
+                        label: "Ball"; shortcut: "";
+                        tooltip: "Ball mate";
+                        tint: #ffb74d;
+                        clicked => { root.on-menu-action("cad:mate_ball"); }
+                    }
                 }
                 GroupDivider {}
-                
+
                 ToolGroup {
                     label: "Effects";
                     IconButton { icon: @image-url("../../assets/icons/particleemitter.svg"); label: "Particles"; tooltip: "Insert Particles"; tint: #f48fb1; clicked => { root.on-menu-action("insert:particleemitter"); } }
                     IconButton { icon: @image-url("../../assets/icons/pointlight.svg"); label: "Point"; tooltip: "Insert PointLight"; tint: #fff176; clicked => { root.on-menu-action("insert:pointlight"); } }
                     IconButton { icon: @image-url("../../assets/icons/spotlight.svg"); label: "Spot"; tooltip: "Insert SpotLight"; tint: #fff176; clicked => { root.on-menu-action("insert:spotlight"); } }
                     IconButton { icon: @image-url("../../assets/icons/sound.svg"); label: "Sound"; tooltip: "Insert Sound"; tint: #80deea; clicked => { root.on-menu-action("insert:sound"); } }
+                    IconButton { icon: @image-url("../../assets/icons/beam.svg"); label: "Beam"; tooltip: "Insert Beam"; tint: #80deea; clicked => { root.on-menu-action("insert:beam"); } }
                 }
                 GroupDivider {}
-                
-                ToolGroup {
-                    label: "CSG";
-                    IconButton { icon: @image-url("../../assets/icons/ui/negate.svg"); label: "Negate"; tooltip: "Negate (CSG Subtract)"; tint: #ef9a9a; clicked => { root.on-menu-action("model:negate"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/intersect.svg"); label: "Intersect"; tooltip: "Intersect (CSG)"; tint: #a5d6a7; clicked => { root.on-menu-action("model:intersect"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/separate.svg"); label: "Separate"; tooltip: "Separate Union"; tint: #90caf9; clicked => { root.on-menu-action("model:separate"); } }
-                }
-                GroupDivider {}
-                
+
                 ToolGroup {
                     label: "Assets";
                     IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import Model (OBJ/FBX/GLTF)"; tint: #4dd0e1; clicked => { root.on-menu-action("model:import"); } }
@@ -2619,6 +2695,55 @@ export component Ribbon inherits Rectangle {
                     label: "Experiment";
                     IconButton { icon: @image-url("../../assets/icons/filetypes/git.svg"); label: "Branch"; tooltip: "Snapshot a Run (signals + world + stats)"; tint: #ffb74d; clicked => { root.on-menu-action("data:branch"); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/swap.svg"); label: "Compare"; tooltip: "Compare Runs (overlay + deltas)"; tint: #ffb74d; clicked => { root.on-menu-action("data:compare"); } }
+                }
+            }
+
+            // ════════════════════════════════════════════════════════════
+            // PLUGINS TAB — fully data-driven from `plugin-sections` /
+            // `plugin-buttons` (populated from `TabRegistry`, which is in
+            // turn populated by real `StudioPlugin`s via `PluginApi` — see
+            // `road_tool.rs` for the first real plugin). Every OTHER tab
+            // above is a hardcoded `ToolGroup`/`IconButton` list because its
+            // buttons are fixed at compile time; this is the one tab where
+            // the button set itself is Rust-side data, so a hot-enabled
+            // plugin's UI appears without touching this file again.
+            // ════════════════════════════════════════════════════════════
+            if root.ribbon-tab == "plugins": HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 6px;
+                alignment: center;
+
+                for section in root.plugin-sections: ToolGroup {
+                    label: section.label;
+                    for button in root.plugin-buttons: IconButton {
+                        // `for X: if Y: Component {}` is not valid Slint syntax
+                        // (a compile-time parse error — confirmed the hard way).
+                        // The proven pattern in this codebase for a filtered
+                        // for-loop is `visible:` + an explicit zero-size
+                        // override on the SAME target component (see
+                        // services_browser.slint's `for service[idx] in
+                        // root.services: ServiceSidebarItem { visible: ...;
+                        // height: ... ? 30px : 0px; }`) — visible alone isn't
+                        // trusted here to fully collapse layout space, so width
+                        // is forced to 0 too when this button belongs to a
+                        // different section.
+                        property <bool> in-this-section: button.tab-id == section.tab-id && button.section-id == section.section-id;
+                        visible: in-this-section;
+                        width: in-this-section ? self.preferred-width : 0px;
+                        icon: @image-url("../../assets/icons/ui/settings.svg");
+                        label: button.label;
+                        tooltip: button.tooltip;
+                        tint: #ce93d8;
+                        clicked => { root.on-plugin-action(button.action-id); }
+                    }
+                }
+
+                if root.plugin-sections.length == 0: Text {
+                    text: "No plugins enabled";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    vertical-alignment: center;
                 }
             }
         }

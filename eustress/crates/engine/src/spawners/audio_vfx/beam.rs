@@ -517,6 +517,66 @@ impl ClassSpawner for BeamSpawner {
 }
 
 // ============================================================================
+// Live sync — the "Wave 4 sync system" `BeamSegmentLink` was always meant
+// to feed (see its doc comment above). Runs every frame: reads each beam's
+// two attachment UUIDs, resolves them against the live ECS via
+// `Instance.uuid` (NOT a WorldDb round-trip — that's the persisted-store
+// lookup used by `find_entity_by_uuid`, wrong layer for a per-frame system),
+// and keeps the stretched-cylinder mesh taut between them. This is what
+// makes a dragged mind-map node's edges follow it instead of staying
+// wherever they were baked.
+// ============================================================================
+
+/// Keeps every `Beam`'s transform taut between its two attachments, every
+/// frame. Unresolved attachments (UUID doesn't match any live entity, or a
+/// beam was authored with no attachments at all) are left exactly as the
+/// spawner built them — this system only ever tightens a beam it can fully
+/// resolve, never collapses one it can't.
+pub fn sync_beam_transforms(
+    mut beams: Query<(&BeamSegmentLink, &mut Transform), With<Beam>>,
+    targets: Query<(&Instance, &GlobalTransform)>,
+) {
+    if beams.is_empty() {
+        return;
+    }
+
+    // Built once per frame, not once per beam — O(entities + beams) instead
+    // of O(entities * beams).
+    let mut positions: std::collections::HashMap<&str, Vec3> = std::collections::HashMap::new();
+    for (instance, gt) in &targets {
+        if !instance.uuid.is_empty() {
+            positions.insert(instance.uuid.as_str(), gt.translation());
+        }
+    }
+
+    for (link, mut transform) in &mut beams {
+        let (Some(a_uuid), Some(b_uuid)) = (&link.attachment0_uuid, &link.attachment1_uuid) else {
+            continue;
+        };
+        let (Some(&a_pos), Some(&b_pos)) =
+            (positions.get(a_uuid.as_str()), positions.get(b_uuid.as_str()))
+        else {
+            continue;
+        };
+
+        let delta = b_pos - a_pos;
+        let length = delta.length();
+        if length < 1e-5 {
+            continue;
+        }
+        let dir = delta / length;
+
+        transform.translation = (a_pos + b_pos) * 0.5;
+        // Shortest-arc rotation from the cylinder mesh's local +Y (its long
+        // axis) onto the live direction between the two attachments — same
+        // convention the spawner used to build the beam once; this just
+        // re-runs it continuously instead of only at spawn time.
+        transform.rotation = Quat::from_rotation_arc(Vec3::Y, dir);
+        transform.scale.y = length;
+    }
+}
+
+// ============================================================================
 // Internal helpers — PropertyBag <-> Beam conversion + enum parsers
 // ============================================================================
 

@@ -604,19 +604,37 @@ pub struct CharacterInput {
 // Systems
 // ============================================================================
 
+/// Peripheral `handle_start_play` params bundled behind one field — bare-fn
+/// systems cap out at 16 `SystemParam`s in Bevy, and this system's param
+/// list sits right at that ceiling.
+#[derive(bevy::ecs::system::SystemParam)]
+struct PlayStartResources<'w> {
+    player_service: Res<'w, PlayerService>,
+    asset_server: Res<'w, AssetServer>,
+    meshes: ResMut<'w, Assets<Mesh>>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+    lighting: Option<Res<'w, eustress_common::services::LightingService>>,
+}
+
 /// Handle start play event - captures full world snapshot and spawns client-like character
+///
+/// Message-driven (`StartPlayEvent`), not Slint-flag-driven — this is a
+/// Core-tier system with zero `crate::ui::StudioState` dependency, so it
+/// runs identically in the windowed editor and a headless runner.
+/// `PlayModeUiPlugin`'s `drain_studio_state_play_requests` is what
+/// translates Slint button clicks / keyboard shortcuts into this message
+/// for the editor; a headless CLI or MCP bridge handler can write the
+/// same message directly.
 fn handle_start_play(
     mut commands: Commands,
-    mut studio_state: ResMut<crate::ui::StudioState>,
+    mut play_events: MessageReader<StartPlayEvent>,
+    mut pause_toggle_writer: MessageWriter<TogglePauseEvent>,
     mut play_mode: ResMut<PlayMode>,
     mut runtime: ResMut<PlayModeRuntime>,
     mut snapshot_stack: ResMut<SnapshotStack>,
     char_config: Res<PlayModeCharacterConfig>,
     mut next_state: ResMut<NextState<PlayModeState>>,
-    player_service: Res<PlayerService>,
-    asset_server: Res<AssetServer>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut res: PlayStartResources,
     mut cursor_options: Query<&mut CursorOptions, With<Window>>,
     // Gap 3 — exclude the off-screen AI camera. It is built from the SAME
     // `studio_camera_bundle` as the editor camera (so it carries `Camera3d`) and
@@ -627,7 +645,6 @@ fn handle_start_play(
     // out keeps it active + at order -1 across the whole Play cycle.
     cameras: Query<(Entity, &Transform), (With<Camera3d>, Without<crate::ai_camera::AiCamera>)>,
     spawn_locations: Query<(&Transform, &SpawnLocation)>,
-    lighting: Option<Res<eustress_common::services::LightingService>>,
     snapshot_query: Query<(
         Entity,
         Option<&Transform>,
@@ -638,22 +655,14 @@ fn handle_start_play(
         Option<&Model>,
     ), Without<PlayModeCharacter>>,
 ) {
-    // Read play requests directly from StudioState flags (set by drain_slint_actions)
-    let play_type = if studio_state.play_solo_requested {
-        studio_state.play_solo_requested = false;
-        Some(PlayModeType::Solo)
-    } else if studio_state.play_with_character_requested {
-        studio_state.play_with_character_requested = false;
-        Some(PlayModeType::WithCharacter)
-    } else {
-        None
-    };
-
-    let Some(play_type) = play_type else { return };
+    // Only the first request in a frame is honored — matches the old
+    // single-flag semantics (a flag was either set or not, never queued).
+    let Some(play_type) = play_events.read().next().map(|e| e.play_type) else { return };
+    play_events.clear();
 
     // If already playing/paused, treat Play as resume (same as unpause)
     if play_mode.started_at.is_some() {
-        studio_state.pause_requested = true; // Toggle pause via handle_pause_toggle
+        pause_toggle_writer.write(TogglePauseEvent);
         return;
     }
 
@@ -669,7 +678,7 @@ fn handle_start_play(
         }
 
         // Save lighting time_of_day so it can be restored on stop
-        runtime.saved_time_of_day = lighting.as_ref().map(|l| l.time_of_day);
+        runtime.saved_time_of_day = res.lighting.as_ref().map(|l| l.time_of_day);
         
         // Create comprehensive world snapshot
         let mut snapshot = WorldSnapshot::new(0, "Play Start");
@@ -790,19 +799,19 @@ fn handle_start_play(
                 let (spawn_pos, spawn_protection) = get_spawn_position_or_default(
                     spawn_locations.iter(),
                     None, // TODO: Get player team when team system is implemented
-                    player_service.spawn_position,
+                    res.player_service.spawn_position,
                 );
-                
+
                 if spawn_protection > 0.0 {
                     info!("🛡️ Spawn protection: {:.1}s", spawn_protection);
                 }
-                
+
                 // Spawn full character with physics (like server would)
                 let character = spawn_play_mode_character(
                     &mut commands,
-                    &mut meshes,
-                    &mut materials,
-                    &asset_server,
+                    &mut res.meshes,
+                    &mut res.materials,
+                    &res.asset_server,
                     spawn_pos,
                     &mut runtime,
                     &char_config,
@@ -855,9 +864,12 @@ fn handle_start_play(
 }
 
 /// Handle stop play event - restores world from snapshot and cleans up play mode entities
+///
+/// Message-driven (`StopPlayEvent`) — see `handle_start_play`'s doc
+/// comment for why this is Core-tier and Slint-free.
 fn handle_stop_play(
     mut commands: Commands,
-    mut studio_state: ResMut<crate::ui::StudioState>,
+    mut events: MessageReader<StopPlayEvent>,
     current_state: Res<State<PlayModeState>>,
     mut play_mode: ResMut<PlayMode>,
     mut runtime: ResMut<PlayModeRuntime>,
@@ -878,8 +890,8 @@ fn handle_stop_play(
     mut lighting: Option<ResMut<eustress_common::services::LightingService>>,
     mut sim_clock: Option<ResMut<crate::studio_plugins::api::SimClock>>,
 ) {
-    if !studio_state.stop_requested { return; }
-    studio_state.stop_requested = false;
+    if events.read().next().is_none() { return; }
+    events.clear();
 
     if !matches!(current_state.get(), PlayModeState::Playing | PlayModeState::Paused) { return; }
 
@@ -1326,15 +1338,17 @@ fn handle_restore_save_point(
     }
 }
 
-/// Handle pause toggle
+/// Handle pause toggle. Message-driven (`TogglePauseEvent`) — see
+/// `handle_start_play`'s doc comment for why this is Core-tier and
+/// Slint-free.
 fn handle_pause_toggle(
-    mut studio_state: ResMut<crate::ui::StudioState>,
+    mut events: MessageReader<TogglePauseEvent>,
     current_state: Res<State<PlayModeState>>,
     mut next_state: ResMut<NextState<PlayModeState>>,
     mut physics_time: ResMut<Time<Physics>>,
 ) {
-    if !studio_state.pause_requested { return; }
-    studio_state.pause_requested = false;
+    if events.read().next().is_none() { return; }
+    events.clear();
 
     match current_state.get() {
         PlayModeState::Playing => {
@@ -1437,46 +1451,87 @@ fn play_mode_shortcuts(
     }
 }
 
+/// UI-tier seam: translates Slint `StudioState` play/pause/stop request
+/// flags into the Core-tier `StartPlayEvent` / `StopPlayEvent` /
+/// `TogglePauseEvent` messages that `handle_start_play` / `handle_stop_play`
+/// / `handle_pause_toggle` consume. This is the ONLY system in the
+/// play-mode subsystem that reads `crate::ui::StudioState` — every other
+/// Core system is Slint-free and runs identically in a headless runner. A
+/// future headless CLI or MCP bridge handler triggers play/stop/pause the
+/// same way: by writing directly into these message queues, no
+/// `StudioState` involved.
+fn drain_studio_state_play_requests(
+    mut studio_state: ResMut<crate::ui::StudioState>,
+    mut start_writer: MessageWriter<StartPlayEvent>,
+    mut stop_writer: MessageWriter<StopPlayEvent>,
+    mut pause_writer: MessageWriter<TogglePauseEvent>,
+) {
+    if studio_state.play_solo_requested {
+        studio_state.play_solo_requested = false;
+        start_writer.write(StartPlayEvent { play_type: PlayModeType::Solo });
+    }
+    if studio_state.play_with_character_requested {
+        studio_state.play_with_character_requested = false;
+        start_writer.write(StartPlayEvent { play_type: PlayModeType::WithCharacter });
+    }
+    if studio_state.pause_requested {
+        studio_state.pause_requested = false;
+        pause_writer.write(TogglePauseEvent);
+    }
+    if studio_state.stop_requested {
+        studio_state.stop_requested = false;
+        stop_writer.write(StopPlayEvent);
+    }
+}
+
 // ============================================================================
 // System Sets
 // ============================================================================
 
-/// System set for play mode handlers. Configured to run after SlintSystems::Drain.
+/// System set for the Core play/pause/stop message handlers. Bare (no
+/// ordering constraint) in `PlayModeCorePlugin`; `PlayModeUiPlugin` adds
+/// `.after(SlintSystems::Drain)` to this same set when the editor tier is
+/// present (`configure_sets` calls are additive across plugins).
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlayModeSystems;
 
 // ============================================================================
-// Plugin
+// Plugin — Core (headless-safe) + UI (editor-only) + compat wrapper
 // ============================================================================
 
-/// Play mode plugin for Studio
-pub struct PlayModePlugin;
+/// Play mode: simulation core. Everything here is Slint-free and runs
+/// identically in the windowed editor and a headless runner — state,
+/// snapshots, physics activation, script lifecycle, embedded-server
+/// control, and the `StartPlayEvent` / `StopPlayEvent` / `TogglePauseEvent`
+/// message handlers. See `PlayModeUiPlugin` for the editor-only seam that
+/// feeds those messages from Slint buttons and keyboard shortcuts.
+pub struct PlayModeCorePlugin;
 
-impl Plugin for PlayModePlugin {
+impl Plugin for PlayModeCorePlugin {
     fn build(&self, app: &mut App) {
         // Add the SHARED character plugin - same code as client!
         // This ensures identical gameplay behavior in Studio play mode
         app.add_plugins(eustress_common::plugins::SharedCharacterPlugin);
-        
+
         // Add skinned character support (GLB models)
         app.add_plugins(eustress_common::plugins::SkinnedCharacterPlugin);
-        
+
         // Add AAA animation system (crossfade blending, locomotion blend tree)
         app.add_plugins(eustress_common::plugins::SharedAnimationPlugin);
-        
+
         // Add the runtime plugin for play mode specific handling
         app.add_plugins(crate::play_mode_runtime::PlayModeRuntimePlugin);
-        
+
         app
             // State
             .init_state::<PlayModeState>()
-            
+
             // Resources
             .init_resource::<PlayMode>()
             .init_resource::<SnapshotStack>()
             .init_resource::<SnapshotConfig>()
             .init_resource::<EmbeddedServer>()
-            
+
             // Messages
             .add_message::<StartPlayEvent>()
             .add_message::<StopPlayEvent>()
@@ -1486,7 +1541,7 @@ impl Plugin for PlayModePlugin {
             .add_message::<StartEmbeddedServerEvent>()
             .add_message::<StopEmbeddedServerEvent>()
             .add_message::<EmbeddedServerStateChanged>()
-            
+
             // Startup: Pause physics in Edit mode (eliminates 500-750ms stutter from Avian3D)
             .add_systems(Startup, pause_physics_on_startup)
 
@@ -1494,16 +1549,13 @@ impl Plugin for PlayModePlugin {
             .init_resource::<crate::soul::rune_api::RuneRuntimeState>()
             .init_resource::<crate::soul::rune_api::RuneModuleRegistry>()
             .add_systems(Startup, crate::soul::rune_api::register_engine_rune_modules)
-            
-            // Systems (always run) - split into groups to avoid tuple size limits
-            // handle_play_mode_ui_buttons must run after drain_slint_actions sets
-            // the play_solo_requested / pause_requested / stop_requested flags.
-            // Play mode handlers run AFTER Slint drains actions (which sets StudioState flags)
-            .configure_sets(Update, PlayModeSystems.after(crate::ui::slint_ui::SlintSystems::Drain))
-            .add_systems(Update, handle_start_play.in_set(PlayModeSystems))
-            .add_systems(Update, handle_stop_play.in_set(PlayModeSystems))
-            .add_systems(Update, handle_pause_toggle.in_set(PlayModeSystems))
-            .add_systems(Update, play_mode_shortcuts.in_set(PlayModeSystems))
+
+            // Message-driven play/pause/stop handlers — see PlayModeSystems doc.
+            .add_systems(Update, (
+                handle_start_play,
+                handle_stop_play,
+                handle_pause_toggle,
+            ).in_set(PlayModeSystems))
             .add_systems(Update, (
                 handle_create_save_point,
                 handle_restore_save_point,
@@ -1511,7 +1563,7 @@ impl Plugin for PlayModePlugin {
                 handle_embedded_server_stop,
                 monitor_embedded_server,
             ))
-            
+
             // Systems that run when entering/exiting play mode
             .add_systems(OnEnter(PlayModeState::Playing), activate_physics_for_unanchored_parts)
             .add_systems(OnEnter(PlayModeState::Playing), start_play_server_if_server_mode)
@@ -1589,18 +1641,67 @@ impl Plugin for PlayModePlugin {
                     .after(crate::soul::rune_api::run_script_init),
                 crate::soul::rune_api::run_script_update
                     .after(crate::soul::rune_api::run_script_ready),
-                dispatch_gui_button_clicks
-                    .after(crate::soul::rune_api::run_script_update),
+                // `dispatch_gui_button_clicks` lives in `PlayModeUiPlugin` — it
+                // reads `SlintUIFocus`, populated by the viewport click
+                // pipeline, so it has no meaning in a headless runner.
+                // `cleanup_script_bindings` no longer orders off it directly;
+                // when the UI tier IS present it re-inserts itself between
+                // `run_script_update` and this system (see `PlayModeUiPlugin`),
+                // preserving the exact ordering Core has here alone.
                 crate::soul::rune_api::cleanup_script_bindings
-                    .after(dispatch_gui_button_clicks),
+                    .after(crate::soul::rune_api::run_script_update),
                 crate::soul::rune_api::drain_script_logs_to_output
                     .after(crate::soul::rune_api::run_script_update),
             ).run_if(in_state(PlayModeState::Playing)))
 
             // Real-time anchored state sync during play mode
             .add_systems(Update, sync_anchored_to_rigidbody.run_if(in_state(PlayModeState::Playing)));
-        
-        info!("🎮 PlayModePlugin initialized with SHARED character plugin (same as client)");
+
+        info!("🎮 PlayModeCorePlugin initialized with SHARED character plugin (same as client)");
+    }
+}
+
+/// Play mode: editor UI seam. Translates Slint `StudioState` request
+/// flags and F5–F8 / Escape / Ctrl+Shift+S / Ctrl+Shift+R keyboard
+/// shortcuts into the `StartPlayEvent` / `StopPlayEvent` /
+/// `TogglePauseEvent` messages `PlayModeCorePlugin` consumes, plus
+/// in-viewport ScreenGui button-click dispatch. This is the ONLY plugin
+/// in the play-mode subsystem that touches `crate::ui::StudioState` /
+/// `SlintUIFocus` — omit it (headless runner) and Core still works, just
+/// driven by messages instead of buttons/keyboard.
+pub struct PlayModeUiPlugin;
+
+impl Plugin for PlayModeUiPlugin {
+    fn build(&self, app: &mut App) {
+        app
+            // Slint drains actions (setting StudioState flags), then the
+            // translator turns them into messages, then PlayModeSystems
+            // (Core's message handlers) consumes them — same-frame
+            // press-to-effect latency as before the Core/UI split.
+            .configure_sets(Update, PlayModeSystems.after(crate::ui::slint_ui::SlintSystems::Drain))
+            .add_systems(Update, (
+                play_mode_shortcuts,
+                drain_studio_state_play_requests.after(play_mode_shortcuts),
+            ).before(PlayModeSystems))
+            // In-viewport ScreenGui button clicks -> Rune on_button_click().
+            // Reinserted between run_script_update and cleanup_script_bindings
+            // to reproduce the exact ordering PlayModeCorePlugin has when it
+            // runs alone (see the comment there).
+            .add_systems(Update, dispatch_gui_button_clicks
+                .after(crate::soul::rune_api::run_script_update)
+                .before(crate::soul::rune_api::cleanup_script_bindings)
+                .run_if(in_state(PlayModeState::Playing)));
+    }
+}
+
+/// Compatibility wrapper — adds both tiers, matching the pre-split
+/// behavior exactly. The windowed editor uses this unchanged; a headless
+/// runner adds `PlayModeCorePlugin` alone.
+pub struct PlayModePlugin;
+
+impl Plugin for PlayModePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins((PlayModeCorePlugin, PlayModeUiPlugin));
     }
 }
 
