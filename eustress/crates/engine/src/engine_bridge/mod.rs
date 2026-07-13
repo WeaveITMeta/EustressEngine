@@ -52,11 +52,15 @@ mod port_file;
 mod protocol;
 mod self_test;
 mod server;
+#[cfg(unix)]
+mod unix_socket_file;
 
 pub use protocol::{BridgeRequest, BridgeResponse, BridgeError, MethodName};
 
 use server::PendingRequests;
 use port_file::PortFile;
+#[cfg(unix)]
+use unix_socket_file::UnixSocketFile;
 
 /// Shared tokio runtime used by the bridge's TCP listener. We own our
 /// own multi-thread runtime because existing engine subsystems each
@@ -104,6 +108,12 @@ pub struct BridgePendingQueue(pub(crate) PendingRequests);
 pub struct EngineBridgeHandle {
     pub port: Option<u16>,
     pub port_file: Option<std::sync::Arc<PortFile>>,
+    /// The Unix socket transport's pointer file + real (short, temp-dir)
+    /// bind path (unix platforms only) — `None` on other platforms or if
+    /// the bind failed. See `unix_socket_file` module docs for why this
+    /// isn't just "the socket path under the Universe".
+    #[cfg(unix)]
+    pub unix_socket: Option<std::sync::Arc<UnixSocketFile>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +171,7 @@ fn setup_engine_bridge(
     // Spawn the long-lived accept loop on the runtime. The runtime is moved into
     // `BridgeRuntime` (below) and lives as long as the engine, so this task is
     // never aborted by an early drop.
-    handle.spawn(server::run_accept_loop(listener, queue));
+    handle.spawn(server::run_accept_loop(listener, queue.clone()));
 
     // Write the port to `.eustress/engine.port` under whichever Universe
     // is current at startup. If `SpaceRoot` isn't set yet (bare engine
@@ -184,9 +194,54 @@ fn setup_engine_bridge(
         port_file.display_path()
     );
 
+    // Also bind a Unix domain socket, advertised via a pointer file at
+    // `<universe>/.eustress/engine.sock` (see `unix_socket_file` docs for
+    // why the socket itself lives elsewhere, under the system temp dir).
+    // Some MCP-connector sandboxes refuse AF_INET loopback outright but
+    // permit filesystem-domain sockets under a writable root — see the
+    // module docs on `server::handle_connection`. Best-effort: failure
+    // just means TCP-only for this run, same "bridge disabled, engine
+    // still runs" ethos as a failed TCP bind above.
+    #[cfg(unix)]
+    let unix_socket = {
+        let bind_path = unix_socket_file::bind_path_for(&universe);
+        match handle.block_on(server::bind_unix_listener(&bind_path)) {
+            Ok(unix_listener) => {
+                handle.spawn(server::run_unix_accept_loop(unix_listener, queue.clone()));
+                match UnixSocketFile::write_for_universe(&universe, &bind_path) {
+                    Ok(usf) => {
+                        info!(
+                            "🔗 Engine Bridge also listening on Unix socket: {} (alternate transport for sandboxes that block loopback TCP)",
+                            usf.display_path()
+                        );
+                        Some(usf)
+                    }
+                    Err(e) => {
+                        warn!(
+                            "EngineBridge: unix socket bound at {} but pointer file write failed: {} — unreachable via .eustress/engine.sock this run",
+                            bind_path.display(),
+                            e
+                        );
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "EngineBridge: unix socket bind failed at {}: {} — TCP-only this run",
+                    bind_path.display(),
+                    e
+                );
+                None
+            }
+        }
+    };
+
     commands.insert_resource(EngineBridgeHandle {
         port: Some(port),
         port_file: Some(Arc::new(port_file)),
+        #[cfg(unix)]
+        unix_socket: unix_socket.map(Arc::new),
     });
 
     // STARTUP SELF-TEST — connect to our own port and do one `ping` round-trip
@@ -290,6 +345,8 @@ fn drain_bridge_requests(world: &mut World) {
 fn resync_port_file_to_space(
     space_root: Option<Res<crate::space::SpaceRoot>>,
     handle: Option<ResMut<EngineBridgeHandle>>,
+    bridge_runtime: Option<Res<BridgeRuntime>>,
+    queue: Res<BridgePendingQueue>,
 ) {
     let Some(space_root) = space_root else { return };
     if !space_root.is_changed() {
@@ -304,29 +361,86 @@ fn resync_port_file_to_space(
     let target = universe.join(".eustress").join("engine.port");
 
     // Already pointing at the loaded Space's Universe — nothing to do.
-    if handle
+    let port_file_current = handle
         .port_file
         .as_ref()
         .map(|pf| pf.path() == target.as_path())
-        .unwrap_or(false)
-    {
-        return;
+        .unwrap_or(false);
+
+    if !port_file_current {
+        match PortFile::write_for_universe(&universe, port) {
+            Ok(new_pf) => {
+                info!(
+                    "🔗 Engine Bridge port file re-pointed to loaded Space's Universe: {}",
+                    new_pf.display_path()
+                );
+                // Replacing the handle drops the previous `PortFile`, whose
+                // `Drop` removes the stale (wrong-Universe) port file.
+                handle.port_file = Some(Arc::new(new_pf));
+            }
+            Err(e) => warn!(
+                "EngineBridge: failed to re-point port file to {}: {}",
+                universe.display(),
+                e
+            ),
+        }
     }
 
-    match PortFile::write_for_universe(&universe, port) {
-        Ok(new_pf) => {
-            info!(
-                "🔗 Engine Bridge port file re-pointed to loaded Space's Universe: {}",
-                new_pf.display_path()
-            );
-            // Replacing the handle drops the previous `PortFile`, whose
-            // `Drop` removes the stale (wrong-Universe) port file.
-            handle.port_file = Some(Arc::new(new_pf));
+    // Same re-pointing for the Unix socket transport (see `unix_socket_file`
+    // module docs). The pointer file's *path* is the discovery mechanism,
+    // so a stale one left pointing at the old Universe would silently
+    // strand siblings there — this mirrors the port-file repoint above
+    // rather than skipping it just because it's more work.
+    #[cfg(unix)]
+    {
+        let new_pointer_path = universe.join(".eustress").join("engine.sock");
+        let sock_current = handle
+            .unix_socket
+            .as_ref()
+            .map(|u| u.pointer_path() == new_pointer_path.as_path())
+            .unwrap_or(false);
+        if !sock_current {
+            if let Some(bridge_runtime) = bridge_runtime {
+                let new_bind_path = unix_socket_file::bind_path_for(&universe);
+                match bridge_runtime
+                    .handle
+                    .block_on(server::bind_unix_listener(&new_bind_path))
+                {
+                    Ok(unix_listener) => {
+                        bridge_runtime
+                            .handle
+                            .spawn(server::run_unix_accept_loop(unix_listener, queue.0.clone()));
+                        match UnixSocketFile::write_for_universe(&universe, &new_bind_path) {
+                            Ok(new_usf) => {
+                                info!(
+                                    "🔗 Engine Bridge unix socket re-pointed to loaded Space's Universe: {}",
+                                    new_usf.display_path()
+                                );
+                                // Replacing the handle drops the previous
+                                // `UnixSocketFile`, whose `Drop` removes the
+                                // stale pointer file(s) AND the stale bind
+                                // path. The old accept-loop task itself keeps
+                                // running on its now-orphaned fd until
+                                // AppExit — harmless (no sibling can discover
+                                // a deleted pointer), matching the "don't
+                                // hard-fail on transport churn" ethos used
+                                // elsewhere in this module.
+                                handle.unix_socket = Some(Arc::new(new_usf));
+                            }
+                            Err(e) => warn!(
+                                "EngineBridge: unix socket bound at {} but pointer file re-point failed: {}",
+                                new_bind_path.display(),
+                                e
+                            ),
+                        }
+                    }
+                    Err(e) => warn!(
+                        "EngineBridge: failed to re-bind unix socket at {}: {}",
+                        new_bind_path.display(),
+                        e
+                    ),
+                }
+            }
         }
-        Err(e) => warn!(
-            "EngineBridge: failed to re-point port file to {}: {}",
-            universe.display(),
-            e
-        ),
     }
 }
