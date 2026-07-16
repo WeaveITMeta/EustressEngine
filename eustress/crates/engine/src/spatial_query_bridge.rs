@@ -477,29 +477,81 @@ pub fn execute_raycast_all(
 // 6. Metadata Sync System — Runs each frame to keep bridge up to date
 // ============================================================================
 
-/// Sync entity metadata from ECS into the ScriptSpatialQuery bridge.
-/// This runs each frame so scripts always see current entity names/materials.
+/// Sync entity metadata from ECS into the ScriptSpatialQuery bridge —
+/// INCREMENTALLY. Scripts still always see current names/materials, but the
+/// map is only touched for entities that actually changed.
+///
+/// The previous version cleared and fully rebuilt the map from an UNGATED
+/// full-world query every frame: at 131K entities that was ~262K heap
+/// string allocations (`Name::to_string` + `format!("{:?}", material)`) per
+/// frame — measured as a dominant slice of the 34 ms PostUpdate bucket on
+/// the Mountain Ascension benchmark. Same data, same freshness (changes
+/// land the frame they happen), a fraction of the cost: a static world now
+/// pays one empty change-query check.
 fn sync_entity_metadata(
     bridge: Res<ScriptSpatialQuery>,
-    query: Query<(Entity, Option<&Name>, Option<&eustress_common::classes::BasePart>), Or<(With<Name>, With<eustress_common::classes::BasePart>)>>,
+    changed: Query<
+        (Entity, Option<&Name>, Option<&eustress_common::classes::BasePart>),
+        (
+            Or<(With<Name>, With<eustress_common::classes::BasePart>)>,
+            Or<(
+                Changed<Name>,
+                Changed<eustress_common::classes::BasePart>,
+                Added<Name>,
+                Added<eustress_common::classes::BasePart>,
+            )>,
+        ),
+    >,
+    mut removed_names: RemovedComponents<Name>,
+    mut removed_parts: RemovedComponents<eustress_common::classes::BasePart>,
+    still_relevant: Query<
+        (Entity, Option<&Name>, Option<&eustress_common::classes::BasePart>),
+        Or<(With<Name>, With<eustress_common::classes::BasePart>)>,
+    >,
 ) {
+    // Fast path: nothing changed, nothing removed — don't even take the lock.
+    if changed.is_empty() && removed_names.is_empty() && removed_parts.is_empty() {
+        return;
+    }
     let Ok(mut map) = bridge.entity_metadata.write() else { return };
-    map.clear();
 
-    for (entity, name_opt, bp_opt) in query.iter() {
+    for (entity, name_opt, bp_opt) in changed.iter() {
         let name = name_opt.map(|n| n.to_string()).unwrap_or_default();
         let (material, can_collide) = if let Some(bp) = bp_opt {
             (format!("{:?}", bp.material), bp.can_collide)
         } else {
             (String::new(), true)
         };
-
         map.insert(entity.to_bits(), EntityMetadata {
             name,
             material,
             can_collide,
             is_water: false, // TODO: detect water volumes
         });
+    }
+
+    // Removals: drop the entry when the entity no longer qualifies at all;
+    // if it still has the OTHER component, refresh it instead.
+    for entity in removed_names.read().chain(removed_parts.read()) {
+        match still_relevant.get(entity) {
+            Ok((entity, name_opt, bp_opt)) => {
+                let name = name_opt.map(|n| n.to_string()).unwrap_or_default();
+                let (material, can_collide) = if let Some(bp) = bp_opt {
+                    (format!("{:?}", bp.material), bp.can_collide)
+                } else {
+                    (String::new(), true)
+                };
+                map.insert(entity.to_bits(), EntityMetadata {
+                    name,
+                    material,
+                    can_collide,
+                    is_water: false,
+                });
+            }
+            Err(_) => {
+                map.remove(&entity.to_bits());
+            }
+        }
     }
 }
 

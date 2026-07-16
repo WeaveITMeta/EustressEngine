@@ -966,6 +966,56 @@ pub type DrawBillboard = (
 
 pub struct BillboardPipelinePlugin;
 
+/// Render-world half of the per-tile atlas upload: `write_texture` each
+/// staged 192×192 tile straight onto the GPU atlas. This replaces the old
+/// whole-Image-asset mutation, which re-uploaded the ENTIRE atlas
+/// (16384-wide × rows ≈ ~100 MB at 8 rows) for a single repainted tile —
+/// and flying through a dense world repaints tiles every frame.
+/// Quality-identical: the same premultiplied RGBA8 bytes reach the same
+/// texels; only the transfer granularity changes.
+fn write_billboard_atlas_tiles(
+    pending: Res<crate::billboard_gui::PendingAtlasTiles>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
+    queue: Res<bevy::render::renderer::RenderQueue>,
+) {
+    if pending.tiles.is_empty() {
+        return;
+    }
+    let Some(atlas_id) = pending.atlas else { return };
+    // GpuImage not prepared yet (first frames / grow frames use the
+    // full-asset path anyway) — skip; nothing is lost because the full
+    // upload covers every tile.
+    let Some(gpu) = gpu_images.get(atlas_id) else { return };
+
+    use bevy::render::render_resource::{
+        Extent3d, Origin3d, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect,
+    };
+    const TILE_W: u32 = crate::billboard_gui::TILE_W;
+    const TILE_H: u32 = crate::billboard_gui::TILE_H;
+
+    for tile in &pending.tiles {
+        queue.write_texture(
+            TexelCopyTextureInfo {
+                texture: &gpu.texture,
+                mip_level: 0,
+                origin: Origin3d { x: tile.x, y: tile.y, z: 0 },
+                aspect: TextureAspect::All,
+            },
+            &tile.data,
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(TILE_W * 4),
+                rows_per_image: Some(TILE_H),
+            },
+            Extent3d {
+                width: TILE_W,
+                height: TILE_H,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+}
+
 impl Plugin for BillboardPipelinePlugin {
     fn build(&self, app: &mut App) {
         // Register the baked shader source in the MAIN world's
@@ -985,6 +1035,13 @@ impl Plugin for BillboardPipelinePlugin {
             ExtractComponentPlugin::<BillboardLockAxis>::default(),
             UniformComponentPlugin::<BillboardUniform>::default(),
             UniformComponentPlugin::<BillboardUv>::default(),
+            // Per-tile atlas uploads staged by billboard_gui's
+            // `upload_atlas_to_gpu`; written by `write_billboard_atlas_tiles`
+            // below via direct `write_texture` (no Image-asset mutation → no
+            // full-atlas re-upload per repainted tile).
+            bevy::render::extract_resource::ExtractResourcePlugin::<
+                crate::billboard_gui::PendingAtlasTiles,
+            >::default(),
         ));
 
         let render_app = app.sub_app_mut(RenderApp);
@@ -999,6 +1056,9 @@ impl Plugin for BillboardPipelinePlugin {
                     queue_billboards.in_set(RenderSystems::Queue),
                     prepare_billboard_view_bind_groups.in_set(RenderSystems::PrepareBindGroups),
                     prepare_billboard_bind_group.in_set(RenderSystems::PrepareBindGroups),
+                    // After PrepareAssets (GpuImage current, incl. post-grow
+                    // recreation); queue-ordered writes land before draws.
+                    write_billboard_atlas_tiles.in_set(RenderSystems::PrepareResources),
                 ),
             );
     }

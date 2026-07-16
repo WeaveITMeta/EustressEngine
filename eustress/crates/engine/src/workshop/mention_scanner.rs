@@ -412,7 +412,17 @@ pub fn trigger_rescan_on_universe_change(
     space_root: Option<Res<crate::space::SpaceRoot>>,
     mut scan_task: ResMut<UniverseScanTask>,
     mut index: ResMut<MentionIndex>,
+    load: Option<Res<crate::space::file_loader::LoadInProgress>>,
 ) {
+    // Don't start the Universe walk while the Space itself is still
+    // loading: on a 131K-file Universe the scan's IO competes with the
+    // loader's disk reads (871 MB tree) and the merge lands mid-burst —
+    // profiled as a dominant slice of the load window on Mountain
+    // Ascension. The scan is a workshop nicety; it can wait the few
+    // seconds until the loader settles.
+    if load.as_deref().map(|l| l.active).unwrap_or(false) {
+        return;
+    }
     let Some(sr) = space_root else { return };
     let universe = match crate::space::universe_root_for_path(&sr.0) {
         Some(u) => u,

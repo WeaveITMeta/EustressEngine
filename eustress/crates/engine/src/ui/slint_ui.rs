@@ -14581,6 +14581,25 @@ fn sync_unified_explorer_to_slint(
     mut panel_dirty: Option<ResMut<eustress_common::change_queue::PanelDirtyFlags>>,
     // Selection manager for multi-select highlighting in tree
     selection_sync: Option<Res<crate::selection_sync::SelectionSyncManager>>,
+    // Structure probe (AAA perf audit): the tree only reflects the Instance
+    // SET, names/classes, and parenting. `PanelDirtyFlags.explorer` is far
+    // coarser — streaming/residency ticks set it nearly every frame in big
+    // worlds, which had this system doing a full-131K-entity rebuild
+    // (HashSet + HashMap + Vec<TreeNode> allocations) at the 4 Hz coalesce
+    // cap FOREVER on a completely static scene. The probe latches the
+    // rebuild only when tree-visible structure actually changed.
+    structure_probe: Query<
+        Entity,
+        (
+            With<eustress_common::classes::Instance>,
+            Or<(
+                Added<eustress_common::classes::Instance>,
+                Changed<eustress_common::classes::Instance>,
+                Changed<ChildOf>,
+            )>,
+        ),
+    >,
+    mut removed_instances: RemovedComponents<eustress_common::classes::Instance>,
     // Coalescing state (system-local, no struct change). rebuild_requested: a
     // streaming/change signal asked for a rebuild but it can wait for the
     // coalesce window. last_rebuild_frame: app-frame of the last actual rebuild.
@@ -14595,15 +14614,21 @@ fn sync_unified_explorer_to_slint(
     // camera-locality residency system spawns/despawns Workspace cores EVERY
     // tick, so this flag is hot almost every frame. Treat it as a latch
     // (rebuild_requested) honoured on the next coalesce window, NOT an instant
-    // bypass. Only genuine user interactions (expand/collapse/select, which set
-    // needs_immediate_sync in the action handlers) bypass the window.
+    // bypass — and only when the structure probe CONFIRMS something the tree
+    // actually shows has changed. Only genuine user interactions
+    // (expand/collapse/select, which set needs_immediate_sync in the action
+    // handlers) bypass the window.
+    let structure_changed = !structure_probe.is_empty() || !removed_instances.is_empty();
+    removed_instances.clear();
     if let Some(ref mut d) = panel_dirty {
         if d.explorer {
             d.explorer = false;
-            *rebuild_requested = true;
             // DB class counts + cached pages may be stale (Phase 4).
             explorer_state.db_cache_valid = false;
         }
+    }
+    if structure_changed {
+        *rebuild_requested = true;
     }
 
     // Minimum frames between churn-driven rebuilds. At 60fps x2 fixed steps the

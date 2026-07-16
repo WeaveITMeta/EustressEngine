@@ -84,11 +84,49 @@ macro_rules! timed_system {
     }};
 }
 
+/// DIAGNOSTIC (armed only when `EUSTRESS_PROFILE` is set): name the
+/// entities whose `Instance` component is marked Changed each frame.
+/// A steady-state world should have ZERO — the Mountain Ascension
+/// profile showed a per-frame `Changed<Instance>` storm keeping four
+/// downstream consumers (explorer sync, scene deltas, mention index,
+/// snapshot extract) permanently hot. This names the writer.
+fn trace_instance_change_storm(
+    changed: Query<(Entity, &eustress_common::classes::Instance), Changed<eustress_common::classes::Instance>>,
+    time: Res<Time>,
+    mut timer: Local<f32>,
+) {
+    static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ARMED.get_or_init(|| std::env::var("EUSTRESS_PROFILE").is_ok()) {
+        return;
+    }
+    *timer += time.delta_secs();
+    if *timer < 2.0 {
+        return;
+    }
+    *timer = 0.0;
+    let total = changed.iter().count();
+    if total == 0 {
+        return;
+    }
+    let sample: Vec<String> = changed
+        .iter()
+        .take(5)
+        .map(|(e, i)| format!("{:?}={}({:?})", e, i.name, i.class_name))
+        .collect();
+    warn!(
+        "🔎 Changed<Instance> storm: {} changed this frame — sample: {}",
+        total,
+        sample.join(", ")
+    );
+}
+
 pub struct FrameDiagnosticsPlugin;
 
 impl Plugin for FrameDiagnosticsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(FrameTimeTracker::new(2000)) // 2 second threshold — only log severe stutters
-            .add_systems(Last, track_frame_time);
+            .add_systems(Last, track_frame_time)
+            // Perf diagnostic — dormant unless EUSTRESS_PROFILE is set.
+            .add_systems(Update, trace_instance_change_storm);
     }
 }

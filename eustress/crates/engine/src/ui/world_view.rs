@@ -570,12 +570,54 @@ pub fn extract_world_snapshot(
     )>,
     selection_manager: Option<Res<BevySelectionManager>>,
     perf: Option<Res<crate::ui::UIPerformance>>,
+    // Cheap change probe: did anything the snapshot reflects actually
+    // change since the last extract? (`is_empty` on a Changed-filtered
+    // query is O(changed archetypes), not O(entities).)
+    probe: Query<
+        Entity,
+        Or<(
+            Changed<Instance>,
+            Changed<BasePart>,
+            Changed<ChildOf>,
+            Changed<Children>,
+            Changed<eustress_common::attributes::Attributes>,
+            Changed<eustress_common::attributes::Tags>,
+        )>,
+    >,
+    mut removed_instances: RemovedComponents<Instance>,
 ) {
     // Throttle: only update every 5 frames — Properties and Explorer are both throttled further
     if let Some(ref p) = perf {
         if p.frame_counter % 5 != 0 { return; }
     }
     let Some(selection_manager) = selection_manager else { return };
+
+    // Change gate (AAA perf audit): the full rebuild below walks EVERY
+    // Instance entity with a 12-wide fetch, per-entity String/HashMap/
+    // HashSet allocations, a root sort, and a recursive assembly-mass
+    // pass. At 131K entities that was ~29 ms burned every 5th frame even
+    // with a completely STATIC scene. When nothing relevant changed, only
+    // refresh the selection fields (cheap) against the existing snapshot.
+    let world_dirty = !probe.is_empty() || !removed_instances.is_empty();
+    removed_instances.clear();
+    if !world_dirty && !snapshot.entities.is_empty() {
+        let selected = selection_manager.0.read().get_selected();
+        if snapshot.selected != selected {
+            let selected_entities: Vec<Entity> = snapshot
+                .entities
+                .keys()
+                .filter(|e| {
+                    selected.contains(&format!("{}v{}", e.index(), e.generation()))
+                })
+                .copied()
+                .collect();
+            snapshot.selected = selected;
+            snapshot.selected_entities = selected_entities;
+            snapshot.frame += 1;
+        }
+        return;
+    }
+
     // Clear previous snapshot
     snapshot.entities.clear();
     snapshot.roots.clear();

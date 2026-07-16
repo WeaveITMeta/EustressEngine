@@ -335,13 +335,22 @@ pub fn list_secondary_variables(tree_toml: &str) -> Vec<(String, String)> {
 // ============================================================================
 
 /// When a TOML-backed instance has a sibling `features.toml`, attach
-/// [`CadPart`] so the parametric regen path owns the mesh. Runs once
-/// per entity (skips if CadPart already present).
+/// [`CadPart`] so the parametric regen path owns the mesh.
+///
+/// `Added<InstanceFile>`-gated: the sibling check is a FILESYSTEM STAT
+/// (`is_file()`), and the previous ungated `Without<CadPart>` query
+/// re-statted every non-CAD part EVERY run — ~131K disk stats ≈ 1.25 s
+/// per execution on the Mountain Ascension benchmark (profiled at 15% of
+/// steady-state frame time; the user-visible periodic freeze). Parts get
+/// their InstanceFile exactly once at load/hot-spawn, so checking on
+/// Added covers every disk-backed part; a features.toml created LATER
+/// arrives via the file-watcher's Create path respawning the folder.
 fn attach_cad_from_features_toml(
     mut commands: Commands,
     query: Query<
         (Entity, &crate::space::instance_loader::InstanceFile),
         (
+            Added<crate::space::instance_loader::InstanceFile>,
             Without<CadPart>,
             With<crate::rendering::PartEntity>,
         ),

@@ -86,13 +86,13 @@ const Z_INDEX_METRES_PER_UNIT: f32 = 0.5;
 /// whatever pixels it's given) reads clearly at this size where it didn't
 /// at 128. Oversized billboards are still clamped at render time with a
 /// one-shot warn.
-const TILE_W: u32 = 192;
+pub(crate) const TILE_W: u32 = 192;
 /// Tile pixel height. Equal to `TILE_W` (square tiles) so vertical
 /// canvas dimensions fit without clamping up to the same size as
 /// horizontal. Asymmetric tiles stretch any billboard whose canvas
 /// exceeds the tile height — vertical text gets aspect-distorted by
 /// `canvas_h / TILE_H`.
-const TILE_H: u32 = 192;
+pub(crate) const TILE_H: u32 = 192;
 
 /// Uniform shrink factor that fits a `raw_w_px × raw_h_px` canvas inside a
 /// `TILE_W × TILE_H` tile. `1.0` when the canvas already fits (the common
@@ -191,6 +191,103 @@ impl Default for BillboardTextState {
 /// `!Send` because `Pixmap` (used during rendering) isn't `Send`; treating
 /// the atlas itself as NonSend keeps every billboard system on the main
 /// thread, which is fine — the renderer is CPU-bound and serial anyway.
+/// Sparse spatial hash over billboard positions. The three distance-driven
+/// systems (slot allocation, slot recycling, and their diagnostics) used to
+/// brute-force EVERY billboard in the world each frame — in a 130K-instance
+/// world with ~57K billboards that is 2-3 full scans × 60 fps of pure
+/// distance math for a near set of a few hundred. The grid converts those
+/// scans to O(cells overlapping the 300-stud radius): the systems ask
+/// "which billboards are near the camera" instead of "for each billboard,
+/// is it near the camera".
+///
+/// Maintenance is change-driven (`Added`/`Changed<GlobalTransform>` +
+/// `RemovedComponents`), so a static world costs nothing per frame.
+#[derive(Resource, Default)]
+pub struct BillboardSpatialGrid {
+    cells: std::collections::HashMap<IVec3, Vec<Entity>>,
+    entity_cell: std::collections::HashMap<Entity, IVec3>,
+}
+
+/// Grid cell edge in studs. 128 gives a 3-4 cell span for the 300-stud
+/// radius per axis — dozens of HashMap probes per query, not thousands.
+const GRID_CELL_SIZE: f32 = 128.0;
+
+impl BillboardSpatialGrid {
+    #[inline]
+    fn cell_of(p: Vec3) -> IVec3 {
+        (p / GRID_CELL_SIZE).floor().as_ivec3()
+    }
+
+    fn insert_or_move(&mut self, entity: Entity, pos: Vec3) {
+        let new_cell = Self::cell_of(pos);
+        if let Some(old_cell) = self.entity_cell.get(&entity) {
+            if *old_cell == new_cell {
+                return;
+            }
+            let old = *old_cell;
+            if let Some(v) = self.cells.get_mut(&old) {
+                v.retain(|e| *e != entity);
+                if v.is_empty() {
+                    self.cells.remove(&old);
+                }
+            }
+        }
+        self.cells.entry(new_cell).or_default().push(entity);
+        self.entity_cell.insert(entity, new_cell);
+    }
+
+    fn remove(&mut self, entity: Entity) {
+        if let Some(cell) = self.entity_cell.remove(&entity) {
+            if let Some(v) = self.cells.get_mut(&cell) {
+                v.retain(|e| *e != entity);
+                if v.is_empty() {
+                    self.cells.remove(&cell);
+                }
+            }
+        }
+    }
+
+    /// Visit every billboard whose grid cell overlaps the sphere at
+    /// `center` with `radius`. Callers still distance-test the entity's
+    /// actual position — the grid only narrows the candidate set.
+    pub fn for_each_in_radius(&self, center: Vec3, radius: f32, mut f: impl FnMut(Entity)) {
+        let min = Self::cell_of(center - Vec3::splat(radius));
+        let max = Self::cell_of(center + Vec3::splat(radius));
+        for x in min.x..=max.x {
+            for y in min.y..=max.y {
+                for z in min.z..=max.z {
+                    if let Some(v) = self.cells.get(&IVec3::new(x, y, z)) {
+                        for e in v {
+                            f(*e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Keep [`BillboardSpatialGrid`] in step with the world. Change-driven:
+/// static billboards cost nothing after their initial insert.
+fn maintain_billboard_spatial_grid(
+    mut grid: ResMut<BillboardSpatialGrid>,
+    moved: Query<
+        (Entity, &GlobalTransform),
+        (
+            With<BillboardGuiMarker>,
+            Or<(Changed<GlobalTransform>, Added<BillboardGuiMarker>)>,
+        ),
+    >,
+    mut removed: RemovedComponents<BillboardGuiMarker>,
+) {
+    for (entity, gt) in &moved {
+        grid.insert_or_move(entity, gt.translation());
+    }
+    for entity in removed.read() {
+        grid.remove(entity);
+    }
+}
+
 pub struct BillboardAtlas {
     /// Atlas Image asset shared by every billboard's bind group.
     pub texture: Handle<Image>,
@@ -213,9 +310,16 @@ pub struct BillboardAtlas {
     pub cpu_buf: Vec<u8>,
     /// Free-slot stack. `pop()` allocates a tile; despawn pushes it back.
     pub free_slots: Vec<u32>,
-    /// True when at least one tile changed this frame; tells the upload
-    /// system to copy the CPU buffer into the GPU image.
+    /// True when the WHOLE atlas must re-upload (initial fill, growth —
+    /// the Image asset was resized so the GPU texture is recreated).
     pub dirty: bool,
+    /// Slots whose pixels changed this frame (repaint / zero-on-release).
+    /// These upload via direct per-tile `write_texture` in the render
+    /// world — NOT by mutating the Image asset, which would re-upload the
+    /// ENTIRE atlas (tens-to-hundreds of MB at 16K width) for one 192×192
+    /// tile. While flying through a dense world new tiles paint every
+    /// frame, so the full-asset path was a per-frame full-atlas PCIe copy.
+    pub dirty_tiles: Vec<u32>,
     /// `Entity -> slot` for every currently-tiled billboard, written the
     /// instant `spawn_billboard_render_state` assigns a slot. `RemovedComponents`
     /// only yields the entity ID, never the component's last value, so
@@ -252,6 +356,7 @@ impl BillboardAtlas {
             cpu_buf: vec![0u8; total_pixels * 4],
             free_slots,
             dirty: true,
+            dirty_tiles: Vec::new(),
             slot_of: std::collections::HashMap::new(),
         }
     }
@@ -520,6 +625,8 @@ fn spawn_billboard_render_state(
     // `update_and_render_billboards`). Atlas slots are scarce (512 max), so
     // we only allocate them to billboards the user can actually see/repaint.
     cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
+    // Near-camera candidate enumeration — see pass 1 below.
+    grid: Res<BillboardSpatialGrid>,
     mut billboards: Query<
         (Entity, &BillboardGuiMarker, Option<&GlobalTransform>, &mut Transform),
         Without<BillboardRenderHandle>,
@@ -538,6 +645,8 @@ fn spawn_billboard_render_state(
     // One-shot latch so a full atlas warns ONCE, not ~16.5K times/frame.
     // (Local params placed last by convention.)
     mut atlas_full_warned: Local<bool>,
+    // The single shared billboard quad mesh, allocated on first use.
+    mut shared_quad: Local<Option<Handle<Mesh>>>,
 ) {
     // Near-camera gate. A billboard outside this radius is never repainted by
     // `update_and_render_billboards` (same BILLBOARD_CULL_RADIUS_SQ = 300^2),
@@ -564,8 +673,15 @@ fn spawn_billboard_render_state(
     // the labelled set tracks the N nearest as the camera moves — the "load
     // nearest first" behaviour for a >slot-count label cluster.
     let mut candidates: Vec<(Entity, f32)> = Vec::new();
-    for (entity, _m, global_tf, transform) in billboards.iter() {
-        let d = if let Some(cp) = cam_pos {
+    if let Some(cp) = cam_pos {
+        // Spatial-grid candidate enumeration: only billboards in cells
+        // overlapping the 300-stud radius are visited. The previous full
+        // `Without<BillboardRenderHandle>` iteration re-scanned every far
+        // billboard in the world every frame (the other dominant
+        // O(all-billboards) cost). `billboards.get` re-applies the
+        // un-slotted filter, so results are identical.
+        grid.for_each_in_radius(cp, 300.0, |e| {
+            let Ok((entity, _m, global_tf, transform)) = billboards.get(e) else { return };
             let bb_pos = global_tf
                 .map(|g: &GlobalTransform| g.translation())
                 .unwrap_or_else(|| transform.translation);
@@ -573,13 +689,17 @@ fn spawn_billboard_render_state(
             // Distance gate — far billboards cost a slot we can't spare and are
             // never repainted anyway.
             if d > SPAWN_ALLOC_RADIUS_SQ {
-                continue;
+                return;
             }
-            d
-        } else {
-            0.0 // no camera yet (startup) — allocate ungated; order irrelevant
-        };
-        candidates.push((entity, d));
+            candidates.push((entity, d));
+        });
+    } else {
+        // No camera yet (startup) — allocate ungated; order irrelevant. The
+        // grid may not be populated on the very first frames either, so the
+        // full iteration is both required and only runs pre-camera.
+        for (entity, _m, _gt, _t) in billboards.iter() {
+            candidates.push((entity, 0.0));
+        }
     }
     candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -676,7 +796,15 @@ fn spawn_billboard_render_state(
 
         let world_pos = global_tf.map(|g: &GlobalTransform| g.translation()).unwrap_or(Vec3::ZERO);
         let (size_x, size_y) = meters_from_pixels([w as f32, h as f32]);
-        let mesh_handle = meshes.add(crate::billboard_pipeline::build_billboard_quad_mesh());
+        // ONE shared quad mesh for every billboard (they are geometrically
+        // identical; per-billboard sizing lives in the uniform, UVs in
+        // BillboardUv). Previously this was `meshes.add(...)` PER billboard
+        // — thousands of duplicate Mesh assets and allocator slabs.
+        let mesh_handle = shared_quad
+            .get_or_insert_with(|| {
+                meshes.add(crate::billboard_pipeline::build_billboard_quad_mesh())
+            })
+            .clone();
 
         // The quad's [0,1]×[0,1] UV range needs to map to the tile region
         // in the atlas, but we ALSO want oversized atlas tiles to show only
@@ -763,7 +891,7 @@ fn release_atlas_slots(
             let atlas_w_px = atlas.atlas_w_px();
             let cols = atlas.cols;
             zero_tile_in_atlas(&mut atlas.cpu_buf, slot, atlas_w_px, cols);
-            atlas.dirty = true;
+            atlas.dirty_tiles.push(slot);
         }
     }
 }
@@ -795,6 +923,10 @@ fn recycle_offscreen_billboard_slots(
     slotted: Query<(Entity, &GlobalTransform), With<BillboardAtlasTile>>,
     // Un-slotted billboards competing for the scarce slots — needed to compute
     // the nearest-N cutoff so a moving camera hands slots to CLOSER labels.
+    // Candidates come from the spatial grid (near-camera cells only); this
+    // lookup resolves them. Brute-forcing `Without<BillboardAtlasTile>` here
+    // was one of the two dominant O(all-billboards) per-frame scans.
+    grid: Res<BillboardSpatialGrid>,
     unslotted: Query<
         (&GlobalTransform, &BillboardGuiMarker),
         Without<BillboardAtlasTile>,
@@ -849,15 +981,16 @@ fn recycle_offscreen_billboard_slots(
                 dists.push(d);
             }
         }
-        for (gt, marker) in &unslotted {
+        grid.for_each_in_radius(cam_pos, 300.0, |e| {
+            let Ok((gt, marker)) = unslotted.get(e) else { return };
             if !marker.visible {
-                continue;
+                return;
             }
             let d = gt.translation().distance_squared(cam_pos);
             if d <= RENDER_RADIUS_SQ {
                 dists.push(d);
             }
-        }
+        });
         if dists.len() > n {
             // Partition so the N nearest occupy [0..n); `dists[n-1]` is the
             // N-th nearest = the keep/evict cutoff.
@@ -879,11 +1012,20 @@ fn recycle_offscreen_billboard_slots(
     *diag_timer += time.delta_secs();
     if *diag_timer >= 2.0 {
         *diag_timer = 0.0;
+        // Count via the grid, not a full-world scan (the old diag itself
+        // was an O(all-billboards) pass every 2 s).
+        let mut in_range = 0usize;
+        grid.for_each_in_radius(cam_pos, 300.0, |e| {
+            if let Ok((gt, m)) = unslotted.get(e) {
+                if m.visible && gt.translation().distance_squared(cam_pos) <= RENDER_RADIUS_SQ {
+                    in_range += 1;
+                }
+            }
+        });
         info!(
             "🪧 recycle diag: slotted={} unslotted_visible_in_range={} evicting_this_frame={} free_slots={} total_slots={}",
             slotted.iter().count(),
-            unslotted.iter().filter(|(gt, m)| m.visible
-                && gt.translation().distance_squared(cam_pos) <= RENDER_RADIUS_SQ).count(),
+            in_range,
             to_evict.len(),
             atlas.free_slots.len(),
             atlas.total_slots(),
@@ -1100,16 +1242,27 @@ fn cull_billboards_by_distance(
         if !marker.visible {
             continue;
         }
-        let dist = global_tf.translation().distance(cam_pos);
+        // distance_squared vs squared limits — same comparison, no sqrt
+        // per billboard per frame.
+        let dist_sq = global_tf.translation().distance_squared(cam_pos);
 
-        let too_close = marker.distance_lower_limit > 0.0 && dist < marker.distance_lower_limit;
-        let too_far = marker.max_distance > 0.0 && dist > marker.max_distance;
+        let too_close = marker.distance_lower_limit > 0.0
+            && dist_sq < marker.distance_lower_limit * marker.distance_lower_limit;
+        let too_far = marker.max_distance > 0.0
+            && dist_sq > marker.max_distance * marker.max_distance;
 
-        *vis = if too_close || too_far {
+        let want = if too_close || too_far {
             Visibility::Hidden
         } else {
             Visibility::Visible
         };
+        // Write-guard: the old unconditional `*vis = …` marked
+        // Changed<Visibility> on EVERY rendered billboard EVERY frame,
+        // forcing visibility propagation + render re-extract to treat the
+        // whole slotted set as dirty each frame.
+        if *vis != want {
+            *vis = want;
+        }
     }
 }
 
@@ -1351,7 +1504,7 @@ fn update_and_render_billboards(
         let atlas_w_px = atlas.atlas_w_px();
         let cols = atlas.cols;
         blit_tile_into_atlas(&mut atlas.cpu_buf, &pixmap, tile.slot, atlas_w_px, cols);
-        atlas.dirty = true;
+        atlas.dirty_tiles.push(tile.slot);
         let _ = entity;
     }
 }
@@ -1375,24 +1528,85 @@ fn blit_tile_into_atlas(cpu_buf: &mut [u8], tile_pixmap: &Pixmap, slot: u32, atl
     }
 }
 
-/// After all dirty tiles are blitted, copy the atlas CPU buffer into the
-/// atlas `Image` asset once. `images.get_mut` returns `Mut<Image>` which
-/// triggers Bevy's render-asset extraction → one GPU upload covering every
-/// dirty tile.
+/// One repainted tile's pixels, headed for a direct GPU `write_texture`.
+/// Tightly packed `TILE_W × TILE_H` RGBA8 rows; `x`/`y` are the tile's
+/// pixel origin inside the atlas texture.
+#[derive(Clone)]
+pub struct AtlasTileUpload {
+    pub x: u32,
+    pub y: u32,
+    pub data: Vec<u8>,
+}
+
+/// Per-tile atlas uploads staged for the render world. Extracted (cloned)
+/// each frame by `ExtractResourcePlugin`; `write_billboard_atlas_tiles`
+/// in the render app writes each tile straight onto the GPU atlas texture.
+/// Empty on quiet frames, so the per-frame clone is a no-op.
+#[derive(Resource, Default, Clone, bevy::render::extract_resource::ExtractResource)]
+pub struct PendingAtlasTiles {
+    pub atlas: Option<bevy::asset::AssetId<Image>>,
+    pub tiles: Vec<AtlasTileUpload>,
+}
+
+/// Stage this frame's atlas changes for the GPU.
+///
+/// Two paths:
+/// * **Full upload** (`atlas.dirty` — initial fill and growth, where the
+///   Image asset was resized and the GPU texture is recreated anyway):
+///   copy the whole CPU buffer into the Image asset, as before. Rare.
+/// * **Per-tile upload** (`atlas.dirty_tiles` — repaints and releases):
+///   copy ONLY the changed tiles' bytes into [`PendingAtlasTiles`]; the
+///   render world `write_texture`s them without touching the Image asset.
+///   The old whole-asset path re-uploaded the ENTIRE atlas (16384-wide ×
+///   rows — ~100 MB at 8 rows) for a single 192×192 repaint, and flying
+///   through a dense world repaints tiles every frame — a per-frame
+///   full-atlas PCIe copy that dominated GPU time.
 fn upload_atlas_to_gpu(
     mut atlas: NonSendMut<BillboardAtlas>,
     mut images: ResMut<Assets<Image>>,
+    mut pending: ResMut<PendingAtlasTiles>,
 ) {
-    if !atlas.dirty {
+    pending.atlas = Some(atlas.texture.id());
+    pending.tiles.clear();
+
+    if atlas.dirty {
+        // Full path — covers every tile, so per-tile dirt is subsumed.
+        atlas.dirty_tiles.clear();
+        let Some(mut image) = images.get_mut(&atlas.texture) else { return };
+        let Some(data) = image.data.as_mut() else { return };
+        if data.len() != atlas.cpu_buf.len() {
+            data.resize(atlas.cpu_buf.len(), 0);
+        }
+        data.copy_from_slice(&atlas.cpu_buf);
+        atlas.dirty = false;
         return;
     }
-    let Some(mut image) = images.get_mut(&atlas.texture) else { return };
-    let Some(data) = image.data.as_mut() else { return };
-    if data.len() != atlas.cpu_buf.len() {
-        data.resize(atlas.cpu_buf.len(), 0);
+
+    if atlas.dirty_tiles.is_empty() {
+        return;
     }
-    data.copy_from_slice(&atlas.cpu_buf);
-    atlas.dirty = false;
+    // A tile can be zeroed AND repainted in one frame — upload it once.
+    atlas.dirty_tiles.sort_unstable();
+    atlas.dirty_tiles.dedup();
+    let slots = std::mem::take(&mut atlas.dirty_tiles);
+    let atlas_w = atlas.atlas_w_px() as usize;
+    let tile_stride = (TILE_W as usize) * 4;
+    for slot in slots {
+        let col = slot % atlas.cols;
+        let row = slot / atlas.cols;
+        let ox = (col * TILE_W) as usize;
+        let oy = (row * TILE_H) as usize;
+        let mut data = Vec::with_capacity((TILE_H as usize) * tile_stride);
+        for r in 0..TILE_H as usize {
+            let start = (oy + r) * atlas_w * 4 + ox * 4;
+            data.extend_from_slice(&atlas.cpu_buf[start..start + tile_stride]);
+        }
+        pending.tiles.push(AtlasTileUpload {
+            x: col * TILE_W,
+            y: row * TILE_H,
+            data,
+        });
+    }
 }
 
 // ── Renderer ───────────────────────────────────────────────────────────────
@@ -2535,6 +2749,16 @@ impl Plugin for BillboardGuiPlugin {
     fn build(&self, app: &mut App) {
         app.insert_non_send_resource(BillboardTextState::default())
             .init_resource::<BillboardEditState>()
+            // Spatial hash for the distance-driven slot systems + the staged
+            // per-tile GPU uploads (extracted to the render world by
+            // BillboardPipelinePlugin's ExtractResourcePlugin).
+            .init_resource::<BillboardSpatialGrid>()
+            .init_resource::<PendingAtlasTiles>()
+            // Grid maintenance runs before anything queries it this frame.
+            .add_systems(
+                Update,
+                maintain_billboard_spatial_grid.before(recycle_offscreen_billboard_slots),
+            )
             // Register DoubleClickedPart alongside the systems that read it.
             // History: the engine crate used to be DUAL-COMPILED (lib + bin
             // each declaring these modules), so the bin's writer and this

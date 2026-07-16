@@ -935,7 +935,10 @@ pub fn spawn_gui_element(
     }
     commands.entity(entity).insert(eustress_common::units::MeasureUnit(parsed_unit));
 
-    info!("🪧 spawn_gui_element: {} attached InstanceFile → {}", gui_type, path.display());
+    // debug!, not info!: this fires once PER GUI ELEMENT during load — a
+    // 57K-TextLabel world emitted 57K console lines, and Windows console IO
+    // alone stretched load by minutes.
+    debug!("🪧 spawn_gui_element: {} attached InstanceFile → {}", gui_type, path.display());
 
     // Attach the ECS Tags component so MCP `get_tagged_entities` and other
     // engine systems can see GUI tags. Empty-tags case is a no-op — the
