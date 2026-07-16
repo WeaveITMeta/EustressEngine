@@ -201,6 +201,40 @@ pub(crate) fn safe_collider_from(
     })
 }
 
+/// Eager colliders attached this load. The deferred-collider "huge scene"
+/// gate used to key ONLY on `streaming_active()` — a world-db/binary-
+/// streamed signal — so a huge LOOSE-TOML world (Mountain Ascension:
+/// 131K instances) took the eager path for every `can_collide` part:
+/// 240K colliders in Avian's broadphase in EDIT mode, ~42 ms/frame of
+/// fixed-tick + collider-transform propagation (profiled). "Huge" is a
+/// COUNT property, not a persistence-backend property: past this budget,
+/// further parts get `DeferredCollider` regardless of backend. Editor
+/// click-selection still works for deferred parts via the OBB fallback
+/// in `part_selection` (it exists precisely for collider-less parts).
+pub(crate) static EAGER_COLLIDERS_THIS_LOAD: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Eager-collider ceiling per Space load. Matches the collider-streaming
+/// resident budget (~10K) so Edit and Play have comparable physics load.
+pub(crate) const EAGER_COLLIDER_BUDGET: usize = 10_000;
+
+/// True when this part should get a `DeferredCollider` instead of a real
+/// one. Counts the eager grant when it returns false.
+fn defer_collider_for_huge_scene() -> bool {
+    if crate::space::active_db::streaming_active() {
+        return true;
+    }
+    let n = EAGER_COLLIDERS_THIS_LOAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if n == EAGER_COLLIDER_BUDGET {
+        info!(
+            "🧱 eager-collider budget ({}) reached — further parts get DeferredCollider \
+             (bounded Avian broadphase; Play-mode collider streaming materializes them near activity)",
+            EAGER_COLLIDER_BUDGET
+        );
+    }
+    n >= EAGER_COLLIDER_BUDGET
+}
+
 /// Attach the Avian physics-material components (`Friction`,
 /// `Restitution`, `ColliderDensity`) to a just-spawned part when the
 /// importer wrote a `[properties.physics]` section. Each component is
@@ -2280,9 +2314,10 @@ pub fn spawn_instance(
         // keeping the resident collider count bounded regardless of scene
         // size. Reversible + scoped: no-op (gate is false) for normal scenes
         // and when `world-db` is off — those keep the eager path unchanged.
-        let huge_scene = crate::space::active_db::streaming_active();
+        // Count-aware: also defers past the eager budget on loose-TOML
+        // worlds (see EAGER_COLLIDERS_THIS_LOAD).
         if instance.properties.can_collide {
-            if huge_scene {
+            if defer_collider_for_huge_scene() {
                 ec.insert(crate::physics::collider_streaming::DeferredCollider {
                     part_shape,
                     size: scale,
@@ -2451,9 +2486,10 @@ pub fn spawn_instance(
     // is `false` for normal-sized scenes and whenever the `world-db` feature
     // is off, so non-huge worlds attach colliders exactly as before (zero
     // behavior change).
-    let huge_scene = crate::space::active_db::streaming_active();
+    // Count-aware: also defers past the eager budget on loose-TOML worlds
+    // (see EAGER_COLLIDERS_THIS_LOAD).
     if instance.properties.can_collide {
-        if huge_scene {
+        if defer_collider_for_huge_scene() {
             ec.insert(crate::physics::collider_streaming::DeferredCollider {
                 part_shape,
                 size: scale,
