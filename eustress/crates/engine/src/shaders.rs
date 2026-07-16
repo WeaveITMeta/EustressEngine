@@ -253,6 +253,17 @@ fn generate_star_catalog() -> Vec<(Vec3, f32, f32)> {
     stars
 }
 
+/// Single root the whole star field hangs off. `sync_star_field` moves
+/// ONLY this entity to follow the camera; each star is a CHILD with a
+/// fixed local transform computed once at spawn. The old design wrote
+/// every star's `Transform` + `Visibility` every frame (1,200 movers/
+/// frame in the tracer — per-frame transform propagation, visibility
+/// re-check, and render re-extraction for the entire field, forever).
+/// A star's orientation relative to the field never changes: facing the
+/// camera from `dir * 7500` is the same as facing the field origin.
+#[derive(Component)]
+pub struct StarFieldRoot;
+
 fn spawn_star_field(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -261,6 +272,15 @@ fn spawn_star_field(
     let star_mesh = meshes.add(Circle::new(0.5));
     let catalog = generate_star_catalog();
     let sky_distance = 7500.0_f32;
+
+    let root = commands
+        .spawn((
+            Transform::default(),
+            Visibility::default(),
+            StarFieldRoot,
+            Name::new("StarField"),
+        ))
+        .id();
 
     for (dir, brightness, warmth) in &catalog {
         // Color: blue-white to warm yellow based on warmth
@@ -282,41 +302,45 @@ fn spawn_star_field(
         // Scale: small points — bright stars slightly larger
         let scale = brightness * 3.0;
 
+        // Fixed LOCAL transform: position on the sky sphere, facing the
+        // field origin (= the camera, since the root tracks it). Set once.
+        let local = Transform::from_translation(*dir * sky_distance)
+            .with_scale(Vec3::splat(scale))
+            .looking_at(Vec3::ZERO, Vec3::Y);
+
         commands.spawn((
             Mesh3d(star_mesh.clone()),
             MeshMaterial3d(mat),
-            Transform::from_translation(*dir * sky_distance)
-                .with_scale(Vec3::splat(scale)),
+            local,
             Visibility::default(),
             StarFieldMarker { direction: *dir },
             bevy::light::NotShadowCaster,
             bevy::light::NotShadowReceiver,
+            ChildOf(root),
         ));
     }
 
     info!("⭐ Spawned {} stars in star field", catalog.len());
 }
 
-/// Position stars relative to camera and fade based on sun elevation.
+/// Follow the camera with the star-field ROOT only. Each star's local
+/// transform (sky-sphere position + camera-facing orientation) was fixed
+/// at spawn, so moving the single root reproduces exactly what the old
+/// per-star loop computed — camera-relative position `cam + dir * 7500`,
+/// facing the camera — at 1 transform write instead of 1,200 (and ZERO
+/// when the camera is still, thanks to the movement guard).
 fn sync_star_field(
-    camera_query: Query<&GlobalTransform, (With<Camera3d>, Without<StarFieldMarker>, Without<MoonDiscMarker>)>,
-    sun_class: Query<&eustress_common::classes::Sun, With<eustress_common::services::lighting::Sun>>,
-    mut stars: Query<(&StarFieldMarker, &mut Transform, &mut Visibility)>,
+    camera_query: Query<&GlobalTransform, (With<Camera3d>, Without<StarFieldRoot>, Without<MoonDiscMarker>)>,
+    mut root: Query<&mut Transform, With<StarFieldRoot>>,
 ) {
     let Some(camera_gt) = camera_query.iter().next() else { return };
     let cam_pos = camera_gt.translation();
 
-    let sun_dir = sun_class.iter().next()
-        .map(|sc| sc.direction())
-        .unwrap_or(Vec3::new(0.3, 0.8, 0.2).normalize());
-
-    let sky_distance = 7500.0_f32;
-
-    for (star, mut transform, mut visibility) in stars.iter_mut() {
-        *visibility = Visibility::Visible;
-        // Use the stored original direction — never derives from position
-        transform.translation = cam_pos + star.direction * sky_distance;
-        // Face camera (billboard)
-        transform.look_at(cam_pos, Vec3::Y);
+    let Ok(mut root_tf) = root.single_mut() else { return };
+    // Movement guard: don't dirty 1,200 child GlobalTransforms when the
+    // camera hasn't moved.
+    if root_tf.translation.distance_squared(cam_pos) < 1e-6 {
+        return;
     }
+    root_tf.translation = cam_pos;
 }

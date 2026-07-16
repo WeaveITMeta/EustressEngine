@@ -92,6 +92,10 @@ macro_rules! timed_system {
 /// snapshot extract) permanently hot. This names the writer.
 fn trace_instance_change_storm(
     changed: Query<(Entity, &eustress_common::classes::Instance), Changed<eustress_common::classes::Instance>>,
+    // Movers: what keeps transform propagation / scene deltas / extract
+    // busy every frame. Named so per-frame animators (sun cycle, stars,
+    // clouds, scripts) are identifiable.
+    moved: Query<(Entity, Option<&Name>), Changed<Transform>>,
     time: Res<Time>,
     mut timer: Local<f32>,
 ) {
@@ -105,19 +109,34 @@ fn trace_instance_change_storm(
     }
     *timer = 0.0;
     let total = changed.iter().count();
-    if total == 0 {
-        return;
+    if total > 0 {
+        let sample: Vec<String> = changed
+            .iter()
+            .take(5)
+            .map(|(e, i)| format!("{:?}={}({:?})", e, i.name, i.class_name))
+            .collect();
+        warn!(
+            "🔎 Changed<Instance> storm: {} changed this frame — sample: {}",
+            total,
+            sample.join(", ")
+        );
     }
-    let sample: Vec<String> = changed
-        .iter()
-        .take(5)
-        .map(|(e, i)| format!("{:?}={}({:?})", e, i.name, i.class_name))
-        .collect();
-    warn!(
-        "🔎 Changed<Instance> storm: {} changed this frame — sample: {}",
-        total,
-        sample.join(", ")
-    );
+    let movers = moved.iter().count();
+    if movers > 0 {
+        let sample: Vec<String> = moved
+            .iter()
+            .take(6)
+            .map(|(e, n)| {
+                n.map(|n| format!("{:?}={}", e, n.as_str()))
+                    .unwrap_or_else(|| format!("{:?}", e))
+            })
+            .collect();
+        warn!(
+            "🔎 Transform movers: {} changed this frame — sample: {}",
+            movers,
+            sample.join(", ")
+        );
+    }
 }
 
 pub struct FrameDiagnosticsPlugin;

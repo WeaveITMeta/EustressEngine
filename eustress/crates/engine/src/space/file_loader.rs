@@ -2551,10 +2551,6 @@ pub(crate) fn begin_budgeted_load(generation: u64) {
         let mut q = SPILL.lock().unwrap_or_else(|e| e.into_inner());
         q.clear();
     }
-    // Fresh eager-collider budget for the incoming Space (see
-    // instance_loader::EAGER_COLLIDERS_THIS_LOAD).
-    super::instance_loader::EAGER_COLLIDERS_THIS_LOAD
-        .store(0, std::sync::atomic::Ordering::Relaxed);
     SPILL_GEN.store(generation, std::sync::atomic::Ordering::Relaxed);
     // Arm the LOAD BURST: from here until `tick_load_in_progress` declares the
     // load settled, every budget site uses the bursted per-frame budget so the
