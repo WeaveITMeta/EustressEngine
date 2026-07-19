@@ -505,6 +505,12 @@ pub enum SlintAction {
     ResetLayoutToDefault,
     ToggleThemeEditor,
     ApplyThemeSettings(bool, bool, f32), // dark-mode, high-contrast, ui-scale
+    SetThemeModern(bool), // Classic/Modern live theme switch (legacy bool path)
+    SelectTheme(String), // TOML theme by id (Settings > Theme) — live swap + persist
+    RescanThemes,        // reload built-ins + user Themes folder
+    ResetToDefaults,     // Settings > Reset Defaults — theme resets to Classic
+    SelectMode(String),  // Eustress Mode by id — ribbon-tab filter + accent overlay + persist
+    SelectSubmode(String, String), // (mode-id, submode-id) — activates the parent mode too
     DetachPanelToWindow(String),
     
     // Viewport
@@ -1216,6 +1222,7 @@ impl Plugin for StudioUiPlugin {
             .init_resource::<ToolboxState>()
             .init_resource::<StudioDockState>()
             .init_resource::<UnifiedExplorerState>()
+            .init_resource::<TerrainVisibility>()
             .init_resource::<ExplorerCache>()
             .init_resource::<UIPerformance>()
             .init_resource::<LabelEditState>()
@@ -1344,6 +1351,11 @@ impl Plugin for SlintUiPlugin {
             // missing → Bevy skips the entire drain every frame → ALL Slint
             // UI callbacks (Explorer, tag X, add-tag, ribbon, …) silently die.
             .init_resource::<LabelEditState>()
+            // Same CRITICAL rule: `DrainResources.terrain_visibility` is a
+            // required (non-Option) ResMut — it was registered only in the
+            // legacy plugin, which skipped the whole drain (the "theme/mode
+            // clicks do nothing" bug; Bevy logs one 'failed validation' WARN).
+            .init_resource::<TerrainVisibility>()
             .init_resource::<SceneFile>()
             .init_resource::<crate::auth::AuthState>()
             .init_resource::<crate::forge::ForgeState>()
@@ -1363,6 +1375,13 @@ impl Plugin for SlintUiPlugin {
             // Insert menu: one-shot push of the data-driven class catalog
             // (ClassRegistry → grouped descriptors) to Slint.
             .init_resource::<InsertClassesInitialized>()
+            // Theme: one-shot push of the persisted active theme into the
+            // Theme global on first frame + signature-gated list re-push.
+            .init_resource::<ThemeInitialized>()
+            .init_resource::<ThemeListSignature>()
+            // Eustress Modes: signature-gated push of the mode list +
+            // data-driven ribbon-tab filter.
+            .init_resource::<ModeSyncSignature>()
             // Events
             .add_message::<FileEvent>()
             .add_message::<MenuActionEvent>()
@@ -1472,6 +1491,10 @@ impl Plugin for SlintUiPlugin {
             // Runs after Drain (like the other one-shot Slint feeds) and
             // self-gates until the ClassRegistry is populated.
             .add_systems(Update, init_insert_classes_to_slint.after(SlintSystems::Drain))
+            // Theme: one-shot push of the active theme + list sync to Slint.
+            .add_systems(Update, init_theme_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, sync_theme_list_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, sync_active_mode_to_slint.after(SlintSystems::Drain))
             .init_resource::<PluginTabSignature>()
             // Plugins tab: re-checks (cheap) every frame, only pushes to
             // Slint on an actual content change — see `PluginTabSignature`.
@@ -1747,9 +1770,15 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_select_node(move |id, node_type, ctrl, shift| q.push(SlintAction::SelectNode(id, node_type.to_string(), ctrl, shift)));
     let q = queue.clone();
-    ui.on_expand_node(move |id, node_type| q.push(SlintAction::ExpandNode(id, node_type.to_string())));
+    ui.on_expand_node(move |id, node_type| {
+        info!("🌲 [diag] on_expand_node fired: id={} type={}", id, node_type);
+        q.push(SlintAction::ExpandNode(id, node_type.to_string()));
+    });
     let q = queue.clone();
-    ui.on_collapse_node(move |id, node_type| q.push(SlintAction::CollapseNode(id, node_type.to_string())));
+    ui.on_collapse_node(move |id, node_type| {
+        info!("🌲 [diag] on_collapse_node fired: id={} type={}", id, node_type);
+        q.push(SlintAction::CollapseNode(id, node_type.to_string()));
+    });
     let q = queue.clone();
     ui.on_open_node(move |id, node_type| q.push(SlintAction::OpenNode(id, node_type.to_string())));
     let q = queue.clone();
@@ -2084,6 +2113,40 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_toggle_theme_editor(move || q.push(SlintAction::ToggleThemeEditor));
     let q = queue.clone();
     ui.on_apply_theme_settings(move |dark, hc, scale| q.push(SlintAction::ApplyThemeSettings(dark, hc, scale)));
+    let q = queue.clone();
+    ui.on_set_theme_modern(move |modern| q.push(SlintAction::SetThemeModern(modern)));
+    let q = queue.clone();
+    let ui_weak_theme = ui.as_weak();
+    ui.on_select_theme(move |id| {
+        q.push(SlintAction::SelectTheme(id.to_string()));
+        // Direct-apply for the two built-ins: instant visual feedback on the
+        // same frame as the click, no queue-drain latency. Only covers
+        // Classic/Modern (compile-time presets); user TOML themes and the
+        // mode-accent overlay still go through the queued path only. The
+        // queued action re-applies + persists regardless — idempotent.
+        if let Some(w) = ui_weak_theme.upgrade() {
+            let th = w.global::<Theme>();
+            if id == "classic" {
+                let p = th.get_preset_classic();
+                th.set_data(p);
+                th.set_modern(false);
+            } else if id == "modern" {
+                let p = th.get_preset_modern();
+                th.set_data(p);
+                th.set_modern(true);
+            }
+        }
+    });
+    let q = queue.clone();
+    ui.on_rescan_themes(move || q.push(SlintAction::RescanThemes));
+    let q = queue.clone();
+    ui.on_select_mode(move |id| q.push(SlintAction::SelectMode(id.to_string())));
+    let q = queue.clone();
+    ui.on_select_submode(move |mode_id, submode_id| {
+        q.push(SlintAction::SelectSubmode(mode_id.to_string(), submode_id.to_string()));
+    });
+    let q = queue.clone();
+    ui.on_reset_defaults(move || q.push(SlintAction::ResetToDefaults));
     let q = queue.clone();
     ui.on_detach_panel_to_window(move |panel| q.push(SlintAction::DetachPanelToWindow(panel.to_string())));
     
@@ -3222,6 +3285,8 @@ struct DrainEventWriters<'w> {
     // Align & Distribute — ribbon menu-action strings route here.
     align_events: MessageWriter<'w, crate::align_distribute::AlignEntitiesEvent>,
     distribute_events: MessageWriter<'w, crate::align_distribute::DistributeEntitiesEvent>,
+    /// Panel → floating OS window (Phase F: dockable/draggable panels).
+    detach_panel_events: MessageWriter<'w, crate::ui::floating_windows::DetachPanelEvent>,
     // Parametric CadPart inserts (Drafting tab Plate / Box / Cylinder).
     cad_insert: MessageWriter<'w, crate::cad_plugin::CadInsertTemplateEvent>,
     cad_set_variable: MessageWriter<'w, crate::cad_plugin::CadSetVariableEvent>,
@@ -3251,6 +3316,25 @@ impl BrushState {
             strength: 0.5,
             falloff: "smooth".to_string(),
         }
+    }
+}
+
+/// Whether terrain is currently shown in the viewport. Flipped by the
+/// Terrain ribbon's Show/Hide button (`terrain:toggle-visibility`), which
+/// pushes `Visibility` onto every `TerrainRoot` + `Chunk` entity.
+///
+/// Visibility-only: terrain entities and their voxel data are untouched, so
+/// hiding is instant, reversible, and survives a re-show with no reload —
+/// unlike `terrain:clear`, which despawns and deletes files.
+#[derive(Resource)]
+pub struct TerrainVisibility {
+    /// `true` = terrain visible (the default on Space load).
+    pub visible: bool,
+}
+
+impl Default for TerrainVisibility {
+    fn default() -> Self {
+        Self { visible: true }
     }
 }
 
@@ -3291,6 +3375,8 @@ struct DrainResources<'w> {
     mention_index: Option<ResMut<'w, crate::workshop::mention::MentionIndex>>,
     /// Rune analyzer output — read by Problems panel handlers.
     script_analysis: Option<Res<'w, crate::script_editor::ScriptAnalysis>>,
+    /// Terrain show/hide latch for the Terrain ribbon's visibility toggle.
+    terrain_visibility: ResMut<'w, TerrainVisibility>,
     /// Material registry for resolving material names on spawned parts
     material_registry: Option<ResMut<'w, crate::space::material_loader::MaterialRegistry>>,
     /// Primitive mesh handle cache — avoids per-entity asset_server.load() for same GLB
@@ -3337,6 +3423,12 @@ struct DrainResources<'w> {
     data_recording: Option<ResMut<'w, crate::space::DataRecording>>,
     /// Deferred service loader — clear pending on space switch to prevent old-space services loading
     deferred_service_loader: Option<ResMut<'w, crate::space::file_loader::DeferredServiceLoader>>,
+    /// TOML theme registry — SelectTheme/RescanThemes mutate the active id
+    /// + reload the user Themes folder; the live palette swap reads it.
+    theme_registry: Option<ResMut<'w, crate::studio_theme::ThemeRegistry>>,
+    /// Eustress Modes registry — SelectMode mutates the active id; the
+    /// ribbon-tab filter + theme-accent overlay both read it.
+    mode_registry: Option<ResMut<'w, crate::studio_modes::ModeRegistry>>,
 }
 
 /// Perform Ed25519 challenge-response auth against the API.
@@ -4327,29 +4419,36 @@ fn drain_slint_actions(
             SlintAction::SaveScene => { events.file_events.write(FileEvent::SaveScene); }
             SlintAction::SaveSceneAs => { events.file_events.write(FileEvent::SaveSceneAs); }
             SlintAction::ImportAsset => {
-                // Open the OS file picker for image / video / Roblox
-                // formats. Picker call is synchronous — fine here because
-                // this arm fires from the user's deliberate ribbon click,
-                // not from a hot path. If the user cancels, log and
+                // Open the OS file picker for image / video / Gaussian-Splat
+                // formats. Roblox place/model import lives EXCLUSIVELY under
+                // the dedicated "Import Place" button (ImportRobloxPlace
+                // below) — it is deliberately NOT a filter option here, so it
+                // doesn't show up twice. `rfd`'s Windows dialog defaults to
+                // whichever filter is added FIRST, so "All Importable" is
+                // listed first: opening the dialog shows every supported
+                // type immediately (no hidden-by-default files), and the
+                // narrower filters are there purely to let the user narrow
+                // down if they want. Picker call is synchronous — fine here
+                // because this arm fires from the user's deliberate ribbon
+                // click, not from a hot path. If the user cancels, log and
                 // move on without writing a FileEvent.
                 let picked = rfd::FileDialog::new()
-                    .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tga"])
-                    .add_filter("Videos", &["mp4", "webm", "mov", "mkv"])
-                    .add_filter("Roblox Place / Model", super::file_dialogs::ROBLOX_IMPORT_EXTENSIONS)
-                    .add_filter("Gaussian Splat", super::file_dialogs::GAUSSIAN_SPLAT_IMPORT_EXTENSIONS)
                     .add_filter("All Importable", &[
                         "png", "jpg", "jpeg", "webp", "bmp", "gif", "tga",
                         "mp4", "webm", "mov", "mkv",
-                        "rbxl", "rbxlx", "rbxm", "rbxmx",
                         "ply",
                     ])
-                    .set_title("Import Image / Video / Roblox Place / Gaussian Splat")
+                    .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tga"])
+                    .add_filter("Videos", &["mp4", "webm", "mov", "mkv"])
+                    .add_filter("Gaussian Splat", super::file_dialogs::GAUSSIAN_SPLAT_IMPORT_EXTENSIONS)
+                    .set_title("Import Image / Video / Gaussian Splat")
                     .pick_file();
                 match picked {
                     Some(path) => {
-                        // Extension whitelist routes Roblox / Gaussian-Splat
-                        // files to their dedicated importers; everything
-                        // else to the image/video asset path.
+                        // Defensive: if a Roblox file somehow ends up picked
+                        // here (e.g. typed directly into the path box), still
+                        // route it correctly rather than mis-importing it as
+                        // media — but it's no longer a discoverable filter.
                         if super::file_dialogs::is_roblox_place_file(&path) {
                             events.file_events.write(FileEvent::ImportRobloxPlace(path));
                         } else if super::file_dialogs::is_gaussian_splat_file(&path) {
@@ -5732,8 +5831,142 @@ fn drain_slint_actions(
                     out.info(format!("Theme: dark={}", dark_mode));
                 }
             }
-            SlintAction::DetachPanelToWindow(_panel) => {
-                // TODO: Detach panel to separate OS window
+            SlintAction::SetThemeModern(modern) => {
+                if let Some(ref mut settings) = res.editor_settings {
+                    settings.theme_modern = modern;
+                }
+                if let Some(ref ctx) = slint_context {
+                    let theme = ctx.window.global::<Theme>();
+                    // Pick the whole palette and swap it atomically. The two
+                    // presets live in theme.slint as compile-time constants
+                    // (Phase B replaces them with TOML-sourced palettes).
+                    let palette = if modern {
+                        theme.get_preset_modern()
+                    } else {
+                        theme.get_preset_classic()
+                    };
+                    theme.set_data(palette);
+                    theme.set_modern(modern); // UI-state mirror for the settings swatch
+                }
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Theme: modern={}", modern));
+                }
+            }
+            SlintAction::SelectTheme(id) => {
+                if let Some(ref mut registry) = res.theme_registry {
+                    registry.active_id = id.clone();
+                }
+                if let Some(ref mut settings) = res.editor_settings {
+                    settings.active_theme_id = Some(id.clone());
+                    settings.theme_modern = id == "modern"; // legacy back-compat mirror
+                }
+                if let (Some(ctx), Some(theme_reg)) = (&slint_context, &res.theme_registry) {
+                    apply_effective_theme(ctx, theme_reg, res.mode_registry.as_deref());
+                }
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Theme: {}", id));
+                }
+            }
+            SlintAction::RescanThemes => {
+                if let Some(ref mut registry) = res.theme_registry {
+                    registry.reload();
+                    let n = registry.themes.len();
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Themes rescanned: {} available", n));
+                    }
+                }
+            }
+            SlintAction::ResetToDefaults => {
+                // Preferences only — never touch saved_identities/
+                // last_space_path (would destructively log the user out /
+                // lose their open space) or active_mode_id/layout_preset_by_mode
+                // (unrelated to "reset appearance/editing preferences").
+                if let Some(ref mut settings) = res.editor_settings {
+                    let defaults = crate::editor_settings::EditorSettings::default();
+                    settings.snap_size = defaults.snap_size;
+                    settings.snap_enabled = defaults.snap_enabled;
+                    settings.collision_snap = defaults.collision_snap;
+                    settings.surface_snap_enabled = defaults.surface_snap_enabled;
+                    settings.align_to_normal_on_drop = defaults.align_to_normal_on_drop;
+                    settings.scale_lock_proportional = defaults.scale_lock_proportional;
+                    settings.angle_snap = defaults.angle_snap;
+                    settings.show_grid = defaults.show_grid;
+                    settings.grid_size = defaults.grid_size;
+                    settings.auto_save_interval = defaults.auto_save_interval;
+                    settings.auto_save_enabled = defaults.auto_save_enabled;
+                    settings.theme_modern = defaults.theme_modern; // false
+                    settings.active_theme_id = defaults.active_theme_id; // Some("classic")
+                }
+                if let Some(ref mut registry) = res.theme_registry {
+                    registry.active_id = "classic".to_string();
+                }
+                if let (Some(ctx), Some(theme_reg)) = (&slint_context, &res.theme_registry) {
+                    apply_effective_theme(ctx, theme_reg, res.mode_registry.as_deref());
+                    // Reset isn't a card click, so the checkmark needs an
+                    // explicit push (SelectTheme relies on the click's own
+                    // local `active-theme-id` write for this).
+                    ctx.window.set_settings_active_theme_id("classic".into());
+                }
+                if let Some(ref mut out) = res.output {
+                    out.info("Settings reset to defaults (theme: Classic)".to_string());
+                }
+            }
+            SlintAction::SelectMode(id) => {
+                if let Some(ref mut registry) = res.mode_registry {
+                    registry.active_id = id.clone();
+                    // Clicking the mode row itself (not a submode row under
+                    // it) means "just this mode" — clear any stale submode
+                    // selection left over from before. SelectSubmode sets it
+                    // right back if that's what the user actually clicked.
+                    registry.active_submode_id.clear();
+                }
+                if let Some(ref mut settings) = res.editor_settings {
+                    settings.active_mode_id = id.clone();
+                    settings.active_submode_id.clear();
+                }
+                // Recompose theme ⊕ mode-accent overlay — a pure
+                // recomposition from the active theme's base palette, never
+                // mutating the stored theme itself (architecture decision 7:
+                // avoids losing/clobbering the accent across repeated
+                // theme/mode switches).
+                if let (Some(ctx), Some(theme_reg)) = (&slint_context, &res.theme_registry) {
+                    apply_effective_theme(ctx, theme_reg, res.mode_registry.as_deref());
+                }
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Mode: {}", id));
+                }
+            }
+            SlintAction::SelectSubmode(mode_id, submode_id) => {
+                if let Some(ref mut registry) = res.mode_registry {
+                    registry.active_id = mode_id.clone();
+                    registry.active_submode_id = submode_id.clone();
+                }
+                if let Some(ref mut settings) = res.editor_settings {
+                    settings.active_mode_id = mode_id.clone();
+                    settings.active_submode_id = submode_id.clone();
+                }
+                if let (Some(ctx), Some(theme_reg)) = (&slint_context, &res.theme_registry) {
+                    apply_effective_theme(ctx, theme_reg, res.mode_registry.as_deref());
+                }
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Mode: {} / {}", mode_id, submode_id));
+                }
+            }
+            SlintAction::DetachPanelToWindow(panel_id) => {
+                // Phase F: pop a dockable panel out into its own draggable OS
+                // window. `handle_detach_panel_events` (floating_windows.rs)
+                // already de-dupes (won't double-open an already-floating
+                // panel) and spawns the real window.
+                let title = detach_panel_title(&panel_id);
+                events.detach_panel_events.write(
+                    crate::ui::floating_windows::DetachPanelEvent {
+                        panel_id: panel_id.clone(),
+                        title: title.clone(),
+                    },
+                );
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Detaching panel to window: {}", title));
+                }
             }
             
             // Viewport bounds changed — update Bevy camera viewport clipping
@@ -5974,10 +6207,16 @@ fn drain_slint_actions(
                                 "MaterialService","AdornmentService"];
                             if let Some(name) = known.iter().find(|n| service_name_to_id(n) == id) {
                                 es.expanded_services.insert(name.to_string());
+                                info!("🌲 [diag] ExpandNode: service '{}' inserted, expanded_services now {:?}", name, es.expanded_services);
+                            } else {
+                                warn!("🌲 [diag] ExpandNode: id={} looked negative but matched no known service name", id);
                             }
                         } else {
                             if let Some(entity) = es.entity_id_cache.get(&id).copied() {
                                 es.expanded_entities.insert(entity);
+                                info!("🌲 [diag] ExpandNode: id={} resolved to entity {:?}, expanded_entities.len()={}, needs_immediate_sync will be set", id, entity, es.expanded_entities.len());
+                            } else {
+                                warn!("🌲 [diag] ExpandNode: id={} NOT FOUND in entity_id_cache (cache has {} entries) — expand silently did nothing", id, es.entity_id_cache.len());
                             }
                         }
                     } else if node_type == "db_class" {
@@ -6010,6 +6249,9 @@ fn drain_slint_actions(
                         } else {
                             if let Some(entity) = es.entity_id_cache.get(&id).copied() {
                                 es.expanded_entities.remove(&entity);
+                                info!("🌲 [diag] CollapseNode: id={} resolved to entity {:?}, expanded_entities.len()={}", id, entity, es.expanded_entities.len());
+                            } else {
+                                warn!("🌲 [diag] CollapseNode: id={} NOT FOUND in entity_id_cache (cache has {} entries) — collapse silently did nothing", id, es.entity_id_cache.len());
                             }
                         }
                     } else if node_type == "db_class" {
@@ -11543,6 +11785,40 @@ fn drain_slint_actions(
                                 }
                             }
                         }
+                    } else if action == "terrain:toggle-visibility" {
+                        // Show/Hide terrain — visibility ONLY. Entities, voxel
+                        // chunks and files are untouched, so this is instant and
+                        // fully reversible (unlike `terrain:clear` below, which
+                        // despawns + deletes). Lets a builder get terrain out of
+                        // the way to work on what's underneath it.
+                        res.terrain_visibility.visible = !res.terrain_visibility.visible;
+                        let now_visible = res.terrain_visibility.visible;
+                        let vis = if now_visible {
+                            Visibility::Inherited
+                        } else {
+                            Visibility::Hidden
+                        };
+                        let mut n = 0usize;
+                        for entity in queries.terrain_roots.iter() {
+                            commands.entity(entity).insert(vis);
+                            n += 1;
+                        }
+                        for entity in queries.terrain_chunks.iter() {
+                            commands.entity(entity).insert(vis);
+                            n += 1;
+                        }
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!(
+                                "Terrain {} ({} entities)",
+                                if now_visible { "shown" } else { "hidden" },
+                                n
+                            ));
+                        }
+                        info!(
+                            "⛰️ Terrain visibility → {} ({} entities)",
+                            if now_visible { "visible" } else { "hidden" },
+                            n
+                        );
                     } else if action == "terrain:clear" {
                         // Clear terrain: delete Workspace/Terrain directory and despawn all terrain entities
                         let space_root = crate::space::default_space_root();
@@ -13661,6 +13937,495 @@ fn init_insert_classes_to_slint(
     );
 }
 
+/// Whether the persisted active-theme choice has been pushed into the `Theme`
+/// global yet. One-shot: after the first push, `Theme.data` is the live source
+/// of truth (swapped by `SlintAction::SelectTheme`), so this never needs to run
+/// again — mirrors `InsertClassesInitialized`.
+#[derive(Resource, Default)]
+struct ThemeInitialized(bool);
+
+/// Read one color token from a parsed palette, falling back to the given base
+/// color (the Modern palette) when the theme omits it or the value is bad.
+fn color_tok(
+    p: &crate::studio_theme::ThemePalette,
+    key: &str,
+    base: slint::Color,
+) -> slint::Color {
+    match p.tokens.get(key).and_then(|s| crate::studio_theme::parse_hex(s)) {
+        Some([r, g, b, a]) => slint::Color::from_argb_u8(a, r, g, b),
+        None => base,
+    }
+}
+
+/// Read one length token (logical px) from a parsed palette, falling back to
+/// the base value when omitted/bad.
+fn len_tok(p: &crate::studio_theme::ThemePalette, key: &str, base: f32) -> f32 {
+    p.tokens
+        .get(key)
+        .and_then(|s| crate::studio_theme::parse_len(s))
+        .unwrap_or(base)
+}
+
+/// Compose a `ThemeData` from a parsed palette on top of `base` (the Modern
+/// preset), filling any token the palette omits. This literal is EXHAUSTIVE by
+/// design — a token added to `theme.slint`'s `ThemeData` struct without a line
+/// here is a compile error, which keeps the palette and the loader in lockstep.
+fn palette_to_theme_data(
+    p: &crate::studio_theme::ThemePalette,
+    base: &ThemeData,
+) -> ThemeData {
+    ThemeData {
+        background_primary: color_tok(p, "background-primary", base.background_primary),
+        background_secondary: color_tok(p, "background-secondary", base.background_secondary),
+        background_tertiary: color_tok(p, "background-tertiary", base.background_tertiary),
+        panel_background: color_tok(p, "panel-background", base.panel_background),
+        header_background: color_tok(p, "header-background", base.header_background),
+        viewport_background: color_tok(p, "viewport-background", base.viewport_background),
+        tab_active: color_tok(p, "tab-active", base.tab_active),
+        tab_inactive: color_tok(p, "tab-inactive", base.tab_inactive),
+        tab_hover: color_tok(p, "tab-hover", base.tab_hover),
+        text_primary: color_tok(p, "text-primary", base.text_primary),
+        text_secondary: color_tok(p, "text-secondary", base.text_secondary),
+        text_disabled: color_tok(p, "text-disabled", base.text_disabled),
+        text_accent: color_tok(p, "text-accent", base.text_accent),
+        text_error: color_tok(p, "text-error", base.text_error),
+        text_warning: color_tok(p, "text-warning", base.text_warning),
+        text_success: color_tok(p, "text-success", base.text_success),
+        border_color: color_tok(p, "border-color", base.border_color),
+        border_focus: color_tok(p, "border-focus", base.border_focus),
+        border_error: color_tok(p, "border-error", base.border_error),
+        success_surface: color_tok(p, "success-surface", base.success_surface),
+        success_surface_hover: color_tok(p, "success-surface-hover", base.success_surface_hover),
+        success_surface_border: color_tok(p, "success-surface-border", base.success_surface_border),
+        success_surface_text_hover: color_tok(
+            p,
+            "success-surface-text-hover",
+            base.success_surface_text_hover,
+        ),
+        error_surface: color_tok(p, "error-surface", base.error_surface),
+        error_surface_hover: color_tok(p, "error-surface-hover", base.error_surface_hover),
+        error_surface_border: color_tok(p, "error-surface-border", base.error_surface_border),
+        button_background: color_tok(p, "button-background", base.button_background),
+        button_hover: color_tok(p, "button-hover", base.button_hover),
+        button_pressed: color_tok(p, "button-pressed", base.button_pressed),
+        button_primary: color_tok(p, "button-primary", base.button_primary),
+        button_primary_hover: color_tok(p, "button-primary-hover", base.button_primary_hover),
+        input_background: color_tok(p, "input-background", base.input_background),
+        input_border: color_tok(p, "input-border", base.input_border),
+        input_focus: color_tok(p, "input-focus", base.input_focus),
+        selection_background: color_tok(p, "selection-background", base.selection_background),
+        selection_border: color_tok(p, "selection-border", base.selection_border),
+        overlay_background: color_tok(p, "overlay-background", base.overlay_background),
+        dialog_background: color_tok(p, "dialog-background", base.dialog_background),
+        modal_backdrop: color_tok(p, "modal-backdrop", base.modal_backdrop),
+        dialog_titlebar_background: color_tok(
+            p,
+            "dialog-titlebar-background",
+            base.dialog_titlebar_background,
+        ),
+        accent_blue: color_tok(p, "accent-blue", base.accent_blue),
+        accent_cyan: color_tok(p, "accent-cyan", base.accent_cyan),
+        accent_eustress: color_tok(p, "accent-eustress", base.accent_eustress),
+        accent_green: color_tok(p, "accent-green", base.accent_green),
+        accent_green_bright: color_tok(p, "accent-green-bright", base.accent_green_bright),
+        accent_orange: color_tok(p, "accent-orange", base.accent_orange),
+        accent_purple: color_tok(p, "accent-purple", base.accent_purple),
+        accent_red: color_tok(p, "accent-red", base.accent_red),
+        accent_yellow: color_tok(p, "accent-yellow", base.accent_yellow),
+        cat_parts: color_tok(p, "cat-parts", base.cat_parts),
+        cat_structure: color_tok(p, "cat-structure", base.cat_structure),
+        cat_constraint: color_tok(p, "cat-constraint", base.cat_constraint),
+        cat_modify: color_tok(p, "cat-modify", base.cat_modify),
+        cat_data: color_tok(p, "cat-data", base.cat_data),
+        panel_glass: color_tok(p, "panel-glass", base.panel_glass),
+        border_highlight: color_tok(p, "border-highlight", base.border_highlight),
+        shadow_float: color_tok(p, "shadow-float", base.shadow_float),
+        border_glow_color: color_tok(p, "border-glow-color", base.border_glow_color),
+        ribbon_background: color_tok(p, "ribbon-background", base.ribbon_background),
+        ribbon_tab_active: color_tok(p, "ribbon-tab-active", base.ribbon_tab_active),
+        ribbon_tab_inactive: color_tok(p, "ribbon-tab-inactive", base.ribbon_tab_inactive),
+        ribbon_separator: color_tok(p, "ribbon-separator", base.ribbon_separator),
+        explorer_item_hover: color_tok(p, "explorer-item-hover", base.explorer_item_hover),
+        explorer_item_selected: color_tok(
+            p,
+            "explorer-item-selected",
+            base.explorer_item_selected,
+        ),
+        explorer_folder: color_tok(p, "explorer-folder", base.explorer_folder),
+        explorer_file: color_tok(p, "explorer-file", base.explorer_file),
+        output_info: color_tok(p, "output-info", base.output_info),
+        output_warning: color_tok(p, "output-warning", base.output_warning),
+        output_error: color_tok(p, "output-error", base.output_error),
+        output_debug: color_tok(p, "output-debug", base.output_debug),
+        gizmo_x: color_tok(p, "gizmo-x", base.gizmo_x),
+        gizmo_y: color_tok(p, "gizmo-y", base.gizmo_y),
+        gizmo_z: color_tok(p, "gizmo-z", base.gizmo_z),
+        shadow_color: color_tok(p, "shadow-color", base.shadow_color),
+        accent_glow_blur: len_tok(p, "accent-glow-blur", base.accent_glow_blur),
+        backdrop_blur_lg: len_tok(p, "backdrop-blur-lg", base.backdrop_blur_lg),
+        radius_sm: len_tok(p, "radius-sm", base.radius_sm),
+        radius_md: len_tok(p, "radius-md", base.radius_md),
+        radius_lg: len_tok(p, "radius-lg", base.radius_lg),
+        radius_xl: len_tok(p, "radius-xl", base.radius_xl),
+    }
+}
+
+/// Resolve the active theme in `theme_registry`, compose its palette over the
+/// Modern base, overlay the active Mode's accent (if any — architecture
+/// decision 7: a pure recomposition, never mutating the stored theme), and
+/// push the result live. Falls back to the Modern preset if the active theme
+/// id is unknown.
+fn apply_effective_theme(
+    ctx: &SlintUiState,
+    theme_registry: &crate::studio_theme::ThemeRegistry,
+    mode_registry: Option<&crate::studio_modes::ModeRegistry>,
+) {
+    let theme = ctx.window.global::<Theme>();
+    let base = theme.get_preset_modern();
+    let mut td = match theme_registry.find(&theme_registry.active_id) {
+        Some(p) => palette_to_theme_data(p, &base),
+        None => base.clone(),
+    };
+    if let Some(mode) = mode_registry.and_then(|r| r.active()) {
+        if let Some(accent_hex) = &mode.accent {
+            if let Some([r, g, b, a]) = crate::studio_theme::parse_hex(accent_hex) {
+                td.accent_eustress = slint::Color::from_argb_u8(a, r, g, b);
+            }
+        }
+    }
+    theme.set_data(td.clone());
+    theme.set_modern(theme_registry.active_id == "modern"); // legacy UI mirror
+
+    // Refresh ribbon-tab colors against the NEW palette immediately — without
+    // this, switching Theme (not Mode) would leave tab-pill colors stale
+    // until the next mode-registry-signature-gated push in
+    // `sync_active_mode_to_slint`, which only fires on mode changes.
+    push_ribbon_tabs(ctx, mode_registry.and_then(|r| r.active()), &td);
+}
+
+/// Resolve a custom tab's optional hex color, falling back to the theme's
+/// brand accent when absent/malformed (already validated at parse time in
+/// `studio_modes::parse_mode_toml`, so this is just the hex→Color step).
+fn resolve_custom_tab_color(color: &Option<String>, td: &ThemeData) -> slint::Color {
+    color
+        .as_deref()
+        .and_then(crate::studio_theme::parse_hex)
+        .map(|[r, g, b, a]| slint::Color::from_argb_u8(a, r, g, b))
+        .unwrap_or(td.accent_eustress)
+}
+
+/// Build + push the ribbon's data-driven tab-pill model: `RIBBON_TAB_TABLE`
+/// filtered to the active mode's built-in `tabs`, PLUS one row per custom
+/// tab the mode declares (Business's "Product"/"Manufacturing", etc.) — same
+/// `RibbonTabData` shape for both, so the tab strip needs no changes to show
+/// either kind. The "home" row's label becomes the mode's own name ("Keep
+/// Home consistent... based on the mode title"). `mode: None` (no
+/// ModeRegistry mounted) falls back to all 9 built-ins, unrenamed. Shared by
+/// `apply_effective_theme` (keeps colors fresh on every theme/mode recompute)
+/// and `sync_active_mode_to_slint` (keeps membership fresh on every
+/// mode-list change) so the two never duplicate this logic.
+fn push_ribbon_tabs(ctx: &SlintUiState, mode: Option<&crate::studio_modes::ModeManifest>, td: &ThemeData) {
+    let mut rows: Vec<RibbonTabData> = match mode {
+        Some(m) => RIBBON_TAB_TABLE
+            .iter()
+            .filter(|(id, _)| m.tabs.iter().any(|t| t == id))
+            .map(|(id, name)| RibbonTabData {
+                id: (*id).into(),
+                name: if *id == "home" { m.name.clone().into() } else { (*name).into() },
+                color: ribbon_tab_color(id, td),
+            })
+            .collect(),
+        None => RIBBON_TAB_TABLE
+            .iter()
+            .map(|(id, name)| RibbonTabData {
+                id: (*id).into(),
+                name: (*name).into(),
+                color: ribbon_tab_color(id, td),
+            })
+            .collect(),
+    };
+    if let Some(m) = mode {
+        for tab in &m.custom_tabs {
+            rows.push(RibbonTabData {
+                id: tab.id.clone().into(),
+                name: tab.name.clone().into(),
+                color: resolve_custom_tab_color(&tab.color, td),
+            });
+        }
+    }
+    let model = std::rc::Rc::new(slint::VecModel::from(rows));
+    ctx.window.set_ribbon_tabs(slint::ModelRc::from(model));
+}
+
+/// One-shot system: on the first frame the Slint window AND the theme
+/// registry (and, if present, the mode registry) are all ready, push the
+/// persisted active theme ⊕ mode-accent overlay into `Theme.data` so the app
+/// opens in the user's chosen look rather than the compile-time default.
+fn init_theme_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    theme_registry: Option<Res<crate::studio_theme::ThemeRegistry>>,
+    mode_registry: Option<Res<crate::studio_modes::ModeRegistry>>,
+    mut initialized: ResMut<ThemeInitialized>,
+) {
+    if initialized.0 {
+        return;
+    }
+    let Some(ref ctx) = slint_context else { return };
+    let Some(theme_registry) = theme_registry else { return };
+    if theme_registry.themes.is_empty() {
+        return; // wait until StudioThemePlugin's Startup load ran
+    }
+    // If the mode registry resource exists at all, wait for its Startup load
+    // too — but don't block forever if the plugin genuinely isn't mounted.
+    if let Some(ref mr) = mode_registry {
+        if mr.modes.is_empty() {
+            return;
+        }
+    }
+    initialized.0 = true;
+    apply_effective_theme(ctx, &theme_registry, mode_registry.as_deref());
+}
+
+/// Last-pushed theme-registry signature, so `sync_theme_list_to_slint` only
+/// rebuilds + re-pushes the Settings > Theme list when the set actually
+/// changes (startup load, or a Rescan that added/removed a user theme).
+#[derive(Resource, Default)]
+struct ThemeListSignature(u64);
+
+/// Push the theme registry into the Settings dialog's `available-themes` model
+/// (id/name/description + swatch colors) whenever the registry signature bumps.
+fn sync_theme_list_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    registry: Option<Res<crate::studio_theme::ThemeRegistry>>,
+    mut pushed: ResMut<ThemeListSignature>,
+) {
+    let Some(ref ctx) = slint_context else { return };
+    let Some(registry) = registry else { return };
+    if pushed.0 == registry.signature {
+        return;
+    }
+    pushed.0 = registry.signature;
+
+    let base = ctx.window.global::<Theme>().get_preset_modern();
+    let rows: Vec<ThemeEntry> = registry
+        .themes
+        .iter()
+        .map(|p| {
+            let td = palette_to_theme_data(p, &base);
+            ThemeEntry {
+                id: p.id.clone().into(),
+                name: p.name.clone().into(),
+                description: p.description.clone().into(),
+                swatch_bg: td.background_primary,
+                swatch_accent: td.accent_eustress,
+                builtin: p.builtin,
+            }
+        })
+        .collect();
+    let model = std::rc::Rc::new(slint::VecModel::from(rows));
+    ctx.window.set_settings_available_themes(slint::ModelRc::from(model));
+    ctx.window
+        .set_settings_active_theme_id(registry.active_id.clone().into());
+}
+
+/// The nine ribbon tabs — mirrors `ribbon.slint`'s former hardcoded tab-pill
+/// literal (now data-driven). id/display-name pairs; color is resolved live
+/// against the active theme in `ribbon_tab_color` so it never drifts from
+/// whatever palette is applied.
+const RIBBON_TAB_TABLE: &[(&str, &str)] = &[
+    ("home", "Home"),
+    ("model", "Model"),
+    ("cad", "Drafting"),
+    ("data", "Data"),
+    ("ui", "UI"),
+    ("terrain", "Terrain"),
+    ("test", "Test"),
+    ("mindspace", "MindSpace"),
+    ("plugins", "Plugins"),
+];
+
+/// Resolve a ribbon tab id to its themed tint — matches the pre-audit
+/// hardcoded array 1:1 (home=text-secondary, model=cat-parts, cad=accent-red
+/// ["Drafting" is the parametric/smart-edit workflow], data/mindspace=
+/// accent-cyan, ui=accent-blue, terrain=accent-green, test=accent-orange,
+/// plugins=accent-purple).
+fn ribbon_tab_color(id: &str, td: &ThemeData) -> slint::Color {
+    match id {
+        "home" => td.text_secondary,
+        "model" => td.cat_parts,
+        "cad" => td.accent_red,
+        "data" => td.accent_cyan,
+        "ui" => td.accent_blue,
+        "terrain" => td.accent_green,
+        "test" => td.accent_orange,
+        "mindspace" => td.accent_cyan,
+        "plugins" => td.accent_purple,
+        _ => td.text_secondary,
+    }
+}
+
+/// Human title for a detached floating panel window. Mirrors
+/// `floating_windows::PanelType::from_panel_id`'s id set; falls back to a
+/// title-cased echo of the id for any panel not in that registry (keeps
+/// detach from silently no-op'ing on an unrecognized id).
+fn detach_panel_title(panel_id: &str) -> String {
+    match panel_id {
+        "explorer" => "Explorer".to_string(),
+        "properties" => "Properties".to_string(),
+        "output" | "console" => "Output".to_string(),
+        "toolbox" | "tools" => "Toolbox".to_string(),
+        "assets" | "asset_manager" => "Asset Manager".to_string(),
+        "universe" | "universe_browser" => "Universes".to_string(),
+        "terrain" | "terrain_editor" => "Terrain".to_string(),
+        "history" => "History".to_string(),
+        "soul" => "Soul".to_string(),
+        "workshop" => "Workshop".to_string(),
+        other => {
+            let mut c = other.replace(['_', '-'], " ");
+            if let Some(first) = c.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            c
+        }
+    }
+}
+
+/// Last-pushed (mode-registry signature, active mode id, active submode id),
+/// so `sync_active_mode_to_slint` only rebuilds + re-pushes when something
+/// actually changed (registry reload, a SelectMode, or a SelectSubmode) —
+/// mirrors `ThemeListSignature`.
+#[derive(Resource, Default)]
+struct ModeSyncSignature {
+    registry_signature: u64,
+    active_id: String,
+    active_submode_id: String,
+}
+
+/// Push the Eustress Modes list (role-filtered) + submenu + the active
+/// mode's icon/custom-tabs into Slint, and filter `RIBBON_TAB_TABLE` down to
+/// the active mode's `tabs` (plus its custom tabs) to populate the ribbon's
+/// data-driven tab-pill row. Runs after Drain; cheap signature check each
+/// frame (same shape as `sync_plugin_tabs_to_slint`).
+fn sync_active_mode_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    registry: Option<Res<crate::studio_modes::ModeRegistry>>,
+    roles: Option<Res<crate::studio_modes::UserRoles>>,
+    mut pushed: ResMut<ModeSyncSignature>,
+) {
+    let Some(ref ctx) = slint_context else { return };
+    let Some(registry) = registry else { return };
+    if registry.modes.is_empty() {
+        return; // wait until StudioModesPlugin's Startup load ran
+    }
+    if pushed.registry_signature == registry.signature
+        && pushed.active_id == registry.active_id
+        && pushed.active_submode_id == registry.active_submode_id
+    {
+        return;
+    }
+    pushed.registry_signature = registry.signature;
+    pushed.active_id = registry.active_id.clone();
+    pushed.active_submode_id = registry.active_submode_id.clone();
+
+    let empty_roles = crate::studio_modes::UserRoles::default();
+    let roles = roles.as_deref().unwrap_or(&empty_roles);
+    let visible: Vec<&crate::studio_modes::ModeManifest> = registry.visible_modes(roles).collect();
+
+    let mode_rows: Vec<ModeData> = visible
+        .iter()
+        .map(|m| ModeData {
+            id: m.id.clone().into(),
+            name: m.name.clone().into(),
+            icon_id: m.icon.clone().into(),
+            // Only show the expand affordance if at least one submode is
+            // visible for the current roles (a mode whose submodes are all
+            // role-gated-out shouldn't dangle an empty expander).
+            has_submodes: m.submodes.iter().any(|sm| sm.visible(roles)),
+        })
+        .collect();
+    let model = std::rc::Rc::new(slint::VecModel::from(mode_rows));
+    ctx.window.set_available_modes(slint::ModelRc::from(model));
+    ctx.window.set_active_mode_id(registry.active_id.clone().into());
+    ctx.window.set_active_submode_id(registry.active_submode_id.clone().into());
+
+    // Submode rows across every VISIBLE mode (not just the active one) — the
+    // dropdown lets you expand any mode's row, not only the currently active
+    // one, and Slint filters this flat list by `mode-id` per row it renders.
+    // Role-gated submodes (e.g. Justice's judges-only "Judge") are filtered
+    // out here unless the user holds the role — the parent mode still shows.
+    let submode_rows: Vec<SubmodeData> = visible
+        .iter()
+        .flat_map(|m| {
+            m.submodes
+                .iter()
+                .filter(|sm| sm.visible(roles))
+                .map(move |sm| SubmodeData {
+                    mode_id: m.id.clone().into(),
+                    id: sm.id.clone().into(),
+                    name: sm.name.clone().into(),
+                })
+        })
+        .collect();
+    let submode_model = std::rc::Rc::new(slint::VecModel::from(submode_rows));
+    ctx.window.set_available_submodes(slint::ModelRc::from(submode_model));
+
+    let active = registry.active();
+    let icon_id = active.map(|m| m.icon.clone()).unwrap_or_else(|| "gear".to_string());
+    ctx.window.set_active_mode_icon_id(icon_id.into());
+
+    let td = ctx.window.global::<Theme>().get_data();
+    push_ribbon_tabs(ctx, active, &td);
+
+    // Custom-tab sections/tools — filtered to the ACTIVE mode only (unlike
+    // submodes, which show for every visible mode in the dropdown; custom
+    // tab content is only ever shown for whichever tab is currently open).
+    let mut section_rows: Vec<CustomTabSectionData> = Vec::new();
+    let mut tool_rows: Vec<CustomTabToolData> = Vec::new();
+    if let Some(m) = active {
+        for tab in &m.custom_tabs {
+            for (si, section) in tab.sections.iter().enumerate() {
+                let section_id = format!("s{si}");
+                section_rows.push(CustomTabSectionData {
+                    tab_id: tab.id.clone().into(),
+                    section_id: section_id.clone().into(),
+                    label: section.name.clone().into(),
+                    tool_count: section.tools.len() as i32,
+                });
+                for tool_action in &section.tools {
+                    tool_rows.push(CustomTabToolData {
+                        tab_id: tab.id.clone().into(),
+                        section_id: section_id.clone().into(),
+                        label: menu_action_display_label(tool_action),
+                        tooltip: tool_action.clone().into(),
+                        action_id: tool_action.clone().into(),
+                    });
+                }
+            }
+        }
+    }
+    let section_model = std::rc::Rc::new(slint::VecModel::from(section_rows));
+    ctx.window.set_custom_tab_sections(slint::ModelRc::from(section_model));
+    let tool_model = std::rc::Rc::new(slint::VecModel::from(tool_rows));
+    ctx.window.set_custom_tab_tools(slint::ModelRc::from(tool_model));
+}
+
+/// A short display label for a menu-action id (`"data:chart"` → `"Chart"`)
+/// used on custom-tab tool buttons, which have no hardcoded label the way
+/// built-in ribbon buttons do. Takes the part after the last `:`/`_`,
+/// title-cased; falls back to the raw id if that yields nothing sensible.
+fn menu_action_display_label(action_id: &str) -> slint::SharedString {
+    let tail = action_id.rsplit([':', '_']).next().unwrap_or(action_id);
+    let mut c = tail.replace(['-', '_'], " ");
+    if let Some(first) = c.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    if c.is_empty() {
+        action_id.into()
+    } else {
+        c.into()
+    }
+}
+
 /// Last-pushed button count for the Plugins tab, so `sync_plugin_tabs_to_slint`
 /// only touches the Slint model when the content actually changed (cheap
 /// per-frame check; avoids marking Slint dirty every frame for a static
@@ -14643,6 +15408,7 @@ fn sync_unified_explorer_to_slint(
     // latch AND coalesce window elapsed -> rebuild; 4) periodic 30-frame safety
     // tick -> rebuild. Otherwise return without touching the tree.
     if explorer_state.needs_immediate_sync {
+        info!("🌲 [diag] tree rebuild: needs_immediate_sync path (expand/collapse/select just fired)");
         explorer_state.needs_immediate_sync = false;
         *rebuild_requested = false;
     } else if frame <= 5 {
@@ -14655,7 +15421,10 @@ fn sync_unified_explorer_to_slint(
         return;
     }
     *last_rebuild_frame = frame;
-    let Some(slint_context) = slint_context else { return };
+    let Some(slint_context) = slint_context else {
+        warn!("🌲 [diag] tree rebuild: bailed — no slint_context this frame, rebuild dropped entirely");
+        return;
+    };
     let ui = &slint_context.window;
     
     use eustress_common::classes::ClassName;
@@ -15727,6 +16496,7 @@ fn sync_unified_explorer_to_slint(
     let new_hash = hasher.finish();
 
     if new_hash != explorer_state.last_tree_hash {
+        info!("🌲 [diag] tree hash changed ({} -> {}), pushing {} nodes to Slint", explorer_state.last_tree_hash, new_hash, tree_nodes.len());
         explorer_state.last_tree_hash = new_hash;
         let model = std::rc::Rc::new(slint::VecModel::from(tree_nodes));
         ui.set_tree_nodes(slint::ModelRc::from(model));
@@ -15738,6 +16508,8 @@ fn sync_unified_explorer_to_slint(
             explorer_state.visible_node_order.clone(),
         ));
         ui.set_visible_node_ids(slint::ModelRc::from(visible_model));
+    } else {
+        info!("🌲 [diag] tree rebuild ran but hash UNCHANGED ({}) — no push to Slint (this is the case to watch: state may have updated but tree_nodes came out identical)", new_hash);
     }
 
     // Process pending scroll-to-selection — driven by 3D viewport
