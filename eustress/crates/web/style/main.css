@@ -20765,7 +20765,9 @@ a.experience-card {
     gap: var(--space-sm, 0.6rem);
     margin-bottom: var(--space-xl, 2rem);
 }
-.tab-btn {
+/* Scoped to .tabs-bar so the many other global .tab-btn rules in this file
+   (including a max-width:900px rule that forces width:100%) can't clobber it. */
+.tabs-bar .tab-btn {
     padding: 10px 20px;
     border-radius: var(--radius-full, 999px);
     border: 1px solid rgba(128, 144, 160, 0.3);
@@ -20775,12 +20777,16 @@ a.experience-card {
     font-size: var(--text-sm, 0.9rem);
     cursor: pointer;
     transition: all 0.2s ease;
+    width: auto;
+    max-width: none;
+    flex-shrink: 0;
+    white-space: nowrap;
 }
-.tab-btn:hover {
+.tabs-bar .tab-btn:hover {
     border-color: rgba(0, 188, 212, 0.4);
     color: var(--color-text-primary, #f0f6fc);
 }
-.tab-btn.active {
+.tabs-bar .tab-btn.active {
     background: rgba(0, 188, 212, 0.12);
     border-color: #00bcd4;
     color: #00bcd4;
@@ -20791,4 +20797,153 @@ a.experience-card {
 @keyframes tabs-panel-fade {
     from { opacity: 0; transform: translateY(4px); }
     to { opacity: 1; transform: translateY(0); }
+}
+
+/* =============================================================================
+   MOBILE LANDING PASS (home page: .epic-landing). Appended last so it wins
+   over earlier rules. Scoped to home classes to avoid regressing other pages.
+   The nav already has a hamburger drawer (.desktop-only hidden <=768px);
+   .power-grid is auto-fit responsive; comparison tables already scroll.
+   ========================================================================== */
+@media (max-width: 768px) {
+    /* Guard: nothing on the home page may cause horizontal scroll. */
+    .page-home { overflow-x: hidden; }
+
+    /* --- Hero: kill the 100vh vertical centering (huge void on mobile), stack,
+       drop the decorative preview, center, and shrink the wide bits to fit. --- */
+    .epic-landing .hero-industrial { min-height: auto; padding-top: 68px; }
+    .epic-landing .hero-main {
+        grid-template-columns: 1fr;
+        gap: var(--space-lg);
+        padding: var(--space-lg) var(--space-md) var(--space-2xl);
+        text-align: center;
+        flex: none;
+    }
+    .epic-landing .hero-visual-new { display: none; }
+    .epic-landing .hero-buttons { justify-content: center; flex-wrap: wrap; }
+    .epic-landing .hero-description { font-size: var(--text-base); }
+
+    /* Beta tag: long brand string was overflowing 375px; shrink + allow wrap. */
+    .epic-landing .beta-tag {
+        font-size: 9px;
+        letter-spacing: 0.04em;
+        padding: 6px 12px;
+        max-width: 100%;
+        white-space: normal;
+        line-height: 1.5;
+        text-align: center;
+    }
+    /* Stats bar: 3 stats + gaps were wider than the screen. Tighten to fit. */
+    .epic-landing .stats-bar {
+        margin-left: auto;
+        margin-right: auto;
+        max-width: 100%;
+        gap: var(--space-sm);
+        padding: var(--space-sm) var(--space-md);
+    }
+    .epic-landing .stat-value { font-size: var(--text-xl); }
+    .epic-landing .stat-label { font-size: 10px; }
+
+    /* "RUNS ON" platform strip: let the 9 chips wrap instead of overflowing */
+    .epic-landing .platform-list { flex-wrap: wrap; justify-content: center; }
+    .epic-landing .platform-bar-inner { flex-wrap: wrap; justify-content: center; }
+
+    /* --- Home sections: trim the big horizontal padding for narrow screens --- */
+    .epic-landing .power-section,
+    .epic-landing .systems-section,
+    .epic-landing .comparison-section,
+    .epic-landing .showcase-industrial,
+    .epic-landing .testimonials-industrial,
+    .epic-landing .github-section,
+    .epic-landing .cta-industrial {
+        padding-left: var(--space-md);
+        padding-right: var(--space-md);
+    }
+    .epic-landing .section-header { margin-bottom: var(--space-xl); }
+
+    /* --- Tabs bar: horizontal scroll row (nicer than stacking 4 pills) --- */
+    .tabs-bar {
+        flex-wrap: nowrap;
+        justify-content: flex-start;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        padding-bottom: 4px;
+    }
+    .tabs-bar::-webkit-scrollbar { display: none; }
+
+    /* --- Showcase grid: single column; featured card flows normally --- */
+    .showcase-grid-industrial { grid-template-columns: 1fr; }
+    .showcase-card.featured { grid-column: auto; grid-row: auto; }
+    .showcase-card.featured .card-visual { min-height: 140px; }
+
+    /* --- Comparison tables: denser so the horizontal scroll is shorter --- */
+    .comparison-table th,
+    .comparison-table td {
+        padding: var(--space-sm) var(--space-xs);
+        font-size: var(--text-xs);
+    }
+    .comparison-table .engine-col { min-width: 96px; }
+    .comparison-table .feature-col { min-width: 128px; width: 128px; }
+    .comparison-table .engine-logo { width: 18px; height: 18px; }
+    .comparison-subtitle { font-size: var(--text-base); }
+
+    /* --- GitHub terminal: keep it inside the viewport --- */
+    .github-terminal { max-width: 100%; }
+    .term-body { font-size: 0.72rem; }
+}
+
+@media (max-width: 400px) {
+    /* Very small phones: relax the multi-word tab labels + hero buttons */
+    .epic-landing .hero-buttons .btn-primary-steel,
+    .epic-landing .hero-buttons .btn-secondary-steel { width: 100%; justify-content: center; }
+    .tabs-bar .tab-btn { padding: 9px 14px; font-size: var(--text-xs); }
+}
+
+/* =============================================================================
+   MOBILE AUDIT FIXES — Pixel 5 overflow sweep across all 52 routes.
+   Appended last so these win. See each block for the specific pages fixed.
+   ========================================================================== */
+@media (max-width: 1024px) {
+    /* Docs + Learn pages (16 routes): the sidebar+content flex row collapses
+       to a column here, but the base align-items:flex-start then sizes the
+       content to its WIDEST child (~1070px) instead of stretching it to the
+       viewport, forcing horizontal scroll. Force stretch + full width. */
+    .docs-layout { align-items: stretch; }
+    .docs-content { width: 100%; max-width: 100%; min-width: 0; }
+}
+
+@media (max-width: 768px) {
+    /* Page-level guard: decorative blur orbs (.*-glow) and any tiny residual
+       overflow are clipped so no page scrolls horizontally. Content that must
+       stay readable gets its own scroll container below, so this only trims
+       decorative bleed. The fixed nav is not clipped by an ancestor. */
+    .page { overflow-x: hidden; }
+
+    /* Docs: break long words/URLs; let wide tables scroll, not stretch. */
+    .docs-content { overflow-wrap: break-word; }
+    .docs-content table { display: block; width: 100%; overflow-x: auto; }
+    .docs-content pre,
+    .docs-content .code-block { max-width: 100%; }
+
+    /* Wide data tables (bliss-leaderboard, leaderboard, trust-registry):
+       scroll horizontally within the page instead of widening it. */
+    .leaderboard-table,
+    .leaderboard-table-full { display: block; overflow-x: auto; max-width: 100%; }
+
+    /* Settings: stack the sidebar + content instead of side-by-side. */
+    .settings-layout { flex-direction: column; }
+    .settings-sidebar { width: 100%; position: static; max-height: none; }
+
+    /* Projects: wrap the toolbar (search + controls) so it fits. */
+    .projects-toolbar,
+    .toolbar-left,
+    .toolbar-right { flex-wrap: wrap; }
+    .search-box,
+    .search-input-industrial { max-width: 100%; }
+
+    /* Legal pages (support, license, kyc): break long URLs / emails. */
+    .legal-content,
+    .legal-content a,
+    .legal-content p { overflow-wrap: anywhere; }
 }

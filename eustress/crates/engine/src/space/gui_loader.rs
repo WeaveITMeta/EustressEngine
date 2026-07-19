@@ -952,28 +952,60 @@ pub fn spawn_gui_element(
     entity
 }
 
-/// ScreenGui — fullscreen absolute overlay root container
+/// ScreenGui — fullscreen absolute overlay root container.
+///
+/// The fullscreen Bevy UI root is attached ONLY when the ScreenGui is a
+/// genuine screen overlay, i.e. it lives under the `StarterGui` service.
+/// Roblox semantics: a ScreenGui renders only from `PlayerGui` (which
+/// `StarterGui` is cloned into at runtime). One parented anywhere else — a
+/// vehicle's `DriveSeat`, a Tool, `ReplicatedStorage` — is an INERT
+/// template that draws nothing until a script clones it into PlayerGui.
+///
+/// Imported places are full of those: Mountain Ascension carries 11
+/// ScreenGuis, every one of them a car-dashboard UI under
+/// `Workspace/<vehicle>/DriveSeat/`. Attaching a fullscreen absolute `Node`
+/// to each meant parenting a UI node to a 3D part entity (which has a
+/// `Transform` but no `Node`), leaving origin-anchored overlay roots stacked
+/// on the editor's UI layer — the "frame outlines / UI boxes at the top-left
+/// origin" import artifact.
+///
+/// This is the same defect (and the same fix) already applied to
+/// `spawn_text_label_element` — see its doc comment: a stray `Node` "confused
+/// Bevy's UI layout when the parent was a 3D BillboardGui". It also mirrors
+/// the service gate `runtime_ui::spawn_bevy_gui_from_loaded_entities` applies
+/// to GUI *leaf* elements; gating the ROOT here is what that gate was missing.
+///
+/// Non-overlay ScreenGuis still spawn as real entities (Explorer, Properties,
+/// scripts and `Clone()` all see them) — they just don't get a UI root.
 fn spawn_screen_gui_element(
     commands: &mut Commands,
     instance: eustress_common::classes::Instance,
     loaded_from: super::file_loader::LoadedFromFile,
     display_name: &str,
 ) -> Entity {
-    commands.spawn((
+    // Read the service before `loaded_from` moves into the spawn bundle.
+    let is_screen_overlay = loaded_from.service == "StarterGui";
+
+    let mut ec = commands.spawn((
         instance,
         loaded_from,
         Name::new(display_name.to_string()),
-        // Fullscreen Bevy UI root
-        Node {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            position_type: PositionType::Absolute,
-            ..default()
-        },
-        GlobalZIndex(100), // Above 3D scene, below Slint overlay
-        // Transparent so it doesn't block the 3D view
-        BackgroundColor(Color::NONE),
-    )).id()
+    ));
+    if is_screen_overlay {
+        ec.insert((
+            // Fullscreen Bevy UI root
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            GlobalZIndex(100), // Above 3D scene, below Slint overlay
+            // Transparent so it doesn't block the 3D view
+            BackgroundColor(Color::NONE),
+        ));
+    }
+    ec.id()
 }
 
 /// Frame — container with background color and optional border

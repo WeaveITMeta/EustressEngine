@@ -97,10 +97,10 @@ component AssignedChip inherits Rectangle {
             width: 18px; height: 18px;
             y: (parent.height - self.height) / 2;
             border-radius: 4px;
-            background: x-ta.has-hover ? #5d1515 : #00000000;
+            background: x-ta.has-hover ? #5d1515 : #00000000;  // theme-exempt: dark-red delete-hover fill + transparent rest, no matching token
             Text {
                 text: "×";
-                color: x-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                color: x-ta.has-hover ? Theme.text-error : Theme.text-secondary;
                 font-size: 15px;
                 font-weight: 700;
                 horizontal-alignment: center;
@@ -123,9 +123,9 @@ component AvailableChip inherits Rectangle {
 
     height: 20px;
     border-radius: 10px;
-    background: add-ta.has-hover ? chip-color.with-alpha(0.20) : #00000000;
+    background: add-ta.has-hover ? chip-color.with-alpha(0.20) : #00000000;  // theme-exempt: transparent (no fill)
     border-width: 1px;
-    border-color: add-ta.has-hover ? chip-color.with-alpha(0.6) : #3a3a3a;
+    border-color: add-ta.has-hover ? chip-color.with-alpha(0.6) : Theme.border-color;
 
     add-ta := TouchArea {
         mouse-cursor: pointer;
@@ -183,7 +183,7 @@ export component TagsEditor inherits Rectangle {
     callback rename-requested(string);     // double-click chip → open rename modal
     callback input-focus-changed(bool);
 
-    background: #00000000;
+    background: #00000000;  // theme-exempt: transparent (no fill)
 
     VerticalLayout {
         padding-left: 10px;

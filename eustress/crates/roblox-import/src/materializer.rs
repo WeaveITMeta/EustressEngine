@@ -2141,10 +2141,16 @@ mod tests {
     /// helper so the materializer integration test stays self-contained.
     fn build_single_chunk_grid(cx: i32, cy: i32, cz: i32, material: u8, occupancy: u8) -> Vec<u8> {
         let cells_per_chunk = crate::terrain::CELLS_PER_CHUNK;
-        let mut buf = vec![crate::terrain::SMOOTH_GRID_VERSION];
-        buf.extend_from_slice(&cx.to_le_bytes());
-        buf.extend_from_slice(&cy.to_le_bytes());
-        buf.extend_from_slice(&cz.to_le_bytes());
+        // File header `[version, log2(chunk_edge)]`, then one chunk whose
+        // coordinate is its delta from the origin, stored as three
+        // byte-plane-interleaved big-endian i32s (see terrain::read_chunk_delta).
+        let mut buf = vec![crate::terrain::SMOOTH_GRID_VERSION, 0x05];
+        let (bx, by, bz) = (cx.to_be_bytes(), cy.to_be_bytes(), cz.to_be_bytes());
+        for plane in 0..4 {
+            buf.push(bx[plane]);
+            buf.push(by[plane]);
+            buf.push(bz[plane]);
+        }
         let mut emitted = 0;
         while emitted < cells_per_chunk {
             let run = (cells_per_chunk - emitted).min(256);

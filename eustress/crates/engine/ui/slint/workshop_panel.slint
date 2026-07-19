@@ -107,16 +107,16 @@ component ChatBubble inherits Rectangle {
             // Windsurf-like flat theme: subtle background tints,
             // no heavy coloured bubbles. Agent messages are nearly
             // transparent; user messages carry a faint blue tint.
-            background: root.role == "user" ? #252538 :
-                        root.role == "mcp" ? #1e1e2a :
-                        root.role == "approval" ? #2a2418 :
-                        root.role == "artifact" ? #1a2a22 :
-                        root.role == "error" ? #2e1a1a :
-                        #1e1e24;
+            background: root.role == "user" ? Theme.accent-blue.with-alpha(0.12) :
+                        root.role == "mcp" ? Theme.accent-purple.with-alpha(0.10) :
+                        root.role == "approval" ? Theme.accent-orange.with-alpha(0.12) :
+                        root.role == "artifact" ? Theme.accent-green.with-alpha(0.12) :
+                        root.role == "error" ? Theme.accent-red.with-alpha(0.12) :
+                        Theme.background-tertiary;
             border-radius: 6px;
             border-width: root.role == "system" ? 0px :
                           root.role == "mcp" ? 1px : 0px;
-            border-color: root.role == "mcp" ? #3a3a52 : transparent;
+            border-color: root.role == "mcp" ? Theme.accent-purple.with-alpha(0.3) : transparent;
 
             VerticalLayout {
                 padding: 10px;
@@ -129,10 +129,10 @@ component ChatBubble inherits Rectangle {
                           root.role == "approval" ? "Approval Required" :
                           root.role == "artifact" ? "Artifact Generated" :
                           "Error";
-                    color: root.role == "mcp" ? #8888cc :
-                           root.role == "approval" ? #cc8844 :
-                           root.role == "artifact" ? #44cc88 :
-                           root.role == "error" ? #cc4444 :
+                    color: root.role == "mcp" ? Theme.accent-purple :
+                           root.role == "approval" ? Theme.accent-orange :
+                           root.role == "artifact" ? Theme.accent-green :
+                           root.role == "error" ? Theme.accent-red :
                            Theme.accent-blue;
                     font-size: 10px;
                     font-weight: 600;
@@ -154,7 +154,7 @@ component ChatBubble inherits Rectangle {
                 // of font metrics or Slint's layout defaults.
                 if root.role == "mcp": Rectangle {
                     height: 28px;
-                    background: #1a1a2e;
+                    background: Theme.background-tertiary;
                     border-radius: 4px;
 
                     // Tool-call glyph — minimal "terminal prompt" feel
@@ -164,7 +164,7 @@ component ChatBubble inherits Rectangle {
                         x: 10px;
                         y: (parent.height - self.height) / 2;
                         text: "›_";
-                        color: #8888cc;
+                        color: Theme.accent-purple;
                         font-size: 12px;
                         font-weight: 700;
                         font-family: "Consolas";
@@ -180,7 +180,7 @@ component ChatBubble inherits Rectangle {
                         width: root.mcp-method != "" ? 40px : 0px;
                         height: 18px;
                         visible: root.mcp-method != "";
-                        background: root.mcp-method == "POST" ? #2d5a27 : #27455a;
+                        background: root.mcp-method == "POST" ? Theme.accent-green : Theme.accent-blue;
                         border-radius: 3px;
 
                         Text {
@@ -206,7 +206,7 @@ component ChatBubble inherits Rectangle {
                         y: (parent.height - self.height) / 2;
                         width: parent.width - self.x - 10px;
                         text: root.mcp-endpoint;
-                        color: #ccccee;
+                        color: Theme.text-primary;
                         font-size: 11px;
                         font-weight: 600;
                         font-family: "Consolas";
@@ -225,10 +225,10 @@ component ChatBubble inherits Rectangle {
                 // so the click target covers icon + name.
                 if root.entity-name != "": Rectangle {
                     height: 30px;
-                    background: entity-touch.has-hover ? #1a3050 : #162638;
+                    background: entity-touch.has-hover ? Theme.accent-blue.with-alpha(0.22) : Theme.accent-blue.with-alpha(0.12);
                     border-radius: 4px;
                     border-width: 1px;
-                    border-color: entity-touch.has-hover ? Theme.accent-blue : #25405a;
+                    border-color: entity-touch.has-hover ? Theme.accent-blue : Theme.accent-blue.with-alpha(0.4);
 
                     entity-touch := TouchArea {
                         mouse-cursor: pointer;
@@ -272,19 +272,19 @@ component ChatBubble inherits Rectangle {
                 // the raw argument JSON is noisy and unreadable).
                 if root.role != "mcp": TextInput {
                     text: root.content;
-                    color: root.role == "error" ? #ff8888 : Theme.text-primary;
+                    color: root.role == "error" ? Theme.text-error : Theme.text-primary;
                     font-size: 12px;
                     wrap: word-wrap;
                     read-only: true;
                     single-line: false;
-                    selection-background-color: #264f78;
-                    selection-foreground-color: #ffffff;
+                    selection-background-color: Theme.selection-background;
+                    selection-foreground-color: Theme.text-primary;
                 }
 
                 // Artifact file path (clickable)
                 if root.role == "artifact": Rectangle {
                     height: 24px;
-                    background: #0a2a1a;
+                    background: Theme.accent-green.with-alpha(0.12);
                     border-radius: 4px;
 
                     TouchArea {
@@ -302,13 +302,13 @@ component ChatBubble inherits Rectangle {
                             height: 12px;
                             source: @image-url("../../assets/icons/ui/new-file.svg");
                             image-fit: contain;
-                            colorize: #44cc88;
+                            colorize: Theme.accent-green;
                             vertical-alignment: center;
                         }
 
                         Text {
                             text: root.artifact-path;
-                            color: #44cc88;
+                            color: Theme.accent-green;
                             font-size: 11px;
                             font-family: "Consolas";
                             vertical-alignment: center;
@@ -326,7 +326,7 @@ component ChatBubble inherits Rectangle {
                     Rectangle {
                         horizontal-stretch: 1;
                         height: 30px;
-                        background: approve-touch.has-hover ? #2d7d46 : #245a36;
+                        background: approve-touch.has-hover ? Theme.accent-green : Theme.accent-green.with-alpha(0.8);
                         border-radius: 4px;
 
                         approve-touch := TouchArea {
@@ -349,7 +349,7 @@ component ChatBubble inherits Rectangle {
                     Rectangle {
                         horizontal-stretch: 1;
                         height: 30px;
-                        background: edit-touch.has-hover ? #5a5a2d : #3e3e20;
+                        background: edit-touch.has-hover ? Theme.accent-yellow.with-alpha(0.3) : Theme.accent-yellow.with-alpha(0.18);
                         border-radius: 4px;
 
                         edit-touch := TouchArea {
@@ -359,7 +359,7 @@ component ChatBubble inherits Rectangle {
 
                         Text {
                             text: "Edit";
-                            color: #cccc88;
+                            color: Theme.text-warning;
                             font-size: 11px;
                             font-weight: 600;
                             horizontal-alignment: center;
@@ -371,7 +371,7 @@ component ChatBubble inherits Rectangle {
                     Rectangle {
                         horizontal-stretch: 1;
                         height: 30px;
-                        background: skip-touch.has-hover ? #5a2d2d : #3e2020;
+                        background: skip-touch.has-hover ? Theme.accent-red.with-alpha(0.35) : Theme.accent-red.with-alpha(0.2);
                         border-radius: 4px;
 
                         skip-touch := TouchArea {
@@ -386,7 +386,7 @@ component ChatBubble inherits Rectangle {
                             y: (parent.height - self.height) / 2;
                             source: @image-url("../../assets/icons/ui/close.svg");
                             image-fit: contain;
-                            colorize: #cc8888;
+                            colorize: Theme.accent-red;
                         }
                     }
                 }
@@ -464,7 +464,7 @@ component PipelineStep inherits Rectangle {
                             root.status == "active" ? Theme.accent-blue :
                             root.status == "error" ? Theme.accent-red :
                             root.status == "skipped" ? Theme.text-disabled :
-                            #333344;
+                            Theme.text-disabled;
             }
         }
 
@@ -486,12 +486,12 @@ component PipelineStep inherits Rectangle {
         if root.artifact-count > 0: Rectangle {
             width: 18px;
             height: 16px;
-            background: #1a3e2c;
+            background: Theme.accent-green.with-alpha(0.2);
             border-radius: 8px;
 
             Text {
                 text: root.artifact-count;
-                color: #44cc88;
+                color: Theme.accent-green;
                 font-size: 9px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -890,7 +890,7 @@ export component WorkshopPanel inherits Rectangle {
                             border-width: is-active || is-dragging ? 1px : 0px;
                             border-color: is-dragging ? Theme.accent-green : Theme.accent-blue;
                             drop-shadow-blur: is-dragging ? 12px : 0px;
-                            drop-shadow-color: #00000080;
+                            drop-shadow-color: Theme.shadow-color;
 
                             HorizontalLayout {
                                 padding-left: 8px;
@@ -915,7 +915,7 @@ export component WorkshopPanel inherits Rectangle {
                                     height: 18px;
                                     y: (parent.height - self.height) / 2;
                                     border-radius: 3px;
-                                    background: close-touch.has-hover ? #3d1515 : transparent;
+                                    background: close-touch.has-hover ? Theme.accent-red.with-alpha(0.25) : transparent;
 
                                     close-touch := TouchArea {
                                         mouse-cursor: pointer;
@@ -924,7 +924,7 @@ export component WorkshopPanel inherits Rectangle {
 
                                     Text {
                                         text: "×";
-                                        color: close-touch.has-hover ? #ef5350 : Theme.text-disabled;
+                                        color: close-touch.has-hover ? Theme.accent-red : Theme.text-disabled;
                                         font-size: 14px;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -951,14 +951,14 @@ export component WorkshopPanel inherits Rectangle {
                 width: max(30px, parent.width * tab-flick.width / tab-flick.viewport-width);
                 height: 2px;
                 border-radius: 1px;
-                background: #ffffff30;
+                background: #ffffff30;  // theme-exempt: translucent white scrollbar thumb, no matching neutral token
             }
         }
 
         // API key warning (if not configured)
         if !root.api-key-valid: Rectangle {
             height: 56px;
-            background: #3e3e20;
+            background: Theme.accent-yellow.with-alpha(0.18);
 
             VerticalLayout {
                 padding: 8px;
@@ -1021,10 +1021,10 @@ export component WorkshopPanel inherits Rectangle {
             || root.pipeline-state == "complete"
             || root.pipeline-state == "error": Rectangle {
             height: 28px;
-            background: root.pipeline-state == "complete" ? #1a3e2c :
-                        root.pipeline-state == "error" ? #4a2020 :
-                        root.pipeline-state == "paused" ? #3e3e20 :
-                        #1a1a3e;
+            background: root.pipeline-state == "complete" ? Theme.accent-green.with-alpha(0.2) :
+                        root.pipeline-state == "error" ? Theme.accent-red.with-alpha(0.25) :
+                        root.pipeline-state == "paused" ? Theme.accent-yellow.with-alpha(0.18) :
+                        Theme.accent-blue.with-alpha(0.2);
 
             HorizontalLayout {
                 padding-left: 10px;
@@ -1038,7 +1038,7 @@ export component WorkshopPanel inherits Rectangle {
                     border-radius: 4px;
                     background: root.pipeline-state == "running" ? Theme.accent-blue :
                                 root.pipeline-state == "complete" ? Theme.accent-green :
-                                root.pipeline-state == "paused" ? #cccc44 :
+                                root.pipeline-state == "paused" ? Theme.accent-yellow :
                                 Theme.accent-red;
                 }
 
@@ -1063,7 +1063,7 @@ export component WorkshopPanel inherits Rectangle {
 
                 Text {
                     text: root.total-artifacts + " files";
-                    color: #44cc88;
+                    color: Theme.accent-green;
                     font-size: 10px;
                     vertical-alignment: center;
                 }
@@ -1178,7 +1178,7 @@ export component WorkshopPanel inherits Rectangle {
                         // Example 1
                         Rectangle {
                             height: 24px;
-                            background: example1-touch.has-hover ? #ffffff08 : transparent;
+                            background: example1-touch.has-hover ? Theme.explorer-item-hover : transparent;
                             border-radius: 4px;
 
                             example1-touch := TouchArea {
@@ -1200,7 +1200,7 @@ export component WorkshopPanel inherits Rectangle {
                         // Example 2
                         Rectangle {
                             height: 24px;
-                            background: example2-touch.has-hover ? #ffffff08 : transparent;
+                            background: example2-touch.has-hover ? Theme.explorer-item-hover : transparent;
                             border-radius: 4px;
 
                             example2-touch := TouchArea {
@@ -1299,7 +1299,7 @@ export component WorkshopPanel inherits Rectangle {
         // "Optimize & Build" handoff button (shown when ideation is complete)
         if root.pipeline-state == "complete": Rectangle {
             height: 44px;
-            background: #1a3e2c;
+            background: Theme.accent-green.with-alpha(0.2);
 
             HorizontalLayout {
                 padding: 8px;
@@ -1308,7 +1308,7 @@ export component WorkshopPanel inherits Rectangle {
                 Rectangle {
                     horizontal-stretch: 1;
                     height: 28px;
-                    background: optimize-touch.has-hover ? #2d7d46 : #245a36;
+                    background: optimize-touch.has-hover ? Theme.accent-green : Theme.accent-green.with-alpha(0.8);
                     border-radius: 4px;
 
                     optimize-touch := TouchArea {
@@ -1410,7 +1410,7 @@ export component WorkshopPanel inherits Rectangle {
                                 border-width: 1px;
                                 border-color: Theme.border-color;
                                 drop-shadow-blur: 8px;
-                                drop-shadow-color: #00000066;
+                                drop-shadow-color: Theme.shadow-float;
 
                                 VerticalLayout {
                                     padding: 4px;
@@ -1419,7 +1419,7 @@ export component WorkshopPanel inherits Rectangle {
                                     for m in root.available-modes: Rectangle {
                                         height: 24px;
                                         border-radius: 4px;
-                                        background: m-touch.has-hover ? #0078d422 : transparent;
+                                        background: m-touch.has-hover ? Theme.accent-blue.with-alpha(0.13) : transparent;
 
                                         m-touch := TouchArea {
                                             mouse-cursor: pointer;
@@ -1490,7 +1490,7 @@ export component WorkshopPanel inherits Rectangle {
                                 border-width: 1px;
                                 border-color: Theme.border-color;
                                 drop-shadow-blur: 8px;
-                                drop-shadow-color: #00000066;
+                                drop-shadow-color: Theme.shadow-float;
 
                                 VerticalLayout {
                                     padding: 4px;
@@ -1499,7 +1499,7 @@ export component WorkshopPanel inherits Rectangle {
                                     for m in root.available-models: Rectangle {
                                         height: 24px;
                                         border-radius: 4px;
-                                        background: mm-touch.has-hover ? #0078d422 : transparent;
+                                        background: mm-touch.has-hover ? Theme.accent-blue.with-alpha(0.13) : transparent;
 
                                         mm-touch := TouchArea {
                                             mouse-cursor: pointer;
@@ -1528,7 +1528,7 @@ export component WorkshopPanel inherits Rectangle {
 
                     if root.active-tool != "": Text {
                         text: "⟳ " + root.active-tool;
-                        color: #4caf50;
+                        color: Theme.accent-green;
                         font-size: 9px;
                         vertical-alignment: center;
                     }
@@ -1561,7 +1561,7 @@ export component WorkshopPanel inherits Rectangle {
                             height: 64px;
                             border-radius: 4px;
                             clip: true;
-                            background: #000;
+                            background: Theme.viewport-background;
 
                             Image {
                                 width: parent.width;
@@ -1586,7 +1586,7 @@ export component WorkshopPanel inherits Rectangle {
                             height: 20px;
                             y: (parent.height - self.height) / 2;
                             border-radius: 10px;
-                            background: clear-touch.has-hover ? #c0392b : Theme.button-background;
+                            background: clear-touch.has-hover ? Theme.accent-red : Theme.button-background;
 
                             clear-touch := TouchArea {
                                 mouse-cursor: pointer;
@@ -1750,7 +1750,7 @@ export component WorkshopPanel inherits Rectangle {
                         width: 36px;
                         height: 36px;
                         y: parent.height - self.height - 2px;
-                        background: root.input-text != "" ? (send-touch.has-hover ? #2d7d46 : Theme.button-primary) : Theme.button-background;
+                        background: root.input-text != "" ? (send-touch.has-hover ? Theme.accent-green : Theme.button-primary) : Theme.button-background;
                         border-radius: 8px;
 
                         send-touch := TouchArea {
@@ -1820,7 +1820,7 @@ export component WorkshopPanel inherits Rectangle {
     if root.show-history-modal: Rectangle {
         width: 100%;
         height: 100%;
-        background: #00000060;
+        background: Theme.modal-backdrop;
 
         TouchArea {
             clicked => { root.show-history-modal = false; }
@@ -1836,7 +1836,7 @@ export component WorkshopPanel inherits Rectangle {
             border-width: 1px;
             border-color: Theme.border-color;
             drop-shadow-blur: 20px;
-            drop-shadow-color: #00000080;
+            drop-shadow-color: Theme.shadow-color;
 
             // Absorb clicks on the modal itself
             TouchArea {
@@ -1875,7 +1875,7 @@ export component WorkshopPanel inherits Rectangle {
                             width: 28px;
                             height: 28px;
                             border-radius: 4px;
-                            background: hist-close-touch.has-hover ? #3d1515 : transparent;
+                            background: hist-close-touch.has-hover ? Theme.accent-red.with-alpha(0.25) : transparent;
                             y: (parent.height - self.height) / 2;
 
                             hist-close-touch := TouchArea {
@@ -1888,7 +1888,7 @@ export component WorkshopPanel inherits Rectangle {
                                 height: 12px;
                                 source: @image-url("../../assets/icons/ui/close.svg");
                                 image-fit: contain;
-                                colorize: hist-close-touch.has-hover ? #ef5350 : Theme.text-secondary;
+                                colorize: hist-close-touch.has-hover ? Theme.accent-red : Theme.text-secondary;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
@@ -1909,9 +1909,9 @@ export component WorkshopPanel inherits Rectangle {
                         Rectangle {
                             horizontal-stretch: 1;
                             border-radius: 6px;
-                            background: #1a1a1a;
+                            background: Theme.input-background;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.input-border;
 
                             HorizontalLayout {
                                 padding-left: 10px;
@@ -1941,7 +1941,7 @@ export component WorkshopPanel inherits Rectangle {
                                         y: (parent.height - self.height) / 2;
                                         source: @image-url("../../assets/icons/ui/search.svg");
                                         image-fit: contain;
-                                        colorize: #666;
+                                        colorize: Theme.text-secondary;
                                     }
                                 }
 
@@ -1972,7 +1972,7 @@ export component WorkshopPanel inherits Rectangle {
                         for conv in root.past-conversations: Rectangle {
                             height: 64px;
                             border-radius: 6px;
-                            background: conv-touch.has-hover ? #2a2a3a : #1e1e2a;
+                            background: conv-touch.has-hover ? Theme.button-hover : Theme.background-tertiary;
 
                             conv-touch := TouchArea {
                                 mouse-cursor: pointer;
@@ -2024,14 +2024,14 @@ export component WorkshopPanel inherits Rectangle {
 
                                     Text {
                                         text: conv.message-count + " msgs";
-                                        color: #666;
+                                        color: Theme.text-secondary;
                                         font-size: 10px;
                                         vertical-alignment: center;
                                     }
 
                                     if conv.cost != "$0.00": Text {
                                         text: conv.cost;
-                                        color: #666;
+                                        color: Theme.text-secondary;
                                         font-size: 10px;
                                         vertical-alignment: center;
                                     }

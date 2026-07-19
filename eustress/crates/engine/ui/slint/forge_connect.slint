@@ -75,7 +75,7 @@ export component ForgeConnectDialog inherits Rectangle {
         border-width: 1px;
         border-color: Theme.border-color;
         drop-shadow-blur: 28px;
-        drop-shadow-color: #000000a0;
+        drop-shadow-color: Theme.shadow-color;
 
         TouchArea {
             scroll-event(event) => {
@@ -90,7 +90,7 @@ export component ForgeConnectDialog inherits Rectangle {
             // ── Title bar ──
             Rectangle {
                 height: 46px;
-                background: #13131f;
+                background: Theme.dialog-titlebar-background;
                 border-radius: 8px;
 
                 Text {
@@ -109,7 +109,7 @@ export component ForgeConnectDialog inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     width: 28px; height: 28px;
                     border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;
+                    background: close-ta.has-hover ? Theme.error-surface-hover : transparent;
 
                     close-ta := TouchArea {
                         mouse-cursor: pointer;
@@ -118,7 +118,7 @@ export component ForgeConnectDialog inherits Rectangle {
 
                     Text {
                         text: "×";
-                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
                         font-size: 17px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -231,10 +231,10 @@ export component ForgeConnectDialog inherits Rectangle {
                 // Error
                 if root.error-message != "": Rectangle {
                     height: 28px;
-                    background: #2a1515;
+                    background: Theme.error-surface;
                     border-radius: 3px;
                     border-width: 1px;
-                    border-color: #4a2020;
+                    border-color: Theme.error-surface-border;
 
                     Text {
                         x: 10px;
@@ -252,7 +252,7 @@ export component ForgeConnectDialog inherits Rectangle {
             }
             Rectangle {
                 height: 52px;
-                background: #0f0f1a;
+                background: Theme.dialog-titlebar-background;
                 border-radius: 8px;
 
                 HorizontalLayout {
@@ -265,7 +265,7 @@ export component ForgeConnectDialog inherits Rectangle {
                     Rectangle {
                         width: 80px; height: 32px;
                         border-radius: 5px;
-                        background: cancel-ta.has-hover ? #1a1a2e : Theme.button-background;
+                        background: cancel-ta.has-hover ? Theme.button-hover : Theme.button-background;
                         border-width: 1px;
                         border-color: Theme.border-color;
 
@@ -289,11 +289,11 @@ export component ForgeConnectDialog inherits Rectangle {
                         border-radius: 5px;
                         background: root.connecting ?
                             Theme.button-background :
-                            (connect-ta.has-hover ? #1a4a2a : #152a1e);
+                            (connect-ta.has-hover ? Theme.success-surface-hover : Theme.success-surface);
                         border-width: 1px;
                         border-color: root.connecting ?
                             Theme.border-color :
-                            (connect-ta.has-hover ? #4caf50 : #2a5a32);
+                            (connect-ta.has-hover ? Theme.accent-green : Theme.success-surface-border);
 
                         connect-ta := TouchArea {
                             mouse-cursor: root.connecting ? default : pointer;
@@ -305,7 +305,7 @@ export component ForgeConnectDialog inherits Rectangle {
                             text: root.connecting ? "Connecting..." : "Connect";
                             color: root.connecting ?
                                 Theme.text-secondary :
-                                (connect-ta.has-hover ? #a5d6a7 : #66bb6a);
+                                (connect-ta.has-hover ? Theme.success-surface-text-hover : Theme.accent-green);
                             font-size: 12px;
                             font-weight: 600;
                             horizontal-alignment: center;

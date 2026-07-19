@@ -277,7 +277,7 @@ export component LayoutDropdownMenu inherits Rectangle {
     border-width: 1px;
     border-color: Theme.border-color;
     drop-shadow-blur: 12px;
-    drop-shadow-color: #00000060;
+    drop-shadow-color: Theme.shadow-float;
 
     // Absorb clicks on menu body
     TouchArea {}
@@ -555,7 +555,7 @@ export component AdvancedTabBar inherits Rectangle {
         border-width: 1px;
         border-color: Theme.border-color;
         drop-shadow-blur: 8px;
-        drop-shadow-color: #00000040;
+        drop-shadow-color: Theme.shadow-float;
         
         VerticalBox {
             padding: 4px;
@@ -670,7 +670,7 @@ export component PerformanceOverlay inherits Rectangle {
         
         Text {
             text: Math.round(root.fps) + " FPS";
-            color: root.fps >= 55 ? #4ade80 : root.fps >= 30 ? #fbbf24 : #ef4444;
+            color: root.fps >= 55 ? Theme.text-success : root.fps >= 30 ? Theme.text-warning : Theme.text-error;
             font-weight: 600;
             vertical-alignment: center;
         }
@@ -684,7 +684,7 @@ export component PerformanceOverlay inherits Rectangle {
             Text { text: "FPS:"; color: Theme.text-secondary; horizontal-stretch: 1; font-size: 13px; vertical-alignment: center; }
             Text { 
                 text: Math.round(root.fps * 10) / 10; 
-                color: root.fps >= 55 ? #4ade80 : root.fps >= 30 ? #fbbf24 : #ef4444;
+                color: root.fps >= 55 ? Theme.text-success : root.fps >= 30 ? Theme.text-warning : Theme.text-error;
                 font-weight: 600;
                 font-size: 13px;
                 vertical-alignment: center;
@@ -760,7 +760,7 @@ export component ThemeEditor inherits Rectangle {
     in-out property <bool> dark-mode: true;
     in-out property <bool> high-contrast: false;
     in-out property <float> ui-scale: 1.0;
-    in-out property <color> accent-color: #3b82f6;
+    in-out property <color> accent-color: Theme.accent-blue;
     
     callback theme-changed();
     callback apply-theme();

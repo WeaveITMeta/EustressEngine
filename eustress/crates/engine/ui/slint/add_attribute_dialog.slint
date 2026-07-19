@@ -43,7 +43,7 @@ export component AddAttributeDialog inherits Rectangle {
         border-width: 1px;
         border-color: Theme.border-color;
         drop-shadow-blur: 28px;
-        drop-shadow-color: #000000a0;
+        drop-shadow-color: Theme.shadow-color;
         clip: true;
 
         // Absorb scroll anywhere over the card (outside the inner list).
@@ -56,7 +56,7 @@ export component AddAttributeDialog inherits Rectangle {
             // ── Title bar ──
             Rectangle {
                 height: 46px;
-                background: #13131f;
+                background: Theme.dialog-titlebar-background;
                 Text {
                     width: parent.width;
                     height: parent.height;
@@ -72,10 +72,10 @@ export component AddAttributeDialog inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     width: 28px; height: 28px;
                     border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;
+                    background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: destructive-hover fill, no dark-red token
                     Text {
                         text: "×";
-                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
                         font-size: 18px;
                         horizontal-alignment: center;
                         vertical-alignment: center;

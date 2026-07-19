@@ -1,0 +1,54 @@
+# Eustress Mode — "Business".
+# Consolidates the Product and Manufacturing workflows as first-class TABS
+# (per 2026-07-18 direction), plus an Operations tab for live tracking.
+
+[mode]
+id = "business"
+name = "Business"
+icon = "briefcase"
+version = "1.0"
+author = "Eustress"
+
+[ribbon]
+tabs = ["home", "data", "plugins"]
+
+[layout]
+preset = "Wide Panels"
+
+[theme]
+accent = "#0a84ff"
+
+[[tabs]]
+id = "product"
+name = "Product"
+color = "#60a5fa"
+
+  [[tabs.sections]]
+  name = "Planning"
+  tools = []
+
+  [[tabs.sections]]
+  name = "Analytics"
+  tools = ["data:chart", "data:stats", "data:dashboard"]
+
+[[tabs]]
+id = "manufacturing"
+name = "Manufacturing"
+color = "#ff9f45"
+
+  [[tabs.sections]]
+  name = "Fabrication"
+  tools = ["insert:cad_plate", "insert:cad_box", "insert:cad_cylinder", "csg:union", "csg:negate"]
+
+  [[tabs.sections]]
+  name = "Assembly"
+  tools = ["cad:mate_revolute", "cad:mate_prismatic", "cad:mate_ball"]
+
+[[tabs]]
+id = "operations"
+name = "Operations"
+color = "#4ade80"
+
+  [[tabs.sections]]
+  name = "Tracking"
+  tools = ["data:record", "data:timeline"]

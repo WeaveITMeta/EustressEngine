@@ -1,0 +1,19 @@
+# Texture — Tiled surface image (child of BasePart)
+# Bevy: tiled quad on the chosen face with a Repeat-sampled StandardMaterial.
+# UV tiling is LIVE: tile count = face-size ÷ studs_per_tile, recomputed every
+# frame from these fields + the parent's size (see decal_place_tool::
+# sync_texture_surfaces), so Properties-panel edits update in real time.
+
+[texture]
+texture = ""
+face = "Front"
+studs_per_tile_u = 2.0
+studs_per_tile_v = 2.0
+offset_studs_u = 0.0
+offset_studs_v = 0.0
+color3 = [255, 255, 255]
+transparency = 0.0
+
+[metadata]
+class_name = "Texture"
+archivable = true

@@ -63,7 +63,7 @@ component KeyframeMarker inherits Rectangle {
     background: transparent;
     Text {
         text: "◆";
-        color: #f9c74f;        // accent-yellow per TOOLSET_UX.md §2.1
+        color: Theme.accent-yellow;        // accent-yellow per TOOLSET_UX.md §2.1
         font-size: 12px;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -75,10 +75,10 @@ component WatchpointMarker inherits Rectangle {
     in property <string> tooltip;
     width: 9px;
     height: 9px;
-    background: #e8912d;       // accent-orange
+    background: Theme.accent-orange;       // accent-orange
     border-radius: 4.5px;
     drop-shadow-blur: 4px;
-    drop-shadow-color: #e8912d80;
+    drop-shadow-color: Theme.accent-orange.with-alpha(0.5);
 }
 
 /// Red asterisk / six-pointed star for breakpoints. Same rationale
@@ -92,7 +92,7 @@ component BreakpointMarker inherits Rectangle {
     background: transparent;
     Text {
         text: "✻";
-        color: #e74856;        // accent-red
+        color: Theme.accent-red;        // accent-red
         font-size: 14px;
         font-weight: 700;
         horizontal-alignment: center;
@@ -106,17 +106,17 @@ component KindChip inherits Rectangle {
     in property <string> kind;
     in property <bool>   visible-when: true;
     in property <int>    count: 0;
-    in property <color>  chip-color: #f9c74f;
+    in property <color>  chip-color: Theme.accent-yellow;
     in property <string> label;
 
     callback toggled();
 
     height: 22px;
     width: label-text.preferred-width + count-text.preferred-width + 32px;
-    background: root.visible-when ? #ffffff08 : transparent;
+    background: root.visible-when ? #ffffff08 : transparent;  // theme-exempt: very-faint white active-chip fill, alpha below any token
     border-radius: Theme.radius-md;
     border-width: 1px;
-    border-color: root.visible-when ? root.chip-color : #ffffff20;
+    border-color: root.visible-when ? root.chip-color : #ffffff20;  // theme-exempt: faint white inactive-chip border, no white-alpha border token
 
     HorizontalLayout {
         padding-left: 8px;
@@ -309,9 +309,9 @@ export component TimelinePanel inherits Rectangle {
                                 : "Breakpoint";
                     count:        chip.count;
                     visible-when: chip.visible;
-                    chip-color:   chip.kind == "keyframe" ? #f9c74f
-                                : chip.kind == "watchpoint" ? #e8912d
-                                : #e74856;
+                    chip-color:   chip.kind == "keyframe" ? Theme.accent-yellow
+                                : chip.kind == "watchpoint" ? Theme.accent-orange
+                                : Theme.accent-red;
                     toggled => { root.kind-toggled(chip.kind); }
                 }
 
@@ -321,7 +321,7 @@ export component TimelinePanel inherits Rectangle {
                 // Search field.
                 Rectangle {
                     width: 180px;
-                    background: #00000030;
+                    background: Theme.input-background;
                     border-radius: Theme.radius-md;
                     border-width: 1px;
                     border-color: Theme.border-color;
@@ -339,7 +339,7 @@ export component TimelinePanel inherits Rectangle {
                 // Filter button → opens the tag-checkbox modal.
                 filter-btn := Rectangle {
                     width: 78px;
-                    background: filter-touch.has-hover ? #ffffff10 : transparent;
+                    background: filter-touch.has-hover ? Theme.border-highlight : transparent;
                     border-radius: Theme.radius-md;
                     border-width: 1px;
                     border-color: Theme.border-color;
@@ -367,7 +367,7 @@ export component TimelinePanel inherits Rectangle {
 
             // ── Timeline body ──
             Rectangle {
-                background: #00000020;
+                background: Theme.background-primary;
                 border-radius: Theme.radius-md;
                 border-width: 1px;
                 border-color: Theme.border-color;
@@ -413,7 +413,7 @@ export component TimelinePanel inherits Rectangle {
                         y: i * 22px;
                         width: parent.width;
                         height: 1px;
-                        background: #ffffff10;
+                        background: Theme.border-highlight;
                     }
 
                     // Markers.
@@ -439,7 +439,7 @@ export component TimelinePanel inherits Rectangle {
                         y: parent.height - 20px;
                         width: parent.width;
                         height: 20px;
-                        background: #00000020;
+                        background: Theme.background-primary;
                         Text {
                             x: 4px;
                             text: root.time-range-label;

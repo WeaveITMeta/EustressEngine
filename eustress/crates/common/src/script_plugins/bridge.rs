@@ -58,6 +58,16 @@ impl std::fmt::Debug for CallbackHandle {
             CallbackHandle::Lua(_) => f.write_str("CallbackHandle::Lua(..)"),
             #[cfg(feature = "realism-scripting")]
             CallbackHandle::Rune(_) => f.write_str("CallbackHandle::Rune(..)"),
+            // With BOTH features off, `CallbackHandle` has zero constructible
+            // variants — no value of this type can exist, so this arm is
+            // unreachable in practice. It exists only because the
+            // exhaustiveness checker treats a reference as always
+            // potentially inhabited (rustc E0004), even when its pointee
+            // type is not.
+            #[cfg(not(any(feature = "luau", feature = "realism-scripting")))]
+            _ => unreachable!(
+                "CallbackHandle has no variants without the `luau` or `realism-scripting` feature"
+            ),
         }
     }
 }

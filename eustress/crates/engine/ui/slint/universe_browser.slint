@@ -148,7 +148,7 @@ export component UniverseBrowser inherits Rectangle {
 
                                 Text {
                                     text: space.name;
-                                    color: space.is-active ? #ffffff : Theme.text-primary;
+                                    color: space.is-active ? #ffffff : Theme.text-primary;  // theme-exempt: white brightens active-row text; no white-text token exists
                                     font-size: 11px;
                                     vertical-alignment: center;
                                     overflow: elide;

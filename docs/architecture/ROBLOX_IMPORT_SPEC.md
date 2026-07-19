@@ -479,18 +479,63 @@ with three binary properties of interest:
 
 ### 6.2 SmoothGrid encoding (what the BinaryString contains)
 
-The `SmoothGrid` payload is documented in `rbx-binary`'s source and in the
-rojo-rbx ecosystem repos. The on-disk layout:
+No dependency decodes `SmoothGrid`: `rbx_dom_weak` / `rbx_binary` carry it
+as an opaque `BinaryString`, and every terrain fixture they ship
+(`baseplate-566`, `two-terrainregions`) holds the EMPTY value `AQU=` →
+`[0x01, 0x05]`, so the ecosystem offers no non-empty sample to validate
+against. The layout below is therefore assembled from two sources: the
+**cell encoding, 32³ chunk size, and hash-map storage model** are documented
+by Roblox engineer Arseny Kapoulkine
+([zeux.io](https://zeux.io/2017/03/27/voxel-terrain-storage/)); the **chunk
+record framing** is derived empirically from real place files (Mountain
+Ascension, 11.8 MB; ServerManagement, 44 KB).
 
 ```
-SmoothGrid := Header || ChunkRecord*
-Header     := u8 version (always 1)
-ChunkRecord := i32 cx, i32 cy, i32 cz  // chunk grid coords (1 chunk = 32×32×32 cells)
-            || u8[] zlib-compressed-payload
-Payload    := per-cell records (32^3 cells = 32768 cells)
-PerCell    := u8 material_id     // 0..N from the Material enum, 0 = Air
-            || u8 occupancy_q    // 0..255, quantised occupancy fraction
+SmoothGrid := u8 version (always 1)
+           || u8 grid_kind (always 0x05; structural — empty terrain is
+           ||               exactly [0x01, 0x05] with zero chunks)
+           || ChunkRecord*
+
+ChunkRecord := [u8; 9]  unidentified (three identical 3-byte groups)
+            || i8 dx || i8 dy || i8 dz   // chunk coord RELATIVE to the
+            ||                           // previous chunk; first is from 0
+            || Cell*  // exactly 32^3 cells
+
+Cell RLE:
+  lead byte: bits 0..=5  material id (0 = Air)
+             bit  6      occupancy-present
+             bit  7      run-length-present
+  if occupancy-present: u8 occupancy_q   // quantised fraction
+  if run-length-present: u8 run_minus_1  // run repeats run_minus_1 + 1
 ```
+
+Evidence for the framing:
+
+- **12 is the only header length under which every chunk's RLE stream lands
+  on exactly 32768 cells.** Lengths 0 and 6 fail on the very first chunk.
+  ServerManagement decodes 33/33 chunks this way, consuming to EOF with zero
+  slack. (Note the trap: "fraction of buffer consumed" is *not* evidence —
+  the RLE is greedy and self-terminating, so it consumes 100% under any wrong
+  header size. Exact-landing is the metric that discriminates.)
+- **The trailing 3 bytes are a signed delta.** Accumulated, they yield chunk
+  coordinates that are 100% unique and emerge in lexicographic order — a
+  sparse chunk list sorted by key, which is what serialising the documented
+  hash map looks like. Because a raster run along +Z is then a repeated
+  `00 00 01`, the field reads as a constant to anyone scanning for an
+  absolute coordinate, which is why one was never found.
+- The cell layout is independently corroborated: decoding Mountain
+  Ascension's stream puts **98.7% of cells in materials 0–21** — exactly
+  Roblox's palette — and runs commonly tile 32-cell columns
+  (`80 08 88 16` = 9 air + 23 rock = 32).
+
+**Known gap — material `0x3f`.** Roblox defines 23 terrain materials, so ids
+23..=63 are not materials. Dense grids emit `0x3f` records mid-chunk
+(typically `ff c8 XX`); counting them as cells overruns the chunk, and their
+true meaning is unresolved. Grids containing them stop decoding at the first
+such chunk, log a decode error naming `0x3f`, and preserve the raw payload to
+`Workspace/Terrain/smooth_grid.raw` so a future decoder can be re-run without
+re-importing. See the `project_terrain_smoothgrid_research` note for the full
+record of what is proven and disproven, so attempts aren't repeated.
 
 The 32^3 = 32,768 cells per chunk are stored in **YXZ order** (Y outer, X
 middle, Z inner) per Roblox's convention. We respect that order on read so
@@ -501,13 +546,12 @@ world-voxel-space is `(cx*32, cy*32, cz*32)`, i.e. multiply by 32 to get
 voxel indices, by `32*4 = 128` studs to get the chunk's world origin in
 studs (and equivalently in meters for Eustress).
 
-**Implementation reference** for the decoder: rojo-rbx's `rbx-binary` parses
-SmoothGrid in `src/serializer/state.rs::serialize_terrain` (writer side) and
-`src/deserializer/state.rs::deserialize_terrain` (reader side). The
-`rbx_dom_weak` `Variant::MaterialColors` decoder + the public `SmoothGrid`
-binary blob give us both halves. Our decoder uses `flate2` for zlib
-(already in workspace via Bevy's asset loaders) and parses the per-cell
-records directly.
+**No implementation to port.** rojo-rbx's `rbx-binary` has no terrain codec —
+it moves `SmoothGrid` through as an opaque `BinaryString`.
+`rbx_dom_weak` gives us the `MaterialColors` half (a real typed `Variant`);
+the voxel half must be decoded by us, from the layout above. There is no
+zlib anywhere in the payload: the cell stream is byte-level RLE, read
+directly.
 
 ### 6.3 Material enum mapping (Roblox → Eustress)
 
@@ -630,9 +674,19 @@ existing procedural-noise generator, we:
 2. The chunk-spawn system reads the source on each tick; on `Imported`,
    it loads `chunk_<cx>_<cy>_<cz>.bin` from disk on the worker pool and
    builds the mesh from the cell records.
-3. The TOML field `[terrain] source = "imported"` on
-   `Workspace/Terrain/_instance.toml` flips the resource. The importer
-   sets this field as the last step of `terrain::import_terrain`.
+3. The TOML field `[terrain] source` on `Workspace/Terrain/_instance.toml`
+   flips the resource. The importer sets it as the last step of
+   `terrain::import_terrain`, to exactly one of:
+
+   | `source`     | Meaning                                                                 |
+   | ------------ | ----------------------------------------------------------------------- |
+   | `"imported"` | The grid decoded clean to the end. The voxels are the Roblox voxels.     |
+   | `"partial"`  | The decode desynced (§6.2 `0x3f`) and stopped; what is on disk is a **fragment**, not the whole grid. Raw payload kept at `smooth_grid.raw`. |
+   | `"none"`     | No voxels — either genuinely empty terrain, or a decode that recovered nothing. The accompanying `terrain_decode_errors` entry tells them apart. |
+
+   `"imported"` is reserved for a complete decode. Never label a fragment
+   `"imported"`: a place carrying 48 of ~3450 chunks would otherwise read as a
+   faithful import, which is the one failure mode worse than importing nothing.
 
 This means the importer doesn't have to spawn Bevy entities directly — it
 writes files, the watcher + chunk-spawn system pick them up, and meshing
@@ -643,7 +697,9 @@ unvisited chunks.**
 
 | Failure                                       | Behaviour                                                                                                     |
 | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `SmoothGrid` zlib decompression fails         | Log to `ImportReport.terrain_decode_errors`, skip that chunk; continue with the rest.                         |
+| `SmoothGrid` cell-RLE decode fails            | Log to `ImportReport.terrain_decode_errors`, skip that chunk; continue with the rest.                         |
+| `SmoothGrid` hits the unresolved `0x3f` escape (§6.2) | Stop at that chunk and keep what decoded; log a decode error naming `0x3f` so it is distinguishable from a real bug. |
+| `SmoothGrid` decodes to 0 chunks              | Log a decode error naming the byte length, and persist the raw payload to `Workspace/Terrain/smooth_grid.raw` so a future decoder can re-run without re-importing. Never write `source = "none"` silently — that makes total failure look like "this place has no terrain". |
 | Unknown material id (newer Roblox release)    | Map to `Rock` (closest safe default), log to `ImportReport.terrain_material_approximations`.                  |
 | Cell count != 32768 per chunk                 | Hard error → abort import. This is a format violation; better to fail loud than write corrupt terrain.        |
 | `MaterialColors` length != expected entries   | Pad with default colors, log warning.                                                                         |
@@ -1283,7 +1339,7 @@ Bottlenecks expected:
   end, plus a direct-worldb-write option that skips the watcher round-trip.
 - CFrame → Quat trig (inlined ~50 ns/instance — negligible).
 - blake3 (~200 ns/instance — negligible).
-- Terrain SmoothGrid zlib decompression dominates terrain import; it's
+- Terrain SmoothGrid cell-RLE decode dominates terrain import; it's
   per-chunk parallelisable.
 - CSG `.glb` writes are the floor for CSG; ~500 KB/mesh average, parallel.
 

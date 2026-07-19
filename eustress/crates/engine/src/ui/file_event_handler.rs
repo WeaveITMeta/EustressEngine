@@ -1071,6 +1071,12 @@ where
 /// imported file lives at `<Universe>/assets/<kind>/<name>.<ext>` and
 /// the instance.toml's `[asset].path` field holds that universe-relative
 /// path so saved scenes stay portable across machines.
+/// Import-button media path: COPY the picked file into the Universe asset
+/// tree, then STAGE it as a `PendingMediaImport` so the radial chooser can
+/// ask which class to become. Materialisation happens later in
+/// [`do_materialize_media`] (GUI / 3D quad) or the surface-placement tool
+/// (Decal / Texture) once the user picks a wedge. Copy-here-then-choose
+/// keeps the file on disk regardless of which class (or none) is chosen.
 fn do_import_asset(world: &mut World, source: PathBuf) {
     let Some(ext) = source
         .extension()
@@ -1081,13 +1087,9 @@ fn do_import_asset(world: &mut World, source: PathBuf) {
         return;
     };
 
-    let kind = match ext.as_str() {
-        "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "tga" => AssetKind::Image,
-        "mp4" | "webm" | "mov" | "mkv"                          => AssetKind::Video,
-        other => {
-            notify_err(world, format!("Unsupported asset extension: .{} (image/video only)", other));
-            return;
-        }
+    let Some(kind) = AssetKind::from_ext(ext.as_str()) else {
+        notify_err(world, format!("Unsupported asset extension: .{} (image/video only)", ext));
+        return;
     };
 
     let space_root = match world.get_resource::<crate::space::SpaceRoot>() {
@@ -1098,15 +1100,13 @@ fn do_import_asset(world: &mut World, source: PathBuf) {
         }
     };
     // Universe root is the Space root's grandparent: `<Universe>/Spaces/<SpaceN>`.
-    // Falls back to the Space root itself if the layout is unusual so
-    // imports don't silently land outside the project tree.
     let universe_root = space_root
         .ancestors()
         .nth(2)
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| space_root.clone());
 
-    // 1. Copy the source file into <Universe>/assets/<kind>/.
+    // Copy the source file into <Universe>/assets/<kind>/.
     let assets_dir = universe_root.join("assets").join(kind.assets_subdir());
     if let Err(e) = std::fs::create_dir_all(&assets_dir) {
         notify_err(world, format!("Could not create assets dir {:?}: {}", assets_dir, e));
@@ -1130,20 +1130,32 @@ fn do_import_asset(world: &mut World, source: PathBuf) {
         dest.file_name().and_then(|n| n.to_str()).unwrap_or(""),
     );
 
-    // 2. Pick an entity-folder name from the file stem.
-    let stem = dest
-        .file_stem()
-        .and_then(|n| n.to_str())
-        .unwrap_or("Imported")
-        .to_string();
-    let entity_name = sanitize_entity_name(&stem);
+    // Stage it — the radial chooser (sync_radial_media_menu_to_slint) picks
+    // this up next frame and asks the user which class to apply it as.
+    if let Some(mut pending) = world.get_resource_mut::<PendingMediaImport>() {
+        pending.stage(universe_rel_asset.clone(), kind);
+    }
+    info!(
+        "📥 Staged {} import '{}' ({}) — awaiting class choice",
+        kind.label(), file_name, universe_rel_asset,
+    );
+}
 
-    // 3. Route through the canonical pipeline: copy the Image/Video
-    //    class template from common, patch `[asset].path` with the
-    //    Universe-relative path we just wrote. StarterGui is created
-    //    on-demand because it's not part of the default scaffold for
-    //    older Spaces — the import would otherwise fail on day-one
-    //    Universes that predate the service.
+/// Materialise a staged media asset as a GUI class (ImageLabel /
+/// ImageButton / VideoFrame under StarterGui) or a 3D quad (Image / Video).
+/// Decal / Texture are NOT handled here — they route through the
+/// surface-placement tool. `rel_path` is the Universe-relative asset path
+/// already copied by [`do_import_asset`] (or an existing Assets-panel item).
+pub fn do_materialize_media(world: &mut World, rel_path: String, class_name: String) {
+    let space_root = match world.get_resource::<crate::space::SpaceRoot>() {
+        Some(sr) => sr.0.clone(),
+        None => {
+            notify_err(world, "Cannot place media: no Space loaded".to_string());
+            return;
+        }
+    };
+
+    // StarterGui is created on-demand for older Spaces that predate the service.
     let starter_gui = space_root.join("StarterGui");
     if !starter_gui.exists() {
         if let Err(e) = std::fs::create_dir_all(&starter_gui) {
@@ -1156,15 +1168,26 @@ fn do_import_asset(world: &mut World, source: PathBuf) {
         );
     }
 
-    let class_name = kind.class_name();
+    let stem = std::path::Path::new(&rel_path)
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Imported")
+        .to_string();
+    let entity_name = sanitize_entity_name(&stem);
+
+    // GUI classes store their path in a class-specific field (`[image].image`
+    // / `[video].video`), NOT the generic `[asset].path` that Image/Video 3D
+    // quads use — so only pass the `asset_path` override for the latter, and
+    // post-patch the class-specific field for the former.
+    let class_field = class_asset_field(&class_name);
     let overrides = eustress_common::instance_create::InstanceOverrides {
         display_name: Some(entity_name.clone()),
-        asset_path: Some(universe_rel_asset.clone()),
+        asset_path: if class_field.is_none() { Some(rel_path.clone()) } else { None },
         ..Default::default()
     };
     let created = match eustress_common::instance_create::create_instance(
         &starter_gui,
-        class_name,
+        &class_name,
         Some(&entity_name),
         overrides,
     ) {
@@ -1175,16 +1198,46 @@ fn do_import_asset(world: &mut World, source: PathBuf) {
         }
     };
 
+    // Post-patch the class-specific asset field (ImageLabel/ImageButton →
+    // [image].image, VideoFrame → [video].video).
+    if let Some((section, key)) = class_field {
+        if let Err(e) = patch_toml_string_field(&created.toml_path, section, key, &rel_path) {
+            warn!("media import: could not patch {}.{} on {:?}: {}", section, key, created.toml_path, e);
+        }
+    }
+
     if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
-        n.success(format!(
-            "{} imported '{}' as {}",
-            kind.icon(), file_name, created.folder_name,
-        ));
+        n.success(format!("Placed '{}' as {}", entity_name, created.folder_name));
     }
     info!(
-        "📥 Imported {:?} as {} class entity '{}' (asset: {})",
-        source, kind.label(), created.folder_name, universe_rel_asset,
+        "📥 Materialised media '{}' as {} entity '{}'",
+        rel_path, class_name, created.folder_name,
     );
+}
+
+/// Set `[section].key = "value"` in a `_instance.toml`, preserving all
+/// other content. Creates the section if absent.
+pub fn patch_toml_string_field(
+    toml_path: &Path,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> std::io::Result<()> {
+    let raw = std::fs::read_to_string(toml_path)?;
+    let mut doc: toml::Value = toml::from_str(&raw)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    let root = doc.as_table_mut().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "TOML root is not a table")
+    })?;
+    let sec = root
+        .entry(section.to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    if let Some(t) = sec.as_table_mut() {
+        t.insert(key.to_string(), toml::Value::String(value.to_string()));
+    }
+    let serialized = toml::to_string_pretty(&doc)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    std::fs::write(toml_path, serialized)
 }
 
 // ============================================================================
@@ -1787,8 +1840,8 @@ fn count_instance_markers(dir: &Path, depth: usize) -> usize {
     count
 }
 
-#[derive(Copy, Clone, Debug)]
-enum AssetKind { Image, Video }
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AssetKind { Image, Video }
 
 impl AssetKind {
     fn assets_subdir(&self) -> &'static str {
@@ -1802,6 +1855,56 @@ impl AssetKind {
     }
     fn class_name(&self) -> &'static str {
         match self { Self::Image => "Image", Self::Video => "Video" }
+    }
+    /// Classify a lowercase extension as importable media, or `None`.
+    pub fn from_ext(ext: &str) -> Option<Self> {
+        match ext {
+            "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "tga" => Some(Self::Image),
+            "mp4" | "webm" | "mov" | "mkv"                          => Some(Self::Video),
+            _ => None,
+        }
+    }
+    pub fn is_video(&self) -> bool { matches!(self, Self::Video) }
+}
+
+// ============================================================================
+// 9a-0. Radial media-import: staged pending + per-class routing
+// ============================================================================
+
+/// Set after a media file is copied into the Universe asset tree (via the
+/// Import button) OR when a media asset is double-clicked in the Assets
+/// panel. Holds the universe-relative asset path + its kind until the user
+/// picks a target class from the radial chooser (or cancels). `request_show`
+/// flips true when a fresh pick needs the radial pushed to Slint; the sync
+/// system clears it after showing.
+#[derive(Resource, Default)]
+pub struct PendingMediaImport {
+    pub rel_path: Option<String>,
+    pub is_video: bool,
+    pub request_show: bool,
+}
+
+impl PendingMediaImport {
+    pub fn stage(&mut self, rel_path: String, kind: AssetKind) {
+        self.rel_path = Some(rel_path);
+        self.is_video = kind.is_video();
+        self.request_show = true;
+    }
+    pub fn clear(&mut self) {
+        self.rel_path = None;
+        self.request_show = false;
+    }
+}
+
+/// Map a radial-chosen class name to the TOML section + key that carries
+/// its image/video asset path. `None` for classes that use the generic
+/// `[asset].path` (Image / Video 3D quads) or that route to the placement
+/// tool (Decal / Texture — handled separately, never materialised here).
+fn class_asset_field(class_name: &str) -> Option<(&'static str, &'static str)> {
+    match class_name {
+        "ImageLabel" | "ImageButton" => Some(("image", "image")),
+        "VideoFrame"                 => Some(("video", "video")),
+        _ => None,
     }
 }
 

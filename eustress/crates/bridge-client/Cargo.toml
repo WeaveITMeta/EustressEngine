@@ -1,0 +1,14 @@
+[package]
+name = "eustress-bridge-client"
+version = "0.1.0"
+edition = "2021"
+description = "Synchronous std-only client for the engine's TCP JSON-RPC Engine Bridge. Shared by the MCP server and the eustress CLI so both drive a live engine or eustress-headless the same way."
+authors = ["EustressEngine Contributors"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# The wire format is JSON-RPC over newline-delimited JSON. No other deps —
+# deliberately std-only (TcpStream, no tokio) so this stays a near-zero-cost
+# add for any consumer, matching the CLI's and eustress-space's minimal-deps
+# policy.
+serde_json = { workspace = true }

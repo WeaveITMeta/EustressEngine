@@ -35,7 +35,7 @@ export component RenameTagDialog inherits Rectangle {
         border-width: 1px;
         border-color: Theme.border-color;
         drop-shadow-blur: 28px;
-        drop-shadow-color: #000000a0;
+        drop-shadow-color: Theme.shadow-color;
 
         TouchArea { scroll-event(event) => { return accept; } }
 
@@ -46,7 +46,7 @@ export component RenameTagDialog inherits Rectangle {
             // Title bar
             Rectangle {
                 height: 46px;
-                background: #13131f;
+                background: Theme.dialog-titlebar-background;
                 border-radius: 8px;
                 Text {
                     width: parent.width;
@@ -63,10 +63,10 @@ export component RenameTagDialog inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     width: 28px; height: 28px;
                     border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;
+                    background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: dark-red close-button hover tint, no palette token
                     Text {
                         text: "×";
-                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
                         font-size: 17px;
                         horizontal-alignment: center;
                         vertical-alignment: center;

@@ -261,11 +261,11 @@ This makes a space a pure function: `(space, inputs, ticks) → recording.json +
 | Phase | Work | Effort | Status |
 |---|---|---|---|
 | **P0** | Untangle lib/bin dual-compilation, one `TypeId` universe, promote `engine_bridge`/`history_stream`/`light_sync`/`photoreal`/`soul_script_migration` to the lib | L | **`done`** — commit `f10298b3`, 2026-07-02 |
-| **P1** | Split `PlayModePlugin` → `PlayModeCorePlugin` + `PlayModeUiPlugin` | M | `new` |
-| **P2** | `app_core::add_core_sim_plugins` / `app_editor::add_editor_plugins` — group `main.rs`'s ~100 `add_plugins` calls into a composition function the headless bin can share | S | `new` |
-| **P3** | `eustress-headless` bin (`MinimalPlugins` + core + autoplay + `TickLimitPlugin`) | S | `new` |
-| **P4** | Lift `bridge_client` to shared crate; un-stub CLI; add `sim`/`ecs`/`raycast`/`run` verbs | M | `extend` |
-| **P5** | `eustress run` batch runner + recording dump + breakpoint exit code | S | `extend` |
+| **P1** | Split `PlayModePlugin` → `PlayModeCorePlugin` + `PlayModeUiPlugin` (message-driven core; Slint-flag translator in the UI tier) | M | **`done`** — landed in `990a034b` |
+| **P2** | `app_core::add_core_sim_plugins` — the shared headless-safe composition tier (`engine/src/app_core.rs`); editor `main.rs` composes base → core → editor | S | **`done`** — 2026-07-13 |
+| **P3** | `eustress-headless` bin (`MinimalPlugins` + `ScheduleRunner` + core + autoplay/tick-limit driver) | S | **`done`** — 2026-07-13; gate passed: ARC space, 120 ticks, recording exported, exit 0, no window, bridge self-test OK |
+| **P4** | Lift `bridge_client` to shared crate; un-stub CLI; add `sim`/`ecs`/`raycast`/`run` verbs | M | **`done`** — 2026-07-13; verified live against `eustress-headless` (ping/ecs-query/entity create+delete/sim-step/oplog round-tripped) |
+| **P5** | `eustress run` batch runner + recording dump + breakpoint exit code | S | **`done`** — landed alongside P4 (`eustress run <space>` wraps `eustress-headless`) |
 | **P6** | `--render gpu` tier (windowless `DefaultPlugins`) for `ai_camera` capture | M | `new` |
 | **P7** | Retire dead `--server` flag; fold `eustress-server` onto `add_core_sim_plugins` (one sim path) or document it as multiplayer-only | S | `extend` |
 

@@ -441,7 +441,7 @@ export component ScriptEditor inherits Rectangle {
                     width: 150px;
                     height: 26px;
                     border-radius: 4px;
-                    background: #1a2e1a;
+                    background: #1a2e1a;  // theme-exempt: decorative green action-theme, no green-button token family
 
                     HorizontalLayout {
                         padding: 2px;
@@ -455,7 +455,7 @@ export component ScriptEditor inherits Rectangle {
                         Rectangle {
                             horizontal-stretch: 1;
                             border-radius: 3px;
-                            background: root.is-summary ? #2e7d32 : transparent;
+                            background: root.is-summary ? #2e7d32 : transparent;  // theme-exempt: decorative green action-theme, no green-button token family
 
                             summary-ta := TouchArea {
                                 mouse-cursor: pointer;
@@ -478,12 +478,12 @@ export component ScriptEditor inherits Rectangle {
                                     source: @image-url("../../assets/icons/ui/summary.svg");
                                     image-fit: contain;
                                     vertical-alignment: center;
-                                    colorize: root.is-summary ? white : #66bb6a;
+                                    colorize: root.is-summary ? white : #66bb6a;  // theme-exempt: decorative green action-theme, no green-button token family
                                 }
                                 Text {
                                     text: "Summary";
                                     font-size: 11px;
-                                    color: root.is-summary ? white : #66bb6a;
+                                    color: root.is-summary ? white : #66bb6a;  // theme-exempt: decorative green action-theme, no green-button token family
                                     vertical-alignment: center;
                                     horizontal-stretch: 0;
                                 }
@@ -495,7 +495,7 @@ export component ScriptEditor inherits Rectangle {
                         Rectangle {
                             horizontal-stretch: 1;
                             border-radius: 3px;
-                            background: !root.is-summary && root.is-soul-script ? #2e7d32 : transparent;
+                            background: !root.is-summary && root.is-soul-script ? #2e7d32 : transparent;  // theme-exempt: decorative green action-theme, no green-button token family
 
                             code-ta := TouchArea {
                                 mouse-cursor: pointer;
@@ -514,12 +514,12 @@ export component ScriptEditor inherits Rectangle {
                                     source: @image-url("../../assets/icons/script.svg");
                                     image-fit: contain;
                                     vertical-alignment: center;
-                                    colorize: !root.is-summary && root.is-soul-script ? white : #66bb6a;
+                                    colorize: !root.is-summary && root.is-soul-script ? white : #66bb6a;  // theme-exempt: decorative green action-theme, no green-button token family
                                 }
                                 Text {
                                     text: "Code";
                                     font-size: 11px;
-                                    color: !root.is-summary && root.is-soul-script ? white : #66bb6a;
+                                    color: !root.is-summary && root.is-soul-script ? white : #66bb6a;  // theme-exempt: decorative green action-theme, no green-button token family
                                     vertical-alignment: center;
                                     horizontal-stretch: 0;
                                 }
@@ -536,7 +536,7 @@ export component ScriptEditor inherits Rectangle {
                 if root.is-summary && root.is-soul-script: Rectangle {
                     width: 70px;
                     height: 26px;
-                    background: build-ta.has-hover ? #388e3c : #2e7d32;
+                    background: build-ta.has-hover ? #388e3c : #2e7d32;  // theme-exempt: decorative green action-theme, no green-button token family
                     border-radius: 4px;
 
                     build-ta := TouchArea {
@@ -568,10 +568,10 @@ export component ScriptEditor inherits Rectangle {
                 if !root.is-summary && root.is-soul-script: Rectangle {
                     width: 105px;
                     height: 26px;
-                    background: summarize-ta.has-hover ? #1a4a2a : #152a1e;
+                    background: summarize-ta.has-hover ? #1a4a2a : #152a1e;  // theme-exempt: decorative green action-theme, no green-button token family
                     border-radius: 4px;
                     border-width: 1px;
-                    border-color: summarize-ta.has-hover ? #4caf50 : #2a5a32;
+                    border-color: summarize-ta.has-hover ? #4caf50 : #2a5a32;  // theme-exempt: decorative green action-theme, no green-button token family
 
                     summarize-ta := TouchArea {
                         mouse-cursor: pointer;
@@ -586,11 +586,11 @@ export component ScriptEditor inherits Rectangle {
                             source: @image-url("../../assets/icons/ui/summary.svg");
                             image-fit: contain;
                             vertical-alignment: center;
-                            colorize: summarize-ta.has-hover ? #a5d6a7 : #66bb6a;
+                            colorize: summarize-ta.has-hover ? #a5d6a7 : #66bb6a;  // theme-exempt: decorative green action-theme, no green-button token family
                         }
                         Text {
                             text: "Summarize";
-                            color: summarize-ta.has-hover ? #a5d6a7 : #66bb6a;
+                            color: summarize-ta.has-hover ? #a5d6a7 : #66bb6a;  // theme-exempt: decorative green action-theme, no green-button token family
                             font-size: 11px;
                             font-weight: 600;
                             vertical-alignment: center;
@@ -668,7 +668,7 @@ export component ScriptEditor inherits Rectangle {
         // Summary mode — full markdown editor (editable, monospace, line numbers)
         if root.tabs.length > 0 && root.is-summary: Rectangle {
             vertical-stretch: 1;
-            background: #1a1a1a;
+            background: Theme.background-tertiary;
 
             HorizontalLayout {
                 spacing: 0px;
@@ -680,7 +680,7 @@ export component ScriptEditor inherits Rectangle {
                 // can desync on fast scroll in Slint's reactive system).
                 Rectangle {
                     width: 52px;
-                    background: #141414;
+                    background: Theme.background-secondary;
                     clip: true;
 
                     Flickable {
@@ -706,7 +706,7 @@ export component ScriptEditor inherits Rectangle {
                 }
 
                 // Separator
-                Rectangle { width: 1px; background: #2a2a2a; }
+                Rectangle { width: 1px; background: Theme.border-color; }
 
                 // Editable markdown text area with per-token highlighting.
                 //
@@ -807,7 +807,7 @@ export component ScriptEditor inherits Rectangle {
                 // Separator
                 Rectangle {
                     width: 1px;
-                    background: #2a2a2a;
+                    background: Theme.border-color;
                 }
 
                 // Code editor. Syntax highlighting is rendered INSIDE the
@@ -839,10 +839,10 @@ export component ScriptEditor inherits Rectangle {
                             y: 16px;
                             width: parent.width;
                             height: 2px;
-                            background: diag.severity == "error"   ? #e53935
-                                      : diag.severity == "warning" ? #fb8c00
-                                      : diag.severity == "info"    ? #1e88e5
-                                      :                               #757575;
+                            background: diag.severity == "error"   ? Theme.output-error
+                                      : diag.severity == "warning" ? Theme.output-warning
+                                      : diag.severity == "info"    ? Theme.output-info
+                                      :                               Theme.output-debug;
                         }
 
                         diag-hover := TouchArea {
@@ -857,15 +857,15 @@ export component ScriptEditor inherits Rectangle {
                             y: -6px - tooltip-text.preferred-height;
                             width: min(420px, max(160px, tooltip-text.preferred-width + 16px));
                             height: tooltip-text.preferred-height + 10px;
-                            background: #1e1f2e;
+                            background: Theme.dialog-background;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: diag.severity == "error"   ? #e53935
-                                        : diag.severity == "warning" ? #fb8c00
-                                        : diag.severity == "info"    ? #1e88e5
-                                        :                               #555;
+                            border-color: diag.severity == "error"   ? Theme.output-error
+                                        : diag.severity == "warning" ? Theme.output-warning
+                                        : diag.severity == "info"    ? Theme.output-info
+                                        :                               Theme.output-debug;
                             drop-shadow-blur: 12px;
-                            drop-shadow-color: #00000088;
+                            drop-shadow-color: Theme.shadow-color;
                             z: 100;
 
                             tooltip-text := Text {

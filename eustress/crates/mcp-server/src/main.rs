@@ -11,7 +11,6 @@
 // infrastructure/mcp/server/. Same installer, same protocol surface, a
 // fraction of the binary size.
 
-mod bridge_client;
 mod bridge_tools;
 mod resources;
 mod shared_registry;

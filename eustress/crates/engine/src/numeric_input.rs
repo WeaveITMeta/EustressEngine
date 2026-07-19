@@ -506,6 +506,7 @@ impl Plugin for NumericInputPlugin {
             .add_message::<NumericInputCancelledEvent>()
             .add_systems(Update, (
                 refresh_property_ref_table,
+                clear_numeric_input_on_drag_end,
                 detect_numeric_input_start,
                 handle_numeric_input_keys,
             ).chain());
@@ -515,6 +516,41 @@ impl Plugin for NumericInputPlugin {
 // ============================================================================
 // Systems
 // ============================================================================
+
+/// Auto-clears the floating numeric input if its owning tool's drag
+/// ends (mouse released) without the user pressing Enter/Escape.
+///
+/// Without this, a numeric entry that activated mid-drag (typed a
+/// digit while dragging a handle) stayed active indefinitely once the
+/// drag itself was long over — `NumericInputState` only ever cleared
+/// on an explicit Enter or Escape keypress, with nothing tying it back
+/// to the drag that spawned it. The popup then kept swallowing every
+/// subsequent keystroke as buffer text (digits AND letters, since
+/// letters are accepted as unit suffixes once a digit is present) —
+/// including WASD camera movement — until the user noticed and hit
+/// Enter or Escape. Nothing is lost by clearing here instead: the
+/// owning tool's own mouse-release handler already finalizes the
+/// transform using `override_value` if one was present (same value the
+/// drag-update system was already live-previewing every frame), so by
+/// the time the drag state goes empty the numeric entry has already
+/// done its job.
+fn clear_numeric_input_on_drag_end(
+    mut numeric: ResMut<NumericInputState>,
+    move_state: Res<MoveToolState>,
+    scale_state: Res<ScaleToolState>,
+    rotate_state: Res<RotateToolState>,
+) {
+    if !numeric.active { return; }
+    let drag_still_active = match numeric.owner {
+        Some(NumericInputOwner::Move)   => !move_state.initial_positions.is_empty(),
+        Some(NumericInputOwner::Scale)  => !scale_state.initial_scales.is_empty(),
+        Some(NumericInputOwner::Rotate) => !rotate_state.initial_rotations.is_empty(),
+        None => false,
+    };
+    if !drag_still_active {
+        numeric.clear();
+    }
+}
 
 /// When a drag is active on any of the three gizmo tools AND the user
 /// types a digit / minus / dot, flip [`NumericInputState`] to active

@@ -46,7 +46,7 @@ export component WebBrowser inherits Rectangle {
                 Rectangle {
                     width: 28px;
                     height: 28px;
-                    background: back-area.has-hover && root.can-go-back ? #ffffff10 : transparent;
+                    background: back-area.has-hover && root.can-go-back ? Theme.button-hover : transparent;
                     border-radius: 4px;
                     opacity: root.can-go-back ? 1.0 : 0.35;
                     
@@ -71,7 +71,7 @@ export component WebBrowser inherits Rectangle {
                 Rectangle {
                     width: 28px;
                     height: 28px;
-                    background: fwd-area.has-hover && root.can-go-forward ? #ffffff10 : transparent;
+                    background: fwd-area.has-hover && root.can-go-forward ? Theme.button-hover : transparent;
                     border-radius: 4px;
                     opacity: root.can-go-forward ? 1.0 : 0.35;
                     
@@ -96,7 +96,7 @@ export component WebBrowser inherits Rectangle {
                 Rectangle {
                     width: 28px;
                     height: 28px;
-                    background: refresh-area.has-hover ? #ffffff10 : transparent;
+                    background: refresh-area.has-hover ? Theme.button-hover : transparent;
                     border-radius: 4px;
                     
                     refresh-area := TouchArea {
@@ -120,7 +120,7 @@ export component WebBrowser inherits Rectangle {
                 Rectangle {
                     horizontal-stretch: 1;
                     height: 28px;
-                    background: #ffffff08;
+                    background: Theme.input-background;
                     border-radius: 14px;
                     border-width: 1px;
                     border-color: url-edit.has-focus ? Theme.accent-blue : Theme.border-color;
@@ -144,7 +144,7 @@ export component WebBrowser inherits Rectangle {
                                     ? @image-url("../../assets/icons/ui/lock.svg")
                                     : @image-url("../../assets/icons/ui/globe.svg");
                                 image-fit: contain;
-                                colorize: root.secure ? #4caf50 : Theme.text-secondary;
+                                colorize: root.secure ? Theme.accent-green : Theme.text-secondary;
                             }
                         }
                         
@@ -166,7 +166,7 @@ export component WebBrowser inherits Rectangle {
                 Rectangle {
                     width: 28px;
                     height: 28px;
-                    background: menu-area.has-hover ? #ffffff10 : transparent;
+                    background: menu-area.has-hover ? Theme.button-hover : transparent;
                     border-radius: 4px;
                     
                     menu-area := TouchArea { }
@@ -200,7 +200,7 @@ export component WebBrowser inherits Rectangle {
         // ---- Page Content Area ----
         Rectangle {
             vertical-stretch: 1;
-            background: #1e1e1e;
+            background: Theme.background-tertiary;
             
             // Rendered web page image (only set when wry offscreen mode is active).
             // In native-overlay mode (WebView2 child window), page-image is always empty —

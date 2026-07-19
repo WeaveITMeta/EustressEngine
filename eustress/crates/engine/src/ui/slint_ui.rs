@@ -268,7 +268,19 @@ pub enum SlintAction {
     PublishUniverse,
     PublishSpace,
     Publish(PublishRequest),
-    
+
+    /// Radial media-import chooser: the user clicked a wedge. Payload is
+    /// the chosen class name ("Decal" / "Texture" / "ImageLabel" /
+    /// "ImageButton" / "VideoFrame" / "Video"). Routes the staged
+    /// `PendingMediaImport` to the right materialise / placement path.
+    RadialMenuChosen(String),
+    /// Radial chooser dismissed (centre hub / backdrop / Esc) — drop the
+    /// staged pending import without materialising anything.
+    RadialMenuCancelled,
+    /// Double-click on a leaf asset in the Assets panel: (id, asset-type,
+    /// universe-relative path). Image/Video open the radial chooser.
+    AssetOpenMedia(i32, String, String),
+
     // Edit operations
     Undo,
     Redo,
@@ -1513,6 +1525,7 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, drain_pending_build.after(SlintSystems::Drain))
             .init_resource::<super::file_event_handler::PendingFileActions>()
             .init_resource::<super::file_event_handler::PendingUniversePath>()
+            .init_resource::<super::file_event_handler::PendingMediaImport>()
             // UI systems
             .add_systems(Update, handle_window_close_request)
             .add_systems(Update, handle_explorer_toggle)
@@ -1520,6 +1533,9 @@ impl Plugin for SlintUiPlugin {
                 super::file_event_handler::drain_file_events,
                 super::file_event_handler::execute_file_actions,
             ).chain())
+            // Radial media-import chooser: when a media file is staged
+            // (Import pick or Assets double-click), push its wedges to Slint.
+            .add_systems(Update, sync_radial_media_menu_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, crate::auth::auth_poll_system)
             .add_systems(Startup, try_restore_auth_session);
 
@@ -1647,6 +1663,10 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_save_scene_as(move || q.push(SlintAction::SaveSceneAs));
     let q = queue.clone();
     ui.on_import_asset(move || q.push(SlintAction::ImportAsset));
+    let q = queue.clone();
+    ui.on_radial_menu_chosen(move |class_name| q.push(SlintAction::RadialMenuChosen(class_name.to_string())));
+    let q = queue.clone();
+    ui.on_radial_menu_cancelled(move || q.push(SlintAction::RadialMenuCancelled));
     let q = queue.clone();
     ui.on_import_roblox_place(move || q.push(SlintAction::ImportRobloxPlace));
     let q = queue.clone();
@@ -1945,6 +1965,10 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_asset_search(move |text| q.push(SlintAction::AssetSearch(text.to_string())));
     let q = queue.clone();
     ui.on_asset_category_changed(move |cat| q.push(SlintAction::AssetCategoryChanged(cat.to_string())));
+    let q = queue.clone();
+    ui.on_asset_open_media(move |id, asset_type, path| {
+        q.push(SlintAction::AssetOpenMedia(id, asset_type.to_string(), path.to_string()))
+    });
 
     // Network
     let q = queue.clone();
@@ -4419,36 +4443,37 @@ fn drain_slint_actions(
             SlintAction::SaveScene => { events.file_events.write(FileEvent::SaveScene); }
             SlintAction::SaveSceneAs => { events.file_events.write(FileEvent::SaveSceneAs); }
             SlintAction::ImportAsset => {
-                // Open the OS file picker for image / video / Gaussian-Splat
-                // formats. Roblox place/model import lives EXCLUSIVELY under
-                // the dedicated "Import Place" button (ImportRobloxPlace
-                // below) — it is deliberately NOT a filter option here, so it
-                // doesn't show up twice. `rfd`'s Windows dialog defaults to
-                // whichever filter is added FIRST, so "All Importable" is
-                // listed first: opening the dialog shows every supported
-                // type immediately (no hidden-by-default files), and the
-                // narrower filters are there purely to let the user narrow
-                // down if they want. Picker call is synchronous — fine here
-                // because this arm fires from the user's deliberate ribbon
-                // click, not from a hot path. If the user cancels, log and
-                // move on without writing a FileEvent.
+                // The SINGLE "Import" button — one unified pipeline for every
+                // importable type: images, videos, Gaussian-splat clouds, AND
+                // Roblox places/models. (There is deliberately no separate
+                // "Import Place" button; the picked file's extension routes it
+                // to the right importer below.) `rfd`'s Windows dialog defaults
+                // to whichever filter is added FIRST, so "All Importable" is
+                // listed first: opening the dialog shows every supported type
+                // immediately (no hidden-by-default files), and the narrower
+                // filters are there purely to let the user narrow down. Picker
+                // call is synchronous — fine here because this arm fires from
+                // the user's deliberate ribbon click, not a hot path. If the
+                // user cancels, log and move on without writing a FileEvent.
                 let picked = rfd::FileDialog::new()
                     .add_filter("All Importable", &[
                         "png", "jpg", "jpeg", "webp", "bmp", "gif", "tga",
                         "mp4", "webm", "mov", "mkv",
                         "ply",
+                        "rbxl", "rbxlx", "rbxm", "rbxmx",
                     ])
                     .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tga"])
                     .add_filter("Videos", &["mp4", "webm", "mov", "mkv"])
                     .add_filter("Gaussian Splat", super::file_dialogs::GAUSSIAN_SPLAT_IMPORT_EXTENSIONS)
-                    .set_title("Import Image / Video / Gaussian Splat")
+                    .add_filter("Roblox Place / Model", super::file_dialogs::ROBLOX_IMPORT_EXTENSIONS)
+                    .set_title("Import")
                     .pick_file();
                 match picked {
                     Some(path) => {
-                        // Defensive: if a Roblox file somehow ends up picked
-                        // here (e.g. typed directly into the path box), still
-                        // route it correctly rather than mis-importing it as
-                        // media — but it's no longer a discoverable filter.
+                        // Extension whitelist routes each type to its dedicated
+                        // importer: Roblox → the place/model materializer,
+                        // Gaussian-Splat → the radiance cloud loader, everything
+                        // else → the image/video asset path.
                         if super::file_dialogs::is_roblox_place_file(&path) {
                             events.file_events.write(FileEvent::ImportRobloxPlace(path));
                         } else if super::file_dialogs::is_gaussian_splat_file(&path) {
@@ -4459,6 +4484,59 @@ fn drain_slint_actions(
                     }
                     None => info!("📥 Import asset cancelled by user"),
                 }
+            }
+            SlintAction::AssetOpenMedia(_id, asset_type, rel_path) => {
+                // Double-click on an Assets-panel leaf. Only image/video open
+                // the radial chooser (the asset is already copied into the
+                // Universe tree, so we stage its existing rel path directly).
+                let is_video = asset_type == "video";
+                if asset_type == "image" || is_video {
+                    commands.queue(move |world: &mut World| {
+                        if let Some(mut pending) =
+                            world.get_resource_mut::<super::file_event_handler::PendingMediaImport>()
+                        {
+                            let kind = if is_video {
+                                super::file_event_handler::AssetKind::Video
+                            } else {
+                                super::file_event_handler::AssetKind::Image
+                            };
+                            pending.stage(rel_path, kind);
+                        }
+                    });
+                }
+            }
+            SlintAction::RadialMenuChosen(class_name) => {
+                // Route the staged media to the chosen class: Decal/Texture →
+                // surface-placement tool; everything else → materialise now.
+                commands.queue(move |world: &mut World| {
+                    let rel_path = world
+                        .get_resource::<super::file_event_handler::PendingMediaImport>()
+                        .and_then(|p| p.rel_path.clone());
+                    if let Some(mut pending) =
+                        world.get_resource_mut::<super::file_event_handler::PendingMediaImport>()
+                    {
+                        pending.clear();
+                    }
+                    let Some(rel_path) = rel_path else {
+                        warn!("radial choice '{}' but no pending media staged", class_name);
+                        return;
+                    };
+                    if class_name == "Decal" || class_name == "Texture" {
+                        let is_texture = class_name == "Texture";
+                        crate::decal_place_tool::begin_surface_placement(world, rel_path, is_texture);
+                    } else {
+                        super::file_event_handler::do_materialize_media(world, rel_path, class_name);
+                    }
+                });
+            }
+            SlintAction::RadialMenuCancelled => {
+                commands.queue(move |world: &mut World| {
+                    if let Some(mut pending) =
+                        world.get_resource_mut::<super::file_event_handler::PendingMediaImport>()
+                    {
+                        pending.clear();
+                    }
+                });
             }
             SlintAction::ImportRobloxPlace => {
                 // Dedicated Roblox place / model picker. Same synchronous
@@ -14118,11 +14196,11 @@ fn resolve_custom_tab_color(color: &Option<String>, td: &ThemeData) -> slint::Co
 /// filtered to the active mode's built-in `tabs`, PLUS one row per custom
 /// tab the mode declares (Business's "Product"/"Manufacturing", etc.) — same
 /// `RibbonTabData` shape for both, so the tab strip needs no changes to show
-/// either kind. The "home" row's label becomes the mode's own name ("Keep
-/// Home consistent... based on the mode title"). `mode: None` (no
-/// ModeRegistry mounted) falls back to all 9 built-ins, unrenamed. Shared by
-/// `apply_effective_theme` (keeps colors fresh on every theme/mode recompute)
-/// and `sync_active_mode_to_slint` (keeps membership fresh on every
+/// either kind. The "home" row always reads "Home" — the active mode's name
+/// is shown on the Mode menu-bar button instead (see `active-mode-name`).
+/// `mode: None` (no ModeRegistry mounted) falls back to all 9 built-ins.
+/// Shared by `apply_effective_theme` (keeps colors fresh on every theme/mode
+/// recompute) and `sync_active_mode_to_slint` (keeps membership fresh on every
 /// mode-list change) so the two never duplicate this logic.
 fn push_ribbon_tabs(ctx: &SlintUiState, mode: Option<&crate::studio_modes::ModeManifest>, td: &ThemeData) {
     let mut rows: Vec<RibbonTabData> = match mode {
@@ -14131,7 +14209,7 @@ fn push_ribbon_tabs(ctx: &SlintUiState, mode: Option<&crate::studio_modes::ModeM
             .filter(|(id, _)| m.tabs.iter().any(|t| t == id))
             .map(|(id, name)| RibbonTabData {
                 id: (*id).into(),
-                name: if *id == "home" { m.name.clone().into() } else { (*name).into() },
+                name: (*name).into(),
                 color: ribbon_tab_color(id, td),
             })
             .collect(),
@@ -14372,6 +14450,10 @@ fn sync_active_mode_to_slint(
     let active = registry.active();
     let icon_id = active.map(|m| m.icon.clone()).unwrap_or_else(|| "gear".to_string());
     ctx.window.set_active_mode_icon_id(icon_id.into());
+    // The Mode menu-bar button shows the active mode's name (falls back to
+    // "Mode" only if no mode resolves).
+    let mode_name = active.map(|m| m.name.clone()).unwrap_or_else(|| "Mode".to_string());
+    ctx.window.set_active_mode_name(mode_name.into());
 
     let td = ctx.window.global::<Theme>().get_data();
     push_ribbon_tabs(ctx, active, &td);
@@ -21054,6 +21136,61 @@ fn extract_entity_chip(
     };
     let icon = load_class_icon(&class_enum);
     (class_str.to_string(), name, icon)
+}
+
+/// Push the staged media-import radial chooser to Slint. Reads
+/// `PendingMediaImport`; when a fresh pick sets `request_show`, builds the
+/// per-kind wedge list (Image → Decal / Texture / ImageLabel / ImageButton;
+/// Video → VideoFrame / Video 3D quad), centres it on the window, and shows
+/// it. Runs after Drain so a same-frame stage is reflected immediately.
+fn sync_radial_media_menu_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    mut pending: ResMut<super::file_event_handler::PendingMediaImport>,
+) {
+    if !pending.request_show { return; }
+    let Some(slint_context) = slint_context else { return };
+    let ui = &slint_context.window;
+
+    use eustress_common::classes::ClassName;
+    // (ClassName for icon, machine class-name, human label). Image list is
+    // the user's four; Video is the native VideoFrame plus the 3D quad.
+    let entries: Vec<(ClassName, &str, &str)> = if pending.is_video {
+        vec![
+            (ClassName::VideoFrame, "VideoFrame", "Video Frame"),
+            (ClassName::Video,      "Video",      "3D Video"),
+        ]
+    } else {
+        vec![
+            (ClassName::Decal,       "Decal",       "Decal"),
+            (ClassName::Texture,     "Texture",     "Texture"),
+            (ClassName::ImageLabel,  "ImageLabel",  "Image Label"),
+            (ClassName::ImageButton, "ImageButton", "Image Button"),
+        ]
+    };
+
+    let opts: Vec<RadialOption> = entries
+        .iter()
+        .map(|(cn, class_name, label)| RadialOption {
+            class_name: (*class_name).into(),
+            label: (*label).into(),
+            icon: load_class_icon(cn),
+        })
+        .collect();
+
+    ui.set_radial_menu_options(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(opts))));
+    ui.set_radial_menu_title(
+        if pending.is_video { "Apply Video As" } else { "Apply Image As" }.into(),
+    );
+
+    // Centre on the window in logical pixels.
+    let win = ui.window();
+    let scale = win.scale_factor().max(0.01);
+    let size = win.size();
+    ui.set_radial_menu_center_x((size.width as f32 / scale) * 0.5);
+    ui.set_radial_menu_center_y((size.height as f32 / scale) * 0.5);
+
+    ui.set_radial_menu_visible(true);
+    pending.request_show = false;
 }
 
 /// Load an SVG icon as a slint::Image from the assets/icons directory

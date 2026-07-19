@@ -1,0 +1,40 @@
+# Eustress Mode — "Health".
+# Clinical / wellness data work: patient records and live vitals monitoring.
+
+[mode]
+id = "health"
+name = "Health"
+icon = "health"
+version = "1.0"
+author = "Eustress"
+
+[ribbon]
+tabs = ["home", "data", "test"]
+
+[layout]
+preset = "Wide Panels"
+
+[theme]
+accent = "#3ce0b0"
+
+[[tabs]]
+id = "patients"
+name = "Patients"
+color = "#3ce0b0"
+
+  [[tabs.sections]]
+  name = "Records"
+  tools = []
+
+  [[tabs.sections]]
+  name = "Intake"
+  tools = ["data:import"]
+
+[[tabs]]
+id = "vitals"
+name = "Vitals"
+color = "#ff5470"
+
+  [[tabs.sections]]
+  name = "Monitoring"
+  tools = ["data:chart", "data:timeline", "data:record"]

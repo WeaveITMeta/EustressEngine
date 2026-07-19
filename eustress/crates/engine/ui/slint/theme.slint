@@ -5,94 +5,398 @@
 
 import { HorizontalBox, VerticalBox, LineEdit, ScrollView, Button, CheckBox, ComboBox, Slider, SpinBox, TextEdit } from "std-widgets.slint";
 
+// ============================================================================
+// ThemeData — the full swappable visual palette.
+//
+// Every aesthetic token (color + themeable radius/glow length) lives here as
+// one struct so Rust can swap the WHOLE palette atomically with a single
+// `Theme.data = ...` (`set_data(...)`) call — no per-token setters. Because a
+// Rust struct literal must fill every field, a token added here that Rust
+// forgets to populate becomes a COMPILE ERROR, not a silent no-op. This is the
+// backbone of the TOML-driven theme engine: a parsed `theme.toml` is turned
+// into one of these structs and pushed in.
+//
+// Layout/motion tokens (spacing-*, font-*, panel-anim-*, reduce-motion) are
+// deliberately NOT here — they are structural, not palette, and stay static on
+// the Theme global below.
+// ============================================================================
+export struct ThemeData {
+    // Primary / panel / viewport surfaces
+    background-primary: color,
+    background-secondary: color,
+    background-tertiary: color,
+    panel-background: color,
+    header-background: color,
+    viewport-background: color,
+    // Tabs
+    tab-active: color,
+    tab-inactive: color,
+    tab-hover: color,
+    // Text
+    text-primary: color,
+    text-secondary: color,
+    text-disabled: color,
+    text-accent: color,
+    text-error: color,
+    text-warning: color,
+    text-success: color,
+    // Borders
+    border-color: color,
+    border-focus: color,
+    border-error: color,
+    // Status "surface" tints — dark tinted backgrounds for success/danger
+    // affordances (a Save-and-Connect button, an error panel) that need more
+    // than a foreground accent color. Discovered as a real recurring gap
+    // during the hex-token audit (soul_settings.slint, forge_connect.slint).
+    success-surface: color,
+    success-surface-hover: color,
+    success-surface-border: color,
+    success-surface-text-hover: color,
+    error-surface: color,
+    error-surface-hover: color,
+    error-surface-border: color,
+    // Buttons
+    button-background: color,
+    button-hover: color,
+    button-pressed: color,
+    button-primary: color,
+    button-primary-hover: color,
+    // Inputs
+    input-background: color,
+    input-border: color,
+    input-focus: color,
+    // Selection
+    selection-background: color,
+    selection-border: color,
+    // Overlays / dialogs
+    overlay-background: color,
+    dialog-background: color,
+    modal-backdrop: color,
+    dialog-titlebar-background: color,
+    // Accents
+    accent-blue: color,
+    accent-cyan: color,
+    accent-eustress: color,
+    accent-green: color,
+    accent-green-bright: color,
+    accent-orange: color,
+    accent-purple: color,
+    accent-red: color,
+    accent-yellow: color,
+    // Semantic ribbon-tint categories
+    cat-parts: color,
+    cat-structure: color,
+    cat-constraint: color,
+    cat-modify: color,
+    cat-data: color,
+    // Floating-overlay surface treatments
+    panel-glass: color,
+    border-highlight: color,
+    shadow-float: color,
+    border-glow-color: color,
+    // Ribbon
+    ribbon-background: color,
+    ribbon-tab-active: color,
+    ribbon-tab-inactive: color,
+    ribbon-separator: color,
+    // Explorer
+    explorer-item-hover: color,
+    explorer-item-selected: color,
+    explorer-folder: color,
+    explorer-file: color,
+    // Output console
+    output-info: color,
+    output-warning: color,
+    output-error: color,
+    output-debug: color,
+    // Gizmo
+    gizmo-x: color,
+    gizmo-y: color,
+    gizmo-z: color,
+    // Shadow
+    shadow-color: color,
+    // Themeable lengths
+    accent-glow-blur: length,
+    backdrop-blur-lg: length,
+    radius-sm: length,
+    radius-md: length,
+    radius-lg: length,
+    radius-xl: length,
+}
+
 // Global theme colors - dark mode by default
 export global Theme {
-    // Primary colors — ultra-dark for AAA professional look
-    out property <color> background-primary: #0e0e0e;
-    out property <color> background-secondary: #121212;
-    out property <color> background-tertiary: #1a1a1a;
-    
-    // Panel colors
-    out property <color> panel-background: #121212;
-    out property <color> header-background: #1a1a1a;
-    out property <color> viewport-background: #0a0a0a;
-    
-    // Tab colors
-    out property <color> tab-active: #121212;
-    out property <color> tab-inactive: #181818;
-    out property <color> tab-hover: #222222;
-    
-    // Text colors — high contrast for readability
-    out property <color> text-primary: #d4d4d4;
-    out property <color> text-secondary: #808080;
-    out property <color> text-disabled: #4a4a4a;
-    out property <color> text-accent: #4fc1ff;
-    out property <color> text-error: #f14c4c;
-    out property <color> text-warning: #cca700;
-    out property <color> text-success: #4ec9b0;
-    
-    // Border colors — subtle, not distracting
-    out property <color> border-color: #222222;
-    out property <color> border-focus: #0078d4;
-    out property <color> border-error: #f14c4c;
-    
-    // Button colors
-    out property <color> button-background: #252525;
-    out property <color> button-hover: #303030;
-    out property <color> button-pressed: #1a1a1a;
-    out property <color> button-primary: #0078d4;
-    out property <color> button-primary-hover: #1a8ae8;
-    
-    // Input colors
-    out property <color> input-background: #161616;
-    out property <color> input-border: #2a2a2a;
-    out property <color> input-focus: #0078d4;
-    
-    // Selection colors
-    out property <color> selection-background: #14304a;
-    out property <color> selection-border: #0078d4;
-    
-    // Overlay colors
-    out property <color> overlay-background: #121212e8;
-    out property <color> dialog-background: #1a1a1a;
-    out property <color> modal-backdrop: #000000a0;
-    
-    // Accent colors — vibrant against dark backgrounds.
-    // See docs/development/TOOLSET_UX.md §2.1 for the full palette spec.
-    //
-    // **2026-04-23** — `accent-eustress` reverted from `#00d4a8` (teal)
-    // back to cyan per user feedback: "we used a cyan selection color
-    // not teal". Every active-tool ring, selected-row glow, and drop-
-    // shadow tint derived from this token now reads cyan again. The
-    // name stays `accent-eustress` so existing callers don't need to
-    // be rewritten — it's still the brand-accent token, just in the
-    // cyan hue it used before the teal drift.
-    out property <color> accent-blue: #0078d4;          // Primary action, selection outlines
-    out property <color> accent-cyan: #00bcd4;          // Tool Options Bar, numeric input, preview outline
-    out property <color> accent-eustress: #00bcd4;      // Selection / active tool — cyan (was teal `#00d4a8`)
-    out property <color> accent-green: #3cba54;         // Success, ghost-preview base
-    out property <color> accent-green-bright: #00e676;  // Commit-success flash (150ms burst)
-    out property <color> accent-orange: #e8912d;        // Warning
-    out property <color> accent-purple: #b180d7;
-    out property <color> accent-red: #e74856;           // Error, over-constrained
-    out property <color> accent-yellow: #f9c74f;
+    // ── Built-in palettes ────────────────────────────────────────────────
+    // The two shipped palettes as compile-time constants (values migrated
+    // 1:1 from the former `modern ? A : B` literals). Rust picks one and
+    // pushes it into `data`. In Phase B these become TOML-sourced — the
+    // Rust loader will build a `ThemeData` from a parsed `theme.toml` and
+    // these two constants become the fallback/default only.
+    out property <ThemeData> preset-classic: {
+        background-primary: #0e0e0e,
+        background-secondary: #121212,
+        background-tertiary: #1a1a1a,
+        panel-background: #121212,
+        header-background: #1a1a1a,
+        viewport-background: #0a0a0a,
+        tab-active: #121212,
+        tab-inactive: #181818,
+        tab-hover: #222222,
+        text-primary: #d4d4d4,
+        text-secondary: #808080,
+        text-disabled: #4a4a4a,
+        text-accent: #4fc1ff,
+        text-error: #f14c4c,
+        text-warning: #cca700,
+        text-success: #4ec9b0,
+        border-color: #222222,
+        border-focus: #3cba54,
+        border-error: #f14c4c,
+        success-surface: #152a1e,
+        success-surface-hover: #1a4a2a,
+        success-surface-border: #2a5a32,
+        success-surface-text-hover: #a5d6a7,
+        error-surface: #2a1515,
+        error-surface-hover: #3d1515,
+        error-surface-border: #4a2020,
+        button-background: #252525,
+        button-hover: #303030,
+        button-pressed: #1a1a1a,
+        button-primary: #0078d4,
+        button-primary-hover: #1a8ae8,
+        input-background: #161616,
+        input-border: #2a2a2a,
+        input-focus: #3cba54,
+        selection-background: #14301c,
+        selection-border: #3cba54,
+        overlay-background: #121212e8,
+        dialog-background: #1a1a1a,
+        modal-backdrop: #000000a0,
+        dialog-titlebar-background: #13131f,
+        accent-blue: #0078d4,
+        accent-cyan: #00bcd4,
+        accent-eustress: #3cba54,
+        accent-green: #3cba54,
+        accent-green-bright: #00e676,
+        accent-orange: #e8912d,
+        accent-purple: #b180d7,
+        accent-red: #e74856,
+        accent-yellow: #f9c74f,
+        cat-parts: #64b5f6,
+        cat-structure: #81c784,
+        cat-constraint: #ffb74d,
+        cat-modify: #ba68c8,
+        cat-data: #4dd0e1,
+        panel-glass: #121212e8,
+        border-highlight: #ffffff10,
+        shadow-float: #00000060,
+        border-glow-color: #00000000,
+        ribbon-background: #101010,
+        ribbon-tab-active: #121212,
+        ribbon-tab-inactive: #1a1a1a,
+        ribbon-separator: #222222,
+        explorer-item-hover: #1a1a1a,
+        explorer-item-selected: #0a2e48,
+        explorer-folder: #e8b84a,
+        explorer-file: #c8c8c8,
+        output-info: #3794ff,
+        output-warning: #cca700,
+        output-error: #f14c4c,
+        output-debug: #858585,
+        gizmo-x: #f14c4c,
+        gizmo-y: #4ec9b0,
+        gizmo-z: #569cd6,
+        shadow-color: #00000080,
+        accent-glow-blur: 0px,
+        backdrop-blur-lg: 12px,
+        radius-sm: 2px,
+        radius-md: 4px,
+        radius-lg: 8px,
+        radius-xl: 12px,
+    };
+    out property <ThemeData> preset-modern: {
+        background-primary: #0a0f18,
+        background-secondary: #0d1320,
+        background-tertiary: #131b2b,
+        panel-background: #0c1220,
+        header-background: #101a2c,
+        viewport-background: #04070d,
+        tab-active: #122034,
+        tab-inactive: #0b1322,
+        tab-hover: #172a42,
+        text-primary: #e8ecf3,
+        text-secondary: #8b95a7,
+        text-disabled: #4b5568,
+        text-accent: #4fd6ff,
+        text-error: #ff6b6b,
+        text-warning: #ffcc55,
+        text-success: #3ce0b0,
+        border-color: #0a84ff26,
+        border-focus: #0a84ff,
+        border-error: #ff5470,
+        success-surface: #0d2419,
+        success-surface-hover: #123320,
+        success-surface-border: #1f5c3a,
+        success-surface-text-hover: #8ce6b8,
+        error-surface: #2a0f14,
+        error-surface-hover: #3d1219,
+        error-surface-border: #7a2030,
+        button-background: #111a2a,
+        button-hover: #1a2740,
+        button-pressed: #0b1322,
+        button-primary: #0a84ff,
+        button-primary-hover: #3aa0ff,
+        input-background: #0a1120,
+        input-border: #0a84ff38,
+        input-focus: #0a84ff,
+        selection-background: #0a84ff26,
+        selection-border: #0a84ff,
+        overlay-background: #060a12e8,
+        dialog-background: #0d1526,
+        modal-backdrop: #000000cc,
+        dialog-titlebar-background: #0a1322,
+        accent-blue: #0a84ff,
+        accent-cyan: #22d3ee,
+        accent-eustress: #0a84ff,
+        accent-green: #34d399,
+        accent-green-bright: #00ffa3,
+        accent-orange: #ff9f45,
+        accent-purple: #c084fc,
+        accent-red: #ff5470,
+        accent-yellow: #ffd166,
+        cat-parts: #60a5fa,
+        cat-structure: #4ade80,
+        cat-constraint: #fbbf24,
+        cat-modify: #c084fc,
+        cat-data: #22d3ee,
+        panel-glass: #0a1120cc,
+        border-highlight: #0a84ff22,
+        shadow-float: #000000a6,
+        border-glow-color: #0a84ff7a,
+        ribbon-background: #080d18,
+        ribbon-tab-active: #122034,
+        ribbon-tab-inactive: #0b1322,
+        ribbon-separator: #0a84ff26,
+        explorer-item-hover: #111a2a,
+        explorer-item-selected: #0a3a4a,
+        explorer-folder: #f0c04a,
+        explorer-file: #c8d0dc,
+        output-info: #4fd6ff,
+        output-warning: #ffcc55,
+        output-error: #ff6b6b,
+        output-debug: #8b95a7,
+        gizmo-x: #f14c4c,
+        gizmo-y: #4ec9b0,
+        gizmo-z: #569cd6,
+        shadow-color: #000000a0,
+        accent-glow-blur: 12px,
+        backdrop-blur-lg: 14px,
+        radius-sm: 5px,
+        radius-md: 9px,
+        radius-lg: 16px,
+        radius-xl: 22px,
+    };
 
-    // Semantic ribbon-tint categories — docs/design/DRAFTING_UX.md Law 3.
-    // A button's tint says what KIND of thing it does; new buttons pick
-    // an existing token, never a fresh hex. Red stays reserved for
-    // destructive actions (accent-red); accent-cyan stays reserved for
-    // armed/selected state.
-    out property <color> cat-parts: #64b5f6;        // Creates geometry (primitives + parametric)
-    out property <color> cat-structure: #81c784;    // Containers / organization
-    out property <color> cat-constraint: #ffb74d;   // Relationships between things
-    out property <color> cat-modify: #ba68c8;       // Patterns / arrays / bulk edits
-    out property <color> cat-data: #4dd0e1;         // Import / export / IO
+    // ── The live palette ─────────────────────────────────────────────────
+    // Swapped atomically by Rust (`set_data`). Default = Classic to match the
+    // pre-first-frame boot look; `init_theme_to_slint` immediately pushes the
+    // persisted choice on the first frame.
+    in-out property <ThemeData> data: root.preset-classic;
 
-    // Floating-overlay surface treatments — see TOOLSET_UX.md §6.1
-    out property <color> panel-glass: #121212e8;        // Frosted-glass backdrop for ToolOptionsBar / toasts / popups
-    out property <color> border-highlight: #ffffff10;   // 1px top hairline (macOS depth trick)
-    out property <color> shadow-float: #00000060;       // Drop shadow for floating panels (16px blur)
+    // UI-state mirror ONLY — no longer drives any color (colors come from
+    // `data`). Kept so the Settings > Theme swatch pair can highlight the
+    // active choice; Rust sets it alongside `set_data`. Phase B removes it
+    // when the swatch pair becomes a data-driven theme list.
+    in-out property <bool> modern: false;
 
+    // ── Alias tokens ─────────────────────────────────────────────────────
+    // Every consumer's `Theme.background-primary` (across ~42 files) keeps
+    // working unchanged — the tokens now read through the swappable struct.
+    out property <color> background-primary: root.data.background-primary;
+    out property <color> background-secondary: root.data.background-secondary;
+    out property <color> background-tertiary: root.data.background-tertiary;
+    out property <color> panel-background: root.data.panel-background;
+    out property <color> header-background: root.data.header-background;
+    out property <color> viewport-background: root.data.viewport-background;
+    out property <color> tab-active: root.data.tab-active;
+    out property <color> tab-inactive: root.data.tab-inactive;
+    out property <color> tab-hover: root.data.tab-hover;
+    out property <color> text-primary: root.data.text-primary;
+    out property <color> text-secondary: root.data.text-secondary;
+    out property <color> text-disabled: root.data.text-disabled;
+    out property <color> text-accent: root.data.text-accent;
+    out property <color> text-error: root.data.text-error;
+    out property <color> text-warning: root.data.text-warning;
+    out property <color> text-success: root.data.text-success;
+    out property <color> border-color: root.data.border-color;
+    out property <color> border-focus: root.data.border-focus;
+    out property <color> border-error: root.data.border-error;
+    out property <color> success-surface: root.data.success-surface;
+    out property <color> success-surface-hover: root.data.success-surface-hover;
+    out property <color> success-surface-border: root.data.success-surface-border;
+    out property <color> success-surface-text-hover: root.data.success-surface-text-hover;
+    out property <color> error-surface: root.data.error-surface;
+    out property <color> error-surface-hover: root.data.error-surface-hover;
+    out property <color> error-surface-border: root.data.error-surface-border;
+    out property <color> button-background: root.data.button-background;
+    out property <color> button-hover: root.data.button-hover;
+    out property <color> button-pressed: root.data.button-pressed;
+    out property <color> button-primary: root.data.button-primary;
+    out property <color> button-primary-hover: root.data.button-primary-hover;
+    out property <color> input-background: root.data.input-background;
+    out property <color> input-border: root.data.input-border;
+    out property <color> input-focus: root.data.input-focus;
+    out property <color> selection-background: root.data.selection-background;
+    out property <color> selection-border: root.data.selection-border;
+    out property <color> overlay-background: root.data.overlay-background;
+    out property <color> dialog-background: root.data.dialog-background;
+    out property <color> modal-backdrop: root.data.modal-backdrop;
+    out property <color> dialog-titlebar-background: root.data.dialog-titlebar-background;
+    // `accent-eustress` is the ONE token a Mode manifest may override
+    // (ModeTheme.accent) — applied as a theme⊕overlay recomposition in Rust,
+    // never mutating the base palette.
+    out property <color> accent-blue: root.data.accent-blue;
+    out property <color> accent-cyan: root.data.accent-cyan;
+    out property <color> accent-eustress: root.data.accent-eustress;
+    out property <color> accent-green: root.data.accent-green;
+    out property <color> accent-green-bright: root.data.accent-green-bright;
+    out property <color> accent-orange: root.data.accent-orange;
+    out property <color> accent-purple: root.data.accent-purple;
+    out property <color> accent-red: root.data.accent-red;
+    out property <color> accent-yellow: root.data.accent-yellow;
+    out property <color> cat-parts: root.data.cat-parts;
+    out property <color> cat-structure: root.data.cat-structure;
+    out property <color> cat-constraint: root.data.cat-constraint;
+    out property <color> cat-modify: root.data.cat-modify;
+    out property <color> cat-data: root.data.cat-data;
+    out property <color> panel-glass: root.data.panel-glass;
+    out property <color> border-highlight: root.data.border-highlight;
+    out property <color> shadow-float: root.data.shadow-float;
+    out property <color> border-glow-color: root.data.border-glow-color;
+    out property <color> ribbon-background: root.data.ribbon-background;
+    out property <color> ribbon-tab-active: root.data.ribbon-tab-active;
+    out property <color> ribbon-tab-inactive: root.data.ribbon-tab-inactive;
+    out property <color> ribbon-separator: root.data.ribbon-separator;
+    out property <color> explorer-item-hover: root.data.explorer-item-hover;
+    out property <color> explorer-item-selected: root.data.explorer-item-selected;
+    out property <color> explorer-folder: root.data.explorer-folder;
+    out property <color> explorer-file: root.data.explorer-file;
+    out property <color> output-info: root.data.output-info;
+    out property <color> output-warning: root.data.output-warning;
+    out property <color> output-error: root.data.output-error;
+    out property <color> output-debug: root.data.output-debug;
+    out property <color> gizmo-x: root.data.gizmo-x;
+    out property <color> gizmo-y: root.data.gizmo-y;
+    out property <color> gizmo-z: root.data.gizmo-z;
+    out property <color> shadow-color: root.data.shadow-color;
+    out property <length> accent-glow-blur: root.data.accent-glow-blur;
+    out property <length> backdrop-blur-lg: root.data.backdrop-blur-lg;
+    out property <length> radius-sm: root.data.radius-sm;
+    out property <length> radius-md: root.data.radius-md;
+    out property <length> radius-lg: root.data.radius-lg;
+    out property <length> radius-xl: root.data.radius-xl;
+
+    // ── Static layout / motion tokens (NOT palette) ──────────────────────
     // Panel enter/exit motion — 180ms slide+fade per TOOLSET_UX.md §2.4.
     // Prefers-reduced-motion gate collapses this to 30ms at runtime
     // via `reduce-motion` input; components multiply the duration by
@@ -107,52 +411,13 @@ export global Theme {
     in property <bool>  reduce-motion: false;
     out property <float> motion-scale: root.reduce-motion ? 0.15 : 1.0;
 
-    // Backdrop-blur intent token — Slint doesn't expose GPU backdrop
-    // filters directly, but declaring the design radius here keeps
-    // the intent centralized so renderer-level wiring (when it
-    // lands) has a single source of truth. Components approximate
-    // via `panel-glass` opacity today.
-    out property <length> backdrop-blur-lg: 12px;
-    
-    // Ribbon colors
-    out property <color> ribbon-background: #101010;
-    out property <color> ribbon-tab-active: #121212;
-    out property <color> ribbon-tab-inactive: #1a1a1a;
-    out property <color> ribbon-separator: #222222;
-    
-    // Explorer colors
-    out property <color> explorer-item-hover: #1a1a1a;
-    out property <color> explorer-item-selected: #0a2e48;
-    out property <color> explorer-folder: #e8b84a;
-    out property <color> explorer-file: #c8c8c8;
-    
-    // Output console colors
-    out property <color> output-info: #3794ff;
-    out property <color> output-warning: #cca700;
-    out property <color> output-error: #f14c4c;
-    out property <color> output-debug: #858585;
-    
-    // Gizmo colors
-    out property <color> gizmo-x: #f14c4c;
-    out property <color> gizmo-y: #4ec9b0;
-    out property <color> gizmo-z: #569cd6;
-    
-    // Shadows — deeper for dark theme
-    out property <color> shadow-color: #00000080;
-    
     // Spacing
     out property <length> spacing-xs: 2px;
     out property <length> spacing-sm: 4px;
     out property <length> spacing-md: 8px;
     out property <length> spacing-lg: 16px;
     out property <length> spacing-xl: 24px;
-    
-    // Border radius
-    out property <length> radius-sm: 2px;
-    out property <length> radius-md: 4px;
-    out property <length> radius-lg: 8px;
-    out property <length> radius-xl: 12px;
-    
+
     // Font sizes
     out property <length> font-xs: 10px;
     out property <length> font-sm: 11px;
@@ -200,12 +465,12 @@ export component IconButton inherits Rectangle {
     // Selected = the currently-active tool. Brand-teal halo with a subtle
     // tinted fill (not a full blue block like before) — matches the
     // active-tool ring convention in TOOLSET_UX.md §5.2.
-    background: self.selected ? #00bcd415 :
+    background: self.selected ? Theme.accent-eustress.with-alpha(0.08) :
                 touch.has-hover ? Theme.button-hover : transparent;
     border-width: self.selected ? 1px : 0px;
     border-color: self.selected ? Theme.accent-eustress : transparent;
     drop-shadow-blur: self.selected ? 8px : 0px;
-    drop-shadow-color: self.selected ? #00bcd440 : transparent;
+    drop-shadow-color: self.selected ? Theme.accent-eustress.with-alpha(0.25) : transparent;
 
     opacity: self.enabled ? 1.0 : 0.5;
     clip: false;
@@ -311,22 +576,22 @@ export component IconButton inherits Rectangle {
         y: root.height + 4px;
         
         Rectangle {
-            background: #1e1e1e;
+            background: Theme.dialog-background;
             border-radius: 3px;
             border-width: 1px;
-            border-color: #3a3a3a;
+            border-color: Theme.border-color;
             drop-shadow-blur: 4px;
-            drop-shadow-color: #00000060;
-            
+            drop-shadow-color: Theme.shadow-float;
+
             HorizontalBox {
                 padding-left: 6px;
                 padding-right: 6px;
                 padding-top: 3px;
                 padding-bottom: 3px;
-                
+
                 Text {
                     text: root.tooltip;
-                    color: #d4d4d4;
+                    color: Theme.text-primary;
                     font-size: 11px;
                 }
             }
@@ -357,14 +622,14 @@ export component SidePanelHeader inherits Rectangle {
     in property <int> count: 0;
 
     height: 36px;
-    background: @linear-gradient(180deg, #1e1e1e 0%, #181818 100%);
+    background: @linear-gradient(180deg, Theme.header-background 0%, Theme.tab-inactive 100%);
 
     // 1px bottom separator — matches Properties panel treatment
     Rectangle {
         y: parent.height - 1px;
         width: 100%;
         height: 1px;
-        background: #2a2a2a;
+        background: Theme.border-color;
     }
 
     HorizontalLayout {
@@ -537,7 +802,7 @@ export component TreeItem inherits Rectangle {
 
     height: root.show ? 22px : 0px;
     visible: root.show;
-    background: root.drop-target ? #0a3a6a :
+    background: root.drop-target ? Theme.selection-background :
                 self.selected ? Theme.explorer-item-selected :
                 row-touch.has-hover ? Theme.explorer-item-hover : transparent;
 
@@ -685,7 +950,7 @@ export component LogEntry inherits Rectangle {
     callback ctrl-clicked(string);
 
     height: 20px;
-    background: log-touch.has-hover ? #ffffff08 : transparent;
+    background: log-touch.has-hover ? Theme.tab-hover : transparent;
 
     log-touch := TouchArea {
         mouse-cursor: pointer;
@@ -721,8 +986,8 @@ export component LogEntry inherits Rectangle {
         read-only: true;
         single-line: true;
         wrap: no-wrap;
-        selection-background-color: #264f78;
-        selection-foreground-color: #ffffff;
+        selection-background-color: Theme.selection-background;
+        selection-foreground-color: Theme.text-primary;
     }
 
     // Message — read-only selectable so users can copy log lines
@@ -739,7 +1004,7 @@ export component LogEntry inherits Rectangle {
         read-only: true;
         single-line: true;
         wrap: no-wrap;
-        selection-background-color: #264f78;
-        selection-foreground-color: #ffffff;
+        selection-background-color: Theme.selection-background;
+        selection-foreground-color: Theme.text-primary;
     }
 }

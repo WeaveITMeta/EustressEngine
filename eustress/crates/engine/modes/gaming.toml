@@ -1,0 +1,38 @@
+# Eustress Mode — "Gaming".
+# World-building + play-testing focus: modeling, terrain, UI, MindSpace for
+# design-note graphs, and live testing. Publish/Economy tabs are
+# forward-looking (declared ahead of their tooling).
+
+[mode]
+id = "gaming"
+name = "Gaming"
+icon = "gamepad"
+version = "1.0"
+author = "Eustress"
+
+[ribbon]
+tabs = ["home", "model", "terrain", "ui", "mindspace", "test", "plugins"]
+
+[layout]
+preset = "Building"
+
+[theme]
+accent = "#c084fc"
+
+[[tabs]]
+id = "publish"
+name = "Publish"
+color = "#c084fc"
+
+  [[tabs.sections]]
+  name = "Release"
+  tools = []
+
+[[tabs]]
+id = "economy"
+name = "Economy"
+color = "#ffd166"
+
+  [[tabs.sections]]
+  name = "Balancing"
+  tools = ["data:chart", "data:stats"]

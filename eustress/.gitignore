@@ -42,3 +42,4 @@ Cargo.lock
 
 # OS
 Thumbs.db
+target-prof/

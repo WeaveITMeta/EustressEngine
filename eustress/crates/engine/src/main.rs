@@ -4,18 +4,9 @@
 use bevy::prelude::*;
 #[allow(unused_imports)]
 use bevy::render::RenderPlugin;
-use bevy::gltf::{GltfExtras, GltfSceneExtras, GltfMeshExtras, GltfMaterialExtras, GltfSceneName, GltfMeshName, GltfMaterialName};
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin, EntityCountDiagnosticsPlugin};
 // Window icon: embedded in exe via winres (build.rs), runtime set in setup_slint_overlay
 use eustress_engine::plugins::lighting_plugin::LightingPlugin;
-use eustress_common::services::{TeamServicePlugin, PlayerService};
-
-#[cfg(feature = "streaming")]
-use std::sync::Arc;
-#[cfg(feature = "streaming")]
-use eustress_common::change_queue::{ChangeQueueConfig, StreamingPlugin};
-#[cfg(feature = "streaming")]
-use eustress_common::sim_stream::SimStreamWriter;
 
 // ── Thin-bin module imports (dual-compile untangling, 2026-07-02) ────
 // The engine used to DUAL-COMPILE ~104 modules: declared `mod X;` here
@@ -37,7 +28,7 @@ use eustress_engine::{
     cad_mate_tool, cad_plugin, csg,
     attachment_editor_tool, attribute_tag_migration, auth, bliss_tracker, camera,
     camera_controller, class_registry, classes, clipboard, commands, commit_flash,
-    constraint_editor_tool, cursor_badge, default_scene, duplicate_place_tool,
+    constraint_editor_tool, cursor_badge, decal_place_tool, default_scene, duplicate_place_tool,
     editor_settings, embedded_client, embedvec_dispatch, engine_bridge, entity_utils,
     forge, frame_diagnostics, generative_pipeline, geom_snap, gizmo_tools, grouping,
     history_stream, interaction, io_manager, keybindings, lasso_paint_select,
@@ -75,22 +66,18 @@ use eustress_engine::rotate_tool::RotateToolPlugin;
 use eustress_engine::scale_tool::ScaleToolPlugin;
 use eustress_engine::selection_sync::SelectionSyncPlugin;
 use eustress_engine::editor_settings::EditorSettingsPlugin;
-use eustress_engine::undo::UndoPlugin;
-use eustress_engine::notifications::NotificationPlugin;
 use eustress_engine::keybindings::KeyBindingsPlugin;
 use eustress_engine::clipboard::ClipboardPlugin;
 use eustress_engine::grouping::GroupingPlugin;
 use eustress_engine::material_sync::MaterialSyncPlugin;
 use eustress_engine::terrain_plugin::EngineTerrainPlugin;
-use eustress_engine::play_mode::PlayModePlugin;
+use eustress_engine::play_mode::PlayModeUiPlugin;
 use eustress_engine::script_editor;
 use eustress_engine::window_focus::WindowFocusPlugin;
 use eustress_engine::startup::{StartupPlugin, StartupArgs};
 // ServicePropertiesPlugin removed - now handled by Slint UI
-use eustress_engine::soul::EngineSoulPlugin;
 use eustress_engine::workshop::WorkshopPlugin;
-use eustress_engine::space::SpaceFileLoaderPlugin;
-use eustress_engine::space::{SpaceRoot, UniverseRegistryPlugin};
+use eustress_engine::space::SpaceRoot;
 
 fn main() {
     println!("Starting Eustress Engine...");
@@ -119,7 +106,7 @@ fn main() {
     // The default `warn` handler spams hundreds of lines per frame. `ignore` hides everything
     // and makes debugging impossible. This handler shows each error once so you know what's
     // broken without drowning in log output.
-    app.set_error_handler(rate_limited_error_handler);
+    app.set_error_handler(eustress_engine::app_core::rate_limited_error_handler);
     
     // Register the Space asset source BEFORE DefaultPlugins
     // This must happen before AssetPlugin is initialized.
@@ -137,33 +124,8 @@ fn main() {
     // here — hot-reload uses the engine's own `notify` watcher), so no
     // writer/watcher is needed.
     let space_root = space::default_space_root();
-    info!("📁 Registering Space asset source at: {:?}", space_root);
-    // Seed the swappable global to the launch root before AssetPlugin runs.
-    space::space_asset_source::set_space_asset_root(space_root.clone());
-    app.register_asset_source(
-        "space",
-        // `AssetSourceBuilder::new(reader_factory)` — reader-only source.
-        // The factory is `FnMut() -> Box<dyn ErasedAssetReader>`; any
-        // `T: AssetReader` auto-implements `ErasedAssetReader`. The explicit
-        // return annotation forces the `Box<DynamicSpaceReader>` → trait-object
-        // unsize coercion in the closure body (closures can otherwise pin the
-        // concrete return type before coercion).
-        bevy::asset::io::AssetSourceBuilder::new(
-            || -> Box<dyn bevy::asset::io::ErasedAssetReader> {
-                Box::new(space::space_asset_source::DynamicSpaceReader)
-            },
-        ),
-    );
+    eustress_engine::app_core::register_asset_sources(&mut app, &space_root);
 
-    // Register bundled common assets (material textures, fonts, etc.)
-    let common_assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../common/assets");
-    info!("📦 Registering bundled asset source at: {:?}", common_assets);
-    app.register_asset_source(
-        "bundled",
-        bevy::asset::io::AssetSourceBuilder::platform_default(&common_assets.to_string_lossy(), None),
-    );
-    
     app // Bevy plugins with optimized window settings
         .add_plugins(DefaultPlugins
             .set(WindowPlugin {
@@ -221,6 +183,26 @@ fn main() {
                             .to_string(),
                     }
                 },
+                // Allow loading assets via ABSOLUTE paths. Bevy 0.16+ defaults
+                // this to `Forbid`, which silently rejects every
+                // `asset_server.load(<absolute path>)` — exactly how
+                // user-imported Universe assets load (images under
+                // `<Universe>/assets/images/`, Gaussian-splat clouds under
+                // `<Universe>/assets/splats/`). Those dirs sit ABOVE the
+                // `space://` root (the live SpaceRoot) and outside the
+                // `default://` asset root, so a relative-through-a-source load
+                // can't reach them — they are genuinely addressed absolutely.
+                // With the default `Forbid`, importing a `.ply`/`.png` copies
+                // the file and spawns the entity, then the load is rejected
+                // with "Asset path … is unapproved" and nothing renders (the
+                // symptom that looks like "import did nothing"). Eustress is a
+                // local-first desktop tool loading files the user explicitly
+                // picked through a native dialog, and asset loading is
+                // local-only (no network egress), so the guard's threat model
+                // (loading untrusted remote/script-supplied paths) does not
+                // apply here. `Allow` restores the pre-0.16 behaviour the rest
+                // of the asset pipeline already assumes.
+                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
                 ..default()
             })
             // Per-system frame micro-profiler hook (feature `profiling`).
@@ -247,47 +229,18 @@ fn main() {
         .add_plugins(LogDiagnosticsPlugin {
             wait_duration: std::time::Duration::from_secs(2),
             ..default()
-        })
-        // Register GLTF types for scene spawning (prevents panic on unregistered types)
-        .register_type::<GltfExtras>()
-        .register_type::<GltfSceneExtras>()
-        .register_type::<GltfMeshExtras>()
-        .register_type::<GltfMaterialExtras>()
-        // Bevy 0.18 added this transform-propagation marker; it lands inside
-        // every glb's scene graph, so `SceneSpawner` panics with "unregistered
-        // type" on any imported mesh / CSG glb unless we register it here.
-        // (This was crashing the engine on Vehicle Simulator's CSG glbs.)
-        .register_type::<bevy::transform::components::TransformTreeChanged>()
-        // glb scene graphs also carry hierarchy/transform/visibility/name
-        // components, and `SceneSpawner` reflects EVERY one — so register the
-        // full set up front (idempotent for any already registered by a plugin)
-        // to end the one-panic-per-missing-type whack-a-mole on import.
-        .register_type::<bevy::prelude::Children>()
-        .register_type::<bevy::prelude::ChildOf>()
-        .register_type::<bevy::prelude::Transform>()
-        .register_type::<bevy::prelude::GlobalTransform>()
-        .register_type::<bevy::prelude::Visibility>()
-        .register_type::<bevy::prelude::InheritedVisibility>()
-        .register_type::<bevy::prelude::ViewVisibility>()
-        .register_type::<bevy::prelude::Name>()
-        // Render components carried by glb mesh entities in the scene graph.
-        .register_type::<bevy::prelude::Mesh3d>()
-        .register_type::<bevy::prelude::MeshMaterial3d<bevy::pbr::StandardMaterial>>()
-        // Aabb (frustum-culling bounds; moved to `bevy_camera` in Bevy 0.18) —
-        // glb mesh entities carry it in the scene graph.
-        .register_type::<bevy::camera::primitives::Aabb>()
-        // gltf naming components the loader stamps on scene/mesh/material
-        // entities — the last category a static glb scene carries. All THREE
-        // of bevy_gltf's name types must be registered: `GltfSceneName` sits
-        // on the glb scene-graph ROOT, so loading any glb-backed Space (e.g.
-        // imported Roblox meshes) reflects it and the WorldAsset spawner
-        // panics ("unregistered type GltfSceneName") mid-load if it's absent —
-        // even though the deeper mesh/material names were registered.
-        .register_type::<GltfSceneName>()
-        .register_type::<GltfMeshName>()
-        .register_type::<GltfMaterialName>()
-        // PlayerService for play mode character spawning
-        .init_resource::<PlayerService>()
+        });
+
+    // ── Core simulation tier ────────────────────────────────────────────
+    // Everything headless-safe — space loading, WorldDb, Avian + the
+    // determinism pins, realism, simulation clock, Rune/Luau, services,
+    // streaming/op-log, Engine Bridge, glb reflect registrations. Shared
+    // verbatim with the eustress-headless bin (HEADLESS_RUNTIME.md §5).
+    // Must come before SlintUiPlugin below, which reads UndoStack and
+    // PlayModeState at build time.
+    eustress_engine::app_core::add_core_sim_plugins(&mut app, &space_root);
+
+    app // ── Editor tier: Slint UI, tools, gizmos, rendering ────────────
         // DisplayUnit — user-selected display unit for the Properties
         // panel, status-bar readout, and Measure tool. Cosmetic only;
         // ECS / Avian / disk stay in engine-native meters regardless.
@@ -300,20 +253,11 @@ fn main() {
         .init_resource::<eustress_common::color_wheels::ColorFavorites>()
         // Startup args
         .insert_resource(args.clone())
-        // NotificationManager resource — always registered. The toast bridge
-        // system inside this plugin is itself gated on `notifications`.
-        .add_plugins(NotificationPlugin)
-        // Undo/Redo (must be before SlintUiPlugin which uses UndoStack)
-        .add_plugins(UndoPlugin)
-        // Tees every UndoStack push onto the `history.<kind>` topic so
-        // MCP / LSP / CLI subscribers see the edit log in real-time.
-        .add_plugins(history_stream::HistoryStreamPlugin)
-        // One-shot migration: promotes legacy flat `SoulService/*.rune`
-        // files to the folder-per-script convention on space load.
-        .add_plugins(soul_script_migration::SoulScriptMigrationPlugin)
-        // (Streaming registered below — cfg-block required, not inline chain)
-        // Play mode (must be before SlintUiPlugin which uses PlayModeState)
-        .add_plugins(PlayModePlugin)
+        // Play-mode editor seam: Slint StudioState flags, F5-F8 keyboard
+        // shortcuts, in-viewport GUI click dispatch. PlayModeCorePlugin
+        // (state/snapshots/physics/scripts) came in with
+        // add_core_sim_plugins above.
+        .add_plugins(PlayModeUiPlugin)
         // Script analyzer (Rune diagnostics + symbol index on AsyncComputeTaskPool)
         .add_plugins(script_editor::ScriptAnalysisPlugin)
         // Runtime snapshot — writes live play-state + sim values to
@@ -324,30 +268,8 @@ fn main() {
         // external IDEs can connect to a live server while Studio is up.
         // No-op if the companion binary isn't on disk.
         .add_plugins(eustress_engine::lsp_launcher::LspLauncherPlugin)
-        // Engine Bridge — JSON-RPC 2.0 over localhost TCP for sibling
-        // processes (MCP server, plugins) to query live ECS / sim /
-        // embedvec. Port handoff via `<universe>/.eustress/engine.port`.
-        // Bin-local (`engine_bridge`, not `eustress_engine::engine_bridge`)
-        // so its handlers share the bin's `TypeId`s — see the `mod
-        // engine_bridge` note above.
-        .add_plugins(engine_bridge::EngineBridgePlugin)
-        // Guarantee `SpaceRoot` is always a resource. On a fresh launch the
-        // space loader resolves `default_space_root()` directly and only the
-        // runtime space-SWITCH path inserts `SpaceRoot`; without this the
-        // resource is absent at boot, breaking bridge handlers
-        // (viewport.capture, tools.call) and the port-file resync. Default
-        // = last-opened/default space; `--space`/`--universe` and runtime
-        // switches override it (init_resource is a no-op if already set).
-        .init_resource::<space::SpaceRoot>()
-        // Keep the swappable `space://` asset root in lock-step with
-        // `SpaceRoot`. This `Changed<SpaceRoot>` chokepoint is the
-        // authoritative coverage: every Space-switch site (runtime
-        // `open_space`, `--space`/`--universe` overrides, "Save As") mutates
-        // the resource, so the asset reader can never be left resolving mesh
-        // paths against a stale launch root. Without this, switching Space at
-        // runtime black-screens because `space://*.glb` resolves under the
-        // OLD Space folder.
-        .add_systems(Update, space::space_asset_source::sync_space_asset_root_on_change)
+        // (Engine Bridge, SpaceRoot init, and the space:// root sync now
+        // come in with add_core_sim_plugins above.)
         // Independent off-screen AI camera — the AI's own eyes (renders to an
         // image, never the window, so it can't displace the editor camera).
         .add_plugins(ai_camera::AiCameraPlugin)
@@ -389,13 +311,8 @@ fn main() {
         .add_plugins(DefaultScenePlugin)
         // Automatic .txt to .toml converter (file system workaround)
         .add_plugins(txt_to_toml_watcher::TxtToTomlWatcherPlugin)
-        // Space file loader (dynamic file-system-first loading)
-        .add_plugins(SpaceFileLoaderPlugin)
-        // Instance streaming (three-tier: Cold disk → Hot RAM → Active ECS)
-        .add_plugins(eustress_common::streaming::StreamingPlugin {
-            config: eustress_common::streaming::StreamingConfig::default(),
-            instances_dir: space::default_space_root().join("Workspace"),
-        })
+        // (SpaceFileLoaderPlugin + instance streaming now come in with
+        // add_core_sim_plugins above.)
         // Toolbox (mesh insertion system)
         .add_plugins(toolbox::ToolboxPlugin)
         // Camera controls
@@ -403,6 +320,10 @@ fn main() {
         .add_systems(Startup, setup_camera_controller.after(default_scene::setup_default_scene))
         // Editor settings
         .add_plugins(EditorSettingsPlugin)
+        // TOML theme engine (loads built-in + user themes; resolves active)
+        .add_plugins(eustress_engine::studio_theme::StudioThemePlugin)
+        // Eustress Modes (task layouts: ribbon subset + layout + accent)
+        .add_plugins(eustress_engine::studio_modes::StudioModesPlugin)
         // Keybindings
         .add_plugins(KeyBindingsPlugin)
         // Clipboard
@@ -474,6 +395,10 @@ fn main() {
         // Duplicate & Place (Phase 1) — clone selection, follow-cursor
         // placement on click. Repeatable until user Esc.
         .add_plugins(duplicate_place_tool::DuplicatePlaceToolPlugin)
+        // Surface placement (Decal / Texture) — radial-chosen media follows
+        // the raycasted face with a ghost preview, applies on a click to an
+        // unlocked BasePart.
+        .add_plugins(decal_place_tool::SurfacePlacementPlugin)
         // Selection Sets (Phase 1) — named, persistent selections per
         // universe. Save/Load/Delete events, TOML-backed storage at
         // `.eustress/selection_sets.toml`.
@@ -548,11 +473,7 @@ fn main() {
         // label registry. Populates immediately; applies to Slint's
         // accessibility tree when the upstream API lands.
         .add_plugins(accessibility::AccessibilityPlugin)
-        // Attribute + Tag migration — ensures every non-service
-        // instance's TOML has `[attributes]` + `[tags]` sections.
-        // Fire `RunAttributeTagMigrationEvent` to invoke (Settings
-        // UI + scripted tests wire the event).
-        .add_plugins(attribute_tag_migration::AttributeTagMigrationPlugin)
+        // (AttributeTagMigrationPlugin now comes in with add_core_sim_plugins.)
         // Smart Build Tools (Gap Fill, Resize Align, Edge Align,
         // Part Swap, Model Reflect). Each registers its factory with
         // ModalToolRegistry.
@@ -573,60 +494,21 @@ fn main() {
         })
         // Terrain
         .add_plugins(EngineTerrainPlugin)
-        // Physics (Avian 0.7 — runs at a fixed timestep)
-        .add_plugins(avian3d::PhysicsPlugins::default())
-        .insert_resource(avian3d::prelude::Gravity(bevy::math::Vec3::NEG_Y * 9.80665))
-        // ── Determinism pins (C2) ──────────────────────────────────────────
-        // Avian's step = Time<Fixed>.delta() * relative_speed. Pin the fixed
-        // timestep explicitly (was relying on Bevy's version-dependent implicit
-        // default) so per-step dt is a fixed contract ("Avian (Deterministic)").
-        // 60 Hz matches the sim clock (common::simulation).
-        .insert_resource(Time::<bevy::time::Fixed>::from_hz(60.0))
-        // Pin substep count + solver config at Avian defaults so a future Avian
-        // default change can't silently alter trajectories. (SubstepCount is in
-        // avian3d::prelude; SolverConfig is not — use its full module path.)
-        .insert_resource(avian3d::prelude::SubstepCount(6))
-        .insert_resource(avian3d::dynamics::solver::SolverConfig::default())
-        // Cap virtual-time max-delta to break the fixed-timestep DEATH SPIRAL.
-        // Bevy's default (250 ms) lets `FixedUpdate` run ~16× per render frame at
-        // low FPS to "catch up" — and the profiler showed EVERY Fixed-schedule
-        // system (transform + collider propagation, mark_dirty_trees, …) running
-        // ~16×/frame over the 301K-entity import, the dominant editor cost.
-        // Clamping to ~2 fixed steps collapses that 16× → 2× (graceful slow-mo
-        // instead of meltdown) and is harmless in the editor, where physics is
-        // already paused.
-        .insert_resource({
-            let mut vt = Time::<bevy::time::Virtual>::default();
-            vt.set_max_delta(std::time::Duration::from_millis(33));
-            vt
-        })
-        // Determinism — registers the GlobalRngSeed resource (C7). Cheap,
-        // resource-only; up before any simulation RNG consumer reads it.
-        .add_plugins(eustress_common::physics::DeterminismPlugin)
-        // Realism Physics System (materials, thermodynamics, fluids, deformation, visualizers)
-        .add_plugins(eustress_common::realism::RealismPlugin)
-        // Tick-based simulation with time compression (integrates with PlayModeState)
-        .add_plugins(simulation::SimulationPlugin::default())
-        .add_plugins(simulation::ElectrochemistryPlugin)
+        // (Avian + determinism pins + realism + simulation + play server +
+        // team service + soul scripting/physics-bridge/ECS-bindings now
+        // come in with add_core_sim_plugins above.)
         // Gamepad
         .add_plugins(eustress_common::services::GamepadServicePlugin)
         // Notifications UI
         .add_plugins(ui::notifications::NotificationsPlugin)
-        // Play server
-        .add_plugins(play_server::PlayServerPlugin)
         // Embedded client
         .add_plugins(embedded_client::EmbeddedClientPlugin)
-        // Team service
-        .add_plugins(TeamServicePlugin)
         // Runtime
         .add_plugins(runtime::RuntimePlugin)
         // Seats
         .add_plugins(seats::SeatPlugin)
-        // Soul scripting + physics bridge
-        .add_plugins(EngineSoulPlugin)
-        .add_plugins(soul::physics_bridge::RunePhysicsBridgePlugin)
+        // Soul GUI bridge (scripts ↔ Slint in-game GUI) — editor tier.
         .add_plugins(soul::gui_bridge::GuiBridgePlugin)
-        .add_plugins(ui::rune_ecs_bindings::RuneECSBindingsPlugin)
         // Workshop (System 0: Ideation — conversational product creation)
         .add_plugins(WorkshopPlugin)
         // In-app updater (checks releases.eustress.dev on startup)
@@ -643,8 +525,7 @@ fn main() {
         .add_plugins(eustress_geo::GeoPlugin)
         // Window focus
         .add_plugins(WindowFocusPlugin)
-        // Universe registry (periodic Universe→Space tree scan)
-        .add_plugins(UniverseRegistryPlugin)
+        // (UniverseRegistryPlugin now comes in with add_core_sim_plugins.)
         // Startup
         .add_plugins(StartupPlugin)
         // Window title: derives "Universe > Space - Eustress Engine" from SpaceRoot
@@ -678,13 +559,7 @@ fn main() {
         app.add_systems(Update, tag_splats_for_explorer);
     }
 
-    // WorldDb — Fjall-backed authoritative ECS store (2026-05-15 binary
-    // pivot; memory project_eustress_binary_pivot). Gated by the
-    // `world-db` feature so the engine still boots on TOML when the
-    // feature is off. The plugin opens `<SpaceRoot>/world.fjalldb/`
-    // and mirrors Transform writes alongside the legacy TOML path.
-    #[cfg(feature = "world-db")]
-    app.add_plugins(space::world_db_plugin::WorldDbPlugin);
+    // (WorldDbPlugin now comes in with add_core_sim_plugins above.)
 
     // Sim orchestration (Phase 6 engine seam + thin Phase 3 driver). Gated by
     // `sim-orchestration` (implies `world-db`), so the default build is
@@ -710,22 +585,8 @@ fn main() {
             .after(ui::slint_ui::update_slint_ui_focus));
     }
 
-    // Streaming — must use a separate block because #[cfg] cannot gate
-    // individual method calls inside a builder chain.
-    #[cfg(feature = "streaming")]
-    {
-        app.add_plugins(StreamingPlugin);
-        app.add_systems(Startup, setup_sim_stream_writer);
-
-        // Cross-process pub/sub over TCP. The in-process EustressStream
-        // (set up by StreamingPlugin above) is exposed on 33000+ so MCP,
-        // LSP, visualizers, and remote agents can subscribe to live
-        // scene_deltas / mcp.entity.* / sim_watchpoints / etc. without
-        // polling filesystem snapshots. The plugin itself writes the
-        // primary TCP port to `<universe>/.eustress/engine.stream.port`
-        // after startup so siblings can discover it.
-        app.add_plugins(eustress_engine::stream_node_plugin::StreamNodePlugin::default());
-    }
+    // (EustressStream change-queue plugin, the persistent SimStreamWriter,
+    // and the TCP stream node now come in with add_core_sim_plugins above.)
 
     // Wrap App::run() so GPU surface-lost panics (swap chain unavailable,
     // uniform buffer unwrap, wgpu buffer invalid) don't show a crash dialog.
@@ -851,60 +712,6 @@ fn derive_window_title(space_path: &std::path::Path) -> String {
     }
 }
 
-/// Re-import from lib so this binary can insert the resource.
-#[cfg(feature = "streaming")]
-use eustress_engine::SimWriterResource;
-
-/// Startup system: connect `SimStreamWriter` once and insert as a Bevy Resource.
-///
-/// Task 10 call sites (`run_simulation`, `process_feedback`, `execute_and_apply`)
-/// read `Option<Res<SimWriterResource>>` and pass `Some(writer.0.clone())` to the
-/// `publish_*_sync` helpers, replacing the `None` fallback connect.
-///
-/// Silently skipped if streaming is unavailable — engine continues without streaming.
-#[cfg(feature = "streaming")]
-fn setup_sim_stream_writer(mut commands: Commands, config: Option<Res<ChangeQueueConfig>>) {
-    let cfg = config.map(|c| c.clone()).unwrap_or_default();
-
-    let result = std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().expect("sim writer rt");
-        rt.block_on(SimStreamWriter::connect(&cfg))
-    })
-    .join()
-    .unwrap_or_else(|_| Err("SimStreamWriter init thread panicked".to_string()));
-
-    match result {
-        Ok(writer) => {
-            info!("SimStreamWriter: persistent connection ready.");
-            commands.insert_resource(SimWriterResource(Arc::new(writer)));
-        }
-        Err(e) => {
-            warn!(
-                "SimStreamWriter: streaming unavailable ({e}). \
-                 Simulation records will use fallback one-shot connects."
-            );
-        }
-    }
-}
-
-/// Rate-limited error handler: logs each unique error source ONCE, then suppresses.
-/// This replaces both `ignore` (hides everything) and `warn` (spams every frame).
-/// Uses a static HashSet to track which system/command names have already been reported.
-fn rate_limited_error_handler(error: bevy::ecs::error::BevyError, ctx: bevy::ecs::error::ErrorContext) {
-    use std::sync::Mutex;
-    use std::collections::HashSet;
-
-    static SEEN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-
-    let key = format!("{}", ctx);
-
-    let mut guard = SEEN.lock().unwrap();
-    let seen = guard.get_or_insert_with(HashSet::new);
-
-    if seen.insert(key.clone()) {
-        // First time seeing this error source — log it
-        warn!("⚠ {} : {}", ctx, error);
-    }
-    // Subsequent occurrences are silently ignored
-}
+// `setup_sim_stream_writer` and `rate_limited_error_handler` moved to
+// `eustress_engine::app_core` so the headless bin shares them.
 

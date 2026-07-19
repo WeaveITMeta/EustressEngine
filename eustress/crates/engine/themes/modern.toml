@@ -1,0 +1,114 @@
+# Eustress Studio — "Modern" theme (dark glass, high-tech console).
+#
+# A cool, near-black glassy palette with a cyan→green signature accent, larger
+# radii, and a live viewport edge-glow. This is the shipped high-tech look and
+# the base that user themes fall back to for any token they don't specify.
+#
+# To author your own: copy this (or classic.toml) to
+#   %LOCALAPPDATA%/Eustress/Themes/<yourtheme>.toml
+# change [meta].id, tweak tokens, Rescan in File > Settings > Theme.
+
+[meta]
+id = "modern"
+name = "Modern"
+description = "Dark glass, high-tech console — cyan/green accents and viewport glow."
+
+[tokens]
+# Surfaces — near-black with a cool blue undertone + glass translucency (alpha)
+background-primary = "#0a0f18"
+background-secondary = "#0d1320"
+background-tertiary = "#131b2b"
+panel-background = "#0c1220"
+header-background = "#101a2c"
+viewport-background = "#04070d"
+# Tabs
+tab-active = "#122034"
+tab-inactive = "#0b1322"
+tab-hover = "#172a42"
+# Text — crisp cool near-white for the console feel
+text-primary = "#e8ecf3"
+text-secondary = "#8b95a7"
+text-disabled = "#4b5568"
+text-accent = "#4fd6ff"
+text-error = "#ff6b6b"
+text-warning = "#ffcc55"
+text-success = "#3ce0b0"
+# Borders — hairline cyan tint
+border-color = "#0a84ff26"
+border-focus = "#0a84ff"
+border-error = "#ff5470"
+# Status "surface" tints — dark tinted backgrounds for success/danger UI.
+success-surface = "#0d2419"
+success-surface-hover = "#123320"
+success-surface-border = "#1f5c3a"
+success-surface-text-hover = "#8ce6b8"
+error-surface = "#2a0f14"
+error-surface-hover = "#3d1219"
+error-surface-border = "#7a2030"
+# Buttons
+button-background = "#111a2a"
+button-hover = "#1a2740"
+button-pressed = "#0b1322"
+button-primary = "#0a84ff"
+button-primary-hover = "#3aa0ff"
+# Inputs
+input-background = "#0a1120"
+input-border = "#0a84ff38"
+input-focus = "#0a84ff"
+# Selection
+selection-background = "#0a84ff26"
+selection-border = "#0a84ff"
+# Overlays / dialogs
+overlay-background = "#060a12e8"
+dialog-background = "#0d1526"
+modal-backdrop = "#000000cc"
+dialog-titlebar-background = "#0a1322"
+# Accents — vivid against the dark glass
+accent-blue = "#0a84ff"
+accent-cyan = "#22d3ee"
+accent-eustress = "#0a84ff"
+accent-green = "#34d399"
+accent-green-bright = "#00ffa3"
+accent-orange = "#ff9f45"
+accent-purple = "#c084fc"
+accent-red = "#ff5470"
+accent-yellow = "#ffd166"
+# Semantic ribbon-tint categories
+cat-parts = "#60a5fa"
+cat-structure = "#4ade80"
+cat-constraint = "#fbbf24"
+cat-modify = "#c084fc"
+cat-data = "#22d3ee"
+# Floating-overlay surface treatments
+panel-glass = "#0a1120cc"
+border-highlight = "#0a84ff22"
+shadow-float = "#000000a6"
+border-glow-color = "#0a84ff7a"
+# Ribbon
+ribbon-background = "#080d18"
+ribbon-tab-active = "#122034"
+ribbon-tab-inactive = "#0b1322"
+ribbon-separator = "#0a84ff26"
+# Explorer
+explorer-item-hover = "#111a2a"
+explorer-item-selected = "#0a3a4a"
+explorer-folder = "#f0c04a"
+explorer-file = "#c8d0dc"
+# Output console
+output-info = "#4fd6ff"
+output-warning = "#ffcc55"
+output-error = "#ff6b6b"
+output-debug = "#8b95a7"
+# Gizmo (keep the standard axis hues for muscle-memory)
+gizmo-x = "#f14c4c"
+gizmo-y = "#4ec9b0"
+gizmo-z = "#569cd6"
+# Shadow
+shadow-color = "#000000a0"
+# Themeable lengths — larger radii + live viewport glow
+accent-glow-blur = "12px"
+backdrop-blur-lg = "14px"
+radius-sm = "5px"
+radius-md = "9px"
+radius-lg = "16px"
+radius-xl = "22px"

@@ -83,6 +83,49 @@ pub struct EditorSettings {
     /// to the first alphabetical space.
     #[serde(default)]
     pub last_space_path: Option<String>,
+
+    /// Modern (dark/glass, high-tech) vs Classic (today's flat look)
+    /// theme. Classic is the default for new/never-saved settings — see
+    /// `default_theme_modern`. Pushed into the Slint `Theme.modern`
+    /// global by `init_theme_to_slint` on startup and by the
+    /// `SetThemeModern` drain handler on every live toggle.
+    #[serde(default = "default_theme_modern")]
+    pub theme_modern: bool,
+
+    /// Active TOML theme id (e.g. "classic", "modern", or a user theme's id).
+    /// `None` for settings written before the theme engine existed — the
+    /// theme registry migrates from `theme_modern` in that case. `SelectTheme`
+    /// writes it (and keeps `theme_modern` in sync for back-compat).
+    #[serde(default)]
+    pub active_theme_id: Option<String>,
+
+    /// Active "Eustress Mode" manifest id (e.g. "engineering", "justice",
+    /// or a user-submitted mode's id). Resolved against `ModeRegistry` at
+    /// startup; falls back to "engineering" if the id no longer resolves
+    /// (mode was renamed/removed from the Modes folder).
+    #[serde(default = "default_active_mode")]
+    pub active_mode_id: String,
+
+    /// Active submode within `active_mode_id`, if that mode has any (e.g.
+    /// Justice's Civil/Criminal/Judge, Military's six branches). Empty
+    /// string = no specific submode selected.
+    #[serde(default)]
+    pub active_submode_id: String,
+
+    /// Per-mode last-used Layout preset NAME (not index — names are
+    /// stable across a future preset-list reorder). Keyed by mode id so
+    /// switching Modes remembers each mode's own Layout choice
+    /// independently.
+    #[serde(default)]
+    pub layout_preset_by_mode: std::collections::HashMap<String, String>,
+}
+
+fn default_theme_modern() -> bool {
+    false
+}
+
+fn default_active_mode() -> String {
+    "engineering".to_string()
 }
 
 /// A saved identity for quick-switch login.
@@ -141,6 +184,12 @@ impl Default for EditorSettings {
             auto_save_enabled: true,
             saved_identities: Vec::new(),
             last_space_path: None,
+
+            theme_modern: false,
+            active_theme_id: Some("classic".to_string()),
+            active_mode_id: "engineering".to_string(),
+            active_submode_id: String::new(),
+            layout_preset_by_mode: std::collections::HashMap::new(),
         }
     }
 }

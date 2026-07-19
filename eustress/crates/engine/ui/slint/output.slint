@@ -155,7 +155,7 @@ export component OutputConsole inherits Rectangle {
                         width: 26px;
                         height: 22px;
                         background: info-touch.has-hover ? Theme.button-hover : 
-                                    (root.show-info ? #333333 : transparent);
+                                    (root.show-info ? Theme.button-hover : transparent);
                         border-radius: 3px;
                         
                         info-touch := TouchArea {
@@ -177,15 +177,15 @@ export component OutputConsole inherits Rectangle {
                             x: 0px;
                             y: parent.height + 4px;
                             Rectangle {
-                                background: #2d2d2d;
+                                background: Theme.dialog-background;
                                 border-radius: 4px;
                                 border-width: 1px;
-                                border-color: #404040;
+                                border-color: Theme.border-color;
                                 height: 24px;
                                 width: info-tip-text.preferred-width + 12px;
                                 info-tip-text := Text {
                                     text: "Toggle Info Messages";
-                                    color: #d4d4d4;
+                                    color: Theme.text-primary;
                                     font-size: 11px;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -205,7 +205,7 @@ export component OutputConsole inherits Rectangle {
                         width: 26px;
                         height: 22px;
                         background: warn-touch.has-hover ? Theme.button-hover :
-                                    (root.show-warnings ? #333333 : transparent);
+                                    (root.show-warnings ? Theme.button-hover : transparent);
                         border-radius: 3px;
                         
                         warn-touch := TouchArea {
@@ -227,15 +227,15 @@ export component OutputConsole inherits Rectangle {
                             x: 0px;
                             y: parent.height + 4px;
                             Rectangle {
-                                background: #2d2d2d;
+                                background: Theme.dialog-background;
                                 border-radius: 4px;
                                 border-width: 1px;
-                                border-color: #404040;
+                                border-color: Theme.border-color;
                                 height: 24px;
                                 width: warn-tip-text.preferred-width + 12px;
                                 warn-tip-text := Text {
                                     text: "Toggle Warnings";
-                                    color: #d4d4d4;
+                                    color: Theme.text-primary;
                                     font-size: 11px;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -255,7 +255,7 @@ export component OutputConsole inherits Rectangle {
                         width: 26px;
                         height: 22px;
                         background: err-touch.has-hover ? Theme.button-hover :
-                                    (root.show-errors ? #333333 : transparent);
+                                    (root.show-errors ? Theme.button-hover : transparent);
                         border-radius: 3px;
                         
                         err-touch := TouchArea {
@@ -277,15 +277,15 @@ export component OutputConsole inherits Rectangle {
                             x: 0px;
                             y: parent.height + 4px;
                             Rectangle {
-                                background: #2d2d2d;
+                                background: Theme.dialog-background;
                                 border-radius: 4px;
                                 border-width: 1px;
-                                border-color: #404040;
+                                border-color: Theme.border-color;
                                 height: 24px;
                                 width: err-tip-text.preferred-width + 12px;
                                 err-tip-text := Text {
                                     text: "Toggle Errors";
-                                    color: #d4d4d4;
+                                    color: Theme.text-primary;
                                     font-size: 11px;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -305,7 +305,7 @@ export component OutputConsole inherits Rectangle {
                         width: 26px;
                         height: 22px;
                         background: dbg-touch.has-hover ? Theme.button-hover :
-                                    (root.show-debug ? #333333 : transparent);
+                                    (root.show-debug ? Theme.button-hover : transparent);
                         border-radius: 3px;
                         
                         dbg-touch := TouchArea {
@@ -327,15 +327,15 @@ export component OutputConsole inherits Rectangle {
                             x: 0px;
                             y: parent.height + 4px;
                             Rectangle {
-                                background: #2d2d2d;
+                                background: Theme.dialog-background;
                                 border-radius: 4px;
                                 border-width: 1px;
-                                border-color: #404040;
+                                border-color: Theme.border-color;
                                 height: 24px;
                                 width: dbg-tip-text.preferred-width + 12px;
                                 dbg-tip-text := Text {
                                     text: "Toggle Debug";
-                                    color: #d4d4d4;
+                                    color: Theme.text-primary;
                                     font-size: 11px;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -372,10 +372,10 @@ export component OutputConsole inherits Rectangle {
                         width: 44px;
                         height: 22px;
                         background: rune-touch.has-hover ? Theme.button-hover :
-                                    (root.source-filter == "rune" ? #4a3a1e : transparent);
+                                    (root.source-filter == "rune" ? #4a3a1e : transparent);  // theme-exempt: bespoke Rune-glyph warm-brown active tint, no palette token
                         border-radius: 3px;
                         border-width: root.source-filter == "rune" ? 1px : 0px;
-                        border-color: #7a5a2e;
+                        border-color: #7a5a2e;  // theme-exempt: bespoke Rune-glyph warm-brown border, no palette token
 
                         rune-touch := TouchArea {
                             mouse-cursor: pointer;
@@ -390,7 +390,7 @@ export component OutputConsole inherits Rectangle {
 
                         Text {
                             text: "Rune";
-                            color: root.source-filter == "rune" ? #ffb74d : Theme.text-secondary;
+                            color: root.source-filter == "rune" ? Theme.cat-constraint : Theme.text-secondary;
                             font-size: 10px;
                             font-weight: 500;
                             horizontal-alignment: center;
@@ -409,10 +409,10 @@ export component OutputConsole inherits Rectangle {
                         width: 44px;
                         height: 22px;
                         background: luau-touch.has-hover ? Theme.button-hover :
-                                    (root.source-filter == "luau" ? #1e3a5a : transparent);
+                                    (root.source-filter == "luau" ? #1e3a5a : transparent);  // theme-exempt: bespoke Luau-glyph navy tint; no solid token (selection-background is translucent in Modern)
                         border-radius: 3px;
                         border-width: root.source-filter == "luau" ? 1px : 0px;
-                        border-color: #2e6aaa;
+                        border-color: #2e6aaa;  // theme-exempt: bespoke Luau-glyph blue border, no palette token
 
                         luau-touch := TouchArea {
                             mouse-cursor: pointer;
@@ -427,7 +427,7 @@ export component OutputConsole inherits Rectangle {
 
                         Text {
                             text: "Luau";
-                            color: root.source-filter == "luau" ? #5aadff : Theme.text-secondary;
+                            color: root.source-filter == "luau" ? Theme.text-accent : Theme.text-secondary;
                             font-size: 10px;
                             font-weight: 500;
                             horizontal-alignment: center;
@@ -468,15 +468,15 @@ export component OutputConsole inherits Rectangle {
                             x: 0px;
                             y: parent.height + 4px;
                             Rectangle {
-                                background: #2d2d2d;
+                                background: Theme.dialog-background;
                                 border-radius: 4px;
                                 border-width: 1px;
-                                border-color: #404040;
+                                border-color: Theme.border-color;
                                 height: 24px;
                                 width: clear-tip-text.preferred-width + 12px;
                                 clear-tip-text := Text {
                                     text: "Clear All Output";
-                                    color: #d4d4d4;
+                                    color: Theme.text-primary;
                                     font-size: 11px;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -573,15 +573,15 @@ export component OutputConsole inherits Rectangle {
                             x: 0px;
                             y: parent.height + 4px;
                             Rectangle {
-                                background: #2d2d2d;
+                                background: Theme.dialog-background;
                                 border-radius: 4px;
                                 border-width: 1px;
-                                border-color: #404040;
+                                border-color: Theme.border-color;
                                 height: 24px;
                                 width: autoscroll-tip-text.preferred-width + 12px;
                                 autoscroll-tip-text := Text {
                                     text: "Toggle Auto-scroll";
-                                    color: #d4d4d4;
+                                    color: Theme.text-primary;
                                     font-size: 11px;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -600,7 +600,7 @@ export component OutputConsole inherits Rectangle {
                         y: 4px;
                         width: 22px;
                         height: 22px;
-                        background: close-touch.has-hover ? #c42b1c : transparent;
+                        background: close-touch.has-hover ? Theme.accent-red : transparent;
                         border-radius: 3px;
                         
                         close-touch := TouchArea {
@@ -622,15 +622,15 @@ export component OutputConsole inherits Rectangle {
                             x: 0px;
                             y: parent.height + 4px;
                             Rectangle {
-                                background: #2d2d2d;
+                                background: Theme.dialog-background;
                                 border-radius: 4px;
                                 border-width: 1px;
-                                border-color: #404040;
+                                border-color: Theme.border-color;
                                 height: 24px;
                                 width: close-tip-text.preferred-width + 12px;
                                 close-tip-text := Text {
                                     text: "Close Output Panel";
-                                    color: #d4d4d4;
+                                    color: Theme.text-primary;
                                     font-size: 11px;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;

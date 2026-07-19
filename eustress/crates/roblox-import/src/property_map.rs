@@ -184,6 +184,17 @@ pub fn map_properties(
     for (key, variant) in rbx_props {
         apply_variant(&mut bag, target_class, key.as_str(), variant);
     }
+    // Post-loop (property HashMap iteration order isn't guaranteed, so
+    // this can't be done inline when "Shape" happens to be read):
+    // a Shape=Cylinder part needs its rotation corrected for the
+    // Roblox-vs-Eustress cylinder-axis mismatch. `asset_mesh` can only be
+    // "parts/cylinder.glb" here via the `Shape` property (`try_part_property`)
+    // — the OTHER cylinder source, `CylinderMesh`/`SpecialMesh` child-folding,
+    // runs later in the materializer, outside this function.
+    if bag.overrides.asset_mesh.as_deref() == Some("parts/cylinder.glb") {
+        let base_rotation = bag.overrides.rotation.unwrap_or([0.0, 0.0, 0.0, 1.0]);
+        bag.overrides.rotation = Some(quat_mul(base_rotation, CYLINDER_AXIS_CORRECTION));
+    }
     bag
 }
 
@@ -195,6 +206,16 @@ fn apply_variant(bag: &mut PropertyBag, target_class: ClassName, key: &str, vari
     // The Roblox `Name` and `Parent` properties never land in extras —
     // they're handled by the materializer (folder name + tree shape).
     if key == "Name" || key == "Parent" {
+        return;
+    }
+
+    // `Terrain.SmoothGrid` is the voxel payload, consumed by the dedicated
+    // decoder (`crate::terrain`), which persists it under
+    // `Workspace/Terrain/`. Letting it fall through to the generic
+    // BinaryString arm hex-encoded ~11.8 MB of voxels into a TOML string —
+    // a 2x-inflated, inert 23.6 MB line that made one Terrain
+    // `_instance.toml` 27 MB. Never round-trip it through extras.
+    if key == "SmoothGrid" {
         return;
     }
 
@@ -1670,7 +1691,64 @@ fn try_part_property(bag: &mut PropertyBag, target_class: ClassName, key: &str, 
             return true;
         }
     }
+    // `Part.Shape` (`Enum.PartType`: Ball=0, Block=1, Cylinder=2) — the
+    // modern, by-far-most-common way to make a non-block primitive in
+    // Roblox (as opposed to the legacy `SpecialMesh`/`CylinderMesh` CHILD
+    // mechanism handled separately in the materializer's mesh-folding
+    // pass). Previously unhandled entirely: `Shape` fell through to
+    // `properties_extras` as an inert integer, so every Ball/Cylinder
+    // `Part` imported with the class-schema default `parts/block.glb` —
+    // i.e. every Roblox cylinder/ball came in as a plain cube.
+    //
+    // The Cylinder case ALSO needs an axis correction: Roblox orients a
+    // Shape=Cylinder part's round faces along its LOCAL X axis, while
+    // Eustress's `parts/cylinder.glb` (and its Avian collider,
+    // `Collider::cylinder(radius, half_height)` in `instance_loader.rs`)
+    // put the cylinder's axis along local Y, the near-universal
+    // engine/DCC convention. Copying Roblox's CFrame verbatim onto a
+    // Y-axis mesh would render the cylinder on its side. The correction
+    // (rotate the mesh's local Y onto Roblox's expected X, i.e. -90°
+    // about local Z) is applied once every property has been read — see
+    // the post-loop step in `map_properties`, since `Shape` and `CFrame`
+    // can arrive in either order from the property HashMap.
+    if key == "Shape" {
+        if let Variant::Enum(e) = variant {
+            let mesh = match e.to_u32() {
+                0 => Some("parts/ball.glb"),
+                2 => Some("parts/cylinder.glb"),
+                // 1 (Block) — the class-schema default already applies;
+                // no override needed. Any future PartType value falls
+                // through to the extras catch-all below (unchanged
+                // behaviour, surfaced in the unmapped-properties report).
+                _ => None,
+            };
+            if let Some(m) = mesh {
+                bag.overrides.asset_mesh = Some(m.to_string());
+                return true;
+            }
+        }
+    }
     false
+}
+
+/// -90° rotation about the local Z axis, as `[x, y, z, w]`. Corrects a
+/// Shape=Cylinder part's axis convention — see `try_part_property`'s
+/// `"Shape"` arm for the full explanation.
+const CYLINDER_AXIS_CORRECTION: [f32; 4] = [0.0, 0.0, -std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2];
+
+/// Hamilton product `a * b` for `[x, y, z, w]` quaternions — applying the
+/// combined rotation means "apply `b` first, in `a`'s own local frame,
+/// then apply `a`". Hand-rolled (this crate stays glam-free by design —
+/// see `mat3_to_quat`'s doc comment).
+fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let (ax, ay, az, aw) = (a[0], a[1], a[2], a[3]);
+    let (bx, by, bz, bw) = (b[0], b[1], b[2], b[3]);
+    [
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -2594,7 +2672,12 @@ mod tests {
     }
 
     #[test]
-    fn text_color3_maps_to_0_255_text_color() {
+    fn text_color3_maps_to_0_1_text_color() {
+        // GUI colors are 0..1 floats (the billboard/Slint renderer multiplies
+        // by 255) — see `try_gui_property`'s `color_f32` calls. Renamed from
+        // `..._0_255_text_color`: that was the PRE-fix range, which made
+        // every imported label's `text_color`/`background_color` saturate to
+        // white when the renderer re-multiplied it by 255.
         let bag = map_properties(
             &props_with(vec![(
                 "TextColor3",
@@ -2607,23 +2690,111 @@ mod tests {
                 .get("text")
                 .and_then(|m| m.get("text_color")),
             Some(&toml::Value::Array(vec![
-                toml::Value::Integer(255),
-                toml::Value::Integer(255),
-                toml::Value::Integer(255),
+                toml::Value::Float(1.0),
+                toml::Value::Float(1.0),
+                toml::Value::Float(1.0),
             ]))
         );
     }
 
     #[test]
     fn enum_extras_carry_integer_label() {
+        // `Shape` is no longer a generic-fallback example (`try_part_property`
+        // now maps it to a mesh — see the tests below) — `FormFactor` is a
+        // genuinely still-unhandled `Part` enum property, exercising the
+        // same generic "unmatched enum -> extras integer" fallback path.
+        let bag = map_properties(
+            &props_with(vec![("FormFactor", Variant::Enum(Enum::from_u32(3)))]),
+            ClassName::Part,
+        );
+        assert_eq!(
+            bag.properties_extras.get("FormFactor"),
+            Some(&toml::Value::Integer(3))
+        );
+    }
+
+    #[test]
+    fn shape_ball_maps_to_ball_mesh() {
+        let bag = map_properties(
+            &props_with(vec![("Shape", Variant::Enum(Enum::from_u32(0)))]),
+            ClassName::Part,
+        );
+        assert_eq!(bag.overrides.asset_mesh.as_deref(), Some("parts/ball.glb"));
+        assert!(
+            !bag.properties_extras.contains_key("Shape"),
+            "Shape must be consumed, not also duplicated into extras"
+        );
+    }
+
+    #[test]
+    fn shape_block_leaves_class_schema_default() {
+        // Shape=1 (Block) is the class-schema default mesh already — no
+        // override needed, so `asset_mesh` stays unset.
+        let bag = map_properties(
+            &props_with(vec![("Shape", Variant::Enum(Enum::from_u32(1)))]),
+            ClassName::Part,
+        );
+        assert_eq!(bag.overrides.asset_mesh, None);
+    }
+
+    #[test]
+    fn shape_cylinder_maps_to_cylinder_mesh_and_corrects_axis() {
+        // Identity CFrame (no authored rotation) — the ONLY rotation on
+        // the resulting part should be the axis correction itself, since
+        // `base_rotation` is identity.
         let bag = map_properties(
             &props_with(vec![("Shape", Variant::Enum(Enum::from_u32(2)))]),
             ClassName::Part,
         );
-        assert_eq!(
-            bag.properties_extras.get("Shape"),
-            Some(&toml::Value::Integer(2))
+        assert_eq!(bag.overrides.asset_mesh.as_deref(), Some("parts/cylinder.glb"));
+        let rot = bag.overrides.rotation.expect("cylinder must get a rotation");
+        let expected = CYLINDER_AXIS_CORRECTION;
+        for i in 0..4 {
+            assert!(
+                (rot[i] - expected[i]).abs() < 1e-5,
+                "component {i}: got {:?}, want {:?}",
+                rot,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn shape_cylinder_axis_correction_composes_with_authored_cframe() {
+        // A part with Shape=Cylinder AND an authored CFrame rotation: the
+        // correction must be applied ON TOP of (not instead of) the
+        // authored rotation, order-independent of HashMap iteration —
+        // exercise both property orderings.
+        let cf = Variant::CFrame(CFrame::new(
+            rbx_dom_weak::types::Vector3::new(0.0, 0.0, 0.0),
+            rbx_dom_weak::types::Matrix3::identity(),
+        ));
+        let bag_a = map_properties(
+            &props_with(vec![
+                ("Shape", Variant::Enum(Enum::from_u32(2))),
+                ("CFrame", cf.clone()),
+            ]),
+            ClassName::Part,
         );
+        let bag_b = map_properties(
+            &props_with(vec![("CFrame", cf), ("Shape", Variant::Enum(Enum::from_u32(2)))]),
+            ClassName::Part,
+        );
+        // Identity CFrame -> base_rotation is identity either way, so both
+        // orderings must land on exactly the correction quaternion.
+        assert_eq!(bag_a.overrides.rotation, bag_b.overrides.rotation);
+        let rot = bag_a.overrides.rotation.unwrap();
+        for i in 0..4 {
+            assert!((rot[i] - CYLINDER_AXIS_CORRECTION[i]).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn quat_mul_identity_is_no_op() {
+        let identity = [0.0, 0.0, 0.0, 1.0];
+        let q = [0.1, 0.2, 0.3, 0.9];
+        assert_eq!(quat_mul(identity, q), q);
+        assert_eq!(quat_mul(q, identity), q);
     }
 
     #[test]

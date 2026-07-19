@@ -26,7 +26,7 @@ export component TimelineFilterModal inherits Rectangle {
     callback close-clicked();
 
     visible: root.visible-when;
-    background: #00000080;        // full-screen backdrop dim
+    background: Theme.modal-backdrop;        // full-screen backdrop dim
     width: 100%;
     height: 100%;
 
@@ -47,7 +47,7 @@ export component TimelineFilterModal inherits Rectangle {
         border-width:      1px;
         border-color:      Theme.border-color;
         drop-shadow-blur:  40px;
-        drop-shadow-color: #000000a0;
+        drop-shadow-color: Theme.shadow-color;
 
         // Swallow clicks inside the dialog so they don't dismiss.
         TouchArea {}
@@ -70,7 +70,7 @@ export component TimelineFilterModal inherits Rectangle {
                 // Close ×
                 close-btn := Rectangle {
                     width: 24px; height: 24px;
-                    background: close-touch.has-hover ? #ffffff15 : transparent;
+                    background: close-touch.has-hover ? #ffffff15 : transparent;  // theme-exempt: translucent white hover overlay, no token
                     border-radius: Theme.radius-md;
                     Text {
                         text: "×";
@@ -92,7 +92,7 @@ export component TimelineFilterModal inherits Rectangle {
                     width: 90px; height: 24px;
                     clicked => { root.select-all(); }
                     Rectangle {
-                        background: parent.has-hover ? #ffffff15 : transparent;
+                        background: parent.has-hover ? #ffffff15 : transparent;  // theme-exempt: translucent white hover overlay, no token
                         border-radius: Theme.radius-md;
                         border-width: 1px;
                         border-color: Theme.accent-blue;
@@ -109,7 +109,7 @@ export component TimelineFilterModal inherits Rectangle {
                     width: 100px; height: 24px;
                     clicked => { root.deselect-all(); }
                     Rectangle {
-                        background: parent.has-hover ? #ffffff15 : transparent;
+                        background: parent.has-hover ? #ffffff15 : transparent;  // theme-exempt: translucent white hover overlay, no token
                         border-radius: Theme.radius-md;
                         border-width: 1px;
                         border-color: Theme.border-color;
@@ -127,7 +127,7 @@ export component TimelineFilterModal inherits Rectangle {
 
             // Checkbox list — one row per tag.
             Rectangle {
-                background: #00000030;
+                background: #00000030;  // theme-exempt: translucent black inset well over glass, no token
                 border-radius: Theme.radius-md;
                 border-width: 1px;
                 border-color: Theme.border-color;
@@ -145,7 +145,7 @@ export component TimelineFilterModal inherits Rectangle {
 
                         for row[i] in root.rows: Rectangle {
                             height: 24px;
-                            background: row-touch.has-hover ? #ffffff08 : transparent;
+                            background: row-touch.has-hover ? #ffffff08 : transparent;  // theme-exempt: translucent white hover overlay, no token
                             border-radius: Theme.radius-sm;
 
                             HorizontalLayout {
@@ -162,7 +162,7 @@ export component TimelineFilterModal inherits Rectangle {
                                     border-radius: 2px;
                                     if row.visible: Text {
                                         text: "✓";
-                                        color: #ffffff;
+                                        color: #ffffff;  // theme-exempt: white checkmark on accent fill
                                         font-size: 11px;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;

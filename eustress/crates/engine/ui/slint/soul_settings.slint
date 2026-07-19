@@ -124,7 +124,7 @@ component SoulToggle inherits Rectangle {
             width: 36px;
             height: 18px;
             border-radius: 9px;
-            background: root.value ? Theme.accent-blue : #333344;
+            background: root.value ? Theme.accent-blue : Theme.button-background;
             y: (28px - self.height) / 2;
 
             TouchArea {
@@ -202,7 +202,7 @@ export component SoulSettingsDialog inherits Rectangle {
         border-width: 1px;
         border-color: Theme.border-color;
         drop-shadow-blur: 28px;
-        drop-shadow-color: #000000a0;
+        drop-shadow-color: Theme.shadow-color;
 
         TouchArea {
             scroll-event(event) => {
@@ -217,7 +217,7 @@ export component SoulSettingsDialog inherits Rectangle {
             // ── Title bar ──
             Rectangle {
                 height: 46px;
-                background: #13131f;
+                background: Theme.dialog-titlebar-background;
                 border-radius: 8px;
 
                 Image {
@@ -245,7 +245,7 @@ export component SoulSettingsDialog inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     width: 28px; height: 28px;
                     border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;
+                    background: close-ta.has-hover ? Theme.button-hover : transparent;
 
                     close-ta := TouchArea {
                         mouse-cursor: pointer;
@@ -254,7 +254,7 @@ export component SoulSettingsDialog inherits Rectangle {
 
                     Text {
                         text: "×";
-                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        color: close-ta.has-hover ? Theme.accent-red : Theme.text-secondary;
                         font-size: 17px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -316,10 +316,10 @@ export component SoulSettingsDialog inherits Rectangle {
                 // Error message
                 if root.error-message != "": Rectangle {
                     height: 28px;
-                    background: #2a1515;
+                    background: Theme.background-tertiary;
                     border-radius: 3px;
                     border-width: 1px;
-                    border-color: #4a2020;
+                    border-color: Theme.border-error;
 
                     Text {
                         x: 10px;
@@ -342,7 +342,7 @@ export component SoulSettingsDialog inherits Rectangle {
                     Rectangle {
                         width: 120px; height: 28px;
                         border-radius: 4px;
-                        background: test-ta.has-hover ? #1a1a2e : Theme.button-background;
+                        background: test-ta.has-hover ? Theme.button-hover : Theme.button-background;
                         border-width: 1px;
                         border-color: test-ta.has-hover ? Theme.accent-blue : Theme.border-color;
 
@@ -369,7 +369,7 @@ export component SoulSettingsDialog inherits Rectangle {
             }
             Rectangle {
                 height: 52px;
-                background: #0f0f1a;
+                background: Theme.dialog-titlebar-background;
                 border-radius: 8px;
 
                 HorizontalLayout {
@@ -382,9 +382,9 @@ export component SoulSettingsDialog inherits Rectangle {
                         width: 100px;
                         height: 32px;
                         border-radius: 5px;
-                        background: save-ta.has-hover ? #1a4a2a : #152a1e;
+                        background: save-ta.has-hover ? Theme.success-surface-hover : Theme.success-surface;
                         border-width: 1px;
-                        border-color: save-ta.has-hover ? #4caf50 : #2a5a32;
+                        border-color: save-ta.has-hover ? Theme.accent-green : Theme.success-surface-border;
 
                         save-ta := TouchArea {
                             mouse-cursor: pointer;
@@ -393,7 +393,7 @@ export component SoulSettingsDialog inherits Rectangle {
 
                         Text {
                             text: "Save";
-                            color: save-ta.has-hover ? #a5d6a7 : #66bb6a;
+                            color: save-ta.has-hover ? Theme.success-surface-text-hover : Theme.accent-green;
                             font-size: 12px;
                             font-weight: 600;
                             horizontal-alignment: center;

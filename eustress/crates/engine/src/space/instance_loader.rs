@@ -2888,6 +2888,31 @@ fn attach_decal_mesh_component(
             extra.remove("decal");
             extra.remove("Decal");
         }
+        ClassName::Texture => {
+            // A Texture tiles an image across one face of its parent part.
+            // We only attach the `Texture` component here (onto the instance
+            // entity itself, which is already `ChildOf` the part); the
+            // dedicated `sync_texture_surfaces` system lazily builds the
+            // tiled quad visual + drives the live UV mapping every frame, so
+            // this loader path needs no mesh/material assets. See
+            // `decal_place_tool::sync_texture_surfaces`.
+            let Some(sec) = section_table(extra, "texture") else { return; };
+            let mut t = eustress_common::classes::Texture::default();
+            if let Some(s) = sec.get("texture").and_then(|v| v.as_str()) { t.texture = s.to_string(); }
+            if let Some(s) = sec.get("face").and_then(|v| v.as_str()) { t.face = s.to_string(); }
+            if let Some(v) = toml_f32(sec.get("studs_per_tile_u")) { t.studs_per_tile_u = v; }
+            if let Some(v) = toml_f32(sec.get("studs_per_tile_v")) { t.studs_per_tile_v = v; }
+            if let Some(v) = toml_f32(sec.get("offset_studs_u")) { t.offset_studs_u = v; }
+            if let Some(v) = toml_f32(sec.get("offset_studs_v")) { t.offset_studs_v = v; }
+            if let Some(rgb) = sec.get("color3").or_else(|| sec.get("color")) {
+                let c = color_u8_array_to_rgba(Some(rgb), [1.0, 1.0, 1.0, 1.0]);
+                t.color3 = [c[0], c[1], c[2]];
+            }
+            if let Some(v) = toml_f32(sec.get("transparency")) { t.transparency = v; }
+            commands.entity(host).insert(t);
+            extra.remove("texture");
+            extra.remove("Texture");
+        }
         ClassName::SpecialMesh => {
             let Some(sec) = section_table(extra, "mesh") else { return; };
             let mut sm = SpecialMesh::default();

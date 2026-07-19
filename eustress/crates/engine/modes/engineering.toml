@@ -1,0 +1,23 @@
+# Eustress Mode — "Engineering" (the default).
+#
+# A Mode reconfigures the Studio for a kind of work: which ribbon tabs show,
+# the default panel Layout, and an optional accent color. This is pure data —
+# copy it to %LOCALAPPDATA%/Eustress/Modes/<yourmode>.toml, change [mode].id,
+# and it appears in the top-left Eustress Modes dropdown.
+
+[mode]
+id = "engineering"
+name = "Engineering"
+icon = "gear"          # allowed: gear, gavel
+version = "1.0"
+author = "Eustress"
+
+[ribbon]
+# The full toolset. Order is preserved. Valid ids: home, model, cad, data,
+# ui, terrain, test, mindspace, plugins.
+tabs = ["home", "model", "cad", "data", "ui", "terrain", "test", "mindspace", "plugins"]
+
+[layout]
+preset = "Default"     # Default | Scripting | Building | Minimal | Wide Panels
+
+# [theme] omitted — Engineering uses the active theme's own accent.

@@ -70,6 +70,9 @@ component AssetTreeRow inherits Rectangle {
     callback clicked();
     callback toggle-expand();
     callback context-menu();
+    // Double-click on a leaf (non-expandable) row — host decides what to do
+    // based on asset-type (media → radial import chooser, script → editor…).
+    callback double-clicked();
 
     height: 24px;
     background: root.selected ? Theme.selection-background :
@@ -78,7 +81,13 @@ component AssetTreeRow inherits Rectangle {
     row-touch := TouchArea {
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
-        double-clicked => { if root.expandable { root.toggle-expand(); } }
+        double-clicked => {
+            if root.expandable {
+                root.toggle-expand();
+            } else {
+                root.double-clicked();
+            }
+        }
         pointer-event(event) => {
             if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
                 root.context-menu();
@@ -162,6 +171,9 @@ export component AssetManager inherits Rectangle {
     callback on-search-changed(string);
     callback on-category-changed(string);
     callback on-open-asset(int);
+    // Double-click on a leaf asset: (id, asset-type, universe-relative path).
+    // Rust routes image/video → radial import chooser.
+    callback on-open-media(int, string, string);
 
     background: Theme.panel-background;
 
@@ -197,7 +209,7 @@ export component AssetManager inherits Rectangle {
                 Rectangle {
                     width: 70px;
                     height: 28px;
-                    background: import-touch.has-hover ? #1a8ae6 : Theme.button-primary;
+                    background: import-touch.has-hover ? Theme.button-primary-hover : Theme.button-primary;
                     border-radius: 4px;
 
                     import-touch := TouchArea {
@@ -327,6 +339,7 @@ export component AssetManager inherits Rectangle {
                     size: node.size;
                     clicked => { root.on-select-asset(node.id); }
                     toggle-expand => { root.on-expand-asset(node.id); }
+                    double-clicked => { root.on-open-media(node.id, node.asset-type, node.path); }
                     context-menu => { }
                 }
             }

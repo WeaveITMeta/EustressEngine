@@ -68,6 +68,9 @@ fn sync_cursor_badge_state(
             "part_swap_positions"  => "assets/icons/ui/cursor-badge-part-swap.svg",
             "model_reflect"        => "assets/icons/ui/cursor-badge-mirror.svg",
             "material_flip"        => "assets/icons/ui/cursor-badge-material-flip.svg",
+            // Decal/Texture surface placement — reuse the material-flip
+            // badge (a surface-paint glyph) as the "paste onto face" cursor.
+            "surface_place"        => "assets/icons/ui/cursor-badge-material-flip.svg",
             _ => "",
         }
     } else if move_state

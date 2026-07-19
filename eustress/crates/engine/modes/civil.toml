@@ -1,0 +1,38 @@
+# Eustress Mode — "Civil".
+# Civil / structural engineering: parametric drafting, terrain, data, and
+# MindSpace for project note-graphs. Survey/Structures tabs are
+# forward-looking (declared ahead of their tooling).
+
+[mode]
+id = "civil"
+name = "Civil"
+icon = "bridge"
+version = "1.0"
+author = "Eustress"
+
+[ribbon]
+tabs = ["home", "model", "cad", "terrain", "data", "mindspace", "test"]
+
+[layout]
+preset = "Wide Panels"
+
+[theme]
+accent = "#4ade80"
+
+[[tabs]]
+id = "survey"
+name = "Survey"
+color = "#4ade80"
+
+  [[tabs.sections]]
+  name = "Site"
+  tools = ["data:import", "data:overlay"]
+
+[[tabs]]
+id = "structures"
+name = "Structures"
+color = "#60a5fa"
+
+  [[tabs.sections]]
+  name = "Analysis"
+  tools = []

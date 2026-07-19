@@ -65,18 +65,18 @@ export component ProblemsPanel inherits Rectangle {
                     width: err-lbl.preferred-width + 18px;
                     height: 20px;
                     y: 6px;
-                    background: root.error-count > 0 ? #3a1515 : transparent;
+                    background: root.error-count > 0 ? #3a1515 : transparent;  // theme-exempt: error-tint chip fill, no error-surface token
                     border-radius: 10px;
                     HorizontalLayout {
                         padding-left: 6px; padding-right: 6px; spacing: 4px;
                         Rectangle {
                             width: 8px; height: 8px; y: 6px;
-                            background: #e53935;
+                            background: Theme.output-error;
                             border-radius: 4px;
                         }
                         err-lbl := Text {
                             text: root.error-count + " errors";
-                            color: root.error-count > 0 ? #ef5350 : Theme.text-secondary;
+                            color: root.error-count > 0 ? Theme.output-error : Theme.text-secondary;
                             font-size: 11px;
                             vertical-alignment: center;
                         }
@@ -88,18 +88,18 @@ export component ProblemsPanel inherits Rectangle {
                     width: warn-lbl.preferred-width + 18px;
                     height: 20px;
                     y: 6px;
-                    background: root.warning-count > 0 ? #3a2a15 : transparent;
+                    background: root.warning-count > 0 ? #3a2a15 : transparent;  // theme-exempt: warning-tint chip fill, no warning-surface token
                     border-radius: 10px;
                     HorizontalLayout {
                         padding-left: 6px; padding-right: 6px; spacing: 4px;
                         Rectangle {
                             width: 8px; height: 8px; y: 6px;
-                            background: #fb8c00;
+                            background: Theme.output-warning;
                             border-radius: 4px;
                         }
                         warn-lbl := Text {
                             text: root.warning-count + " warnings";
-                            color: root.warning-count > 0 ? #ffb74d : Theme.text-secondary;
+                            color: root.warning-count > 0 ? Theme.output-warning : Theme.text-secondary;
                             font-size: 11px;
                             vertical-alignment: center;
                         }
@@ -115,11 +115,11 @@ export component ProblemsPanel inherits Rectangle {
                     height: 22px;
                     y: 5px;
                     background: fix-ta.has-hover && root.can-fix-with-workshop
-                        ? #388e3c
-                        : (root.can-fix-with-workshop ? #2e7d32 : #252525);
+                        ? #388e3c  // theme-exempt: green action-button hover fill, no green-fill token
+                        : (root.can-fix-with-workshop ? #2e7d32 : Theme.button-background);  // theme-exempt: #2e7d32 green action-button base fill, no green-fill token
                     border-radius: 4px;
                     border-width: 1px;
-                    border-color: root.can-fix-with-workshop ? #4caf50 : #3a3a3a;
+                    border-color: root.can-fix-with-workshop ? #4caf50 : Theme.border-color;  // theme-exempt: #4caf50 green action-button border, no green token
                     visible: root.items.length > 0;
 
                     fix-ta := TouchArea {
@@ -194,10 +194,10 @@ export component ProblemsPanel inherits Rectangle {
                             width: 10px;
                             height: 10px;
                             y: 9px;
-                            background: item.severity == "error"   ? #e53935
-                                      : item.severity == "warning" ? #fb8c00
-                                      : item.severity == "info"    ? #1e88e5
-                                      :                              #757575;
+                            background: item.severity == "error"   ? Theme.output-error
+                                      : item.severity == "warning" ? Theme.output-warning
+                                      : item.severity == "info"    ? Theme.output-info
+                                      :                              Theme.output-debug;
                             border-radius: 5px;
                         }
 

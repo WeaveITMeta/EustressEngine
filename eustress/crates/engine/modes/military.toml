@@ -1,0 +1,64 @@
+# Eustress Mode — "Military".
+# Terrain-centric operations planning + logistics. Six service-branch submodes.
+
+[mode]
+id = "military"
+name = "Military"
+icon = "military"
+version = "1.0"
+author = "Eustress"
+
+[ribbon]
+tabs = ["home", "model", "terrain", "data", "test"]
+
+[layout]
+preset = "Wide Panels"
+
+[theme]
+accent = "#4ade80"
+
+[[submodes]]
+id = "marines"
+name = "Marines"
+
+[[submodes]]
+id = "army"
+name = "Army"
+
+[[submodes]]
+id = "navy"
+name = "Navy"
+
+[[submodes]]
+id = "coast-guard"
+name = "Coast Guard"
+
+[[submodes]]
+id = "air-force"
+name = "Air Force"
+
+[[submodes]]
+id = "space-force"
+name = "Space Force"
+
+[[tabs]]
+id = "operations"
+name = "Operations"
+color = "#4ade80"
+
+  [[tabs.sections]]
+  name = "Planning"
+  tools = []
+
+  [[tabs.sections]]
+  name = "Map"
+  tools = ["data:grid", "data:overlay"]
+
+[[tabs]]
+id = "logistics"
+name = "Logistics"
+color = "#ffd166"
+
+  [[tabs.sections]]
+  name = "Supply"
+  tools = ["data:import", "data:stats", "data:record"]

@@ -73,7 +73,7 @@ export component DataSourcesDialog inherits Rectangle {
         border-width: 1px;
         border-color: Theme.border-color;
         drop-shadow-blur: 28px;
-        drop-shadow-color: #000000a0;
+        drop-shadow-color: Theme.shadow-color;
 
         TouchArea {
             scroll-event(event) => { return accept; }
@@ -86,7 +86,7 @@ export component DataSourcesDialog inherits Rectangle {
             // ── Title bar ──
             Rectangle {
                 height: 46px;
-                background: #13131f;
+                background: Theme.dialog-titlebar-background;
                 border-radius: 8px;
 
                 Text {
@@ -105,7 +105,7 @@ export component DataSourcesDialog inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     width: 28px; height: 28px;
                     border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;
+                    background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: dark-red destructive-hover tint, no red-surface token
 
                     close-ta := TouchArea {
                         mouse-cursor: pointer;
@@ -114,7 +114,7 @@ export component DataSourcesDialog inherits Rectangle {
 
                     Text {
                         text: "×";
-                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
                         font-size: 17px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -225,7 +225,7 @@ export component DataSourcesDialog inherits Rectangle {
                             Rectangle {
                                 width: 70px; height: 28px;
                                 border-radius: 4px;
-                                background: cancel-add-ta.has-hover ? #1a1a2e : Theme.button-background;
+                                background: cancel-add-ta.has-hover ? Theme.button-hover : Theme.button-background;
                                 border-width: 1px;
                                 border-color: Theme.border-color;
 
@@ -246,9 +246,9 @@ export component DataSourcesDialog inherits Rectangle {
                             Rectangle {
                                 width: 70px; height: 28px;
                                 border-radius: 4px;
-                                background: add-ta.has-hover ? #1a4a2a : #152a1e;
+                                background: add-ta.has-hover ? #1a4a2a : #152a1e;  // theme-exempt: dark-green add-button fill, no green-surface token
                                 border-width: 1px;
-                                border-color: add-ta.has-hover ? #4caf50 : #2a5a32;
+                                border-color: add-ta.has-hover ? Theme.accent-green : #2a5a32;  // theme-exempt: dark-green default border, no green-surface token
 
                                 add-ta := TouchArea {
                                     mouse-cursor: pointer;
@@ -257,7 +257,7 @@ export component DataSourcesDialog inherits Rectangle {
 
                                 Text {
                                     text: "Add";
-                                    color: add-ta.has-hover ? #a5d6a7 : #66bb6a;
+                                    color: add-ta.has-hover ? #a5d6a7 : Theme.accent-green;  // theme-exempt: light success-green hover text, no light-green token
                                     font-size: 11px;
                                     font-weight: 600;
                                     horizontal-alignment: center;
@@ -280,9 +280,9 @@ export component DataSourcesDialog inherits Rectangle {
                             Rectangle {
                                 width: 100px; height: 24px;
                                 border-radius: 4px;
-                                background: add-src-ta.has-hover ? #1a4a2a : #152a1e;
+                                background: add-src-ta.has-hover ? #1a4a2a : #152a1e;  // theme-exempt: dark-green add-button fill, no green-surface token
                                 border-width: 1px;
-                                border-color: add-src-ta.has-hover ? #4caf50 : #2a5a32;
+                                border-color: add-src-ta.has-hover ? Theme.accent-green : #2a5a32;  // theme-exempt: dark-green default border, no green-surface token
 
                                 add-src-ta := TouchArea {
                                     mouse-cursor: pointer;
@@ -291,7 +291,7 @@ export component DataSourcesDialog inherits Rectangle {
 
                                 Text {
                                     text: "+ Add Source";
-                                    color: add-src-ta.has-hover ? #a5d6a7 : #66bb6a;
+                                    color: add-src-ta.has-hover ? #a5d6a7 : Theme.accent-green;  // theme-exempt: light success-green hover text, no light-green token
                                     font-size: 11px;
                                     font-weight: 600;
                                     horizontal-alignment: center;
@@ -346,8 +346,8 @@ export component DataSourcesDialog inherits Rectangle {
                             Rectangle {
                                 width: 8px; height: 8px;
                                 y: (parent.height - self.height) / 2;
-                                background: source.status == "connected" ? #66bb6a :
-                                           source.status == "error" ? #ef5350 :
+                                background: source.status == "connected" ? Theme.accent-green :
+                                           source.status == "error" ? Theme.text-error :
                                            Theme.text-secondary;
                                 border-radius: 4px;
                             }
@@ -377,7 +377,7 @@ export component DataSourcesDialog inherits Rectangle {
                             Rectangle {
                                 width: 40px; height: 24px;
                                 border-radius: 3px;
-                                background: test-ta.has-hover ? #1a1a2e : Theme.button-background;
+                                background: test-ta.has-hover ? Theme.button-hover : Theme.button-background;
                                 border-width: 1px;
                                 border-color: Theme.border-color;
 
@@ -398,7 +398,7 @@ export component DataSourcesDialog inherits Rectangle {
                             Rectangle {
                                 width: 40px; height: 24px;
                                 border-radius: 3px;
-                                background: edit-ta.has-hover ? #1a1a2e : Theme.button-background;
+                                background: edit-ta.has-hover ? Theme.button-hover : Theme.button-background;
                                 border-width: 1px;
                                 border-color: Theme.border-color;
 
@@ -419,9 +419,9 @@ export component DataSourcesDialog inherits Rectangle {
                             Rectangle {
                                 width: 24px; height: 24px;
                                 border-radius: 3px;
-                                background: del-ta.has-hover ? #3d1515 : Theme.button-background;
+                                background: del-ta.has-hover ? #3d1515 : Theme.button-background;  // theme-exempt: dark-red destructive-hover tint, no red-surface token
                                 border-width: 1px;
-                                border-color: del-ta.has-hover ? #5a2020 : Theme.border-color;
+                                border-color: del-ta.has-hover ? #5a2020 : Theme.border-color;  // theme-exempt: dark-red destructive-hover border, no red-surface token
 
                                 del-ta := TouchArea {
                                     mouse-cursor: pointer;
@@ -430,7 +430,7 @@ export component DataSourcesDialog inherits Rectangle {
 
                                 Text {
                                     text: "×";
-                                    color: del-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                                    color: del-ta.has-hover ? Theme.text-error : Theme.text-secondary;
                                     font-size: 14px;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -447,7 +447,7 @@ export component DataSourcesDialog inherits Rectangle {
             }
             Rectangle {
                 height: 52px;
-                background: #0f0f1a;
+                background: Theme.dialog-titlebar-background;
                 border-radius: 8px;
 
                 HorizontalLayout {
@@ -456,7 +456,7 @@ export component DataSourcesDialog inherits Rectangle {
                     Rectangle {
                         width: 80px; height: 32px;
                         border-radius: 5px;
-                        background: close-btn.has-hover ? #1a1a2e : Theme.button-background;
+                        background: close-btn.has-hover ? Theme.button-hover : Theme.button-background;
                         border-width: 1px;
                         border-color: Theme.border-color;
 

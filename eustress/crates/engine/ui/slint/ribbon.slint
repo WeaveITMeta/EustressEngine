@@ -6,6 +6,54 @@
 import { HorizontalBox, VerticalBox, ScrollView, Slider } from "std-widgets.slint";
 import { Theme, IconButton, ToolbarSeparator } from "theme.slint";
 
+// An "Eustress Mode" entry for the Modes dropdown (id/name/icon-id pushed
+// from Rust's ModeRegistry). `icon-id` is one of the small compile-time
+// allowlisted names ("gear", "gavel") — resolved to an image below, never an
+// arbitrary path. `has-submodes` shows an expand affordance in the dropdown;
+// the submode rows themselves come from `SubmodeData` filtered by `mode-id`.
+export struct ModeData {
+    id: string,
+    name: string,
+    icon-id: string,
+    has-submodes: bool,
+}
+
+// One entry in a mode's secondary submenu (e.g. Military's six branches),
+// filtered by `mode-id` when the dropdown expands that mode's row.
+export struct SubmodeData {
+    mode-id: string,
+    id: string,
+    name: string,
+}
+
+// One ribbon tab pill, fed from Rust so the active Mode can filter which
+// tabs show (`RIBBON_TAB_TABLE` in slint_ui.rs mirrors this literal). Also
+// used for a mode's CUSTOM tabs (beyond the 9 built-ins) — same shape, so
+// the tab-strip rendering below needs no changes to show both.
+export struct RibbonTabData {
+    name: string,
+    id: string,
+    color: color,
+}
+
+// One section inside a mode's custom tab (mirrors PluginSectionData/
+// PluginButtonData's flat-list-plus-filter pattern below).
+export struct CustomTabSectionData {
+    tab-id: string,
+    section-id: string,
+    label: string,
+    // 0 = render a "Coming soon" placeholder instead of an empty group —
+    // Rust precomputes this since Slint can't count a filtered subset inline.
+    tool-count: int,
+}
+export struct CustomTabToolData {
+    tab-id: string,
+    section-id: string,
+    label: string,
+    tooltip: string,
+    action-id: string,
+}
+
 // Saved identity for multi-user quick switch
 export struct SavedIdentityData {
     username: string,
@@ -62,12 +110,12 @@ component BrushSettingsModal inherits PopupWindow {
     width: 220px;
     
     Rectangle {
-        background: #2a2a2a;
+        background: Theme.dialog-background;
         border-radius: 6px;
         border-width: 1px;
-        border-color: #3a3a3a;
+        border-color: Theme.border-color;
         drop-shadow-blur: 8px;
-        drop-shadow-color: #00000080;
+        drop-shadow-color: Theme.shadow-color;
         
         VerticalBox {
             padding: 12px;
@@ -81,7 +129,7 @@ component BrushSettingsModal inherits PopupWindow {
                 font-weight: 600;
             }
             
-            Rectangle { height: 1px; background: #3a3a3a; }
+            Rectangle { height: 1px; background: Theme.border-color; }
             
             // Size slider
             VerticalBox {
@@ -506,7 +554,71 @@ export component Ribbon inherits Rectangle {
     
     // Active ribbon tab: "home", "model", "ui", "terrain", "test", "mindspace"
     in-out property <string> ribbon-tab: "home";
-    
+
+    // Eustress Modes — the loaded mode list (pushed from Rust's
+    // ModeRegistry), the active mode id, and the ribbon-tab subset the
+    // active mode filters to. `select-mode` fires the Rust round-trip that
+    // swaps the tab set + default Layout + accent overlay.
+    in property <[ModeData]> available-modes: [];
+    in-out property <string> active-mode-id: "engineering";
+    // Pushed alongside active-mode-id so the menu-bar icon never needs to
+    // search `available-modes` inside a binding (Slint bindings are pure
+    // expressions, not loops).
+    in property <string> active-mode-icon-id: "gear";
+    // The active mode's display name — shown as the menu-bar button label
+    // (the button reads the current mode, e.g. "Engineering", not "Mode").
+    in property <string> active-mode-name: "Mode";
+    in property <[RibbonTabData]> ribbon-tabs: [];
+    callback select-mode(string);
+
+    // Submodes — a secondary menu on modes that have one (Justice's
+    // Civil/Criminal/Judge, Military's six branches). `select-submode`
+    // activates the PARENT mode and records which submode is active.
+    in property <[SubmodeData]> available-submodes: [];
+    in-out property <string> active-submode-id: "";
+    callback select-submode(string, string); // (mode-id, submode-id)
+    // Which mode's submode list is currently expanded in the dropdown
+    // (empty = none expanded). Local UI state, not persisted.
+    property <string> expanded-mode-id: "";
+
+    // Custom tabs (beyond the 9 built-ins) — a mode's own Product/
+    // Manufacturing/Notebook/etc. Pushed alongside ribbon-tabs whenever the
+    // active mode changes; already filtered to the active mode.
+    in property <[CustomTabSectionData]> custom-tab-sections: [];
+    in property <[CustomTabToolData]> custom-tab-tools: [];
+
+    // Resolve a mode's allowlisted icon-id to its image. Kept as a function
+    // (not a path string) so manifests can never reference arbitrary files —
+    // unknown ids fall back to the gear.
+    pure function mode-icon(id: string) -> image {
+        if id == "gavel" { return @image-url("../../assets/icons/ui/gavel.svg"); }
+        if id == "gamepad" { return @image-url("../../assets/icons/ui/gamepad.svg"); }
+        if id == "bridge" { return @image-url("../../assets/icons/ui/bridge.svg"); }
+        if id == "scales" { return @image-url("../../assets/icons/ui/scales.svg"); }
+        if id == "factory" { return @image-url("../../assets/icons/ui/factory.svg"); }
+        if id == "mortarboard" { return @image-url("../../assets/icons/ui/mortarboard.svg"); }
+        if id == "briefcase" { return @image-url("../../assets/icons/ui/briefcase.svg"); }
+        if id == "health" { return @image-url("../../assets/icons/ui/health.svg"); }
+        if id == "military" { return @image-url("../../assets/icons/ui/military.svg"); }
+        return @image-url("../../assets/icons/ui/settings.svg");
+    }
+
+    // True when `ribbon-tab` is one of the 9 built-in ids — a plain boolean
+    // expression (Slint bindings can't loop/search a list), so the custom-tab
+    // content block below can gate on "not a built-in" without needing to
+    // know which specific custom tab is active.
+    property <bool> ribbon-tab-is-builtin:
+        root.ribbon-tab == "home" || root.ribbon-tab == "model" || root.ribbon-tab == "cad" ||
+        root.ribbon-tab == "data" || root.ribbon-tab == "ui" || root.ribbon-tab == "terrain" ||
+        root.ribbon-tab == "test" || root.ribbon-tab == "mindspace" || root.ribbon-tab == "plugins";
+    // Whenever Rust re-pushes the filtered tab set (startup, or a Mode
+    // switch), jump to its first tab. Simpler than "only reset if the
+    // current tab is now hidden" and gives the same guarantee — the active
+    // tab is always a member of the currently-visible set.
+    changed ribbon-tabs => {
+        root.ribbon-tab = root.ribbon-tabs.length > 0 ? root.ribbon-tabs[0].id : "home";
+    }
+
     height: 118px;
     background: Theme.ribbon-background;
     
@@ -531,14 +643,172 @@ export component Ribbon inherits Rectangle {
                 padding-left: 4px;
                 padding-right: 8px;
                 spacing: 0px;
-                
+
+                // ── EUSTRESS MODES ── (first item, ahead of File — window-
+                // chrome-level dropdown that reconfigures the whole Studio
+                // for a kind of work: ribbon-tab subset + default Layout +
+                // optional accent). Icon reflects the active mode.
+                Rectangle {
+                    width: self.preferred-width;
+                    preferred-width: modes-label.preferred-width + modes-icon.width + 18px;
+                    background: modes-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 2px;
+
+                    modes-touch := TouchArea { clicked => { modes-popup.show(); } }
+
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        spacing: 5px;
+                        alignment: center;
+
+                        // Icon wrapped in a VerticalLayout so it centers on the
+                        // row's cross-axis instead of top-aligning.
+                        VerticalLayout {
+                            alignment: center;
+                            modes-icon := Image {
+                                width: 13px;
+                                height: 13px;
+                                source: root.mode-icon(root.active-mode-icon-id);
+                                colorize: Theme.accent-eustress;
+                                image-fit: contain;
+                            }
+                        }
+                        modes-label := Text { text: root.active-mode-name; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                    }
+
+                    modes-popup := PopupWindow {
+                        x: 0px;
+                        y: parent.height;
+                        width: 200px;
+
+                        Rectangle {
+                            width: 200px;
+                            background: Theme.dialog-background;
+                            border-width: 1px;
+                            border-color: Theme.border-color;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: Theme.shadow-color;
+
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 0px;
+
+                                for m in root.available-modes: VerticalLayout {
+                                    // Main mode row. The select-touch area is
+                                    // narrowed to leave room for the expand
+                                    // arrow (when present) so the two never
+                                    // spatially overlap — avoids relying on
+                                    // TouchArea z-order tie-breaking.
+                                    Rectangle {
+                                        height: 30px;
+                                        background: mode-row-touch.has-hover ? Theme.button-hover : transparent;
+                                        border-radius: 3px;
+
+                                        mode-row-touch := TouchArea {
+                                            x: 0px;
+                                            width: parent.width - (m.has-submodes ? 22px : 0px);
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.active-mode-id = m.id;
+                                                // Clicking the mode row itself
+                                                // (not a submode under it)
+                                                // clears any stale submode
+                                                // highlight — mirrors the
+                                                // Rust-side SelectMode clear.
+                                                root.active-submode-id = "";
+                                                root.select-mode(m.id);
+                                            }
+                                        }
+
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            spacing: 8px;
+                                            alignment: start;
+
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Image {
+                                                    width: 14px; height: 14px;
+                                                    source: root.mode-icon(m.icon-id);
+                                                    colorize: m.id == root.active-mode-id ? Theme.accent-eustress : Theme.text-secondary;
+                                                    image-fit: contain;
+                                                }
+                                            }
+                                            Text {
+                                                text: m.name;
+                                                color: m.id == root.active-mode-id ? Theme.accent-eustress : Theme.text-primary;
+                                                font-size: 12px;
+                                                font-weight: m.id == root.active-mode-id ? 600 : 400;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        if m.has-submodes: Rectangle {
+                                            x: parent.width - 20px;
+                                            y: 0px;
+                                            width: 20px;
+                                            height: 30px;
+
+                                            TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => {
+                                                    root.expanded-mode-id = root.expanded-mode-id == m.id ? "" : m.id;
+                                                }
+                                            }
+                                            Text {
+                                                width: 100%; height: 100%;
+                                                text: root.expanded-mode-id == m.id ? "\u{25BE}" : "\u{25B8}";
+                                                color: Theme.text-secondary;
+                                                font-size: 10px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+
+                                    // Submode rows — indented, shown only
+                                    // while this mode's row is expanded.
+                                    if m.has-submodes && root.expanded-mode-id == m.id: VerticalLayout {
+                                        for sm in root.available-submodes: Rectangle {
+                                            property <bool> in-this-mode: sm.mode-id == m.id;
+                                            visible: in-this-mode;
+                                            height: in-this-mode ? 24px : 0px;
+                                            background: sm-touch.has-hover ? Theme.button-hover : transparent;
+                                            border-radius: 3px;
+
+                                            sm-touch := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => {
+                                                    root.active-mode-id = m.id;
+                                                    root.active-submode-id = sm.id;
+                                                    root.select-submode(m.id, sm.id);
+                                                }
+                                            }
+                                            Text {
+                                                x: 34px;
+                                                text: sm.name;
+                                                color: (m.id == root.active-mode-id && sm.id == root.active-submode-id) ?
+                                                    Theme.accent-eustress : Theme.text-secondary;
+                                                font-size: 11px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // ── FILE ──
                 Rectangle {
                     width: self.preferred-width;
                     preferred-width: file-label.preferred-width + 12px;
                     background: file-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 2px;
-                    
+
                     file-touch := TouchArea { clicked => { file-popup.show(); } }
                     file-label := Text { text: "File"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                     
@@ -548,12 +818,12 @@ export component Ribbon inherits Rectangle {
                         width: 240px;
                         
                         Rectangle {
-                            background: #1e1e1e;
+                            background: Theme.dialog-background;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.border-color;
                             drop-shadow-blur: 8px;
-                            drop-shadow-color: #00000080;
+                            drop-shadow-color: Theme.shadow-color;
                             width: 240px;
                             
                             VerticalLayout {
@@ -596,12 +866,12 @@ export component Ribbon inherits Rectangle {
                         width: 220px;
                         
                         Rectangle {
-                            background: #1e1e1e;
+                            background: Theme.dialog-background;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.border-color;
                             drop-shadow-blur: 8px;
-                            drop-shadow-color: #00000080;
+                            drop-shadow-color: Theme.shadow-color;
                             width: 220px;
                             
                             VerticalLayout {
@@ -642,12 +912,12 @@ export component Ribbon inherits Rectangle {
                         width: 220px;
                         
                         Rectangle {
-                            background: #1e1e1e;
+                            background: Theme.dialog-background;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.border-color;
                             drop-shadow-blur: 8px;
-                            drop-shadow-color: #00000080;
+                            drop-shadow-color: Theme.shadow-color;
                             width: 220px;
                             
                             VerticalLayout {
@@ -686,12 +956,12 @@ export component Ribbon inherits Rectangle {
                         height: 600px;
                         
                         Rectangle {
-                            background: #1e1e1e;
+                            background: Theme.dialog-background;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.border-color;
                             drop-shadow-blur: 8px;
-                            drop-shadow-color: #00000080;
+                            drop-shadow-color: Theme.shadow-color;
                             width: 260px;
                             height: 600px;
                             
@@ -773,12 +1043,12 @@ export component Ribbon inherits Rectangle {
                         width: 200px;
                         
                         Rectangle {
-                            background: #1e1e1e;
+                            background: Theme.dialog-background;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.border-color;
                             drop-shadow-blur: 8px;
-                            drop-shadow-color: #00000080;
+                            drop-shadow-color: Theme.shadow-color;
                             width: 200px;
                             
                             VerticalLayout {
@@ -808,12 +1078,12 @@ export component Ribbon inherits Rectangle {
                         width: 200px;
                         
                         Rectangle {
-                            background: #1e1e1e;
+                            background: Theme.dialog-background;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.border-color;
                             drop-shadow-blur: 8px;
-                            drop-shadow-color: #00000080;
+                            drop-shadow-color: Theme.shadow-color;
                             width: 200px;
                             
                             VerticalLayout {
@@ -847,12 +1117,12 @@ export component Ribbon inherits Rectangle {
                         width: 200px;
                         
                         Rectangle {
-                            background: #1e1e1e;
+                            background: Theme.dialog-background;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.border-color;
                             drop-shadow-blur: 8px;
-                            drop-shadow-color: #00000080;
+                            drop-shadow-color: Theme.shadow-color;
                             width: 200px;
                             
                             VerticalLayout {
@@ -887,12 +1157,12 @@ export component Ribbon inherits Rectangle {
                         width: 220px;
                         
                         Rectangle {
-                            background: #1e1e1e;
+                            background: Theme.dialog-background;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.border-color;
                             drop-shadow-blur: 8px;
-                            drop-shadow-color: #00000080;
+                            drop-shadow-color: Theme.shadow-color;
                             width: 220px;
                             
                             VerticalLayout {
@@ -931,12 +1201,12 @@ export component Ribbon inherits Rectangle {
                         width: 220px;
                         
                         Rectangle {
-                            background: #1e1e1e;
+                            background: Theme.dialog-background;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.border-color;
                             drop-shadow-blur: 8px;
-                            drop-shadow-color: #00000080;
+                            drop-shadow-color: Theme.shadow-color;
                             width: 220px;
                             
                             VerticalLayout {
@@ -984,12 +1254,12 @@ export component Ribbon inherits Rectangle {
                         width: 200px;
                         
                         Rectangle {
-                            background: #1e1e1e;
+                            background: Theme.dialog-background;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.border-color;
                             drop-shadow-blur: 8px;
-                            drop-shadow-color: #00000080;
+                            drop-shadow-color: Theme.shadow-color;
                             width: 200px;
                             
                             VerticalLayout {
@@ -1002,6 +1272,7 @@ export component Ribbon inherits Rectangle {
                                 DropdownItem { label: "Large (2km)"; clicked => { root.on-spawn-terrain("large"); } }
                                 DropdownSeparator {}
                                 DropdownItem { label: "Toggle Edit Mode"; shortcut: "T"; clicked => { root.on-toggle-terrain-edit(); } }
+                                DropdownItem { label: "Show/Hide Terrain"; clicked => { root.on-menu-action("terrain:toggle-visibility"); } }
                                 DropdownSeparator {}
                                 DropdownHeader { label: "BRUSH TOOLS"; }
                                 DropdownItem { label: "Raise"; shortcut: "1"; clicked => { root.on-set-terrain-brush("raise"); } }
@@ -1034,12 +1305,12 @@ export component Ribbon inherits Rectangle {
                         width: 200px;
                         
                         Rectangle {
-                            background: #1e1e1e;
+                            background: Theme.dialog-background;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.border-color;
                             drop-shadow-blur: 8px;
-                            drop-shadow-color: #00000080;
+                            drop-shadow-color: Theme.shadow-color;
                             width: 200px;
                             
                             VerticalLayout {
@@ -1078,12 +1349,12 @@ export component Ribbon inherits Rectangle {
                 if root.has-unsaved-changes: Rectangle {
                     width: 60px;
                     height: 20px;
-                    background: #3d2a1a;
+                    background: #3d2a1a;  // theme-exempt: unsaved-badge tinted surface, no matching token
                     border-radius: 4px;
                     
                     Text {
                         text: "Unsaved";
-                        color: #ffb74d;
+                        color: Theme.cat-constraint;
                         font-size: 10px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -1101,10 +1372,10 @@ export component Ribbon inherits Rectangle {
                     // Wide enough for "Units: studs" — the longest label.
                     width: 110px;
                     height: 20px;
-                    background: #1a1a2e;
+                    background: #1a1a2e;  // theme-exempt: units-badge tinted surface, no matching token
                     border-radius: 4px;
                     border-width: 1px;
-                    border-color: #2a2a4a;
+                    border-color: #2a2a4a;  // theme-exempt: units-badge tinted border, no matching token
 
                     unit-touch := TouchArea {
                         mouse-cursor: pointer;
@@ -1118,7 +1389,7 @@ export component Ribbon inherits Rectangle {
                         alignment: center;
                         Text {
                             text: "Units: " + root.display-unit-symbol;
-                            color: #9faaff;
+                            color: Theme.text-accent;
                             font-size: 10px;
                             font-weight: 600;
                             vertical-alignment: center;
@@ -1126,7 +1397,7 @@ export component Ribbon inherits Rectangle {
                         }
                         Text {
                             text: "▾";
-                            color: #6c7080;
+                            color: Theme.text-secondary;
                             font-size: 8px;
                             vertical-alignment: center;
                         }
@@ -1139,12 +1410,12 @@ export component Ribbon inherits Rectangle {
                         y: parent.height + 2px;
                         width: 170px;
                         Rectangle {
-                            background: #1e1e1e;
+                            background: Theme.dialog-background;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.border-color;
                             drop-shadow-blur: 8px;
-                            drop-shadow-color: #00000080;
+                            drop-shadow-color: Theme.shadow-color;
                             width: 170px;
 
                             VerticalLayout {
@@ -1172,12 +1443,12 @@ export component Ribbon inherits Rectangle {
                 Rectangle {
                     width: 80px;
                     height: 20px;
-                    background: #1a2e1a;
+                    background: #1a2e1a;  // theme-exempt: sync-badge tinted surface, no matching token
                     border-radius: 4px;
 
                     Text {
                         text: root.sync-status;
-                        color: #81c784;
+                        color: Theme.cat-structure;
                         font-size: 10px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -1189,10 +1460,10 @@ export component Ribbon inherits Rectangle {
                 if root.update-available: Rectangle {
                     width: root.update-status == "downloading" ? 160px : (root.update-status == "ready" ? 150px : 120px);
                     height: 20px;
-                    background: root.update-status == "ready" ? #1a3a1a : (root.update-status == "downloading" ? #2a2a3a : #1a2a3a);
+                    background: root.update-status == "ready" ? #1a3a1a : (root.update-status == "downloading" ? #2a2a3a : #1a2a3a);  // theme-exempt: update-badge tinted surfaces (ready/downloading/pending), no matching token
                     border-radius: 4px;
                     border-width: 1px;
-                    border-color: root.update-status == "ready" ? #81c78480 : #4a9eff60;
+                    border-color: root.update-status == "ready" ? Theme.cat-structure.with-alpha(0.5) : #4a9eff60;  // theme-exempt: downloading-state blue border tint, no near token
 
                     update-touch := TouchArea {
                         mouse-cursor: pointer;
@@ -1208,7 +1479,7 @@ export component Ribbon inherits Rectangle {
                         // Icon
                         Text {
                             text: root.update-status == "ready" ? "✓" : (root.update-status == "downloading" ? "⬇" : "⬆");
-                            color: root.update-status == "ready" ? #81c784 : #4a9eff;
+                            color: root.update-status == "ready" ? Theme.cat-structure : #4a9eff;  // theme-exempt: downloading-state blue accent, no near token (see border-color above)
                             font-size: 10px;
                             font-weight: 700;
                             vertical-alignment: center;
@@ -1221,7 +1492,7 @@ export component Ribbon inherits Rectangle {
                                 : (root.update-status == "downloading"
                                     ? "Downloading " + root.update-progress + "%"
                                     : "Update to " + root.update-version);
-                            color: root.update-status == "ready" ? #81c784 : #4a9eff;
+                            color: root.update-status == "ready" ? Theme.cat-structure : #4a9eff;  // theme-exempt: downloading-state blue accent, no near token (see border-color above)
                             font-size: 10px;
                             font-weight: 500;
                             vertical-alignment: center;
@@ -1237,7 +1508,7 @@ export component Ribbon inherits Rectangle {
                 Rectangle {
                     width: 110px;
                     height: 20px;
-                    background: root.bliss-enabled ? #2a2a3a : Theme.background-secondary;
+                    background: root.bliss-enabled ? #2a2a3a : Theme.background-secondary;  // theme-exempt: bliss-badge tinted surface, no matching token
                     border-radius: 4px;
 
                     bliss-touch := TouchArea {
@@ -1252,7 +1523,7 @@ export component Ribbon inherits Rectangle {
 
                         Text {
                             text: "Bliss";
-                            color: root.bliss-enabled ? #ffffff : Theme.text-secondary;
+                            color: root.bliss-enabled ? #ffffff : Theme.text-secondary;  // theme-exempt: white foreground on colored bliss badge, no white token
                             font-size: 10px;
                             font-weight: 600;
                             vertical-alignment: center;
@@ -1274,12 +1545,12 @@ export component Ribbon inherits Rectangle {
                         width: 260px;
 
                         Rectangle {
-                            background: #1e1e1e;
+                            background: Theme.dialog-background;
                             border-radius: 6px;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.border-color;
                             drop-shadow-blur: 12px;
-                            drop-shadow-color: #00000080;
+                            drop-shadow-color: Theme.shadow-color;
                             width: 260px;
 
                             VerticalLayout {
@@ -1291,7 +1562,7 @@ export component Ribbon inherits Rectangle {
                                     spacing: 6px;
                                     Text {
                                         text: "Bliss";
-                                        color: #ffffff;
+                                        color: #ffffff;  // theme-exempt: white foreground on colored/accent surface, no white token
                                         font-size: 13px;
                                         font-weight: 700;
                                         vertical-alignment: center;
@@ -1324,7 +1595,7 @@ export component Ribbon inherits Rectangle {
                                     Rectangle { horizontal-stretch: 1; }
                                     Text {
                                         text: root.bliss-pending;
-                                        color: #81c784;
+                                        color: Theme.cat-structure;
                                         font-size: 10px;
                                         vertical-alignment: center;
                                     }
@@ -1338,10 +1609,10 @@ export component Ribbon inherits Rectangle {
                                 // Light node option
                                 Rectangle {
                                     height: 40px;
-                                    background: root.bliss-node-mode == "Light" ? #3a3a4a : (light-touch.has-hover ? Theme.button-hover : transparent);
+                                    background: root.bliss-node-mode == "Light" ? Theme.selection-background : (light-touch.has-hover ? Theme.button-hover : transparent);
                                     border-radius: 4px;
                                     border-width: root.bliss-node-mode == "Light" ? 1px : 0px;
-                                    border-color: #ffffff40;
+                                    border-color: Theme.border-highlight.with-alpha(0.25);
 
                                     light-touch := TouchArea {
                                         mouse-cursor: pointer;
@@ -1364,7 +1635,7 @@ export component Ribbon inherits Rectangle {
                                             }
                                             Text {
                                                 text: "DEFAULT";
-                                                color: #ffffff;
+                                                color: #ffffff;  // theme-exempt: white foreground on colored/accent surface, no white token
                                                 font-size: 8px;
                                                 font-weight: 700;
                                                 vertical-alignment: center;
@@ -1388,10 +1659,10 @@ export component Ribbon inherits Rectangle {
                                 // Full node option
                                 Rectangle {
                                     height: 40px;
-                                    background: root.bliss-node-mode == "Full" ? #1a3a1a : (full-touch.has-hover ? Theme.button-hover : transparent);
+                                    background: root.bliss-node-mode == "Full" ? #1a3a1a : (full-touch.has-hover ? Theme.button-hover : transparent);  // theme-exempt: full-node-selected green tinted surface, no matching token
                                     border-radius: 4px;
                                     border-width: root.bliss-node-mode == "Full" ? 1px : 0px;
-                                    border-color: #81c78440;
+                                    border-color: Theme.cat-structure.with-alpha(0.25);
 
                                     full-touch := TouchArea {
                                         mouse-cursor: pointer;
@@ -1414,7 +1685,7 @@ export component Ribbon inherits Rectangle {
                                             }
                                             Text {
                                                 text: "+10% BLS";
-                                                color: #81c784;
+                                                color: Theme.cat-structure;
                                                 font-size: 8px;
                                                 font-weight: 700;
                                                 vertical-alignment: center;
@@ -1422,7 +1693,7 @@ export component Ribbon inherits Rectangle {
                                             Rectangle { horizontal-stretch: 1; }
                                             Text {
                                                 text: "1.1x";
-                                                color: #81c784;
+                                                color: Theme.cat-structure;
                                                 font-size: 10px;
                                                 vertical-alignment: center;
                                             }
@@ -1449,7 +1720,7 @@ export component Ribbon inherits Rectangle {
                                     Rectangle { horizontal-stretch: 1; }
                                     Text {
                                         text: root.bliss-bonus;
-                                        color: root.bliss-node-mode == "Full" ? #81c784 : Theme.text-primary;
+                                        color: root.bliss-node-mode == "Full" ? Theme.cat-structure : Theme.text-primary;
                                         font-size: 10px;
                                         font-weight: 600;
                                         vertical-alignment: center;
@@ -1467,7 +1738,7 @@ export component Ribbon inherits Rectangle {
                 if root.account-status == "Logged out": Rectangle {
                     width: 70px;
                     height: 20px;
-                    background: #2563eb;
+                    background: Theme.button-primary;
                     border-radius: 4px;
 
                     sign-in-touch := TouchArea {
@@ -1481,7 +1752,7 @@ export component Ribbon inherits Rectangle {
 
                         Text {
                             text: "Sign In";
-                            color: #ffffff;
+                            color: #ffffff;  // theme-exempt: white foreground on colored/accent surface, no white token
                             font-size: 10px;
                             font-weight: 600;
                             vertical-alignment: center;
@@ -1492,7 +1763,7 @@ export component Ribbon inherits Rectangle {
                 if root.account-status != "Logged out": Rectangle {
                     width: 100px;
                     height: 20px;
-                    background: account-touch.has-hover ? #3a3a4a : Theme.background-secondary;
+                    background: account-touch.has-hover ? Theme.button-hover : Theme.background-secondary;
                     border-radius: 4px;
 
                     account-touch := TouchArea {
@@ -1513,7 +1784,7 @@ export component Ribbon inherits Rectangle {
                                 width: 6px;
                                 height: 6px;
                                 border-radius: 3px;
-                                background: #4caf50;
+                                background: Theme.accent-green;
                             }
                         }
 
@@ -1533,12 +1804,12 @@ export component Ribbon inherits Rectangle {
                         width: 200px;
 
                         Rectangle {
-                            background: #1e1e1e;
+                            background: Theme.dialog-background;
                             border-radius: 6px;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.border-color;
                             drop-shadow-blur: 12px;
-                            drop-shadow-color: #00000080;
+                            drop-shadow-color: Theme.shadow-color;
                             width: 200px;
 
                             VerticalLayout {
@@ -1552,7 +1823,7 @@ export component Ribbon inherits Rectangle {
 
                                     Text {
                                         text: root.account-name;
-                                        color: #ffffff;
+                                        color: #ffffff;  // theme-exempt: white foreground on colored/accent surface, no white token
                                         font-size: 13px;
                                         font-weight: 700;
                                         vertical-alignment: center;
@@ -1560,7 +1831,7 @@ export component Ribbon inherits Rectangle {
                                     Rectangle { horizontal-stretch: 1; }
                                     Text {
                                         text: root.account-status;
-                                        color: #4caf50;
+                                        color: Theme.accent-green;
                                         font-size: 10px;
                                         vertical-alignment: center;
                                     }
@@ -1569,7 +1840,7 @@ export component Ribbon inherits Rectangle {
                                 // Separator
                                 Rectangle {
                                     height: 1px;
-                                    background: #3a3a3a;
+                                    background: Theme.border-color;
                                 }
 
                                 // Session time
@@ -1636,7 +1907,7 @@ export component Ribbon inherits Rectangle {
                                 // Separator
                                 Rectangle {
                                     height: 1px;
-                                    background: #3a3a3a;
+                                    background: Theme.border-color;
                                 }
 
                                 // Saved identities (quick switch)
@@ -1657,7 +1928,7 @@ export component Ribbon inherits Rectangle {
 
                                         for identity[idx] in root.saved-identities: Rectangle {
                                             height: 24px;
-                                            background: id-touch.has-hover ? #3a3a4a : (identity.active ? #2a2a3a : transparent);
+                                            background: id-touch.has-hover ? Theme.button-hover : (identity.active ? Theme.selection-background : transparent);
                                             border-radius: 3px;
 
                                             id-touch := TouchArea {
@@ -1682,7 +1953,7 @@ export component Ribbon inherits Rectangle {
                                                         width: 6px;
                                                         height: 6px;
                                                         border-radius: 3px;
-                                                        background: identity.active ? #4caf50 : #3a3a3a;
+                                                        background: identity.active ? Theme.accent-green : Theme.border-color;
                                                     }
                                                 }
 
@@ -1709,13 +1980,13 @@ export component Ribbon inherits Rectangle {
                                 // Separator before sign out
                                 Rectangle {
                                     height: 1px;
-                                    background: #3a3a3a;
+                                    background: Theme.border-color;
                                 }
 
                                 // Sign Out button
                                 Rectangle {
                                     height: 28px;
-                                    background: sign-out-touch.has-hover ? #3a3a3a : transparent;
+                                    background: sign-out-touch.has-hover ? Theme.button-hover : transparent;
                                     border-radius: 4px;
 
                                     sign-out-touch := TouchArea {
@@ -1725,7 +1996,7 @@ export component Ribbon inherits Rectangle {
 
                                     Text {
                                         text: "Sign Out";
-                                        color: #ef5350;
+                                        color: Theme.text-error;
                                         font-size: 11px;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -1766,7 +2037,7 @@ export component Ribbon inherits Rectangle {
                     Image {
                         x: 5px; y: 2px; width: 16px; height: 16px;
                         source: @image-url("../../assets/icons/ui/play.svg");
-                        image-fit: contain; colorize: #66bb6a;
+                        image-fit: contain; colorize: Theme.accent-green;
                     }
                 }
                 // Play Here with Character
@@ -1783,7 +2054,7 @@ export component Ribbon inherits Rectangle {
                     Image {
                         x: 5px; y: 2px; width: 16px; height: 16px;
                         source: @image-url("../../assets/icons/ui/gamepad.svg");
-                        image-fit: contain; colorize: #66bb6a;
+                        image-fit: contain; colorize: Theme.accent-green;
                     }
                 }
                 // Pause
@@ -1801,7 +2072,7 @@ export component Ribbon inherits Rectangle {
                     Image {
                         x: 5px; y: 2px; width: 16px; height: 16px;
                         source: @image-url("../../assets/icons/ui/pause.svg");
-                        image-fit: contain; colorize: #ffb74d;
+                        image-fit: contain; colorize: Theme.cat-constraint;
                     }
                 }
                 // Stop
@@ -1818,7 +2089,7 @@ export component Ribbon inherits Rectangle {
                     Image {
                         x: 5px; y: 2px; width: 16px; height: 16px;
                         source: @image-url("../../assets/icons/ui/stop.svg");
-                        image-fit: contain; colorize: #ef5350;
+                        image-fit: contain; colorize: Theme.text-error;
                     }
                 }
 
@@ -1849,17 +2120,11 @@ export component Ribbon inherits Rectangle {
                 height: 20px;
                 spacing: 6px;
                 
-                for tab-item in [
-                    { name: "Home",      id: "home",      color: #808080 },
-                    { name: "Model",     id: "model",     color: #6495ed },
-                    { name: "Drafting",  id: "cad",       color: #cc3333 },  // red — Drafting is the parametric/smart-edit workflow
-                    { name: "Data",      id: "data",      color: #00bcd4 },
-                    { name: "UI",        id: "ui",        color: #00A2FF },
-                    { name: "Terrain",   id: "terrain",   color: #3cb371 },
-                    { name: "Test",      id: "test",      color: #ff8c00 },
-                    { name: "MindSpace", id: "mindspace", color: #0ACED6 },
-                    { name: "Plugins",   id: "plugins",   color: #9c27b0 },
-                ] : Rectangle {
+                // Data-driven: fed from Rust (`sync_active_mode_to_slint`),
+                // filtered to the active Mode's ribbon-tab subset. Falls
+                // back to nothing pre-first-frame; the sync system pushes
+                // the full 9-tab set immediately on startup.
+                for tab-item in root.ribbon-tabs : Rectangle {
                     width: tab-text.preferred-width + 16px;
                     height: 20px;
                     border-radius: 4px;
@@ -1873,7 +2138,7 @@ export component Ribbon inherits Rectangle {
 
                     tab-text := Text {
                         text: tab-item.name;
-                        color: root.ribbon-tab == tab-item.id ? #ffffff : Theme.text-secondary;
+                        color: root.ribbon-tab == tab-item.id ? #ffffff : Theme.text-secondary;  // theme-exempt: white foreground on colored tab-pill fill, no white token
                         font-size: 11px;
                         font-weight: root.ribbon-tab == tab-item.id ? 600 : 400;
                         horizontal-alignment: center;
@@ -1917,40 +2182,39 @@ export component Ribbon inherits Rectangle {
                 // ── FILE group ──
                 ToolGroup {
                     label: "File";
-                    IconButton { icon: @image-url("../../assets/icons/ui/new-file.svg"); label: "New"; shortcut: root.shortcut-new; tooltip: "New Space"; tint: #64b5f6; clicked => { root.on-new-scene(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Open"; shortcut: root.shortcut-open; tooltip: "Open File"; tint: #64b5f6; clicked => { root.on-open-scene(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/save.svg"); label: "Save"; shortcut: root.shortcut-save; tooltip: "Save Space"; tint: #64b5f6; clicked => { root.on-save-scene(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import image or video into Universe assets"; tint: #81c784; clicked => { root.on-import-asset(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import Place"; tooltip: "Import a Roblox place / model (.rbxl/.rbxlx/.rbxm/.rbxmx)"; tint: #81c784; clicked => { root.on-import-roblox-place(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/new-file.svg"); label: "New"; shortcut: root.shortcut-new; tooltip: "New Space"; tint: Theme.cat-parts; clicked => { root.on-new-scene(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Open"; shortcut: root.shortcut-open; tooltip: "Open File"; tint: Theme.cat-parts; clicked => { root.on-open-scene(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/save.svg"); label: "Save"; shortcut: root.shortcut-save; tooltip: "Save Space"; tint: Theme.cat-parts; clicked => { root.on-save-scene(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import into this Space: image, video, Gaussian splat (.ply), or Roblox place/model (.rbxl/.rbxlx/.rbxm/.rbxmx)"; tint: Theme.cat-structure; clicked => { root.on-import-asset(); } }
                 }
                 GroupDivider {}
 
                 // ── HISTORY group ──
                 ToolGroup {
                     label: "History";
-                    IconButton { icon: @image-url("../../assets/icons/ui/undo.svg"); label: "Undo"; shortcut: root.shortcut-undo; tooltip: "Undo"; tint: #ffb74d; clicked => { root.on-undo(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/redo.svg"); label: "Redo"; shortcut: root.shortcut-redo; tooltip: "Redo"; tint: #ffb74d; clicked => { root.on-redo(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/undo.svg"); label: "Undo"; shortcut: root.shortcut-undo; tooltip: "Undo"; tint: Theme.cat-constraint; clicked => { root.on-undo(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/redo.svg"); label: "Redo"; shortcut: root.shortcut-redo; tooltip: "Redo"; tint: Theme.cat-constraint; clicked => { root.on-redo(); } }
                 }
                 GroupDivider {}
 
                 // ── CLIPBOARD group ──
                 ToolGroup {
                     label: "Clipboard";
-                    IconButton { icon: @image-url("../../assets/icons/ui/cut.svg"); label: "Cut"; shortcut: root.shortcut-cut; tooltip: "Cut"; tint: #4dd0e1; clicked => { root.on-cut(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/copy.svg"); label: "Copy"; shortcut: root.shortcut-copy; tooltip: "Copy"; tint: #4dd0e1; clicked => { root.on-copy(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/paste.svg"); label: "Paste"; shortcut: root.shortcut-paste; tooltip: "Paste"; tint: #4dd0e1; clicked => { root.on-paste(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/duplicate.svg"); label: "Duplicate"; shortcut: root.shortcut-duplicate; tooltip: "Duplicate"; tint: #81c784; clicked => { root.on-duplicate(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/delete.svg"); label: "Delete"; shortcut: root.shortcut-delete; tooltip: "Delete"; tint: #ef5350; clicked => { root.on-delete(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/cut.svg"); label: "Cut"; shortcut: root.shortcut-cut; tooltip: "Cut"; tint: Theme.cat-data; clicked => { root.on-cut(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/copy.svg"); label: "Copy"; shortcut: root.shortcut-copy; tooltip: "Copy"; tint: Theme.cat-data; clicked => { root.on-copy(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/paste.svg"); label: "Paste"; shortcut: root.shortcut-paste; tooltip: "Paste"; tint: Theme.cat-data; clicked => { root.on-paste(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/duplicate.svg"); label: "Duplicate"; shortcut: root.shortcut-duplicate; tooltip: "Duplicate"; tint: Theme.cat-structure; clicked => { root.on-duplicate(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/delete.svg"); label: "Delete"; shortcut: root.shortcut-delete; tooltip: "Delete"; tint: Theme.text-error; clicked => { root.on-delete(); } }
                 }
                 GroupDivider {}
 
                 // ── TOOLS group ──
                 ToolGroup {
                     label: "Tools";
-                    IconButton { icon: @image-url("../../assets/icons/ui/cursor.svg"); label: "Select"; shortcut: root.shortcut-select; tooltip: "Select"; tint: #e0e0e0; selected: root.current-tool == "select"; clicked => { root.on-select-tool("select"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/move.svg"); label: "Move"; shortcut: root.shortcut-move; tooltip: "Move"; tint: #66bb6a; selected: root.current-tool == "move"; clicked => { root.on-select-tool("move"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/scale.svg"); label: "Scale"; shortcut: root.shortcut-scale; tooltip: "Scale"; tint: #fdd835; selected: root.current-tool == "scale"; clicked => { root.on-select-tool("scale"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/rotate.svg"); label: "Rotate"; shortcut: root.shortcut-rotate; tooltip: "Rotate"; tint: #42a5f5; selected: root.current-tool == "rotate"; clicked => { root.on-select-tool("rotate"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/cursor.svg"); label: "Select"; shortcut: root.shortcut-select; tooltip: "Select"; tint: Theme.text-primary; selected: root.current-tool == "select"; clicked => { root.on-select-tool("select"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/move.svg"); label: "Move"; shortcut: root.shortcut-move; tooltip: "Move"; tint: Theme.accent-green; selected: root.current-tool == "move"; clicked => { root.on-select-tool("move"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/scale.svg"); label: "Scale"; shortcut: root.shortcut-scale; tooltip: "Scale"; tint: Theme.accent-yellow; selected: root.current-tool == "scale"; clicked => { root.on-select-tool("scale"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/rotate.svg"); label: "Rotate"; shortcut: root.shortcut-rotate; tooltip: "Rotate"; tint: Theme.text-accent; selected: root.current-tool == "rotate"; clicked => { root.on-select-tool("rotate"); } }
                 }
                 GroupDivider {}
                 
@@ -1984,11 +2248,11 @@ export component Ribbon inherits Rectangle {
                 // ── EDIT group ──
                 ToolGroup {
                     label: "Edit";
-                    IconButton { icon: @image-url("../../assets/icons/ui/group.svg"); label: "Group"; shortcut: root.shortcut-group; tooltip: "Group"; tint: #90caf9; clicked => { root.on-group(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/ungroup.svg"); label: "Ungroup"; shortcut: root.shortcut-ungroup; tooltip: "Ungroup"; tint: #90caf9; clicked => { root.on-ungroup(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/lock.svg"); label: "Lock"; shortcut: root.shortcut-lock; tooltip: "Lock"; tint: #ffcc80; clicked => { root.on-menu-action("edit:lock"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/unlock.svg"); label: "Unlock All"; shortcut: root.shortcut-unlock; tooltip: "Unlock All"; tint: #ffcc80; clicked => { root.on-menu-action("edit:unlock"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/anchor.svg"); label: "Anchor"; shortcut: root.shortcut-anchor; tooltip: "Toggle Anchor"; tint: #ce93d8; clicked => { root.on-menu-action("edit:anchor"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/group.svg"); label: "Group"; shortcut: root.shortcut-group; tooltip: "Group"; tint: Theme.cat-parts; clicked => { root.on-group(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/ungroup.svg"); label: "Ungroup"; shortcut: root.shortcut-ungroup; tooltip: "Ungroup"; tint: Theme.cat-parts; clicked => { root.on-ungroup(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/lock.svg"); label: "Lock"; shortcut: root.shortcut-lock; tooltip: "Lock"; tint: Theme.accent-yellow; clicked => { root.on-menu-action("edit:lock"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/unlock.svg"); label: "Unlock All"; shortcut: root.shortcut-unlock; tooltip: "Unlock All"; tint: Theme.accent-yellow; clicked => { root.on-menu-action("edit:unlock"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/anchor.svg"); label: "Anchor"; shortcut: root.shortcut-anchor; tooltip: "Toggle Anchor"; tint: Theme.accent-purple; clicked => { root.on-menu-action("edit:anchor"); } }
                 }
                 
                 GroupDivider {}
@@ -1996,9 +2260,9 @@ export component Ribbon inherits Rectangle {
                 // ── UTILS group ──
                 ToolGroup {
                     label: "Utils";
-                    IconButton { icon: @image-url("../../assets/icons/ui/keyboard.svg"); label: "Keys"; tooltip: "Keyboard Shortcuts"; tint: #b39ddb; clicked => { root.on-show-keybindings(); } }
-                    IconButton { icon: @image-url("../../assets/icons/soulservice.svg"); label: "Soul"; tooltip: "Soul Settings"; tint: #b39ddb; clicked => { root.on-show-soul-settings(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/terminal.svg"); label: "Console"; tooltip: "Command Palette (Ctrl+Shift+P)"; tint: #b39ddb; clicked => { root.on-toggle-command-bar(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/keyboard.svg"); label: "Keys"; tooltip: "Keyboard Shortcuts"; tint: Theme.accent-purple; clicked => { root.on-show-keybindings(); } }
+                    IconButton { icon: @image-url("../../assets/icons/soulservice.svg"); label: "Soul"; tooltip: "Soul Settings"; tint: Theme.accent-purple; clicked => { root.on-show-soul-settings(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/terminal.svg"); label: "Console"; tooltip: "Command Palette (Ctrl+Shift+P)"; tint: Theme.accent-purple; clicked => { root.on-toggle-command-bar(); } }
                 }
             }
             
@@ -2067,42 +2331,42 @@ export component Ribbon inherits Rectangle {
                         icon: @image-url("../../assets/icons/ui/align-center.svg");
                         label: "X"; shortcut: "";
                         tooltip: "Align centers on X";
-                        tint: #ffb74d;
+                        tint: Theme.cat-constraint;
                         clicked => { root.on-menu-action("align:center:x"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/align-center.svg");
                         label: "Y"; shortcut: "";
                         tooltip: "Align centers on Y";
-                        tint: #ffb74d;
+                        tint: Theme.cat-constraint;
                         clicked => { root.on-menu-action("align:center:y"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/align-center.svg");
                         label: "Z"; shortcut: "";
                         tooltip: "Align centers on Z";
-                        tint: #ffb74d;
+                        tint: Theme.cat-constraint;
                         clicked => { root.on-menu-action("align:center:z"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/distribute.svg");
                         label: "Dist X"; shortcut: "";
                         tooltip: "Distribute evenly on X";
-                        tint: #ffb74d;
+                        tint: Theme.cat-constraint;
                         clicked => { root.on-menu-action("distribute:x"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/distribute.svg");
                         label: "Dist Y"; shortcut: "";
                         tooltip: "Distribute evenly on Y";
-                        tint: #ffb74d;
+                        tint: Theme.cat-constraint;
                         clicked => { root.on-menu-action("distribute:y"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/distribute.svg");
                         label: "Dist Z"; shortcut: "";
                         tooltip: "Distribute evenly on Z";
-                        tint: #ffb74d;
+                        tint: Theme.cat-constraint;
                         clicked => { root.on-menu-action("distribute:z"); }
                     }
                 }
@@ -2115,7 +2379,7 @@ export component Ribbon inherits Rectangle {
                         icon: @image-url("../../assets/icons/ui/array-linear.svg");
                         label: "Linear"; shortcut: "Ctrl+Alt+L";
                         tooltip: "Linear Array";
-                        tint: #ba68c8;
+                        tint: Theme.cat-modify;
                         selected: root.active-modal-tool-id == "linear_array";
                         clicked => { root.on-activate-modal-tool("linear_array"); }
                     }
@@ -2123,7 +2387,7 @@ export component Ribbon inherits Rectangle {
                         icon: @image-url("../../assets/icons/ui/array-radial.svg");
                         label: "Radial"; shortcut: "Ctrl+Alt+R";
                         tooltip: "Radial Array";
-                        tint: #ba68c8;
+                        tint: Theme.cat-modify;
                         selected: root.active-modal-tool-id == "radial_array";
                         clicked => { root.on-activate-modal-tool("radial_array"); }
                     }
@@ -2131,7 +2395,7 @@ export component Ribbon inherits Rectangle {
                         icon: @image-url("../../assets/icons/ui/array-grid.svg");
                         label: "Grid"; shortcut: "";
                         tooltip: "Grid Array";
-                        tint: #ba68c8;
+                        tint: Theme.cat-modify;
                         selected: root.active-modal-tool-id == "grid_array";
                         clicked => { root.on-activate-modal-tool("grid_array"); }
                     }
@@ -2145,28 +2409,28 @@ export component Ribbon inherits Rectangle {
                         icon: @image-url("../../assets/icons/ui/csg-union.svg");
                         label: "Union"; shortcut: "";
                         tooltip: "Union";
-                        tint: #64b5f6;
+                        tint: Theme.cat-parts;
                         clicked => { root.on-menu-action("csg:union"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/csg-subtract.svg");
                         label: "Subtract"; shortcut: "";
                         tooltip: "Subtract";
-                        tint: #64b5f6;
+                        tint: Theme.cat-parts;
                         clicked => { root.on-menu-action("csg:negate"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/csg-intersect.svg");
                         label: "Intersect"; shortcut: "";
                         tooltip: "Intersect";
-                        tint: #64b5f6;
+                        tint: Theme.cat-parts;
                         clicked => { root.on-menu-action("csg:intersect"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/csg-separate.svg");
                         label: "Separate"; shortcut: "";
                         tooltip: "Separate";
-                        tint: #64b5f6;
+                        tint: Theme.cat-parts;
                         clicked => { root.on-menu-action("csg:separate"); }
                     }
                 }
@@ -2183,10 +2447,10 @@ export component Ribbon inherits Rectangle {
                 
                 ToolGroup {
                     label: "Parts";
-                    IconButton { icon: @image-url("../../assets/icons/part.svg"); label: "Part"; tooltip: "Insert Part"; tint: #64b5f6; clicked => { root.on-menu-action("insert:part"); } }
-                    IconButton { icon: @image-url("../../assets/icons/unionoperation.svg"); label: "Union"; tooltip: "Insert Union"; tint: #64b5f6; clicked => { root.on-menu-action("insert:unionoperation"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/seat.svg"); label: "Seat"; tooltip: "Insert Seat"; tint: #64b5f6; clicked => { root.on-menu-action("insert:seat"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/vehicle.svg"); label: "Vehicle"; tooltip: "Insert VehicleSeat"; tint: #64b5f6; clicked => { root.on-menu-action("insert:vehicleseat"); } }
+                    IconButton { icon: @image-url("../../assets/icons/part.svg"); label: "Part"; tooltip: "Insert Part"; tint: Theme.cat-parts; clicked => { root.on-menu-action("insert:part"); } }
+                    IconButton { icon: @image-url("../../assets/icons/unionoperation.svg"); label: "Union"; tooltip: "Insert Union"; tint: Theme.cat-parts; clicked => { root.on-menu-action("insert:unionoperation"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/seat.svg"); label: "Seat"; tooltip: "Insert Seat"; tint: Theme.cat-parts; clicked => { root.on-menu-action("insert:seat"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/vehicle.svg"); label: "Vehicle"; tooltip: "Insert VehicleSeat"; tint: Theme.cat-parts; clicked => { root.on-menu-action("insert:vehicleseat"); } }
 
                     // ── Parametric — feature-tree CadPart (eustress-cad)
                     IconButton {
@@ -2257,16 +2521,16 @@ export component Ribbon inherits Rectangle {
                 
                 ToolGroup {
                     label: "Structure";
-                    IconButton { icon: @image-url("../../assets/icons/model.svg"); label: "Model"; tooltip: "Insert Model"; tint: #81c784; clicked => { root.on-menu-action("insert:model"); } }
-                    IconButton { icon: @image-url("../../assets/icons/folder.svg"); label: "Folder"; tooltip: "Insert Folder"; tint: #81c784; clicked => { root.on-menu-action("insert:folder"); } }
-                    IconButton { icon: @image-url("../../assets/icons/spawnlocation.svg"); label: "Spawn"; tooltip: "Insert SpawnLocation"; tint: #81c784; clicked => { root.on-menu-action("insert:spawnlocation"); } }
+                    IconButton { icon: @image-url("../../assets/icons/model.svg"); label: "Model"; tooltip: "Insert Model"; tint: Theme.cat-structure; clicked => { root.on-menu-action("insert:model"); } }
+                    IconButton { icon: @image-url("../../assets/icons/folder.svg"); label: "Folder"; tooltip: "Insert Folder"; tint: Theme.cat-structure; clicked => { root.on-menu-action("insert:folder"); } }
+                    IconButton { icon: @image-url("../../assets/icons/spawnlocation.svg"); label: "Spawn"; tooltip: "Insert SpawnLocation"; tint: Theme.cat-structure; clicked => { root.on-menu-action("insert:spawnlocation"); } }
                 }
                 GroupDivider {}
                 
                 ToolGroup {
                     label: "Constraints";
-                    IconButton { icon: @image-url("../../assets/icons/attachment.svg"); label: "Attach"; tooltip: "Insert Attachment"; tint: #ffb74d; clicked => { root.on-menu-action("insert:attachment"); } }
-                    IconButton { icon: @image-url("../../assets/icons/weldconstraint.svg"); label: "Weld"; tooltip: "Insert Weld"; tint: #ffb74d; clicked => { root.on-menu-action("insert:weldconstraint"); } }
+                    IconButton { icon: @image-url("../../assets/icons/attachment.svg"); label: "Attach"; tooltip: "Insert Attachment"; tint: Theme.cat-constraint; clicked => { root.on-menu-action("insert:attachment"); } }
+                    IconButton { icon: @image-url("../../assets/icons/weldconstraint.svg"); label: "Weld"; tooltip: "Insert Weld"; tint: Theme.cat-constraint; clicked => { root.on-menu-action("insert:weldconstraint"); } }
 
                     // ── Assembly mates — live Avian joints (eustress-cad).
                     // Coincident is covered by "Weld" above (same practical
@@ -2277,22 +2541,22 @@ export component Ribbon inherits Rectangle {
                         icon: @image-url("../../assets/icons/ui/hinge.svg");
                         label: "Hinge"; shortcut: "";
                         tooltip: "Revolute mate";
-                        tint: #ffb74d;
+                        tint: Theme.cat-constraint;
                         clicked => { root.on-menu-action("cad:mate_revolute"); }
                     }
-                    IconButton { icon: @image-url("../../assets/icons/motor6d.svg"); label: "Motor"; tooltip: "Insert Motor6D"; tint: #ffb74d; clicked => { root.on-menu-action("insert:motor6d"); } }
+                    IconButton { icon: @image-url("../../assets/icons/motor6d.svg"); label: "Motor"; tooltip: "Insert Motor6D"; tint: Theme.cat-constraint; clicked => { root.on-menu-action("insert:motor6d"); } }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/cad-slide.svg");
                         label: "Slide"; shortcut: "";
                         tooltip: "Prismatic mate";
-                        tint: #ffb74d;
+                        tint: Theme.cat-constraint;
                         clicked => { root.on-menu-action("cad:mate_prismatic"); }
                     }
                     IconButton {
                         icon: @image-url("../../assets/icons/ui/cad-ball.svg");
                         label: "Ball"; shortcut: "";
                         tooltip: "Ball mate";
-                        tint: #ffb74d;
+                        tint: Theme.cat-constraint;
                         clicked => { root.on-menu-action("cad:mate_ball"); }
                     }
                 }
@@ -2300,18 +2564,18 @@ export component Ribbon inherits Rectangle {
 
                 ToolGroup {
                     label: "Effects";
-                    IconButton { icon: @image-url("../../assets/icons/particleemitter.svg"); label: "Particles"; tooltip: "Insert Particles"; tint: #f48fb1; clicked => { root.on-menu-action("insert:particleemitter"); } }
-                    IconButton { icon: @image-url("../../assets/icons/pointlight.svg"); label: "Point"; tooltip: "Insert PointLight"; tint: #fff176; clicked => { root.on-menu-action("insert:pointlight"); } }
-                    IconButton { icon: @image-url("../../assets/icons/spotlight.svg"); label: "Spot"; tooltip: "Insert SpotLight"; tint: #fff176; clicked => { root.on-menu-action("insert:spotlight"); } }
-                    IconButton { icon: @image-url("../../assets/icons/sound.svg"); label: "Sound"; tooltip: "Insert Sound"; tint: #80deea; clicked => { root.on-menu-action("insert:sound"); } }
-                    IconButton { icon: @image-url("../../assets/icons/beam.svg"); label: "Beam"; tooltip: "Insert Beam"; tint: #80deea; clicked => { root.on-menu-action("insert:beam"); } }
+                    IconButton { icon: @image-url("../../assets/icons/particleemitter.svg"); label: "Particles"; tooltip: "Insert Particles"; tint: Theme.accent-purple; clicked => { root.on-menu-action("insert:particleemitter"); } }
+                    IconButton { icon: @image-url("../../assets/icons/pointlight.svg"); label: "Point"; tooltip: "Insert PointLight"; tint: Theme.accent-yellow; clicked => { root.on-menu-action("insert:pointlight"); } }
+                    IconButton { icon: @image-url("../../assets/icons/spotlight.svg"); label: "Spot"; tooltip: "Insert SpotLight"; tint: Theme.accent-yellow; clicked => { root.on-menu-action("insert:spotlight"); } }
+                    IconButton { icon: @image-url("../../assets/icons/sound.svg"); label: "Sound"; tooltip: "Insert Sound"; tint: Theme.cat-data; clicked => { root.on-menu-action("insert:sound"); } }
+                    IconButton { icon: @image-url("../../assets/icons/beam.svg"); label: "Beam"; tooltip: "Insert Beam"; tint: Theme.cat-data; clicked => { root.on-menu-action("insert:beam"); } }
                 }
                 GroupDivider {}
 
                 ToolGroup {
                     label: "Assets";
-                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import Model (OBJ/FBX/GLTF)"; tint: #4dd0e1; clicked => { root.on-menu-action("model:import"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/export.svg"); label: "Export"; tooltip: "Export Selection"; tint: #4dd0e1; clicked => { root.on-menu-action("model:export"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import Model (OBJ/FBX/GLTF)"; tint: Theme.cat-data; clicked => { root.on-menu-action("model:import"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/export.svg"); label: "Export"; tooltip: "Export Selection"; tint: Theme.cat-data; clicked => { root.on-menu-action("model:export"); } }
                 }
             }
             
@@ -2326,39 +2590,39 @@ export component Ribbon inherits Rectangle {
                 
                 ToolGroup {
                     label: "Containers";
-                    IconButton { icon: @image-url("../../assets/icons/ui/screen.svg"); label: "Screen"; tooltip: "ScreenGui"; tint: #00A2FF; clicked => { root.on-menu-action("insert:screengui"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/billboard.svg"); label: "Billboard"; tooltip: "BillboardGui"; tint: #00A2FF; clicked => { root.on-menu-action("insert:billboardgui"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/surface.svg"); label: "Surface"; tooltip: "SurfaceGui"; tint: #00A2FF; clicked => { root.on-menu-action("insert:surfacegui"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/frame.svg"); label: "Frame"; tooltip: "Frame"; tint: #00A2FF; clicked => { root.on-menu-action("insert:frame"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/scroll.svg"); label: "Scroll"; tooltip: "ScrollingFrame"; tint: #00A2FF; clicked => { root.on-menu-action("insert:scrollingframe"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/screen.svg"); label: "Screen"; tooltip: "ScreenGui"; tint: Theme.accent-blue; clicked => { root.on-menu-action("insert:screengui"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/billboard.svg"); label: "Billboard"; tooltip: "BillboardGui"; tint: Theme.accent-blue; clicked => { root.on-menu-action("insert:billboardgui"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/surface.svg"); label: "Surface"; tooltip: "SurfaceGui"; tint: Theme.accent-blue; clicked => { root.on-menu-action("insert:surfacegui"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/frame.svg"); label: "Frame"; tooltip: "Frame"; tint: Theme.accent-blue; clicked => { root.on-menu-action("insert:frame"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/scroll.svg"); label: "Scroll"; tooltip: "ScrollingFrame"; tint: Theme.accent-blue; clicked => { root.on-menu-action("insert:scrollingframe"); } }
                 }
                 GroupDivider {}
                 
                 ToolGroup {
                     label: "Display";
-                    IconButton { icon: @image-url("../../assets/icons/ui/text.svg"); label: "Text"; tooltip: "TextLabel"; tint: #80cbc4; clicked => { root.on-menu-action("insert:textlabel"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/image.svg"); label: "Image"; tooltip: "ImageLabel"; tint: #80cbc4; clicked => { root.on-menu-action("insert:imagelabel"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/text.svg"); label: "Text"; tooltip: "TextLabel"; tint: Theme.text-success; clicked => { root.on-menu-action("insert:textlabel"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/image.svg"); label: "Image"; tooltip: "ImageLabel"; tint: Theme.text-success; clicked => { root.on-menu-action("insert:imagelabel"); } }
                 }
                 GroupDivider {}
                 
                 ToolGroup {
                     label: "Interactive";
-                    IconButton { icon: @image-url("../../assets/icons/ui/button.svg"); label: "Button"; tooltip: "TextButton"; tint: #ffab91; clicked => { root.on-menu-action("insert:textbutton"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/image.svg"); label: "ImgBtn"; tooltip: "ImageButton"; tint: #ffab91; clicked => { root.on-menu-action("insert:imagebutton"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/textbox.svg"); label: "TextBox"; tooltip: "TextBox"; tint: #ffab91; clicked => { root.on-menu-action("insert:textbox"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/viewport.svg"); label: "Viewport"; tooltip: "ViewportFrame"; tint: #a5d6a7; clicked => { root.on-menu-action("insert:viewportframe"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/video.svg"); label: "Video"; tooltip: "VideoFrame"; tint: #a5d6a7; clicked => { root.on-menu-action("insert:videoframe"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/document.svg"); label: "Doc"; tooltip: "DocumentFrame"; tint: #a5d6a7; clicked => { root.on-menu-action("insert:documentframe"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/web.svg"); label: "Web"; tooltip: "WebFrame"; tint: #a5d6a7; clicked => { root.on-menu-action("insert:webframe"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/button.svg"); label: "Button"; tooltip: "TextButton"; tint: Theme.cat-constraint; clicked => { root.on-menu-action("insert:textbutton"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/image.svg"); label: "ImgBtn"; tooltip: "ImageButton"; tint: Theme.cat-constraint; clicked => { root.on-menu-action("insert:imagebutton"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/textbox.svg"); label: "TextBox"; tooltip: "TextBox"; tint: Theme.cat-constraint; clicked => { root.on-menu-action("insert:textbox"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/viewport.svg"); label: "Viewport"; tooltip: "ViewportFrame"; tint: Theme.cat-structure; clicked => { root.on-menu-action("insert:viewportframe"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/video.svg"); label: "Video"; tooltip: "VideoFrame"; tint: Theme.cat-structure; clicked => { root.on-menu-action("insert:videoframe"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/document.svg"); label: "Doc"; tooltip: "DocumentFrame"; tint: Theme.cat-structure; clicked => { root.on-menu-action("insert:documentframe"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/web.svg"); label: "Web"; tooltip: "WebFrame"; tint: Theme.cat-structure; clicked => { root.on-menu-action("insert:webframe"); } }
                 }
                 GroupDivider {}
                 
                 ToolGroup {
                     label: "Layout";
-                    IconButton { icon: @image-url("../../assets/icons/ui/align-left.svg"); label: "Left"; tooltip: "Align Left"; tint: #b0bec5; clicked => { root.on-menu-action("ui:align-left"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/align-center.svg"); label: "Center"; tooltip: "Align Center"; tint: #b0bec5; clicked => { root.on-menu-action("ui:align-center"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/align-right.svg"); label: "Right"; tooltip: "Align Right"; tint: #b0bec5; clicked => { root.on-menu-action("ui:align-right"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/distribute.svg"); label: "Distribute"; tooltip: "Distribute Evenly"; tint: #b0bec5; clicked => { root.on-menu-action("ui:distribute"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/align-left.svg"); label: "Left"; tooltip: "Align Left"; tint: Theme.text-primary; clicked => { root.on-menu-action("ui:align-left"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/align-center.svg"); label: "Center"; tooltip: "Align Center"; tint: Theme.text-primary; clicked => { root.on-menu-action("ui:align-center"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/align-right.svg"); label: "Right"; tooltip: "Align Right"; tint: Theme.text-primary; clicked => { root.on-menu-action("ui:align-right"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/distribute.svg"); label: "Distribute"; tooltip: "Distribute Evenly"; tint: Theme.text-primary; clicked => { root.on-menu-action("ui:distribute"); } }
                 }
             }
             
@@ -2373,15 +2637,31 @@ export component Ribbon inherits Rectangle {
                 
                 ToolGroup {
                     label: "Generate";
-                    IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Small"; tooltip: "Small Terrain (128m)"; tint: #66bb6a; clicked => { root.on-spawn-terrain("small"); } }
-                    IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Medium"; tooltip: "Medium Terrain (512m)"; tint: #43a047; clicked => { root.on-spawn-terrain("medium"); } }
-                    IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Large"; tooltip: "Large Terrain (2km)"; tint: #2e7d32; clicked => { root.on-spawn-terrain("large"); } }
+                    IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Small"; tooltip: "Small Terrain (128m)"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("small"); } }
+                    IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Medium"; tooltip: "Medium Terrain (512m)"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("medium"); } }
+                    IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Large"; tooltip: "Large Terrain (2km)"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("large"); } }
                 }
                 GroupDivider {}
                 
                 ToolGroup {
                     label: "Edit";
-                    IconButton { icon: @image-url("../../assets/icons/ui/check.svg"); label: "Edit"; tooltip: "Toggle Edit Mode (T)"; tint: #fdd835; clicked => { root.on-toggle-terrain-edit(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/check.svg"); label: "Edit"; tooltip: "Toggle Edit Mode (T)"; tint: Theme.accent-yellow; clicked => { root.on-toggle-terrain-edit(); } }
+                }
+                GroupDivider {}
+
+                ToolGroup {
+                    label: "View";
+                    // Show/Hide is VISIBILITY only — terrain entities, voxel
+                    // chunks and files are untouched, so it's instant and
+                    // reversible. Distinct from Clear (in Assets), which
+                    // despawns and deletes.
+                    IconButton {
+                        icon: @image-url("../../assets/icons/terrain.svg");
+                        label: "Show/Hide";
+                        tooltip: "Show or hide terrain in the viewport (visibility only — does not delete)";
+                        tint: Theme.text-success;
+                        clicked => { root.on-menu-action("terrain:toggle-visibility"); }
+                    }
                 }
                 GroupDivider {}
                 
@@ -2391,7 +2671,7 @@ export component Ribbon inherits Rectangle {
                         icon: @image-url("../../assets/icons/ui/chevron-up.svg"); 
                         label: "Raise"; 
                         tooltip: "Raise (1) | Hold or right-click for settings"; 
-                        tint: #81c784; 
+                        tint: Theme.cat-structure; 
                         clicked => { root.on-set-terrain-brush("raise"); }
                         right-clicked => { 
                             root.settings-brush-name = "Raise";
@@ -2412,7 +2692,7 @@ export component Ribbon inherits Rectangle {
                         icon: @image-url("../../assets/icons/ui/chevron-down.svg"); 
                         label: "Lower"; 
                         tooltip: "Lower (2) | Hold or right-click for settings"; 
-                        tint: #e57373; 
+                        tint: Theme.accent-red; 
                         clicked => { root.on-set-terrain-brush("lower"); }
                         right-clicked => { 
                             root.settings-brush-name = "Lower";
@@ -2433,7 +2713,7 @@ export component Ribbon inherits Rectangle {
                         icon: @image-url("../../assets/icons/ui/filter.svg"); 
                         label: "Smooth"; 
                         tooltip: "Smooth (3) | Hold or right-click for settings"; 
-                        tint: #64b5f6; 
+                        tint: Theme.cat-parts; 
                         clicked => { root.on-set-terrain-brush("smooth"); }
                         right-clicked => { 
                             root.settings-brush-name = "Smooth";
@@ -2454,7 +2734,7 @@ export component Ribbon inherits Rectangle {
                         icon: @image-url("../../assets/icons/ui/reset.svg"); 
                         label: "Flatten"; 
                         tooltip: "Flatten (4) | Hold or right-click for settings"; 
-                        tint: #ffb74d; 
+                        tint: Theme.cat-constraint; 
                         clicked => { root.on-set-terrain-brush("flatten"); }
                         right-clicked => { 
                             root.settings-brush-name = "Flatten";
@@ -2475,7 +2755,7 @@ export component Ribbon inherits Rectangle {
                         icon: @image-url("../../assets/icons/ui/palette.svg"); 
                         label: "Paint"; 
                         tooltip: "Paint (5) | Hold or right-click for settings"; 
-                        tint: #ce93d8; 
+                        tint: Theme.accent-purple; 
                         clicked => { root.on-set-terrain-brush("paint"); }
                         right-clicked => { 
                             root.settings-brush-name = "Paint";
@@ -2496,7 +2776,7 @@ export component Ribbon inherits Rectangle {
                         icon: @image-url("../../assets/icons/ui/frame.svg"); 
                         label: "Region"; 
                         tooltip: "Region | Hold or right-click for settings"; 
-                        tint: #90caf9; 
+                        tint: Theme.cat-parts; 
                         clicked => { root.on-set-terrain-brush("region"); }
                         right-clicked => { 
                             root.settings-brush-name = "Region";
@@ -2517,7 +2797,7 @@ export component Ribbon inherits Rectangle {
                         icon: @image-url("../../assets/icons/ui/palette.svg"); 
                         label: "Fill"; 
                         tooltip: "Fill | Hold or right-click for settings"; 
-                        tint: #a5d6a7; 
+                        tint: Theme.cat-structure; 
                         clicked => { root.on-set-terrain-brush("fill"); }
                         right-clicked => { 
                             root.settings-brush-name = "Fill";
@@ -2539,15 +2819,15 @@ export component Ribbon inherits Rectangle {
                 
                 ToolGroup {
                     label: "Water";
-                    IconButton { icon: @image-url("../../assets/icons/ui/water.svg"); label: "Water"; tooltip: "Set Sea Level"; tint: #4fc3f7; clicked => { root.on-menu-action("terrain:water"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/water.svg"); label: "Water"; tooltip: "Set Sea Level"; tint: Theme.text-accent; clicked => { root.on-menu-action("terrain:water"); } }
                 }
                 GroupDivider {}
                 
                 ToolGroup {
                     label: "Assets";
-                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import Heightmap"; tint: #4dd0e1; clicked => { root.on-import-heightmap(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/export.svg"); label: "Export"; tooltip: "Export Heightmap"; tint: #4dd0e1; clicked => { root.on-export-heightmap(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/delete.svg"); label: "Clear"; tooltip: "Clear Terrain"; tint: #ef5350; clicked => { root.on-menu-action("terrain:clear"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import Heightmap"; tint: Theme.cat-data; clicked => { root.on-import-heightmap(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/export.svg"); label: "Export"; tooltip: "Export Heightmap"; tint: Theme.cat-data; clicked => { root.on-export-heightmap(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/delete.svg"); label: "Clear"; tooltip: "Clear Terrain"; tint: Theme.text-error; clicked => { root.on-menu-action("terrain:clear"); } }
                 }
             }
             
@@ -2562,45 +2842,45 @@ export component Ribbon inherits Rectangle {
                 
                 ToolGroup {
                     label: "Server";
-                    IconButton { icon: @image-url("../../assets/icons/ui/server.svg"); label: "Start"; tooltip: "Start Server (F9)"; tint: #66bb6a; clicked => { root.on-start-server(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/close.svg"); label: "Stop"; tooltip: "Stop Server"; tint: #ef5350; clicked => { root.on-stop-server(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/server.svg"); label: "Start"; tooltip: "Start Server (F9)"; tint: Theme.accent-green; clicked => { root.on-start-server(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/close.svg"); label: "Stop"; tooltip: "Stop Server"; tint: Theme.text-error; clicked => { root.on-stop-server(); } }
                 }
                 GroupDivider {}
                 
                 ToolGroup {
                     label: "Clients";
-                    IconButton { icon: @image-url("../../assets/icons/ui/client.svg"); label: "Spawn"; tooltip: "Spawn Synthetic Clients"; tint: #64b5f6; clicked => { root.on-plugin-action("network:spawn-clients"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/close.svg"); label: "Disconnect"; tooltip: "Disconnect All"; tint: #ef9a9a; clicked => { root.on-plugin-action("network:disconnect-all"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/client.svg"); label: "Spawn"; tooltip: "Spawn Synthetic Clients"; tint: Theme.cat-parts; clicked => { root.on-plugin-action("network:spawn-clients"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/close.svg"); label: "Disconnect"; tooltip: "Disconnect All"; tint: Theme.accent-red; clicked => { root.on-plugin-action("network:disconnect-all"); } }
                 }
                 GroupDivider {}
                 
                 ToolGroup {
                     label: "Play";
-                    IconButton { icon: @image-url("../../assets/icons/ui/gamepad.svg"); label: "Play"; tooltip: "Play Here"; tint: #66bb6a; clicked => { root.on-play-with-character(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/pause.svg"); label: "Pause"; tooltip: "Pause"; tint: #ffb74d; clicked => { root.on-pause(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/gamepad.svg"); label: "Play"; tooltip: "Play Here"; tint: Theme.accent-green; clicked => { root.on-play-with-character(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/pause.svg"); label: "Pause"; tooltip: "Pause"; tint: Theme.cat-constraint; clicked => { root.on-pause(); } }
                 }
                 GroupDivider {}
                 
                 ToolGroup {
                     label: "Network";
-                    IconButton { icon: @image-url("../../assets/icons/ui/server.svg"); label: "Server"; tooltip: "Dedicated Server"; tint: #90caf9; clicked => { root.on-start-server(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/client.svg"); label: "Client"; tooltip: "Join as Client"; tint: #90caf9; clicked => { root.on-menu-action("test:join-client"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/network.svg"); label: "Local"; tooltip: "Local Server + Client"; tint: #90caf9; clicked => { root.on-menu-action("test:local"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/server.svg"); label: "Server"; tooltip: "Dedicated Server"; tint: Theme.cat-parts; clicked => { root.on-start-server(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/client.svg"); label: "Client"; tooltip: "Join as Client"; tint: Theme.cat-parts; clicked => { root.on-menu-action("test:join-client"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/network.svg"); label: "Local"; tooltip: "Local Server + Client"; tint: Theme.cat-parts; clicked => { root.on-menu-action("test:local"); } }
                 }
                 GroupDivider {}
                 
                 ToolGroup {
                     label: "Benchmark";
-                    IconButton { icon: @image-url("../../assets/icons/ui/network.svg"); label: "Network"; tooltip: "Network Panel"; tint: #ffcc80; clicked => { root.on-show-network-panel(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/stress.svg"); label: "Stress"; tooltip: "Stress Test"; tint: #ffcc80; clicked => { root.on-show-stress-test(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/network.svg"); label: "Network"; tooltip: "Network Panel"; tint: Theme.accent-yellow; clicked => { root.on-show-network-panel(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/stress.svg"); label: "Stress"; tooltip: "Stress Test"; tint: Theme.accent-yellow; clicked => { root.on-show-stress-test(); } }
                 }
                 GroupDivider {}
                 
                 ToolGroup {
                     label: "Debug";
-                    IconButton { icon: @image-url("../../assets/icons/ui/terminal.svg"); label: "Output"; tooltip: "Output Console"; tint: #b0bec5; clicked => { root.on-menu-action("test:console"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/debug.svg"); label: "Debug"; tooltip: "Debug Mode"; tint: #b0bec5; clicked => { root.on-menu-action("test:debug"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/cleanup.svg"); label: "Reset"; tooltip: "Reset Simulation"; tint: #ef5350; clicked => { root.on-stop(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/terminal.svg"); label: "Output"; tooltip: "Output Console"; tint: Theme.text-primary; clicked => { root.on-menu-action("test:console"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/debug.svg"); label: "Debug"; tooltip: "Debug Mode"; tint: Theme.text-primary; clicked => { root.on-menu-action("test:debug"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/cleanup.svg"); label: "Reset"; tooltip: "Reset Simulation"; tint: Theme.text-error; clicked => { root.on-stop(); } }
                 }
             }
             
@@ -2615,29 +2895,29 @@ export component Ribbon inherits Rectangle {
                 
                 ToolGroup {
                     label: "Labels";
-                    IconButton { icon: @image-url("../../assets/icons/ui/label.svg"); label: "Add"; tooltip: "Add Label (Ctrl+L)"; tint: #9575cd; clicked => { root.on-plugin-action("mindspace:add-label"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/close.svg"); label: "Remove"; tooltip: "Remove Label"; tint: #ef9a9a; clicked => { root.on-plugin-action("mindspace:remove-label"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/label.svg"); label: "Add"; tooltip: "Add Label (Ctrl+L)"; tint: Theme.accent-purple; clicked => { root.on-plugin-action("mindspace:add-label"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/close.svg"); label: "Remove"; tooltip: "Remove Label"; tint: Theme.accent-red; clicked => { root.on-plugin-action("mindspace:remove-label"); } }
                 }
                 GroupDivider {}
 
                 ToolGroup {
                     label: "Connect";
-                    IconButton { icon: @image-url("../../assets/icons/ui/link.svg"); label: "Connect"; tooltip: "Connect Nodes (Ctrl+K)"; tint: #66bb6a; clicked => { root.on-plugin-action("mindspace:connect"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/link.svg"); label: "Connect"; tooltip: "Connect Nodes (Ctrl+K)"; tint: Theme.accent-green; clicked => { root.on-plugin-action("mindspace:connect"); } }
                 }
                 GroupDivider {}
                 
                 ToolGroup {
                     label: "File";
-                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import Mind Map"; tint: #4dd0e1; clicked => { root.on-plugin-action("mindspace:import"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/export.svg"); label: "Export"; tooltip: "Export Mind Map"; tint: #ef9a9a; clicked => { root.on-plugin-action("mindspace:export"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import Mind Map"; tint: Theme.cat-data; clicked => { root.on-plugin-action("mindspace:import"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/export.svg"); label: "Export"; tooltip: "Export Mind Map"; tint: Theme.accent-red; clicked => { root.on-plugin-action("mindspace:export"); } }
                 }
                 GroupDivider {}
                 
                 ToolGroup {
                     label: "AI Tools";
-                    IconButton { icon: @image-url("../../assets/icons/ui/suggest.svg"); label: "Suggest"; tooltip: "AI Suggestions"; tint: #81c784; clicked => { root.on-plugin-action("mindspace:ai-suggest"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/auto-layout.svg"); label: "Layout"; tooltip: "Auto Layout"; tint: #81c784; clicked => { root.on-plugin-action("mindspace:ai-layout"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/summary.svg"); label: "Summary"; tooltip: "Generate Summary"; tint: #81c784; clicked => { root.on-plugin-action("mindspace:ai-summarize"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/suggest.svg"); label: "Suggest"; tooltip: "AI Suggestions"; tint: Theme.cat-structure; clicked => { root.on-plugin-action("mindspace:ai-suggest"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/auto-layout.svg"); label: "Layout"; tooltip: "Auto Layout"; tint: Theme.cat-structure; clicked => { root.on-plugin-action("mindspace:ai-layout"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/summary.svg"); label: "Summary"; tooltip: "Generate Summary"; tint: Theme.cat-structure; clicked => { root.on-plugin-action("mindspace:ai-summarize"); } }
                 }
             }
 
@@ -2654,47 +2934,47 @@ export component Ribbon inherits Rectangle {
 
                 ToolGroup {
                     label: "Source";
-                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import CSV / JSON / Parquet"; tint: #4dd0e1; clicked => { root.on-menu-action("data:import"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/link.svg"); label: "Connect"; tooltip: "Connect a live source"; tint: #4dd0e1; clicked => { root.on-menu-action("data:connect"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import CSV / JSON / Parquet"; tint: Theme.cat-data; clicked => { root.on-menu-action("data:import"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/link.svg"); label: "Connect"; tooltip: "Connect a live source"; tint: Theme.cat-data; clicked => { root.on-menu-action("data:connect"); } }
                 }
                 GroupDivider {}
 
                 ToolGroup {
                     label: "Table";
-                    IconButton { icon: @image-url("../../assets/icons/filetypes/table.svg"); label: "Grid"; tooltip: "Open the Data Grid"; tint: #64b5f6; clicked => { root.on-menu-action("data:grid"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/array-grid.svg"); label: "Columns"; tooltip: "Add a calculated column"; tint: #64b5f6; clicked => { root.on-menu-action("data:columns"); } }
+                    IconButton { icon: @image-url("../../assets/icons/filetypes/table.svg"); label: "Grid"; tooltip: "Open the Data Grid"; tint: Theme.cat-parts; clicked => { root.on-menu-action("data:grid"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/array-grid.svg"); label: "Columns"; tooltip: "Add a calculated column"; tint: Theme.cat-parts; clicked => { root.on-menu-action("data:columns"); } }
                 }
                 GroupDivider {}
 
                 ToolGroup {
                     label: "Analyze";
-                    IconButton { icon: @image-url("../../assets/icons/ui/summary.svg"); label: "Stats"; tooltip: "Descriptive statistics"; tint: #81c784; clicked => { root.on-menu-action("data:stats"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/brain.svg"); label: "Fit"; tooltip: "Curve fit (linear / polynomial)"; tint: #81c784; clicked => { root.on-menu-action("data:fit"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/sparkle.svg"); label: "FFT"; tooltip: "Spectral analysis"; tint: #81c784; clicked => { root.on-menu-action("data:fft"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/array-radial.svg"); label: "Cluster"; tooltip: "k-means clustering"; tint: #81c784; clicked => { root.on-menu-action("data:cluster"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/search.svg"); label: "Anomaly"; tooltip: "Anomaly detection"; tint: #81c784; clicked => { root.on-menu-action("data:anomaly"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/summary.svg"); label: "Stats"; tooltip: "Descriptive statistics"; tint: Theme.cat-structure; clicked => { root.on-menu-action("data:stats"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/brain.svg"); label: "Fit"; tooltip: "Curve fit (linear / polynomial)"; tint: Theme.cat-structure; clicked => { root.on-menu-action("data:fit"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/sparkle.svg"); label: "FFT"; tooltip: "Spectral analysis"; tint: Theme.cat-structure; clicked => { root.on-menu-action("data:fft"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/array-radial.svg"); label: "Cluster"; tooltip: "k-means clustering"; tint: Theme.cat-structure; clicked => { root.on-menu-action("data:cluster"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/search.svg"); label: "Anomaly"; tooltip: "Anomaly detection"; tint: Theme.cat-structure; clicked => { root.on-menu-action("data:anomaly"); } }
                 }
                 GroupDivider {}
 
                 ToolGroup {
                     label: "Visualize";
-                    IconButton { icon: @image-url("../../assets/icons/ui/viewport.svg"); label: "Chart"; tooltip: "Open a Chart tab"; tint: #4fc3f7; clicked => { root.on-menu-action("data:chart"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/palette.svg"); label: "Overlay"; tooltip: "Color the 3D scene by a metric"; tint: #4fc3f7; clicked => { root.on-menu-action("data:overlay"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/layout-default.svg"); label: "Dashboard"; tooltip: "Compose a dashboard"; tint: #4fc3f7; clicked => { root.on-menu-action("data:dashboard"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/viewport.svg"); label: "Chart"; tooltip: "Open a Chart tab"; tint: Theme.text-accent; clicked => { root.on-menu-action("data:chart"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/palette.svg"); label: "Overlay"; tooltip: "Color the 3D scene by a metric"; tint: Theme.text-accent; clicked => { root.on-menu-action("data:overlay"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/layout-default.svg"); label: "Dashboard"; tooltip: "Compose a dashboard"; tint: Theme.text-accent; clicked => { root.on-menu-action("data:dashboard"); } }
                 }
                 GroupDivider {}
 
                 ToolGroup {
                     label: "Record";
-                    IconButton { icon: @image-url("../../assets/icons/ui/play.svg"); label: "Record"; tooltip: "Start the timeseries Recorder"; tint: #ce93d8; clicked => { root.on-menu-action("data:record"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/history.svg"); label: "Timeline"; tooltip: "Open the Recorder timeline"; tint: #ce93d8; clicked => { root.on-menu-action("data:timeline"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/play.svg"); label: "Record"; tooltip: "Start the timeseries Recorder"; tint: Theme.accent-purple; clicked => { root.on-menu-action("data:record"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/history.svg"); label: "Timeline"; tooltip: "Open the Recorder timeline"; tint: Theme.accent-purple; clicked => { root.on-menu-action("data:timeline"); } }
                 }
                 GroupDivider {}
 
                 ToolGroup {
                     label: "Experiment";
-                    IconButton { icon: @image-url("../../assets/icons/filetypes/git.svg"); label: "Branch"; tooltip: "Snapshot a Run (signals + world + stats)"; tint: #ffb74d; clicked => { root.on-menu-action("data:branch"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/swap.svg"); label: "Compare"; tooltip: "Compare Runs (overlay + deltas)"; tint: #ffb74d; clicked => { root.on-menu-action("data:compare"); } }
+                    IconButton { icon: @image-url("../../assets/icons/filetypes/git.svg"); label: "Branch"; tooltip: "Snapshot a Run (signals + world + stats)"; tint: Theme.cat-constraint; clicked => { root.on-menu-action("data:branch"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/swap.svg"); label: "Compare"; tooltip: "Compare Runs (overlay + deltas)"; tint: Theme.cat-constraint; clicked => { root.on-menu-action("data:compare"); } }
                 }
             }
 
@@ -2734,7 +3014,7 @@ export component Ribbon inherits Rectangle {
                         icon: @image-url("../../assets/icons/ui/settings.svg");
                         label: button.label;
                         tooltip: button.tooltip;
-                        tint: #ce93d8;
+                        tint: Theme.accent-purple;
                         clicked => { root.on-plugin-action(button.action-id); }
                     }
                 }
@@ -2744,6 +3024,48 @@ export component Ribbon inherits Rectangle {
                     color: Theme.text-secondary;
                     font-size: 11px;
                     vertical-alignment: center;
+                }
+            }
+
+            // CUSTOM MODE TABS — a mode's own tabs beyond the 9 built-ins
+            // (e.g. Business's "Product"/"Manufacturing"). Mirrors the
+            // Plugins-tab pattern exactly: `custom-tab-sections`/
+            // `custom-tab-tools` are already filtered to the active mode by
+            // Rust, so this block just needs to filter by `tab-id ==
+            // root.ribbon-tab` (the same `visible` + zero-width trick, since
+            // `for X: if Y: Component {}` isn't valid Slint). A tab with
+            // zero tools in a section shows "Coming soon" — a mode may be
+            // declared before its tooling exists.
+            // ════════════════════════════════════════════════════════════
+            if !root.ribbon-tab-is-builtin: HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 6px;
+                alignment: center;
+
+                for section in root.custom-tab-sections: ToolGroup {
+                    property <bool> section-in-this-tab: section.tab-id == root.ribbon-tab;
+                    label: section.label;
+                    visible: section-in-this-tab;
+                    width: section-in-this-tab ? self.preferred-width : 0px;
+
+                    for tool in root.custom-tab-tools: IconButton {
+                        property <bool> in-this-section: tool.tab-id == section.tab-id && tool.section-id == section.section-id;
+                        visible: section-in-this-tab && in-this-section;
+                        width: (section-in-this-tab && in-this-section) ? self.preferred-width : 0px;
+                        icon: @image-url("../../assets/icons/ui/settings.svg");
+                        label: tool.label;
+                        tooltip: tool.tooltip;
+                        tint: Theme.accent-eustress;
+                        clicked => { root.on-menu-action(tool.action-id); }
+                    }
+
+                    if section-in-this-tab && section.tool-count == 0: Text {
+                        text: "Coming soon";
+                        color: Theme.text-disabled;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }

@@ -13,6 +13,9 @@ path = "src/main.rs"
 [dependencies]
 # Shared types + EustressStream + TOML materializer
 eustress-common = { path = "../common", features = ["async-assets"] }
+# Synchronous TCP JSON-RPC client for the engine's Engine Bridge — drives
+# a live eustress-engine or eustress-headless (`bridge` subcommand).
+eustress-bridge-client = { path = "../bridge-client" }
 
 # CLI argument parsing
 clap = { version = "4.4", features = ["derive", "env"] }

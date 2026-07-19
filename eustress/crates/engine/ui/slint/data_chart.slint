@@ -31,7 +31,7 @@ component Chip inherits Rectangle {
     callback clicked;
     height: 22px;
     border-radius: 6px;
-    background: (root.clickable && ta.has-hover) ? #14323a : (root.active ? #0e3a44 : Theme.button-background);
+    background: (root.clickable && ta.has-hover) ? Theme.selection-background : (root.active ? Theme.selection-background : Theme.button-background);
     border-width: 1px;
     border-color: root.active ? root.accent : Theme.border-color;
     ta := TouchArea {
@@ -43,7 +43,7 @@ component Chip inherits Rectangle {
         padding-right: 8px;
         Text {
             text: root.label;
-            color: root.active ? #7fe3f5 : Theme.text-secondary;
+            color: root.active ? Theme.text-accent : Theme.text-secondary;
             font-size: 11px;
             vertical-alignment: center;
         }
@@ -97,7 +97,7 @@ component PlotBox inherits Rectangle {
         y: root.py0 + root.ph * i / 4;
         width: root.pw;
         height: 1px;
-        background: #ffffff10;
+        background: Theme.border-highlight;
         Text {
             x: -42px; y: -7px; width: 38px;
             text: t; color: Theme.text-disabled; font-size: 9px;
@@ -110,7 +110,7 @@ component PlotBox inherits Rectangle {
         y: root.py0;
         width: 1px;
         height: root.ph;
-        background: #ffffff08;
+        background: Theme.border-highlight;
         Text {
             x: -18px; y: parent.height + 3px; width: 36px;
             text: t; color: Theme.text-disabled; font-size: 9px;
@@ -128,13 +128,13 @@ component PlotBox inherits Rectangle {
             viewbox-x: 0; viewbox-y: 0; viewbox-width: 1000; viewbox-height: 500;
             width: 100%; height: 100%;
             commands: root.fit-path;
-            fill: transparent; stroke: #f5a524; stroke-width: 1.5px;
+            fill: transparent; stroke: Theme.accent-orange; stroke-width: 1.5px;
         }
         Path {
             viewbox-x: 0; viewbox-y: 0; viewbox-width: 1000; viewbox-height: 500;
             width: 100%; height: 100%;
             commands: root.series-path;
-            fill: transparent; stroke: #38bdf8; stroke-width: 1.6px;
+            fill: transparent; stroke: Theme.text-accent; stroke-width: 1.6px;
         }
 
         // Plot-background hover → fit equation tooltip (under the point markers)
@@ -143,11 +143,11 @@ component PlotBox inherits Rectangle {
             x: plot-ta.mouse-x + 12px;
             y: plot-ta.mouse-y - 22px;
             width: 198px; height: 18px;
-            background: #11161fee; border-radius: 4px;
-            border-width: 1px; border-color: #f5a524;
+            background: Theme.panel-glass; border-radius: 4px;
+            border-width: 1px; border-color: Theme.accent-orange;
             Text {
                 x: 6px; width: parent.width - 10px; vertical-alignment: center;
-                text: root.fit-label; color: #ffd9a0; font-size: 10px; overflow: elide;
+                text: root.fit-label; color: Theme.text-primary; font-size: 10px; overflow: elide;
             }
         }
 
@@ -159,16 +159,16 @@ component PlotBox inherits Rectangle {
             pta := TouchArea {}
             Rectangle {
                 x: 3px; y: 3px; width: 4px; height: 4px; border-radius: 2px;
-                background: pta.has-hover ? #ffffff : #38bdf8;
+                background: pta.has-hover ? #ffffff : Theme.text-accent;  // theme-exempt: pure-white marker hover highlight, no white token
             }
             if pta.has-hover: Rectangle {
                 x: 10px; y: -4px; width: 110px; height: 20px;
-                background: #11161fee; border-radius: 4px;
-                border-width: 1px; border-color: #38bdf8;
+                background: Theme.panel-glass; border-radius: 4px;
+                border-width: 1px; border-color: Theme.text-accent;
                 Text {
                     x: 6px; width: parent.width - 10px; vertical-alignment: center;
                     text: "(" + p.xv + ", " + p.yv + ")";
-                    color: #cfe8ff; font-size: 10px; overflow: elide;
+                    color: Theme.text-primary; font-size: 10px; overflow: elide;
                 }
             }
         }
@@ -198,11 +198,11 @@ component SeriesTable inherits Rectangle {
     clip: true;
     VerticalLayout {
         Rectangle {
-            height: 22px; background: #0e3a44;
+            height: 22px; background: Theme.header-background;
             HorizontalLayout {
                 padding-left: 10px; spacing: 8px;
-                Text { text: root.x-label == "" ? "x" : root.x-label; color: #7fe3f5; font-size: 10px; vertical-alignment: center; width: 45%; }
-                Text { text: root.y-label == "" ? "y" : root.y-label; color: #7fe3f5; font-size: 10px; vertical-alignment: center; }
+                Text { text: root.x-label == "" ? "x" : root.x-label; color: Theme.text-accent; font-size: 10px; vertical-alignment: center; width: 45%; }
+                Text { text: root.y-label == "" ? "y" : root.y-label; color: Theme.text-accent; font-size: 10px; vertical-alignment: center; }
             }
         }
         Flickable {
@@ -228,7 +228,7 @@ component AxisField inherits Rectangle {
     callback applied(string);
     width: 50px;
     height: 18px;
-    background: #0d1420;
+    background: Theme.input-background;
     border-width: 1px;
     border-color: Theme.border-color;
     border-radius: 3px;
@@ -292,8 +292,8 @@ export component DataChartView inherits Rectangle {
             height: 16px;
             spacing: 16px;
             alignment: start;
-            LegendItem { label: root.title == "" ? "Series" : root.title; swatch: #38bdf8; }
-            LegendItem { label: root.fit-label == "" ? "Linear fit" : root.fit-label; swatch: #f5a524; }
+            LegendItem { label: root.title == "" ? "Series" : root.title; swatch: Theme.text-accent; }
+            LegendItem { label: root.fit-label == "" ? "Linear fit" : root.fit-label; swatch: Theme.accent-orange; }
         }
 
         // ── Axis range controls (type a value + Enter to apply; empty = auto) ─

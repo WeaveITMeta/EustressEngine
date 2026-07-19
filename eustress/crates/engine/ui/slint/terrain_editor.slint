@@ -94,7 +94,7 @@ export component ChunkRow inherits Rectangle {
         Rectangle {
             width: 12px;
             height: 12px;
-            background: #3cb371;
+            background: Theme.accent-green;
             border-radius: 2px;
         }
         
@@ -393,7 +393,7 @@ export component TerrainEditor inherits Rectangle {
                                 
                                 if root.edit-mode: Text {
                                     text: root.current-brush.to-uppercase();
-                                    color: #ffffff80;
+                                    color: #ffffff80;  // theme-exempt: translucent white label on accent-blue button
                                     font-size: 10px;
                                     vertical-alignment: center;
                                     min-width: 40px;

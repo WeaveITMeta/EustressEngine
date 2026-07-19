@@ -38,7 +38,7 @@ component ApiFnCard inherits Rectangle {
     callback copy-example(string);
 
     height: card-layout.preferred-height + 16px;
-    background: card-touch.has-hover ? #2a2a3a : transparent;
+    background: card-touch.has-hover ? Theme.explorer-item-hover : transparent;
     border-radius: 4px;
 
     card-touch := TouchArea {
@@ -58,7 +58,7 @@ component ApiFnCard inherits Rectangle {
             // Function name
             Text {
                 text: root.entry.name;
-                color: #7cc5f0;
+                color: Theme.text-accent;
                 font-size: 13px;
                 font-weight: 600;
                 font-family: "Cascadia Code, Consolas, monospace";
@@ -85,11 +85,11 @@ component ApiFnCard inherits Rectangle {
                 height: 8px;
                 border-radius: 4px;
                 y: (parent.height - self.height) / 2;
-                background: root.entry.status == "implemented" ? #4caf50 :
-                            root.entry.status == "partial" ? #ff9800 :
-                            root.entry.status == "extension" ? #2196f3 :
-                            root.entry.status == "n/a" ? #666666 :
-                            #e53935;
+                background: root.entry.status == "implemented" ? Theme.accent-green :
+                            root.entry.status == "partial" ? Theme.accent-orange :
+                            root.entry.status == "extension" ? Theme.accent-blue :
+                            root.entry.status == "n/a" ? Theme.text-secondary :
+                            Theme.accent-red;
             }
         }
 
@@ -110,15 +110,15 @@ component ApiFnCard inherits Rectangle {
                 width: lang-text.preferred-width + 10px;
                 height: 16px;
                 border-radius: 3px;
-                background: root.entry.language == "Rune" ? #1a3a2a :
-                            root.entry.language == "Luau" ? #1a2a3a :
-                            #2a2a1a;
+                background: root.entry.language == "Rune" ? #1a3a2a :  // theme-exempt: language badge tint, no dark-green surface token
+                            root.entry.language == "Luau" ? #1a2a3a :  // theme-exempt: language badge tint, no dark-blue surface token
+                            #2a2a1a;  // theme-exempt: language badge tint, no dark-amber surface token
 
                 lang-text := Text {
                     text: root.entry.language;
-                    color: root.entry.language == "Rune" ? #4caf50 :
-                           root.entry.language == "Luau" ? #42a5f5 :
-                           #ffb74d;
+                    color: root.entry.language == "Rune" ? Theme.accent-green :
+                           root.entry.language == "Luau" ? Theme.text-accent :
+                           Theme.accent-yellow;
                     font-size: 10px;
                     horizontal-alignment: center;
                     vertical-alignment: center;
@@ -130,11 +130,11 @@ component ApiFnCard inherits Rectangle {
                 width: cat-text.preferred-width + 10px;
                 height: 16px;
                 border-radius: 3px;
-                background: #1a1a2a;
+                background: Theme.background-tertiary;
 
                 cat-text := Text {
                     text: root.entry.category;
-                    color: #888;
+                    color: Theme.text-secondary;
                     font-size: 10px;
                     horizontal-alignment: center;
                     vertical-alignment: center;
@@ -155,7 +155,7 @@ component CategoryItem inherits Rectangle {
     callback clicked();
 
     height: 26px;
-    background: root.selected ? #2a2a4a : (cat-touch.has-hover ? #2a2a3a : transparent);
+    background: root.selected ? Theme.explorer-item-selected : (cat-touch.has-hover ? Theme.explorer-item-hover : transparent);
     border-radius: 4px;
 
     cat-touch := TouchArea {
@@ -180,7 +180,7 @@ component CategoryItem inherits Rectangle {
             width: count-text.preferred-width + 8px;
             height: 16px;
             border-radius: 3px;
-            background: #2a2a2a;
+            background: Theme.button-background;
             y: (parent.height - self.height) / 2;
 
             count-text := Text {
@@ -232,9 +232,9 @@ export component ApiReferencePanel inherits Rectangle {
                 Rectangle {
                     horizontal-stretch: 1;
                     border-radius: 4px;
-                    background: #1a1a1a;
+                    background: Theme.input-background;
                     border-width: 1px;
-                    border-color: #3a3a3a;
+                    border-color: Theme.input-border;
 
                     HorizontalLayout {
                         padding-left: 8px;
@@ -243,7 +243,7 @@ export component ApiReferencePanel inherits Rectangle {
                         Text {
                             text: "\u{1F50D}";
                             font-size: 11px;
-                            color: #666;
+                            color: Theme.text-secondary;
                             vertical-alignment: center;
                             width: 18px;
                         }
@@ -266,7 +266,7 @@ export component ApiReferencePanel inherits Rectangle {
                     width: 140px;
                     height: 28px;
                     border-radius: 4px;
-                    background: #1a1a1a;
+                    background: Theme.input-background;
 
                     HorizontalLayout {
                         spacing: 0px;
@@ -276,7 +276,7 @@ export component ApiReferencePanel inherits Rectangle {
                         Rectangle {
                             horizontal-stretch: 1;
                             border-radius: 3px;
-                            background: root.language-filter == "All" ? #3a3a5a : transparent;
+                            background: root.language-filter == "All" ? Theme.selection-background : transparent;
 
                             TouchArea {
                                 mouse-cursor: pointer;
@@ -299,7 +299,7 @@ export component ApiReferencePanel inherits Rectangle {
                         Rectangle {
                             horizontal-stretch: 1;
                             border-radius: 3px;
-                            background: root.language-filter == "Rune" ? #1a3a2a : transparent;
+                            background: root.language-filter == "Rune" ? #1a3a2a : transparent;  // theme-exempt: language filter tint, no dark-green surface token
 
                             TouchArea {
                                 mouse-cursor: pointer;
@@ -311,7 +311,7 @@ export component ApiReferencePanel inherits Rectangle {
 
                             Text {
                                 text: "Rune";
-                                color: root.language-filter == "Rune" ? #4caf50 : Theme.text-secondary;
+                                color: root.language-filter == "Rune" ? Theme.accent-green : Theme.text-secondary;
                                 font-size: 11px;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -322,7 +322,7 @@ export component ApiReferencePanel inherits Rectangle {
                         Rectangle {
                             horizontal-stretch: 1;
                             border-radius: 3px;
-                            background: root.language-filter == "Luau" ? #1a2a3a : transparent;
+                            background: root.language-filter == "Luau" ? #1a2a3a : transparent;  // theme-exempt: language filter tint, no dark-blue surface token
 
                             TouchArea {
                                 mouse-cursor: pointer;
@@ -334,7 +334,7 @@ export component ApiReferencePanel inherits Rectangle {
 
                             Text {
                                 text: "Luau";
-                                color: root.language-filter == "Luau" ? #42a5f5 : Theme.text-secondary;
+                                color: root.language-filter == "Luau" ? Theme.text-accent : Theme.text-secondary;
                                 font-size: 11px;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -368,7 +368,7 @@ export component ApiReferencePanel inherits Rectangle {
                 y: 0px;
                 width: 160px;
                 height: parent.height;
-                background: #1a1a1e;
+                background: Theme.background-tertiary;
                 clip: true;
 
                 ScrollView {
@@ -405,7 +405,7 @@ export component ApiReferencePanel inherits Rectangle {
                 y: 0px;
                 width: 5px;
                 height: parent.height;
-                background: splitter-touch.has-hover || splitter-touch.pressed ? #5a5a7a : #333;
+                background: splitter-touch.has-hover || splitter-touch.pressed ? #5a5a7a : Theme.border-color;  // theme-exempt: splitter hover highlight #5a5a7a, no matching token
 
                 splitter-touch := TouchArea {
                     mouse-cursor: col-resize;

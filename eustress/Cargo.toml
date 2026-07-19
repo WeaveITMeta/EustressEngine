@@ -23,6 +23,7 @@ members = [
     "crates/texture-gen",
     "crates/workshop",
     "crates/tools",
+    "crates/bridge-client",
     "crates/cli",
     "crates/stream",
     "crates/stream-node",

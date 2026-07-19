@@ -44,6 +44,9 @@ dirs = { workspace = true }
 # external IDEs get every Workshop tool. Consumed WITHOUT the `bevy`
 # feature so we don't drag in Bevy on the MCP-server side.
 eustress-tools = { path = "../tools" }
+# Synchronous TCP JSON-RPC client for the engine's Engine Bridge —
+# shared with the eustress CLI (crates/bridge-client).
+eustress-bridge-client = { path = "../bridge-client" }
 # For service_templates_dir() — new_space scaffolds a Space from the templates.
 # default-features off so this stays Bevy-free on the MCP-server side.
 eustress-common = { path = "../common", default-features = false }

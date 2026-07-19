@@ -1,0 +1,38 @@
+# Eustress Mode — "Legal".
+# Records, discovery, and scenario work: data-forward with MindSpace for
+# case-relationship graphs and a scripting layout. Case/Discovery tabs are
+# forward-looking (declared ahead of their tooling).
+
+[mode]
+id = "legal"
+name = "Legal"
+icon = "scales"
+version = "1.0"
+author = "Eustress"
+
+[ribbon]
+tabs = ["home", "data", "mindspace", "test"]
+
+[layout]
+preset = "Scripting"
+
+[theme]
+accent = "#ffd166"
+
+[[tabs]]
+id = "case"
+name = "Case"
+color = "#ffd166"
+
+  [[tabs.sections]]
+  name = "Files"
+  tools = []
+
+[[tabs]]
+id = "discovery"
+name = "Discovery"
+color = "#4fd6ff"
+
+  [[tabs.sections]]
+  name = "Records"
+  tools = ["data:import", "data:columns"]

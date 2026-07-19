@@ -4,7 +4,7 @@
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, TabWidget, Button, ComboBox, LineEdit, ScrollView, StandardListView, CheckBox, Slider, GridBox, GroupBox, SpinBox, TextEdit } from "std-widgets.slint";
-import { Ribbon, SavedIdentityData, InsertClassData, PluginSectionData, PluginButtonData } from "ribbon.slint";
+import { Ribbon, SavedIdentityData, InsertClassData, PluginSectionData, PluginButtonData, ModeData, RibbonTabData, SubmodeData, CustomTabSectionData, CustomTabToolData } from "ribbon.slint";
 import { ExplorerPanel, TreeNode } from "explorer.slint";
 import { PropertiesPanel, PropertyData, HoneycombCell } from "properties.slint";
 import { TagChip, TagSuggestion } from "tags_editor.slint";
@@ -25,7 +25,15 @@ import { LoginDialog } from "login.slint";
 import { HistoryPanel, HistoryEntry } from "history_panel.slint";
 import { PublishTreeNode } from "publish.slint";
 import { ContextMenu, MenuItem } from "context_menu.slint";
-import { Theme } from "theme.slint";
+import { RadialMenu, RadialOption } from "radial_menu.slint";
+import { Theme, ThemeData } from "theme.slint";
+// Re-export so `slint::include_modules!()` generates Rust bindings for the
+// Theme global + the ThemeData struct (a plain `import` only makes them usable
+// within .slint files). Rust builds a ThemeData and pushes it via set_data().
+export { Theme, ThemeData }
+// Same re-export requirement as Theme/ThemeData above — plain `import`
+// doesn't generate Rust bindings, only `export` does.
+export { ModeData, RibbonTabData, ThemeEntry, SubmodeData, CustomTabSectionData, CustomTabToolData }
 // Dock layout system
 import { LayoutPresetSelector, LayoutDropdownMenu, AdvancedTabBar, PerformanceOverlay, DockZoneIndicator, ThemeEditor, LayoutPreset, DockTab, DockZone } from "dock_layout.slint";
 import { ToolOptionsBar, ToolOptionControlData } from "tool_options_bar.slint";
@@ -40,7 +48,7 @@ import { DataChartView, ChartPoint } from "data_chart.slint";
 import { DataGrid, DataGridRow } from "data_grid.slint";
 // New components for complete egui parity
 import { TerrainEditor } from "terrain_editor.slint";
-import { SettingsDialog } from "settings.slint";
+import { SettingsDialog, ThemeEntry } from "settings.slint";
 import { NetworkPanel } from "network_panel.slint";
 import { FindDialog } from "find_dialog.slint";
 import { ServiceProperties } from "service_properties.slint";
@@ -195,6 +203,45 @@ export component StudioWindow inherits Window {
     in-out property <bool> show-exit-confirmation: false;
     in-out property <bool> show-settings-dialog: false;
     in-out property <int> settings-active-tab: 0;
+    // Legacy Classic/Modern bool round-trip (kept for back-compat; the Theme
+    // tab now uses the data-driven theme list below).
+    callback set-theme-modern(bool);
+    // TOML theme engine — the list of loaded themes (pushed from Rust), the
+    // active id, and the round-trips that swap/rescan. `select-theme(id)`
+    // swaps the whole palette live + persists; `rescan-themes` re-reads the
+    // user Themes folder.
+    in property <[ThemeEntry]> settings-available-themes: [];
+    in-out property <string> settings-active-theme-id: "modern";
+    callback select-theme(string);
+    callback rescan-themes();
+    // Settings dialog's "Reset Defaults" button — was declared on
+    // SettingsDialog and clicked, but never forwarded to root (so it never
+    // reached Rust at all; same missing-callback-forwarding bug class as
+    // the Theme/Mode callbacks).
+    // Named `reset-defaults`, NOT `on-reset-defaults` — Slint always
+    // prefixes a callback's Rust setter with `on_`, so a callback already
+    // named `on-...` generates a colliding `on_on_reset_defaults` (compile
+    // error). SettingsDialog's own callback keeps its `on-reset-defaults`
+    // name below; only this root-level one needs the clean name.
+    callback reset-defaults();
+
+    // Eustress Modes — mode list + active id/icon (pushed from Rust's
+    // ModeRegistry) and the data-driven ribbon-tab subset the active mode
+    // filters to (`sync_active_mode_to_slint` in slint_ui.rs).
+    in property <[ModeData]> available-modes: [];
+    in-out property <string> active-mode-id: "engineering";
+    in property <string> active-mode-icon-id: "gear";
+    in property <string> active-mode-name: "Mode";
+    in property <[RibbonTabData]> ribbon-tabs: [];
+    callback select-mode(string);
+    // Submodes (Justice's Civil/Criminal/Judge, Military's six branches) +
+    // a mode's custom tabs beyond the 9 built-ins — all pushed alongside
+    // ribbon-tabs whenever the active mode changes.
+    in property <[SubmodeData]> available-submodes: [];
+    in-out property <string> active-submode-id: "";
+    callback select-submode(string, string);
+    in property <[CustomTabSectionData]> custom-tab-sections: [];
+    in property <[CustomTabToolData]> custom-tab-tools: [];
     in-out property <bool> show-find-dialog: false;
     in-out property <bool> show-new-universe-dialog: false;
     in-out property <string> new-universe-name: "";
@@ -435,7 +482,19 @@ export component StudioWindow inherits Window {
     // Soul Panel context menu — target script entity id + target-type tag
     in-out property <int> context-menu-target-id: -1;
     in-out property <string> context-menu-target-type: "";
-    
+
+    // Radial media-import menu — shown after picking / double-clicking an
+    // image or video, to choose which class the media becomes (Decal /
+    // Texture / ImageLabel / ImageButton, or VideoFrame / Video). Rust
+    // populates the options + centre + title, then handles the choice.
+    in-out property <bool> radial-menu-visible: false;
+    in-out property <[RadialOption]> radial-menu-options: [];
+    in-out property <length> radial-menu-center-x: 0px;
+    in-out property <length> radial-menu-center-y: 0px;
+    in-out property <string> radial-menu-title: "";
+    callback radial-menu-chosen(string);
+    callback radial-menu-cancelled();
+
     // Current tool
     in-out property <string> current-tool: "select";
     
@@ -817,6 +876,8 @@ export component StudioWindow inherits Window {
     callback asset-import(string);
     callback asset-search(string);
     callback asset-category-changed(string);
+    // Double-click a leaf asset: (id, asset-type, universe-relative path).
+    callback asset-open-media(int, string, string);
 
     // ========================================================================
     // Callbacks (bound to Bevy systems)
@@ -1068,6 +1129,19 @@ export component StudioWindow inherits Window {
         // ====================================================================
         Ribbon {
             current-tool: root.current-tool;
+            // Eustress Modes — mode list + active id/icon + data-driven
+            // ribbon-tab subset, all pushed from Rust's ModeRegistry.
+            available-modes: root.available-modes;
+            active-mode-id <=> root.active-mode-id;
+            active-mode-icon-id: root.active-mode-icon-id;
+            active-mode-name: root.active-mode-name;
+            ribbon-tabs: root.ribbon-tabs;
+            select-mode(id) => { root.select-mode(id); }
+            available-submodes: root.available-submodes;
+            active-submode-id <=> root.active-submode-id;
+            select-submode(mode-id, submode-id) => { root.select-submode(mode-id, submode-id); }
+            custom-tab-sections: root.custom-tab-sections;
+            custom-tab-tools: root.custom-tab-tools;
             // Data-driven Insert-menu catalog (ClassRegistry → grouped list).
             insert-classes: root.insert-classes;
             // Plugins tab content (TabRegistry → grouped section/button list).
@@ -1261,10 +1335,40 @@ export component StudioWindow inherits Window {
                     Rectangle {
                         height: 30px;
                         background: Theme.header-background;
-                        
+
+                        // Phase F: pop the CURRENTLY ACTIVE left-zone panel out
+                        // into its own draggable OS window. Absolutely
+                        // positioned so it never disturbs the tab
+                        // HorizontalLayout's stretch-based widths below.
+                        Rectangle {
+                            x: parent.width - 22px;
+                            y: (parent.height - 18px) / 2;
+                            width: 18px; height: 18px;
+                            border-radius: 3px;
+                            background: left-detach-ta.has-hover ? Theme.button-hover : transparent;
+                            left-detach-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.detach-panel-to-window(
+                                        root.left-tab-index == 0 ? "explorer" :
+                                        root.left-tab-index == 1 ? "assets" :
+                                        root.left-tab-index == 2 ? "universe" :
+                                        root.left-tab-index == 3 ? "toolbox" : "terrain"
+                                    );
+                                }
+                            }
+                            Image {
+                                width: 12px; height: 12px;
+                                x: 3px; y: 3px;
+                                source: @image-url("../../assets/icons/ui/detach.svg");
+                                colorize: Theme.text-secondary;
+                                image-fit: contain;
+                            }
+                        }
+
                         HorizontalLayout {
                             padding-left: 2px;
-                            padding-right: 2px;
+                            padding-right: 24px;
                             padding-top: 2px;
                             spacing: 1px;
 
@@ -1380,12 +1484,12 @@ export component StudioWindow inherits Window {
                                     width: 140px;
 
                                     Rectangle {
-                                        background: #1e1e1e;
+                                        background: Theme.dialog-background;
                                         border-radius: 4px;
                                         border-width: 1px;
-                                        border-color: #3a3a3a;
+                                        border-color: Theme.border-color;
                                         drop-shadow-blur: 8px;
-                                        drop-shadow-color: #00000080;
+                                        drop-shadow-color: Theme.shadow-color;
                                         width: 140px;
 
                                         VerticalLayout {
@@ -1535,6 +1639,7 @@ export component StudioWindow inherits Window {
                             on-import-asset(kind) => { root.asset-import(kind); }
                             on-search-changed(text) => { root.asset-search(text); }
                             on-category-changed(cat) => { root.asset-category-changed(cat); }
+                            on-open-media(id, asset-type, path) => { root.asset-open-media(id, asset-type, path); }
                         }
                         
                         if root.left-tab-index == 2: UniverseBrowser {
@@ -1612,7 +1717,7 @@ export component StudioWindow inherits Window {
                         y: 0px;
                         width: 36px;
                         height: 35px;
-                        background: home-btn-touch.has-hover ? #ffffff0c : transparent;
+                        background: home-btn-touch.has-hover ? Theme.button-hover : transparent;
                         
                         home-btn-touch := TouchArea {
                             mouse-cursor: pointer;
@@ -1644,7 +1749,7 @@ export component StudioWindow inherits Window {
                         y: 0px;
                         width: 36px;
                         height: 35px;
-                        background: hud-toggle-touch.has-hover ? #ffffff0c : transparent;
+                        background: hud-toggle-touch.has-hover ? Theme.button-hover : transparent;
                         
                         hud-toggle-touch := TouchArea {
                             mouse-cursor: pointer;
@@ -1656,7 +1761,7 @@ export component StudioWindow inherits Window {
                             height: 16px;
                             source: @image-url("../../assets/icons/ui/layout-default.svg");
                             image-fit: contain;
-                            colorize: root.show-hud ? Theme.text-secondary : #ef5350;
+                            colorize: root.show-hud ? Theme.text-secondary : Theme.accent-red;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
@@ -1700,7 +1805,7 @@ export component StudioWindow inherits Window {
                             width: space1-label.preferred-width + 24px;
                             height: 35px;
                             background: (root.center-active-tab == 0 && root.active-tab-type != "chart") ? Theme.panel-background :
-                                        space1-touch.has-hover ? #ffffff08 : Theme.background-secondary;
+                                        space1-touch.has-hover ? Theme.tab-hover : Theme.background-secondary;
 
                             // Active tab indicator (blue top border — VS Code style)
                             if root.center-active-tab == 0 && root.active-tab-type != "chart": Rectangle {
@@ -1750,7 +1855,7 @@ export component StudioWindow inherits Window {
                             height: 35px;
                             background: root.center-active-tab == index + 1
                                 ? Theme.panel-background
-                                : (tab-hover.has-hover ? #ffffff08 : Theme.background-secondary);
+                                : (tab-hover.has-hover ? Theme.tab-hover : Theme.background-secondary);
                             
                             // Active tab indicator (blue top border — VS Code style)
                             if root.center-active-tab == index + 1: Rectangle {
@@ -1898,7 +2003,7 @@ export component StudioWindow inherits Window {
                                         width: 8px;
                                         height: 8px;
                                         border-radius: 4px;
-                                        background: #e8e8e8;
+                                        background: Theme.text-primary;
                                     }
                                 }
 
@@ -1912,7 +2017,7 @@ export component StudioWindow inherits Window {
                                 y: (parent.height - 22px) / 2;
                                 width: 22px;
                                 height: 22px;
-                                background: close-area.has-hover ? #c42b1c40 : transparent;
+                                background: close-area.has-hover ? Theme.accent-red.with-alpha(0.25) : transparent;
                                 border-radius: 4px;
 
                                 close-area := TouchArea {
@@ -1925,7 +2030,7 @@ export component StudioWindow inherits Window {
                                     height: 12px;
                                     source: @image-url("../../assets/icons/ui/close.svg");
                                     image-fit: contain;
-                                    colorize: close-area.has-hover ? #ef5350 : Theme.text-secondary;
+                                    colorize: close-area.has-hover ? Theme.accent-red : Theme.text-secondary;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
@@ -1995,12 +2100,12 @@ export component StudioWindow inherits Window {
                         width: 220px;
                         
                         Rectangle {
-                            background: #1e1e1e;
+                            background: Theme.dialog-background;
                             border-radius: 6px;
                             border-width: 1px;
-                            border-color: #3a3a3a;
+                            border-color: Theme.border-color;
                             drop-shadow-blur: 8px;
-                            drop-shadow-color: #00000060;
+                            drop-shadow-color: Theme.shadow-float;
                             width: 220px;
                             
                             VerticalLayout {
@@ -2010,7 +2115,7 @@ export component StudioWindow inherits Window {
                                 // Close
                                 if root.tab-context-menu-index >= 0: Rectangle {
                                     height: 28px;
-                                    background: ctx-close-touch.has-hover ? #ffffff10 : transparent;
+                                    background: ctx-close-touch.has-hover ? Theme.button-hover : transparent;
                                     border-radius: 3px;
                                     ctx-close-touch := TouchArea {
                                         mouse-cursor: pointer;
@@ -2029,7 +2134,7 @@ export component StudioWindow inherits Window {
                                 // Close Others
                                 Rectangle {
                                     height: 28px;
-                                    background: ctx-others-touch.has-hover ? #ffffff10 : transparent;
+                                    background: ctx-others-touch.has-hover ? Theme.button-hover : transparent;
                                     border-radius: 3px;
                                     ctx-others-touch := TouchArea {
                                         mouse-cursor: pointer;
@@ -2046,7 +2151,7 @@ export component StudioWindow inherits Window {
                                 // Close All
                                 Rectangle {
                                     height: 28px;
-                                    background: ctx-all-touch.has-hover ? #ffffff10 : transparent;
+                                    background: ctx-all-touch.has-hover ? Theme.button-hover : transparent;
                                     border-radius: 3px;
                                     ctx-all-touch := TouchArea {
                                         mouse-cursor: pointer;
@@ -2063,7 +2168,7 @@ export component StudioWindow inherits Window {
                                 // Close to the Right
                                 if root.tab-context-menu-index >= 0: Rectangle {
                                     height: 28px;
-                                    background: ctx-right-touch.has-hover ? #ffffff10 : transparent;
+                                    background: ctx-right-touch.has-hover ? Theme.button-hover : transparent;
                                     border-radius: 3px;
                                     ctx-right-touch := TouchArea {
                                         mouse-cursor: pointer;
@@ -2083,7 +2188,7 @@ export component StudioWindow inherits Window {
                                 // Copy Path
                                 if root.tab-context-menu-index >= 0: Rectangle {
                                     height: 28px;
-                                    background: ctx-copy-touch.has-hover ? #ffffff10 : transparent;
+                                    background: ctx-copy-touch.has-hover ? Theme.button-hover : transparent;
                                     border-radius: 3px;
                                     ctx-copy-touch := TouchArea {
                                         mouse-cursor: pointer;
@@ -2100,7 +2205,7 @@ export component StudioWindow inherits Window {
                                 // Reveal in Explorer
                                 if root.tab-context-menu-index >= 0: Rectangle {
                                     height: 28px;
-                                    background: ctx-reveal-touch.has-hover ? #ffffff10 : transparent;
+                                    background: ctx-reveal-touch.has-hover ? Theme.button-hover : transparent;
                                     border-radius: 3px;
                                     ctx-reveal-touch := TouchArea {
                                         mouse-cursor: pointer;
@@ -2201,7 +2306,24 @@ export component StudioWindow inherits Window {
                     // so the 3D scene shows through. The Slint overlay composites UI on top.
                     if root.active-tab-type == "scene": viewport-area := Rectangle {
                         background: transparent;
-                        
+
+                        // Signature Modern-only touch: a thin accent-glow
+                        // traced around the viewport edge. `border-glow-color`
+                        // is fully transparent and `accent-glow-blur` is 0px
+                        // under Classic (and any theme that doesn't set them),
+                        // so this renders as a true no-op there — no `if`
+                        // needed. Non-interactive; sits behind the overlay
+                        // widgets below so it never blocks clicks.
+                        Rectangle {
+                            width: 100%;
+                            height: 100%;
+                            background: transparent;
+                            border-width: 1px;
+                            border-color: Theme.border-glow-color;
+                            drop-shadow-blur: Theme.accent-glow-blur;
+                            drop-shadow-color: Theme.border-glow-color;
+                        }
+
                         // Layout Preset Selector (top-left)
                         LayoutPresetSelector {
                             x: 8px;
@@ -2341,15 +2463,15 @@ export component StudioWindow inherits Window {
                             width: 360px;
                             height: 46px;
                             border-radius: 8px;
-                            background: #1a1d21ee;
+                            background: Theme.panel-glass;
                             border-width: 1px;
-                            border-color: #00bcd455;
+                            border-color: Theme.accent-cyan.with-alpha(0.33);
                             VerticalLayout {
                                 padding: 9px;
                                 spacing: 7px;
                                 Text {
                                     text: root.loading-detail;
-                                    color: #e8eaed;
+                                    color: Theme.text-primary;
                                     font-size: 12px;
                                     horizontal-alignment: center;
                                     overflow: elide;
@@ -2357,13 +2479,13 @@ export component StudioWindow inherits Window {
                                 Rectangle {
                                     height: 4px;
                                     border-radius: 2px;
-                                    background: #ffffff14;
+                                    background: #ffffff14;  // theme-exempt: translucent white progress-track, no token
                                     clip: true;
                                     Rectangle {
                                         width: 30%;
                                         height: parent.height;
                                         border-radius: 2px;
-                                        background: #00bcd4;
+                                        background: Theme.accent-cyan;
                                         // Indeterminate sweep: bounce across the
                                         // track on the global animation clock.
                                         x: (parent.width - self.width)
@@ -2406,7 +2528,7 @@ export component StudioWindow inherits Window {
                             y: 8px;
                             width: 320px;
                             height: 32px;
-                            background: root.play-state == "playing" ? #2d7d46 : #7d6d2d;
+                            background: root.play-state == "playing" ? Theme.accent-green : Theme.accent-yellow;
                             border-radius: 4px;
 
                             HorizontalBox {
@@ -2421,7 +2543,7 @@ export component StudioWindow inherits Window {
                                 }
                                 Text {
                                     text: root.sim-clock-display;
-                                    color: #ffffffcc;
+                                    color: #ffffffcc;  // theme-exempt: translucent white text on colored status badge
                                     font-size: 11px;
                                     vertical-alignment: center;
                                 }
@@ -2492,7 +2614,7 @@ export component StudioWindow inherits Window {
                     
                     // Image Viewer (shown for "image" tab type)
                     if root.active-tab-type == "image": Rectangle {
-                        background: #181825;
+                        background: Theme.viewport-background;
                         
                         VerticalLayout {
                             alignment: center;
@@ -2514,7 +2636,7 @@ export component StudioWindow inherits Window {
                     
                     // Video Player (shown for "video" tab type)
                     if root.active-tab-type == "video": Rectangle {
-                        background: #11111b;
+                        background: Theme.viewport-background;
                         
                         VerticalLayout {
                             alignment: center;
@@ -2526,7 +2648,7 @@ export component StudioWindow inherits Window {
                             }
                             Text {
                                 text: "WebView-based playback";
-                                color: #45475a;
+                                color: Theme.text-disabled;
                                 font-size: 12px;
                                 horizontal-alignment: center;
                             }
@@ -2619,9 +2741,9 @@ export component StudioWindow inherits Window {
                     y: root.box-select-y * 1px;
                     width: root.box-select-w * 1px;
                     height: root.box-select-h * 1px;
-                    background: #59bbff26;
+                    background: Theme.text-accent.with-alpha(0.15);
                     border-width: 1px;
-                    border-color: #59bbffcc;
+                    border-color: Theme.text-accent.with-alpha(0.8);
                     border-radius: 1px;
                 }
 
@@ -2667,13 +2789,40 @@ export component StudioWindow inherits Window {
                     Rectangle {
                         height: 30px;
                         background: Theme.header-background;
-                        
+
+                        // Phase F: pop the CURRENTLY ACTIVE right-zone panel
+                        // out into its own draggable OS window.
+                        Rectangle {
+                            x: parent.width - 22px;
+                            y: (parent.height - 18px) / 2;
+                            width: 18px; height: 18px;
+                            border-radius: 3px;
+                            background: right-detach-ta.has-hover ? Theme.button-hover : transparent;
+                            right-detach-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.detach-panel-to-window(
+                                        root.right-tab-index == 0 ? "properties" :
+                                        root.right-tab-index == 1 ? "history" :
+                                        root.right-tab-index == 2 ? "soul" : "workshop"
+                                    );
+                                }
+                            }
+                            Image {
+                                width: 12px; height: 12px;
+                                x: 3px; y: 3px;
+                                source: @image-url("../../assets/icons/ui/detach.svg");
+                                colorize: Theme.text-secondary;
+                                image-fit: contain;
+                            }
+                        }
+
                         HorizontalLayout {
                             padding-left: 2px;
-                            padding-right: 2px;
+                            padding-right: 24px;
                             padding-top: 2px;
                             spacing: 1px;
-                            
+
                             Rectangle {
                                 horizontal-stretch: 1;
                                 background: root.right-tab-index == 0 ? Theme.panel-background : Theme.tab-inactive;
@@ -2791,7 +2940,7 @@ export component StudioWindow inherits Window {
                                 if root.problem-error-count > 0 && root.right-tab-index != 4: Rectangle {
                                     x: 2px; y: 2px;
                                     width: 8px; height: 8px;
-                                    background: #e53935;
+                                    background: Theme.accent-red;
                                     border-radius: 4px;
                                 }
 
@@ -2811,12 +2960,12 @@ export component StudioWindow inherits Window {
                                     width: 160px;
 
                                     Rectangle {
-                                        background: #1e1e1e;
+                                        background: Theme.dialog-background;
                                         border-radius: 4px;
                                         border-width: 1px;
-                                        border-color: #3a3a3a;
+                                        border-color: Theme.border-color;
                                         drop-shadow-blur: 8px;
-                                        drop-shadow-color: #00000080;
+                                        drop-shadow-color: Theme.shadow-color;
                                         width: 160px;
 
                                         VerticalLayout {
@@ -2847,7 +2996,7 @@ export component StudioWindow inherits Window {
                                                     }
                                                     if root.problem-error-count > 0: Text {
                                                         text: root.problem-error-count;
-                                                        color: #ef5350;
+                                                        color: Theme.text-error;
                                                         font-size: 10px;
                                                         vertical-alignment: center;
                                                     }
@@ -3301,7 +3450,28 @@ export component StudioWindow inherits Window {
             on-close => { root.show-context-menu = false; }
         }
     }
-    
+
+    // Radial media-import chooser — full-viewport overlay. Centre is
+    // clamped away from the edges so every wedge (radius ~104px) stays
+    // on-screen even when triggered near a corner.
+    if root.radial-menu-visible: RadialMenu {
+        x: 0; y: 0;
+        width: root.width;
+        height: root.height;
+        options: root.radial-menu-options;
+        title: root.radial-menu-title;
+        center-x: min(max(root.radial-menu-center-x, 150px), root.width - 150px);
+        center-y: min(max(root.radial-menu-center-y, 150px), root.height - 150px);
+        chosen(class-name) => {
+            root.radial-menu-visible = false;
+            root.radial-menu-chosen(class-name);
+        }
+        cancelled => {
+            root.radial-menu-visible = false;
+            root.radial-menu-cancelled();
+        }
+    }
+
     // Publish dialog
     if root.show-publish-dialog: PublishDialog {
         experience-name <=> root.publish-experience-name;
@@ -3358,6 +3528,11 @@ export component StudioWindow inherits Window {
     // Settings dialog
     if root.show-settings-dialog: SettingsDialog {
         active-tab <=> root.settings-active-tab;
+        available-themes: root.settings-available-themes;
+        active-theme-id <=> root.settings-active-theme-id;
+        select-theme(id) => { root.select-theme(id); }
+        rescan-themes => { root.rescan-themes(); }
+        on-reset-defaults => { root.reset-defaults(); }
         show-help-icons <=> root.show-help-icons;
         help-opens-in-tab <=> root.help-opens-in-tab;
         soul-api-key <=> root.soul-api-key;
@@ -3402,7 +3577,7 @@ export component StudioWindow inherits Window {
         border-width: 1px;
         border-color: Theme.border-color;
         drop-shadow-blur: 12px;
-        drop-shadow-color: #00000060;
+        drop-shadow-color: Theme.shadow-float;
         
         VerticalBox {
             padding: 0px;

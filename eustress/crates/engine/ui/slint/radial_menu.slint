@@ -1,0 +1,162 @@
+// ============================================================================
+// Eustress Engine Studio - Radial Menu
+// ============================================================================
+//
+// A circular pop-up chooser shown after the user picks a media file to
+// import (or double-clicks a media asset). Each wedge is one target class
+// (Decal / Texture / ImageLabel / ImageButton for images; VideoFrame /
+// Video for video). Click a wedge to choose; click the centre hub, the
+// backdrop, or press Esc (handled host-side) to cancel.
+//
+// Themed to match the app (Theme.panel-glass surface, accent-eustress
+// highlight) with WHITE labels per design. Options are data-driven from
+// Rust so the same component serves both image and video menus.
+
+import { Theme } from "theme.slint";
+
+// One selectable target class.
+export struct RadialOption {
+    // Machine-readable class name returned on choose ("Decal", "ImageLabel", …).
+    class-name: string,
+    // Human label shown under the wedge icon ("Decal", "Image Label", …).
+    label: string,
+    // Wedge icon.
+    icon: image,
+}
+
+// ─ A single wedge button ────────────────────────────────────────────────────
+
+component RadialWedge inherits Rectangle {
+    in property <string> label;
+    in property <image> icon;
+
+    callback chosen();
+
+    width: 76px;
+    height: 76px;
+    border-radius: self.width / 2;
+    // Glass surface; accent ring + lift on hover.
+    background: touch.has-hover ? Theme.accent-eustress.with-alpha(0.22) : Theme.panel-glass;
+    border-width: touch.has-hover ? 2px : 1px;
+    border-color: touch.has-hover ? Theme.accent-eustress : Theme.border-highlight;
+    drop-shadow-blur: touch.has-hover ? 14px : 6px;
+    drop-shadow-color: touch.has-hover ? Theme.accent-eustress.with-alpha(0.35) : Theme.shadow-float;
+
+    animate background, border-color, drop-shadow-blur { duration: 90ms; }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.chosen(); }
+    }
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 3px;
+        padding: 6px;
+
+        HorizontalLayout {
+            alignment: center;
+            Image {
+                width: 26px;
+                height: 26px;
+                source: root.icon;
+                image-fit: contain;
+                colorize: white;
+            }
+        }
+
+        Text {
+            text: root.label;
+            // White text per design spec.
+            color: white;
+            font-size: 10px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// ─ The radial menu overlay ──────────────────────────────────────────────────
+
+export component RadialMenu inherits Rectangle {
+    // Data-driven wedges (2-6 supported comfortably).
+    in property <[RadialOption]> options: [];
+    // Screen-space centre the ring is laid out around (cursor or viewport centre).
+    in property <length> center-x: 0px;
+    in property <length> center-y: 0px;
+    // Heading shown in the centre hub ("Apply Image As", "Apply Video As").
+    in property <string> title: "";
+    // Ring radius from centre to each wedge's centre.
+    in property <length> radius: 104px;
+
+    // Fired with the chosen class-name; or cancelled with no value.
+    callback chosen(string);
+    callback cancelled();
+
+    // Full-viewport catcher — a dim backdrop that cancels on outside click.
+    background: #00000066;
+
+    backdrop := TouchArea {
+        mouse-cursor: default;
+        clicked => { root.cancelled(); }
+    }
+
+    // Centre hub — title + cancel affordance. Sits above the backdrop so a
+    // click here cancels without falling through as an "outside" click.
+    hub := Rectangle {
+        x: root.center-x - self.width / 2;
+        y: root.center-y - self.height / 2;
+        width: 92px;
+        height: 92px;
+        border-radius: self.width / 2;
+        background: hub-touch.has-hover ? Theme.error-surface : Theme.dialog-background;
+        border-width: 1px;
+        border-color: hub-touch.has-hover ? Theme.accent-red : Theme.border-color;
+        drop-shadow-blur: 10px;
+        drop-shadow-color: Theme.shadow-float;
+
+        animate background, border-color { duration: 90ms; }
+
+        hub-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.cancelled(); }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            padding: 8px;
+
+            Text {
+                text: root.title;
+                color: white;
+                font-size: 10px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+            Text {
+                text: hub-touch.has-hover ? "✕ Cancel" : "";
+                color: Theme.accent-red;
+                font-size: 9px;
+                horizontal-alignment: center;
+            }
+        }
+    }
+
+    // Wedges positioned around the ring via polar math. Start at the top
+    // (-90deg) and step clockwise. `sin`/`cos` take an angle and return a
+    // float; multiplying by `radius` (a length) yields the offset.
+    for opt[i] in root.options: RadialWedge {
+        // Per-wedge step (angle ÷ count) × index, starting at the top.
+        // Writing it as angle/count*index keeps the arithmetic in `angle`
+        // units the whole way (no int-division ambiguity).
+        property <angle> a: 360deg / root.options.length * i - 90deg;
+        x: root.center-x + root.radius * cos(a) - self.width / 2;
+        y: root.center-y + root.radius * sin(a) - self.height / 2;
+        label: opt.label;
+        icon: opt.icon;
+        chosen => { root.chosen(opt.class-name); }
+    }
+}

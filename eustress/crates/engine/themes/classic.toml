@@ -1,0 +1,114 @@
+# Eustress Studio — "Classic" theme (the original flat dark-gray look).
+#
+# This file is the authoritative source for the Classic palette AND a copy-me
+# template: to author your own theme, copy this file to
+#   %LOCALAPPDATA%/Eustress/Themes/<yourtheme>.toml
+# give it a unique [meta].id, change any tokens you like, and it shows up in
+# File > Settings > Theme after a Rescan. You only need to keep the tokens you
+# actually change — anything omitted falls back to the Modern base palette.
+
+[meta]
+id = "classic"
+name = "Classic"
+description = "The original flat dark-gray Studio look."
+
+[tokens]
+# Surfaces
+background-primary = "#0e0e0e"
+background-secondary = "#121212"
+background-tertiary = "#1a1a1a"
+panel-background = "#121212"
+header-background = "#1a1a1a"
+viewport-background = "#0a0a0a"
+# Tabs
+tab-active = "#121212"
+tab-inactive = "#181818"
+tab-hover = "#222222"
+# Text
+text-primary = "#d4d4d4"
+text-secondary = "#808080"
+text-disabled = "#4a4a4a"
+text-accent = "#4fc1ff"
+text-error = "#f14c4c"
+text-warning = "#cca700"
+text-success = "#4ec9b0"
+# Borders
+border-color = "#222222"
+border-focus = "#3cba54"
+border-error = "#f14c4c"
+# Status "surface" tints — dark tinted backgrounds for success/danger UI
+# (e.g. a Save-and-Connect CTA, an error panel) beyond a foreground accent.
+success-surface = "#152a1e"
+success-surface-hover = "#1a4a2a"
+success-surface-border = "#2a5a32"
+success-surface-text-hover = "#a5d6a7"
+error-surface = "#2a1515"
+error-surface-hover = "#3d1515"
+error-surface-border = "#4a2020"
+# Buttons
+button-background = "#252525"
+button-hover = "#303030"
+button-pressed = "#1a1a1a"
+button-primary = "#0078d4"
+button-primary-hover = "#1a8ae8"
+# Inputs
+input-background = "#161616"
+input-border = "#2a2a2a"
+input-focus = "#3cba54"
+# Selection
+selection-background = "#14301c"
+selection-border = "#3cba54"
+# Overlays / dialogs
+overlay-background = "#121212e8"
+dialog-background = "#1a1a1a"
+modal-backdrop = "#000000a0"
+dialog-titlebar-background = "#13131f"
+# Accents
+accent-blue = "#0078d4"
+accent-cyan = "#00bcd4"
+accent-eustress = "#3cba54"
+accent-green = "#3cba54"
+accent-green-bright = "#00e676"
+accent-orange = "#e8912d"
+accent-purple = "#b180d7"
+accent-red = "#e74856"
+accent-yellow = "#f9c74f"
+# Semantic ribbon-tint categories
+cat-parts = "#64b5f6"
+cat-structure = "#81c784"
+cat-constraint = "#ffb74d"
+cat-modify = "#ba68c8"
+cat-data = "#4dd0e1"
+# Floating-overlay surface treatments
+panel-glass = "#121212e8"
+border-highlight = "#ffffff10"
+shadow-float = "#00000060"
+border-glow-color = "#00000000"
+# Ribbon
+ribbon-background = "#101010"
+ribbon-tab-active = "#121212"
+ribbon-tab-inactive = "#1a1a1a"
+ribbon-separator = "#222222"
+# Explorer
+explorer-item-hover = "#1a1a1a"
+explorer-item-selected = "#0a2e48"
+explorer-folder = "#e8b84a"
+explorer-file = "#c8c8c8"
+# Output console
+output-info = "#3794ff"
+output-warning = "#cca700"
+output-error = "#f14c4c"
+output-debug = "#858585"
+# Gizmo
+gizmo-x = "#f14c4c"
+gizmo-y = "#4ec9b0"
+gizmo-z = "#569cd6"
+# Shadow
+shadow-color = "#00000080"
+# Themeable lengths
+accent-glow-blur = "0px"
+backdrop-blur-lg = "12px"
+radius-sm = "2px"
+radius-md = "4px"
+radius-lg = "8px"
+radius-xl = "12px"

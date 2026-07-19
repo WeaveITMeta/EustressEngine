@@ -33,7 +33,7 @@ component SectionHeader inherits Rectangle {
     in property <int> count: 0;
 
     height: 22px;
-    background: #0f0f1a;
+    background: Theme.header-background;
 
     HorizontalLayout {
         padding-left: 8px;
@@ -166,7 +166,7 @@ component ScriptRow inherits Rectangle {
                         border-radius: 8px;
                         background: root.status == "building" ? Theme.accent-blue :
                                     root.status == "error"    ? Theme.text-error :
-                                    root.source-exists        ? #2e7d32 :
+                                    root.source-exists        ? Theme.accent-green :
                                                                 Theme.background-tertiary;
                         src-text := Text {
                             x: 6px;
@@ -187,7 +187,7 @@ component ScriptRow inherits Rectangle {
                         width: sum-text.preferred-width + 12px;
                         height: 16px;
                         border-radius: 8px;
-                        background: root.summary-exists ? #5e35b1 : Theme.background-tertiary;
+                        background: root.summary-exists ? Theme.accent-purple : Theme.background-tertiary;
                         sum-text := Text {
                             x: 6px;
                             text: root.summary-exists ? "Summarized" : "Not summarized";
@@ -208,7 +208,7 @@ component ScriptRow inherits Rectangle {
                 height: 28px;
                 y: (parent.height - self.height) / 2;
                 background: root.status == "building" ? Theme.button-background :
-                            build-ta.has-hover ? #388e3c : #2e7d32;
+                            build-ta.has-hover ? Theme.accent-green-bright : Theme.accent-green;
                 border-radius: 4px;
 
                 build-ta := TouchArea {
@@ -229,9 +229,9 @@ component ScriptRow inherits Rectangle {
 
         // Expanded error area — wraps full error text for readability
         if root.expanded && root.error-message != "": Rectangle {
-            background: #2a1818;
+            background: #2a1818;  // theme-exempt: dark red-tinted error surface, no themed error-background token
             border-width: 1px;
-            border-color: #4a2020;
+            border-color: #4a2020;  // theme-exempt: dark red-tinted error border, no themed error-surface-border token
 
             err-text := Text {
                 x: 8px; y: 6px;
@@ -324,7 +324,7 @@ export component SoulPanel inherits Rectangle {
         // API key banner — only shown when not configured, matches Workshop style
         if root.api-key-status != "valid": Rectangle {
             height: 56px;
-            background: root.api-key-status == "invalid" ? #3a2020 : #2a2a1a;
+            background: root.api-key-status == "invalid" ? #3a2020 : #2a2a1a;  // theme-exempt: tinted error/warning banner surfaces, no themed background token for either
 
             VerticalLayout {
                 padding: 6px;

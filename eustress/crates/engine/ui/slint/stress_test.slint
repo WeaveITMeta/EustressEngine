@@ -67,7 +67,7 @@ export component StressTestDialog inherits Rectangle {
         border-width: 1px;
         border-color: Theme.border-color;
         drop-shadow-blur: 28px;
-        drop-shadow-color: #000000a0;
+        drop-shadow-color: Theme.shadow-color;
 
         TouchArea {
             scroll-event(event) => {
@@ -82,7 +82,7 @@ export component StressTestDialog inherits Rectangle {
             // ── Title bar ──
             Rectangle {
                 height: 46px;
-                background: #13131f;
+                background: Theme.dialog-titlebar-background;
                 border-radius: 8px;
 
                 Text {
@@ -101,7 +101,7 @@ export component StressTestDialog inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     width: 28px; height: 28px;
                     border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;
+                    background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: destructive close-button hover tint, no token
 
                     close-ta := TouchArea {
                         mouse-cursor: pointer;
@@ -110,7 +110,7 @@ export component StressTestDialog inherits Rectangle {
 
                     Text {
                         text: "×";
-                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
                         font-size: 17px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -251,7 +251,7 @@ export component StressTestDialog inherits Rectangle {
                         }
                         Rectangle {
                             height: 6px;
-                            background: #1a1a2e;
+                            background: Theme.background-tertiary;
                             border-radius: 3px;
 
                             Rectangle {
@@ -267,7 +267,7 @@ export component StressTestDialog inherits Rectangle {
                 // Results (after test)
                 if root.total-messages > 0: Rectangle {
                     height: 60px;
-                    background: #0f0f1a;
+                    background: Theme.dialog-titlebar-background;
                     border-radius: 4px;
                     border-width: 1px;
                     border-color: Theme.border-color;
@@ -291,7 +291,7 @@ export component StressTestDialog inherits Rectangle {
                             horizontal-stretch: 1;
                             Text {
                                 text: round(root.avg-latency) + "ms";
-                                color: #66bb6a;
+                                color: Theme.accent-green;
                                 font-size: 16px;
                                 font-weight: 600;
                             }
@@ -302,7 +302,7 @@ export component StressTestDialog inherits Rectangle {
                             horizontal-stretch: 1;
                             Text {
                                 text: root.errors;
-                                color: root.errors > 0 ? #ef5350 : #66bb6a;
+                                color: root.errors > 0 ? Theme.text-error : Theme.accent-green;
                                 font-size: 16px;
                                 font-weight: 600;
                             }
@@ -318,7 +318,7 @@ export component StressTestDialog inherits Rectangle {
             }
             Rectangle {
                 height: 52px;
-                background: #0f0f1a;
+                background: Theme.dialog-titlebar-background;
                 border-radius: 8px;
 
                 HorizontalLayout {
@@ -331,7 +331,7 @@ export component StressTestDialog inherits Rectangle {
                     Rectangle {
                         width: 80px; height: 32px;
                         border-radius: 5px;
-                        background: close-btn.has-hover ? #1a1a2e : Theme.button-background;
+                        background: close-btn.has-hover ? Theme.button-hover : Theme.button-background;
                         border-width: 1px;
                         border-color: Theme.border-color;
 
@@ -354,12 +354,12 @@ export component StressTestDialog inherits Rectangle {
                         width: 100px; height: 32px;
                         border-radius: 5px;
                         background: root.running ?
-                            (stop-ta.has-hover ? #4a1515 : #2a1515) :
-                            (start-ta.has-hover ? #1a4a2a : #152a1e);
+                            (stop-ta.has-hover ? #4a1515 : #2a1515) :  // theme-exempt: dark danger-button fill tints, no token
+                            (start-ta.has-hover ? #1a4a2a : #152a1e);  // theme-exempt: dark success-button fill tints, no token
                         border-width: 1px;
                         border-color: root.running ?
-                            (stop-ta.has-hover ? #ef5350 : #5a2020) :
-                            (start-ta.has-hover ? #4caf50 : #2a5a32);
+                            (stop-ta.has-hover ? Theme.border-error : #5a2020) :  // theme-exempt: #5a2020 dark danger-button idle border tint
+                            (start-ta.has-hover ? Theme.accent-green : #2a5a32);  // theme-exempt: #2a5a32 dark success-button idle border tint
 
                         start-ta := TouchArea {
                             mouse-cursor: pointer;
@@ -376,8 +376,8 @@ export component StressTestDialog inherits Rectangle {
                         Text {
                             text: root.running ? "Stop" : "Start Test";
                             color: root.running ?
-                                (stop-ta.has-hover ? #ef5350 : #e57373) :
-                                (start-ta.has-hover ? #a5d6a7 : #66bb6a);
+                                (stop-ta.has-hover ? Theme.text-error : #e57373) :  // theme-exempt: #e57373 muted danger-button idle text
+                                (start-ta.has-hover ? #a5d6a7 : Theme.accent-green);  // theme-exempt: #a5d6a7 light success-button hover text
                             font-size: 12px;
                             font-weight: 600;
                             horizontal-alignment: center;

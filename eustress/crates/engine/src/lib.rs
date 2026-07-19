@@ -1,7 +1,11 @@
 //! # Eustress Engine Library
-//! 
+//!
 //! Desktop editor/studio functionality.
 
+/// App composition tiers (HEADLESS_RUNTIME.md §5): `add_core_sim_plugins`
+/// is the headless-safe "simulate a Space" tier shared by the windowed
+/// editor bin and the `eustress-headless` bin.
+pub mod app_core;
 pub mod auth;
 pub mod bliss_tracker;
 pub mod forge;
@@ -48,6 +52,8 @@ pub mod ui;
 pub mod seats;
 pub mod keybindings;
 pub mod editor_settings;
+pub mod studio_theme;
+pub mod studio_modes;
 pub mod undo;
 pub mod camera_controller;
 // Off-screen AI camera (marker/state/plugin). Also declared in main.rs; mirror
@@ -75,6 +81,7 @@ pub mod align_distribute;
 pub mod array_tools;
 pub mod measure_tool;
 pub mod duplicate_place_tool;
+pub mod decal_place_tool;
 pub mod selection_sets;
 pub mod pivot_mode;
 pub mod geom_snap;

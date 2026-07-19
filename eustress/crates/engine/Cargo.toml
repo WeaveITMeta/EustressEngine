@@ -52,6 +52,14 @@ name = "eustress-lsp"
 path = "src/bin/eustress_lsp.rs"
 required-features = ["lsp"]
 
+# Headless simulator — runs a Space's REAL simulation (Avian + realism +
+# Rune/Luau + WorldDb + engine bridge) with no window, over the shared
+# `app_core::add_core_sim_plugins` tier. HEADLESS_RUNTIME.md §6.
+# Run: cargo run -p eustress-engine --bin eustress-headless -- --space <dir> --ticks 300
+[[bin]]
+name = "eustress-headless"
+path = "src/bin/headless.rs"
+required-features = ["world-db"]
 
 [dependencies]
 # Cross-platform clipboard (arboard). Backs the Slint platform clipboard

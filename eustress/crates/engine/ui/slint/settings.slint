@@ -6,6 +6,18 @@
 import { VerticalBox, HorizontalBox, ScrollView, CheckBox, ComboBox, Slider, LineEdit, TabWidget } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
+// One row in the Settings > Theme picker — pushed from Rust (ThemeRegistry).
+// swatch-bg/swatch-accent are the theme's own background-primary/accent-eustress
+// so each card previews the palette it applies.
+export struct ThemeEntry {
+    id: string,
+    name: string,
+    description: string,
+    swatch-bg: color,
+    swatch-accent: color,
+    builtin: bool,
+}
+
 component SettingsSection inherits Rectangle {
     in property <string> title: "";
     height: 28px;
@@ -45,7 +57,16 @@ component SettingsHint inherits Rectangle {
 
 export component SettingsDialog inherits Rectangle {
     // Properties
-    in-out property <int> active-tab: 0; // 0=General, 1=Graphics, 2=Audio, 3=Soul, 4=Notifications
+    in-out property <int> active-tab: 0; // 0=General, 1=Graphics, 2=Audio, 3=Soul, 4=Notifications, 5=Theme
+
+    // Theme settings — data-driven list of loaded TOML themes (built-ins +
+    // user Themes folder), pushed from Rust. Clicking a card fires
+    // `select-theme(id)` → Rust swaps the whole palette live + persists.
+    // `rescan-themes` re-reads the user folder (the v1 "marketplace").
+    in property <[ThemeEntry]> available-themes: [];
+    in-out property <string> active-theme-id: "modern";
+    callback select-theme(string);
+    callback rescan-themes();
 
     // Notifications settings (wired to Bevy NotificationSettings resource)
     in-out property <bool> notifications-enabled: true;
@@ -131,7 +152,7 @@ export component SettingsDialog inherits Rectangle {
         border-width: 1px;
         border-color: Theme.border-color;
         drop-shadow-blur: 28px;
-        drop-shadow-color: #000000a0;
+        drop-shadow-color: Theme.shadow-color;
 
         // Absorb all clicks on the dialog so they don't bleed through
         // to the backdrop (which closes) or the viewport behind
@@ -150,7 +171,7 @@ export component SettingsDialog inherits Rectangle {
             // ── Title bar ──
             Rectangle {
                 height: 46px;
-                background: #13131f;
+                background: Theme.dialog-titlebar-background;
                 border-radius: 8px;
 
                 Text {
@@ -169,7 +190,7 @@ export component SettingsDialog inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     width: 28px; height: 28px;
                     border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;
+                    background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: close-button danger hover tint (no red-surface token)
 
                     close-ta := TouchArea {
                         mouse-cursor: pointer;
@@ -178,7 +199,7 @@ export component SettingsDialog inherits Rectangle {
 
                     Text {
                         text: "×";
-                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        color: close-ta.has-hover ? Theme.accent-red : Theme.text-secondary;
                         font-size: 17px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -195,7 +216,7 @@ export component SettingsDialog inherits Rectangle {
             // ── Tab bar ──
             Rectangle {
                 height: 36px;
-                background: #0f0f1a;
+                background: Theme.tab-inactive;
 
                 HorizontalLayout {
                     padding-left: 12px;
@@ -208,6 +229,7 @@ export component SettingsDialog inherits Rectangle {
                         { name: "Audio" },
                         { name: "Soul" },
                         { name: "Notifications" },
+                        { name: "Theme" },
                     ] : Rectangle {
                         width: stab-t.preferred-width + 24px;
                         height: 36px;
@@ -245,6 +267,104 @@ export component SettingsDialog inherits Rectangle {
             // ── Content ──
             Rectangle {
                 vertical-stretch: 1;
+
+                // Theme tab — data-driven list of loaded TOML themes. Clicking
+                // a card applies INSTANTLY (no Apply button): active-theme-id
+                // updates locally for the highlight ring, and select-theme(id)
+                // fires the Rust round-trip that swaps the whole palette live +
+                // persists the choice. "Rescan" re-reads the user Themes folder.
+                if root.active-tab == 5: ScrollView {
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 12px;
+                        alignment: start;
+
+                        HorizontalLayout {
+                            SettingsSection { title: "APPEARANCE"; horizontal-stretch: 1; }
+                            // Rescan the %LOCALAPPDATA%/Eustress/Themes folder
+                            Rectangle {
+                                width: 78px; height: 24px;
+                                border-radius: Theme.radius-sm;
+                                border-width: 1px;
+                                border-color: Theme.border-color;
+                                background: rescan-ta.has-hover ? Theme.button-hover : Theme.button-background;
+                                rescan-ta := TouchArea { clicked => { root.rescan-themes(); } }
+                                Text {
+                                    text: "Rescan";
+                                    color: Theme.text-secondary;
+                                    font-size: 10px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    width: 100%; height: 100%;
+                                }
+                            }
+                        }
+
+                        // Theme cards — one per loaded theme (built-ins + user
+                        // folder). The outer ScrollView handles overflow.
+                        VerticalLayout {
+                            spacing: 10px;
+                            for entry in root.available-themes: Rectangle {
+                                height: 76px;
+                                border-radius: Theme.radius-md;
+                                border-width: entry.id == root.active-theme-id ? 2px : 1px;
+                                border-color: entry.id == root.active-theme-id ? entry.swatch-accent : Theme.border-color;
+                                background: entry.swatch-bg;
+
+                                card-ta := TouchArea {
+                                    clicked => {
+                                        root.active-theme-id = entry.id;
+                                        root.select-theme(entry.id);
+                                    }
+                                }
+
+                                // Accent chip
+                                Rectangle {
+                                    x: 12px; y: 12px;
+                                    width: 20px; height: 20px;
+                                    border-radius: 10px;
+                                    background: entry.swatch-accent;
+                                }
+                                // Name
+                                Text {
+                                    x: 42px; y: 12px;
+                                    text: entry.name;
+                                    color: Theme.text-primary;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                }
+                                // Active check
+                                if entry.id == root.active-theme-id: Text {
+                                    x: parent.width - 24px; y: 12px;
+                                    text: "✓";
+                                    color: entry.swatch-accent;
+                                    font-size: 14px;
+                                    font-weight: 700;
+                                }
+                                // Built-in / user badge
+                                Text {
+                                    x: 42px; y: 32px;
+                                    text: entry.builtin ? "Built-in" : "User theme";
+                                    color: Theme.text-disabled;
+                                    font-size: 9px;
+                                }
+                                // Description
+                                Text {
+                                    x: 12px; y: parent.height - 20px;
+                                    width: parent.width - 24px;
+                                    text: entry.description;
+                                    color: Theme.text-secondary;
+                                    font-size: 9px;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+
+                        SettingsHint {
+                            text: "Themes are TOML files. Drop your own into %LOCALAPPDATA%/Eustress/Themes and press Rescan. Switches instantly — no restart needed.";
+                        }
+                    }
+                }
 
                 // General tab
                 if root.active-tab == 0: ScrollView {
@@ -540,7 +660,7 @@ export component SettingsDialog inherits Rectangle {
                                 width: 36px;
                                 height: 18px;
                                 border-radius: 9px;
-                                background: root.soul-use-global-key ? Theme.accent-blue : #333344;
+                                background: root.soul-use-global-key ? Theme.accent-blue : Theme.button-background;
                                 y: (28px - self.height) / 2;
 
                                 TouchArea {
@@ -647,10 +767,10 @@ export component SettingsDialog inherits Rectangle {
 
                         if root.soul-error-message != "": Rectangle {
                             height: 28px;
-                            background: #2a1515;
+                            background: Theme.dialog-background;
                             border-radius: 3px;
                             border-width: 1px;
-                            border-color: #4a2020;
+                            border-color: Theme.border-error;
 
                             Text {
                                 x: 10px;
@@ -672,7 +792,7 @@ export component SettingsDialog inherits Rectangle {
                             Rectangle {
                                 width: 120px; height: 28px;
                                 border-radius: 4px;
-                                background: test-soul-ta.has-hover ? #1a1a2e : Theme.button-background;
+                                background: test-soul-ta.has-hover ? Theme.button-hover : Theme.button-background;
                                 border-width: 1px;
                                 border-color: test-soul-ta.has-hover ? Theme.accent-blue : Theme.border-color;
 
@@ -773,7 +893,7 @@ export component SettingsDialog inherits Rectangle {
             }
             Rectangle {
                 height: 52px;
-                background: #0f0f1a;
+                background: Theme.tab-inactive;
                 border-radius: 8px;
 
                 HorizontalLayout {
@@ -787,7 +907,7 @@ export component SettingsDialog inherits Rectangle {
                     Rectangle {
                         width: 100px; height: 32px;
                         border-radius: 5px;
-                        background: reset-ta.has-hover ? #1a1a2e : Theme.button-background;
+                        background: reset-ta.has-hover ? Theme.button-hover : Theme.button-background;
                         border-width: 1px;
                         border-color: Theme.border-color;
 
@@ -808,7 +928,7 @@ export component SettingsDialog inherits Rectangle {
                     Rectangle {
                         width: 80px; height: 32px;
                         border-radius: 5px;
-                        background: cancel-ta.has-hover ? #1a1a2e : Theme.button-background;
+                        background: cancel-ta.has-hover ? Theme.button-hover : Theme.button-background;
                         border-width: 1px;
                         border-color: Theme.border-color;
 
@@ -829,9 +949,9 @@ export component SettingsDialog inherits Rectangle {
                     Rectangle {
                         width: 80px; height: 32px;
                         border-radius: 5px;
-                        background: save-ta.has-hover ? #1a4a2a : #152a1e;
+                        background: save-ta.has-hover ? #1a4a2a : #152a1e;  // theme-exempt: green Save CTA surface (no green button-surface token)
                         border-width: 1px;
-                        border-color: save-ta.has-hover ? #4caf50 : #2a5a32;
+                        border-color: save-ta.has-hover ? #4caf50 : #2a5a32;  // theme-exempt: green Save CTA border (no green button-surface token)
 
                         save-ta := TouchArea {
                             mouse-cursor: pointer;
@@ -840,7 +960,7 @@ export component SettingsDialog inherits Rectangle {
 
                         Text {
                             text: "Save";
-                            color: save-ta.has-hover ? #a5d6a7 : #66bb6a;
+                            color: save-ta.has-hover ? #a5d6a7 : #66bb6a;  // theme-exempt: green Save CTA label (no green button-text token)
                             font-size: 12px;
                             font-weight: 600;
                             horizontal-alignment: center;

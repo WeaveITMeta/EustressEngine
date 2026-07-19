@@ -97,7 +97,7 @@ export component HelpIcon inherits Rectangle {
             border-width: 1px;
             border-color: learn-url != "" ? Theme.accent-blue : Theme.border-color;
             drop-shadow-blur: 8px;
-            drop-shadow-color: #00000060;
+            drop-shadow-color: Theme.shadow-float;
 
             tip-text := Text {
                 x: 8px;
@@ -133,13 +133,13 @@ export component HelpIcon inherits Rectangle {
         y: (parent.height - self.height) / 2;
         border-radius: 7px;
         background: tip-area.has-hover && learn-url != "" ? Theme.accent-blue
-                  : tip-area.has-hover ? #3a3a3a
-                  : learn-url != "" ? #1e4a7a
-                  : #2a2a2a;
+                  : tip-area.has-hover ? Theme.button-hover
+                  : learn-url != "" ? Theme.selection-background
+                  : Theme.button-background;
         border-width: 1px;
         border-color: tip-area.has-hover && learn-url != "" ? Theme.accent-blue
                     : learn-url != "" ? Theme.accent-blue
-                    : #444444;
+                    : Theme.border-color;
 
         Text {
             text: "?";
@@ -164,14 +164,14 @@ component SectionHeader inherits Rectangle {
     callback add-clicked();
 
     height: 32px;
-    background: @linear-gradient(180deg, #252525 0%, #1e1e1e 100%);
+    background: @linear-gradient(180deg, Theme.button-background 0%, Theme.background-tertiary 100%);
 
     // Bottom border line
     Rectangle {
         y: parent.height - 1px;
         width: 100%;
         height: 1px;
-        background: #333333;
+        background: Theme.border-color;
     }
 
     header-ta := TouchArea {
@@ -218,9 +218,9 @@ component SectionHeader inherits Rectangle {
             height: 20px;
             y: (parent.height - self.height) / 2;
             border-radius: 4px;
-            background: add-ta.has-hover ? Theme.accent-blue : #2e2e2e;
+            background: add-ta.has-hover ? Theme.accent-blue : Theme.button-background;
             border-width: 1px;
-            border-color: add-ta.has-hover ? Theme.accent-blue : #3a3a3a;
+            border-color: add-ta.has-hover ? Theme.accent-blue : Theme.border-color;
 
             add-ta := TouchArea {
                 mouse-cursor: pointer;
@@ -243,7 +243,7 @@ component SectionHeader inherits Rectangle {
                 width: 6px;
                 height: 6px;
                 border-radius: 3px;
-                background: root.expanded ? Theme.accent-blue : #444444;
+                background: root.expanded ? Theme.accent-blue : Theme.text-disabled;
             }
         }
     }
@@ -400,12 +400,12 @@ component MaterialDropdown inherits Rectangle {
         height: min(320px, root.options.length * 24px + 12px);
 
         Rectangle {
-            background: #1e1e1e;
+            background: Theme.dialog-background;
             border-radius: 6px;
             border-width: 1px;
-            border-color: #3a3a3a;
+            border-color: Theme.border-color;
             drop-shadow-blur: 12px;
-            drop-shadow-color: #00000080;
+            drop-shadow-color: Theme.shadow-float;
             width: 100%;
             height: 100%;
 
@@ -427,7 +427,7 @@ component MaterialDropdown inherits Rectangle {
                     for option[idx] in root.options: Rectangle {
                         height: 24px;
                         // Highlight keyboard-navigated row, hover row, or selected row
-                        background: idx == root.highlight-index ? #4a4a4a : (opt-touch.has-hover ? #3a3a3a : (option == root.value ? #2a2a2a : transparent));
+                        background: idx == root.highlight-index ? Theme.selection-background : (opt-touch.has-hover ? Theme.button-hover : (option == root.value ? Theme.button-background : transparent));
                         border-radius: 3px;
 
                         opt-touch := TouchArea {
@@ -606,7 +606,7 @@ component PropRow inherits Rectangle {
                 height: 18px;
                 y: (parent.height - self.height) / 2;
                 border-radius: 9px;
-                background: #2a3550;
+                background: Theme.selection-background;
                 Text {
                     text: root.attribute-type;
                     color: Theme.accent-blue;
@@ -624,7 +624,7 @@ component PropRow inherits Rectangle {
                 height: 20px;
                 y: (parent.height - self.height) / 2;
                 border-radius: 4px;
-                background: gear-ta.has-hover ? #3a3a3a : transparent;
+                background: gear-ta.has-hover ? Theme.button-hover : transparent;
                 gear-ta := TouchArea {
                     mouse-cursor: pointer;
                     clicked => { root.gear-clicked(root.label, root.attribute-type, root.value); }
@@ -646,7 +646,7 @@ component PropRow inherits Rectangle {
                 height: 20px;
                 y: (parent.height - self.height) / 2;
                 border-radius: 4px;
-                background: trash-ta.has-hover ? #5d1515 : transparent;
+                background: trash-ta.has-hover ? Theme.error-surface-hover : transparent;
                 trash-ta := TouchArea {
                     mouse-cursor: pointer;
                     clicked => { root.trash-clicked(root.label); }
@@ -658,7 +658,7 @@ component PropRow inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     source: @image-url("../../assets/icons/ui/delete.svg");
                     image-fit: contain;
-                    colorize: trash-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                    colorize: trash-ta.has-hover ? Theme.text-error : Theme.text-secondary;
                 }
             }
         }
@@ -775,7 +775,7 @@ component Vec3Row inherits Rectangle {
             background: Theme.input-background;
             border-radius: 3px;
             border-width: 1px;
-            border-color: #3a2020;
+            border-color: Theme.input-border;
             
             // Left accent bar
             Rectangle {
@@ -830,7 +830,7 @@ component Vec3Row inherits Rectangle {
             background: Theme.input-background;
             border-radius: 3px;
             border-width: 1px;
-            border-color: #203a30;
+            border-color: Theme.input-border;
             
             // Left accent bar
             Rectangle {
@@ -880,7 +880,7 @@ component Vec3Row inherits Rectangle {
             background: Theme.input-background;
             border-radius: 3px;
             border-width: 1px;
-            border-color: #202a3a;
+            border-color: Theme.input-border;
             
             // Left accent bar
             Rectangle {
@@ -1003,7 +1003,7 @@ component Vec2Row inherits Rectangle {
             background: Theme.input-background;
             border-radius: 3px;
             border-width: 1px;
-            border-color: #3a2020;
+            border-color: Theme.input-border;
             Rectangle {
                 x: 0px; y: 0px; width: 3px; height: 100%;
                 background: Theme.gizmo-x;
@@ -1043,7 +1043,7 @@ component Vec2Row inherits Rectangle {
             background: Theme.input-background;
             border-radius: 3px;
             border-width: 1px;
-            border-color: #203a30;
+            border-color: Theme.input-border;
             Rectangle {
                 x: 0px; y: 0px; width: 3px; height: 100%;
                 background: Theme.gizmo-y;
@@ -1410,7 +1410,7 @@ component RotationVec3Row inherits Rectangle {
             background: Theme.input-background;
             border-radius: 3px;
             border-width: 1px;
-            border-color: #3a2020;
+            border-color: Theme.input-border;
 
             Rectangle { x: 0px; y: 0px; width: 3px; height: 100%; background: Theme.gizmo-x; }
 
@@ -1436,7 +1436,7 @@ component RotationVec3Row inherits Rectangle {
                 }
 
                 Rectangle {
-                    width: 16px; height: 18px; background: rx-m.has-hover ? #3a3a3a : #2a2a2a; border-radius: 2px;
+                    width: 16px; height: 18px; background: rx-m.has-hover ? Theme.button-hover : Theme.button-background; border-radius: 2px;
                     rx-m := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.value-changed("step:x:-1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
@@ -1444,7 +1444,7 @@ component RotationVec3Row inherits Rectangle {
                     Text { text: "-"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
                 }
                 Rectangle {
-                    width: 16px; height: 18px; background: rx-p.has-hover ? #3a3a3a : #2a2a2a; border-radius: 2px;
+                    width: 16px; height: 18px; background: rx-p.has-hover ? Theme.button-hover : Theme.button-background; border-radius: 2px;
                     rx-p := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.value-changed("step:x:+1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
@@ -1462,7 +1462,7 @@ component RotationVec3Row inherits Rectangle {
             background: Theme.input-background;
             border-radius: 3px;
             border-width: 1px;
-            border-color: #203a30;
+            border-color: Theme.input-border;
 
             Rectangle { x: 0px; y: 0px; width: 3px; height: 100%; background: Theme.gizmo-y; }
 
@@ -1488,7 +1488,7 @@ component RotationVec3Row inherits Rectangle {
                 }
 
                 Rectangle {
-                    width: 16px; height: 18px; background: ry-m.has-hover ? #3a3a3a : #2a2a2a; border-radius: 2px;
+                    width: 16px; height: 18px; background: ry-m.has-hover ? Theme.button-hover : Theme.button-background; border-radius: 2px;
                     ry-m := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.value-changed("step:y:-1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
@@ -1496,7 +1496,7 @@ component RotationVec3Row inherits Rectangle {
                     Text { text: "-"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
                 }
                 Rectangle {
-                    width: 16px; height: 18px; background: ry-p.has-hover ? #3a3a3a : #2a2a2a; border-radius: 2px;
+                    width: 16px; height: 18px; background: ry-p.has-hover ? Theme.button-hover : Theme.button-background; border-radius: 2px;
                     ry-p := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.value-changed("step:y:+1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
@@ -1514,7 +1514,7 @@ component RotationVec3Row inherits Rectangle {
             background: Theme.input-background;
             border-radius: 3px;
             border-width: 1px;
-            border-color: #202a3a;
+            border-color: Theme.input-border;
 
             Rectangle { x: 0px; y: 0px; width: 3px; height: 100%; background: Theme.gizmo-z; }
 
@@ -1540,7 +1540,7 @@ component RotationVec3Row inherits Rectangle {
                 }
 
                 Rectangle {
-                    width: 16px; height: 18px; background: rz-m.has-hover ? #3a3a3a : #2a2a2a; border-radius: 2px;
+                    width: 16px; height: 18px; background: rz-m.has-hover ? Theme.button-hover : Theme.button-background; border-radius: 2px;
                     rz-m := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.value-changed("step:z:-1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
@@ -1548,7 +1548,7 @@ component RotationVec3Row inherits Rectangle {
                     Text { text: "-"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
                 }
                 Rectangle {
-                    width: 16px; height: 18px; background: rz-p.has-hover ? #3a3a3a : #2a2a2a; border-radius: 2px;
+                    width: 16px; height: 18px; background: rz-p.has-hover ? Theme.button-hover : Theme.button-background; border-radius: 2px;
                     rz-p := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.value-changed("step:z:+1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
@@ -1596,7 +1596,7 @@ export component ColorSwatchCell inherits Rectangle {
         viewbox-width: 18;
         viewbox-height: 16;
         fill: rgb(root.r, root.g, root.b);
-        stroke: touch.has-hover ? Theme.accent-blue : #20202080;
+        stroke: touch.has-hover ? Theme.accent-blue : #20202080;  // theme-exempt: semi-transparent swatch outline, no alpha border token
         stroke-width: touch.has-hover ? 1.5px : 0.5px;
         commands: "M 0 8 L 4.5 0 L 13.5 0 L 18 8 L 13.5 16 L 4.5 16 Z";
         animate stroke-width { duration: 80ms; }
@@ -1614,12 +1614,12 @@ export component ColorSwatchCell inherits Rectangle {
         y: -22px;
         width: 100px;
         height: 18px;
-        background: #1a1a22;
+        background: Theme.dialog-background;
         border-radius: 4px;
         border-width: 1px;
-        border-color: #3a3a3a;
+        border-color: Theme.border-color;
         drop-shadow-blur: 6px;
-        drop-shadow-color: #000000a0;
+        drop-shadow-color: Theme.shadow-float;
         Text {
             text: root.swatch-name;
             color: Theme.text-primary;
@@ -1640,7 +1640,7 @@ component ColorRow inherits Rectangle {
     // `value` string represents. Used for the swatch chip — Slint can't
     // parse the "r, g, b" string into a typed color at runtime so the
     // parsing has to happen Rust-side.
-    in property <color> preview-color: #808080;
+    in property <color> preview-color: #808080;  // theme-exempt: neutral placeholder, runtime-overridden by Rust color-value
     in property <bool> editable: true;
     in property <string> description: "";
     in property <string> learn-url: "";
@@ -1699,9 +1699,9 @@ component ColorRow inherits Rectangle {
             background: root.preview-color;
             border-radius: 4px;
             border-width: 1px;
-            border-color: swatch-touch.has-hover ? Theme.accent-blue : #444444;
+            border-color: swatch-touch.has-hover ? Theme.accent-blue : Theme.border-color;
             drop-shadow-blur: 2px;
-            drop-shadow-color: #00000040;
+            drop-shadow-color: Theme.shadow-color;
 
             swatch-touch := TouchArea {
                 mouse-cursor: root.editable ? pointer : default;
@@ -1771,12 +1771,12 @@ component ColorRow inherits Rectangle {
         Rectangle {
             width: 100%;
             height: 100%;
-            background: #1a1a22;
+            background: Theme.dialog-background;
             border-radius: 8px;
             border-width: 1px;
-            border-color: #3a3a3a;
+            border-color: Theme.border-color;
             drop-shadow-blur: 16px;
-            drop-shadow-color: #000000a0;
+            drop-shadow-color: Theme.shadow-float;
 
             // Swallow clicks so they don't bubble to the viewport.
             TouchArea { }
@@ -1801,7 +1801,7 @@ component ColorRow inherits Rectangle {
                         height: 20px;
                         border-radius: 4px;
                         border-width: 1px;
-                        border-color: #444444;
+                        border-color: Theme.border-color;
                         background: rgb(Math.round(root.r-val), Math.round(root.g-val), Math.round(root.b-val));
                     }
                 }
@@ -1812,7 +1812,7 @@ component ColorRow inherits Rectangle {
                     Text {
                         text: "R";
                         width: 14px;
-                        color: #ff8080;
+                        color: Theme.accent-red;
                         font-size: 11px;
                         font-weight: 700;
                         vertical-alignment: center;
@@ -1843,7 +1843,7 @@ component ColorRow inherits Rectangle {
                     Text {
                         text: "G";
                         width: 14px;
-                        color: #80ff80;
+                        color: Theme.accent-green;
                         font-size: 11px;
                         font-weight: 700;
                         vertical-alignment: center;
@@ -1874,7 +1874,7 @@ component ColorRow inherits Rectangle {
                     Text {
                         text: "B";
                         width: 14px;
-                        color: #8080ff;
+                        color: Theme.accent-blue;
                         font-size: 11px;
                         font-weight: 700;
                         vertical-alignment: center;
@@ -1902,10 +1902,10 @@ component ColorRow inherits Rectangle {
                 Rectangle {
                     height: 24px;
                     width: 70px;
-                    background: close-touch.has-hover ? #3a3a3a : #252530;
+                    background: close-touch.has-hover ? Theme.button-hover : Theme.button-background;
                     border-radius: 4px;
                     border-width: 1px;
-                    border-color: #4a4a4a;
+                    border-color: Theme.border-color;
 
                     Text {
                         text: "Close";
@@ -1935,7 +1935,7 @@ component ColorRow inherits Rectangle {
 component BrickColorRow inherits Rectangle {
     in property <string> label: "";
     in property <string> value: "128, 128, 128";
-    in property <color> preview-color: #808080;
+    in property <color> preview-color: #808080;  // theme-exempt: neutral placeholder, runtime-overridden by Rust color-value
     in property <bool> editable: true;
     in property <string> description: "";
     in property <string> learn-url: "";
@@ -1987,9 +1987,9 @@ component BrickColorRow inherits Rectangle {
             background: root.preview-color;
             border-radius: 4px;
             border-width: 1px;
-            border-color: bc-swatch-touch.has-hover ? Theme.accent-blue : #444444;
+            border-color: bc-swatch-touch.has-hover ? Theme.accent-blue : Theme.border-color;
             drop-shadow-blur: 2px;
-            drop-shadow-color: #00000040;
+            drop-shadow-color: Theme.shadow-color;
 
             bc-swatch-touch := TouchArea {
                 mouse-cursor: root.editable ? pointer : default;
@@ -2022,12 +2022,12 @@ component BrickColorRow inherits Rectangle {
         Rectangle {
             width: 100%;
             height: 100%;
-            background: #1a1a22;
+            background: Theme.dialog-background;
             border-radius: 8px;
             border-width: 1px;
-            border-color: #3a3a3a;
+            border-color: Theme.border-color;
             drop-shadow-blur: 16px;
-            drop-shadow-color: #000000a0;
+            drop-shadow-color: Theme.shadow-float;
 
             // Swallow clicks so they don't bubble to the viewport.
             TouchArea { }
@@ -2057,7 +2057,7 @@ component BrickColorRow inherits Rectangle {
                         { id: "umbra",   name: "Umbra",   desc: "dark · evil — voids" },
                     ]: Rectangle {
                         height: 38px;
-                        background: wheel-touch.has-hover ? #2a2a3a : transparent;
+                        background: wheel-touch.has-hover ? Theme.button-hover : transparent;
                         border-radius: 4px;
 
                         wheel-touch := TouchArea {
@@ -2081,13 +2081,13 @@ component BrickColorRow inherits Rectangle {
                                 }
                                 Text {
                                     text: w.desc;
-                                    color: #8a8a9a;
+                                    color: Theme.text-secondary;
                                     font-size: 9px;
                                 }
                             }
                             Text {
                                 text: "›";
-                                color: #6c7080;
+                                color: Theme.text-secondary;
                                 font-size: 14px;
                                 vertical-alignment: center;
                             }
@@ -2102,7 +2102,7 @@ component BrickColorRow inherits Rectangle {
                     // Back row → return to the wheel list.
                     Rectangle {
                         height: 24px;
-                        background: bc-back-touch.has-hover ? #2a2a3a : transparent;
+                        background: bc-back-touch.has-hover ? Theme.button-hover : transparent;
                         border-radius: 4px;
 
                         bc-back-touch := TouchArea {
@@ -2403,14 +2403,14 @@ export component PropertiesPanel inherits Rectangle {
         // Header showing selection info - polished design
         Rectangle {
             height: 36px;
-            background: @linear-gradient(180deg, #1e1e1e 0%, #181818 100%);
+            background: @linear-gradient(180deg, Theme.header-background 0%, Theme.tab-inactive 100%);
             
             // Bottom border
             Rectangle {
                 y: parent.height - 1px;
                 width: 100%;
                 height: 1px;
-                background: #2a2a2a;
+                background: Theme.border-color;
             }
             
             HorizontalLayout {
@@ -2439,7 +2439,7 @@ export component PropertiesPanel inherits Rectangle {
                         width: 16px;
                         height: 16px;
                         border-radius: 3px;
-                        background: #333333;
+                        background: Theme.button-background;
                         Text {
                             text: "?";
                             color: Theme.text-secondary;
@@ -2500,9 +2500,9 @@ export component PropertiesPanel inherits Rectangle {
                         width: 48px;
                         height: 48px;
                         border-radius: 24px;
-                        background: #1a1a1a;
+                        background: Theme.background-tertiary;
                         border-width: 1px;
-                        border-color: #2a2a2a;
+                        border-color: Theme.border-color;
                         
                         Text {
                             text: "◇";

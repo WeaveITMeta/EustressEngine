@@ -78,12 +78,12 @@ component ToolButton inherits Rectangle {
         y: root.height + 2px;
         
         Rectangle {
-            background: #1e1e1e;
+            background: Theme.dialog-background;
             border-radius: 3px;
             border-width: 1px;
-            border-color: #3a3a3a;
+            border-color: Theme.border-color;
             drop-shadow-blur: 4px;
-            drop-shadow-color: #00000060;
+            drop-shadow-color: Theme.shadow-float;
             
             HorizontalBox {
                 padding-left: 6px;
@@ -93,7 +93,7 @@ component ToolButton inherits Rectangle {
                 
                 Text {
                     text: root.tooltip;
-                    color: #d4d4d4;
+                    color: Theme.text-primary;
                     font-size: 11px;
                 }
             }

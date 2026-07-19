@@ -96,19 +96,19 @@ component ServiceCard inherits Rectangle {
                             width: cat-label.preferred-width + 12px;
                             height: 18px;
                             border-radius: 3px;
-                            background: root.service.category == "Core" ? #1a2a4a :
-                                        root.service.category == "Player" ? #1a3a2a :
-                                        root.service.category == "Data" ? #3a2a1a :
-                                        root.service.category == "Scripting" ? #2a1a3a :
-                                        #1a2a2a;
+                            background: root.service.category == "Core" ? #1a2a4a :  // theme-exempt: decorative category badge tint
+                                        root.service.category == "Player" ? #1a3a2a :  // theme-exempt: decorative category badge tint
+                                        root.service.category == "Data" ? #3a2a1a :  // theme-exempt: decorative category badge tint
+                                        root.service.category == "Scripting" ? #2a1a3a :  // theme-exempt: decorative category badge tint
+                                        #1a2a2a;  // theme-exempt: decorative category badge tint
 
                             cat-label := Text {
                                 text: root.service.category;
-                                color: root.service.category == "Core" ? #6699cc :
-                                       root.service.category == "Player" ? #66cc99 :
-                                       root.service.category == "Data" ? #cc9966 :
-                                       root.service.category == "Scripting" ? #9966cc :
-                                       #66cccc;
+                                color: root.service.category == "Core" ? Theme.accent-blue :
+                                       root.service.category == "Player" ? Theme.accent-green :
+                                       root.service.category == "Data" ? Theme.accent-orange :
+                                       root.service.category == "Scripting" ? Theme.accent-purple :
+                                       Theme.accent-cyan;
                                 font-size: 10px;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -129,7 +129,7 @@ component ServiceCard inherits Rectangle {
             // ---- Learn URL hyperlink ----
             if root.service.learn-url != "": Rectangle {
                 height: 28px;
-                background: link-touch.has-hover ? #1a2a4a : transparent;
+                background: link-touch.has-hover ? Theme.selection-background : transparent;
                 border-radius: 4px;
 
                 link-touch := TouchArea {
@@ -175,7 +175,7 @@ component ServiceCard inherits Rectangle {
             // ---- Divider ----
             Rectangle {
                 height: 1px;
-                background: #2a2a2a;
+                background: Theme.border-color;
             }
 
             // ---- Summary ----
@@ -197,7 +197,7 @@ component ServiceCard inherits Rectangle {
             // ---- Properties section header ----
             if root.service.property-count > 0: Rectangle {
                 height: 1px;
-                background: #2a2a2a;
+                background: Theme.border-color;
             }
 
             if root.service.property-count > 0: HorizontalLayout {
@@ -216,7 +216,7 @@ component ServiceCard inherits Rectangle {
                     width: count-txt.preferred-width + 10px;
                     height: 18px;
                     border-radius: 9px;
-                    background: #2a2a2a;
+                    background: Theme.background-tertiary;
                     y: (parent.height - self.height) / 2;
 
                     count-txt := Text {
@@ -232,7 +232,7 @@ component ServiceCard inherits Rectangle {
             // ---- Property list ----
             for prop in root.service.properties: Rectangle {
                 height: prop-layout.preferred-height + 8px;
-                background: prop-hover.has-hover ? #1e1e28 : transparent;
+                background: prop-hover.has-hover ? Theme.explorer-item-hover : transparent;
                 border-radius: 4px;
 
                 prop-hover := TouchArea {
@@ -254,9 +254,9 @@ component ServiceCard inherits Rectangle {
                             width: 14px;
                             height: 14px;
                             border-radius: 7px;
-                            background: prop.description != "" ? #1e4a7a : #2a2a2a;
+                            background: prop.description != "" ? Theme.selection-background : Theme.background-tertiary;
                             border-width: 1px;
-                            border-color: prop.description != "" ? Theme.accent-blue : #444444;
+                            border-color: prop.description != "" ? Theme.accent-blue : Theme.border-color;
                             y: (parent.height - self.height) / 2;
 
                             Text {
@@ -272,7 +272,7 @@ component ServiceCard inherits Rectangle {
                         // Property name
                         Text {
                             text: prop.name;
-                            color: #7cc5f0;
+                            color: Theme.text-accent;
                             font-size: 12px;
                             font-weight: 600;
                             font-family: "Cascadia Code, Consolas, monospace";
@@ -284,22 +284,22 @@ component ServiceCard inherits Rectangle {
                             width: type-txt.preferred-width + 8px;
                             height: 16px;
                             border-radius: 3px;
-                            background: prop.property-type == "bool" ? #1a3a2a :
-                                        prop.property-type == "float" ? #1a2a3a :
-                                        prop.property-type == "int" ? #1a2a3a :
-                                        prop.property-type == "string" ? #3a2a1a :
-                                        prop.property-type == "color" ? #3a1a2a :
-                                        #2a2a1a;
+                            background: prop.property-type == "bool" ? #1a3a2a :  // theme-exempt: decorative type badge tint
+                                        prop.property-type == "float" ? #1a2a3a :  // theme-exempt: decorative type badge tint
+                                        prop.property-type == "int" ? #1a2a3a :  // theme-exempt: decorative type badge tint
+                                        prop.property-type == "string" ? #3a2a1a :  // theme-exempt: decorative type badge tint
+                                        prop.property-type == "color" ? #3a1a2a :  // theme-exempt: decorative type badge tint
+                                        #2a2a1a;  // theme-exempt: decorative type badge tint
                             y: (parent.height - self.height) / 2;
 
                             type-txt := Text {
                                 text: prop.property-type;
-                                color: prop.property-type == "bool" ? #4caf50 :
-                                       prop.property-type == "float" ? #42a5f5 :
-                                       prop.property-type == "int" ? #42a5f5 :
-                                       prop.property-type == "string" ? #ffb74d :
-                                       prop.property-type == "color" ? #f06292 :
-                                       #ffee58;
+                                color: prop.property-type == "bool" ? Theme.accent-green :
+                                       prop.property-type == "float" ? Theme.accent-blue :
+                                       prop.property-type == "int" ? Theme.accent-blue :
+                                       prop.property-type == "string" ? Theme.accent-orange :
+                                       prop.property-type == "color" ? Theme.accent-red :
+                                       Theme.accent-yellow;
                                 font-size: 10px;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -347,7 +347,7 @@ component ServiceSidebarItem inherits Rectangle {
     callback clicked();
 
     height: 30px;
-    background: root.selected ? #2a2a4a : (item-touch.has-hover ? #2a2a3a : transparent);
+    background: root.selected ? Theme.selection-background : (item-touch.has-hover ? Theme.explorer-item-hover : transparent);
     border-radius: 4px;
 
     item-touch := TouchArea {
@@ -458,7 +458,7 @@ export component ServicesBrowserPanel inherits Rectangle {
                 y: 0px;
                 width: 180px;
                 height: parent.height;
-                background: #1a1a1e;
+                background: Theme.background-tertiary;
 
                 ScrollView {
                     VerticalLayout {
@@ -590,7 +590,7 @@ export component ServicesBrowserPanel inherits Rectangle {
                 y: 0px;
                 width: 5px;
                 height: parent.height;
-                background: splitter-touch.has-hover || splitter-touch.pressed ? #5a5a7a : #333;
+                background: splitter-touch.has-hover || splitter-touch.pressed ? #5a5a7a : Theme.border-color;  // theme-exempt: #5a5a7a decorative splitter-active highlight
 
                 splitter-touch := TouchArea {
                     mouse-cursor: col-resize;

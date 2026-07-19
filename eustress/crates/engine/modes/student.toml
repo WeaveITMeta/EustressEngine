@@ -1,0 +1,41 @@
+# Eustress Mode — "Student".
+# Learning-first workspace: modeling + data for coursework, MindSpace for
+# note-graphs, and forward-looking Notebook/Assignments tabs.
+
+[mode]
+id = "student"
+name = "Student"
+icon = "mortarboard"
+version = "1.0"
+author = "Eustress"
+
+[ribbon]
+tabs = ["home", "model", "data", "mindspace", "test"]
+
+[layout]
+preset = "Default"
+
+[theme]
+accent = "#4fd6ff"
+
+[[tabs]]
+id = "notebook"
+name = "Notebook"
+color = "#4fd6ff"
+
+  [[tabs.sections]]
+  name = "Study"
+  tools = ["data:timeline", "data:chart"]
+
+  [[tabs.sections]]
+  name = "Notes"
+  tools = []
+
+[[tabs]]
+id = "assignments"
+name = "Assignments"
+color = "#ffd166"
+
+  [[tabs.sections]]
+  name = "Work"
+  tools = []

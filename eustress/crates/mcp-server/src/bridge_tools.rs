@@ -1,17 +1,19 @@
 //! Live-engine tools — drive the RUNNING engine over the TCP bridge.
 //!
 //! Unlike the filesystem-backed tools in `eustress-tools` (which write
-//! `_instance.toml` for the file watcher to pick up), these four reach
-//! the engine *while it runs*: they connect to `.eustress/engine.port`
-//! and call the bridge methods `ecs.inspect`, `tool.equip`,
-//! `selection.set`, and `state.get`.
+//! `_instance.toml` for the file watcher to pick up), these reach the
+//! engine *while it runs*: they connect to `.eustress/engine.port` and
+//! call bridge methods like `ecs.inspect`, `tool.equip`, `selection.set`,
+//! and `state.get`.
 //!
 //! Each is a `ToolHandler` (same trait the shared registry uses) so it
 //! plugs into `tools/list` + `tools/call` exactly like `QueryEntitiesTool`.
 //! They live here in the MCP-server crate rather than in `eustress-tools`
-//! because the bridge client is MCP-server-local (the engine talks to its
-//! own ECS directly, in-process, and has no need for a TCP client of
-//! itself).
+//! because these are the ONLY tools with a live-RPC concern — the engine
+//! talks to its own ECS in-process and has no need for a TCP client of
+//! itself. The client itself (`call_engine`) lives in the small shared
+//! `eustress-bridge-client` crate, so the `eustress` CLI can drive the
+//! same bridge without pulling in this crate's tool-registry machinery.
 //!
 //! Pattern mirrors `eustress_tools::entity_tools::QueryEntitiesTool`:
 //! `definition()` (modes General, `requires_approval: false`) +
@@ -22,7 +24,7 @@ use eustress_tools::modes::WorkshopMode;
 use eustress_tools::{ToolContext, ToolDefinition, ToolHandler, ToolResult};
 use serde_json::Value;
 
-use crate::bridge_client::call_engine;
+use eustress_bridge_client::call_engine;
 
 /// Build a failed `ToolResult` with a bridge/engine error message. Shared
 /// by all four tools so the "engine not running" surface is identical.

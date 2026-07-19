@@ -128,7 +128,7 @@ component SimToggle inherits Rectangle {
                 width: 36px;
                 height: 18px;
                 border-radius: 9px;
-                background: root.value ? Theme.accent-blue : #333344;
+                background: root.value ? Theme.accent-blue : Theme.button-background;
                 y: (28px - self.height) / 2;
 
                 TouchArea {
@@ -229,7 +229,7 @@ component WatchpointRow inherits Rectangle {
     callback remove();
 
     height: 32px;
-    background: wpt-touch.has-hover ? #1a1a2e : transparent;
+    background: wpt-touch.has-hover ? Theme.explorer-item-hover : transparent;
     border-radius: 3px;
 
     wpt-touch := TouchArea { }
@@ -270,10 +270,10 @@ component WatchpointRow inherits Rectangle {
         Rectangle {
             width: 54px;
             height: 18px;
-            background: #1e2a3a;
+            background: Theme.selection-background;
             border-radius: 3px;
             border-width: 1px;
-            border-color: #2a3a4a;
+            border-color: Theme.border-color;
 
             Text {
                 width: 100%;
@@ -292,7 +292,7 @@ component WatchpointRow inherits Rectangle {
         Rectangle {
             width: 24px; height: 24px;
             border-radius: 4px;
-            background: rm-touch.has-hover ? #3d1515 : transparent;
+            background: rm-touch.has-hover ? #3d1515 : transparent;  // theme-exempt: no danger/error background token defined
 
             rm-touch := TouchArea {
                 mouse-cursor: pointer;
@@ -301,7 +301,7 @@ component WatchpointRow inherits Rectangle {
 
             Text {
                 text: "×";
-                color: rm-touch.has-hover ? #ef5350 : #666688;
+                color: rm-touch.has-hover ? Theme.text-error : Theme.text-secondary;
                 font-size: 15px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -391,7 +391,7 @@ export component SimulationSettingsDialog inherits Rectangle {
         border-width: 1px;
         border-color: Theme.border-color;
         drop-shadow-blur: 28px;
-        drop-shadow-color: #000000a0;
+        drop-shadow-color: Theme.modal-backdrop;
 
         TouchArea {
             scroll-event(event) => {
@@ -406,7 +406,7 @@ export component SimulationSettingsDialog inherits Rectangle {
             // ── Title bar ── centered icon + title, close X top-right ──
             Rectangle {
                 height: 46px;
-                background: #13131f;
+                background: Theme.dialog-titlebar-background;
                 border-radius: 8px;
 
                 // Centered icon + text — absolute position for true visual center
@@ -436,7 +436,7 @@ export component SimulationSettingsDialog inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     width: 28px; height: 28px;
                     border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;
+                    background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: no danger/error background token defined
 
                     close-ta := TouchArea {
                         mouse-cursor: pointer;
@@ -445,7 +445,7 @@ export component SimulationSettingsDialog inherits Rectangle {
 
                     Text {
                         text: "×";
-                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
                         font-size: 17px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -462,7 +462,7 @@ export component SimulationSettingsDialog inherits Rectangle {
             // ── Tab bar ──
             Rectangle {
                 height: 36px;
-                background: #0f0f1a;
+                background: Theme.background-primary;
 
                 HorizontalLayout {
                     padding-left: 12px;
@@ -629,10 +629,10 @@ export component SimulationSettingsDialog inherits Rectangle {
 
                         Rectangle {
                             height: 84px;
-                            background: #0b0b16;
+                            background: Theme.background-primary;
                             border-radius: 5px;
                             border-width: 1px;
-                            border-color: #252535;
+                            border-color: Theme.border-color;
 
                             VerticalLayout {
                                 padding: 10px;
@@ -640,19 +640,19 @@ export component SimulationSettingsDialog inherits Rectangle {
 
                                 Text {
                                     text: "sim.set_time_scale(3600.0);   // 1 hr / simulated-sec";
-                                    color: #7ec8e3; font-size: 10px; font-family: "Consolas";
+                                    color: Theme.text-accent; font-size: 10px; font-family: "Consolas";
                                 }
                                 Text {
                                     text: "sim.run_until_time(86400.0);  // stop at 24 h";
-                                    color: #7ec8e3; font-size: 10px; font-family: "Consolas";
+                                    color: Theme.text-accent; font-size: 10px; font-family: "Consolas";
                                 }
                                 Text {
                                     text: "sim.step_n(100);              // advance 100 ticks";
-                                    color: #7ec8e3; font-size: 10px; font-family: "Consolas";
+                                    color: Theme.text-accent; font-size: 10px; font-family: "Consolas";
                                 }
                                 Text {
                                     text: "sim.run_hours(24.0);          // run 24 simulated hours";
-                                    color: #7ec8e3; font-size: 10px; font-family: "Consolas";
+                                    color: Theme.text-accent; font-size: 10px; font-family: "Consolas";
                                 }
                             }
                         }
@@ -707,7 +707,7 @@ export component SimulationSettingsDialog inherits Rectangle {
                     // Watchpoints section header
                     Rectangle {
                         height: 32px;
-                        background: #0f0f1a;
+                        background: Theme.background-primary;
 
                         HorizontalLayout {
                             padding-left: 14px;
@@ -738,7 +738,7 @@ export component SimulationSettingsDialog inherits Rectangle {
                     // Watchpoint column headers
                     Rectangle {
                         height: 22px;
-                        background: #0c0c17;
+                        background: Theme.background-primary;
 
                         HorizontalLayout {
                             padding-left: 14px; padding-right: 8px;
@@ -789,7 +789,7 @@ export component SimulationSettingsDialog inherits Rectangle {
                     Rectangle { height: 1px; background: Theme.border-color; }
                     Rectangle {
                         height: 50px;
-                        background: #0d0d18;
+                        background: Theme.background-primary;
 
                         HorizontalLayout {
                             padding-left: 12px;
@@ -843,7 +843,7 @@ export component SimulationSettingsDialog inherits Rectangle {
                             Rectangle {
                                 width: 80px; height: 28px;
                                 border-radius: 4px;
-                                background: add-wp-ta.has-hover ? #1a3a5a : Theme.button-background;
+                                background: add-wp-ta.has-hover ? Theme.selection-background : Theme.button-background;
                                 border-width: 1px;
                                 border-color: add-wp-ta.has-hover ? Theme.accent-blue : Theme.border-color;
 
@@ -875,7 +875,7 @@ export component SimulationSettingsDialog inherits Rectangle {
                     // Explainer
                     Rectangle {
                         height: 48px;
-                        background: #0b0b16;
+                        background: Theme.background-primary;
 
                         HorizontalLayout {
                             padding: 12px;
@@ -906,7 +906,7 @@ export component SimulationSettingsDialog inherits Rectangle {
                     // Column headers
                     Rectangle {
                         height: 26px;
-                        background: #0f0f1a;
+                        background: Theme.background-primary;
 
                         HorizontalLayout {
                             padding-left: 14px; padding-right: 12px;
@@ -937,7 +937,7 @@ export component SimulationSettingsDialog inherits Rectangle {
 
                             for bind[i] in root.output-bindings: Rectangle {
                                 height: 32px;
-                                background: bind-hover.has-hover ? #1a1a2e : transparent;
+                                background: bind-hover.has-hover ? Theme.explorer-item-hover : transparent;
                                 border-radius: 3px;
 
                                 bind-hover := TouchArea { }
@@ -946,7 +946,7 @@ export component SimulationSettingsDialog inherits Rectangle {
                                     x: 0px; y: 0px;
                                     width: 3px; height: parent.height;
                                     border-radius: 1.5px;
-                                    background: #66bb6a;
+                                    background: Theme.accent-green;
                                     opacity: 0.6;
                                 }
 
@@ -957,20 +957,20 @@ export component SimulationSettingsDialog inherits Rectangle {
 
                                     Text { width: 140px; text: bind.instance-name; color: Theme.text-primary; font-size: 11px; font-weight: 600; vertical-alignment: center; overflow: elide; }
                                     Text { width: 90px; text: bind.property-name; color: Theme.accent-blue; font-size: 11px; vertical-alignment: center; overflow: elide; }
-                                    Text { width: 120px; text: bind.watchpoint; color: #66bb6a; font-size: 11px; vertical-alignment: center; overflow: elide; }
+                                    Text { width: 120px; text: bind.watchpoint; color: Theme.accent-green; font-size: 11px; vertical-alignment: center; overflow: elide; }
                                     Text { horizontal-stretch: 1; text: bind.format; color: Theme.text-secondary; font-size: 10px; font-family: "Consolas"; vertical-alignment: center; }
 
                                     Rectangle {
                                         width: 24px; height: 24px;
                                         border-radius: 4px;
-                                        background: rm2-touch.has-hover ? #3d1515 : transparent;
+                                        background: rm2-touch.has-hover ? #3d1515 : transparent;  // theme-exempt: no danger/error background token defined
 
                                         rm2-touch := TouchArea {
                                             mouse-cursor: pointer;
                                             clicked => { root.on-remove-output-binding(i); }
                                         }
 
-                                        Text { text: "×"; color: rm2-touch.has-hover ? #ef5350 : #666688; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
+                                        Text { text: "×"; color: rm2-touch.has-hover ? Theme.text-error : Theme.text-secondary; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
                                     }
                                 }
                             }
@@ -995,7 +995,7 @@ export component SimulationSettingsDialog inherits Rectangle {
                     Rectangle { height: 1px; background: Theme.border-color; }
                     Rectangle {
                         height: 50px;
-                        background: #0d0d18;
+                        background: Theme.background-primary;
 
                         HorizontalLayout {
                             padding-left: 12px;
@@ -1063,7 +1063,7 @@ export component SimulationSettingsDialog inherits Rectangle {
                             Rectangle {
                                 width: 80px; height: 28px;
                                 border-radius: 4px;
-                                background: add-bind-ta.has-hover ? #1a3a5a : Theme.button-background;
+                                background: add-bind-ta.has-hover ? Theme.selection-background : Theme.button-background;
                                 border-width: 1px;
                                 border-color: add-bind-ta.has-hover ? Theme.accent-blue : Theme.border-color;
 
@@ -1092,7 +1092,7 @@ export component SimulationSettingsDialog inherits Rectangle {
             }
             Rectangle {
                 height: 52px;
-                background: #0f0f1a;
+                background: Theme.background-primary;
                 border-radius: 8px;
 
                 HorizontalLayout {
@@ -1106,9 +1106,9 @@ export component SimulationSettingsDialog inherits Rectangle {
                         width: 80px;
                         height: 32px;
                         border-radius: 5px;
-                        background: save-ta.has-hover ? #1a4a2a : #152a1e;
+                        background: save-ta.has-hover ? #1a4a2a : #152a1e;  // theme-exempt: no success/positive button-background token defined
                         border-width: 1px;
-                        border-color: save-ta.has-hover ? #4caf50 : #2a5a32;
+                        border-color: save-ta.has-hover ? Theme.accent-green : #2a5a32;  // theme-exempt: #2a5a32 has no dark-green border token
 
                         save-ta := TouchArea {
                             mouse-cursor: pointer;
@@ -1117,7 +1117,7 @@ export component SimulationSettingsDialog inherits Rectangle {
 
                         Text {
                             text: "Save";
-                            color: save-ta.has-hover ? #a5d6a7 : #66bb6a;
+                            color: save-ta.has-hover ? #a5d6a7 : Theme.accent-green;  // theme-exempt: #a5d6a7 (light green hover) has no matching token
                             font-size: 12px;
                             font-weight: 600;
                             horizontal-alignment: center;

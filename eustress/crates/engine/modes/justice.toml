@@ -1,0 +1,66 @@
+# Eustress Mode — "Justice".
+#
+# A focused layout for policy / governance / case work: a trimmed ribbon,
+# MindSpace for case-relationship graphs, and a scripting-forward panel
+# layout, with a distinctive amber accent so the whole Studio signals "you
+# are in Justice mode". Docket/Evidence tabs are forward-looking (declared
+# ahead of their tooling).
+#
+# Justice is PUBLIC — open to everyone. Only the "Judge" submode is gated,
+# to holders of the "judge" role (see `studio_modes::UserRoles` — v1 is
+# client-side/env-var, with KYC-verified-identity → Cloudflare KV role
+# assignment as the documented production path). Submodes: Civil, Criminal,
+# Judge (gated). Civil and Criminal are meant to branch further later.
+
+[mode]
+id = "justice"
+name = "Justice"
+icon = "gavel"
+version = "1.0"
+author = "Eustress"
+
+[ribbon]
+# A deliberately small subset — home for essentials, data for records/evidence,
+# mindspace for case graphs, test for running scenarios.
+tabs = ["home", "data", "mindspace", "test"]
+
+[layout]
+preset = "Scripting"
+
+[theme]
+# Overlays accent-eustress only (selection / active-tool / focus rings) — the
+# rest of the palette stays whatever theme is active. Amber = gavel/justice.
+accent = "#e8912d"
+
+[[submodes]]
+id = "civil"
+name = "Civil"
+
+[[submodes]]
+id = "criminal"
+name = "Criminal"
+
+[[submodes]]
+id = "judge"
+name = "Judge"
+# Gated: this submode is hidden from Justice's submenu unless the user holds
+# the "judge" role. Justice itself stays open to all.
+required-role = "judge"
+
+[[tabs]]
+id = "docket"
+name = "Docket"
+color = "#e8912d"
+
+  [[tabs.sections]]
+  name = "Calendar"
+  tools = []
+
+[[tabs]]
+id = "evidence"
+name = "Evidence"
+color = "#ff5470"
+
+  [[tabs.sections]]
+  name = "Exhibits"
+  tools = ["data:import", "data:record"]

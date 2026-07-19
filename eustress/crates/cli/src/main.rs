@@ -2,17 +2,19 @@
 //!
 //! ## Table of Contents
 //! - Cli / Commands       — CLAP top-level command tree
-//! - cmd_server           — `eustress server`  — start headless dedicated server
-//! - cmd_publish          — `eustress publish` — publish Space to Cloudflare R2
-//! - cmd_sim              — `eustress sim`     — simulation history (in-process only)
-//! - cmd_stream/agent     — stubs (EustressStream is in-process; no network transport)
+//! - cmd_bridge            — `eustress bridge`  — drive a live engine or eustress-headless over TCP
+//! - cmd_run               — `eustress run`     — one-shot: launch eustress-headless, wait, relay exit code
+//! - cmd_server            — `eustress server`  — start headless dedicated server
+//! - cmd_publish           — `eustress publish` — publish Space to Cloudflare R2
+//! - cmd_sim               — `eustress sim`     — simulation history (in-process ring-buffer replay)
 //!
-//! ## Note on streaming commands
-//! Apache Iggy has been replaced with `eustress-stream`, an **in-process** streaming
-//! library. The `stream`, `agent`, `scene`, `server watch`, and `stats` commands
-//! required a live network connection to an Iggy server and are now stubs that
-//! print an informative message. The `publish`, `server start`, and `sim` commands
-//! continue to work as before.
+//! ## Drive surface (HEADLESS_RUNTIME.md §7)
+//! `bridge` and `run` are the CLI half of the headless runtime: `bridge` is a thin
+//! wrapper over `eustress-bridge-client::call_engine` (the same TCP JSON-RPC client
+//! the MCP server uses), so it drives EITHER a windowed `eustress-engine` or a
+//! headless `eustress-headless` process identically — whichever has a live
+//! `<universe>/.eustress/engine.port`. `run` launches `eustress-headless` as a child
+//! process and relays its exit code, for CI / scripted batch use.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,6 +25,7 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+use eustress_bridge_client::call_engine;
 use eustress_common::sim_record::{ArcEpisodeRecord, IterationRecord, RuneScriptRecord, SimRecord, WorkshopIterationRecord};
 use eustress_common::sim_stream::{SimQuery, SimStreamConfig, SimStreamReader};
 
@@ -51,17 +54,18 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// [stub] Subscribe to the live scene delta feed (requires in-process access).
-    Stream(StreamArgs),
-
-    /// [stub] Agent-in-the-loop commands (requires in-process access).
-    Agent(AgentArgs),
-
-    /// [stub] Scene utilities: snapshot, replay, diff (requires in-process access).
-    Scene {
+    /// Drive a LIVE engine (windowed or eustress-headless) over the TCP bridge.
+    Bridge {
+        /// Universe root (holds `.eustress/engine.port`). Defaults to the
+        /// current directory.
+        #[arg(long)]
+        universe: Option<PathBuf>,
         #[command(subcommand)]
-        action: SceneCommands,
+        action: BridgeCommands,
     },
+
+    /// Run a Space's simulation headlessly (spawns eustress-headless, relays its exit code).
+    Run(RunArgs),
 
     /// Manage headless dedicated server processes.
     Server {
@@ -71,9 +75,6 @@ enum Commands {
 
     /// Publish a Space to Cloudflare R2 via Wrangler.
     Publish(PublishArgs),
-
-    /// [stub] Show stream statistics (requires in-process access).
-    Stats(StatsArgs),
 
     /// Simulation history: replay runs, best iteration, workshop convergence.
     Sim {
@@ -92,60 +93,157 @@ enum Commands {
 // Subcommand args
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Args, Debug)]
-struct StreamArgs {
-    #[arg(long, value_delimiter = ',')]
-    filter: Vec<String>,
-    #[arg(long, default_value = "0")]
-    limit: u64,
-    #[arg(long)]
-    json: bool,
-    #[arg(long)]
-    from_seq: Option<u64>,
-}
-
-#[derive(Args, Debug)]
-struct AgentArgs {
-    #[arg(long, short)]
-    script: Option<String>,
-    #[arg(long)]
-    script_file: Option<PathBuf>,
-    #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"])]
-    spawn_part: Option<Vec<f32>>,
-    #[arg(long, default_value = "Part")]
-    class_name: String,
-    #[arg(long, num_args = 4, value_names = ["ENTITY", "X", "Y", "Z"])]
-    set_transform: Option<Vec<f32>>,
-    #[arg(long)]
-    snapshot: bool,
-    #[arg(long)]
-    simulate_ticks: Option<u32>,
-    #[arg(long, default_value = "10")]
-    timeout_secs: u64,
-    #[arg(long)]
-    json: bool,
+/// Subcommands for `eustress bridge` — one call = one JSON-RPC round-trip to
+/// `<universe>/.eustress/engine.port` (windowed editor or eustress-headless,
+/// whichever is live). Mirrors `eustress_engine::engine_bridge::protocol::MethodName`;
+/// see `bridge_tools.rs` in the MCP server for the same surface as AI tool calls.
+#[derive(Subcommand, Debug)]
+enum BridgeCommands {
+    /// Health check — verify a live engine is reachable.
+    Ping,
+    /// Raw JSON-RPC passthrough — call any bridge method by name. Use this
+    /// for methods without a dedicated subcommand (tool.equip, selection.set,
+    /// action.invoke, viewport.capture, ai_camera.*, scene.overview, ...).
+    Call {
+        /// Bridge method name, e.g. "ecs.inspect" or "tool.equip".
+        method: String,
+        /// JSON object of params, e.g. '{"limit": 10}'.
+        #[arg(long, default_value = "{}")]
+        params: String,
+    },
+    /// List entities (id/name/class), paginated. Cheap; use `inspect` for detail.
+    EcsQuery {
+        #[arg(long)]
+        class: Option<String>,
+        #[arg(long, default_value = "0")]
+        offset: u64,
+        #[arg(long, default_value = "100")]
+        limit: u64,
+    },
+    /// Rich live scene inspection: mesh/material/transform/physics flags + FPS.
+    Inspect {
+        #[arg(long)]
+        class: Option<String>,
+        #[arg(long)]
+        name_contains: Option<String>,
+        #[arg(long, default_value = "50")]
+        limit: u64,
+    },
+    /// Read live simulation watchpoint values (empty = all).
+    SimRead {
+        #[arg(long, value_delimiter = ',')]
+        keys: Vec<String>,
+    },
+    /// Deterministically advance physics by N fixed (1/60s) ticks — the
+    /// POMDP control primitive. Leaves physics paused between calls.
+    SimStep {
+        #[arg(long, default_value = "1")]
+        ticks: u64,
+    },
+    /// Cast a ray against live Avian colliders — the POMDP "sense" primitive.
+    Raycast {
+        #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"])]
+        origin: Option<Vec<f32>>,
+        #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"])]
+        direction: Option<Vec<f32>>,
+        #[arg(long)]
+        max_distance: Option<f32>,
+        #[arg(long)]
+        max_hits: Option<u64>,
+    },
+    /// Tail the causal op-log — recent entity mutations, oldest-first.
+    Oplog {
+        #[arg(long, default_value = "50")]
+        limit: u64,
+    },
+    /// Binary-ECS entity CRUD (create/read/update/delete/find).
+    Entity {
+        #[command(subcommand)]
+        action: EntityCommands,
+    },
 }
 
 #[derive(Subcommand, Debug)]
-enum SceneCommands {
-    Snapshot {
-        #[arg(long, short)]
-        out: Option<PathBuf>,
-    },
-    Replay {
-        #[arg(long, default_value = "0")]
-        from: u64,
-        #[arg(long, default_value = "0")]
-        to: u64,
+enum EntityCommands {
+    Create {
+        #[arg(long, default_value = "Part")]
+        class: String,
+        #[arg(long, default_value = "block")]
+        shape: String,
+        #[arg(long, default_value = "Part")]
+        name: String,
+        #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"])]
+        position: Option<Vec<f32>>,
+        #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"])]
+        size: Option<Vec<f32>>,
+        #[arg(long, num_args = 3, value_names = ["R", "G", "B"])]
+        color: Option<Vec<f32>>,
         #[arg(long)]
-        out: Option<PathBuf>,
-    },
-    Diff {
+        material: Option<String>,
         #[arg(long)]
-        seq_a: u64,
+        anchored: Option<bool>,
         #[arg(long)]
-        seq_b: u64,
+        can_collide: Option<bool>,
     },
+    Read {
+        #[arg(long)]
+        uuid: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    Update {
+        #[arg(long)]
+        uuid: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"])]
+        position: Option<Vec<f32>>,
+        #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"])]
+        size: Option<Vec<f32>>,
+        #[arg(long, num_args = 3, value_names = ["R", "G", "B"])]
+        color: Option<Vec<f32>>,
+        #[arg(long)]
+        material: Option<String>,
+        #[arg(long)]
+        anchored: Option<bool>,
+        #[arg(long)]
+        can_collide: Option<bool>,
+    },
+    Delete {
+        #[arg(long)]
+        uuid: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    Find {
+        #[arg(long)]
+        uuid: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        class: Option<String>,
+        #[arg(long, default_value = "50")]
+        limit: u64,
+    },
+}
+
+/// `eustress run <space>` — launch eustress-headless as a child process,
+/// wait for it, relay its exit code. See HEADLESS_RUNTIME.md §8: with
+/// `--ticks`, a Space becomes a pure function `(space, ticks) -> recording.json + exit code`.
+#[derive(Args, Debug)]
+struct RunArgs {
+    /// `.eustress` Space directory to simulate.
+    space: PathBuf,
+    /// Stop after N sim ticks (60 Hz fixed), export the recording, exit.
+    /// Omit to run until killed or stopped via the bridge.
+    #[arg(long)]
+    ticks: Option<u64>,
+    /// Main-loop rate in Hz (sim fixed-step always stays 60 Hz).
+    #[arg(long, default_value = "60")]
+    tick_rate: f64,
+    /// Boot into Edit state instead of auto-entering Play.
+    #[arg(long)]
+    no_autoplay: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -171,12 +269,6 @@ struct PublishArgs {
     env: String,
     #[arg(long)]
     dry_run: bool,
-}
-
-#[derive(Args, Debug)]
-struct StatsArgs {
-    #[arg(long, default_value = "0")]
-    watch: u64,
 }
 
 #[derive(Subcommand, Debug)]
@@ -300,35 +392,280 @@ async fn main() -> Result<()> {
         .init();
 
     match cli.command {
-        Commands::Stream(args) => cmd_streaming_stub("stream", args.json),
-        Commands::Agent(args) => cmd_streaming_stub("agent", args.json),
-        Commands::Scene { action: _ } => cmd_streaming_stub("scene", false),
+        Commands::Bridge { universe, action } => cmd_bridge(universe, action),
+        Commands::Run(args) => cmd_run(args).await,
         Commands::Server { action } => cmd_server(action).await,
         Commands::Publish(args) => cmd_publish(args).await,
-        Commands::Stats(_) => cmd_streaming_stub("stats", false),
         Commands::Sim { action } => cmd_sim(&cli.iggy_url, action).await,
         Commands::Fork { action } => cmd_fork(action).await,
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Streaming commands — stubs
+// cmd_bridge — drive a live engine (windowed or eustress-headless) over TCP
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn cmd_streaming_stub(cmd: &str, _json: bool) -> Result<()> {
-    eprintln!(
-        "{} The '{}' command is not available in this build.\n\
-         \n\
-         EustressStream is an in-process streaming library — live streaming\n\
-         commands require access to the running engine process directly.\n\
-         \n\
-         For simulation history use:  eustress sim replay / best / convergence\n\
-         For server management use:   eustress server start\n\
-         For publishing use:          eustress publish",
-        "ℹ".cyan().bold(),
-        cmd
+/// Resolve the Universe root a `bridge`/`run` call should use: the explicit
+/// `--universe` flag, else the current directory. `call_engine` itself also
+/// falls back to the parent (workspace-root) port file, so this only needs
+/// to get the common case right.
+fn resolve_universe(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    let dir = explicit.unwrap_or_else(|| PathBuf::from("."));
+    dir.canonicalize()
+        .with_context(|| format!("universe path not found: {}", dir.display()))
+}
+
+/// Print a bridge result: a colored one-line summary, then the full JSON
+/// pretty-printed (so `eustress bridge ... | jq` composes cleanly).
+fn print_bridge_result(summary: &str, result: &serde_json::Value) {
+    println!("{} {summary}", "✓".green());
+    println!("{}", serde_json::to_string_pretty(result).unwrap_or_default());
+}
+
+fn print_bridge_error(method: &str, err: &str) -> Result<()> {
+    eprintln!("{} {method}: {err}", "✗".red());
+    anyhow::bail!("bridge call failed");
+}
+
+fn cmd_bridge(universe: Option<PathBuf>, action: BridgeCommands) -> Result<()> {
+    let universe = resolve_universe(universe)?;
+
+    match action {
+        BridgeCommands::Ping => match call_engine(&universe, "ping", serde_json::json!({})) {
+            Ok(r) => {
+                print_bridge_result("engine bridge is alive", &r);
+                Ok(())
+            }
+            Err(e) => print_bridge_error("ping", &e),
+        },
+
+        BridgeCommands::Call { method, params } => {
+            let params: serde_json::Value = serde_json::from_str(&params)
+                .with_context(|| format!("--params is not valid JSON: {params}"))?;
+            match call_engine(&universe, &method, params) {
+                Ok(r) => {
+                    print_bridge_result(&format!("{method} ok"), &r);
+                    Ok(())
+                }
+                Err(e) => print_bridge_error(&method, &e),
+            }
+        }
+
+        BridgeCommands::EcsQuery { class, offset, limit } => {
+            let mut params = serde_json::Map::new();
+            if let Some(c) = class { params.insert("class".into(), c.into()); }
+            params.insert("offset".into(), offset.into());
+            params.insert("limit".into(), limit.into());
+            match call_engine(&universe, "ecs.query", serde_json::Value::Object(params)) {
+                Ok(r) => {
+                    let total = r.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let returned = r.get("returned").and_then(|v| v.as_u64()).unwrap_or(0);
+                    print_bridge_result(&format!("{returned} of {total} entities"), &r);
+                    Ok(())
+                }
+                Err(e) => print_bridge_error("ecs.query", &e),
+            }
+        }
+
+        BridgeCommands::Inspect { class, name_contains, limit } => {
+            let mut params = serde_json::Map::new();
+            if let Some(c) = class { params.insert("class".into(), c.into()); }
+            if let Some(n) = name_contains { params.insert("name_contains".into(), n.into()); }
+            params.insert("limit".into(), limit.into());
+            match call_engine(&universe, "ecs.inspect", serde_json::Value::Object(params)) {
+                Ok(r) => {
+                    let total = r.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let fps = r.get("fps").and_then(|v| v.as_f64());
+                    let fps_note = fps.map(|f| format!(", fps={f:.1}")).unwrap_or_default();
+                    print_bridge_result(&format!("{total} entities{fps_note}"), &r);
+                    Ok(())
+                }
+                Err(e) => print_bridge_error("ecs.inspect", &e),
+            }
+        }
+
+        BridgeCommands::SimRead { keys } => {
+            let params = if keys.is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::json!({ "keys": keys })
+            };
+            match call_engine(&universe, "sim.read", params) {
+                Ok(r) => {
+                    let count = r.as_object().map(|m| m.len()).unwrap_or(0);
+                    print_bridge_result(&format!("{count} sim value(s)"), &r);
+                    Ok(())
+                }
+                Err(e) => print_bridge_error("sim.read", &e),
+            }
+        }
+
+        BridgeCommands::SimStep { ticks } => {
+            match call_engine(&universe, "sim.step", serde_json::json!({ "ticks": ticks })) {
+                Ok(r) => {
+                    let stepped = r.get("stepped").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let secs = r.get("sim_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    print_bridge_result(&format!("stepped {stepped} tick(s) ({secs:.3}s sim time)"), &r);
+                    Ok(())
+                }
+                Err(e) => print_bridge_error("sim.step", &e),
+            }
+        }
+
+        BridgeCommands::Raycast { origin, direction, max_distance, max_hits } => {
+            let mut params = serde_json::Map::new();
+            if let Some(o) = origin { params.insert("origin".into(), o.into()); }
+            if let Some(d) = direction { params.insert("direction".into(), d.into()); }
+            if let Some(m) = max_distance { params.insert("max_distance".into(), m.into()); }
+            if let Some(m) = max_hits { params.insert("max_hits".into(), m.into()); }
+            match call_engine(&universe, "scene.raycast", serde_json::Value::Object(params)) {
+                Ok(r) => {
+                    let n = r.get("hit_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    print_bridge_result(&format!("{n} hit(s)"), &r);
+                    Ok(())
+                }
+                Err(e) => print_bridge_error("scene.raycast", &e),
+            }
+        }
+
+        BridgeCommands::Oplog { limit } => {
+            match call_engine(&universe, "oplog.tail", serde_json::json!({ "limit": limit })) {
+                Ok(r) => {
+                    let count = r.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    print_bridge_result(&format!("{count} mutation record(s)"), &r);
+                    Ok(())
+                }
+                Err(e) => print_bridge_error("oplog.tail", &e),
+            }
+        }
+
+        BridgeCommands::Entity { action } => cmd_bridge_entity(&universe, action),
+    }
+}
+
+fn cmd_bridge_entity(universe: &std::path::Path, action: EntityCommands) -> Result<()> {
+    match action {
+        EntityCommands::Create { class, shape, name, position, size, color, material, anchored, can_collide } => {
+            let mut params = serde_json::Map::new();
+            params.insert("class".into(), class.into());
+            params.insert("shape".into(), shape.into());
+            params.insert("name".into(), name.into());
+            if let Some(v) = position { params.insert("position".into(), v.into()); }
+            if let Some(v) = size { params.insert("size".into(), v.into()); }
+            if let Some(v) = color { params.insert("color".into(), v.into()); }
+            if let Some(v) = material { params.insert("material".into(), v.into()); }
+            if let Some(v) = anchored { params.insert("anchored".into(), v.into()); }
+            if let Some(v) = can_collide { params.insert("can_collide".into(), v.into()); }
+            match call_engine(universe, "entity.create", serde_json::Value::Object(params)) {
+                Ok(r) => {
+                    print_bridge_result("entity created", &r);
+                    Ok(())
+                }
+                Err(e) => print_bridge_error("entity.create", &e),
+            }
+        }
+        EntityCommands::Read { uuid, name } => {
+            let mut params = serde_json::Map::new();
+            if let Some(v) = uuid { params.insert("uuid".into(), v.into()); }
+            if let Some(v) = name { params.insert("name".into(), v.into()); }
+            match call_engine(universe, "entity.read", serde_json::Value::Object(params)) {
+                Ok(r) => {
+                    print_bridge_result("entity read", &r);
+                    Ok(())
+                }
+                Err(e) => print_bridge_error("entity.read", &e),
+            }
+        }
+        EntityCommands::Update { uuid, name, position, size, color, material, anchored, can_collide } => {
+            let mut params = serde_json::Map::new();
+            if let Some(v) = uuid { params.insert("uuid".into(), v.into()); }
+            if let Some(v) = name { params.insert("name".into(), v.into()); }
+            if let Some(v) = position { params.insert("position".into(), v.into()); }
+            if let Some(v) = size { params.insert("size".into(), v.into()); }
+            if let Some(v) = color { params.insert("color".into(), v.into()); }
+            if let Some(v) = material { params.insert("material".into(), v.into()); }
+            if let Some(v) = anchored { params.insert("anchored".into(), v.into()); }
+            if let Some(v) = can_collide { params.insert("can_collide".into(), v.into()); }
+            match call_engine(universe, "entity.update", serde_json::Value::Object(params)) {
+                Ok(r) => {
+                    print_bridge_result("entity updated", &r);
+                    Ok(())
+                }
+                Err(e) => print_bridge_error("entity.update", &e),
+            }
+        }
+        EntityCommands::Delete { uuid, name } => {
+            let mut params = serde_json::Map::new();
+            if let Some(v) = uuid { params.insert("uuid".into(), v.into()); }
+            if let Some(v) = name { params.insert("name".into(), v.into()); }
+            match call_engine(universe, "entity.delete", serde_json::Value::Object(params)) {
+                Ok(r) => {
+                    print_bridge_result("entity deleted", &r);
+                    Ok(())
+                }
+                Err(e) => print_bridge_error("entity.delete", &e),
+            }
+        }
+        EntityCommands::Find { uuid, path, class, limit } => {
+            let mut params = serde_json::Map::new();
+            if let Some(v) = uuid { params.insert("uuid".into(), v.into()); }
+            if let Some(v) = path { params.insert("path".into(), v.into()); }
+            if let Some(v) = class { params.insert("class".into(), v.into()); }
+            params.insert("limit".into(), limit.into());
+            match call_engine(universe, "entity.find", serde_json::Value::Object(params)) {
+                Ok(r) => {
+                    let total = r.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+                    print_bridge_result(&format!("{total} entities found"), &r);
+                    Ok(())
+                }
+                Err(e) => print_bridge_error("entity.find", &e),
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// cmd_run — one-shot headless batch runner (HEADLESS_RUNTIME.md §8)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn cmd_run(args: RunArgs) -> Result<()> {
+    let space = args
+        .space
+        .canonicalize()
+        .with_context(|| format!("Space directory not found: {}", args.space.display()))?;
+
+    let mut cmd = tokio::process::Command::new("eustress-headless");
+    cmd.arg("--space").arg(&space);
+    cmd.arg("--tick-rate").arg(args.tick_rate.to_string());
+    if let Some(n) = args.ticks {
+        cmd.arg("--ticks").arg(n.to_string());
+    }
+    if args.no_autoplay {
+        cmd.arg("--no-autoplay");
+    }
+
+    println!(
+        "{} Running {} {}…",
+        "▶".cyan().bold(),
+        space.display().to_string().cyan(),
+        match args.ticks {
+            Some(n) => format!("for {n} ticks"),
+            None => "(no tick limit — until killed or stopped via bridge)".to_string(),
+        }
     );
-    Ok(())
+
+    let mut child = cmd.spawn().context(
+        "Failed to start eustress-headless. Build it with: \
+         cargo build -p eustress-engine --bin eustress-headless"
+    )?;
+    let status = child.wait().await.context("eustress-headless error")?;
+
+    if status.success() {
+        println!("{} Run complete.", "✓".green());
+        Ok(())
+    } else {
+        anyhow::bail!("eustress-headless exited with: {status}");
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -356,7 +693,11 @@ async fn cmd_server(action: ServerCommands) -> Result<()> {
         }
 
         ServerCommands::Watch => {
-            return cmd_streaming_stub("server watch", false);
+            eprintln!(
+                "{} 'server watch' needs a live network connection and isn't wired up yet. \
+                 Use `eustress bridge ping` to check a running engine/eustress-headless instead.",
+                "ℹ".cyan().bold()
+            );
         }
     }
     Ok(())

@@ -91,13 +91,13 @@ export component ToastUndo inherits Rectangle {
                 spacing: 4px;
                 Text {
                     text: "Undo";
-                    color: undo-touch.has-hover ? #ffffff : Theme.accent-blue;
+                    color: undo-touch.has-hover ? #ffffff : Theme.accent-blue;  // theme-exempt: pure white text on accent-blue hover fill, no on-accent token
                     font-size: Theme.font-sm;
                     vertical-alignment: center;
                 }
                 Text {
                     text: root.undo-shortcut;
-                    color: undo-touch.has-hover ? #ffffffbb : #ffffff88;
+                    color: undo-touch.has-hover ? #ffffffbb : #ffffff88;  // theme-exempt: translucent-white shortcut hint composited over both transparent + accent-blue states, no token
                     font-size: Theme.font-xs;
                     vertical-alignment: center;
                 }
@@ -112,7 +112,7 @@ export component ToastUndo inherits Rectangle {
             width: 24px;
             height: 24px;
             y: (parent.height - self.height) / 2;
-            background: dismiss-touch.has-hover ? #ffffff15 : transparent;
+            background: dismiss-touch.has-hover ? #ffffff15 : transparent;  // theme-exempt: translucent-white hover overlay on transparent button, no white-overlay fill token
             border-radius: Theme.radius-md;
             Text {
                 text: "×";

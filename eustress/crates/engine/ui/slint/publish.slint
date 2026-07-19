@@ -144,7 +144,7 @@ export component PublishDialog inherits Rectangle {
         border-width: 1px;
         border-color: Theme.border-color;
         drop-shadow-blur: 32px;
-        drop-shadow-color: #00000090;
+        drop-shadow-color: Theme.shadow-color;
 
         TouchArea { scroll-event(event) => { return accept; } }
 
@@ -155,7 +155,7 @@ export component PublishDialog inherits Rectangle {
             // ── Title bar ──
             Rectangle {
                 height: 42px;
-                background: #13131f;
+                background: Theme.dialog-titlebar-background;
                 border-radius: 8px;
 
                 Text {
@@ -176,14 +176,14 @@ export component PublishDialog inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     width: 28px; height: 28px;
                     border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;
+                    background: close-ta.has-hover ? Theme.accent-red.with-alpha(0.2) : transparent;
                     close-ta := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.on-close(); }
                     }
                     Text {
                         text: "×";
-                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        color: close-ta.has-hover ? Theme.accent-red : Theme.text-secondary;
                         font-size: 17px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -201,7 +201,7 @@ export component PublishDialog inherits Rectangle {
                 // ── LEFT: Hierarchy Tree ──
                 Rectangle {
                     width: 260px;
-                    background: #0e0e1a;
+                    background: Theme.background-primary;
                     border-radius: 0px;
 
                     VerticalLayout {
@@ -398,10 +398,10 @@ export component PublishDialog inherits Rectangle {
                         // Error
                         if root.error-message != "": Rectangle {
                             height: 28px;
-                            background: #2a1515;
+                            background: Theme.accent-red.with-alpha(0.12);
                             border-radius: 3px;
                             border-width: 1px;
-                            border-color: #4a2020;
+                            border-color: Theme.accent-red.with-alpha(0.28);
                             Text {
                                 x: 10px;
                                 text: root.error-message;
@@ -418,7 +418,7 @@ export component PublishDialog inherits Rectangle {
             Rectangle { height: 1px; background: Theme.border-color; }
             Rectangle {
                 height: 48px;
-                background: #0f0f1a;
+                background: Theme.dialog-titlebar-background;
                 border-radius: 8px;
 
                 HorizontalLayout {
@@ -430,7 +430,7 @@ export component PublishDialog inherits Rectangle {
                     Rectangle {
                         width: 80px; height: 30px;
                         border-radius: 5px;
-                        background: cancel-btn.has-hover ? #1a1a2e : Theme.button-background;
+                        background: cancel-btn.has-hover ? Theme.button-hover : Theme.button-background;
                         border-width: 1px;
                         border-color: Theme.border-color;
                         cancel-btn := TouchArea {
@@ -451,11 +451,11 @@ export component PublishDialog inherits Rectangle {
                         border-radius: 5px;
                         background: root.is-publishing || root.experience-name == "" ?
                             Theme.button-background :
-                            (pub-btn.has-hover ? #1a4a2a : #152a1e);
+                            (pub-btn.has-hover ? Theme.accent-green.with-alpha(0.28) : Theme.accent-green.with-alpha(0.15));
                         border-width: 1px;
                         border-color: root.is-publishing || root.experience-name == "" ?
                             Theme.border-color :
-                            (pub-btn.has-hover ? #4caf50 : #2a5a32);
+                            (pub-btn.has-hover ? Theme.accent-green : Theme.accent-green.with-alpha(0.5));
 
                         pub-btn := TouchArea {
                             mouse-cursor: root.is-publishing || root.experience-name == "" ? default : pointer;
@@ -477,7 +477,7 @@ export component PublishDialog inherits Rectangle {
                             text: root.is-publishing ? "Publishing..." : root.is-update ? "Update" : "Publish";
                             color: root.is-publishing || root.experience-name == "" ?
                                 Theme.text-secondary :
-                                (pub-btn.has-hover ? #a5d6a7 : #66bb6a);
+                                (pub-btn.has-hover ? Theme.accent-green-bright : Theme.accent-green);
                             font-size: 11.5px;
                             font-weight: 600;
                             horizontal-alignment: center;
