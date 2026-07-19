@@ -2954,20 +2954,33 @@ fn attach_gaussian_splat_component(
     toml_path: &Path,
     extra: &std::collections::HashMap<String, toml::Value>,
 ) {
-    let Some(rel_path) = extra
-        .get("gaussian_splats")
-        .and_then(|v| v.get("path"))
+    let Some(gs) = extra.get("gaussian_splats") else {
+        return;
+    };
+    let Some(rel_path) = gs
+        .get("path")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
     else {
         return;
     };
+    // Per-cloud correction toggles (Properties booleans). Absent ⇒ default ON,
+    // matching `SplatCloud::default()`, so pre-existing imports light up both
+    // passes without a schema migration.
+    let cull_floaters = gs.get("cull_floaters").and_then(|v| v.as_bool()).unwrap_or(true);
+    let ppisp = gs.get("ppisp").and_then(|v| v.as_bool()).unwrap_or(true);
     let Some(universe_root) = crate::space::universe_root_for_path(toml_path) else {
         warn!("gaussian_splats: could not resolve Universe root for {:?}", toml_path);
         return;
     };
     let abs_path = universe_root.join(rel_path);
-    eustress_radiance::attach_splat_cloud(ec, asset_server, abs_path.to_string_lossy().to_string());
+    eustress_radiance::attach_splat_cloud(
+        ec,
+        asset_server,
+        abs_path.to_string_lossy().to_string(),
+        cull_floaters,
+        ppisp,
+    );
 }
 
 /// Attach the data-only ParticleEmitter / Beam component from the

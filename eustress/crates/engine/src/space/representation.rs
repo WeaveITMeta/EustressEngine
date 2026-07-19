@@ -94,6 +94,18 @@ pub fn class_is_file_natured(class_name: &str) -> bool {
         // directory loader's env arm; keep FileSystem so they are not
         // skipped on streaming-primary imports.
         | "Atmosphere" | "Sky" | "Clouds" | "DirectionalLight"
+        // Gaussian-splat clouds: essential content is a real `.ply`
+        // radiance-field file (referenced by a `[gaussian_splats].path`
+        // section), exactly like a custom-mesh part owns its `.glb`. This
+        // keeps the instance folder-form (FileSystem) so it persists +
+        // reloads on DB-primary Spaces via the same load-merge path as
+        // custom meshes — instead of the DB layer trying to `bincode`-
+        // collapse it into a flat binary core, which FAILS (the
+        // `#[serde(flatten)]` `extra` table carrying the splat path is not
+        // bincode-serialisable) and left the folder unbacked, so the
+        // reconcile sweep trashed it on the next open ("imported splat
+        // vanishes on restart").
+        | "GaussianSplats"
     )
 }
 
