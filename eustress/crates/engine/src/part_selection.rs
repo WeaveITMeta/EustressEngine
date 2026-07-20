@@ -83,7 +83,13 @@ pub fn part_selection_system(
     // Query selectable parts: must have PartEntityMarker OR (Instance + BasePart) so Folders,
     // Services, Scripts, and UI entities are excluded from raycasting entirely.
     part_entities_query: Query<(Entity, Option<&PartEntity>, Option<&PartEntityMarker>, Option<&Instance>, &GlobalTransform, Option<&Mesh3d>, Option<&BasePart>, Option<&ChildOf>),
-        Or<(With<PartEntityMarker>, With<PartEntity>, (With<BasePart>, With<Instance>))>>,
+        // Last clause admits Gaussian-splat clouds: they carry `Instance` +
+        // a bevy `Aabb` (inserted by bevy_gaussian_splatting) but NO
+        // `BasePart`/`PartEntity`/`Mesh3d`, so the prior filter excluded them
+        // entirely and the OBB pass below never ran → unselectable in the
+        // viewport. `Without<Mesh3d>` keeps this clause from redundantly
+        // re-matching ordinary mesh parts (already covered above).
+        Or<(With<PartEntityMarker>, With<PartEntity>, (With<BasePart>, With<Instance>), (With<Instance>, With<bevy::camera::primitives::Aabb>, Without<Mesh3d>))>>,
     // Query for children to calculate accurate group bounds (matching move_tool.rs)
     children_query: Query<&Children>,
     // Query for child transforms/baseparts
