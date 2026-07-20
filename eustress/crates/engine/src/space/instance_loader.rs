@@ -2027,6 +2027,14 @@ pub fn spawn_instance(
         // rich-schema `extra` sections on top.
         let mut attrs = base_attributes.clone();
         for (_section_name, section_val) in &instance.extra {
+            // `[gaussian_splats]` is a FIRST-CLASS section: it is attached as a
+            // SplatCloud component and surfaced as built-in Appearance
+            // properties (CullFloaters / Path / PPISP in PascalCase), NOT a
+            // generic user attribute. Skip it here so its keys don't ALSO fold
+            // into the Attributes component as snake_case attribute rows.
+            if _section_name == "gaussian_splats" {
+                continue;
+            }
             // Each top-level entry under [extra] is a section table (e.g. [Appearance])
             if let toml::Value::Table(props) = section_val {
                 for (prop_key, prop_val) in props {

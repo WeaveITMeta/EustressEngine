@@ -173,7 +173,7 @@ fn sync_move_handle_root(
     // case the Move tool operates on. A non-identity ancestor would
     // require reading the propagated global; not applicable here.
     selected: Query<
-        (Entity, &Transform, Option<&BasePart>),
+        (Entity, &Transform, Option<&BasePart>, Option<&bevy::camera::primitives::Aabb>),
         With<Selected>,
     >,
     mut root_query: Query<&mut Transform, (With<MoveHandleRoot>, Without<Selected>)>,
@@ -203,7 +203,7 @@ fn sync_move_handle_root(
 
     // Compute group bounds over ALL selected entities.
     let Some((center, active_rotation)) = compute_group_frame(
-        selected.iter().map(|(e, t, bp)| (e, t, bp)),
+        selected.iter().map(|(e, t, bp, aabb)| (e, t, bp, aabb)),
     ) else {
         return;
     };
@@ -247,16 +247,38 @@ fn sync_move_handle_root(
 /// ordering we'd need a separate "ActiveSelection" resource; deferred
 /// to Phase 1.
 fn compute_group_frame<'a>(
-    iter: impl Iterator<Item = (Entity, &'a Transform, Option<&'a BasePart>)>,
+    iter: impl Iterator<
+        Item = (
+            Entity,
+            &'a Transform,
+            Option<&'a BasePart>,
+            Option<&'a bevy::camera::primitives::Aabb>,
+        ),
+    >,
 ) -> Option<(Vec3, Quat)> {
     let mut bounds_min = Vec3::splat(f32::MAX);
     let mut bounds_max = Vec3::splat(f32::MIN);
     let mut count = 0;
     let mut last_rotation = Quat::IDENTITY;
 
-    for (_entity, t, base_part) in iter {
-        let size = base_part.map(|bp| bp.size).unwrap_or(t.scale);
-        let (mn, mx) = calculate_rotated_aabb(t.translation, size * 0.5, t.rotation);
+    for (_entity, t, base_part, aabb) in iter {
+        // Bounds priority: BasePart.size → render Aabb → Transform.scale.
+        // Gaussian-splat clouds have NO BasePart; bevy_gaussian_splatting
+        // inserts a LOCAL-space Aabb whose center is offset from the entity
+        // origin, so the gizmo must center on `translation + rot·(center·scale)`
+        // — otherwise the handles draw at the origin, far from the visible
+        // cloud. Mirrors the already-committed fallback in `move_tool.rs`.
+        let (obb_center, size) = if let Some(bp) = base_part {
+            (t.translation, bp.size)
+        } else if let Some(a) = aabb {
+            (
+                t.translation + t.rotation * (Vec3::from(a.center) * t.scale),
+                Vec3::from(a.half_extents) * 2.0 * t.scale,
+            )
+        } else {
+            (t.translation, t.scale)
+        };
+        let (mn, mx) = calculate_rotated_aabb(obb_center, size * 0.5, t.rotation);
         bounds_min = bounds_min.min(mn);
         bounds_max = bounds_max.max(mx);
         last_rotation = t.rotation;

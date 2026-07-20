@@ -100,7 +100,7 @@ fn sync_rotate_handle_root(
     // Selected parts: LOCAL `Transform` so the rotate-tool's write
     // this frame is picked up before TransformPropagate runs.
     selected: Query<
-        (Entity, &Transform, Option<&BasePart>),
+        (Entity, &Transform, Option<&BasePart>, Option<&bevy::camera::primitives::Aabb>),
         With<Selected>,
     >,
     // `Without<Selected>` disjoints this from the `selected` read-only
@@ -134,7 +134,7 @@ fn sync_rotate_handle_root(
     }
 
     let Some(group) = compute_group_frame(
-        selected.iter().map(|(e, t, bp)| (e, t, bp)),
+        selected.iter().map(|(e, t, bp, aabb)| (e, t, bp, aabb)),
     ) else {
         return;
     };
@@ -193,16 +193,37 @@ struct GroupFrame {
 }
 
 fn compute_group_frame<'a>(
-    iter: impl Iterator<Item = (Entity, &'a Transform, Option<&'a BasePart>)>,
+    iter: impl Iterator<
+        Item = (
+            Entity,
+            &'a Transform,
+            Option<&'a BasePart>,
+            Option<&'a bevy::camera::primitives::Aabb>,
+        ),
+    >,
 ) -> Option<GroupFrame> {
     let mut bounds_min = Vec3::splat(f32::MAX);
     let mut bounds_max = Vec3::splat(f32::MIN);
     let mut count = 0;
     let mut last_rotation = Quat::IDENTITY;
 
-    for (_e, t, base_part) in iter {
-        let size = base_part.map(|bp| bp.size).unwrap_or(t.scale);
-        let (mn, mx) = calculate_rotated_aabb(t.translation, size * 0.5, t.rotation);
+    for (_e, t, base_part, aabb) in iter {
+        // BasePart.size → render Aabb (Gaussian-splat clouds; local-space
+        // Aabb offset from the entity origin) → Transform.scale. Centering
+        // the rotate pivot on the Aabb centroid is what makes a splat rotate
+        // in place instead of swinging around its far-off origin. Mirrors
+        // `move_tool.rs`.
+        let (obb_center, size) = if let Some(bp) = base_part {
+            (t.translation, bp.size)
+        } else if let Some(a) = aabb {
+            (
+                t.translation + t.rotation * (Vec3::from(a.center) * t.scale),
+                Vec3::from(a.half_extents) * 2.0 * t.scale,
+            )
+        } else {
+            (t.translation, t.scale)
+        };
+        let (mn, mx) = calculate_rotated_aabb(obb_center, size * 0.5, t.rotation);
         bounds_min = bounds_min.min(mn);
         bounds_max = bounds_max.max(mx);
         last_rotation = t.rotation;
