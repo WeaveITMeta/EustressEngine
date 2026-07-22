@@ -2963,6 +2963,15 @@ fn attach_gaussian_splat_component(
     extra: &std::collections::HashMap<String, toml::Value>,
 ) {
     let Some(gs) = extra.get("gaussian_splats") else {
+        // DIAG: a GaussianSplats reached the attach with NO gaussian_splats
+        // section in its `extra` — this is the "empty reload" smoking gun (the
+        // cloud path was stripped somewhere upstream, e.g. a component-rebuilt
+        // core). `warn!` so it survives the engine's hardcoded log filter.
+        warn!(
+            "gaussian_splats ATTACH SKIPPED — no [gaussian_splats] in extra (path stripped upstream) for {:?}; extra keys = {:?}",
+            toml_path,
+            extra.keys().collect::<Vec<_>>()
+        );
         return;
     };
     let Some(rel_path) = gs
@@ -2970,6 +2979,7 @@ fn attach_gaussian_splat_component(
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
     else {
+        warn!("gaussian_splats ATTACH SKIPPED — [gaussian_splats] present but no usable path for {:?}", toml_path);
         return;
     };
     // Per-cloud correction toggles (Properties booleans). Absent ⇒ default ON,
@@ -2989,6 +2999,62 @@ fn attach_gaussian_splat_component(
         cull_floaters,
         ppisp,
     );
+}
+
+/// One-shot marker: the entity's radiance collider proxy has been converted to
+/// a real Avian collider (so the conversion runs once).
+#[cfg(feature = "gaussian-splatting")]
+#[derive(bevy::prelude::Component)]
+pub struct SplatColliderAttached;
+
+/// Convert a splat cloud's radiance-extracted [`eustress_radiance::SplatColliderProxy`]
+/// (Avian-free voxel boxes, in cloud-LOCAL space) into a REAL Avian compound
+/// collider + a static body. This is the physics-engine-specific half that
+/// radiance deliberately leaves to the engine.
+///
+/// Once attached, the cloud is a first-class physical object: things rest on
+/// it, and — crucially — the click-pick's Avian `ray_hits` strikes THIS collider
+/// (the precise voxel shell), so selection uses the real geometry, not the
+/// coarse Aabb box (which stays only as a load-time fallback: `part_selection`
+/// skips the OBB pass for any entity that has a collider). Runs once per cloud.
+#[cfg(feature = "gaussian-splatting")]
+pub fn apply_splat_colliders(
+    mut commands: Commands,
+    query: Query<
+        (Entity, &eustress_radiance::SplatColliderProxy),
+        Without<SplatColliderAttached>,
+    >,
+) {
+    use avian3d::prelude::*;
+    for (entity, sp) in &query {
+        // Mark done up front — even an empty proxy must not re-run every frame.
+        commands.entity(entity).insert(SplatColliderAttached);
+        let shapes: Vec<(Vec3, Quat, Collider)> = sp
+            .proxy
+            .primitives
+            .iter()
+            .map(|p| match p {
+                eustress_radiance::ColliderPrimitive::Box { center, half_extents } => (
+                    Vec3::from(*center),
+                    Quat::IDENTITY,
+                    // Avian `cuboid` takes FULL side lengths (parry half-extents
+                    // × 2). radiance emits half-extents.
+                    Collider::cuboid(half_extents[0] * 2.0, half_extents[1] * 2.0, half_extents[2] * 2.0),
+                ),
+                eustress_radiance::ColliderPrimitive::Sphere { center, radius } => {
+                    (Vec3::from(*center), Quat::IDENTITY, Collider::sphere(*radius))
+                }
+            })
+            .collect();
+        if shapes.is_empty() {
+            continue;
+        }
+        let n = shapes.len();
+        commands
+            .entity(entity)
+            .insert((Collider::compound(shapes), RigidBody::Static));
+        warn!("splat collider: attached {} Avian voxel boxes (static) to {:?}", n, entity);
+    }
 }
 
 /// Attach the data-only ParticleEmitter / Beam component from the

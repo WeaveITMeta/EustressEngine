@@ -557,6 +557,11 @@ fn main() {
         // Make splat clouds browsable: tag them with an Instance so the unified
         // Explorer sync lists + nests them under Workspace.
         app.add_systems(Update, tag_splats_for_explorer);
+        // Convert radiance's Avian-free collider proxy into a real Avian compound
+        // collider so ANY imported splat becomes physical + click-selectable via
+        // its true geometry (not the Aabb box). radiance extracts the proxy;
+        // this attaches it.
+        app.add_systems(Update, eustress_engine::space::instance_loader::apply_splat_colliders);
     }
 
     // (WorldDbPlugin now comes in with add_core_sim_plugins above.)

@@ -249,6 +249,22 @@ pub fn demote_to_binary(world: &mut World, target: EntityRef) -> Result<(), Stri
     if snap.is_binary {
         return Err("entity is already binary-backed".into());
     }
+    // File-natured classes (GaussianSplats, and any class whose essential
+    // content is an external file) must NEVER fold into a bare binary core:
+    // the core is built from live COMPONENTS (`core_from_components`), which
+    // carry no reference to the external asset — so demoting would silently
+    // strip the asset path, and the subsequent disk-TOML delete makes that
+    // loss permanent (an invisible, undeletable orphan on the next reload).
+    // The doc contract already promised this guard; a splat slips the folder
+    // "artifact-free" check because its `.ply` lives under `assets/`, not in
+    // the entity folder. Keep it FileSystem-backed.
+    if crate::space::representation::class_is_file_natured(snap.instance.class_name.as_str()) {
+        return Err(format!(
+            "'{}' is a file-natured class (its content is an external asset) — \
+             refusing to demote to a bare binary core, which would strip the asset path",
+            snap.instance.class_name.as_str()
+        ));
+    }
     let toml_path = snap
         .instance_file_toml
         .clone()

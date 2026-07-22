@@ -28,6 +28,7 @@ use bevy_gaussian_splatting::{
 };
 
 pub mod collider;
+pub use collider::{ColliderPrimitive, ColliderStrategy, CompoundProxy};
 
 /// Adds Gaussian-Splatting / radiance-field rendering to the app.
 ///
@@ -79,6 +80,83 @@ impl Plugin for RadiancePlugin {
         // asset finishes loading, then filters ONCE (guarded by
         // `FloaterCullApplied`) — see [`apply_floater_cull`].
         app.add_systems(Update, apply_floater_cull);
+        // Physics-proxy extraction: once the (culled) cloud is resident, voxel-fit
+        // a collider proxy from the splat centers so the ENGINE can attach a real
+        // Avian collider (radiance stays Avian-free). See [`extract_splat_collider_proxy`].
+        app.add_systems(Update, extract_splat_collider_proxy);
+    }
+}
+
+/// The voxel-box collider proxy extracted from a splat cloud, in the cloud's
+/// LOCAL space. Avian-free: the engine reads this and builds an Avian compound
+/// collider (see `collider.rs` — radiance is physics-engine-agnostic). Present
+/// once extraction has run (empty proxy ⇒ nothing collidable, still marks done).
+#[derive(Component, Debug, Clone)]
+pub struct SplatColliderProxy {
+    pub proxy: CompoundProxy,
+}
+
+/// Minimum EFFECTIVE opacity a splat must have to contribute to the collider —
+/// reuse the floater threshold so ghost floaters don't inflate the proxy.
+const COLLIDER_MIN_OPACITY: f32 = 0.08;
+
+/// Voxel-fit an invisible physics proxy from a resident [`SplatCloud`]'s splat
+/// centers. Runs AFTER the floater cull (gated on `FloaterCullApplied`, so the
+/// handle is stable and the cloud is de-floatered) and ONCE per cloud (gated on
+/// `Without<SplatColliderProxy>`). The voxel size is ADAPTIVE — ~48 cells across
+/// the cloud's largest extent, clamped to [5 cm, 2 m] — so ANY imported cloud,
+/// tabletop or building, yields a sane collider count instead of exploding on a
+/// large scene. Deterministic (see [`collider::extract_colliders`]).
+fn extract_splat_collider_proxy(
+    mut commands: Commands,
+    assets: Res<Assets<PlanarGaussian3d>>,
+    query: Query<
+        (Entity, &PlanarGaussian3dHandle),
+        (With<SplatCloud>, With<FloaterCullApplied>, Without<SplatColliderProxy>),
+    >,
+) {
+    for (entity, handle) in &query {
+        let Some(cloud) = assets.get(&handle.0) else {
+            continue; // still loading — retry next frame
+        };
+        // Solid splat centers only (skip near-transparent floaters). Detect the
+        // opacity convention the same way the cull does (raw logits ⇒ sigmoid).
+        let looks_logit = cloud
+            .iter()
+            .take(4096)
+            .any(|g| g.scale_opacity.opacity < -0.001 || g.scale_opacity.opacity > 1.001);
+        let effective = |raw: f32| -> f32 {
+            if looks_logit { 1.0 / (1.0 + (-raw).exp()) } else { raw }
+        };
+        let points: Vec<[f32; 3]> = cloud
+            .iter()
+            .filter(|g| effective(g.scale_opacity.opacity) >= COLLIDER_MIN_OPACITY)
+            .map(|g| {
+                let p = g.position_visibility.position;
+                [p[0], p[1], p[2]]
+            })
+            .collect();
+        if points.is_empty() {
+            commands.entity(entity).insert(SplatColliderProxy { proxy: CompoundProxy::default() });
+            continue;
+        }
+        // Adaptive voxel size from the cloud extent.
+        let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for p in &points {
+            for i in 0..3 {
+                mn[i] = mn[i].min(p[i]);
+                mx[i] = mx[i].max(p[i]);
+            }
+        }
+        let extent = (0..3).map(|i| mx[i] - mn[i]).fold(0.0f32, f32::max);
+        let voxel = (extent / 48.0).clamp(0.05, 2.0);
+        let proxy = collider::extract_colliders(&points, ColliderStrategy::CsgPrimitiveFit, voxel);
+        let n = proxy.primitives.len();
+        commands.entity(entity).insert(SplatColliderProxy { proxy });
+        warn!(
+            "splat collider proxy: {} voxel boxes (voxel={:.3} m, extent={:.2} m, solid pts={}) for {:?}",
+            n, voxel, extent, points.len(), entity
+        );
     }
 }
 

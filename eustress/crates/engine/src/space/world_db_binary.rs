@@ -564,6 +564,18 @@ pub(crate) fn spawn_binary_core(
     let marker = BinaryEcsInstance::from_core(stored_id, &arch);
     let synthetic = synthetic_path(space_root, &arch.class_name, stored_id);
     let def = arch_instance::arch_to_instance(&arch);
+    // DIAG: a GaussianSplats reloading FROM A BINARY CORE — log whether the
+    // core preserved its cloud path. If this fires with has_gs=false, a
+    // component-rebuilt core (demote/promote) stripped it; if has_gs=true the
+    // core is fine and the attach downstream should render it.
+    if arch.class_name == "GaussianSplats" {
+        warn!(
+            target: "eustress_engine::world_db",
+            stored_id,
+            has_gs = def.extra.contains_key("gaussian_splats"),
+            "binary-core spawn of a GaussianSplats (came from a Fjall core, not disk)"
+        );
+    }
     let t2 = timing.then(std::time::Instant::now);
 
     // Bare binary-ECS part — never a Decal/SpecialMesh host (see
