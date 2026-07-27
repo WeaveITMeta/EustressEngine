@@ -41,7 +41,7 @@ use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::render::render_resource::{
     Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
 };
-use eustress_common::classes::BillboardGui;
+use eustress_common::classes::{BillboardGui, ClassName, Folder, Instance};
 use eustress_common::gui::billboard_renderer::{BillboardGuiMarker, GuiElementDisplay};
 use std::collections::HashMap;
 
@@ -505,9 +505,18 @@ fn ensure_billboard_marker(
 fn sync_billboard_class_to_marker(
     mut q: Query<
         (Entity, &BillboardGui, &mut BillboardGuiMarker, &mut Transform, Option<&ChildOf>),
-        Changed<BillboardGui>,
+        // `Changed<ChildOf>` as well as `Changed<BillboardGui>`: the
+        // folder gate below depends on WHO the parent is, so a re-parent
+        // (drag in/out of a Folder in the Explorer) must re-evaluate
+        // visibility even though the BillboardGui class data is untouched.
+        Or<(Changed<BillboardGui>, Changed<ChildOf>)>,
     >,
     parent_globals: Query<&GlobalTransform>,
+    // Parent class lookup for the folder gate. Checks BOTH the `Folder`
+    // marker component and `Instance.class_name` so every spawn path
+    // (registry FolderSpawner, legacy `spawn_folder`, TOML instance
+    // loader) is covered.
+    parent_class: Query<(Option<&Folder>, Option<&Instance>)>,
     mut last_offsets: Local<HashMap<Entity, [f32; 6]>>,
 ) {
     for (entity, class, mut marker, mut transform, child_of) in &mut q {
@@ -567,7 +576,34 @@ fn sync_billboard_class_to_marker(
         marker.light_influence = class.light_influence.clamp(0.0, 1.0);
 
         // Visibility — Roblox `Enabled` is the user-facing toggle.
-        marker.visible = class.enabled;
+        //
+        // FOLDER GATE: a Folder is a purely organizational container with
+        // an identity Transform and no spatial meaning, so a billboard
+        // parented to one resolves its anchor to the folder's origin —
+        // world origin for a top-level folder — and renders as a stray
+        // label floating at 0,0,0. Suppress it entirely rather than draw
+        // it somewhere meaningless. Only the DIRECT parent is checked:
+        // a billboard under Folder/Model/... still anchors to the Model,
+        // which is a real spatial parent and should render normally.
+        // Re-parenting out of the folder restores it (see the
+        // `Changed<ChildOf>` half of this system's query filter).
+        //
+        // Gating `marker.visible` — rather than writing `Visibility`
+        // directly — keeps a single authority: both visibility writers
+        // (`sync_billboard_properties` and `cull_billboards_by_distance`)
+        // already defer to this flag, and the atlas allocator skips
+        // invisible billboards so a foldered label costs no atlas slot.
+        // NOTE this writes only the runtime `marker`, never `class.enabled`
+        // — the user's authored `Enabled` property is left untouched, so
+        // nothing persists the gate back to disk.
+        let parent_is_folder = child_of
+            .map(|c| c.parent())
+            .and_then(|p| parent_class.get(p).ok())
+            .is_some_and(|(folder, inst)| {
+                folder.is_some()
+                    || inst.is_some_and(|i| i.class_name == ClassName::Folder)
+            });
+        marker.visible = class.enabled && !parent_is_folder;
 
         // FaceCamera — Roblox-parity behaviour toggle. When false, the
         // pipeline uses the entity's Transform rotation literally
@@ -708,6 +744,17 @@ fn spawn_billboard_render_state(
         else {
             continue;
         };
+        // Never spend a scarce atlas slot on a billboard that cannot
+        // render: `Enabled = false`, or parented to a Folder (see the
+        // folder gate in `sync_billboard_class_to_marker`). Both writers
+        // of `Visibility` already defer to `marker.visible`, so such a
+        // billboard would occupy a slot and paint nothing. It stays in
+        // the `Without<BillboardRenderHandle>` query and allocates the
+        // instant it becomes visible again (re-enabled or re-parented
+        // out of the folder).
+        if !marker.visible {
+            continue;
+        }
         // Atlas exhausted? Stop scanning the rest of the (potentially huge)
         // orphan set this frame and warn exactly once. Without this, a scene
         // with more billboards than slots (Vehicle Sim: ~17K vs 512) emits one

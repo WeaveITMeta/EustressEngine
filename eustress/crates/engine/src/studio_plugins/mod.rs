@@ -969,6 +969,7 @@ fn sync_plugin_tabs(
                 buttons: Vec::new(),
                 collapsible: false,
                 collapsed: false,
+                modes: section.modes,
             });
         }
         

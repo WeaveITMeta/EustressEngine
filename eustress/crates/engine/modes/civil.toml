@@ -19,14 +19,65 @@ preset = "Wide Panels"
 [theme]
 accent = "#4ade80"
 
+# Civil itself is NOT directly selectable in the Modes dropdown (see
+# ribbon.slint's mode-row-touch handler: any mode with submodes only expands
+# its submenu) — a discipline must be chosen. Submodes render in the default
+# grey (like every other mode's submenu) — no per-discipline color override.
+[[submodes]]
+id = "structural"
+name = "Structural Engineering"
+icon = "truss"
+
+[[submodes]]
+id = "geotechnical"
+name = "Geotechnical Engineering"
+icon = "layers"
+
+[[submodes]]
+id = "transportation"
+name = "Transportation Engineering"
+icon = "map"
+
+[[submodes]]
+id = "water-resources"
+name = "Water Resources Engineering"
+icon = "water"
+
+[[submodes]]
+id = "construction-management"
+name = "Construction Engineering & Management"
+icon = "build"
+
+[[submodes]]
+id = "environmental"
+name = "Environmental Engineering"
+icon = "globe"
+
+[[submodes]]
+id = "surveying-geospatial"
+name = "Surveying & Geospatial Engineering"
+icon = "compass"
+
+[[submodes]]
+id = "utility"
+name = "Utility Engineering"
+icon = "lightning"
+
+[[submodes]]
+id = "coastal-ocean"
+name = "Coastal & Ocean Engineering"
+icon = "anchor"
+
 [[tabs]]
 id = "survey"
 name = "Survey"
 color = "#4ade80"
 
+  # `data:overlay` had no Rust-side handler (a pre-existing dead button
+  # shared with the built-in Data tab, see ribbon.slint) — dropped.
   [[tabs.sections]]
   name = "Site"
-  tools = ["data:import", "data:overlay"]
+  tools = ["data:import"]
 
 [[tabs]]
 id = "structures"
@@ -35,4 +86,498 @@ color = "#60a5fa"
 
   [[tabs.sections]]
   name = "Analysis"
-  tools = []
+  tools = ["cstr:load_case_builder", "cstr:frame_analyzer", "cstr:moment_diagram"]
+
+# ── Per-discipline submode_tabs — each of Civil's 9 disciplines carries the
+# shared "Survey" tab (site data intake applies to all of them) plus its OWN
+# discipline-flavored tab, so the ribbon genuinely differs per discipline
+# instead of every one falling back to the same generic Structures tab.
+# `tools = []` throughout except Survey's own already-wired `data:import` —
+# none of this domain content has real dispatch yet (same honest-placeholder
+# rule as Justice/Legal above). ─────────────────────────────────────────────
+
+[[submode_tabs]]
+submode = "structural"
+id = "survey"
+name = "Survey"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Site"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "structural"
+id = "structural-analysis"
+name = "Structural Analysis"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Load Cases"
+  tools = ["cstr:load_case_builder", "cstr:load_combinator", "cstr:influence_lines", "cstr:snow_load_calc"]
+  [[submode_tabs.sections]]
+  name = "Frame & FEA"
+  tools = ["cstr:frame_analyzer", "cstr:moment_diagram", "cstr:deflection_checker"]
+  [[submode_tabs.sections]]
+  name = "Dynamics"
+  tools = ["cstr:modal_analyzer", "cstr:seismic_evaluator", "cstr:wind_load_calc"]
+
+[[submode_tabs]]
+submode = "structural"
+id = "structural-design"
+name = "Design & Detailing"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Steel"
+  tools = ["cstr:steel_designer", "cstr:connection_detailer", "cstr:weld_sizer"]
+  [[submode_tabs.sections]]
+  name = "Concrete"
+  tools = ["cstr:concrete_designer", "cstr:rebar_scheduler", "cstr:pt_layout"]
+  [[submode_tabs.sections]]
+  name = "Timber & Masonry"
+  tools = ["cstr:timber_designer", "cstr:masonry_checker", "cstr:shear_wall_designer"]
+
+[[submode_tabs]]
+submode = "structural"
+id = "structural-mastery"
+name = "Codes & Mastery"
+color = "#f472b6"
+  [[submode_tabs.sections]]
+  name = "Code Compliance"
+  tools = ["cstr:code_checker", "cstr:load_path_review", "cstr:drift_limits"]
+  [[submode_tabs.sections]]
+  name = "Peer Review"
+  tools = ["cstr:calc_package", "cstr:peer_review_log", "cstr:design_narrative"]
+  [[submode_tabs.sections]]
+  name = "Portfolio"
+  tools = ["cstr:project_gallery", "cstr:pe_exam_prep"]
+
+[[submode_tabs]]
+submode = "geotechnical"
+id = "survey"
+name = "Survey"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Site"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "geotechnical"
+id = "geotech-investigation"
+name = "Site Investigation"
+color = "#a78bfa"
+  [[submode_tabs.sections]]
+  name = "Borings & Sampling"
+  tools = ["cgeo:boring_log", "cgeo:sample_tracker", "cgeo:spt_analyzer", "cgeo:cpt_interpreter", "cgeo:lab_test_suite"]
+  [[submode_tabs.sections]]
+  name = "Soil Classification"
+  tools = ["cgeo:soil_classifier", "cgeo:atterberg_calc", "cgeo:gradation_curve"]
+  [[submode_tabs.sections]]
+  name = "Groundwater"
+  tools = ["cgeo:piezometer_log", "cgeo:seepage_model", "cgeo:dewatering_planner"]
+
+[[submode_tabs]]
+submode = "geotechnical"
+id = "geotech-design"
+name = "Foundations & Earthworks"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Shallow Foundations"
+  tools = ["cgeo:bearing_capacity", "cgeo:settlement_calc", "cgeo:footing_designer"]
+  [[submode_tabs.sections]]
+  name = "Deep Foundations"
+  tools = ["cgeo:pile_designer", "cgeo:capacity_curves", "cgeo:load_test_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Retaining Structures"
+  tools = ["cgeo:retaining_wall_designer", "cgeo:earth_pressure_calc", "cgeo:tieback_designer"]
+
+[[submode_tabs]]
+submode = "geotechnical"
+id = "geotech-mastery"
+name = "Stability & Mastery"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Slope Stability"
+  tools = ["cgeo:slope_stability", "cgeo:failure_surface_search", "cgeo:reinforcement_designer"]
+  [[submode_tabs.sections]]
+  name = "Seismic Hazards"
+  tools = ["cgeo:liquefaction_screen", "cgeo:site_response", "cgeo:lateral_spread_calc"]
+  [[submode_tabs.sections]]
+  name = "Ground Improvement"
+  tools = ["cgeo:ground_improvement_planner", "cgeo:surcharge_designer"]
+
+[[submode_tabs]]
+submode = "transportation"
+id = "survey"
+name = "Survey"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Site"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "transportation"
+id = "transport-geometry"
+name = "Alignment & Geometry"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Horizontal & Vertical"
+  tools = ["ctrn:alignment_designer", "ctrn:curve_calculator", "ctrn:superelevation_calc", "ctrn:design_vehicle_library"]
+  [[submode_tabs.sections]]
+  name = "Sight & Safety"
+  tools = ["ctrn:sight_distance_checker", "ctrn:clear_zone_checker", "ctrn:barrier_selector"]
+  [[submode_tabs.sections]]
+  name = "Intersections"
+  tools = ["ctrn:intersection_designer", "ctrn:roundabout_analyzer", "ctrn:turning_templates"]
+
+[[submode_tabs]]
+submode = "transportation"
+id = "transport-operations"
+name = "Pavement & Traffic"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Pavement"
+  tools = ["ctrn:pavement_designer", "ctrn:esal_calculator", "ctrn:overlay_designer"]
+  [[submode_tabs.sections]]
+  name = "Traffic Studies"
+  tools = ["ctrn:traffic_counter", "ctrn:los_analyzer", "ctrn:warrant_analysis"]
+  [[submode_tabs.sections]]
+  name = "Signals"
+  tools = ["ctrn:signal_timing", "ctrn:phasing_designer", "ctrn:coordination_planner"]
+
+[[submode_tabs]]
+submode = "transportation"
+id = "transport-mastery"
+name = "Networks & Mastery"
+color = "#f472b6"
+  [[submode_tabs.sections]]
+  name = "Corridor & Network"
+  tools = ["ctrn:corridor_simulator", "ctrn:travel_demand_model", "ctrn:transit_planner"]
+  [[submode_tabs.sections]]
+  name = "Safety Analysis"
+  tools = ["ctrn:crash_analyzer", "ctrn:safety_audit", "ctrn:countermeasure_selector"]
+  [[submode_tabs.sections]]
+  name = "Portfolio"
+  tools = ["ctrn:project_gallery", "ctrn:pe_exam_prep"]
+
+[[submode_tabs]]
+submode = "water-resources"
+id = "survey"
+name = "Survey"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Site"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "water-resources"
+id = "water-hydrology"
+name = "Hydrology"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Rainfall & Runoff"
+  tools = ["cwtr:rainfall_runoff", "cwtr:idf_curves", "cwtr:time_of_concentration", "cwtr:rational_method", "cwtr:scs_curve_number"]
+  [[submode_tabs.sections]]
+  name = "Watersheds"
+  tools = ["cwtr:watershed_delineator", "cwtr:hydrograph_builder", "cwtr:baseflow_separator"]
+  [[submode_tabs.sections]]
+  name = "Statistics"
+  tools = ["cwtr:flood_frequency", "cwtr:return_period_calc", "cwtr:trend_analyzer"]
+
+[[submode_tabs]]
+submode = "water-resources"
+id = "water-hydraulics"
+name = "Hydraulics"
+color = "#22d3ee"
+  [[submode_tabs.sections]]
+  name = "Open Channel"
+  tools = ["cwtr:open_channel_calc", "cwtr:normal_depth_solver", "cwtr:profile_computer"]
+  [[submode_tabs.sections]]
+  name = "Structures"
+  tools = ["cwtr:culvert_sizer", "cwtr:weir_designer", "cwtr:energy_dissipator"]
+  [[submode_tabs.sections]]
+  name = "Networks"
+  tools = ["cwtr:storm_network_designer", "cwtr:pipe_sizer", "cwtr:pump_station_designer"]
+
+[[submode_tabs]]
+submode = "water-resources"
+id = "water-mastery"
+name = "Systems & Mastery"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Floodplain"
+  tools = ["cwtr:flood_mapper", "cwtr:floodway_analyzer", "cwtr:levee_evaluator"]
+  [[submode_tabs.sections]]
+  name = "Treatment & Quality"
+  tools = ["cwtr:treatment_designer", "cwtr:bmp_selector", "cwtr:water_quality_model"]
+  [[submode_tabs.sections]]
+  name = "Water Balance"
+  tools = ["cwtr:water_balance_model", "cwtr:reservoir_router"]
+
+[[submode_tabs]]
+submode = "construction-management"
+id = "survey"
+name = "Survey"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Site"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "construction-management"
+id = "construction-planning"
+name = "Planning & Scheduling"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Schedule"
+  tools = ["ccem:cpm_scheduler", "ccem:lookahead_planner", "ccem:milestone_board", "ccem:pull_planning_board"]
+  [[submode_tabs.sections]]
+  name = "Resources"
+  tools = ["ccem:crew_loader", "ccem:equipment_planner", "ccem:productivity_rates"]
+  [[submode_tabs.sections]]
+  name = "Risk"
+  tools = ["ccem:risk_register", "ccem:weather_windows", "ccem:contingency_planner"]
+
+[[submode_tabs]]
+submode = "construction-management"
+id = "construction-cost"
+name = "Cost & Procurement"
+color = "#eab308"
+  [[submode_tabs.sections]]
+  name = "Estimating"
+  tools = ["ccem:quantity_takeoff", "ccem:unit_cost_library", "ccem:bid_leveler"]
+  [[submode_tabs.sections]]
+  name = "Contracts"
+  tools = ["ccem:change_order_log", "ccem:pay_application", "ccem:claims_tracker"]
+  [[submode_tabs.sections]]
+  name = "Procurement"
+  tools = ["ccem:submittal_log", "ccem:procurement_tracker", "ccem:long_lead_monitor"]
+
+[[submode_tabs]]
+submode = "construction-management"
+id = "construction-field"
+name = "Field & Mastery"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Daily Operations"
+  tools = ["ccem:daily_report", "ccem:rfi_manager", "ccem:photo_log"]
+  [[submode_tabs.sections]]
+  name = "Quality & Safety"
+  tools = ["ccem:punch_list", "ccem:safety_inspection", "ccem:toolbox_talks"]
+  [[submode_tabs.sections]]
+  name = "Closeout"
+  tools = ["ccem:asbuilt_compiler", "ccem:warranty_tracker"]
+
+[[submode_tabs]]
+submode = "environmental"
+id = "survey"
+name = "Survey"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Site"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "environmental"
+id = "env-assessment"
+name = "Assessment"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Impact Analysis"
+  tools = ["cenv:impact_assessor", "cenv:receptor_mapper", "cenv:baseline_surveyor", "cenv:phase1_esa_checklist"]
+  [[submode_tabs.sections]]
+  name = "Air & Noise"
+  tools = ["cenv:emissions_inventory", "cenv:dispersion_screen", "cenv:noise_model"]
+  [[submode_tabs.sections]]
+  name = "Ecology"
+  tools = ["cenv:habitat_evaluator", "cenv:wetland_delineator", "cenv:species_screener"]
+
+[[submode_tabs]]
+submode = "environmental"
+id = "env-treatment"
+name = "Treatment & Remediation"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Water Treatment"
+  tools = ["cenv:treatment_train_designer", "cenv:clarifier_sizer", "cenv:disinfection_calc"]
+  [[submode_tabs.sections]]
+  name = "Remediation"
+  tools = ["cenv:remediation_planner", "cenv:plume_modeler", "cenv:excavation_estimator"]
+  [[submode_tabs.sections]]
+  name = "Stormwater"
+  tools = ["cenv:stormwater_bmp_selector", "cenv:bioretention_designer", "cenv:swppp_builder"]
+
+[[submode_tabs]]
+submode = "environmental"
+id = "env-mastery"
+name = "Compliance & Mastery"
+color = "#a3e635"
+  [[submode_tabs.sections]]
+  name = "Permits"
+  tools = ["cenv:permit_tracker", "cenv:npdes_manager", "cenv:compliance_calendar"]
+  [[submode_tabs.sections]]
+  name = "Monitoring"
+  tools = ["cenv:monitoring_dashboard", "cenv:sampling_planner", "cenv:exceedance_alerts"]
+  [[submode_tabs.sections]]
+  name = "Sustainability"
+  tools = ["cenv:sustainability_scorecard", "cenv:lifecycle_analyzer"]
+
+[[submode_tabs]]
+submode = "surveying-geospatial"
+id = "survey"
+name = "Survey"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Site"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "surveying-geospatial"
+id = "survey-field"
+name = "Field Survey"
+color = "#94a3b8"
+  [[submode_tabs.sections]]
+  name = "Traverse & Level"
+  tools = ["csrv:traverse_calculator", "csrv:level_run_reducer", "csrv:closure_checker", "csrv:resection_solver"]
+  [[submode_tabs.sections]]
+  name = "GNSS"
+  tools = ["csrv:gnss_processor", "csrv:baseline_analyzer", "csrv:datum_transformer"]
+  [[submode_tabs.sections]]
+  name = "Instruments"
+  tools = ["csrv:instrument_calibration", "csrv:field_notes", "csrv:stakeout_planner"]
+
+[[submode_tabs]]
+submode = "surveying-geospatial"
+id = "survey-mapping"
+name = "Mapping & GIS"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Terrain Products"
+  tools = ["csrv:contour_generator", "csrv:surface_modeler", "csrv:volume_calculator"]
+  [[submode_tabs.sections]]
+  name = "Cadastral"
+  tools = ["csrv:parcel_mapper", "csrv:legal_description_writer", "csrv:boundary_resolver"]
+  [[submode_tabs.sections]]
+  name = "Imagery"
+  tools = ["csrv:georeferencer", "csrv:orthophoto_manager", "csrv:point_cloud_viewer"]
+
+[[submode_tabs]]
+submode = "surveying-geospatial"
+id = "survey-mastery"
+name = "Deliverables & Mastery"
+color = "#f472b6"
+  [[submode_tabs.sections]]
+  name = "Plats & Plans"
+  tools = ["csrv:plat_composer", "csrv:title_sheet_builder", "csrv:record_drawing"]
+  [[submode_tabs.sections]]
+  name = "Adjustment"
+  tools = ["csrv:control_network_adjuster", "csrv:least_squares_report", "csrv:accuracy_reporter"]
+  [[submode_tabs.sections]]
+  name = "Licensure"
+  tools = ["csrv:ls_exam_prep", "csrv:standards_reference"]
+
+[[submode_tabs]]
+submode = "utility"
+id = "survey"
+name = "Survey"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Site"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "utility"
+id = "utility-design"
+name = "Network Design"
+color = "#eab308"
+  [[submode_tabs.sections]]
+  name = "Corridors & Profiles"
+  tools = ["cutl:corridor_planner", "cutl:profile_designer", "cutl:crossing_designer", "cutl:subsurface_utility_mapper"]
+  [[submode_tabs.sections]]
+  name = "Sizing"
+  tools = ["cutl:conduit_sizer", "cutl:water_main_sizer", "cutl:load_estimator"]
+  [[submode_tabs.sections]]
+  name = "Materials"
+  tools = ["cutl:material_selector", "cutl:trench_detailer", "cutl:thrust_block_calc"]
+
+[[submode_tabs]]
+submode = "utility"
+id = "utility-coordination"
+name = "Coordination"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Conflict Resolution"
+  tools = ["cutl:clash_detector", "cutl:utility_matrix", "cutl:test_hole_log"]
+  [[submode_tabs.sections]]
+  name = "Relocation"
+  tools = ["cutl:relocation_scheduler", "cutl:agreement_tracker", "cutl:cost_share_calc"]
+  [[submode_tabs.sections]]
+  name = "Damage Prevention"
+  tools = ["cutl:one_call_tracker", "cutl:locate_manager", "cutl:strike_reporter"]
+
+[[submode_tabs]]
+submode = "utility"
+id = "utility-mastery"
+name = "Records & Mastery"
+color = "#94a3b8"
+  [[submode_tabs.sections]]
+  name = "As-Builts"
+  tools = ["cutl:asbuilt_manager", "cutl:gis_sync", "cutl:record_verifier"]
+  [[submode_tabs.sections]]
+  name = "Asset Management"
+  tools = ["cutl:asset_registry", "cutl:condition_assessor", "cutl:renewal_planner"]
+  [[submode_tabs.sections]]
+  name = "Portfolio"
+  tools = ["cutl:project_gallery", "cutl:standards_reference"]
+
+[[submode_tabs]]
+submode = "coastal-ocean"
+id = "survey"
+name = "Survey"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Site"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "coastal-ocean"
+id = "coastal-processes"
+name = "Coastal Processes"
+color = "#22d3ee"
+  [[submode_tabs.sections]]
+  name = "Waves"
+  tools = ["ccst:wave_transformer", "ccst:runup_calculator", "ccst:spectra_analyzer", "ccst:wave_gauge_network"]
+  [[submode_tabs.sections]]
+  name = "Sediment"
+  tools = ["ccst:sediment_budget", "ccst:transport_model", "ccst:shoreline_change"]
+  [[submode_tabs.sections]]
+  name = "Water Levels"
+  tools = ["ccst:tide_surge_model", "ccst:datum_converter", "ccst:extreme_levels"]
+
+[[submode_tabs]]
+submode = "coastal-ocean"
+id = "coastal-structures"
+name = "Protection & Structures"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Shore Protection"
+  tools = ["ccst:revetment_designer", "ccst:armor_sizer", "ccst:overtopping_calc"]
+  [[submode_tabs.sections]]
+  name = "Harbor Works"
+  tools = ["ccst:breakwater_planner", "ccst:marina_layout", "ccst:navigation_channel"]
+  [[submode_tabs.sections]]
+  name = "Soft Solutions"
+  tools = ["ccst:beach_nourishment_calc", "ccst:dune_designer", "ccst:living_shoreline"]
+
+[[submode_tabs]]
+submode = "coastal-ocean"
+id = "coastal-mastery"
+name = "Resilience & Mastery"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Forecasting"
+  tools = ["ccst:erosion_forecaster", "ccst:storm_impact_model", "ccst:monitoring_network"]
+  [[submode_tabs.sections]]
+  name = "Adaptation"
+  tools = ["ccst:sea_level_planner", "ccst:vulnerability_index", "ccst:adaptation_pathways"]
+  [[submode_tabs.sections]]
+  name = "Portfolio"
+  tools = ["ccst:project_gallery", "ccst:coastal_exam_prep"]

@@ -54,6 +54,8 @@ pub mod keybindings;
 pub mod editor_settings;
 pub mod studio_theme;
 pub mod studio_modes;
+pub mod tool_metadata;
+pub mod usage_telemetry;
 pub mod undo;
 pub mod camera_controller;
 // Off-screen AI camera (marker/state/plugin). Also declared in main.rs; mirror
@@ -215,6 +217,9 @@ pub mod engine_bridge;
 pub mod history_stream;
 pub mod light_sync;
 pub mod photoreal;
+// Free-camera Space↔Space teleport, driven by `[attributes]` on ordinary
+// instances — no new class, no revival of the dead `scene::PortalData`.
+pub mod portal;
 pub mod soul_script_migration;
 
 // SimWriterResource must live in the lib so scenarios/plugin.rs and viga/pipeline.rs

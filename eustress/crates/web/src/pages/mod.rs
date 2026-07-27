@@ -10,6 +10,7 @@
 pub mod about;
 pub mod acts;
 pub mod admin;
+pub mod admin_telemetry;
 pub mod ai;
 pub mod bliss;
 pub mod bliss_leaderboard;

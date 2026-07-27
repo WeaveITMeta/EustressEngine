@@ -3057,6 +3057,164 @@ pub fn apply_splat_colliders(
     }
 }
 
+/// Re-spawn imported GaussianSplats on Space open — closes the DB-primary
+/// persistence gap for splat clouds.
+///
+/// A DB-primary Space cold-loads its instances from binary cores in the Fjall
+/// `entities` partition. GaussianSplats are file-natured (their
+/// `[gaussian_splats]` path can't survive the core's bincode round-trip — the
+/// `#[serde(flatten)] extra` fails to serialise), so they get NO core, and the
+/// `FjallSource` file walk doesn't re-materialise their disk folders either.
+/// Net effect the user hit: an imported splat renders the session it was
+/// imported (the file-watcher's hot-create path) but VANISHES on every later
+/// launch — "3DGS fail to load unless you launch it from here".
+///
+/// This system re-spawns them, once per Space open, WITHOUT disturbing the
+/// delicate DB load order: after the file loader has registered the
+/// `Workspace` service root, it walks the DISK `Workspace` tree for
+/// GaussianSplats `_instance.toml` folders and spawns any not already live —
+/// through the exact same [`spawn_instance`] funnel the watcher uses, so the
+/// cloud (and, downstream, the [`apply_splat_colliders`] collider) attach
+/// identically. The [`super::file_loader::SpaceFileRegistry::is_loaded`] guard
+/// makes it idempotent and prevents a double-spawn if any other path did
+/// materialise the folder. The `.ply` is read straight off disk, so it works
+/// for pre-existing imports with no schema migration.
+#[cfg(feature = "gaussian-splatting")]
+pub fn load_disk_gaussian_splats_on_open(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut material_registry: ResMut<super::material_loader::MaterialRegistry>,
+    mut mesh_cache: ResMut<PrimitiveMeshCache>,
+    mut decal_materials: ResMut<Assets<ForwardDecalMaterial<StandardMaterial>>>,
+    mut registry: ResMut<super::file_loader::SpaceFileRegistry>,
+    space_root: Res<super::SpaceRoot>,
+    mut last_space: Local<Option<PathBuf>>,
+) {
+    // Run once per genuine Space open (mirrors the binary boot-load latch).
+    if last_space.as_deref() == Some(space_root.0.as_path()) {
+        return;
+    }
+    let workspace = space_root.0.join("Workspace");
+    // Gate ONLY on the Space's Workspace existing on disk — skips the pre-load
+    // default SpaceRoot without depending on the file loader's service
+    // registration (which keys differently in DB-primary mode, so an earlier
+    // service-entity gate never fired). We read disk directly, so DB/loader
+    // ordering is irrelevant; the `is_loaded` guard below still prevents any
+    // double-spawn.
+    if !workspace.is_dir() {
+        return;
+    }
+    *last_space = Some(space_root.0.clone());
+
+    // Best-effort parent: the Workspace service entity if the file loader has
+    // registered it (by `_service.toml` path or by directory path); else spawn
+    // at the root — `tag_splats_for_explorer` still nests the cloud under
+    // Workspace in the Explorer, and rendering needs no parent.
+    let workspace_entity = registry
+        .get_entity(&workspace.join("_service.toml"))
+        .or_else(|| registry.get_entity(&workspace));
+
+    // Walk the DISK Workspace (GaussianSplats are disk-authoritative). A cheap
+    // substring pre-filter avoids full-parsing every non-splat instance.
+    let mut stack = vec![workspace];
+    let mut found_toml = 0usize;
+    let mut found_gs = 0usize;
+    let mut replaced = 0usize;
+    let mut spawned = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(read_dir) = std::fs::read_dir(&dir) else { continue; };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Skip `.eustress` (trash + world.fjalldb) — only the human tree.
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !name.starts_with('.') {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if path.file_name().and_then(|n| n.to_str()) != Some("_instance.toml") {
+                continue;
+            }
+            found_toml += 1;
+            let Ok(content) = std::fs::read_to_string(&path) else { continue; };
+            // Only GaussianSplats carry a `[gaussian_splats]` section.
+            if !content.contains("gaussian_splats") {
+                continue;
+            }
+            found_gs += 1;
+            // In DB-primary mode the file loader DOES spawn this GS folder — but
+            // WITHOUT a cloud: the `[gaussian_splats]` section is lost through the
+            // Fjall core/tree, and the folder-spawn never re-reads it from disk
+            // (confirmed at runtime — the entity is registered, yet no cloud or
+            // collider attaches and nothing renders). Despawn that cloudless husk,
+            // if present, then re-spawn a COMPLETE instance straight from disk
+            // below — which routes through `spawn_instance`'s GaussianSplats arm
+            // and attaches the real radiance-field cloud + collider.
+            if let Some(old) = registry.get_entity(&path) {
+                commands.entity(old).despawn();
+                replaced += 1;
+            }
+            match spawn_instance_from_toml_str(
+                &mut commands,
+                &asset_server,
+                &mut materials,
+                &mut material_registry,
+                &mut mesh_cache,
+                &mut decal_materials,
+                path.clone(),
+                &content,
+            ) {
+                Ok(entity) => {
+                    // Mirror the watcher's post-spawn bookkeeping so the Explorer
+                    // classifies the entity and disk move/delete keep working.
+                    commands.entity(entity).insert(super::file_loader::LoadedFromFile {
+                        path: path.clone(),
+                        file_type: super::file_loader::FileType::Toml,
+                        service: "Workspace".to_string(),
+                    });
+                    // Best-effort parent (see above). No parent → still renders +
+                    // Explorer-nests via `tag_splats_for_explorer`.
+                    if let Some(pe) = workspace_entity {
+                        commands.entity(entity).insert(ChildOf(pe));
+                    }
+                    let name = path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("SplatCloud")
+                        .to_string();
+                    registry.register(
+                        path.clone(),
+                        entity,
+                        super::file_loader::FileMetadata {
+                            path: path.clone(),
+                            file_type: super::file_loader::FileType::Toml,
+                            service: "Workspace".to_string(),
+                            name,
+                            size: 0,
+                            modified: std::time::SystemTime::now(),
+                            children: Vec::new(),
+                        },
+                    );
+                    spawned += 1;
+                    info!("🌫️ GS persistence: re-spawned disk GaussianSplats on open: {:?}", path);
+                }
+                Err(e) => {
+                    warn!("GS persistence: failed to re-spawn disk GaussianSplats {:?}: {}", path, e);
+                }
+            }
+        }
+    }
+    // One-shot scan summary (always, even at zero) — the definitive diagnostic
+    // of what the open-time GS pass saw.
+    info!(
+        "🌫️ GS persistence scan: {} _instance.toml, {} gaussian_splats, {} cloudless-replaced, {} spawned (parent={:?})",
+        found_toml, found_gs, replaced, spawned, workspace_entity
+    );
+}
+
 /// Attach the data-only ParticleEmitter / Beam component from the
 /// importer `[particle]` / `[beam]` section. These classes have no
 /// `[asset]`, so they hit the no-mesh branch and read from the flattened

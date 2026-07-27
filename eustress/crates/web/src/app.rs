@@ -19,6 +19,7 @@ use crate::pages::{
     about::AboutPage,
     acts::ActsPage,
     admin::AdminPage,
+    admin_telemetry::AdminTelemetryPage,
     ai::AiPage,
     home::HomePage,
     login::LoginPage,
@@ -245,6 +246,7 @@ pub fn App() -> impl IntoView {
 
                 // Admin-only (server-side gated by requireAdmin)
                 <Route path=path!("/admin") view=AdminPage />
+                <Route path=path!("/admin/telemetry") view=AdminTelemetryPage />
 
                 // Info pages
                 <Route path=path!("/license") view=LicensePage />

@@ -5,6 +5,8 @@
 id = "health"
 name = "Health"
 icon = "health"
+# Mode-selection-menu color - Roblox BrickColor Pink (1016) - closest bright pink.
+color = "#FF66CC"
 version = "1.0"
 author = "Eustress"
 
@@ -15,7 +17,42 @@ tabs = ["home", "data", "test"]
 preset = "Wide Panels"
 
 [theme]
-accent = "#3ce0b0"
+# Matches [mode].color so the selection ring/active-tool tint reads Pink too,
+# not just the dropdown/header identity color.
+accent = "#FF66CC"
+
+# Health itself is NOT directly selectable in the Modes dropdown (see
+# ribbon.slint's mode-row-touch handler: any mode with submodes only expands
+# its submenu) — a discipline must be chosen.
+[[submodes]]
+id = "clinical"
+name = "Clinical"
+icon = "heart-pulse"
+
+[[submodes]]
+id = "public-health"
+name = "Public Health"
+icon = "globe"
+
+[[submodes]]
+id = "biomedical"
+name = "Biomedical"
+icon = "microscope"
+
+[[submodes]]
+id = "nursing"
+name = "Nursing"
+icon = "checklist"
+
+[[submodes]]
+id = "pharmacy"
+name = "Pharmacy"
+icon = "pill"
+
+[[submodes]]
+id = "allied-health"
+name = "Allied Health"
+icon = "users"
 
 [[tabs]]
 id = "patients"
@@ -24,7 +61,7 @@ color = "#3ce0b0"
 
   [[tabs.sections]]
   name = "Records"
-  tools = []
+  tools = ["hlth:patient_chart", "hlth:medical_history", "hlth:problem_list"]
 
   [[tabs.sections]]
   name = "Intake"
@@ -38,3 +75,405 @@ color = "#ff5470"
   [[tabs.sections]]
   name = "Monitoring"
   tools = ["data:chart", "data:timeline", "data:record"]
+
+# ── Per-discipline submode_tabs — Patients and Vitals are universal (every
+# discipline touches patient records/vitals data in some form), so both
+# carry forward verbatim into every discipline's block, plus one new
+# discipline-specific tab. `tools = []` throughout except where a section's
+# purpose genuinely matches an already-wired action. ───────────────────────
+
+[[submode_tabs]]
+submode = "clinical"
+id = "patients"
+name = "Patients"
+color = "#3ce0b0"
+  [[submode_tabs.sections]]
+  name = "Records"
+  tools = ["hlth:patient_chart", "hlth:medical_history", "hlth:problem_list"]
+  [[submode_tabs.sections]]
+  name = "Intake"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "clinical"
+id = "vitals"
+name = "Vitals"
+color = "#ff5470"
+  [[submode_tabs.sections]]
+  name = "Monitoring"
+  tools = ["data:chart", "data:timeline", "data:record"]
+
+[[submode_tabs]]
+submode = "clinical"
+id = "clinical-fundamentals"
+name = "Clinical Fundamentals"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Differential Diagnosis"
+  tools = ["clin:differential_builder", "clin:symptom_analyzer", "clin:diagnostic_criteria_lookup", "clin:clinical_calculators", "clin:red_flag_screener"]
+  [[submode_tabs.sections]]
+  name = "Care Plan Design"
+  tools = ["clin:care_plan_builder", "clin:problem_list_manager", "clin:goal_tracker"]
+  [[submode_tabs.sections]]
+  name = "Evidence & Guidelines"
+  tools = ["clin:guideline_lookup", "clin:evidence_grading", "clin:clinical_pathway_viewer"]
+
+[[submode_tabs]]
+submode = "clinical"
+id = "clinical-workflow"
+name = "Patient Encounters"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Documentation"
+  tools = ["clin:soap_note", "clin:history_and_physical", "clin:progress_note"]
+  [[submode_tabs.sections]]
+  name = "Orders & Procedures"
+  tools = ["clin:order_entry", "clin:procedure_checklist", "clin:consent_form"]
+  [[submode_tabs.sections]]
+  name = "Referrals & Coordination"
+  tools = ["clin:referral_builder", "clin:consult_request", "clin:care_coordination_board"]
+
+[[submode_tabs]]
+submode = "clinical"
+id = "clinical-mastery"
+name = "Case Mastery"
+color = "#2dd4bf"
+  [[submode_tabs.sections]]
+  name = "Case Review"
+  tools = ["clin:case_presentation", "clin:morbidity_mortality_review", "clin:peer_case_review"]
+  [[submode_tabs.sections]]
+  name = "Quality & Outcomes"
+  tools = ["clin:outcome_tracker", "clin:quality_metrics_dashboard", "clin:complication_audit"]
+  [[submode_tabs.sections]]
+  name = "Board Prep & Competency"
+  tools = ["clin:board_review_qbank", "clin:osce_simulator"]
+
+[[submode_tabs]]
+submode = "public-health"
+id = "patients"
+name = "Patients"
+color = "#3ce0b0"
+  [[submode_tabs.sections]]
+  name = "Records"
+  tools = ["hlth:patient_chart", "hlth:medical_history", "hlth:problem_list"]
+  [[submode_tabs.sections]]
+  name = "Intake"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "public-health"
+id = "vitals"
+name = "Vitals"
+color = "#ff5470"
+  [[submode_tabs.sections]]
+  name = "Monitoring"
+  tools = ["data:chart", "data:timeline", "data:record"]
+
+[[submode_tabs]]
+submode = "public-health"
+id = "public-health-fundamentals"
+name = "Public Health Fundamentals"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Epidemiologic Measures"
+  tools = ["ph:incidence_calculator", "ph:prevalence_calculator", "ph:attack_rate_calculator", "ph:vaccination_coverage_map"]
+  [[submode_tabs.sections]]
+  name = "Transmission Dynamics"
+  tools = ["ph:sir_model_builder", "ph:r_naught_estimator", "ph:transmission_chain_mapper"]
+  [[submode_tabs.sections]]
+  name = "Population Health Statistics"
+  tools = ["data:stats", "ph:life_table_builder", "ph:health_disparity_index"]
+
+[[submode_tabs]]
+submode = "public-health"
+id = "public-health-surveillance"
+name = "Surveillance & Field Practice"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Case Investigation"
+  tools = ["ph:case_report_form", "data:record", "ph:contact_tracing_tracker"]
+  [[submode_tabs.sections]]
+  name = "Surveillance Systems"
+  tools = ["data:import", "data:connect", "ph:syndromic_surveillance_feed"]
+  [[submode_tabs.sections]]
+  name = "Outbreak Response"
+  tools = ["data:anomaly", "ph:line_list_builder", "ph:outbreak_investigation_kit"]
+
+[[submode_tabs]]
+submode = "public-health"
+id = "public-health-mastery"
+name = "Program Evaluation & Mastery"
+color = "#f97316"
+  [[submode_tabs.sections]]
+  name = "Spatial Epidemiology"
+  tools = ["data:cluster", "ph:disease_hotspot_mapper", "ph:gis_choropleth_builder"]
+  [[submode_tabs.sections]]
+  name = "Program Evaluation"
+  tools = ["ph:intervention_impact_model", "data:fit", "ph:cost_effectiveness_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Risk Communication & Policy"
+  tools = ["ph:risk_communication_planner", "ph:policy_brief_generator"]
+
+[[submode_tabs]]
+submode = "biomedical"
+id = "patients"
+name = "Patients"
+color = "#3ce0b0"
+  [[submode_tabs.sections]]
+  name = "Records"
+  tools = ["hlth:patient_chart", "hlth:medical_history", "hlth:problem_list"]
+  [[submode_tabs.sections]]
+  name = "Intake"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "biomedical"
+id = "vitals"
+name = "Vitals"
+color = "#ff5470"
+  [[submode_tabs.sections]]
+  name = "Monitoring"
+  tools = ["data:chart", "data:timeline", "data:record"]
+
+[[submode_tabs]]
+submode = "biomedical"
+id = "biomedical-fundamentals"
+name = "Biomedical Fundamentals"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Study Design & Biostatistics"
+  tools = ["bmed:study_design_wizard", "bmed:sample_size_calculator", "data:stats", "bmed:signal_filter_designer"]
+  [[submode_tabs.sections]]
+  name = "Anatomy & Physiology Reference"
+  tools = ["bmed:anatomy_atlas", "bmed:physiological_systems_map", "bmed:biomechanics_reference"]
+  [[submode_tabs.sections]]
+  name = "Regulatory Literacy & Risk Classification"
+  tools = ["bmed:device_classification_guide", "bmed:fda_pathway_selector", "bmed:iso14971_risk_primer"]
+
+[[submode_tabs]]
+submode = "biomedical"
+id = "biomedical-device-design"
+name = "Device Design & Instrumentation"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Signal Acquisition & Processing"
+  tools = ["bmed:sensor_calibrator", "data:import", "data:fft"]
+  [[submode_tabs.sections]]
+  name = "Device Prototyping"
+  tools = ["insert:cad_plate", "insert:cad_cylinder", "insert:cad_lbracket"]
+  [[submode_tabs.sections]]
+  name = "Design Controls & Documentation"
+  tools = ["bmed:design_history_file", "bmed:requirements_traceability_matrix", "bmed:verification_protocol_builder"]
+
+[[submode_tabs]]
+submode = "biomedical"
+id = "biomedical-regulatory-mastery"
+name = "Regulatory & Clinical Mastery"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Clinical Data Analytics"
+  tools = ["data:cluster", "data:anomaly", "bmed:biosignal_classifier"]
+  [[submode_tabs.sections]]
+  name = "Regulatory Submission & Quality Systems"
+  tools = ["bmed:510k_predicate_finder", "bmed:capa_tracker", "bmed:audit_readiness_checklist"]
+  [[submode_tabs.sections]]
+  name = "Reliability & Risk Assessment"
+  tools = ["bmed:fmea_builder", "bmed:fault_tree_analyzer"]
+
+[[submode_tabs]]
+submode = "nursing"
+id = "patients"
+name = "Patients"
+color = "#3ce0b0"
+  [[submode_tabs.sections]]
+  name = "Records"
+  tools = ["hlth:patient_chart", "hlth:medical_history", "hlth:problem_list"]
+  [[submode_tabs.sections]]
+  name = "Intake"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "nursing"
+id = "vitals"
+name = "Vitals"
+color = "#ff5470"
+  [[submode_tabs.sections]]
+  name = "Monitoring"
+  tools = ["data:chart", "data:timeline", "data:record"]
+
+[[submode_tabs]]
+submode = "nursing"
+id = "nursing-fundamentals"
+name = "Nursing Fundamentals"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Assessment & Care Planning"
+  tools = ["nurs:head_to_toe_assessment", "nurs:nursing_diagnosis_builder", "nurs:care_plan_template", "nurs:braden_scale", "nurs:pain_assessment"]
+  [[submode_tabs.sections]]
+  name = "Pharmacology Basics"
+  tools = ["nurs:drug_classification_reference", "nurs:dosage_calculator", "nurs:med_interaction_checker"]
+  [[submode_tabs.sections]]
+  name = "Pathophysiology & Clinical Reasoning"
+  tools = ["nurs:lab_value_interpreter", "nurs:clinical_judgment_model"]
+
+[[submode_tabs]]
+submode = "nursing"
+id = "nursing-clinical-practice"
+name = "Clinical Practice"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Medication Administration"
+  tools = ["nurs:emar_scanner", "nurs:five_rights_checklist", "nurs:med_pass_scheduler"]
+  [[submode_tabs.sections]]
+  name = "Shift Handoff"
+  tools = ["nurs:sbar_report", "nurs:handoff_checklist", "nurs:isbar_note"]
+  [[submode_tabs.sections]]
+  name = "Bedside Care"
+  tools = ["nurs:vitals_flowsheet", "nurs:wound_care_tracker", "nurs:iv_therapy_log"]
+
+[[submode_tabs]]
+submode = "nursing"
+id = "nursing-advanced-mastery"
+name = "Advanced Practice & Mastery"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Critical Care & Rapid Response"
+  tools = ["nurs:early_warning_score", "nurs:code_response_simulator", "nurs:triage_acuity_tool"]
+  [[submode_tabs.sections]]
+  name = "Quality & Patient Safety"
+  tools = ["nurs:fall_risk_screener", "nurs:incident_report_builder", "nurs:pressure_injury_stager"]
+  [[submode_tabs.sections]]
+  name = "Competency & Certification"
+  tools = ["nurs:skills_checkoff_tracker", "nurs:case_study_simulator"]
+
+[[submode_tabs]]
+submode = "pharmacy"
+id = "patients"
+name = "Patients"
+color = "#3ce0b0"
+  [[submode_tabs.sections]]
+  name = "Records"
+  tools = ["hlth:patient_chart", "hlth:medical_history", "hlth:problem_list"]
+  [[submode_tabs.sections]]
+  name = "Intake"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "pharmacy"
+id = "vitals"
+name = "Vitals"
+color = "#ff5470"
+  [[submode_tabs.sections]]
+  name = "Monitoring"
+  tools = ["data:chart", "data:timeline", "data:record"]
+
+[[submode_tabs]]
+submode = "pharmacy"
+id = "pharmacy-fundamentals"
+name = "Pharmacology Fundamentals"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Pharmacokinetics & Pharmacodynamics"
+  tools = ["rx:pk_curve_plotter", "rx:dose_response_curve", "rx:half_life_calculator", "rx:creatinine_clearance"]
+  [[submode_tabs.sections]]
+  name = "Drug Classification & MOA"
+  tools = ["rx:drug_class_browser", "rx:moa_diagram", "rx:receptor_binding_model"]
+  [[submode_tabs.sections]]
+  name = "Chemistry & Formulation Science"
+  tools = ["rx:molecular_structure_viewer", "rx:bioavailability_estimator", "rx:solubility_profile"]
+
+[[submode_tabs]]
+submode = "pharmacy"
+id = "pharmacy-dispensing"
+name = "Dispensing Workflow"
+color = "#2dd4bf"
+  [[submode_tabs.sections]]
+  name = "Prescription Processing"
+  tools = ["rx:rx_intake_queue", "rx:sig_translator", "rx:refill_authorization"]
+  [[submode_tabs.sections]]
+  name = "Compounding & Sterile Prep"
+  tools = ["rx:compounding_calculator", "rx:sterile_prep_checklist", "rx:beyond_use_dating"]
+  [[submode_tabs.sections]]
+  name = "Formulary & Inventory"
+  tools = ["rx:formulary_lookup", "rx:therapeutic_interchange", "rx:inventory_tracker"]
+
+[[submode_tabs]]
+submode = "pharmacy"
+id = "pharmacy-clinical-mastery"
+name = "Clinical Safety & Mastery"
+color = "#fb7185"
+  [[submode_tabs.sections]]
+  name = "Drug Interaction & Safety Screening"
+  tools = ["rx:interaction_checker", "rx:allergy_cross_check", "rx:black_box_alert"]
+  [[submode_tabs.sections]]
+  name = "Medication Therapy Management"
+  tools = ["rx:mtm_review", "rx:renal_dose_adjuster", "rx:polypharmacy_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Quality Assurance & Assessment"
+  tools = ["rx:med_error_analyzer", "rx:adverse_event_reporter"]
+
+[[submode_tabs]]
+submode = "allied-health"
+id = "patients"
+name = "Patients"
+color = "#3ce0b0"
+  [[submode_tabs.sections]]
+  name = "Records"
+  tools = ["hlth:patient_chart", "hlth:medical_history", "hlth:problem_list"]
+  [[submode_tabs.sections]]
+  name = "Intake"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "allied-health"
+id = "vitals"
+name = "Vitals"
+color = "#ff5470"
+  [[submode_tabs.sections]]
+  name = "Monitoring"
+  tools = ["data:chart", "data:timeline", "data:record"]
+
+[[submode_tabs]]
+submode = "allied-health"
+id = "allied-health-fundamentals"
+name = "Allied Health Fundamentals"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Anatomy & Kinesiology"
+  tools = ["ah:musculoskeletal_atlas", "ah:range_of_motion_chart", "ah:gait_cycle_viewer", "ah:balance_assessment"]
+  [[submode_tabs.sections]]
+  name = "Assessment Frameworks"
+  tools = ["ah:icf_framework_mapper", "ah:functional_capacity_index", "ah:outcome_measure_library"]
+  [[submode_tabs.sections]]
+  name = "Clinical Reasoning"
+  tools = ["ah:differential_screening", "ah:red_flag_checklist", "ah:evidence_lookup"]
+
+[[submode_tabs]]
+submode = "allied-health"
+id = "allied-health-practice"
+name = "Therapy & Rehab Practice"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Patient Intake"
+  tools = ["data:record", "data:import", "ah:intake_form_builder"]
+  [[submode_tabs.sections]]
+  name = "Treatment Planning"
+  tools = ["ah:plan_of_care_builder", "ah:exercise_prescription", "ah:goal_tracker"]
+  [[submode_tabs.sections]]
+  name = "Session Documentation"
+  tools = ["ah:soap_note_composer", "data:chart", "ah:home_exercise_handout"]
+
+[[submode_tabs]]
+submode = "allied-health"
+id = "allied-health-outcomes"
+name = "Outcomes & Care Coordination"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Outcome Measures & Analytics"
+  tools = ["data:stats", "ah:outcome_score_trend", "ah:discharge_readiness_index"]
+  [[submode_tabs.sections]]
+  name = "Referral & Care Coordination"
+  tools = ["data:connect", "ah:referral_router", "ah:interdisciplinary_case_conference"]
+  [[submode_tabs.sections]]
+  name = "Quality & Case Review"
+  tools = ["ah:peer_case_review", "ah:caseload_dashboard", "data:anomaly"]

@@ -70,6 +70,8 @@ export component SettingsDialog inherits Rectangle {
 
     // Notifications settings (wired to Bevy NotificationSettings resource)
     in-out property <bool> notifications-enabled: true;
+    // Privacy — anonymous ribbon-tool usage counting (see usage_telemetry.rs).
+    in-out property <bool> usage-telemetry-enabled: true;
     in-out property <bool> notifications-show-dismiss: true;
     in-out property <bool> notifications-mute-file: false;
     in-out property <bool> notifications-mute-script: false;
@@ -831,6 +833,20 @@ export component SettingsDialog inherits Rectangle {
                             text: "Show dismiss (X) button on toasts";
                             checked <=> root.notifications-show-dismiss;
                             toggled => { root.on-notifications-changed(); }
+                        }
+
+                        Rectangle { height: 8px; }
+                        SettingsSection { title: "PRIVACY"; }
+                        CheckBox {
+                            text: "Send anonymous usage statistics";
+                            checked <=> root.usage-telemetry-enabled;
+                            toggled => { root.on-notifications-changed(); }
+                        }
+                        Text {
+                            text: "Counts which tools you click so we build the most-wanted ones first. Never your scene content, files, or personal data.";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            wrap: word-wrap;
                         }
 
                         Rectangle { height: 8px; }

@@ -453,13 +453,21 @@ p {
 }
 
 /* Loading */
-.loading-container {
+.loading-container,
+.loading-state {
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     padding: var(--space-2xl);
     gap: var(--space-md);
+}
+
+/* Give the async states real vertical presence so a spinner mid-page doesn't
+   read as a stray dot in the corner. Used by /admin, /admin/telemetry, /dashboard. */
+.loading-state {
+    min-height: 320px;
+    text-align: center;
 }
 
 .spinner {
@@ -20946,4 +20954,426 @@ a.experience-card {
     .legal-content,
     .legal-content a,
     .legal-content p { overflow-wrap: anywhere; }
+}
+
+/* Mobile nav: hamburger to the LEFT of the gear + wordmark.
+   The base nav is a 3-col grid; on mobile only the logo + hamburger show, so
+   switch to a left-aligned flex row and order the hamburger first. */
+@media (max-width: 768px) {
+    .central-nav {
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+        gap: var(--space-sm);
+    }
+    .central-nav .hamburger-btn { order: -1; margin-left: -6px; }
+    .central-nav .nav-logo { order: 0; }
+}
+
+/* When the drawer is open, hide the hamburger button (which otherwise
+   animates into a second X). The drawer's own .drawer-close (top-right) is
+   the single close control. */
+.hamburger-btn.is-open { display: none !important; }
+
+/* ==========================================================================
+   LEARN + DOCS — mobile width usage
+   On phones three paddings STACKED per side: page shell (24px) + docs-layout
+   (24px) + section (48px) = ~96px, starving the readable column to ~50% of the
+   screen (a ~200px text column on a 393px phone). Collapse to ONE ~16px edge
+   gutter so content fills the width. Covers all 18 learn routes: the /learn
+   hub, /learn/{ide,mcp,lsp}, and every /docs/* page. Wide tables/code still
+   scroll (handled in the audit block above). Appended last so these win. */
+@media (max-width: 768px) {
+    /* Single small edge gutter on the page shell; nothing else adds horizontal
+       padding, so the readable column goes from ~50% to ~92% of the viewport. */
+    .page.page-docs,
+    .page.page-learn-industrial {
+        padding-left: var(--space-md);
+        padding-right: var(--space-md);
+    }
+
+    /* Kill the stacked layout + section padding on every learn/docs container. */
+    .page-docs .docs-layout,
+    .page-docs .docs-content { padding-left: 0; padding-right: 0; }
+
+    .page-docs .docs-section,
+    .page-learn-industrial .docs-section,
+    .page-learn-industrial .tutorials-section,
+    .page-learn-industrial .resources-section,
+    .page-learn-industrial .mindspace-feature {
+        padding-left: 0;
+        padding-right: 0;
+    }
+
+    /* Inner blocks keep a comfortable pad but no longer double-inset the text. */
+    .page-docs .docs-hero {
+        padding-left: var(--space-md);
+        padding-right: var(--space-md);
+    }
+    .mindspace-card { padding: var(--space-lg); }
+    .mindspace-content { min-width: 0; }
+
+    /* Long words / titles wrap instead of clipping on the right. */
+    .mindspace-content h2,
+    .mindspace-content p,
+    .mindspace-title,
+    .mindspace-tagline,
+    .mindspace-features li { overflow-wrap: break-word; }
+}
+
+
+/* ── Admin tool-telemetry (/admin/telemetry) ──────────────────────────────
+   Reading order the page is tuned for: how much demand exists (stat row) →
+   what people asked for most recently (feed) → what to build next (queue) →
+   where any single button lives (tree). Depth in the tree is carried by
+   indentation + a guide rail, never by font size alone. */
+
+.page-admin-telemetry .admin-wrap { display: flex; flex-direction: column; gap: var(--space-xl); }
+.tel-headline { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+
+/* Card chrome shared by every panel on the page. */
+.tel-panel {
+    background: rgba(255, 255, 255, 0.022);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius-lg);
+    padding: var(--space-lg);
+    margin-bottom: 0;
+    min-width: 0;
+}
+.tel-panel .section-header-industrial { margin-bottom: var(--space-sm); }
+.tel-panel-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-md); flex-wrap: wrap; }
+.tel-panel-sub {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    line-height: 1.5;
+    margin-bottom: var(--space-md);
+    max-width: 68ch;
+}
+.tel-breadcrumb {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    letter-spacing: 0.02em;
+}
+.tel-empty { color: var(--color-text-muted); font-size: var(--text-sm); line-height: 1.6; }
+
+/* Two-column split: the request feed earns the wider column. */
+.tel-split { display: grid; grid-template-columns: 1fr; gap: var(--space-lg); align-items: start; }
+@media (min-width: 1020px) {
+    .tel-split { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
+}
+.tel-side { display: flex; flex-direction: column; gap: var(--space-lg); min-width: 0; }
+
+/* ── Copy button ─────────────────────────────────────────────────────────── */
+.tel-copy {
+    flex: 0 0 auto;
+    font-family: var(--font-sans);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--color-text-secondary);
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.13);
+    border-radius: var(--radius-sm);
+    padding: 3px 9px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease, opacity 0.14s ease;
+}
+.tel-copy:hover { background: rgba(0, 188, 212, 0.16); border-color: #00bcd4; color: #7fe3f0; }
+.tel-copy-strong { background: rgba(0, 188, 212, 0.12); border-color: rgba(0, 188, 212, 0.45); color: #7fe3f0; }
+.tel-copy-done,
+.tel-copy-done:hover {
+    background: rgba(63, 185, 80, 0.18);
+    border-color: rgba(63, 185, 80, 0.6);
+    color: #6fd67f;
+}
+
+/* ── Recent request feed ─────────────────────────────────────────────────── */
+.tel-feed { display: flex; flex-direction: column; gap: 10px; max-height: 640px; overflow-y: auto; padding-right: 4px; }
+.tel-feed-item {
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-left: 3px solid rgba(255, 255, 255, 0.14);
+    border-radius: var(--radius-md);
+    padding: 10px 12px;
+}
+.tel-feed-comment { border-left-color: #00bcd4; background: rgba(0, 188, 212, 0.05); }
+.tel-feed-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tel-feed-kind {
+    font-size: 0.58rem;
+    font-weight: 800;
+    letter-spacing: 0.09em;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+.tel-feed-kind-said { color: #00bcd4; background: rgba(0, 188, 212, 0.14); border: 1px solid rgba(0, 188, 212, 0.4); }
+.tel-feed-kind-used { color: var(--color-text-muted); background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.12); }
+.tel-feed-title { font-weight: 650; font-size: var(--text-sm); color: var(--color-text-primary); min-width: 0; overflow-wrap: anywhere; }
+.tel-feed-count { font-weight: 400; color: var(--color-text-muted); }
+.tel-feed-time { margin-left: auto; font-size: var(--text-xs); color: var(--color-text-muted); white-space: nowrap; }
+.tel-feed-quote {
+    margin: 8px 0 6px;
+    padding-left: 10px;
+    border-left: 2px solid rgba(0, 188, 212, 0.35);
+    font-size: var(--text-sm);
+    line-height: 1.55;
+    color: var(--color-text-primary);
+    overflow-wrap: anywhere;
+}
+.tel-feed-sub { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: var(--text-xs); }
+.tel-path { color: var(--color-text-muted); overflow-wrap: anywhere; }
+
+.tel-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.tel-tool-chip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    font-family: var(--font-sans);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: var(--radius-full);
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: border-color 0.14s ease, color 0.14s ease;
+}
+.tel-tool-chip:hover { border-color: #00bcd4; color: #7fe3f0; }
+.tel-tool-chip-n { font-variant-numeric: tabular-nums; color: var(--color-text-muted); }
+.tel-more { font-size: var(--text-xs); color: var(--color-text-muted); align-self: center; }
+
+/* ── Sessions bars ───────────────────────────────────────────────────────── */
+.tel-bars { height: 120px; }
+.tel-bar-empty { background: rgba(255, 255, 255, 0.08); }
+.tel-axis {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    margin-top: 6px;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-variant-numeric: tabular-nums;
+}
+.tel-axis-peak { color: var(--color-text-secondary); }
+
+/* ── Wiring queue ────────────────────────────────────────────────────────── */
+.tel-queue { display: flex; flex-direction: column; }
+.tel-q-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 9px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.tel-q-row:last-child { border-bottom: 0; }
+.tel-q-rank {
+    flex: 0 0 auto;
+    width: 1.6em;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+}
+.tel-q-main { flex: 1 1 auto; min-width: 0; }
+.tel-q-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tel-q-label { font-weight: 600; font-size: var(--text-sm); color: var(--color-text-primary); overflow-wrap: anywhere; }
+.tel-q-meter { height: 3px; background: rgba(255, 255, 255, 0.07); border-radius: 2px; margin: 6px 0 4px; overflow: hidden; }
+.tel-q-meter-fill { height: 100%; background: linear-gradient(90deg, #00bcd4, #0d7f92); border-radius: 2px; }
+.tel-q-path { font-size: var(--text-xs); color: var(--color-text-muted); overflow-wrap: anywhere; }
+
+/* ── Tree controls ───────────────────────────────────────────────────────── */
+.tel-controls { display: flex; align-items: center; gap: var(--space-md); flex-wrap: wrap; margin-bottom: var(--space-md); }
+.tel-search {
+    flex: 1 1 260px;
+    min-width: 0;
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    color: var(--color-text-primary);
+    background: rgba(0, 0, 0, 0.28);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: var(--radius-md);
+    padding: 8px 12px;
+}
+.tel-search:focus { outline: none; border-color: #00bcd4; box-shadow: 0 0 0 3px rgba(0, 188, 212, 0.14); }
+.tel-search::placeholder { color: var(--color-text-muted); }
+.tel-toggle { display: inline-flex; align-items: center; gap: 7px; font-size: var(--text-sm); color: var(--color-text-secondary); cursor: pointer; white-space: nowrap; }
+.tel-toggle input { accent-color: #00bcd4; width: 15px; height: 15px; cursor: pointer; }
+.tel-btn-row { display: flex; gap: 6px; }
+.tel-ghost {
+    font-family: var(--font-sans);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.13);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: border-color 0.14s ease, color 0.14s ease;
+}
+.tel-ghost:hover { border-color: #00bcd4; color: #7fe3f0; }
+
+/* ── The tree ────────────────────────────────────────────────────────────── */
+.tel-hidden { display: none !important; }
+.tel-tree { display: flex; flex-direction: column; gap: 6px; }
+
+.tel-node { border-radius: var(--radius-md); }
+.tel-node > summary {
+    cursor: pointer;
+    padding: 8px 12px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    list-style: none;
+    border-radius: var(--radius-md);
+    transition: background 0.12s ease;
+}
+.tel-node > summary::-webkit-details-marker { display: none; }
+.tel-node > summary:hover { background: rgba(255, 255, 255, 0.045); }
+
+/* Disclosure caret — rotation is the only thing that moves. */
+.tel-caret {
+    flex: 0 0 auto;
+    width: 0;
+    height: 0;
+    border-left: 5px solid var(--color-text-muted);
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    transition: transform 0.15s ease;
+}
+.tel-node[open] > summary .tel-caret { transform: rotate(90deg); }
+
+/* Indentation + guide rail: one rail per level, so depth is unambiguous. */
+.tel-children {
+    margin-left: 17px;
+    padding-left: 15px;
+    border-left: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+/* Level 1 — mode. Its own brand colour rides the dot and the rail. */
+.tel-mode {
+    background: rgba(255, 255, 255, 0.022);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.tel-mode > summary { font-size: var(--text-base); font-weight: 700; }
+.tel-mode-dot {
+    flex: 0 0 auto;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--tel-accent, #8b949e);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--tel-accent, #8b949e) 22%, transparent);
+}
+.tel-mode-name { color: var(--color-text-primary); }
+.tel-mode > .tel-children { border-left-color: color-mix(in srgb, var(--tel-accent, #8b949e) 40%, transparent); margin: 0 12px 10px 22px; }
+.tel-node-note { font-size: var(--text-xs); color: var(--color-text-muted); font-weight: 400; }
+
+/* Level 2 — discipline. */
+.tel-discipline > summary { font-size: var(--text-sm); font-weight: 650; }
+.tel-disc-name { color: var(--color-text-primary); }
+.tel-discipline > .tel-children { margin-bottom: 6px; }
+
+/* Level 3 — tab. */
+.tel-tab > summary { font-size: var(--text-sm); font-weight: 550; color: var(--color-text-secondary); }
+.tel-tab-name { position: relative; padding-left: 9px; }
+.tel-tab-name::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 3px;
+    height: 11px;
+    border-radius: 2px;
+    background: var(--tel-tab-color, #8b949e);
+    opacity: 0.85;
+}
+
+/* Level 4 — section. */
+.tel-section { margin: 8px 0 12px; }
+.tel-section-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--color-text-muted);
+    margin-bottom: 4px;
+}
+.tel-section-count { font-variant-numeric: tabular-nums; color: var(--color-text-secondary); }
+.tel-tools { display: flex; flex-direction: column; }
+
+/* Level 5 — the button itself. */
+.tel-tool { padding: 2px 6px; border-radius: var(--radius-sm); }
+.tel-tool:hover { background: rgba(255, 255, 255, 0.04); }
+.tel-tool-line { display: flex; align-items: center; gap: 8px; font-size: var(--text-sm); min-height: 26px; }
+.tel-tool-zero { opacity: 0.62; }
+.tel-tool-zero:hover { opacity: 1; }
+.tel-tool-said { background: rgba(0, 188, 212, 0.05); }
+.tel-tool-label { font-weight: 500; color: var(--color-text-primary); overflow-wrap: anywhere; }
+.tel-tool-id { font-family: var(--font-mono); font-size: 0.72rem; color: var(--color-text-muted); overflow-wrap: anywhere; }
+.tel-last { font-size: var(--text-xs); color: var(--color-text-muted); white-space: nowrap; }
+
+/* The Copy button stays out of the way until the row is under the cursor —
+   except on rows that already carry demand, where it is the next action. */
+.tel-tool .tel-copy { opacity: 0; margin-left: 4px; }
+.tel-tool:hover .tel-copy,
+.tel-tool:focus-within .tel-copy,
+.tel-tool-said .tel-copy { opacity: 1; }
+
+.tel-chip {
+    flex: 0 0 auto;
+    font-size: 0.58rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+.tel-chip-wired { color: #3fb950; background: rgba(63, 185, 80, 0.12); border: 1px solid rgba(63, 185, 80, 0.4); }
+.tel-chip-dream { color: #d29922; background: rgba(210, 153, 34, 0.12); border: 1px solid rgba(210, 153, 34, 0.4); }
+
+.tel-cmt-badge {
+    font-size: var(--text-xs);
+    color: #7fe3f0;
+    background: rgba(0, 188, 212, 0.12);
+    border: 1px solid rgba(0, 188, 212, 0.35);
+    border-radius: var(--radius-full);
+    padding: 1px 8px;
+    white-space: nowrap;
+}
+
+.tel-count { margin-left: auto; display: inline-flex; gap: 7px; font-variant-numeric: tabular-nums; font-size: var(--text-xs); white-space: nowrap; }
+.tel-count-installs { color: var(--color-text-muted); }
+.tel-count-clicks { color: var(--color-text-secondary); font-weight: 600; }
+.tel-count-hot .tel-count-clicks,
+.tel-count-hot .tel-count-installs { color: #00bcd4; font-weight: 700; }
+.tel-count-zero { color: var(--color-text-muted); opacity: 0.55; }
+
+/* A written request rendered where it was written — under its own button. */
+.tel-tool-comment {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin: 2px 0 6px 44px;
+    padding: 6px 10px;
+    background: rgba(0, 188, 212, 0.07);
+    border-left: 2px solid rgba(0, 188, 212, 0.5);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    font-size: var(--text-xs);
+    line-height: 1.55;
+}
+.tel-quote-mark { color: #00bcd4; font-size: var(--text-base); line-height: 1; }
+.tel-quote-text { color: var(--color-text-primary); overflow-wrap: anywhere; }
+.tel-quote-meta { margin-left: auto; color: var(--color-text-muted); white-space: nowrap; }
+
+@media (max-width: 640px) {
+    .tel-children { margin-left: 10px; padding-left: 10px; }
+    .tel-mode > .tel-children { margin: 0 6px 8px 14px; }
+    .tel-tool-comment { margin-left: 12px; }
+    .tel-tool .tel-copy { opacity: 1; }
 }

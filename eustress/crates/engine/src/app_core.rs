@@ -66,13 +66,22 @@ pub fn register_asset_sources(app: &mut App, space_root: &Path) {
         ),
     );
 
-    // Bundled common assets (material textures, fonts, etc.)
-    let common_assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../common/assets");
-    info!("📦 Registering bundled asset source at: {:?}", common_assets);
-    app.register_asset_source(
-        "bundled",
-        bevy::asset::io::AssetSourceBuilder::platform_default(&common_assets.to_string_lossy(), None),
-    );
+    // Bundled common assets (material textures, fonts, character glTF, clips).
+    //
+    // Delegated to the avatar boot registrar rather than registered here:
+    // `AvatarRuntimePlugin` (pulled in by `PlayModeCorePlugin` below) asserts at
+    // startup that `register_avatar_asset_sources` ran, and registering
+    // `bundled://` twice panics inside Bevy — so the shell cannot both keep its
+    // own registration AND satisfy that assertion. The Client already boots this
+    // way (`crates/client/src/main.rs`), so this makes the two shells agree.
+    //
+    // Same directory either way in a dev build: this crate's
+    // `CARGO_MANIFEST_DIR/../common/assets` and the registrar's own
+    // `CARGO_MANIFEST_DIR/assets` (from `eustress-common`) both resolve to
+    // `crates/common/assets`. In a shipped build the registrar is strictly
+    // better — it prefers an exe-adjacent root and verifies the characters are
+    // actually in it instead of trusting a path that merely exists.
+    eustress_common::avatar::boot::register_avatar_asset_sources(app);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -133,6 +142,7 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
         // NotificationManager resource — always registered. The toast bridge
         // system inside this plugin is itself gated on `notifications`.
         .add_plugins(crate::notifications::NotificationPlugin)
+        .add_plugins(crate::usage_telemetry::UsageTelemetryPlugin)
         // Undo/Redo (must be before SlintUiPlugin, which uses UndoStack)
         .add_plugins(crate::undo::UndoPlugin)
         // Tees every UndoStack push onto the `history.<kind>` topic so
@@ -227,7 +237,11 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
         // Universe registry (periodic Universe→Space tree scan)
         .add_plugins(crate::space::UniverseRegistryPlugin)
         // Attribute + Tag migration (event-driven)
-        .add_plugins(crate::attribute_tag_migration::AttributeTagMigrationPlugin);
+        .add_plugins(crate::attribute_tag_migration::AttributeTagMigrationPlugin)
+        // Portals — free-camera Space↔Space teleport in Studio. Reads
+        // `portal_target` off any instance's `[attributes]`; inert when no
+        // instance carries one, so this costs a single query on other Spaces.
+        .add_plugins(crate::portal::PortalPlugin);
 
     // WorldDb — Fjall-backed authoritative ECS store. Opens
     // `<SpaceRoot>/world.fjalldb/` and persists runtime edits.

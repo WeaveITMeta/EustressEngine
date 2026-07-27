@@ -490,6 +490,54 @@ mod imp {
         removed_toml || removed_bin
     }
 
+    /// Purge a folder-form entity from EVERY Fjall store so a delete actually
+    /// STICKS in a migrated Space — the fix for the "I delete it, it comes
+    /// back next session / delete one CadBox and its twin resurrects it" bug.
+    ///
+    /// [`delete_path`] only drops the `tree` TOML + its `#bin` twin. But the
+    /// one-shot `migrate_identity` pass wrote FIVE records per TOML entity:
+    /// the two `tree` records PLUS a full uuid-keyed core in `entities_uuid`
+    /// and the `path_to_uuid` / `uuid_to_path` / `class_index` indices. A
+    /// reconcile / index-rebuild re-materializes the entity from ANY of those
+    /// survivors, so clearing only two of five never sticks. Mirror
+    /// [`delete_binary_instance`]'s uuid cleanup here, keyed on the UUID (the
+    /// unifying identity) — resolved from the entity's own hex, else the
+    /// `path_to_uuid` index. EXACT single-key deletes only, never a
+    /// Morton/prefix range, so a live sibling is never collaterally purged.
+    pub fn purge_path_all_stores(abs: &Path, uuid_hex: &str, class_name: &str) -> bool {
+        let Ok(g) = ACTIVE.read() else {
+            return false;
+        };
+        let Some(a) = g.as_ref() else {
+            return false;
+        };
+        let Some(rel) = rel_key(&a.root, abs) else {
+            return false;
+        };
+
+        // Tree partition + its binary twin (what `delete_path` already did).
+        let removed_toml = a.db.delete_file(&rel).is_ok();
+        let _ = a.db.delete_file(&format!("{rel}{BIN_SUFFIX}"));
+
+        // Resolve the UUID: the entity's own hex first, else the path index.
+        let uuid: Option<[u8; 16]> =
+            eustress_common::instance_create::uuid_hex_to_bytes(uuid_hex)
+                .filter(|b| *b != [0u8; 16])
+                .or_else(|| a.db.path_to_uuid(&rel).ok().flatten());
+
+        // Clear every uuid-keyed store `migrate_identity` populated. The
+        // `entities_uuid` core is THE resurrector; the indices are pointers.
+        if let Some(uuid) = uuid {
+            let _ = a.db.delete_entity_by_uuid(&uuid);
+            let _ = a.db.delete_uuid_to_path(&uuid);
+            if !class_name.is_empty() {
+                let _ = a.db.delete_class_index(class_name, &uuid);
+            }
+        }
+        let _ = a.db.delete_path_to_uuid(&rel);
+        removed_toml
+    }
+
     /// Eager snapshot of every binary-ECS core in the active Space's
     /// `entities` partition — the boot-load path. Empty when no DB is
     /// active or the partition holds no cores (the common legacy case).
@@ -942,6 +990,9 @@ mod imp {
         false
     }
     pub fn delete_path(_abs: &Path) -> bool {
+        false
+    }
+    pub fn purge_path_all_stores(_abs: &Path, _uuid_hex: &str, _class_name: &str) -> bool {
         false
     }
     pub fn iter_instance_cores() -> Vec<(u64, Vec<u8>)> {

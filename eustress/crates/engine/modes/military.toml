@@ -5,6 +5,8 @@
 id = "military"
 name = "Military"
 icon = "military"
+# Mode-selection-menu color - Roblox BrickColor Silver flip/flop (179) - closest dark grey silver.
+color = "#898788"
 version = "1.0"
 author = "Eustress"
 
@@ -15,31 +17,41 @@ tabs = ["home", "model", "terrain", "data", "test"]
 preset = "Wide Panels"
 
 [theme]
-accent = "#4ade80"
+# Matches [mode].color so the selection ring/active-tool tint reads the same
+# silver-grey as the mode's own dropdown/header identity color.
+accent = "#898788"
 
+# Branches render in the default grey (like every other mode's submenu, e.g.
+# Business's) — no per-branch color override.
 [[submodes]]
 id = "marines"
 name = "Marines"
+icon = "crosshair"
 
 [[submodes]]
 id = "army"
 name = "Army"
+icon = "shield"
 
 [[submodes]]
 id = "navy"
 name = "Navy"
+icon = "anchor"
 
 [[submodes]]
 id = "coast-guard"
 name = "Coast Guard"
+icon = "lifebuoy"
 
 [[submodes]]
 id = "air-force"
 name = "Air Force"
+icon = "plane"
 
 [[submodes]]
 id = "space-force"
 name = "Space Force"
+icon = "satellite"
 
 [[tabs]]
 id = "operations"
@@ -48,11 +60,14 @@ color = "#4ade80"
 
   [[tabs.sections]]
   name = "Planning"
-  tools = []
+  tools = ["mil:mission_planner", "mil:op_overlay", "mil:warno_builder"]
 
+  # `data:overlay` had no Rust-side handler (a pre-existing dead button
+  # shared with the built-in Data tab, see ribbon.slint) — dropped, matching
+  # civil.toml's identical fix.
   [[tabs.sections]]
   name = "Map"
-  tools = ["data:grid", "data:overlay"]
+  tools = ["data:grid"]
 
 [[tabs]]
 id = "logistics"
@@ -62,3 +77,405 @@ color = "#ffd166"
   [[tabs.sections]]
   name = "Supply"
   tools = ["data:import", "data:stats", "data:record"]
+
+# ── Per-branch submode_tabs — Operations and Logistics are universal (every
+# branch plans and supplies), so both carry forward verbatim into every
+# branch's block, plus one new branch-specific tab. No per-branch colors
+# (reverted earlier, stays that way — branches render in the default grey
+# like every other mode's submenu). `tools = []` throughout. ───────────────
+
+[[submode_tabs]]
+submode = "marines"
+id = "operations"
+name = "Operations"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Planning"
+  tools = ["mil:mission_planner", "mil:op_overlay", "mil:warno_builder"]
+  [[submode_tabs.sections]]
+  name = "Map"
+  tools = ["data:grid"]
+
+[[submode_tabs]]
+submode = "marines"
+id = "logistics"
+name = "Logistics"
+color = "#ffd166"
+  [[submode_tabs.sections]]
+  name = "Supply"
+  tools = ["data:import", "data:stats", "data:record"]
+
+[[submode_tabs]]
+submode = "marines"
+id = "marines-fundamentals"
+name = "Amphibious Doctrine"
+color = "#2f5233"
+  [[submode_tabs.sections]]
+  name = "Ship-to-Shore Movement"
+  tools = ["usmc:wave_planner", "usmc:landing_craft_selector", "usmc:surf_zone_analyzer", "usmc:beach_survey", "usmc:ship_to_shore_tracker"]
+  [[submode_tabs.sections]]
+  name = "MAGTF Task Organization"
+  tools = ["usmc:magtf_task_organizer", "usmc:command_relationship_mapper", "usmc:element_composition_builder"]
+  [[submode_tabs.sections]]
+  name = "Naval Integration"
+  tools = ["usmc:naval_gunfire_planner", "usmc:embarkation_planner", "usmc:well_deck_scheduler"]
+
+[[submode_tabs]]
+submode = "marines"
+id = "marines-operations"
+name = "Expeditionary Operations"
+color = "#c2410c"
+  [[submode_tabs.sections]]
+  name = "Combat Service Support"
+  tools = ["usmc:supply_class_tracker", "usmc:casevac_router", "usmc:resupply_scheduler"]
+  [[submode_tabs.sections]]
+  name = "Force Protection Fieldcraft"
+  tools = ["usmc:perimeter_designer", "usmc:entry_control_point_layout", "usmc:threat_assessment_matrix"]
+  [[submode_tabs.sections]]
+  name = "FOB & Comms Planning"
+  tools = ["usmc:fob_layout_tool", "usmc:patrol_route_planner", "usmc:comms_plan_builder"]
+
+[[submode_tabs]]
+submode = "marines"
+id = "marines-readiness"
+name = "Readiness & Assessment"
+color = "#7f1d1d"
+  [[submode_tabs.sections]]
+  name = "Live-Fire & Exercise Design"
+  tools = ["usmc:range_safety_planner", "usmc:exercise_scenario_builder", "usmc:after_action_reviewer"]
+  [[submode_tabs.sections]]
+  name = "FPCON & Vulnerability Assessment"
+  tools = ["usmc:fpcon_manager", "usmc:vulnerability_assessment", "usmc:antiterrorism_survey"]
+  [[submode_tabs.sections]]
+  name = "Mission Readiness Certification"
+  tools = ["usmc:readiness_dashboard", "usmc:certification_tracker"]
+
+[[submode_tabs]]
+submode = "army"
+id = "operations"
+name = "Operations"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Planning"
+  tools = ["mil:mission_planner", "mil:op_overlay", "mil:warno_builder"]
+  [[submode_tabs.sections]]
+  name = "Map"
+  tools = ["data:grid"]
+
+[[submode_tabs]]
+submode = "army"
+id = "logistics"
+name = "Logistics"
+color = "#ffd166"
+  [[submode_tabs.sections]]
+  name = "Supply"
+  tools = ["data:import", "data:stats", "data:record"]
+
+[[submode_tabs]]
+submode = "army"
+id = "army-doctrine"
+name = "Army Doctrine"
+color = "#6b8e23"
+  [[submode_tabs.sections]]
+  name = "Terrain & Movement Analysis"
+  tools = ["army:terrain_analysis", "army:avenue_of_approach", "army:mett_tc_worksheet", "army:ipb_workbook"]
+  [[submode_tabs.sections]]
+  name = "Order of Battle"
+  tools = ["army:tactical_symbol_editor", "army:order_of_battle", "army:unit_echelon_builder"]
+  [[submode_tabs.sections]]
+  name = "Fire Support Fundamentals"
+  tools = ["army:range_fan_calculator", "army:call_for_fire", "army:target_reference_point"]
+
+[[submode_tabs]]
+submode = "army"
+id = "army-maneuver-fires"
+name = "Maneuver & Fires"
+color = "#c19a6b"
+  [[submode_tabs.sections]]
+  name = "Mission Planning"
+  tools = ["army:opord_builder", "army:overlay_editor", "army:phase_line_tool"]
+  [[submode_tabs.sections]]
+  name = "Fire Missions"
+  tools = ["army:fire_mission_planner", "army:indirect_fire_overlay", "army:danger_close_calculator", "army:target_sync_matrix"]
+  [[submode_tabs.sections]]
+  name = "Sustainment & Logistics"
+  tools = ["army:logpac_planner", "army:supply_point_tracker", "army:casevac_router"]
+
+[[submode_tabs]]
+submode = "army"
+id = "army-combined-arms-mastery"
+name = "Combined Arms Mastery"
+color = "#b22222"
+  [[submode_tabs.sections]]
+  name = "Wargaming & COA Analysis"
+  tools = ["army:coa_wargame", "army:decision_support_matrix", "army:enemy_sitemp"]
+  [[submode_tabs.sections]]
+  name = "Combined Arms Integration"
+  tools = ["army:combined_arms_rehearsal", "army:fire_support_coordination_line", "army:air_ground_integration"]
+  [[submode_tabs.sections]]
+  name = "After Action & Readiness"
+  tools = ["army:after_action_review", "army:readiness_tracker"]
+
+[[submode_tabs]]
+submode = "navy"
+id = "operations"
+name = "Operations"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Planning"
+  tools = ["mil:mission_planner", "mil:op_overlay", "mil:warno_builder"]
+  [[submode_tabs.sections]]
+  name = "Map"
+  tools = ["data:grid"]
+
+[[submode_tabs]]
+submode = "navy"
+id = "logistics"
+name = "Logistics"
+color = "#ffd166"
+  [[submode_tabs.sections]]
+  name = "Supply"
+  tools = ["data:import", "data:stats", "data:record"]
+
+[[submode_tabs]]
+submode = "navy"
+id = "navy-fundamentals"
+name = "Naval Fundamentals"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Ship Classification & Doctrine"
+  tools = ["navy:hull_classification", "navy:order_of_battle", "navy:rules_of_engagement", "navy:emcon_planner"]
+  [[submode_tabs.sections]]
+  name = "Maritime Domain Awareness"
+  tools = ["navy:contact_picture", "data:fft", "data:anomaly"]
+  [[submode_tabs.sections]]
+  name = "Naval Architecture & Seakeeping"
+  tools = ["navy:stability_curve", "navy:displacement_calculator", "navy:freeboard_analyzer"]
+
+[[submode_tabs]]
+submode = "navy"
+id = "navy-fleet-operations"
+name = "Fleet Operations"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Navigation & Piloting"
+  tools = ["navy:route_planner", "navy:chart_overlay", "navy:collision_avoidance"]
+  [[submode_tabs.sections]]
+  name = "Underway Replenishment & Logistics"
+  tools = ["navy:unrep_scheduler", "data:import", "navy:fuel_ledger"]
+  [[submode_tabs.sections]]
+  name = "Watchstanding & Force Protection"
+  tools = ["navy:watch_bill", "navy:zone_defense", "data:record"]
+
+[[submode_tabs]]
+submode = "navy"
+id = "navy-fleet-command"
+name = "Fleet Command & Assessment"
+color = "#f87171"
+  [[submode_tabs.sections]]
+  name = "Task Force Organization"
+  tools = ["navy:task_force_builder", "navy:screen_formation", "navy:cic_display"]
+  [[submode_tabs.sections]]
+  name = "Wargaming & Tactics"
+  tools = ["navy:tactical_wargame", "navy:engagement_simulator", "navy:threat_board"]
+  [[submode_tabs.sections]]
+  name = "Readiness & Assessment"
+  tools = ["data:stats", "data:chart"]
+
+[[submode_tabs]]
+submode = "coast-guard"
+id = "operations"
+name = "Operations"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Planning"
+  tools = ["mil:mission_planner", "mil:op_overlay", "mil:warno_builder"]
+  [[submode_tabs.sections]]
+  name = "Map"
+  tools = ["data:grid"]
+
+[[submode_tabs]]
+submode = "coast-guard"
+id = "logistics"
+name = "Logistics"
+color = "#ffd166"
+  [[submode_tabs.sections]]
+  name = "Supply"
+  tools = ["data:import", "data:stats", "data:record"]
+
+[[submode_tabs]]
+submode = "coast-guard"
+id = "coast-guard-fundamentals"
+name = "Coast Guard Fundamentals"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Navigation & Seamanship"
+  tools = ["uscg:chart_plotter", "uscg:colregs_trainer", "uscg:tide_current_calculator", "uscg:sweep_width_tables"]
+  [[submode_tabs.sections]]
+  name = "SAR Theory & Planning"
+  tools = ["uscg:datum_calculator", "uscg:drift_model", "uscg:search_pattern_planner"]
+  [[submode_tabs.sections]]
+  name = "Maritime Law & Jurisdiction"
+  tools = ["uscg:jurisdiction_reference", "uscg:right_of_approach_guide", "uscg:vessel_documentation_lookup"]
+
+[[submode_tabs]]
+submode = "coast-guard"
+id = "coast-guard-operations"
+name = "Cutter & Boat Operations"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Search & Rescue Response"
+  tools = ["uscg:sar_case_board", "uscg:asset_tasking", "uscg:datum_marker_drop"]
+  [[submode_tabs.sections]]
+  name = "Law Enforcement Boardings"
+  tools = ["uscg:boarding_checklist", "uscg:vessel_query", "uscg:use_of_force_log"]
+  [[submode_tabs.sections]]
+  name = "Ports, Waterways & Coastal Security"
+  tools = ["uscg:security_zone_designator", "uscg:facility_inspection", "uscg:vts_traffic_monitor"]
+
+[[submode_tabs]]
+submode = "coast-guard"
+id = "coast-guard-command-mastery"
+name = "Command & Readiness"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Incident Command & Multi-Agency Ops"
+  tools = ["uscg:ics_organizer", "uscg:unified_command_board", "uscg:common_operating_picture"]
+  [[submode_tabs.sections]]
+  name = "Environmental Response"
+  tools = ["uscg:oil_spill_trajectory", "uscg:hazmat_response_planner", "uscg:pollution_incident_report"]
+  [[submode_tabs.sections]]
+  name = "Readiness & Assessment"
+  tools = ["uscg:crew_certification_tracker", "uscg:cutter_readiness_dashboard"]
+
+[[submode_tabs]]
+submode = "air-force"
+id = "operations"
+name = "Operations"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Planning"
+  tools = ["mil:mission_planner", "mil:op_overlay", "mil:warno_builder"]
+  [[submode_tabs.sections]]
+  name = "Map"
+  tools = ["data:grid"]
+
+[[submode_tabs]]
+submode = "air-force"
+id = "logistics"
+name = "Logistics"
+color = "#ffd166"
+  [[submode_tabs.sections]]
+  name = "Supply"
+  tools = ["data:import", "data:stats", "data:record"]
+
+[[submode_tabs]]
+submode = "air-force"
+id = "air-force-fundamentals"
+name = "Air Ops Fundamentals"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Aerodynamics & Performance"
+  tools = ["usaf:lift_drag_calculator", "usaf:flight_envelope_plotter", "usaf:airfoil_visualizer", "usaf:weaponeering_calc"]
+  [[submode_tabs.sections]]
+  name = "Airspace Structure & Control"
+  tools = ["usaf:airspace_class_map", "usaf:aco_builder", "usaf:notam_viewer"]
+  [[submode_tabs.sections]]
+  name = "Doctrine & C2 Structure"
+  tools = ["usaf:jfacc_org_chart", "usaf:ato_cycle_timeline", "usaf:doctrine_reference"]
+
+[[submode_tabs]]
+submode = "air-force"
+id = "air-force-operations"
+name = "Air Ops Practice"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Mission Planning"
+  tools = ["usaf:sortie_planner", "usaf:route_deconfliction", "usaf:air_refuel_track_designer"]
+  [[submode_tabs.sections]]
+  name = "Airlift & Sustainment"
+  tools = ["usaf:airlift_manifest", "usaf:pallet_load_planner", "usaf:mog_scheduler"]
+  [[submode_tabs.sections]]
+  name = "Air Traffic Control"
+  tools = ["usaf:radar_scope", "usaf:ifr_clearance_builder", "usaf:sector_handoff_sim"]
+
+[[submode_tabs]]
+submode = "air-force"
+id = "air-force-mastery"
+name = "Air Ops Mastery"
+color = "#a855f7"
+  [[submode_tabs.sections]]
+  name = "Tactics & Threat Response"
+  tools = ["usaf:threat_ring_analyzer", "usaf:sead_planner", "usaf:coa_wargamer"]
+  [[submode_tabs.sections]]
+  name = "Readiness & Assessment"
+  tools = ["usaf:sortie_generation_rate", "usaf:crew_qualification_tracker", "usaf:readiness_scorecard"]
+  [[submode_tabs.sections]]
+  name = "Campaign & AOR Analysis"
+  tools = ["usaf:aor_dashboard", "usaf:tpfdd_analyzer"]
+
+[[submode_tabs]]
+submode = "space-force"
+id = "operations"
+name = "Operations"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Planning"
+  tools = ["mil:mission_planner", "mil:op_overlay", "mil:warno_builder"]
+  [[submode_tabs.sections]]
+  name = "Map"
+  tools = ["data:grid"]
+
+[[submode_tabs]]
+submode = "space-force"
+id = "logistics"
+name = "Logistics"
+color = "#ffd166"
+  [[submode_tabs.sections]]
+  name = "Supply"
+  tools = ["data:import", "data:stats", "data:record"]
+
+[[submode_tabs]]
+submode = "space-force"
+id = "space-force-fundamentals"
+name = "Space Fundamentals"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Orbital Mechanics"
+  tools = ["ussf:orbit_propagator", "ussf:delta_v_calculator", "ussf:ground_track_plotter", "ussf:tle_catalog", "ussf:maneuver_detector"]
+  [[submode_tabs.sections]]
+  name = "Space Domain Awareness"
+  tools = ["ussf:conjunction_analyzer", "ussf:debris_catalog_viewer", "ussf:orbital_regime_classifier"]
+  [[submode_tabs.sections]]
+  name = "Space Environment"
+  tools = ["ussf:radiation_belt_model", "ussf:solar_weather_monitor", "ussf:atmospheric_drag_estimator"]
+
+[[submode_tabs]]
+submode = "space-force"
+id = "space-force-operations"
+name = "Satellite Ops & C2"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Command & Control"
+  tools = ["ussf:satellite_tasking", "ussf:telemetry_console", "ussf:contact_scheduler"]
+  [[submode_tabs.sections]]
+  name = "Mission Planning"
+  tools = ["ussf:pass_predictor", "ussf:link_budget_calculator", "ussf:constellation_designer"]
+  [[submode_tabs.sections]]
+  name = "Launch & Range Ops"
+  tools = ["ussf:launch_window_calculator", "ussf:range_safety_planner", "ussf:payload_integration_tracker"]
+
+[[submode_tabs]]
+submode = "space-force"
+id = "space-force-advanced"
+name = "Advanced Space Ops"
+color = "#c084fc"
+  [[submode_tabs.sections]]
+  name = "Sustainment & Logistics"
+  tools = ["ussf:propellant_budget_tracker", "ussf:station_keeping_planner", "ussf:onorbit_servicing_planner"]
+  [[submode_tabs.sections]]
+  name = "Threat & Wargaming"
+  tools = ["ussf:counterspace_threat_model", "ussf:space_wargame_simulator", "ussf:red_team_exercise"]
+  [[submode_tabs.sections]]
+  name = "Mission Assessment"
+  tools = ["ussf:mission_readiness_review", "ussf:anomaly_resolution_board"]

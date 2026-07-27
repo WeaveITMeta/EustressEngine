@@ -212,6 +212,167 @@ impl ToolHandler for CreateEntityTool {
 }
 
 // ---------------------------------------------------------------------------
+// Insert Gaussian Splats (3DGS)
+// ---------------------------------------------------------------------------
+
+pub struct InsertGaussianSplatsTool;
+
+impl ToolHandler for InsertGaussianSplatsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "insert_gaussian_splats",
+            description: "Insert a photoreal Gaussian-splat (3DGS) cloud into the Space from a `.ply` file. Copies the `.ply` into the Universe's `assets/splats/` and writes a `GaussianSplats` instance, so the engine's file-watcher hot-spawns it — rendering the radiance field, culling floaters, and extracting a physics collider automatically. This is the ONLY way to insert a WORKING splat over MCP: `create_entity(class=\"GaussianSplats\")` produces an EMPTY splat because it cannot attach the cloud path. Standard 3DGS `.ply` only (f_dc/f_rest/opacity/scale/rot).",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the source `.ply` Gaussian-splat file — absolute, or relative to the Universe root (e.g. `assets/splats/bicycle.ply`). It is copied into `assets/splats/` if not already there (a file already staged there is referenced in place, never re-copied)."
+                    },
+                    "name":     { "type": "string", "description": "Entity name (folder + Instance.name)." },
+                    "position": { "type": "array", "items": { "type": "number" }, "description": "[x, y, z] world position in meters. Default [0, 2, 0]." },
+                    "cull_floaters": { "type": "boolean", "description": "Remove near-transparent floater splats on load (cleaner capture). Default true." },
+                    "ppisp":         { "type": "boolean", "description": "Apply PPISP photometric correction. Default true." }
+                },
+                "required": ["path", "name"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &["workshop.tool.insert_gaussian_splats"],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let fail = |msg: String| ToolResult {
+            tool_name: "insert_gaussian_splats".to_string(),
+            tool_use_id: String::new(),
+            success: false,
+            content: msg,
+            structured_data: None,
+            stream_topic: None,
+        };
+
+        let path_str = input.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("SplatCloud");
+        let position = parse_vec3(&input, "position", [0.0, 2.0, 0.0]);
+        let cull_floaters = input.get("cull_floaters").and_then(|v| v.as_bool()).unwrap_or(true);
+        let ppisp = input.get("ppisp").and_then(|v| v.as_bool()).unwrap_or(true);
+
+        if path_str.is_empty() {
+            return fail("'path' is required (a `.ply` Gaussian-splat file)".to_string());
+        }
+
+        // The splat asset root is `<Universe>/assets/splats/`. `universe_root`
+        // is the sandbox boundary the engine is running against — the same
+        // place its file-watcher scans.
+        let universe_root = ctx.universe_root.clone();
+
+        // Resolve the source `.ply` (absolute, or relative to the Universe root).
+        let src = {
+            let p = std::path::Path::new(path_str);
+            if p.is_absolute() { p.to_path_buf() } else { universe_root.join(path_str) }
+        };
+        if !src.exists() {
+            return fail(format!("source `.ply` not found: {}", src.display()));
+        }
+        let is_ply = src
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("ply"))
+            .unwrap_or(false);
+        if !is_ply {
+            return fail("only standard 3DGS `.ply` files are supported".to_string());
+        }
+
+        // Stage into `<Universe>/assets/splats/<basename>` — but NEVER re-copy a
+        // multi-hundred-MB cloud that is already staged there.
+        let splats_dir = universe_root.join("assets").join("splats");
+        if let Err(e) = std::fs::create_dir_all(&splats_dir) {
+            return fail(format!("could not create assets/splats: {e}"));
+        }
+        let basename = src
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "cloud.ply".to_string());
+        let dest = splats_dir.join(&basename);
+        if src != dest && !dest.exists() {
+            if let Err(e) = std::fs::copy(&src, &dest) {
+                return fail(format!("could not copy `.ply` into assets/splats: {e}"));
+            }
+        }
+        let rel_path = format!("assets/splats/{}", basename);
+
+        // Write the GaussianSplats instance folder + `_instance.toml`.
+        let workspace_dir = ctx.space_root.join("Workspace");
+        let overrides = eustress_common::instance_create::InstanceOverrides {
+            display_name: Some(name.to_string()),
+            position: Some(position),
+            // Land COLMAP-frame splats upright (180° about X) — see the const doc.
+            rotation: Some(eustress_common::instance_create::GAUSSIAN_SPLAT_UPRIGHT_ROTATION),
+            ..Default::default()
+        };
+        let created = match eustress_common::instance_create::create_instance(
+            &workspace_dir,
+            "GaussianSplats",
+            Some(name),
+            overrides,
+        ) {
+            Ok(c) => c,
+            Err(e) => return fail(format!("could not create GaussianSplats instance: {e}")),
+        };
+
+        // Post-process: inject the `[gaussian_splats]` section. `create_instance`
+        // has no notion of it, and it must NOT be an `[asset]` (whose `mesh`
+        // field is required — a path-only asset fails to deserialize); it lands
+        // in the instance's generic `extra` catch-all, which the loader reads to
+        // attach the radiance-field cloud. Read-parse-insert-write, mirroring the
+        // engine's `do_import_gaussian_splat`.
+        let toml_path = created.toml_path.clone();
+        let raw = match std::fs::read_to_string(&toml_path) {
+            Ok(s) => s,
+            Err(e) => return fail(format!("wrote instance but could not re-read it: {e}")),
+        };
+        let mut doc: toml::Value = match raw.parse() {
+            Ok(d) => d,
+            Err(e) => return fail(format!("wrote instance but could not parse it: {e}")),
+        };
+        if let Some(t) = doc.as_table_mut() {
+            let mut gs = toml::value::Table::new();
+            gs.insert("path".to_string(), toml::Value::String(rel_path.clone()));
+            gs.insert("cull_floaters".to_string(), toml::Value::Boolean(cull_floaters));
+            gs.insert("ppisp".to_string(), toml::Value::Boolean(ppisp));
+            t.insert("gaussian_splats".to_string(), toml::Value::Table(gs));
+        }
+        let out = match toml::to_string_pretty(&doc) {
+            Ok(s) => s,
+            Err(e) => return fail(format!("could not re-serialize instance: {e}")),
+        };
+        if let Err(e) = std::fs::write(&toml_path, out) {
+            return fail(format!("could not write [gaussian_splats] section: {e}"));
+        }
+
+        ToolResult {
+            tool_name: "insert_gaussian_splats".to_string(),
+            tool_use_id: String::new(),
+            success: true,
+            content: format!(
+                "Inserted GaussianSplats '{}' from {} at [{:.1}, {:.1}, {:.1}] — the engine will render it, cull floaters (cull_floaters={}, ppisp={}), and extract a physics collider.",
+                created.folder_name, rel_path, position[0], position[1], position[2], cull_floaters, ppisp
+            ),
+            structured_data: Some(serde_json::json!({
+                "class": "GaussianSplats",
+                "name": created.folder_name,
+                "file": created.toml_path.to_string_lossy(),
+                "cloud_path": rel_path,
+                "cull_floaters": cull_floaters,
+                "ppisp": ppisp,
+            })),
+            stream_topic: Some("workshop.tool.insert_gaussian_splats".to_string()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Query Entities
 // ---------------------------------------------------------------------------
 

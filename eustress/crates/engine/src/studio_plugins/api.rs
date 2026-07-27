@@ -455,6 +455,8 @@ pub struct PendingSectionRegistration {
     pub tab_id: String,
     pub section_id: String,
     pub label: String,
+    /// Eustress-Mode affinity — empty = every mode (see `TabSection.modes`).
+    pub modes: Vec<String>,
 }
 
 /// Pending button registration
@@ -583,6 +585,25 @@ impl PluginApi {
             tab_id: tab_id.into(),
             section_id: section_id.into(),
             label: label.into(),
+            modes: Vec::new(), // visible in every mode
+        });
+    }
+
+    /// Like [`add_tab_section`], but scopes the section to specific Eustress
+    /// Modes — it appears in the Plugins tab only when one of `modes` is
+    /// active (e.g. Road Builder → `["civil"]`). Empty `modes` = every mode.
+    pub fn add_tab_section_scoped(
+        &mut self,
+        tab_id: impl Into<String>,
+        section_id: impl Into<String>,
+        label: impl Into<String>,
+        modes: Vec<String>,
+    ) {
+        self.pending_sections.push(PendingSectionRegistration {
+            tab_id: tab_id.into(),
+            section_id: section_id.into(),
+            label: label.into(),
+            modes,
         });
     }
     

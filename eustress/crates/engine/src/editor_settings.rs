@@ -118,6 +118,23 @@ pub struct EditorSettings {
     /// independently.
     #[serde(default)]
     pub layout_preset_by_mode: std::collections::HashMap<String, String>,
+
+    /// Anonymous usage telemetry — counts which ribbon tools get clicked so
+    /// the (mostly aspirational) tool surface can be wired in demand order.
+    /// ON by default; see `usage_telemetry.rs` for the privacy posture and
+    /// Settings ▸ Notifications ▸ Privacy for the user-facing switch.
+    #[serde(default = "default_usage_telemetry_enabled")]
+    pub usage_telemetry_enabled: bool,
+
+    /// Whether the first-run "usage stats are on" notice has been shown.
+    /// Persisted so the notice appears exactly once per install, not once
+    /// per launch.
+    #[serde(default)]
+    pub telemetry_notice_shown: bool,
+}
+
+fn default_usage_telemetry_enabled() -> bool {
+    true
 }
 
 fn default_theme_modern() -> bool {
@@ -190,6 +207,8 @@ impl Default for EditorSettings {
             active_mode_id: "engineering".to_string(),
             active_submode_id: String::new(),
             layout_preset_by_mode: std::collections::HashMap::new(),
+            usage_telemetry_enabled: default_usage_telemetry_enabled(),
+            telemetry_notice_shown: false,
         }
     }
 }

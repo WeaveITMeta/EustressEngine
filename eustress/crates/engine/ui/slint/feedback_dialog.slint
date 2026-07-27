@@ -1,0 +1,88 @@
+// ============================================================================
+// Feedback dialog — Help ▸ Send Feedback.
+//
+// The comment half of the usage-telemetry loop: dream-button clicks are
+// counted automatically; this is where a user says WHAT they expected the
+// tool to do. Posts to /api/telemetry/comment via the Rust side (anonymous
+// install id — never the account). Pre-fills "about" with the last dream
+// tool clicked this session, clearable to send general feedback.
+// ============================================================================
+
+import { Button, TextEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component FeedbackDialog inherits Rectangle {
+    in property <string> about-tool: "";
+    in-out property <string> feedback-text: "";
+    callback send(string /* about-tool */, string /* text */);
+    callback cancel();
+
+    // Full-window dim backdrop (window-root modal, same as NewSpaceDialog).
+    background: Theme.modal-backdrop;
+
+    // Swallow clicks behind the card; backdrop click cancels.
+    TouchArea { clicked => { root.cancel(); } }
+
+    Rectangle {
+        width: 460px;
+        height: 300px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.dialog-background;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        border-radius: 10px;
+        drop-shadow-blur: 18px;
+        drop-shadow-color: Theme.shadow-color;
+
+        TouchArea { } // block backdrop-cancel inside the card
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 10px;
+
+            Text {
+                text: "Send feedback";
+                font-size: 16px;
+                font-weight: 700;
+                color: Theme.text-primary;
+            }
+            Text {
+                text: root.about-tool == ""
+                    ? "Tell us what you'd want a tool to do, or what's missing."
+                    : "About: " + root.about-tool + " — what did you expect it to do?";
+                font-size: 12px;
+                color: Theme.text-secondary;
+                wrap: word-wrap;
+            }
+
+            input := TextEdit {
+                text <=> root.feedback-text;
+                wrap: word-wrap;
+                // Fills remaining vertical space above the buttons.
+            }
+
+            Text {
+                text: "Sent anonymously with your random install id — never your account, files, or scene.";
+                font-size: 10px;
+                color: Theme.text-disabled;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                Button {
+                    text: "Cancel";
+                    clicked => { root.cancel(); }
+                }
+                Button {
+                    text: "Send";
+                    primary: true;
+                    enabled: root.feedback-text != "";
+                    clicked => { root.send(root.about-tool, root.feedback-text); }
+                }
+            }
+        }
+    }
+}

@@ -21,3 +21,365 @@ tabs = ["home", "model", "cad", "data", "ui", "terrain", "test", "mindspace", "p
 preset = "Default"     # Default | Scripting | Building | Minimal | Wide Panels
 
 # [theme] omitted — Engineering uses the active theme's own accent.
+
+# Engineering itself is NOT directly selectable in the Modes dropdown (see
+# ribbon.slint's mode-row-touch handler: any mode with submodes only expands
+# its submenu) — a discipline must be chosen. No "Civil" here deliberately —
+# Civil Engineering already lives at the standalone top-level "civil" MODE
+# (bridges/terrain), which carries its own discipline submenu instead.
+[[submodes]]
+id = "mechanical"
+name = "Mechanical"
+icon = "gear"
+
+[[submodes]]
+id = "electrical"
+name = "Electrical"
+icon = "lightning"
+
+[[submodes]]
+id = "chemical"
+name = "Chemical"
+icon = "flask"
+
+[[submodes]]
+id = "aerospace"
+name = "Aerospace"
+icon = "plane"
+
+[[submodes]]
+id = "materials"
+name = "Materials"
+icon = "layers"
+
+[[submodes]]
+id = "systems"
+name = "Systems"
+icon = "network"
+
+[[submodes]]
+id = "industrial"
+name = "Industrial"
+icon = "factory"
+
+# ── Per-discipline submode_tabs — Engineering has no mode-level custom tabs
+# to carry forward (it already shows the full 9-tab built-in ribbon, unlike
+# Civil's trimmed subset), so each discipline just gets one new tab.
+# `tools = []` throughout — matches Civil's own choice not to duplicate
+# generic CAD primitives (already reachable via the built-in "cad" tab) into
+# a discipline tab. ─────────────────────────────────────────────────────────
+
+[[submode_tabs]]
+submode = "mechanical"
+id = "mechanical-fundamentals"
+name = "Mechanical Fundamentals"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Statics & Mechanics of Materials"
+  tools = ["mech:free_body_diagram", "mech:stress_strain_calculator", "mech:beam_deflection", "mech:shear_moment_diagrams", "mech:truss_solver"]
+  [[submode_tabs.sections]]
+  name = "Kinematics & Motion"
+  tools = ["mech:dof_analyzer", "mech:linkage_synthesizer", "mech:cam_profile_designer"]
+  [[submode_tabs.sections]]
+  name = "Materials & Tolerancing"
+  tools = ["mech:material_selector", "mech:gdt_annotator", "mech:fit_tolerance_calculator"]
+
+[[submode_tabs]]
+submode = "mechanical"
+id = "mechanical-design-assembly"
+name = "Design & Assembly"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Part Modeling"
+  tools = ["insert:cad_box", "insert:cad_cylinder", "insert:cad_plate_hole"]
+  [[submode_tabs.sections]]
+  name = "Sketch & Features"
+  tools = ["cad:solve_sketch", "mech:parametric_dimension", "mech:feature_pattern_array"]
+  [[submode_tabs.sections]]
+  name = "Assembly & Mates"
+  tools = ["cad:mate_coincident", "cad:mate_revolute", "cad:mate_prismatic"]
+
+[[submode_tabs]]
+submode = "mechanical"
+id = "mechanical-analysis"
+name = "Analysis & Validation"
+color = "#f87171"
+  [[submode_tabs.sections]]
+  name = "Structural Analysis (FEA)"
+  tools = ["mech:mesh_generator", "mech:load_case_builder", "mech:stress_contour_viewer"]
+  [[submode_tabs.sections]]
+  name = "Thermal & Motion Simulation"
+  tools = ["mech:thermal_solver", "mech:motion_study", "mech:fatigue_life_estimator"]
+  [[submode_tabs.sections]]
+  name = "Validation & Reporting"
+  tools = ["cad:export_glb", "mech:design_review_checklist"]
+
+[[submode_tabs]]
+submode = "electrical"
+id = "electrical-fundamentals"
+name = "Electrical Fundamentals"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Circuit Theory"
+  tools = ["elec:ohms_law_solver", "elec:kirchhoff_analyzer", "elec:thevenin_reducer", "elec:node_voltage_solver"]
+  [[submode_tabs.sections]]
+  name = "Signals & Waveforms"
+  tools = ["elec:waveform_generator", "elec:phasor_diagram", "elec:bode_plotter"]
+  [[submode_tabs.sections]]
+  name = "Components & Devices"
+  tools = ["elec:symbol_library", "elec:component_datasheet", "elec:tolerance_calculator"]
+
+[[submode_tabs]]
+submode = "electrical"
+id = "electrical-circuit-design"
+name = "Circuit Design"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Schematic Capture"
+  tools = ["elec:schematic_editor", "elec:netlist_generator", "elec:erc_checker"]
+  [[submode_tabs.sections]]
+  name = "PCB Layout"
+  tools = ["elec:pcb_layout", "elec:footprint_editor", "elec:autorouter"]
+  [[submode_tabs.sections]]
+  name = "Control Systems"
+  tools = ["insert:script", "insert:localscript", "insert:modulescript"]
+
+[[submode_tabs]]
+submode = "electrical"
+id = "electrical-power-systems-mastery"
+name = "Power Systems & Mastery"
+color = "#f87171"
+  [[submode_tabs.sections]]
+  name = "Power Systems Analysis"
+  tools = ["elec:load_flow_solver", "elec:short_circuit_analyzer", "elec:harmonic_distortion_analyzer", "elec:arc_flash_study"]
+  [[submode_tabs.sections]]
+  name = "Instrumentation & Test"
+  tools = ["data:connect", "data:record", "data:fft"]
+  [[submode_tabs.sections]]
+  name = "Certification & Portfolio"
+  tools = ["elec:compliance_checker", "elec:design_review"]
+
+[[submode_tabs]]
+submode = "chemical"
+id = "chemical-fundamentals"
+name = "Chemical Fundamentals"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Thermodynamics & Phase Equilibria"
+  tools = ["chme:vle_diagram", "chme:phase_envelope", "chme:activity_coefficients"]
+  [[submode_tabs.sections]]
+  name = "Reaction Kinetics"
+  tools = ["chme:rate_law_builder", "chme:reactor_sizing", "chme:equilibrium_conversion"]
+  [[submode_tabs.sections]]
+  name = "Mass & Energy Balances"
+  tools = ["chme:material_balance", "chme:energy_balance", "chme:degrees_of_freedom", "chme:steam_tables"]
+
+[[submode_tabs]]
+submode = "chemical"
+id = "chemical-process-design"
+name = "Process Design"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Flowsheeting"
+  tools = ["chme:pfd_builder", "chme:pid_builder", "data:chart"]
+  [[submode_tabs.sections]]
+  name = "Separations & Heat Transfer"
+  tools = ["chme:distillation_column", "chme:heat_exchanger_sizer", "chme:absorber_stripper"]
+  [[submode_tabs.sections]]
+  name = "Equipment Specification"
+  tools = ["insert:cad_cylinder", "chme:pump_selector", "chme:control_loop_tuner"]
+
+[[submode_tabs]]
+submode = "chemical"
+id = "chemical-safety-optimization"
+name = "Process Safety & Optimization"
+color = "#f87171"
+  [[submode_tabs.sections]]
+  name = "Hazard Analysis"
+  tools = ["chme:hazop_worksheet", "chme:what_if_analysis", "chme:layer_of_protection"]
+  [[submode_tabs.sections]]
+  name = "Relief & Containment Systems"
+  tools = ["chme:relief_valve_sizing", "chme:flare_system_calc", "chme:dispersion_model"]
+  [[submode_tabs.sections]]
+  name = "Plant Performance & Integration"
+  tools = ["chme:pinch_analysis", "chme:debottleneck_study", "data:stats"]
+
+[[submode_tabs]]
+submode = "aerospace"
+id = "aerospace-fundamentals"
+name = "Aero Fundamentals"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Aerodynamics & Flight Theory"
+  tools = ["aero:airfoil_polar", "aero:lift_drag_ratio", "aero:reynolds_mach_calc", "aero:wind_tunnel_lab", "aero:drag_polar_builder"]
+  [[submode_tabs.sections]]
+  name = "Propulsion Theory"
+  tools = ["aero:engine_cycle_analyzer", "aero:thrust_to_weight_calc", "aero:specific_impulse_calc"]
+  [[submode_tabs.sections]]
+  name = "Structures & Loads Theory"
+  tools = ["aero:vn_diagram", "aero:load_factor_calc", "aero:stress_strain_curve"]
+
+[[submode_tabs]]
+submode = "aerospace"
+id = "aerospace-design-workshop"
+name = "Aero Design & Build"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Structural Fabrication"
+  tools = ["insert:cad_plate", "insert:cad_frame", "insert:cad_shell"]
+  [[submode_tabs.sections]]
+  name = "Assembly & Kinematics"
+  tools = ["cad:solve_sketch", "cad:mate_revolute", "cad:mate_prismatic"]
+  [[submode_tabs.sections]]
+  name = "Instrumentation & Data Acquisition"
+  tools = ["data:import", "data:chart", "data:fft"]
+
+[[submode_tabs]]
+submode = "aerospace"
+id = "aerospace-flight-test"
+name = "Flight Test & Certification"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Stability & Control"
+  tools = ["aero:stability_derivatives", "aero:trim_analyzer", "aero:flutter_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Performance & Mission Analysis"
+  tools = ["aero:mission_profile_planner", "aero:range_endurance_calc", "aero:performance_envelope"]
+  [[submode_tabs.sections]]
+  name = "Structural Certification"
+  tools = ["aero:fatigue_life_estimator", "aero:factor_of_safety_checker"]
+
+[[submode_tabs]]
+submode = "materials"
+id = "materials-fundamentals"
+name = "Materials Fundamentals"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Crystal Structure & Microstructure"
+  tools = ["mat:unit_cell_viewer", "mat:phase_diagram_reader", "mat:grain_structure_map"]
+  [[submode_tabs.sections]]
+  name = "Properties & Classification"
+  tools = ["mat:property_explorer", "mat:ashby_chart", "mat:material_database", "mat:xrd_pattern_viewer"]
+  [[submode_tabs.sections]]
+  name = "Materials Selection"
+  tools = ["mat:selection_matrix", "mat:performance_index", "mat:tradeoff_study"]
+
+[[submode_tabs]]
+submode = "materials"
+id = "materials-testing"
+name = "Testing & Characterization"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Specimen Preparation"
+  tools = ["insert:cad_plate", "insert:cad_cylinder", "mat:coupon_designer"]
+  [[submode_tabs.sections]]
+  name = "Mechanical Testing"
+  tools = ["mat:tensile_test_rig", "mat:hardness_tester", "mat:impact_test_logger"]
+  [[submode_tabs.sections]]
+  name = "Data Acquisition & Reduction"
+  tools = ["data:record", "data:chart", "data:fit"]
+
+[[submode_tabs]]
+submode = "materials"
+id = "materials-failure-analysis"
+name = "Failure Analysis & Mastery"
+color = "#f43f5e"
+  [[submode_tabs.sections]]
+  name = "Fractography"
+  tools = ["mat:fracture_surface_viewer", "mat:crack_initiation_mapper", "mat:sem_image_overlay"]
+  [[submode_tabs.sections]]
+  name = "Fatigue & Fracture Mechanics"
+  tools = ["mat:sn_curve_analyzer", "mat:fracture_toughness_calc", "mat:stress_concentration_finder"]
+  [[submode_tabs.sections]]
+  name = "Root Cause & Reporting"
+  tools = ["mat:root_cause_tree", "data:anomaly"]
+
+[[submode_tabs]]
+submode = "systems"
+id = "systems-fundamentals"
+name = "Systems Fundamentals"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Requirements Engineering"
+  tools = ["sys:requirements_elicitor", "sys:requirements_traceability_matrix", "sys:stakeholder_needs_mapper", "sys:moe_definer"]
+  [[submode_tabs.sections]]
+  name = "Systems Thinking"
+  tools = ["sys:context_diagram_builder", "sys:functional_decomposition", "sys:system_boundary_definer"]
+  [[submode_tabs.sections]]
+  name = "Modeling Notations"
+  tools = ["sys:sysml_block_diagram", "sys:n2_chart_builder", "sys:use_case_diagrammer"]
+
+[[submode_tabs]]
+submode = "systems"
+id = "systems-design"
+name = "Systems Design"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Architecture Development"
+  tools = ["sys:functional_architecture_builder", "sys:physical_architecture_builder", "sys:allocated_baseline_manager"]
+  [[submode_tabs.sections]]
+  name = "Interface Design"
+  tools = ["sys:interface_control_document", "sys:interface_compatibility_checker", "data:connect"]
+  [[submode_tabs.sections]]
+  name = "Trade Studies"
+  tools = ["sys:trade_study_matrix", "sys:design_alternative_comparator", "data:import"]
+
+[[submode_tabs]]
+submode = "systems"
+id = "systems-integration-test"
+name = "Integration & Test"
+color = "#22d3ee"
+  [[submode_tabs.sections]]
+  name = "V&V Planning"
+  tools = ["sys:verification_cross_reference_matrix", "sys:test_case_generator", "sys:acceptance_criteria_builder"]
+  [[submode_tabs.sections]]
+  name = "Integration Test Execution"
+  tools = ["sys:integration_test_planner", "data:record", "data:anomaly"]
+  [[submode_tabs.sections]]
+  name = "Technical Performance Assessment"
+  tools = ["sys:technical_performance_measures", "data:stats", "data:chart"]
+
+[[submode_tabs]]
+submode = "industrial"
+id = "industrial-fundamentals"
+name = "Industrial Fundamentals"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Process Analysis"
+  tools = ["ind:process_map_builder", "ind:value_stream_map", "ind:flow_diagram"]
+  [[submode_tabs.sections]]
+  name = "Statistical Foundations"
+  tools = ["ind:spc_fundamentals", "ind:process_capability", "ind:pareto_analyzer", "ind:control_chart_builder", "ind:gage_rr_study"]
+  [[submode_tabs.sections]]
+  name = "Work Measurement"
+  tools = ["ind:time_study", "ind:work_sampling", "ind:pmts_calculator"]
+
+[[submode_tabs]]
+submode = "industrial"
+id = "industrial-process-quality"
+name = "Process & Quality Ops"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Facility Layout"
+  tools = ["ind:layout_optimizer", "insert:cad_box", "insert:cad_plate"]
+  [[submode_tabs.sections]]
+  name = "Quality Data Collection"
+  tools = ["data:record", "data:import", "data:chart"]
+  [[submode_tabs.sections]]
+  name = "Root Cause & DMAIC"
+  tools = ["ind:fishbone_diagram", "ind:five_whys", "ind:fmea_worksheet"]
+
+[[submode_tabs]]
+submode = "industrial"
+id = "industrial-optimization-mastery"
+name = "Optimization & Mastery"
+color = "#f472b6"
+  [[submode_tabs.sections]]
+  name = "Simulation & Optimization"
+  tools = ["ind:discrete_event_sim", "ind:linear_program_solver", "ind:queueing_model"]
+  [[submode_tabs.sections]]
+  name = "Ergonomics Assessment"
+  tools = ["ind:rula_reba_scorer", "ind:workstation_ergonomics", "ind:fatigue_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Continuous Improvement Portfolio"
+  tools = ["ind:kaizen_tracker", "ind:six_sigma_certification"]

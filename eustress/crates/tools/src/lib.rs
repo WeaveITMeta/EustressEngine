@@ -64,6 +64,7 @@ pub mod universe_tools;
 pub fn register_all_tools(registry: &mut ToolRegistry) {
     // Entity manipulation.
     registry.register(entity_tools::CreateEntityTool);
+    registry.register(entity_tools::InsertGaussianSplatsTool);
     registry.register(entity_tools::QueryEntitiesTool);
     registry.register(entity_tools::UpdateEntityTool);
     registry.register(entity_tools::DeleteEntityTool);

@@ -62,6 +62,10 @@ pub mod sim_record;
 #[cfg(feature = "streaming")]
 pub mod sim_stream;
 pub mod classes;
+// The sealed avatar runtime — one character implementation shared by Studio
+// Play Mode and the Client. See `avatar::AvatarRuntimePlugin` for why this
+// replaces the convention-based `plugins::SharedCharacterPlugin`.
+pub mod avatar;
 // Authoritative per-class TOML schema — embedded templates + self-heal +
 // extra-section claimants. Single source of truth shared between engine,
 // client, and external tooling.

@@ -1,7 +1,7 @@
-//! # Array Tools (Phase 1)
+//! # Array Tools
 //!
-//! Linear / Radial / Grid array — clone the current selection into a
-//! pattern. Ships as three sibling `ModalTool` implementations on the
+//! Linear / Radial / Grid / Path array — clone the current selection
+//! into a pattern. Four sibling `ModalTool` implementations on the
 //! CAD-tab Pattern ribbon group.
 //!
 //! ## Shared approach
@@ -15,18 +15,41 @@
 //! 3. Applies a per-copy transform (translation/rotation) computed from
 //!    the tool's parameters.
 //! 4. Writes each copy via `spawn_new_part_with_toml` which handles
-//!    folder creation, TOML write, ECS spawn, SpaceFileRegistry insert,
-//!    and a `SpawnFolders` undo entry.
+//!    folder creation, TOML write, ECS spawn, and SpaceFileRegistry
+//!    insert.
+//! 5. Folds the whole pattern into ONE undo entry.
+//!
+//! ## Undo
+//!
+//! An array is one gesture and costs one Ctrl+Z.
+//! `spawn_new_part_with_toml` pushes a single-folder `SpawnFolders`
+//! entry per part — right for a tool that makes one part, wrong for a
+//! tool that makes hundreds — so every commit runs its spawn loop
+//! through an [`ArrayUndo`]. That takes each per-copy entry straight
+//! back off the stack as it lands, then re-pushes all of the reserved
+//! trash paths as a single `Action::CreateEntities` labeled with the
+//! pattern's shape and part count, e.g. `"Grid Array (4×3×2 = 23
+//! parts)"`. Reclaiming per copy rather than in one sweep at the end is
+//! what keeps a 1000-part grid from shoving the whole 100-entry history
+//! off the front before the fold can reach it. When a copy's entry
+//! cannot be reclaimed the shortfall is reported as a warning toast
+//! rather than buried inside a quietly-incomplete history entry.
 //!
 //! ## Tool dispatch
 //!
-//! - `linear_array`: N copies along a step vector.
+//! - `linear_array`: N copies along a step vector. The vector is
+//!   typed into the panel or dragged out in the viewport — press where
+//!   the source sits, release where the next copy belongs.
 //! - `radial_array`: N copies around a pivot axis + angle.
 //! - `grid_array`: Nx × Ny × Nz copies on three orthogonal step vectors.
+//! - `path_array`: N copies spaced evenly along a clicked polyline.
 //!
-//! All three commit on an explicit "Apply" toggle in the Options Bar,
-//! matching the Model Reflect pattern — no viewport click is needed;
-//! the tool sits active while the user dials in parameters.
+//! All four commit on an explicit "Apply" toggle in the Options Bar,
+//! matching the Model Reflect pattern — no viewport click is required
+//! to spawn; the tool sits active while the user dials in parameters.
+//! Path Array additionally collects its polyline from viewport clicks,
+//! and Linear Array's drag is a way to aim the step vector, never a
+//! way to spawn: an exploratory drag must not be destructive.
 
 use bevy::prelude::*;
 use crate::selection_box::Selected;
@@ -135,6 +158,145 @@ fn descriptor_for_copy(
 }
 
 // ============================================================================
+// Shared undo — one entry per array, not one per copy
+// ============================================================================
+
+/// Suffix naming the selection size. Empty for the single-source case
+/// so the common label reads `"Grid Array (4×3×2 = 23 parts)"` instead
+/// of dragging a redundant `"× 1 selected"` along.
+fn sources_suffix(sources: usize) -> String {
+    if sources > 1 {
+        format!(" × {} selected", sources)
+    } else {
+        String::new()
+    }
+}
+
+/// `"1 part"` / `"23 parts"` — the History row reads as a sentence, so
+/// the count has to agree with its noun.
+fn parts_label(n: usize) -> String {
+    if n == 1 { "1 part".to_string() } else { format!("{n} parts") }
+}
+
+/// Folds one array's spawns into a single labeled undo entry.
+///
+/// `spawn_new_part_with_toml` is the shared creation path for every
+/// Smart Build Tool and pushes its own single-folder `SpawnFolders`
+/// entry. That is correct for a tool that makes one part and wrong for
+/// a tool that makes hundreds: a 4×3×2 grid would cost 23 presses of
+/// Ctrl+Z, and a 1000-part grid would push the entire 100-entry history
+/// off the front. So [`record`](ArrayUndo::record) takes each per-copy
+/// entry back off the stack the moment it lands — the stack never grows
+/// during the spawn loop — and [`finish`](ArrayUndo::finish) re-pushes
+/// everything as one action.
+///
+/// Reclaiming the reserved trash paths rather than re-deriving them
+/// keeps undo and redo symmetric single renames on exactly the paths
+/// the spawn helper picked.
+struct ArrayUndo {
+    /// Tool name for the log line + toast ("Grid Array").
+    tool: &'static str,
+    /// `(created_folder, reserved_trash_path)` pairs, in creation order
+    /// so undo's reverse walk unwinds the array the way it was built.
+    folders: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+    /// Every entity the array spawned. These ride along in the entry:
+    /// `CreateEntities` despawns the recorded ids outright, which makes
+    /// the scene half of the undo independent of whether the registry
+    /// has caught up with each new folder yet.
+    entities: Vec<Entity>,
+}
+
+impl ArrayUndo {
+    fn new(tool: &'static str) -> Self {
+        Self { tool, folders: Vec::new(), entities: Vec::new() }
+    }
+
+    /// Record one freshly-spawned copy and reclaim the per-copy entry
+    /// the spawn helper just pushed for it. A copy whose entry cannot be
+    /// reclaimed still counts toward the total, so
+    /// [`finish`](ArrayUndo::finish) can report the shortfall instead of
+    /// hiding it.
+    fn record(&mut self, world: &mut World, entity: Entity) {
+        self.entities.push(entity);
+
+        let Some(mut undo) = world.get_resource_mut::<crate::undo::UndoStack>() else {
+            return;
+        };
+        let Some(top) = undo.current_index().checked_sub(1) else {
+            return;
+        };
+
+        // Peek before taking. Nothing else writes to the stack between
+        // the spawn and this call today, but the creation path is
+        // shared and a future caller's entry must stop the reclaim
+        // rather than be destroyed by it.
+        if !matches!(
+            undo.history().get(top),
+            Some(
+                crate::undo::Action::SpawnFolders { .. }
+                    | crate::undo::Action::CreateEntities { .. }
+            )
+        ) {
+            return;
+        }
+        match undo.take_at(top) {
+            Some(crate::undo::Action::SpawnFolders { folders }) => self.folders.extend(folders),
+            Some(crate::undo::Action::CreateEntities { paths, .. }) => self.folders.extend(paths),
+            _ => {}
+        }
+    }
+
+    /// Number of copies recorded so far — what the commit log reports.
+    fn spawned(&self) -> usize {
+        self.entities.len()
+    }
+
+    /// Push the one labeled entry covering the whole pattern.
+    fn finish(self, world: &mut World, label: String) {
+        let ArrayUndo { tool, folders, entities } = self;
+        if entities.is_empty() {
+            return;
+        }
+        let total = entities.len();
+        let covered = folders.len();
+        let entity_bits: Vec<u64> = entities.iter().map(|e| e.to_bits()).collect();
+
+        {
+            let Some(mut undo) = world.get_resource_mut::<crate::undo::UndoStack>() else {
+                warn!("{tool}: no UndoStack resource — {total} spawned part(s) cannot be undone");
+                return;
+            };
+            undo.push_labeled(
+                label,
+                crate::undo::Action::CreateEntities {
+                    paths: folders,
+                    entities: entity_bits,
+                },
+            );
+        }
+
+        // Honest about partial coverage. The scene half of the undo is
+        // still complete — every entity id is recorded — but copies
+        // without a reclaimed folder leave that folder on disk and it
+        // would reappear on the next Space load. Say so: the entry is
+        // worth pushing, silence about its limits is not.
+        if covered < total {
+            let orphans = total - covered;
+            warn!(
+                "{tool}: {orphans} of {total} copies have no reclaimed folder — Ctrl+Z removes them from the scene but leaves their folders on disk"
+            );
+            if let Some(mut notifications) =
+                world.get_resource_mut::<crate::notifications::NotificationManager>()
+            {
+                notifications.warning(format!(
+                    "{tool}: {orphans} of {total} copies can't be fully undone — delete them by hand if you Ctrl+Z"
+                ));
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Linear Array
 // ============================================================================
 
@@ -146,6 +308,10 @@ pub struct LinearArray {
     pub step_x: f32,
     pub step_y: f32,
     pub step_z: f32,
+    /// True between `on_drag_start` and `on_drag_end` — only drives the
+    /// step label, so the user can see the vector tracking the cursor
+    /// instead of wondering whether the drag registered.
+    dragging: bool,
     ready_to_commit: bool,
 }
 
@@ -156,8 +322,20 @@ impl Default for LinearArray {
             step_x: 2.0,
             step_y: 0.0,
             step_z: 0.0,
+            dragging: false,
             ready_to_commit: false,
         }
+    }
+}
+
+impl LinearArray {
+    /// Adopt a dragged offset as the step vector, clamped to the same
+    /// ±100 m the Step X/Y/Z controls accept — a drag must never put the
+    /// panel into a state the panel itself refuses to represent.
+    fn set_step(&mut self, offset: Vec3) {
+        self.step_x = offset.x.clamp(-100.0, 100.0);
+        self.step_y = offset.y.clamp(-100.0, 100.0);
+        self.step_z = offset.z.clamp(-100.0, 100.0);
     }
 }
 
@@ -166,7 +344,13 @@ impl ModalTool for LinearArray {
     fn name(&self) -> &'static str { "Linear Array" }
 
     fn step_label(&self) -> String {
-        format!("count {} · step ({:.2}, {:.2}, {:.2})", self.count, self.step_x, self.step_y, self.step_z)
+        if self.dragging {
+            format!("step ({:.2}, {:.2}, {:.2}) — release to keep · {} copies",
+                    self.step_x, self.step_y, self.step_z, self.count)
+        } else {
+            format!("count {} · step ({:.2}, {:.2}, {:.2}) — drag in viewport to aim",
+                    self.count, self.step_x, self.step_y, self.step_z)
+        }
     }
 
     fn options(&self) -> Vec<ToolOptionControl> {
@@ -203,6 +387,42 @@ impl ModalTool for LinearArray {
         ToolStepResult::Continue
     }
 
+    /// Aiming the step vector by hand beats typing three numbers: press
+    /// where the source sits, release where the next copy belongs, and
+    /// the offset between the two hit points IS the step. Turning this
+    /// on also moves the (no-op) `on_click` from press to release, which
+    /// costs this tool nothing.
+    fn wants_drag(&self) -> bool { true }
+
+    fn on_drag_start(&mut self, _hit: &ViewportHit, _ctx: &mut ToolContext) -> ToolStepResult {
+        self.dragging = true;
+        ToolStepResult::Continue
+    }
+
+    fn on_drag(
+        &mut self,
+        start: &ViewportHit,
+        current: &ViewportHit,
+        _ctx: &mut ToolContext,
+    ) -> ToolStepResult {
+        self.set_step(current.hit_point - start.hit_point);
+        ToolStepResult::Continue
+    }
+
+    /// Returns `Continue`, not `Commit`. The drag aims the pattern; it
+    /// never spawns it. An exploratory sweep across the viewport has to
+    /// cost nothing, so Apply stays the only way to create parts.
+    fn on_drag_end(
+        &mut self,
+        start: &ViewportHit,
+        end: &ViewportHit,
+        _ctx: &mut ToolContext,
+    ) -> ToolStepResult {
+        self.set_step(end.hit_point - start.hit_point);
+        self.dragging = false;
+        ToolStepResult::Continue
+    }
+
     fn on_option_changed(&mut self, id: &str, value: &str, _ctx: &mut ToolContext) -> ToolStepResult {
         match id {
             "count"  => { if let Ok(v) = value.parse::<f32>() { self.count = (v as u32).clamp(2, 100); } }
@@ -232,7 +452,7 @@ impl ModalTool for LinearArray {
         };
 
         let step = Vec3::new(self.step_x, self.step_y, self.step_z);
-        let mut spawned = 0usize;
+        let mut undo = ArrayUndo::new("Linear Array");
 
         for source in &sources {
             for i in 1..self.count {
@@ -242,23 +462,29 @@ impl ModalTool for LinearArray {
                     &format!("L{:02}", i), &space_root,
                 );
                 match spawn_new_part_with_toml(world, desc) {
-                    Ok(_) => spawned += 1,
+                    Ok(part) => undo.record(world, part.entity),
                     Err(e) => warn!("Linear Array: spawn failed — {}", e),
                 }
             }
         }
+        let spawned = undo.spawned();
         info!("↺ Linear Array: spawned {} copies across {} sources (count={}, step={:?})",
               spawned, sources.len(), self.count, step);
+        undo.finish(world, format!(
+            "Linear Array (×{} = {}{})",
+            self.count, parts_label(spawned), sources_suffix(sources.len()),
+        ));
     }
 
     fn cancel(&mut self, _commands: &mut Commands) {
+        self.dragging = false;
         self.ready_to_commit = false;
     }
 
-    /// Pattern tools don't pick anything in the viewport — selection is
-    /// the source, controls are the parameters. The right-side ToolPanel
-    /// fits a vertical form (count + step XYZ + Apply) far better than
-    /// the bar's horizontal pill.
+    /// Selection is the source and the controls are the parameters, so
+    /// the right-side ToolPanel fits a vertical form (count + step XYZ +
+    /// Apply) far better than the bar's horizontal pill — and it leaves
+    /// the viewport clear for the drag that aims the step vector.
     fn prefers_panel(&self) -> bool { true }
 }
 
@@ -411,7 +637,7 @@ impl ModalTool for RadialArray {
             self.angle_deg.to_radians() / (self.count - 1) as f32
         };
 
-        let mut spawned = 0usize;
+        let mut undo = ArrayUndo::new("Radial Array");
         for source in &sources {
             for i in 1..self.count {
                 let rot = Quat::from_axis_angle(axis_vec, step_rad * i as f32);
@@ -424,13 +650,19 @@ impl ModalTool for RadialArray {
                     &format!("R{:02}", i), &space_root,
                 );
                 match spawn_new_part_with_toml(world, desc) {
-                    Ok(_) => spawned += 1,
+                    Ok(part) => undo.record(world, part.entity),
                     Err(e) => warn!("Radial Array: spawn failed — {}", e),
                 }
             }
         }
+        let spawned = undo.spawned();
         info!("↺ Radial Array: spawned {} copies ({} sources, {}° / {} axis)",
               spawned, sources.len(), self.angle_deg, self.axis);
+        undo.finish(world, format!(
+            "Radial Array ({} × {:.0}° {} = {}{})",
+            self.count, self.angle_deg, self.axis.to_uppercase(),
+            parts_label(spawned), sources_suffix(sources.len()),
+        ));
     }
 
     fn cancel(&mut self, _commands: &mut Commands) {
@@ -560,7 +792,7 @@ impl ModalTool for GridArray {
             None => { warn!("Grid Array: no SpaceRoot"); return; }
         };
 
-        let mut spawned = 0usize;
+        let mut undo = ArrayUndo::new("Grid Array");
         for source in &sources {
             for i in 0..self.count_x {
                 for j in 0..self.count_y {
@@ -577,15 +809,21 @@ impl ModalTool for GridArray {
                             &format!("G{:02}x{:02}x{:02}", i, j, k), &space_root,
                         );
                         match spawn_new_part_with_toml(world, desc) {
-                            Ok(_) => spawned += 1,
+                            Ok(part) => undo.record(world, part.entity),
                             Err(e) => warn!("Grid Array: spawn failed — {}", e),
                         }
                     }
                 }
             }
         }
+        let spawned = undo.spawned();
         info!("↺ Grid Array: spawned {} copies ({}×{}×{}, {} sources)",
               spawned, self.count_x, self.count_y, self.count_z, sources.len());
+        undo.finish(world, format!(
+            "Grid Array ({}×{}×{} = {}{})",
+            self.count_x, self.count_y, self.count_z,
+            parts_label(spawned), sources_suffix(sources.len()),
+        ));
     }
 
     fn cancel(&mut self, _commands: &mut Commands) {
@@ -706,7 +944,7 @@ impl ModalTool for PathArray {
         let total_len = *cumulative.last().unwrap();
         if total_len <= 1e-4 { info!("↺ Path Array: zero-length path"); return; }
 
-        let mut spawned = 0usize;
+        let mut undo = ArrayUndo::new("Path Array");
         let align_tangent = self.align_to_tangent;
         for source in &sources {
             for i in 1..self.count {
@@ -741,13 +979,19 @@ impl ModalTool for PathArray {
                     &format!("P{:03}", i), &space_root,
                 );
                 match spawn_new_part_with_toml(world, desc) {
-                    Ok(_) => spawned += 1,
+                    Ok(part) => undo.record(world, part.entity),
                     Err(e) => warn!("Path Array: spawn failed — {}", e),
                 }
             }
         }
+        let spawned = undo.spawned();
         info!("↺ Path Array: spawned {} copies along {:.2}-unit polyline ({} points)",
               spawned, total_len, self.points.len());
+        undo.finish(world, format!(
+            "Path Array ({} along {} points = {}{})",
+            self.count, self.points.len(),
+            parts_label(spawned), sources_suffix(sources.len()),
+        ));
     }
 
     fn cancel(&mut self, _commands: &mut Commands) {

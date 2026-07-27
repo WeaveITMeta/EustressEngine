@@ -942,8 +942,9 @@ fn eustress_camera_controls(
         cam.pivot += *cam_up * move_speed; // Up (camera-relative)
     }
     // `-` / `=` are intentionally NOT bound to camera vertical here.
-    // Those keys belong to `Action::NudgeUp` / `Action::NudgeDown` —
-    // moving the selected PART up / down by one grid unit (handled in
+    // Those keys belong to `Action::LiftSelection` /
+    // `Action::SettleSelection` — lifting the selected PART by one grid unit
+    // or settling it onto the surface below (handled in
     // `keybindings.rs::handle_nudge_keys`). Binding the camera to the
     // same keys ran both systems every frame: the part nudged up by
     // `snap` while the camera pivoted down by `move_speed × dt`,

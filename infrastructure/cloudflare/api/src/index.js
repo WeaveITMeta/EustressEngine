@@ -468,6 +468,14 @@ export default {
         return handleAdminStats(request, env, cors);
 
       // Public, cookieless pageview beacon (feeds the admin funnel)
+      // Engine usage telemetry (anonymous tool-click aggregates + feedback).
+      if (url.pathname === '/api/telemetry/usage' && request.method === 'POST')
+        return handleTelemetryUsage(request, env, cors);
+      if (url.pathname === '/api/telemetry/comment' && request.method === 'POST')
+        return handleTelemetryComment(request, env, cors);
+      if (url.pathname === '/api/telemetry/summary' && request.method === 'GET')
+        return handleTelemetrySummary(request, env, cors);
+
       if (url.pathname === '/api/analytics/hit' && request.method === 'POST')
         return handleAnalyticsHit(request, env, cors);
 
@@ -2195,6 +2203,195 @@ async function handleAdminStats(request, env, cors) {
 // Visitor identity is a daily-rotating salted hash of IP+UA: no cookie, no
 // stable cross-day identifier, nothing personal stored. No-ops gracefully if
 // the ANALYTICS KV binding isn't present, and never throws into page load.
+// ── Engine usage telemetry ──────────────────────────────────────────────────
+// One aggregate per engine session (counts keyed by tool id), never raw click
+// streams — nothing here can be replayed into a behavioural timeline. The
+// install_id is a random UUID the engine generates locally; it is NEVER an
+// account id and this worker never joins it to one. Storage is the TELEMETRY
+// KV: `tool:<id>:clicks` running totals, `tinst:<id>:<install>` first-seen
+// markers feeding `tool:<id>:installs`, `comment:<ts>:<rand>` feedback rows.
+// KV read-modify-write counters are lossy under heavy concurrency — accepted
+// exactly like the pv:/uv: counters above; alpha volumes make it moot.
+// Everything no-ops gracefully when the TELEMETRY binding is absent.
+
+const TELEMETRY_MAX_TOOLS = 400;     // per session; ~1,400 ids exist total
+const TELEMETRY_MAX_COMMENT = 500;   // chars
+const TELEMETRY_COMMENTS_PER_DAY = 20;
+
+function telemetryValidId(s, max) {
+  return typeof s === 'string' && s.length > 0 && s.length <= max && /^[\w:.-]+$/.test(s);
+}
+
+async function kvIncr(kv, key, by) {
+  const cur = Number(await kv.get(key)) || 0;
+  await kv.put(key, String(cur + by));
+  return cur + by;
+}
+
+async function handleTelemetryUsage(request, env, cors) {
+  if (!env.TELEMETRY) return json({ ok: true, recorded: false }, 200, cors);
+  try {
+    const body = await request.json();
+    const installId = body.install_id;
+    if (!telemetryValidId(installId, 64)) return json({ error: 'bad install_id' }, 400, cors);
+    const counts = body.counts && typeof body.counts === 'object' ? body.counts : {};
+    const entries = Object.entries(counts).slice(0, TELEMETRY_MAX_TOOLS);
+
+    const day = new Date().toISOString().slice(0, 10);
+    let recorded = 0;
+    const touched = [];
+    for (const [tool, n] of entries) {
+      if (!telemetryValidId(tool, 128)) continue;
+      const clicks = Math.min(Math.max(Number(n) || 0, 0), 10000);
+      if (clicks <= 0) continue;
+      await kvIncr(env.TELEMETRY, `tool:${tool}:clicks`, clicks);
+      const seenKey = `tinst:${tool}:${installId}`;
+      if (!(await env.TELEMETRY.get(seenKey))) {
+        await env.TELEMETRY.put(seenKey, '1');
+        await kvIncr(env.TELEMETRY, `tool:${tool}:installs`, 1);
+      }
+      touched.push([tool, clicks]);
+      recorded++;
+    }
+
+    // One recency record per SESSION (never per tool — KV daily write budget is
+    // the binding constraint, and the admin feed only needs session grain).
+    // Ordered by zero-padded ts so `list` returns them chronologically.
+    if (touched.length) {
+      const ts = Date.now();
+      const rand = Math.random().toString(36).slice(2, 8);
+      touched.sort((a, b) => b[1] - a[1]);
+      await env.TELEMETRY.put(
+        `recent:${String(ts).padStart(14, '0')}:${rand}`,
+        JSON.stringify({
+          ts,
+          install: installId.slice(0, 8),
+          mode: telemetryValidId(body.mode, 64) ? body.mode : '',
+          version: telemetryValidId(body.app_version, 32) ? body.app_version : '',
+          tools: touched.slice(0, 12),
+          total: touched.reduce((sum, t) => sum + t[1], 0),
+        }),
+        { expirationTtl: 86400 * 45 }
+      );
+    }
+
+    // Site-wide session counter per day (cheap health signal).
+    await kvIncr(env.TELEMETRY, `sessions:${day}`, 1);
+    return json({ ok: true, recorded }, 200, cors);
+  } catch (e) {
+    return json({ ok: false }, 200, cors); // telemetry must never error a client
+  }
+}
+
+async function handleTelemetryComment(request, env, cors) {
+  if (!env.TELEMETRY) return json({ ok: true, recorded: false }, 200, cors);
+  try {
+    const body = await request.json();
+    const installId = body.install_id;
+    if (!telemetryValidId(installId, 64)) return json({ error: 'bad install_id' }, 400, cors);
+    let text = typeof body.text === 'string' ? body.text : '';
+    text = text.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, TELEMETRY_MAX_COMMENT);
+    if (!text) return json({ error: 'empty comment' }, 400, cors);
+    const tool = telemetryValidId(body.tool, 128) ? body.tool : '';
+
+    // Per-install daily cap — feedback, not a firehose.
+    const day = new Date().toISOString().slice(0, 10);
+    const capKey = `climit:${installId}:${day}`;
+    const used = Number(await env.TELEMETRY.get(capKey)) || 0;
+    if (used >= TELEMETRY_COMMENTS_PER_DAY) return json({ error: 'daily limit' }, 429, cors);
+    await env.TELEMETRY.put(capKey, String(used + 1), { expirationTtl: 86400 * 2 });
+
+    const ts = Date.now();
+    const rand = Math.random().toString(36).slice(2, 8);
+    // Key sorts chronologically via zero-padded ts; summary reverses for newest-first.
+    await env.TELEMETRY.put(
+      `comment:${String(ts).padStart(14, '0')}:${rand}`,
+      JSON.stringify({ ts, tool, text, install: installId.slice(0, 8) })
+    );
+    return json({ ok: true }, 200, cors);
+  } catch (e) {
+    return json({ ok: false }, 200, cors);
+  }
+}
+
+async function handleTelemetrySummary(request, env, cors) {
+  const adminId = await requireAdmin(request, env);
+  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
+  if (!env.TELEMETRY) {
+    return json({ generated_at: new Date().toISOString(), enabled: false, tools: [], comments: [], sessions_by_day: [] }, 200, cors);
+  }
+
+  // Tool counters — `tool:<id>:clicks` / `tool:<id>:installs`.
+  const tools = new Map();
+  let cursor;
+  for (let page = 0; page < 20; page++) {
+    const l = await env.TELEMETRY.list({ prefix: 'tool:', limit: 1000, cursor });
+    for (const k of l.keys) {
+      const m = k.name.match(/^tool:(.+):(clicks|installs)$/);
+      if (!m) continue;
+      const rec = tools.get(m[1]) || { id: m[1], clicks: 0, installs: 0 };
+      rec[m[2]] = Number(await env.TELEMETRY.get(k.name)) || 0;
+      tools.set(m[1], rec);
+    }
+    if (l.list_complete) break;
+    cursor = l.cursor;
+  }
+
+  // Latest comments (list is lexicographic = chronological by padded ts).
+  const comments = [];
+  cursor = undefined;
+  const commentKeys = [];
+  for (let page = 0; page < 10; page++) {
+    const l = await env.TELEMETRY.list({ prefix: 'comment:', limit: 1000, cursor });
+    commentKeys.push(...l.keys.map(k => k.name));
+    if (l.list_complete) break;
+    cursor = l.cursor;
+  }
+  for (const name of commentKeys.slice(-200).reverse()) {
+    const v = await env.TELEMETRY.get(name);
+    if (v) { try { comments.push(JSON.parse(v)); } catch {} }
+  }
+
+  // Recent sessions (newest first). Doubles as the per-tool recency source —
+  // the ingest path deliberately writes no `tool:<id>:last` key, so "when was
+  // this last clicked" is derived here instead of costing a write per tool.
+  const recentKeys = [];
+  cursor = undefined;
+  for (let page = 0; page < 5; page++) {
+    const l = await env.TELEMETRY.list({ prefix: 'recent:', limit: 1000, cursor });
+    recentKeys.push(...l.keys.map(k => k.name));
+    if (l.list_complete) break;
+    cursor = l.cursor;
+  }
+  const recent = [];
+  for (const name of recentKeys.slice(-60).reverse()) {
+    const v = await env.TELEMETRY.get(name);
+    if (v) { try { recent.push(JSON.parse(v)); } catch {} }
+  }
+  const lastSeen = new Map();
+  for (const r of recent) {
+    for (const [id] of r.tools || []) if (!lastSeen.has(id)) lastSeen.set(id, r.ts);
+  }
+
+  // Session counts, last 14 days.
+  const sessions_by_day = [];
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+    sessions_by_day.push({ date: d, count: Number(await env.TELEMETRY.get(`sessions:${d}`)) || 0 });
+  }
+
+  return json({
+    generated_at: new Date().toISOString(),
+    enabled: true,
+    tools: [...tools.values()]
+      .map(t => ({ ...t, last: lastSeen.get(t.id) || 0 }))
+      .sort((a, b) => b.installs - a.installs || b.clicks - a.clicks),
+    comments,
+    recent,
+    sessions_by_day,
+  }, 200, cors);
+}
+
 async function handleAnalyticsHit(request, env, cors) {
   if (!env.ANALYTICS) return json({ ok: true, recorded: false }, 200, cors);
   try {
@@ -3140,6 +3337,10 @@ async function handlePublishSimulation(request, env, cors) {
     id: simId, name, description: description || '',
     genre: genre || 'all', max_players: max_players || 10,
     author_id: userId, author_name: user.username || 'Unknown',
+    // Explicit: handleDownloadPak gates on `!sim.is_public`, and the listing
+    // endpoint separately defaults undefined to public. Leaving it unset made
+    // every published simulation publicly listed and privately denied.
+    is_public: true,
     thumbnail_url: thumbnail_url || null, r2_key: r2_key || null,
     play_count: 0, favorite_count: 0, version: 1,
     published_at: new Date().toISOString(),
@@ -3165,7 +3366,7 @@ async function handleUploadScene(request, simId, env, cors) {
   const simData = await env.SOCIAL.get(`sim:${simId}`);
   if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
   const sim = JSON.parse(simData);
-  if (sim.author_id !== auth.userId) return json({ error: 'Not your simulation' }, 403, cors);
+  if (sim.author_id !== auth) return json({ error: 'Not your simulation' }, 403, cors);
 
   // Read the binary body (the .pak file)
   const body = await request.arrayBuffer();
@@ -3178,7 +3379,7 @@ async function handleUploadScene(request, simId, env, cors) {
   const r2Key = `universes/${simId}/universe.pak`;
   await env.SCENES.put(r2Key, body, {
     httpMetadata: { contentType: 'application/octet-stream' },
-    customMetadata: { simId, authorId: auth.userId, uploadedAt: new Date().toISOString() },
+    customMetadata: { simId, authorId: auth, uploadedAt: new Date().toISOString() },
   });
 
   // Update simulation record with R2 key and file size
@@ -3198,12 +3399,12 @@ async function handleMultipartCreate(request, simId, env, cors) {
   const simData = await env.SOCIAL.get(`sim:${simId}`);
   if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
   const sim = JSON.parse(simData);
-  if (sim.author_id !== auth.userId) return json({ error: 'Not your simulation' }, 403, cors);
+  if (sim.author_id !== auth) return json({ error: 'Not your simulation' }, 403, cors);
 
   const r2Key = `universes/${simId}/universe.pak`;
   const multipart = await env.SCENES.createMultipartUpload(r2Key, {
     httpMetadata: { contentType: 'application/octet-stream' },
-    customMetadata: { simId, authorId: auth.userId, uploadedAt: new Date().toISOString() },
+    customMetadata: { simId, authorId: auth, uploadedAt: new Date().toISOString() },
   });
 
   return json({ upload_id: multipart.uploadId, r2_key: r2Key }, 200, cors);
@@ -3269,7 +3470,7 @@ async function handleUploadSingleSpace(request, simId, spaceName, env, cors) {
   const simData = await env.SOCIAL.get(`sim:${simId}`);
   if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
   const sim = JSON.parse(simData);
-  if (sim.author_id !== auth.userId) return json({ error: 'Not your simulation' }, 403, cors);
+  if (sim.author_id !== auth) return json({ error: 'Not your simulation' }, 403, cors);
 
   const body = await request.arrayBuffer();
   if (!body || body.byteLength === 0) return json({ error: 'Empty body' }, 400, cors);
@@ -3280,7 +3481,7 @@ async function handleUploadSingleSpace(request, simId, spaceName, env, cors) {
   const r2Key = `universes/${simId}/spaces/${decodedName}.pak`;
   await env.SCENES.put(r2Key, body, {
     httpMetadata: { contentType: 'application/octet-stream' },
-    customMetadata: { simId, spaceName: decodedName, authorId: auth.userId, uploadedAt: new Date().toISOString() },
+    customMetadata: { simId, spaceName: decodedName, authorId: auth, uploadedAt: new Date().toISOString() },
   });
 
   // Track individual space uploads in the simulation record
@@ -3300,7 +3501,7 @@ async function handleUploadThumbnail(request, simId, env, cors) {
   const simData = await env.SOCIAL.get(`sim:${simId}`);
   if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
   const sim = JSON.parse(simData);
-  if (sim.author_id !== auth.userId) return json({ error: 'Not your simulation' }, 403, cors);
+  if (sim.author_id !== auth) return json({ error: 'Not your simulation' }, 403, cors);
 
   const body = await request.arrayBuffer();
   if (!body || body.byteLength === 0) return json({ error: 'Empty body' }, 400, cors);
@@ -3315,7 +3516,7 @@ async function handleUploadThumbnail(request, simId, env, cors) {
 
   await env.SCENES.put(r2Key, body, {
     httpMetadata: { contentType },
-    customMetadata: { simId, authorId: auth.userId },
+    customMetadata: { simId, authorId: auth },
   });
 
   // Build public thumbnail URL
@@ -3340,7 +3541,7 @@ async function handleUserProjects(request, url, env, cors) {
 
   try {
     // Find all simulations authored by this user via sim-author:{userId}:* keys
-    const list = await env.SOCIAL.list({ prefix: `sim-author:${auth.userId}:`, limit: 100 });
+    const list = await env.SOCIAL.list({ prefix: `sim-author:${auth}:`, limit: 100 });
     const projects = [];
 
     for (const key of list.keys) {
@@ -3418,7 +3619,7 @@ async function handleDownloadPak(request, simId, env, cors) {
   // Private simulations require auth
   if (!sim.is_public) {
     const auth = await verifyAuth(request, env);
-    if (!auth || auth.userId !== sim.author_id)
+    if (!auth || auth !== sim.author_id)
       return json({ error: 'Private simulation — access denied' }, 403, cors);
   }
 

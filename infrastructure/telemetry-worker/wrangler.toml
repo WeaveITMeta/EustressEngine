@@ -1,0 +1,13 @@
+name = "eustress-telemetry"
+main = "src/index.js"
+compatibility_date = "2026-01-15"
+
+# Workers Analytics Engine — SQL-queryable, no database to run, free at the
+# volumes this will see at launch. The binding name `USAGE` is what
+# src/index.js writes to.
+[[analytics_engine_datasets]]
+binding = "USAGE"
+dataset = "eustress_usage"
+
+# NOT DEPLOYED. See README.md — deploying needs a Cloudflare account and
+# `wrangler deploy`, both of which are the operator's call, not the build's.

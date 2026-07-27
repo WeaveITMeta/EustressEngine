@@ -683,6 +683,19 @@ pub struct PasteCompletedEvent {
 // ============================================================================
 
 /// System to handle copy/cut operations (simplified query)
+///
+/// Copy pushes no undo entry, and correctly so: it mutates nothing but
+/// the clipboard resource, which the History panel does not model.
+///
+/// Cut is NOT purely a clipboard write, despite the name. Ctrl+X
+/// (`keybindings.rs` → `Action::Cut`) writes `CopyEvent { is_cut: true }`
+/// and the destruction happens later, in `handle_paste_event`'s cut
+/// branch, which trashes the source files. That branch records its
+/// moves and `handle_paste_event` folds them into the same `Batch` as
+/// the paste, so the whole Cut+Paste is one Ctrl+Z. (The Explorer's
+/// context-menu Cut takes a different route — `slint_ui.rs` fires
+/// `Action::Copy` + `Action::Delete`, and Delete pushes its own
+/// `TrashEntities`.)
 pub fn handle_copy_event(
     mut events: MessageReader<CopyEvent>,
     mut clipboard: ResMut<EditorClipboard>,
@@ -937,14 +950,22 @@ pub fn handle_paste_event(
     mut material_registry: Option<ResMut<crate::space::material_loader::MaterialRegistry>>,
     mut mesh_cache: Option<ResMut<crate::space::instance_loader::PrimitiveMeshCache>>,
     mut file_registry: Option<ResMut<crate::space::file_loader::SpaceFileRegistry>>,
-    // Bundled into one tuple param to stay within Bevy's 16-system-param ceiling.
-    cut_queries: (
+    // Bundled into one tuple param to stay within Bevy's 16-system-param
+    // ceiling. The `UndoStack` rides along for the same reason — this
+    // system is already at 16 params, and a 17th is a hard compile error.
+    // It is `Option` because headless/tool binaries boot `ClipboardPlugin`
+    // without `UndoPlugin`; in the editor it is always present.
+    mut cut_bundle: (
         Query<&crate::space::instance_loader::InstanceFile>,
         Query<&crate::space::file_loader::LoadedFromFile>,
+        Option<ResMut<crate::undo::UndoStack>>,
     ),
     mut paste_queue: ResMut<crate::space::file_loader::PasteSpawnQueue>,
 ) {
-    let (instance_file_query, loaded_from_file_query) = (&cut_queries.0, &cut_queries.1);
+    // Field-wise borrows: `.0`/`.1` are read all the way through the cut
+    // loop while `.2` is written at the end, and the borrow checker
+    // splits disjoint tuple fields of a local without complaint.
+    let (instance_file_query, loaded_from_file_query) = (&cut_bundle.0, &cut_bundle.1);
     for event in events.read() {
         if clipboard.is_empty() {
             notifications.warning("Clipboard is empty");
@@ -1045,13 +1066,23 @@ pub fn handle_paste_event(
         };
         
         let mut created_ids = Vec::new();
+        // Undo ledger for this paste. `created_paths` are the files /
+        // folders written to disk, `created_entities` the entities that
+        // existed synchronously — `Action::create_entities` takes both
+        // and reverses whichever half applies per pasted object.
+        let mut created_paths: Vec<PathBuf> = Vec::new();
+        let mut created_entities: Vec<Entity> = Vec::new();
+        // Clipboard rows that produced neither: an unsupported class, or
+        // a folder copy that failed. Undo cannot reach them, and the
+        // toast below says so rather than silently under-reporting.
+        let mut unrecorded = 0usize;
 
         // `workspace_dir` is defined above (before the §8.3 collision
         // scan) — reused here for the per-entity TOML writes.
 
         // Spawn entities from clipboard — write TOML files for Parts (same as Insert)
         for entity_data in &clipboard.entities {
-            let spawned_id = spawn_pasted_entity(
+            let spawned = spawn_pasted_entity(
                 &mut commands,
                 &asset_server,
                 &mut materials,
@@ -1064,11 +1095,20 @@ pub fn handle_paste_event(
                 &mut paste_queue,
             );
 
-            if let Some(id) = spawned_id {
+            if spawned.path.is_none() && spawned.entity.is_none() {
+                unrecorded += 1;
+            }
+            if let Some(id) = spawned.id {
                 created_ids.push(id);
             }
+            if let Some(path) = spawned.path {
+                created_paths.push(path);
+            }
+            if let Some(entity) = spawned.entity {
+                created_entities.push(entity);
+            }
         }
-        
+
         clipboard.increment_paste_count();
 
         // Select the newly pasted entities so the user sees immediate feedback
@@ -1081,23 +1121,34 @@ pub fn handle_paste_event(
             }
         }
 
-        // Paste undo recording lives in the command system: each spawn_pasted_entity
-        // call records a CreatePart in the History via spawn_events/command_history
-        // flow. If the flow is not yet wired for paste specifically, Ctrl+Z will
-        // fall back to deleting the most-recently-selected paste result — see
-        // `PasteCompletedEvent` which updates the selection to the new entities.
+        // Undo is recorded once, at the END of this iteration — after the
+        // cut branch, so a Cut+Paste collapses into a single `Batch`
+        // (restore the originals, remove the copies) instead of leaving
+        // half the operation stranded. See the push below.
 
         // Fire completion event
         paste_completed.write(PasteCompletedEvent {
             created_entity_ids: created_ids.clone(),
         });
-        
-        notifications.info(format!("Pasted {} object(s)", clipboard.entities.len()));
-        
+
+        // Read before the cut branch: it ends with `clipboard.clear()`,
+        // which zeroes both of these.
+        let pasted_count = clipboard.entities.len();
+        let was_cut = clipboard.is_cut;
+
+        notifications.info(format!("Pasted {} object(s)", pasted_count));
+
+        // `(original_path, trash_path)` for every source the cut branch
+        // actually moved — the `TrashEntities` half of the undo Batch.
+        let mut cut_moves: Vec<(PathBuf, PathBuf)> = Vec::new();
+        // Cut sources with no file on disk at all: they are despawned
+        // below and nothing can bring them back.
+        let mut cut_unbacked = 0usize;
+
         // If this was a cut, trash the original files and despawn entities.
         // Without the file-trash step, the file watcher re-creates entities
         // from the still-present files on the next scan.
-        if clipboard.is_cut {
+        if was_cut {
             for entity_id in &clipboard.copied_entity_ids {
                 if let Some(entity) = crate::entity_utils::id_string_to_entity(entity_id) {
                     if commands.get_entity(entity).is_ok() {
@@ -1131,7 +1182,19 @@ pub fn handle_paste_event(
                                     reg.rename_in_progress.insert(toml_path.clone());
                                     reg.rename_in_progress.insert(source.clone());
                                 }
-                                let _ = std::fs::rename(&source, &trash_path);
+                                // Record only moves that actually landed:
+                                // `TrashEntities` undo renames the pair
+                                // back, and a pair that was never created
+                                // would fail that rename every time.
+                                match std::fs::rename(&source, &trash_path) {
+                                    Ok(()) => cut_moves.push((source.clone(), trash_path)),
+                                    Err(e) => warn!(
+                                        "📋 cut: failed to trash source {:?}: {e}",
+                                        source
+                                    ),
+                                }
+                            } else {
+                                cut_unbacked += 1;
                             }
                             if let Some(ref mut reg) = file_registry {
                                 reg.unregister_file(&toml_path);
@@ -1158,11 +1221,24 @@ pub fn handle_paste_event(
                                 if let Some(ref mut reg) = file_registry {
                                     reg.rename_in_progress.insert(source.clone());
                                 }
-                                let _ = std::fs::rename(&source, &trash_path);
+                                match std::fs::rename(&source, &trash_path) {
+                                    Ok(()) => cut_moves.push((source.clone(), trash_path)),
+                                    Err(e) => warn!(
+                                        "📋 cut: failed to trash source {:?}: {e}",
+                                        source
+                                    ),
+                                }
+                            } else {
+                                cut_unbacked += 1;
                             }
                             if let Some(ref mut reg) = file_registry {
                                 reg.unregister_file(&source);
                             }
+                        }
+                        // Neither `InstanceFile` nor `LoadedFromFile`:
+                        // in-memory only, so the despawn below is final.
+                        else {
+                            cut_unbacked += 1;
                         }
                         commands.entity(entity).despawn();
                     }
@@ -1174,10 +1250,88 @@ pub fn handle_paste_event(
             }
             clipboard.clear();
         }
+
+        // ── One undo entry for the whole paste ───────────────────────
+        // Paste, Duplicate (which is Copy + Paste in `DuplicateInPlace`
+        // mode) and the keyboard Cut+Paste all land here, and all of them
+        // produce exactly ONE history row no matter how many objects the
+        // selection held. `CreateEntities` alone covers Paste/Duplicate;
+        // a Cut also has to restore the originals it just trashed, which
+        // is the `TrashEntities` half of the `Batch`. Batch undo runs its
+        // actions in REVERSE order, so the copies are removed before the
+        // originals come home — the order the user would do it by hand.
+        let recorded_anything =
+            !created_paths.is_empty() || !created_entities.is_empty() || !cut_moves.is_empty();
+        if recorded_anything {
+            // Built inside the guard: `create_entities` reserves a
+            // timestamped trash path per folder, which is pointless work
+            // when there is nothing to record.
+            let space_root_path = space_root
+                .as_ref()
+                .map(|sr| sr.0.clone())
+                .unwrap_or_else(crate::space::default_space_root);
+            let create_action = crate::undo::Action::create_entities(
+                &space_root_path,
+                &created_paths,
+                &created_entities,
+            );
+            let action = if cut_moves.is_empty() {
+                create_action
+            } else {
+                crate::undo::Action::Batch {
+                    actions: vec![
+                        crate::undo::Action::TrashEntities { paths: cut_moves },
+                        create_action,
+                    ],
+                }
+            };
+            let label = if was_cut {
+                format!("Cut & paste {} object(s)", pasted_count)
+            } else if event.mode == PasteMode::DuplicateInPlace {
+                format!("Duplicate {} object(s)", pasted_count)
+            } else {
+                format!("Paste {} object(s)", pasted_count)
+            };
+            match cut_bundle.2 {
+                Some(ref mut u) => u.push_labeled(label, action),
+                None => warn!(
+                    "📋 Paste: no UndoStack resource — pasting {pasted_count} object(s) \
+                     was NOT recorded and cannot be undone"
+                ),
+            }
+        } else if pasted_count > 0 {
+            warn!(
+                "📋 Paste: {pasted_count} object(s) produced no folder and no entity — \
+                 nothing to record for undo"
+            );
+        }
+
+        // Be explicit about the parts Ctrl+Z cannot reach, rather than
+        // letting the user discover the gap by pressing it.
+        if unrecorded > 0 {
+            notifications.warning(format!(
+                "Pasted {} object(s) — {} could not be recorded (unsupported class, or the source folder copy failed), so Ctrl+Z will not remove them",
+                pasted_count, unrecorded,
+            ));
+        }
+        if cut_unbacked > 0 {
+            notifications.warning(format!(
+                "Cut {} object(s) that had no file on disk — Ctrl+Z removes the pasted copies but cannot bring those originals back",
+                cut_unbacked,
+            ));
+        }
     }
 }
 
 /// System to handle duplicate operations (copy + paste in one step)
+///
+/// No undo entry is pushed here on purpose. Duplicate is literally Copy
+/// followed by Paste in `DuplicateInPlace` mode, and the systems run in
+/// that order within the frame (see `ClipboardPlugin`), so
+/// `handle_paste_event` pushes the single `CreateEntities` entry —
+/// labelled "Duplicate N object(s)" because it can see the paste mode.
+/// Recording anything here as well would give Ctrl+Z two steps to undo
+/// one user action.
 pub fn handle_duplicate_event(
     mut events: MessageReader<DuplicateEvent>,
     mut copy_events: MessageWriter<CopyEvent>,
@@ -1439,6 +1593,28 @@ fn apply_offset_to_root_toml(
     Ok(())
 }
 
+/// What one `spawn_pasted_entity` call actually brought into existence.
+///
+/// Paste has three shapes and the undo entry needs a different half of
+/// each: the folder-form path creates a DIRECTORY but no entity yet (the
+/// spawn lands a frame later via `PasteSpawnQueue`), the property-based
+/// Part path creates both, and the in-memory classes (Model, Folder,
+/// lights) create only an entity. Returning all three fields lets
+/// `handle_paste_event` build one `Action::CreateEntities` that covers
+/// every case instead of guessing from the id string alone.
+#[derive(Default)]
+struct PastedSpawn {
+    /// Selection id (`"{index}v{generation}"`) when an entity existed
+    /// immediately. `None` for the folder-form path.
+    id: Option<String>,
+    /// Path created on disk — the instance FOLDER for folder-form and
+    /// Part pastes, the `<Name>.instance.toml` FILE for service
+    /// children. `None` for purely in-memory classes.
+    path: Option<PathBuf>,
+    /// The live entity, when one was spawned synchronously.
+    entity: Option<Entity>,
+}
+
 fn spawn_pasted_entity(
     commands: &mut Commands,
     asset_server: &AssetServer,
@@ -1450,7 +1626,7 @@ fn spawn_pasted_entity(
     mesh_cache: Option<&mut crate::space::instance_loader::PrimitiveMeshCache>,
     file_registry: Option<&mut crate::space::file_loader::SpaceFileRegistry>,
     paste_queue: &mut crate::space::file_loader::PasteSpawnQueue,
-) -> Option<String> {
+) -> PastedSpawn {
     use crate::spawn::*;
 
     // ── Folder-form paste ────────────────────────────────────────────────
@@ -1480,7 +1656,7 @@ fn spawn_pasted_entity(
                     "📋 paste: failed to copy folder {} → {}: {}",
                     src_folder.display(), dst_folder.display(), e
                 );
-                return None;
+                return PastedSpawn::default();
             }
             // Patch root TOML so the duplicate appears at the paste
             // position instead of overlapping the source. `data.name`
@@ -1511,13 +1687,15 @@ fn spawn_pasted_entity(
             // `drain_paste_spawn_queue`, which scans + spawns the whole tree
             // parent-first (children attached) by reusing the cold-load loader —
             // instead of relying on the file watcher, which dropped/orphaned
-            // children (ordering/timing/low-FPS). Return `None` so we don't
-            // pollute `created_ids` with a synthetic string (the spawn lands a
-            // frame later); the notification reads `clipboard.entities.len()`.
+            // children (ordering/timing/low-FPS). No `id`/`entity` here: the
+            // spawn lands a frame later, so `created_ids` stays clean (the
+            // notification reads `clipboard.entities.len()`) and undo keys off
+            // the FOLDER, which `trash_created_folder` resolves to the whole
+            // spawned subtree through `SpaceFileRegistry::descendants_of`.
             paste_queue.folders.push(dst_folder.clone());
             let _ = (commands, asset_server, materials, material_registry, mesh_cache, file_registry);
             info!("📋 paste: queued folder for deterministic spawn {} → {}", src_folder.display(), dst_folder.display());
-            return None;
+            return PastedSpawn { id: None, path: Some(dst_folder), entity: None };
         } else {
             warn!(
                 "📋 paste: source folder {} no longer exists; falling back to property paste",
@@ -1535,9 +1713,14 @@ fn spawn_pasted_entity(
         Ok(cn) => cn,
         Err(_) => {
             warn!("Unknown class name: {}", data.class);
-            return None;
+            return PastedSpawn::default();
         }
     };
+
+    // Set by the arms that write to disk. Undo moves this path to trash;
+    // arms that leave it `None` are in-memory only and are reversed by
+    // despawning the entity alone.
+    let mut created_path: Option<PathBuf> = None;
 
     let pos = Vec3::new(data.position[0], data.position[1], data.position[2]) + offset;
     let rot = Quat::from_euler(
@@ -1655,8 +1838,9 @@ fn spawn_pasted_entity(
             // Write TOML file
             if let Err(e) = crate::space::instance_loader::write_instance_definition(&toml_path, &instance_def) {
                 warn!("Failed to write pasted entity TOML: {}", e);
-                return None;
+                return PastedSpawn::default();
             }
+            created_path = Some(instance_dir.clone());
 
             // Spawn via standard instance loader (same path as file_loader)
             let mut default_mat_reg = crate::space::material_loader::MaterialRegistry::default();
@@ -1753,8 +1937,11 @@ fn spawn_pasted_entity(
             let target_path = service_dir.join(&file_name);
             if let Err(e) = std::fs::write(&target_path, &toml_content) {
                 warn!("Failed to write pasted service child TOML {:?}: {}", target_path, e);
-                return None;
+                return PastedSpawn::default();
             }
+            // A flat FILE, not a folder — `trash_created_folder` renames
+            // either kind, so undo removes it the same way.
+            created_path = Some(target_path.clone());
             // Register in file registry so Explorer shows it immediately.
             if let Some(registry) = file_registry {
                 let dummy_entity = commands.spawn(Name::new(data.name.clone())).id();
@@ -1782,8 +1969,12 @@ fn spawn_pasted_entity(
             None
         }
     };
-    
-    entity.map(|e| format!("{}v{}", e.index(), e.generation()))
+
+    PastedSpawn {
+        id: entity.map(|e| format!("{}v{}", e.index(), e.generation())),
+        path: created_path,
+        entity,
+    }
 }
 
 /// System to render cross-scene paste modal

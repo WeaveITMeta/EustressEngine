@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<mask id="kb"><rect x="0" y="0" width="24" height="24" fill="white"/><circle cx="17.6" cy="17.6" r="6.1" fill="black"/></mask>
+<g mask="url(#kb)"><g transform="scale(0.82)"><path d="M9 3 4 21M15 3l5 18" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="12" y1="4" x2="12" y2="7" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="12" y1="10.5" x2="12" y2="13.5" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="12" y1="17" x2="12" y2="20" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></g></g>
+<circle cx="17.6" cy="17.6" r="4.5" stroke="#d4d4d4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+<rect x="15.7" y="15.2" width="3.8" height="4.8" rx=".7" stroke="#d4d4d4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M16.6 16.4h2M16.7 18h.01M17.7 18h.01M18.7 18h.01M16.7 19.1h.01M17.7 19.1h.01" stroke="#d4d4d4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>

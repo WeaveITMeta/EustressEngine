@@ -1,0 +1,1243 @@
+# Eustress Mode — "Government".
+#
+# Appropriation, administration, and legislation. Deliberately NOT the
+# judiciary (that is the separate "justice" MODE) and NOT civil engineering
+# (that is the separate "civil" MODE — Public Works hands off to it rather than
+# duplicating its cutl:/cwtr: tooling).
+#
+# Government is PUBLIC and every discipline is UNGATED, because these are
+# ANALYSIS SEATS, NOT AUTHORITY SEATS: anyone may model the Mayor's budget, and
+# the mode signs, files, certifies, and authorizes nothing. Role gating arrives
+# only with real KYC-verified identity (see `studio_modes::UserRoles`), not with
+# an env var — so nothing here is gated today rather than pretending to be.
+#
+# Government itself is NOT directly selectable in the Modes dropdown — it only
+# expands to its submenu; a discipline must be chosen (see ribbon.slint's
+# mode-row-touch handler). Disciplines render in the default grey, like every
+# other mode's submenu.
+#
+# Two rules govern the tool sets below, and they are the whole point:
+#   1. AGGREGATE ONLY. No tool profiles an individual, infers a protected
+#      attribute, or reaches into a named official's private life. Institutional
+#      and money-flow data from PUBLIC records only (docs/LAW-ORDER.md §3).
+#   2. EVERY DISCIPLINE CARRIES A FALSIFIER — at least one tool able to produce
+#      a result UNFAVOURABLE to its own operator's platform (a breakeven solver,
+#      a net-vs-gross calculator, a regression guard). A civic model that cannot
+#      contradict you is a prop.
+#
+# `tools = []` nowhere below: every id has a `tool_metadata` entry (generated),
+# but almost none has live dispatch yet. That is the same honest-placeholder
+# posture as Justice/Legal/Civil — a declared button is a declared intention,
+# and `docs/architecture/GOVERNMENT_MODE.md` §6 is the order they get wired in.
+#
+# Canonical design doc: docs/architecture/GOVERNMENT_MODE.md
+# Companion Universe:  scripts/gen_tucson_universe.py (Temple hub + 16 sim Spaces)
+
+[mode]
+id = "government"
+name = "Government"
+icon = "capitol"
+# Mode-selection-menu color — Roblox BrickColor 194 "Medium stone grey".
+# Institutional stone, deliberately distinct from Justice's khaki (#E2DCBC).
+color = "#A3A2A5"
+version = "1.0"
+author = "Eustress"
+
+[ribbon]
+# Record-and-model work, not geometry work: home for essentials, data for the
+# substrate, mindspace for policy/stakeholder graphs, test for running
+# scenarios. Government is the first mode that is ~95% records and ~5% geometry
+# — the inverse of every mode shipped so far.
+tabs = ["home", "data", "mindspace", "test"]
+
+[layout]
+preset = "Wide Panels"
+
+[theme]
+# Matches [mode].color so the selection ring reads the same institutional stone
+# as the mode's dropdown identity.
+accent = "#A3A2A5"
+
+# ── The twelve disciplines ──────────────────────────────────────────────
+[[submodes]]
+id = "executive"
+name = "Executive (Mayor)"
+icon = "flag"
+
+[[submodes]]
+id = "council"
+name = "Council (Ward)"
+icon = "users"
+
+[[submodes]]
+id = "budget"
+name = "Budget & Finance"
+icon = "coin"
+
+[[submodes]]
+id = "administration"
+name = "Administration"
+icon = "flowchart"
+
+[[submodes]]
+id = "clerk"
+name = "Clerk & Elections"
+icon = "stamp"
+
+[[submodes]]
+id = "procurement"
+name = "Procurement & Contracts"
+icon = "handshake"
+
+[[submodes]]
+id = "audit"
+name = "Audit & Inspector General"
+icon = "search"
+
+[[submodes]]
+id = "permitting"
+name = "Permitting & Land Use"
+icon = "map"
+
+[[submodes]]
+id = "public-works"
+name = "Public Works & Utilities"
+icon = "hardhat"
+
+[[submodes]]
+id = "public-safety"
+name = "Public Safety Administration"
+icon = "shield"
+
+[[submodes]]
+id = "human-services"
+name = "Health & Human Services"
+icon = "heart-pulse"
+
+[[submodes]]
+id = "constituent"
+name = "Constituent Services (311)"
+icon = "lifebuoy"
+
+# ── Fallback tabs, used by any discipline that has no `[[submode_tabs]]`
+# override yet. Jurisdiction is the shared intake tab — the Government analogue
+# of Civil's "Survey" — and is repeated per-discipline below so every ribbon
+# carries it. `data:import` is already wired; the rest of `gov:` is not.
+[[tabs]]
+id = "jurisdiction"
+name = "Jurisdiction"
+color = "#A3A2A5"
+
+  [[tabs.sections]]
+  name = "Boundaries"
+  tools = ["gov:jurisdiction_loader", "gov:ward_boundary_importer", "gov:parcel_importer"]
+
+  [[tabs.sections]]
+  name = "Sources"
+  tools = ["data:import", "gov:open_data_connector", "gov:provenance_inspector"]
+
+  [[tabs.sections]]
+  name = "Scenarios"
+  tools = ["gov:scenario_manager", "gov:run_comparator", "gov:publish_dashboard"]
+
+# ── Per-discipline tabs. Each carries the shared Jurisdiction tab first
+# (intake applies to all twelve), then its own discipline tabs. Tool-id
+# prefixes are one per discipline so ids stay unique across the manifest:
+#   gov: shared   gexe: executive   gcnl: council   gbud: budget
+#   gadm: admin   gclk: clerk       gprc: procurement  gaud: audit
+#   gpln: permitting  gpwk: public works  gpsa: public safety
+#   ghhs: human services  gcon: constituent services
+# ─────────────────────────────────────────────────────────────────────────
+
+[[submode_tabs]]
+submode = "executive"
+id = "jurisdiction"
+name = "Jurisdiction"
+color = "#A3A2A5"
+  [[submode_tabs.sections]]
+  name = "Boundaries"
+  tools = ["gov:jurisdiction_loader", "gov:ward_boundary_importer", "gov:parcel_importer"]
+  [[submode_tabs.sections]]
+  name = "Sources"
+  tools = ["data:import", "gov:open_data_connector", "gov:provenance_inspector"]
+  [[submode_tabs.sections]]
+  name = "Scenarios"
+  tools = ["gov:scenario_manager", "gov:run_comparator", "gov:publish_dashboard"]
+
+# ---- 1. Executive (Mayor) -------------------------------------------------
+# The Mayor authors a budget, issues directives, and is judged on promises.
+# Every tab here is an ANALYSIS seat: it drafts, costs, and scores — it does
+# not adopt, sign, appoint, or transmit. `exec-authority` exists because the
+# largest single risk to this seat's agenda is asserting powers that the
+# charter, the council-manager structure, and Arizona preemption do not grant
+# it; `authority_boundary_checker` and `preemption_conflict_screener` are
+# there to say so before a debate does.
+
+[[submode_tabs]]
+submode = "executive"
+id = "exec-budget"
+name = "Executive Budget"
+color = "#eab308"
+  [[submode_tabs.sections]]
+  name = "Proposal"
+  tools = ["gexe:budget_proposal_builder", "gexe:department_allocation_editor", "gexe:fund_balance_viewer", "gexe:outyear_budget_estimator"]
+  [[submode_tabs.sections]]
+  name = "Targets & Tradeoffs"
+  tools = ["gexe:reduction_target_solver", "gexe:budget_deficit_solver", "gexe:service_cut_tradeoff_matrix", "gexe:reserve_floor_solver"]
+  [[submode_tabs.sections]]
+  name = "Message & Notes"
+  tools = ["gexe:budget_message_writer", "gexe:proposal_fiscal_note_reviewer", "gexe:budget_assumptions_registry", "gexe:budget_sensitivity_publisher"]
+
+[[submode_tabs]]
+submode = "executive"
+id = "exec-action"
+name = "Executive Action"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Directives"
+  tools = ["gexe:executive_order_drafter", "gexe:administrative_directive_log", "gexe:directive_fiscal_impact_estimator", "gexe:directive_status_dashboard"]
+  [[submode_tabs.sections]]
+  name = "Appointments & Boards"
+  tools = ["gexe:appointment_roster", "gexe:commission_authority_map", "gexe:board_vacancy_monitor", "gexe:appointment_disclosure_checklist"]
+  [[submode_tabs.sections]]
+  name = "Intergovernmental"
+  tools = ["gexe:intergovernmental_agreement_matrix", "gexe:unfunded_mandate_calculator", "gexe:grant_pipeline_tracker", "gexe:regional_cost_share_calculator"]
+
+[[submode_tabs]]
+submode = "executive"
+id = "exec-accountability"
+name = "Citywide Accountability"
+color = "#f472b6"
+  [[submode_tabs.sections]]
+  name = "Scorecard"
+  tools = ["gexe:citywide_kpi_registry", "gexe:service_level_trend_viewer", "gexe:cost_per_outcome_model", "gexe:department_scorecard_grid"]
+  [[submode_tabs.sections]]
+  name = "Promises"
+  tools = ["gexe:promise_registry", "gexe:promise_outcome_scorer", "gexe:promise_variance_analyzer", "gexe:term_report_composer"]
+  [[submode_tabs.sections]]
+  name = "Publication"
+  tools = ["gexe:public_dashboard_designer", "gexe:state_of_city_briefing_composer", "gexe:fiscal_transparency_publisher", "gexe:dashboard_publication_scheduler"]
+
+[[submode_tabs]]
+submode = "executive"
+id = "exec-authority"
+name = "Charter & Delivery"
+color = "#22d3ee"
+  [[submode_tabs.sections]]
+  name = "Charter Authority"
+  tools = ["gexe:charter_authority_registry", "gexe:authority_boundary_checker", "gexe:council_manager_governance_matrix", "gexe:preemption_conflict_screener"]
+  [[submode_tabs.sections]]
+  name = "Program Delivery"
+  tools = ["gexe:policy_sequence_planner", "gexe:department_target_builder", "gexe:department_dependency_network", "gexe:agenda_delivery_timeline"]
+  [[submode_tabs.sections]]
+  name = "Delivery Risk"
+  tools = ["gexe:delivery_risk_registry", "gexe:stalled_initiative_finder", "gexe:delivery_capacity_estimator"]
+
+[[submode_tabs]]
+submode = "council"
+id = "jurisdiction"
+name = "Jurisdiction"
+color = "#A3A2A5"
+  [[submode_tabs.sections]]
+  name = "Boundaries"
+  tools = ["gov:jurisdiction_loader", "gov:ward_boundary_importer", "gov:parcel_importer"]
+  [[submode_tabs.sections]]
+  name = "Sources"
+  tools = ["data:import", "gov:open_data_connector", "gov:provenance_inspector"]
+  [[submode_tabs.sections]]
+  name = "Scenarios"
+  tools = ["gov:scenario_manager", "gov:run_comparator", "gov:publish_dashboard"]
+
+# ---- 2. Council (Ward) ---------------------------------------------------
+# A ward seat is citywide legislating read through one ward's ledger, so the
+# four tabs follow that arc: know the ward, work the agenda, allocate every
+# citywide policy DOWN to the ward, then keep the record.
+#
+# Two scope lines are load-bearing here, and they are why several otherwise
+# obvious tools are absent:
+#   - Nothing casts, counts, or certifies a vote. The Roll Call section reads
+#     PUBLISHED minutes into a queryable record and analyzes the pattern; the
+#     Clerk records votes, this seat only models them.
+#   - No canvassing, voter-file, or walk-list tooling. That is campaign work
+#     and it stays out of Government mode entirely (GOVERNMENT_MODE.md §4.4).
+# Casework arrives person-level by nature and is operational record only: it is
+# never joined into a published model, every published cut is aggregate under
+# minimum-cell-size suppression, and nothing here profiles, predicts, or infers
+# attributes about an individual (LAW-ORDER.md §3, U6).
+
+[[submode_tabs]]
+submode = "council"
+id = "ward"
+name = "Ward"
+color = "#4ade80"
+  # Aggregate public sources only — Census/ACS tables, the adopted zoning map,
+  # Assessor parcels, the City's registered-neighborhood list.
+  [[submode_tabs.sections]]
+  name = "Ward Base"
+  tools = ["gcnl:ward_census_viewer", "gcnl:ward_zoning_overlay", "gcnl:neighborhood_association_registry", "gcnl:ward_parcel_explorer"]
+  # What the city actually delivers inside this ward and what it spends here.
+  # `ward_capital_share_calculator` is per-capita CIP dollars in-ward against
+  # citywide, which is a number that can come out against the seat holding it.
+  [[submode_tabs.sections]]
+  name = "Service Delivery"
+  tools = ["gcnl:service_request_heatmap", "gcnl:ward_response_time_chart", "gcnl:ward_maintenance_backlog", "gcnl:ward_capital_share_calculator"]
+  [[submode_tabs.sections]]
+  name = "Public Engagement"
+  tools = ["gcnl:town_hall_planner", "gcnl:public_comment_log", "gcnl:meeting_notice_composer"]
+
+[[submode_tabs]]
+submode = "council"
+id = "legislative"
+name = "Legislative"
+color = "#60a5fa"
+  # Drafts, never enacts. `legal_authority_checker` tests a draft against the
+  # charter and Arizona preemption statute and fails proposals the city has no
+  # power to pass — the cheapest falsifier in the discipline.
+  [[submode_tabs.sections]]
+  name = "Drafting"
+  tools = ["gcnl:ordinance_drafter", "gcnl:amendment_clause_tracker", "gcnl:fiscal_note_reviewer", "gcnl:legal_authority_checker"]
+  # Whether an item can lawfully be heard, and when. `consent_calendar_splitter`
+  # pulls an item off consent so it takes a recorded vote instead of passing in
+  # a block.
+  [[submode_tabs.sections]]
+  name = "Agenda"
+  tools = ["gcnl:agenda_reviewer", "gcnl:consent_calendar_splitter", "gcnl:notice_period_checker", "gcnl:agenda_deadline_tracker"]
+  # Published minutes only. `vote_threshold_checker` reports the majority or
+  # supermajority an item needs; it does not tally one.
+  [[submode_tabs.sections]]
+  name = "Roll Call"
+  tools = ["gcnl:roll_call_archive", "gcnl:vote_history_chart", "gcnl:coalition_finder", "gcnl:vote_threshold_checker"]
+
+[[submode_tabs]]
+submode = "council"
+id = "ward-impact"
+name = "Ward Impact"
+color = "#fb923c"
+  # S14 lives here: take every citywide output and allocate it to this ward by
+  # incidence. A ward member is elected by one ward and answers to it.
+  [[submode_tabs.sections]]
+  name = "Incidence"
+  tools = ["gcnl:ward_impact_calculator", "gcnl:tax_burden_share_viewer", "gcnl:fee_incidence_model"]
+  # Built to be able to return the unwelcome answer.
+  # `income_regressivity_screener` ranks wards by burden against income and
+  # reports when a proposal's cost lands hardest on the lowest-income wards.
+  [[submode_tabs.sections]]
+  name = "Winners & Losers"
+  tools = ["gcnl:ward_service_spend_gap_calculator", "gcnl:ward_per_capita_spend_choropleth", "gcnl:income_regressivity_screener"]
+  # `ward_cost_shift_calculator` nets a cut against the cost it pushes onto
+  # residents (added travel, private substitution, downstream service use): a
+  # cut that only moves cost is a transfer, not a saving.
+  # `service_regression_guard` is S13 read at ward scale and exists to reject
+  # cuts, not to approve them.
+  [[submode_tabs.sections]]
+  name = "Scenario Review"
+  tools = ["gcnl:policy_scenario_comparator", "gcnl:ward_cost_shift_calculator", "gcnl:ward_service_impact_viewer"]
+
+[[submode_tabs]]
+submode = "council"
+id = "casework"
+name = "Casework & Record"
+color = "#a78bfa"
+  # Operational queue only — routing and deadlines, no profiling and no
+  # prediction. `casework_redaction_editor` strips identifying detail before
+  # anything leaves the office or reaches the Insight section.
+  [[submode_tabs.sections]]
+  name = "Casework"
+  tools = ["gcnl:casework_category_intake_log", "gcnl:referral_tracker", "gcnl:response_deadline_monitor", "gcnl:casework_redaction_editor"]
+  # Aggregate-only: counts by category and by area, never by person. A
+  # recurring issue is evidence for an ordinance, which is the loop that makes
+  # casework legislative rather than clerical.
+  [[submode_tabs.sections]]
+  name = "Insight"
+  tools = ["gcnl:recurring_issue_finder", "gcnl:issue_category_breakdown", "gcnl:issue_triage_router", "gcnl:service_gap_analyzer"]
+  # The seat's own record, published. Attendance and disclosure point at the
+  # officeholder, not at constituents.
+  [[submode_tabs.sections]]
+  name = "Record & Publication"
+  tools = ["gcnl:attendance_log", "gcnl:disclosure_registry", "gcnl:vote_explainer", "gcnl:ward_report_composer"]
+
+[[submode_tabs]]
+submode = "budget"
+id = "jurisdiction"
+name = "Jurisdiction"
+color = "#A3A2A5"
+  [[submode_tabs.sections]]
+  name = "Boundaries"
+  tools = ["gov:jurisdiction_loader", "gov:ward_boundary_importer", "gov:parcel_importer"]
+  [[submode_tabs.sections]]
+  name = "Sources"
+  tools = ["data:import", "gov:open_data_connector", "gov:provenance_inspector"]
+  [[submode_tabs.sections]]
+  name = "Scenarios"
+  tools = ["gov:scenario_manager", "gov:run_comparator", "gov:publish_dashboard"]
+
+# ---- 3. Budget & Finance -------------------------------------------------
+# The budget office seat: line-item ingest, zero-based reconstruction, revenue
+# forecasting, tax incidence, debt and capital. Drives S1 (budget twin), S6
+# (tax incidence), and S10 (farebox recovery); supplies the gross reduction
+# that Audit's S13 is built to reject and the incidence Council's S14 splits
+# by ward. Nothing here adopts, certifies, or levies anything.
+
+[[submode_tabs]]
+submode = "budget"
+id = "appropriation"
+name = "Appropriation"
+color = "#eab308"
+  [[submode_tabs.sections]]
+  name = "Line Items"
+  tools = ["gbud:adopted_budget_loader", "gbud:fund_structure_viewer", "gbud:line_item_classifier", "gbud:department_allocation_matrix"]
+  [[submode_tabs.sections]]
+  name = "Zero-Based Rebuild"
+  tools = ["gbud:decision_package_builder", "gbud:automation_savings_estimator", "gbud:discretionary_share_calculator", "gbud:mandated_cost_registry"]
+  [[submode_tabs.sections]]
+  name = "Cut Scenarios"
+  tools = ["gbud:cut_scenario_builder", "gbud:budget_gap_solver", "gbud:multiyear_deficit_dashboard", "gbud:cut_tradeoff_explorer"]
+
+[[submode_tabs]]
+submode = "budget"
+id = "revenue"
+name = "Revenue & Tax"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Forecast"
+  tools = ["gbud:revenue_forecaster", "gbud:revenue_elasticity_estimator", "gbud:revenue_cycle_adjuster", "gbud:state_shared_revenue_viewer"]
+  [[submode_tabs.sections]]
+  name = "Incidence"
+  tools = ["gbud:property_tax_incidence_estimator", "gbud:effective_rate_calculator", "gbud:ward_burden_choropleth", "gbud:constitutional_levy_limit_checker"]
+  [[submode_tabs.sections]]
+  name = "Fees & Charges"
+  tools = ["gbud:fee_cost_recovery_calculator", "gbud:fee_schedule_scenario_builder", "gbud:farebox_recovery_ratio_model", "gbud:enterprise_fund_rate_designer"]
+
+[[submode_tabs]]
+submode = "budget"
+id = "capital-debt"
+name = "Capital & Debt"
+color = "#a78bfa"
+  [[submode_tabs.sections]]
+  name = "Debt"
+  tools = ["gbud:debt_service_schedule", "gbud:bond_capacity_calculator", "gbud:refunding_npv_analyzer", "gbud:credit_rating_tracker"]
+  [[submode_tabs.sections]]
+  name = "Capital Plan"
+  tools = ["gbud:capital_plan_scheduler", "gbud:lifecycle_cost_model", "gbud:deferred_maintenance_backlog", "gbud:pension_funding_gap_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Reserves & Risk"
+  tools = ["gbud:fund_balance_policy_checker", "gbud:revenue_stress_tester", "gbud:recession_scenario_simulator", "gbud:contingency_reserve_viewer"]
+
+[[submode_tabs]]
+submode = "budget"
+id = "execution"
+name = "Execution & Transparency"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Monthly Close"
+  tools = ["gbud:encumbrance_balance_tracker", "gbud:collections_variance_report", "gbud:budget_amendment_log", "gbud:carryforward_balance_viewer"]
+  [[submode_tabs.sections]]
+  name = "Provenance & Sources"
+  tools = ["gbud:extraction_confidence_reviewer", "gbud:line_item_provenance_viewer", "gbud:source_document_registry", "gbud:unsourced_figure_finder"]
+  [[submode_tabs.sections]]
+  name = "Public Reporting"
+  tools = ["gbud:checkbook_ledger_publisher", "gbud:public_budget_dashboard_designer", "gbud:fiscal_note_generator", "gbud:budget_book_composer"]
+
+[[submode_tabs]]
+submode = "administration"
+id = "jurisdiction"
+name = "Jurisdiction"
+color = "#A3A2A5"
+  [[submode_tabs.sections]]
+  name = "Boundaries"
+  tools = ["gov:jurisdiction_loader", "gov:ward_boundary_importer", "gov:parcel_importer"]
+  [[submode_tabs.sections]]
+  name = "Sources"
+  tools = ["data:import", "gov:open_data_connector", "gov:provenance_inspector"]
+  [[submode_tabs.sections]]
+  name = "Scenarios"
+  tools = ["gov:scenario_manager", "gov:run_comparator", "gov:publish_dashboard"]
+
+# ---- 4. Administration (the city-manager seat) ---------------------------
+# Authorized POSITIONS and CLASSES — never named employees. The roster,
+# vacancy, and attrition tooling below is class-level and rate-based by
+# construction: no person-level records enter, and nothing here predicts an
+# individual's departure or performance (LAW-ORDER.md §3, U6). Salary
+# schedules and position ledgers are public records; personnel files are not
+# and are out of scope.
+#
+# Analysis seat, not an authority seat: this tab group scores, models, and
+# publishes. It does not create, abolish, classify, hire, or separate a
+# position — those are official acts and live outside the engine.
+#
+# Owns S5 (Automation Displacement & Transition) and supplies the
+# service-level models S13 tests every proposed cut against.
+
+[[submode_tabs]]
+submode = "administration"
+id = "admin-org"
+name = "Org & Positions"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Org Structure"
+  tools = ["gadm:org_hierarchy_viewer", "gadm:reporting_layer_analyzer", "gadm:span_of_control_analyzer", "gadm:reorg_scenario_builder"]
+  [[submode_tabs.sections]]
+  name = "Position Roster"
+  tools = ["gadm:position_roster_viewer", "gadm:vacancy_rate_calculator", "gadm:headcount_trend_viewer", "gadm:vacancy_service_impact_scorer"]
+  [[submode_tabs.sections]]
+  name = "Classification & Pay"
+  tools = ["gadm:job_classification_editor", "gadm:salary_schedule_scenario_builder", "gadm:total_compensation_cost_calculator", "gadm:step_increase_cost_forecaster"]
+
+[[submode_tabs]]
+submode = "administration"
+id = "admin-automation"
+name = "Automation & Transition"
+color = "#a78bfa"
+  [[submode_tabs.sections]]
+  name = "Task Inventory"
+  tools = ["gadm:task_inventory_builder", "gadm:process_map_editor", "gadm:rework_loop_finder", "gadm:handoff_delay_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Automatability"
+  tools = ["gadm:automatability_scorer", "gadm:automation_candidate_screener", "gadm:mechanical_task_classifier", "gadm:automation_cost_estimator"]
+  [[submode_tabs.sections]]
+  name = "Transition Paths"
+  tools = ["gadm:attrition_path_simulator", "gadm:hiring_freeze_planner", "gadm:severance_cost_estimator", "gadm:attrition_tradeoff_comparator"]
+
+[[submode_tabs]]
+submode = "administration"
+id = "admin-service"
+name = "Service Levels"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Service Catalog"
+  tools = ["gadm:service_catalog_editor", "gadm:service_inventory_viewer", "gadm:statutory_mandate_registry", "gadm:mandated_service_hours_share_calculator"]
+  [[submode_tabs.sections]]
+  name = "Standards & Metrics"
+  tools = ["gadm:service_level_target_editor", "gadm:cycle_time_tracker", "gadm:backlog_queue_monitor", "gadm:standard_breach_escalation_log"]
+  [[submode_tabs.sections]]
+  name = "Capacity & Risk"
+  tools = ["gadm:workload_distribution_viewer", "gadm:overtime_cost_tracker", "gadm:service_risk_threshold_solver"]
+
+[[submode_tabs]]
+submode = "administration"
+id = "admin-cost"
+name = "Cost of Service"
+color = "#f472b6"
+  [[submode_tabs.sections]]
+  name = "Unit Cost"
+  tools = ["gadm:cost_per_transaction_calculator", "gadm:overhead_allocation_model", "gadm:activity_based_costing_builder", "gadm:peer_city_unit_cost_comparator"]
+  [[submode_tabs.sections]]
+  name = "Consolidation"
+  tools = ["gadm:automation_savings_breakeven_solver", "gadm:duplicate_function_finder", "gadm:shared_services_consolidation_model"]
+  [[submode_tabs.sections]]
+  name = "Transparency"
+  tools = ["gadm:service_cost_report_writer", "gadm:position_control_dashboard", "gadm:position_ledger_publisher"]
+
+[[submode_tabs]]
+submode = "clerk"
+id = "jurisdiction"
+name = "Jurisdiction"
+color = "#A3A2A5"
+  [[submode_tabs.sections]]
+  name = "Boundaries"
+  tools = ["gov:jurisdiction_loader", "gov:ward_boundary_importer", "gov:parcel_importer"]
+  [[submode_tabs.sections]]
+  name = "Sources"
+  tools = ["data:import", "gov:open_data_connector", "gov:provenance_inspector"]
+  [[submode_tabs.sections]]
+  name = "Scenarios"
+  tools = ["gov:scenario_manager", "gov:run_comparator", "gov:publish_dashboard"]
+
+# ---- 5. Clerk & Elections -------------------------------------------------
+# The records custodian's seat: public records, retention schedules,
+# disclosure, and hash-anchored publication of released record sets.
+#
+# ANALYSIS SEAT, NOT AN AUTHORITY SEAT. Nothing here signs, certifies,
+# files, or releases an official record — a tool may STAGE a release
+# package and compute its hash; the release itself is an act of the office,
+# performed outside this engine. There is deliberately no vote-casting,
+# no ballot tabulation, and no signature verification anywhere in this
+# discipline: the Elections tab models election ADMINISTRATION (siting,
+# queues, staffing, cost, ballot language) and reads only already-published
+# aggregate results. See docs/architecture/GOVERNMENT_MODE.md §8.1 — the
+# defensible version of "unfudgeable records" is Merkle anchoring through
+# the bliss witness ledger, not blockchain voting.
+#
+# PRIVACY (LAW-ORDER.md §3, binding): the unit of analysis is the FILER,
+# the COMMITTEE, the RECORD SERIES, or the PRECINCT — never a person. No
+# voter file, no donor-level mapping, no requester profiling. The Privacy
+# Review section exists to REMOVE identifiers before publication, which is
+# the only person-level work this seat is permitted to do.
+
+[[submode_tabs]]
+submode = "clerk"
+id = "clerk-records"
+name = "Records"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Requests"
+  tools = ["gclk:request_backlog_board", "gclk:response_deadline_tracker", "gclk:statute_exemption_checker", "gclk:copy_fee_estimator"]
+  [[submode_tabs.sections]]
+  name = "Retention"
+  tools = ["gclk:retention_schedule_viewer", "gclk:legal_hold_registry", "gclk:record_series_classifier", "gclk:retention_cost_model"]
+  [[submode_tabs.sections]]
+  name = "Index & Access"
+  tools = ["gclk:finding_aid_builder", "gclk:records_inventory_viewer", "gclk:metadata_schema_editor", "gclk:open_data_catalog_publisher"]
+
+# Election ADMINISTRATION only — siting, queueing, staffing, cost, and
+# ballot-language legibility, plus already-published aggregate results.
+# Nothing casts, counts, or verifies a ballot.
+[[submode_tabs]]
+submode = "clerk"
+id = "clerk-elections"
+name = "Elections"
+color = "#a78bfa"
+  [[submode_tabs.sections]]
+  name = "Precincts & Sites"
+  tools = ["gclk:precinct_boundary_viewer", "gclk:polling_facility_optimizer", "gclk:polling_queue_simulator", "gclk:vote_center_coverage_map"]
+  [[submode_tabs.sections]]
+  name = "Administration"
+  tools = ["gclk:election_calendar_planner", "gclk:poll_worker_roster_planner", "gclk:election_cost_calculator", "gclk:ballot_language_readability_scorer"]
+  [[submode_tabs.sections]]
+  name = "Turnout & Results"
+  tools = ["gclk:turnout_history_viewer", "gclk:turnout_choropleth_viewer", "gclk:ballot_measure_archive", "gclk:undervote_rate_chart"]
+
+# Disclosure custodianship over ALL filers — this is the Clerk's statutory
+# function, not campaign operations (§4.4 keeps campaign tooling out of
+# Government mode entirely). Every input is a public filing; the unit of
+# analysis is the committee or registered filer.
+[[submode_tabs]]
+submode = "clerk"
+id = "clerk-disclosure"
+name = "Disclosure"
+color = "#eab308"
+  [[submode_tabs.sections]]
+  name = "Campaign Finance"
+  tools = ["gclk:campaign_finance_loader", "gclk:committee_ledger_viewer", "gclk:contribution_limit_checker", "gclk:in_district_share_calculator"]
+  [[submode_tabs.sections]]
+  name = "Filings & Deadlines"
+  tools = ["gclk:filing_deadline_monitor", "gclk:late_filing_registry", "gclk:filing_amendment_log", "gclk:disclosure_completeness_scorer"]
+  [[submode_tabs.sections]]
+  name = "Lobbying & Interests"
+  tools = ["gclk:lobbyist_registration_viewer", "gclk:lobbying_activity_dashboard", "gclk:gift_disclosure_registry", "gclk:conflict_recusal_log"]
+
+# Hash-anchored publication + the aggregate-only gate. Publication
+# Economics is this discipline's falsifier: "radical transparency" has a
+# staffing and storage cost, and the breakeven solver can return an answer
+# the platform will not like.
+[[submode_tabs]]
+submode = "clerk"
+id = "clerk-integrity"
+name = "Record Integrity"
+color = "#f87171"
+  [[submode_tabs.sections]]
+  name = "Hash Anchoring"
+  tools = ["gclk:record_hash_tree_builder", "gclk:anchor_ledger_browser", "gclk:provenance_chain_verifier", "gclk:redaction_audit_log"]
+  [[submode_tabs.sections]]
+  name = "Privacy Review"
+  tools = ["gclk:aggregation_threshold_auditor", "gclk:identifier_field_detector", "gclk:dataset_sensitivity_classifier"]
+  [[submode_tabs.sections]]
+  name = "Publication Economics"
+  tools = ["gclk:release_cost_breakeven_solver", "gclk:request_volume_trend_chart", "gclk:records_staff_hours_calculator", "gclk:records_automation_savings_estimator"]
+
+[[submode_tabs]]
+submode = "procurement"
+id = "jurisdiction"
+name = "Jurisdiction"
+color = "#A3A2A5"
+  [[submode_tabs.sections]]
+  name = "Boundaries"
+  tools = ["gov:jurisdiction_loader", "gov:ward_boundary_importer", "gov:parcel_importer"]
+  [[submode_tabs.sections]]
+  name = "Sources"
+  tools = ["data:import", "gov:open_data_connector", "gov:provenance_inspector"]
+  [[submode_tabs.sections]]
+  name = "Scenarios"
+  tools = ["gov:scenario_manager", "gov:run_comparator", "gov:publish_dashboard"]
+
+# ---- 6. Procurement & Contracts -----------------------------------------
+# The procurement office: solicitation, bid leveling, the no-bid registry,
+# vendor pattern review over PUBLIC award records, and contract performance.
+# ANALYSIS SEAT: nothing here issues a solicitation, awards a contract, or
+# approves a payment — it drafts, levels, and scores so a human can decide.
+
+[[submode_tabs]]
+submode = "procurement"
+id = "prc-solicitation"
+name = "Solicitation"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Requirement"
+  tools = ["gprc:requirement_spec_composer", "gprc:market_survey_planner", "gprc:bid_threshold_checker", "gprc:proprietary_spec_detector"]
+  [[submode_tabs.sections]]
+  name = "Documents"
+  tools = ["gprc:rfp_composer", "gprc:evaluation_criteria_builder", "gprc:addendum_notice_log", "gprc:solicitation_calendar"]
+  [[submode_tabs.sections]]
+  name = "Outreach & Access"
+  tools = ["gprc:vendor_outreach_planner", "gprc:small_vendor_barrier_analyzer", "gprc:bid_count_tracker"]
+
+[[submode_tabs]]
+submode = "procurement"
+id = "prc-bids"
+name = "Bids & Evaluation"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Leveling"
+  tools = ["gprc:bid_tabulation_builder", "gprc:bid_leveling_worksheet", "gprc:scope_exception_screener", "gprc:unit_price_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Scoring"
+  tools = ["gprc:responsiveness_determination_reviewer", "gprc:evaluation_score_matrix", "gprc:best_value_tradeoff_model", "gprc:award_memo_composer"]
+  [[submode_tabs.sections]]
+  name = "Protest & Debrief"
+  tools = ["gprc:protest_hearing_log", "gprc:debrief_note_composer", "gprc:protest_rate_viewer"]
+
+[[submode_tabs]]
+submode = "procurement"
+id = "prc-integrity"
+name = "Competition & Integrity"
+color = "#f87171"
+  [[submode_tabs.sections]]
+  name = "No-Bid & Sole Source"
+  tools = ["gprc:no_bid_registry", "gprc:sole_source_justification_checker", "gprc:cooperative_contract_screener", "gprc:emergency_award_log"]
+  [[submode_tabs.sections]]
+  name = "Addressable Pool"
+  tools = ["gprc:competitive_conversion_solver", "gprc:competition_premium_estimator", "gprc:single_bid_premium_analyzer", "gprc:savings_breakeven_calculator"]
+  # Institutional records only — awards, registrations, and vendor-filed
+  # disclosures, all public. Surfaces PATTERNS for human review; it alleges
+  # nothing, and no output is an accusation (GOVERNMENT_MODE.md S8 boundary).
+  [[submode_tabs.sections]]
+  name = "Vendor Patterns"
+  tools = ["gprc:vendor_registry", "gprc:related_entity_browser", "gprc:vendor_share_analyzer", "gprc:disclosure_form_reviewer"]
+
+[[submode_tabs]]
+submode = "procurement"
+id = "prc-performance"
+name = "Contract Performance"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Register & Renewals"
+  tools = ["gprc:contract_registry", "gprc:renewal_deadline_monitor", "gprc:escalation_clause_calculator", "gprc:expiring_contract_dashboard"]
+  [[submode_tabs.sections]]
+  name = "Cost Growth"
+  tools = ["gprc:change_order_tracker", "gprc:cost_growth_analyzer", "gprc:lowball_bid_screener", "gprc:privatization_cost_breakeven_solver"]
+  [[submode_tabs.sections]]
+  name = "Delivery & Outcomes"
+  tools = ["gprc:sla_compliance_tracker", "gprc:vendor_performance_scorer", "gprc:invoice_match_checker", "gprc:cost_per_deliverable_calculator"]
+
+[[submode_tabs]]
+submode = "audit"
+id = "jurisdiction"
+name = "Jurisdiction"
+color = "#A3A2A5"
+  [[submode_tabs.sections]]
+  name = "Boundaries"
+  tools = ["gov:jurisdiction_loader", "gov:ward_boundary_importer", "gov:parcel_importer"]
+  [[submode_tabs.sections]]
+  name = "Sources"
+  tools = ["data:import", "gov:open_data_connector", "gov:provenance_inspector"]
+  [[submode_tabs.sections]]
+  name = "Scenarios"
+  tools = ["gov:scenario_manager", "gov:run_comparator", "gov:publish_dashboard"]
+
+# ---- 7. Audit & Inspector General ----------------------------------------
+# The adversarial seat. Every other discipline's numbers are this one's input,
+# and the tabs run in the order an audit actually runs: plan and sample
+# (Audit Program) -> try to break the claim (Falsification) -> trace where the
+# number came from and whether it reruns (Provenance) -> write it up and
+# publish (Findings).
+#
+# Institutional data only: awards, payments, change orders, and self-filed
+# disclosures, all from PUBLIC records. Nothing here profiles a person, infers
+# a protected attribute, or looks into a named official's private life. The
+# Privacy section gates the publish path (LAW-ORDER.md §3, U6) rather than
+# annotating it.
+#
+# Analysis seat, not an authority seat: this discipline drafts, verifies, and
+# publishes findings. It certifies nothing, files nothing, signs nothing.
+#
+# Owns S4 (determinism harness) and S13 (service-level regression guard); S13
+# is the tool that subtracts from S1's headline cut, and it is designed to fire.
+
+[[submode_tabs]]
+submode = "audit"
+id = "audit-program"
+name = "Audit Program"
+color = "#a78bfa"
+  [[submode_tabs.sections]]
+  name = "Risk & Planning"
+  tools = ["gaud:audit_universe_registry", "gaud:risk_assessment_scorer", "gaud:audit_plan_builder", "gaud:materiality_calculator"]
+  [[submode_tabs.sections]]
+  name = "Testwork & Analytics"
+  tools = ["gaud:sample_size_calculator", "gaud:control_test_designer", "gaud:exception_tracker", "gaud:backtest_accuracy_scorer"]
+  [[submode_tabs.sections]]
+  name = "Quality & Independence"
+  tools = ["gaud:workpaper_review_log", "gaud:peer_review_checklist", "gaud:independence_disclosure_log"]
+
+[[submode_tabs]]
+submode = "audit"
+id = "audit-falsification"
+name = "Falsification"
+color = "#f87171"
+  [[submode_tabs.sections]]
+  name = "Claims"
+  tools = ["gaud:claim_registry", "gaud:claim_type_classifier", "gaud:falsifier_condition_editor", "gaud:assumption_ledger"]
+  [[submode_tabs.sections]]
+  name = "Sensitivity"
+  tools = ["gaud:sensitivity_sweep_runner", "gaud:tornado_chart", "gaud:cost_breakeven_solver", "gaud:net_savings_calculator"]
+  [[submode_tabs.sections]]
+  name = "Counterfactual"
+  tools = ["gaud:counterfactual_scenario_builder", "gaud:baseline_diff_viewer", "gaud:service_regression_guard", "gaud:placebo_hypothesis_tester"]
+
+[[submode_tabs]]
+submode = "audit"
+id = "audit-provenance"
+name = "Provenance"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Citation"
+  tools = ["gaud:source_citation_checker", "gaud:provenance_tracer", "gaud:orphan_number_finder", "gaud:derivation_tree_viewer"]
+  [[submode_tabs.sections]]
+  name = "Reproducibility"
+  tools = ["gaud:reproducibility_verifier", "gaud:hash_anchor_verifier", "gaud:run_diff_viewer", "gaud:nondeterminism_detector"]
+  [[submode_tabs.sections]]
+  name = "Privacy"
+  tools = ["gaud:aggregation_gate_checker", "gaud:cell_suppression_report", "gaud:consent_class_reviewer"]
+
+[[submode_tabs]]
+submode = "audit"
+id = "audit-findings"
+name = "Findings"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Register"
+  tools = ["gaud:finding_registry", "gaud:recommendation_tracker", "gaud:management_response_reviewer", "gaud:follow_up_audit_scheduler"]
+  [[submode_tabs.sections]]
+  name = "Money Flow"
+  tools = ["gaud:award_history_tracker", "gaud:duplicate_payment_finder", "gaud:change_order_escalation_analyzer", "gaud:vendor_conflict_screener"]
+  [[submode_tabs.sections]]
+  name = "Publication"
+  tools = ["gaud:audit_report_composer", "gaud:replication_package_builder", "gaud:sourced_figure_share_calculator", "gaud:public_finding_publisher"]
+
+[[submode_tabs]]
+submode = "permitting"
+id = "jurisdiction"
+name = "Jurisdiction"
+color = "#A3A2A5"
+  [[submode_tabs.sections]]
+  name = "Boundaries"
+  tools = ["gov:jurisdiction_loader", "gov:ward_boundary_importer", "gov:parcel_importer"]
+  [[submode_tabs.sections]]
+  name = "Sources"
+  tools = ["data:import", "gov:open_data_connector", "gov:provenance_inspector"]
+  [[submode_tabs.sections]]
+  name = "Scenarios"
+  tools = ["gov:scenario_manager", "gov:run_comparator", "gov:publish_dashboard"]
+
+# ---- 8. Permitting & Land Use -------------------------------------------
+# Development services. Permit Ops carries S2 (permit throughput queue) and
+# Housing Supply carries S7 (zoning liberalization → buildout). ANALYSIS ONLY:
+# nothing here issues a permit, grants a variance, publishes a statutory
+# notice, or enacts a zoning change — drafters draft and checkers report.
+# All land-use data is PARCEL-level from public Assessor/zoning records, never
+# applicant-level (LAW-ORDER.md §3 / GOVERNMENT_MODE.md U6).
+[[submode_tabs]]
+submode = "permitting"
+id = "permitting-ops"
+name = "Permit Ops"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Intake & Queue"
+  tools = ["gpln:application_volume_log", "gpln:permit_type_classifier", "gpln:submittal_completeness_checker", "gpln:permit_backlog_board"]
+  [[submode_tabs.sections]]
+  name = "Review Stages"
+  tools = ["gpln:review_stage_flowchart", "gpln:reviewer_load_analyzer", "gpln:outside_agency_handoff_tracker", "gpln:statutory_window_checker"]
+  [[submode_tabs.sections]]
+  name = "Throughput"
+  tools = ["gpln:permit_queue_simulator", "gpln:cycle_time_distribution", "gpln:bottleneck_stage_detector", "gpln:automation_gain_solver"]
+
+[[submode_tabs]]
+submode = "permitting"
+id = "permitting-zoning"
+name = "Zoning"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Code & Zones"
+  tools = ["gpln:zone_district_viewer", "gpln:zone_use_table_lookup", "gpln:dimensional_standard_checker"]
+  [[submode_tabs.sections]]
+  name = "By-Right Checks"
+  tools = ["gpln:by_right_eligibility_checker", "gpln:ministerial_review_checklist", "gpln:discretionary_review_flagger"]
+  [[submode_tabs.sections]]
+  name = "Consolidation"
+  tools = ["gpln:zone_consolidation_designer", "gpln:zone_crosswalk_matrix", "gpln:parking_minimum_calculator", "gpln:nonconforming_use_inventory"]
+
+[[submode_tabs]]
+submode = "permitting"
+id = "permitting-housing"
+name = "Housing Supply"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Capacity"
+  tools = ["gpln:parcel_capacity_calculator", "gpln:zoned_capacity_analyzer", "gpln:lot_dimension_screener", "gpln:adu_capacity_viewer"]
+  [[submode_tabs.sections]]
+  name = "Feasibility"
+  tools = ["gpln:construction_cost_model", "gpln:development_pro_forma_model", "gpln:water_allocation_checker", "gpln:absorption_rate_curve"]
+  [[submode_tabs.sections]]
+  name = "Buildout"
+  tools = ["gpln:building_massing_designer", "gpln:unit_yield_scenario_builder", "gpln:buildout_terrain_viewer", "gpln:buildout_yield_chart"]
+
+[[submode_tabs]]
+submode = "permitting"
+id = "permitting-appeals"
+name = "Appeals"
+color = "#a78bfa"
+  [[submode_tabs.sections]]
+  name = "Variance & Rezoning"
+  tools = ["gpln:variance_case_tracker", "gpln:rezoning_case_viewer", "gpln:protest_area_calculator", "gpln:hardship_finding_drafter"]
+  [[submode_tabs.sections]]
+  name = "Hearings & Notice"
+  tools = ["gpln:hearing_calendar_planner", "gpln:staff_report_composer", "gpln:public_notice_drafter", "gpln:notification_area_mapper"]
+  [[submode_tabs.sections]]
+  name = "Outcomes"
+  tools = ["gpln:filing_deadline_clock", "gpln:board_decision_tracker", "gpln:approval_rate_dashboard", "gpln:denial_reason_pareto"]
+
+[[submode_tabs]]
+submode = "public-works"
+id = "jurisdiction"
+name = "Jurisdiction"
+color = "#A3A2A5"
+  [[submode_tabs.sections]]
+  name = "Boundaries"
+  tools = ["gov:jurisdiction_loader", "gov:ward_boundary_importer", "gov:parcel_importer"]
+  [[submode_tabs.sections]]
+  name = "Sources"
+  tools = ["data:import", "gov:open_data_connector", "gov:provenance_inspector"]
+  [[submode_tabs.sections]]
+  name = "Scenarios"
+  tools = ["gov:scenario_manager", "gov:run_comparator", "gov:publish_dashboard"]
+
+# ---- 9. Public Works & Utilities ------------------------------------------
+# WATER FIRST: Tucson is a desert city living on a Colorado River (CAP)
+# allocation plus a stressed aquifer, so supply, loss, and the full-cost rate
+# come before pavement. Design work HANDS OFF to the civil MODE (cwtr:/cutl:)
+# rather than duplicating it — these tools size the PROGRAM, not the pipe.
+# Add `"colorado": "Colorado"` to gen_tool_metadata's ACR so the derived
+# tooltip reads "View Colorado allocation" rather than lower-casing the river.
+[[submode_tabs]]
+submode = "public-works"
+id = "pwk-water"
+name = "Water & Aquifer"
+color = "#22d3ee"
+  [[submode_tabs.sections]]
+  name = "Supply & Allocation"
+  tools = ["gpwk:colorado_allocation_viewer", "gpwk:groundwater_drawdown_simulator", "gpwk:reclaimed_water_reuse_calculator", "gpwk:allocation_shortage_matrix"]
+  [[submode_tabs.sections]]
+  name = "Demand & Loss"
+  tools = ["gpwk:water_demand_forecaster", "gpwk:nonrevenue_water_analyzer", "gpwk:main_break_hotspot_mapper", "gpwk:conservation_program_scorer"]
+  [[submode_tabs.sections]]
+  name = "Rates & Resilience"
+  tools = ["gpwk:water_rate_cost_recovery_solver", "gpwk:drought_contingency_planner", "gpwk:pumping_energy_cost_estimator"]
+
+[[submode_tabs]]
+submode = "public-works"
+id = "pwk-assets"
+name = "Assets & Backlog"
+color = "#94a3b8"
+  [[submode_tabs.sections]]
+  name = "Inventory & Condition"
+  tools = ["gpwk:asset_registry_explorer", "gpwk:pavement_condition_index_viewer", "gpwk:pipe_age_cohort_chart", "gpwk:equipment_replacement_scheduler"]
+  [[submode_tabs.sections]]
+  name = "Deferred Maintenance"
+  tools = ["gpwk:deferred_maintenance_registry", "gpwk:backlog_cost_estimator", "gpwk:deferral_cost_escalation_model", "gpwk:service_disruption_risk_scorer"]
+  [[submode_tabs.sections]]
+  name = "Renewal & Risk"
+  tools = ["gpwk:renewal_schedule_solver", "gpwk:asset_criticality_scorer", "gpwk:condition_decay_simulator"]
+
+[[submode_tabs]]
+submode = "public-works"
+id = "pwk-streets"
+name = "Streets & Transit"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Streets & Pavement"
+  tools = ["gpwk:pavement_resurfacing_optimizer", "gpwk:pothole_backlog_tracker", "gpwk:lane_mile_cost_calculator", "gpwk:sidewalk_gap_inventory"]
+  [[submode_tabs.sections]]
+  name = "Transit Operations"
+  tools = ["gpwk:transit_route_cost_analyzer", "gpwk:farebox_recovery_ratio_calculator", "gpwk:net_fare_revenue_estimator", "gpwk:ridership_trend_viewer"]
+  [[submode_tabs.sections]]
+  name = "Right of Way"
+  tools = ["gpwk:encroachment_permit_tracker", "gpwk:trench_restoration_checker", "gpwk:streetlight_energy_audit"]
+
+[[submode_tabs]]
+submode = "public-works"
+id = "pwk-capital"
+name = "Capital & Competition"
+color = "#a78bfa"
+  [[submode_tabs.sections]]
+  name = "Capital Program"
+  tools = ["gpwk:cip_project_sequencer", "gpwk:lifecycle_cost_calculator", "gpwk:cost_overrun_history_viewer", "gpwk:funding_source_matrix"]
+  [[submode_tabs.sections]]
+  name = "Managed Competition"
+  tools = ["gpwk:inhouse_cost_baseline_calculator", "gpwk:overhead_rate_calculator", "gpwk:outsourcing_cost_breakeven_solver", "gpwk:contract_performance_monitor"]
+  [[submode_tabs.sections]]
+  name = "Delivery & Benchmarks"
+  tools = ["gpwk:project_delivery_method_selector", "gpwk:capital_variance_report", "gpwk:asset_condition_dashboard", "gpwk:lane_mile_benchmark_comparator"]
+
+[[submode_tabs]]
+submode = "public-safety"
+id = "jurisdiction"
+name = "Jurisdiction"
+color = "#A3A2A5"
+  [[submode_tabs.sections]]
+  name = "Boundaries"
+  tools = ["gov:jurisdiction_loader", "gov:ward_boundary_importer", "gov:parcel_importer"]
+  [[submode_tabs.sections]]
+  name = "Sources"
+  tools = ["data:import", "gov:open_data_connector", "gov:provenance_inspector"]
+  [[submode_tabs.sections]]
+  name = "Scenarios"
+  tools = ["gov:scenario_manager", "gov:run_comparator", "gov:publish_dashboard"]
+
+# ---- 10. Public Safety Administration -------------------------------------
+# ADMINISTRATION, not operations: how many units, on which beats, at which
+# hours, sited where, answered by which responder type, and published to whom.
+# Nothing here dispatches a unit, opens a case, or names a person.
+#
+# PRIVACY LINE (docs/LAW-ORDER.md §3, GOVERNMENT_MODE.md U6) — binding on this
+# discipline more than any other: every demand, response, and outcome input is
+# an AGGREGATE space-time cell that has already passed minimum-cell-size
+# suppression. No person-level records, no individual or place-based
+# prediction, no enforcement trigger fed back from a model. The Privacy Guard
+# section exists so that constraint is checked mechanically rather than
+# promised, and `gpsa:reidentification_risk_screener` is allowed to refuse a
+# publish.
+
+[[submode_tabs]]
+submode = "public-safety"
+id = "psafety-deployment"
+name = "Deployment"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Demand Surface"
+  tools = ["gpsa:demand_choropleth_viewer", "gpsa:peak_demand_window_analyzer", "gpsa:seasonal_demand_curve", "gpsa:unit_availability_rate_viewer"]
+  [[submode_tabs.sections]]
+  name = "Allocation"
+  tools = ["gpsa:beat_boundary_designer", "gpsa:shift_schedule_builder", "gpsa:coverage_zone_editor", "gpsa:redeployment_gain_optimizer"]
+  [[submode_tabs.sections]]
+  name = "Deployment Economics"
+  tools = ["gpsa:marginal_unit_cost_calculator", "gpsa:overtime_cost_analyzer", "gpsa:staffing_tradeoff_explorer", "gpsa:civilianization_mix_analyzer"]
+
+[[submode_tabs]]
+submode = "public-safety"
+id = "psafety-response"
+name = "Response"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Travel Time"
+  tools = ["gpsa:road_network_loader", "gpsa:travel_time_surface_builder", "gpsa:response_time_distribution_viewer", "gpsa:response_interval_breakdown_chart"]
+  [[submode_tabs.sections]]
+  name = "Station Siting"
+  tools = ["gpsa:facility_siting_optimizer", "gpsa:station_coverage_simulator", "gpsa:station_capital_cost_model", "gpsa:response_goal_breakeven_solver"]
+  [[submode_tabs.sections]]
+  name = "Load & Mutual Aid"
+  tools = ["gpsa:mutual_aid_coordination_matrix", "gpsa:call_priority_triage_reviewer", "gpsa:no_unit_available_hours_viewer"]
+
+[[submode_tabs]]
+submode = "public-safety"
+id = "psafety-alt-response"
+name = "Alternative Response"
+color = "#a78bfa"
+  [[submode_tabs.sections]]
+  name = "Call Diversion"
+  tools = ["gpsa:call_type_taxonomy_editor", "gpsa:divertible_call_classifier", "gpsa:diversion_pathway_designer", "gpsa:offloaded_call_share_viewer"]
+  [[submode_tabs.sections]]
+  name = "Crisis Capacity"
+  tools = ["gpsa:crisis_team_capacity_model", "gpsa:responder_type_matrix", "gpsa:mobile_crisis_travel_time_model", "gpsa:handoff_volume_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Cost per Outcome"
+  tools = ["gpsa:cost_per_call_model", "gpsa:diversion_net_cost_solver", "gpsa:downstream_cost_tracker", "gpsa:diversion_outcome_rate_viewer"]
+
+[[submode_tabs]]
+submode = "public-safety"
+id = "psafety-open-data"
+name = "Open Data"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Publication"
+  tools = ["gpsa:incident_data_catalog_builder", "gpsa:response_time_dashboard", "gpsa:open_data_release_scheduler", "gpsa:export_format_verifier"]
+  [[submode_tabs.sections]]
+  name = "Privacy Guard"
+  tools = ["gpsa:aggregation_level_checker", "gpsa:cell_size_suppression_reviewer", "gpsa:reidentification_risk_screener", "gpsa:location_precision_reducer"]
+  [[submode_tabs.sections]]
+  name = "Accountability"
+  tools = ["gpsa:ward_response_time_gap_calculator", "gpsa:use_of_force_aggregate_report", "gpsa:clearance_rate_trend_plotter", "gpsa:records_request_backlog_analyzer"]
+
+[[submode_tabs]]
+submode = "human-services"
+id = "jurisdiction"
+name = "Jurisdiction"
+color = "#A3A2A5"
+  [[submode_tabs.sections]]
+  name = "Boundaries"
+  tools = ["gov:jurisdiction_loader", "gov:ward_boundary_importer", "gov:parcel_importer"]
+  [[submode_tabs.sections]]
+  name = "Sources"
+  tools = ["data:import", "gov:open_data_connector", "gov:provenance_inspector"]
+  [[submode_tabs.sections]]
+  name = "Scenarios"
+  tools = ["gov:scenario_manager", "gov:run_comparator", "gov:publish_dashboard"]
+
+# ---- 11. Health & Human Services ----------------------------------------
+# Homelessness stock-and-flow, shelter/treatment capacity, food access,
+# outcome-tied grants, and the downstream emergency-room / jail / EMS cost
+# terms that decide whether a gross cut is a net saving.
+#
+# Every dataset behind these tools is an AGGREGATE: system-wide counts and
+# rates, facility capacity, geographic coverage, institutional contracts, and
+# public court/hospital-discharge tabulations. No person-level record, no
+# individual prediction, no caseload profiling — see docs/LAW-ORDER.md §3.
+# Nothing here enrolls, determines eligibility, disburses, or renews: the
+# contract tools draft and score terms, they do not execute them.
+
+[[submode_tabs]]
+submode = "human-services"
+id = "hhs-flow"
+name = "Flow"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Observed Counts"
+  tools = ["ghhs:homeless_count_trend_viewer", "ghhs:inflow_pathway_estimator", "ghhs:exit_destination_distribution", "ghhs:return_rate_tracker"]
+  [[submode_tabs.sections]]
+  name = "Stock & Flow Model"
+  tools = ["ghhs:stock_flow_simulator", "ghhs:model_calibration_checker", "ghhs:homeless_count_reduction_solver", "ghhs:binding_constraint_finder"]
+  [[submode_tabs.sections]]
+  name = "Prevention & Inflow"
+  tools = ["ghhs:eviction_filing_trend_viewer", "ghhs:diversion_program_estimator", "ghhs:institutional_discharge_pathway_inventory", "ghhs:prevention_cost_calculator"]
+
+[[submode_tabs]]
+submode = "human-services"
+id = "hhs-capacity"
+name = "Capacity"
+color = "#a78bfa"
+  [[submode_tabs.sections]]
+  name = "Shelter"
+  tools = ["ghhs:shelter_bed_inventory", "ghhs:shelter_utilization_chart", "ghhs:seasonal_surge_planner", "ghhs:shelter_queue_simulator"]
+  [[submode_tabs.sections]]
+  name = "Treatment & Behavioral Health"
+  tools = ["ghhs:treatment_slot_tracker", "ghhs:crisis_stabilization_pathway_viewer", "ghhs:medication_treatment_gap_estimator", "ghhs:wait_time_distribution"]
+  [[submode_tabs.sections]]
+  name = "Food Access"
+  tools = ["ghhs:food_desert_overlay", "ghhs:pantry_network_viewer", "ghhs:meal_program_cost_calculator", "ghhs:benefit_enrollment_gap_estimator"]
+
+[[submode_tabs]]
+submode = "human-services"
+id = "hhs-outcome-funding"
+name = "Outcome Funding"
+color = "#eab308"
+  [[submode_tabs.sections]]
+  name = "Grant Portfolio"
+  tools = ["ghhs:contract_ledger_viewer", "ghhs:funding_stream_explorer", "ghhs:outcome_criteria_builder", "ghhs:payment_milestone_designer"]
+  [[submode_tabs.sections]]
+  name = "Cost per Outcome"
+  tools = ["ghhs:cost_per_outcome_calculator", "ghhs:provider_outcome_scorer", "ghhs:unit_price_benchmark_viewer", "ghhs:renewal_decision_matrix"]
+  [[submode_tabs.sections]]
+  name = "Verification"
+  tools = ["ghhs:outcome_audit_trail_viewer", "ghhs:subrecipient_monitoring_checklist", "ghhs:outcome_dashboard_composer"]
+
+[[submode_tabs]]
+submode = "human-services"
+id = "hhs-downstream-cost"
+name = "Downstream Cost"
+color = "#f87171"
+  [[submode_tabs.sections]]
+  name = "Utilization"
+  tools = ["ghhs:emergency_visit_trend_viewer", "ghhs:jail_bed_day_cost_calculator", "ghhs:ambulance_transport_cost_model", "ghhs:behavioral_crisis_call_distribution"]
+  [[submode_tabs.sections]]
+  name = "Enforcement vs. Treatment"
+  tools = ["ghhs:enforcement_cycle_cost_model", "ghhs:treatment_pathway_cost_model", "ghhs:return_loop_simulator", "ghhs:cost_per_exit_ranking"]
+  [[submode_tabs.sections]]
+  name = "Net Fiscal Effect"
+  tools = ["ghhs:net_versus_gross_cut_calculator", "ghhs:social_services_cut_simulator", "ghhs:downstream_cost_sensitivity_analyzer", "ghhs:cut_breakeven_solver"]
+
+[[submode_tabs]]
+submode = "constituent"
+id = "jurisdiction"
+name = "Jurisdiction"
+color = "#A3A2A5"
+  [[submode_tabs.sections]]
+  name = "Boundaries"
+  tools = ["gov:jurisdiction_loader", "gov:ward_boundary_importer", "gov:parcel_importer"]
+  [[submode_tabs.sections]]
+  name = "Sources"
+  tools = ["data:import", "gov:open_data_connector", "gov:provenance_inspector"]
+  [[submode_tabs.sections]]
+  name = "Scenarios"
+  tools = ["gov:scenario_manager", "gov:run_comparator", "gov:publish_dashboard"]
+
+# ---- 12. Constituent Services (311) -------------------------------------
+# The 311 seat: request intake, auto-triage, service-level monitoring,
+# recurring-issue detection, and resolution verification. 311 records arrive
+# person-level by nature, so the Privacy Gate section is load-bearing rather
+# than decorative (GOVERNMENT_MODE.md U6 / §7.4 + LAW-ORDER.md §3): the
+# aggregation class is checked, direct identifiers are reviewed out, and every
+# published aggregate passes minimum-count suppression BEFORE it can be joined
+# into a model. Recurrence is detected against LOCATIONS and CITY ASSETS, never
+# against requesters — there is no caller profile anywhere in this discipline.
+# This is an analysis seat: a status update is COMPOSED and a work order is
+# TRACKED; nothing here issues, dispatches, certifies, or transmits an official
+# act.
+
+[[submode_tabs]]
+submode = "constituent"
+id = "constituent-intake"
+name = "Intake"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Request Intake"
+  tools = ["gcon:service_request_intake", "gcon:intake_form_designer", "gcon:request_type_taxonomy", "gcon:duplicate_request_detector"]
+  [[submode_tabs.sections]]
+  name = "Triage & Routing"
+  tools = ["gcon:request_classifier", "gcon:triage_rule_builder", "gcon:department_routing_matrix", "gcon:agency_handoff_queue"]
+  [[submode_tabs.sections]]
+  name = "Privacy Gate"
+  tools = ["gcon:aggregation_class_checker", "gcon:identifier_redaction_reviewer", "gcon:count_suppression_screener", "gcon:public_dataset_catalog"]
+
+[[submode_tabs]]
+submode = "constituent"
+id = "constituent-service-levels"
+name = "Service Levels"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Targets & Clocks"
+  tools = ["gcon:response_target_editor", "gcon:completion_deadline_monitor", "gcon:target_attainment_scorer"]
+  [[submode_tabs.sections]]
+  name = "Backlog & Escalation"
+  tools = ["gcon:open_request_backlog_board", "gcon:escalation_rule_builder", "gcon:aging_request_report", "gcon:backlog_queue_simulator"]
+  [[submode_tabs.sections]]
+  name = "Capacity & Cost"
+  tools = ["gcon:staffing_scenario_comparator", "gcon:automation_breakeven_solver", "gcon:cost_per_request_calculator", "gcon:staff_roster_planner"]
+
+[[submode_tabs]]
+submode = "constituent"
+id = "constituent-resolution"
+name = "Resolution"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Work Orders"
+  tools = ["gcon:work_order_tracker", "gcon:service_request_lifecycle_flow", "gcon:asset_defect_log", "gcon:status_update_composer"]
+  [[submode_tabs.sections]]
+  name = "Closure Verification"
+  tools = ["gcon:completion_evidence_reviewer", "gcon:repair_verification_checklist", "gcon:reinspection_sample_planner"]
+  [[submode_tabs.sections]]
+  name = "Reopen & Rework"
+  tools = ["gcon:reopen_rate_chart", "gcon:rework_cost_estimator", "gcon:failure_cause_tree", "gcon:first_pass_resolution_rate_calculator"]
+
+[[submode_tabs]]
+submode = "constituent"
+id = "constituent-insight"
+name = "Insight"
+color = "#a78bfa"
+  [[submode_tabs.sections]]
+  name = "Demand Patterns"
+  tools = ["gcon:request_trend_viewer", "gcon:heat_season_demand_estimator", "gcon:intake_source_mix", "gcon:self_service_deflection_calculator"]
+  [[submode_tabs.sections]]
+  name = "Recurring Issues"
+  tools = ["gcon:recurring_issue_detector", "gcon:request_hotspot_map", "gcon:repeat_asset_registry", "gcon:request_frequency_analysis"]
+  [[submode_tabs.sections]]
+  name = "Service Equity"
+  tools = ["gcon:ward_request_rate_chart", "gcon:service_equity_scorer", "gcon:response_time_choropleth", "gcon:online_access_gap_estimator"]
+

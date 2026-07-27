@@ -5,7 +5,10 @@ edition = "2021"
 description = "Shared types and utilities for Eustress Engine"
 
 [dependencies]
-bevy = { workspace = true, features = ["serialize", "bevy_color", "bevy_pbr", "bevy_render", "bevy_asset", "bevy_animation", "bevy_gltf", "bevy_gizmos"] }
+bevy = { workspace = true, features = ["serialize", "bevy_color", "bevy_pbr", "bevy_render", "bevy_asset", "bevy_animation", "bevy_gltf", "bevy_gizmos", "bevy_scene"] }
+# Avatar descriptor + derived metrics. Bevy-free by design so the wasm web
+# customizer links the SAME code — see the crate's module doc.
+eustress-avatar-schema = { path = "../avatar-schema", features = ["bevy"] }
 serde = { workspace = true }
 ron = { workspace = true }
 uuid = { workspace = true }

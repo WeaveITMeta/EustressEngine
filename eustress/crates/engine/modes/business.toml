@@ -6,6 +6,8 @@
 id = "business"
 name = "Business"
 icon = "briefcase"
+# Mode-selection-menu color - Roblox BrickColor Bright red (21).
+color = "#C4281C"
 version = "1.0"
 author = "Eustress"
 
@@ -16,7 +18,47 @@ tabs = ["home", "data", "plugins"]
 preset = "Wide Panels"
 
 [theme]
-accent = "#0a84ff"
+# Matches [mode].color so the selection ring/active-tool tint reads the same
+# red as the mode's own dropdown/header identity color.
+accent = "#C4281C"
+
+# Business itself is NOT directly selectable in the Modes dropdown (see
+# ribbon.slint's mode-row-touch handler: any mode with submodes only expands
+# its submenu) — a function must be chosen.
+[[submodes]]
+id = "strategy"
+name = "Strategy"
+icon = "crosshair"
+
+[[submodes]]
+id = "finance"
+name = "Finance"
+icon = "coin"
+
+[[submodes]]
+id = "accounting"
+name = "Accounting"
+icon = "calc"
+
+[[submodes]]
+id = "operations"
+name = "Operations"
+icon = "gear"
+
+[[submodes]]
+id = "supply-chain"
+name = "Supply Chain"
+icon = "truck"
+
+[[submodes]]
+id = "marketing"
+name = "Marketing"
+icon = "megaphone"
+
+[[submodes]]
+id = "entrepreneurship"
+name = "Entrepreneurship"
+icon = "rocket"
 
 [[tabs]]
 id = "product"
@@ -25,11 +67,14 @@ color = "#60a5fa"
 
   [[tabs.sections]]
   name = "Planning"
-  tools = []
+  tools = ["biz:product_roadmap", "biz:feature_backlog", "biz:user_research"]
 
+  # `data:dashboard` had no Rust-side handler (a pre-existing dead button
+  # shared with the built-in Data tab, see ribbon.slint) — dropped; Chart +
+  # Stats already cover this section's real functionality.
   [[tabs.sections]]
   name = "Analytics"
-  tools = ["data:chart", "data:stats", "data:dashboard"]
+  tools = ["data:chart", "data:stats"]
 
 [[tabs]]
 id = "manufacturing"
@@ -52,3 +97,422 @@ color = "#4ade80"
   [[tabs.sections]]
   name = "Tracking"
   tools = ["data:record", "data:timeline"]
+
+# ── Per-function submode_tabs — Product and Operations are universal
+# (dashboards + tracking are generically useful to any function), so both
+# carry forward verbatim into every function's block, plus one new
+# function-specific tab. Manufacturing (CAD/CSG fabrication) is NOT
+# universal — a Finance or Marketing tab showing fabrication tools would be
+# a real mismatch — so it's carried forward only into Supply Chain, where it
+# genuinely applies. The "operations" SUBMODE deliberately has no
+# submode_tabs entries at all below: it's already identical to the mode's
+# plain fallback (Product + Manufacturing + Operations), so leaving it with
+# zero overrides means it falls back to exactly that automatically. ────────
+
+[[submode_tabs]]
+submode = "strategy"
+id = "product"
+name = "Product"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Planning"
+  tools = ["biz:product_roadmap", "biz:feature_backlog", "biz:user_research"]
+  [[submode_tabs.sections]]
+  name = "Analytics"
+  tools = ["data:chart", "data:stats"]
+
+[[submode_tabs]]
+submode = "strategy"
+id = "operations"
+name = "Operations"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Tracking"
+  tools = ["data:record", "data:timeline"]
+
+[[submode_tabs]]
+submode = "strategy"
+id = "strategy-fundamentals"
+name = "Strategy Fundamentals"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Strategic Frameworks"
+  tools = ["strat:swot_matrix", "strat:five_forces_analyzer", "strat:pestel_scanner", "strat:blue_ocean_canvas"]
+  [[submode_tabs.sections]]
+  name = "Competitive Analysis"
+  tools = ["strat:competitor_matrix", "strat:positioning_map", "data:cluster"]
+  [[submode_tabs.sections]]
+  name = "Vision & Direction"
+  tools = ["strat:vision_statement_builder", "strat:mission_canvas", "strat:core_values_mapper"]
+
+[[submode_tabs]]
+submode = "strategy"
+id = "strategy-planning"
+name = "Planning & OKRs"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "OKR Workflow"
+  tools = ["strat:okr_builder", "strat:objective_tree", "data:chart"]
+  [[submode_tabs.sections]]
+  name = "Roadmapping"
+  tools = ["strat:roadmap_timeline", "strat:initiative_backlog", "strat:milestone_tracker"]
+  [[submode_tabs.sections]]
+  name = "Business Model & Market Intel"
+  tools = ["strat:business_model_canvas", "data:import", "data:stats"]
+
+[[submode_tabs]]
+submode = "strategy"
+id = "strategy-mastery"
+name = "Strategic Mastery"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Scenario & Risk Planning"
+  tools = ["strat:scenario_planner", "strat:risk_heatmap", "strat:war_gaming_simulator"]
+  [[submode_tabs.sections]]
+  name = "Portfolio Prioritization"
+  tools = ["strat:portfolio_prioritizer", "strat:tradeoff_analyzer", "strat:resource_allocator"]
+  [[submode_tabs.sections]]
+  name = "Strategy Review & Governance"
+  tools = ["strat:strategy_scorecard", "data:anomaly"]
+
+[[submode_tabs]]
+submode = "finance"
+id = "product"
+name = "Product"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Planning"
+  tools = ["biz:product_roadmap", "biz:feature_backlog", "biz:user_research"]
+  [[submode_tabs.sections]]
+  name = "Analytics"
+  tools = ["data:chart", "data:stats"]
+
+[[submode_tabs]]
+submode = "finance"
+id = "operations"
+name = "Operations"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Tracking"
+  tools = ["data:record", "data:timeline"]
+
+[[submode_tabs]]
+submode = "finance"
+id = "finance-fundamentals"
+name = "Finance Fundamentals"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Financial Statements"
+  tools = ["fin:income_statement_builder", "fin:balance_sheet_builder", "fin:cash_flow_statement"]
+  [[submode_tabs.sections]]
+  name = "Valuation & Time Value"
+  tools = ["fin:npv_calculator", "fin:dcf_model", "fin:irr_solver", "fin:wacc_calculator", "fin:monte_carlo_valuation"]
+  [[submode_tabs.sections]]
+  name = "Accounting Principles"
+  tools = ["fin:chart_of_accounts", "fin:general_ledger", "fin:amortization_schedule"]
+
+[[submode_tabs]]
+submode = "finance"
+id = "finance-budgeting-forecasting"
+name = "Budgeting & Forecasting"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Budget Workflow"
+  tools = ["data:record", "data:import", "fin:variance_tracker"]
+  [[submode_tabs.sections]]
+  name = "Forecasting Models"
+  tools = ["fin:forecast_model", "data:fit", "fin:scenario_planner"]
+  [[submode_tabs.sections]]
+  name = "Financial Automation"
+  tools = ["insert:script", "insert:localscript", "insert:modulescript"]
+
+[[submode_tabs]]
+submode = "finance"
+id = "finance-reporting-capital"
+name = "Reporting & Capital"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Financial Reporting"
+  tools = ["fin:mgmt_reporting_pack", "data:chart", "fin:audit_trail"]
+  [[submode_tabs.sections]]
+  name = "Fundraising & Capital"
+  tools = ["fin:cap_table_manager", "fin:term_sheet_builder", "fin:investor_deck_generator"]
+  [[submode_tabs.sections]]
+  name = "Risk & Valuation Mastery"
+  tools = ["data:anomaly", "fin:sensitivity_analysis"]
+
+[[submode_tabs]]
+submode = "accounting"
+id = "product"
+name = "Product"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Planning"
+  tools = ["biz:product_roadmap", "biz:feature_backlog", "biz:user_research"]
+  [[submode_tabs.sections]]
+  name = "Analytics"
+  tools = ["data:chart", "data:stats"]
+
+[[submode_tabs]]
+submode = "accounting"
+id = "operations"
+name = "Operations"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Tracking"
+  tools = ["data:record", "data:timeline"]
+
+[[submode_tabs]]
+submode = "accounting"
+id = "accounting-fundamentals"
+name = "Accounting Fundamentals"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "GAAP & Standards"
+  tools = ["acct:gaap_reference", "acct:accrual_vs_cash", "acct:matching_principle", "acct:journal_entry_builder"]
+  [[submode_tabs.sections]]
+  name = "Financial Statements"
+  tools = ["acct:balance_sheet_builder", "acct:income_statement_builder", "acct:cash_flow_builder"]
+  [[submode_tabs.sections]]
+  name = "Chart of Accounts & Double-Entry"
+  tools = ["acct:coa_designer", "acct:double_entry_trainer", "acct:trial_balance_checker"]
+
+[[submode_tabs]]
+submode = "accounting"
+id = "accounting-workflow"
+name = "Bookkeeping & Workflow"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "General Ledger & Reconciliation"
+  tools = ["data:record", "data:import", "acct:bank_reconciliation"]
+  [[submode_tabs.sections]]
+  name = "Accounts Payable"
+  tools = ["acct:invoice_entry", "acct:payment_run", "acct:vendor_aging"]
+  [[submode_tabs.sections]]
+  name = "Accounts Receivable"
+  tools = ["acct:invoice_generator", "acct:collections_tracker", "acct:customer_aging"]
+
+[[submode_tabs]]
+submode = "accounting"
+id = "accounting-reporting"
+name = "Reporting & Assurance"
+color = "#f87171"
+  [[submode_tabs.sections]]
+  name = "Compliance & Regulatory Reporting"
+  tools = ["acct:tax_provision_calculator", "acct:regulatory_filing_tracker", "acct:disclosure_checklist"]
+  [[submode_tabs.sections]]
+  name = "Audit & Internal Controls"
+  tools = ["acct:audit_trail_viewer", "data:anomaly", "acct:internal_controls_matrix"]
+  [[submode_tabs.sections]]
+  name = "Financial Analysis & Close"
+  tools = ["acct:ratio_analyzer", "acct:variance_analysis"]
+
+[[submode_tabs]]
+submode = "supply-chain"
+id = "product"
+name = "Product"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Planning"
+  tools = ["biz:product_roadmap", "biz:feature_backlog", "biz:user_research"]
+  [[submode_tabs.sections]]
+  name = "Analytics"
+  tools = ["data:chart", "data:stats"]
+
+[[submode_tabs]]
+submode = "supply-chain"
+id = "manufacturing"
+name = "Manufacturing"
+color = "#ff9f45"
+  [[submode_tabs.sections]]
+  name = "Fabrication"
+  tools = ["insert:cad_plate", "insert:cad_box", "insert:cad_cylinder", "csg:union", "csg:negate"]
+  [[submode_tabs.sections]]
+  name = "Assembly"
+  tools = ["cad:mate_revolute", "cad:mate_prismatic", "cad:mate_ball"]
+
+[[submode_tabs]]
+submode = "supply-chain"
+id = "operations"
+name = "Operations"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Tracking"
+  tools = ["data:record", "data:timeline"]
+
+[[submode_tabs]]
+submode = "supply-chain"
+id = "supply-chain-fundamentals"
+name = "Supply Chain Fundamentals"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Demand & Forecasting"
+  tools = ["sc:demand_forecast_model", "sc:seasonality_analyzer", "data:fit"]
+  [[submode_tabs.sections]]
+  name = "Inventory Theory"
+  tools = ["sc:eoq_calculator", "sc:safety_stock_calculator", "sc:abc_analysis", "sc:milk_run_designer"]
+  [[submode_tabs.sections]]
+  name = "Network & Systems Design"
+  tools = ["sc:network_flow_model", "sc:facility_location_optimizer", "sc:bullwhip_simulator"]
+
+[[submode_tabs]]
+submode = "supply-chain"
+id = "supply-chain-operations"
+name = "Procurement & Logistics"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Sourcing & Procurement"
+  tools = ["sc:supplier_scorecard", "sc:rfq_builder", "sc:purchase_order_tracker"]
+  [[submode_tabs.sections]]
+  name = "Inventory Management"
+  tools = ["data:record", "sc:reorder_point_monitor", "sc:cycle_count_sheet"]
+  [[submode_tabs.sections]]
+  name = "Warehouse & Distribution"
+  tools = ["insert:cad_box", "sc:pick_path_optimizer", "sc:route_planner"]
+
+[[submode_tabs]]
+submode = "supply-chain"
+id = "supply-chain-analytics-mastery"
+name = "Analytics & Mastery"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Risk & Resilience"
+  tools = ["sc:risk_heat_map", "data:anomaly", "sc:scenario_stress_test"]
+  [[submode_tabs.sections]]
+  name = "Performance & KPIs"
+  tools = ["sc:otif_dashboard", "data:chart", "sc:cost_to_serve_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Optimization & Simulation"
+  tools = ["sc:vehicle_routing_solver", "data:cluster"]
+
+[[submode_tabs]]
+submode = "marketing"
+id = "product"
+name = "Product"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Planning"
+  tools = ["biz:product_roadmap", "biz:feature_backlog", "biz:user_research"]
+  [[submode_tabs.sections]]
+  name = "Analytics"
+  tools = ["data:chart", "data:stats"]
+
+[[submode_tabs]]
+submode = "marketing"
+id = "operations"
+name = "Operations"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Tracking"
+  tools = ["data:record", "data:timeline"]
+
+[[submode_tabs]]
+submode = "marketing"
+id = "marketing-fundamentals"
+name = "Marketing Fundamentals"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Brand Strategy"
+  tools = ["mktg:perceptual_map", "mktg:value_prop_canvas", "mktg:brand_voice_guide", "mktg:funnel_analyzer", "mktg:seo_audit"]
+  [[submode_tabs.sections]]
+  name = "Market Research"
+  tools = ["mktg:persona_builder", "mktg:tam_sam_som_calculator", "mktg:competitive_landscape"]
+  [[submode_tabs.sections]]
+  name = "Strategic Frameworks"
+  tools = ["mktg:swot_canvas", "mktg:customer_journey_mapper", "mktg:marketing_mix_planner"]
+
+[[submode_tabs]]
+submode = "marketing"
+id = "marketing-campaigns"
+name = "Campaign Ops"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Campaign Planning"
+  tools = ["mktg:campaign_calendar", "mktg:budget_allocator", "mktg:channel_mix_planner"]
+  [[submode_tabs.sections]]
+  name = "Content Production"
+  tools = ["mktg:content_brief_builder", "mktg:creative_asset_manager", "mktg:ab_test_designer"]
+  [[submode_tabs.sections]]
+  name = "Performance Tracking"
+  tools = ["data:import", "data:record", "data:chart"]
+
+[[submode_tabs]]
+submode = "marketing"
+id = "marketing-growth-analytics"
+name = "Growth & Analytics"
+color = "#818cf8"
+  [[submode_tabs.sections]]
+  name = "Customer Analytics"
+  tools = ["data:cluster", "mktg:cohort_analyzer", "mktg:ltv_cac_calculator"]
+  [[submode_tabs.sections]]
+  name = "Attribution & Forecasting"
+  tools = ["mktg:attribution_model", "data:fit", "data:anomaly"]
+  [[submode_tabs.sections]]
+  name = "Mastery & Reporting"
+  tools = ["mktg:media_mix_model", "mktg:kpi_dashboard_builder"]
+
+[[submode_tabs]]
+submode = "entrepreneurship"
+id = "product"
+name = "Product"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Planning"
+  tools = ["biz:product_roadmap", "biz:feature_backlog", "biz:user_research"]
+  [[submode_tabs.sections]]
+  name = "Analytics"
+  tools = ["data:chart", "data:stats"]
+
+[[submode_tabs]]
+submode = "entrepreneurship"
+id = "operations"
+name = "Operations"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Tracking"
+  tools = ["data:record", "data:timeline"]
+
+[[submode_tabs]]
+submode = "entrepreneurship"
+id = "entrepreneurship-ideation-validation"
+name = "Ideation & Validation"
+color = "#facc15"
+  [[submode_tabs.sections]]
+  name = "Customer Discovery"
+  tools = ["ent:customer_interview_guide", "ent:jobs_to_be_done_map", "ent:pain_point_ranker", "ent:problem_interview_scripts"]
+  [[submode_tabs.sections]]
+  name = "Market & Opportunity Sizing"
+  tools = ["ent:tam_sam_som_calculator", "ent:competitive_landscape_map", "data:cluster"]
+  [[submode_tabs.sections]]
+  name = "Business Model Design"
+  tools = ["ent:business_model_canvas", "ent:value_proposition_canvas", "ent:revenue_model_simulator"]
+
+[[submode_tabs]]
+submode = "entrepreneurship"
+id = "entrepreneurship-mvp-launch"
+name = "MVP & Launch"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "MVP Scoping"
+  tools = ["ent:mvp_scope_planner", "ent:feature_prioritization_matrix", "ent:build_measure_learn_tracker"]
+  [[submode_tabs.sections]]
+  name = "Experimentation & Testing"
+  tools = ["ent:landing_page_ab_tester", "ent:pricing_tester", "data:record"]
+  [[submode_tabs.sections]]
+  name = "Go-To-Market"
+  tools = ["ent:launch_checklist", "ent:channel_experiment_tracker", "data:chart"]
+
+[[submode_tabs]]
+submode = "entrepreneurship"
+id = "entrepreneurship-pitch-fundraising"
+name = "Pitch & Fundraising"
+color = "#818cf8"
+  [[submode_tabs.sections]]
+  name = "Financial Modeling"
+  tools = ["ent:cap_table_builder", "ent:runway_calculator", "ent:unit_economics_model"]
+  [[submode_tabs.sections]]
+  name = "Pitch Craft"
+  tools = ["ent:pitch_deck_builder", "ent:investor_narrative_map", "ent:demo_day_rehearsal"]
+  [[submode_tabs.sections]]
+  name = "Investor Readiness"
+  tools = ["ent:term_sheet_analyzer", "ent:due_diligence_checklist"]

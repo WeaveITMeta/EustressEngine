@@ -30,6 +30,28 @@ pub struct DoubleClickTracker {
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rendering::BevySelectionManager;
 
+/// How a viewport click combines with the existing selection.
+///
+/// Mirrors the Explorer's modifier model (`slint_ui.rs`) so the tree and
+/// the viewport never disagree about what a modifier means. Toggle alone
+/// is not enough for a refine pass: the user has to already know an
+/// item's membership before the click lands, which is exactly what they
+/// can't see mid-sweep across a marquee result. Add and Subtract are
+/// stateless, so a whole sweep of clicks is predictable from the modifier
+/// alone.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SelectionCombine {
+    /// No modifier — replace the selection with just this entity.
+    Replace,
+    /// Ctrl — flip this entity's membership.
+    Toggle,
+    /// Shift — add, never remove.
+    Add,
+    /// Ctrl+Shift — remove, never add.
+    Subtract,
+}
+
 /// System for left-click part selection with raycasting (Modern ECS)
 /// Tool-state bundle for `part_selection_system` — groups the three
 /// active-tool resources so the outer system stays under Bevy's
@@ -181,12 +203,24 @@ pub fn part_selection_system(
         trace!("[select] no ViewportBounds");
     }
     
-    // Check if Shift or Ctrl is pressed for multi-select
+    // Selection modifiers. Ctrl toggles, Shift only ever grows the
+    // selection, Ctrl+Shift only ever shrinks it — see [`SelectionCombine`]
+    // for why plain toggle isn't sufficient on its own.
+    //
+    // Alt is ORTHOGONAL to all three: it chooses WHAT the click resolves to
+    // (the individual part rather than its parent Model), not how that
+    // result merges with the selection, so it composes with every branch
+    // below.
     let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let alt_pressed = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
-    let multi_select_modifier = shift_pressed || ctrl_pressed;
-    
+    let combine = match (ctrl_pressed, shift_pressed) {
+        (false, false) => SelectionCombine::Replace,
+        (true, false) => SelectionCombine::Toggle,
+        (false, true) => SelectionCombine::Add,
+        (true, true) => SelectionCombine::Subtract,
+    };
+
     // Find the main 3D camera (order=0) — there may be multiple cameras (e.g. Slint overlay at order=100)
     let (camera, camera_transform, projection) = match camera_query.iter().find(|(c, _, _)| c.order == 0) {
         Some(ct) => ct,
@@ -480,9 +514,12 @@ pub fn part_selection_system(
         // also resolves (and matches Roblox-style "tap part to follow
         // link" intent). Case-insensitive key match — "Link", "link",
         // "LINK" all work; the first hit on the chain wins. The three-key
-        // chord (Ctrl+Shift+Alt) keeps link-follow clear of plain click +
-        // multi-select, and intentionally mirrors the Ctrl+Shift+Alt+wheel
-        // hover-resize gesture (see `hover_resize_system`).
+        // chord (Ctrl+Shift+Alt) keeps link-follow clear of the plain and
+        // single-modifier selection clicks, and intentionally mirrors the
+        // Ctrl+Shift+Alt+wheel hover-resize gesture (see
+        // `hover_resize_system`). Adding Alt to Ctrl+Shift is what
+        // distinguishes it from the Subtract modifier; a link-less part
+        // clicked with this chord simply falls through and is subtracted.
         if ctrl_pressed && shift_pressed && alt_pressed {
             let candidates = std::iter::once(hit_entity).chain(parent_model.into_iter());
             let mut opened = false;
@@ -560,31 +597,51 @@ pub fn part_selection_system(
         };
         
         let sel = selection_manager.0.write();
-        
-        if multi_select_modifier {
-            if sel.is_selected(&selection_id) {
-                sel.remove_from_selection(&selection_id);
-                info!("[select] removed '{}' from selection", selection_id);
-            } else {
-                sel.add_to_selection(selection_id.clone());
-                info!("[select] added '{}' to selection", selection_id);
-            }
-        } else {
-            sel.select(selection_id.clone());
-            info!("[select] selected '{}'", selection_id);
 
-            // Single-click selection — request the Explorer to scroll
-            // this entity's tree row to the top. Skipped for multi-select
-            // (Ctrl/Shift) above so accumulating clicks don't whip the
-            // tree around with every addition.
-            if let Some(ref mut es) = explorer_state {
-                let target = if alt_pressed {
-                    hit_entity
+        match combine {
+            SelectionCombine::Toggle => {
+                if sel.is_selected(&selection_id) {
+                    sel.remove_from_selection(&selection_id);
+                    info!("[select] Ctrl+click removed '{}' from selection", selection_id);
                 } else {
-                    parent_model.unwrap_or(hit_entity)
-                };
-                es.pending_scroll_target_entity = Some(target);
-                es.needs_immediate_sync = true;
+                    sel.add_to_selection(selection_id.clone());
+                    info!("[select] Ctrl+click added '{}' to selection", selection_id);
+                }
+            }
+            SelectionCombine::Add => {
+                // `add_to_selection` is idempotent, so re-clicking something
+                // already in the set is a no-op rather than a silent removal.
+                // That's the whole point: a Shift sweep across a marquee
+                // result can't accidentally punch holes in it.
+                sel.add_to_selection(selection_id.clone());
+                info!("[select] Shift+click added '{}' to selection", selection_id);
+            }
+            SelectionCombine::Subtract => {
+                // Ctrl+Shift never adds. Note that Ctrl+Shift+Alt is claimed
+                // FIRST by the Link-follow chord above, which returns early
+                // whenever the hit part (or its Model) actually carries a
+                // `Link` attribute — only a link-less part reaches here, and
+                // subtracting it is the right fallback for that chord.
+                sel.remove_from_selection(&selection_id);
+                info!("[select] Ctrl+Shift+click removed '{}' from selection", selection_id);
+            }
+            SelectionCombine::Replace => {
+                sel.select(selection_id.clone());
+                info!("[select] selected '{}'", selection_id);
+
+                // Single-click selection — request the Explorer to scroll
+                // this entity's tree row to the top. Skipped for every
+                // modifier branch above so accumulating clicks don't whip
+                // the tree around with each add/remove.
+                if let Some(ref mut es) = explorer_state {
+                    let target = if alt_pressed {
+                        hit_entity
+                    } else {
+                        parent_model.unwrap_or(hit_entity)
+                    };
+                    es.pending_scroll_target_entity = Some(target);
+                    es.needs_immediate_sync = true;
+                }
             }
         }
     } else {

@@ -1,14 +1,49 @@
 // ============================================================================
 // Eustress Engine - Keyboard Shortcuts Dialog
+//
+// The row list is data-driven from Rust (`slint_ui::sync_keybindings_to_slint`
+// builds it straight off the live `KeyBindings` resource), so what the dialog
+// shows is what the engine will actually do — a hand-written row list drifts
+// from the real bindings the moment anything is remapped.
+//
+// Clicking a row's key cell arms capture; the next chord replaces the binding.
+// Esc backs out of capture without changing anything.
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
+/// One row of the dialog. Section headers and action rows share the model so
+/// Rust owns the ordering and the Slint side is a straight `for`.
+export struct ShortcutEntry {
+    /// Stable id handed back on rebind — the Rust `Action::name()` string.
+    /// Empty for section headers.
+    action-id: string,
+    /// Row label (action name) or, for a header row, the section title.
+    label: string,
+    /// Current chord, e.g. "Ctrl+Shift+S". Empty means unbound.
+    chord: string,
+    /// True for a section header row: no key cell, not clickable.
+    is-section: bool,
+}
+
 component ShortcutRow inherits Rectangle {
     in property <string> action: "";
     in property <string> shortcut: "";
+    /// This row is waiting for a chord — the key cell shows a prompt and an
+    /// accent border instead of the current binding.
+    in property <bool> capturing: false;
+
+    callback rebind-requested();
+
     height: 26px;
+    background: row-touch.has-hover ? Theme.button-hover : transparent;
+    border-radius: 3px;
+
+    row-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.rebind-requested(); }
+    }
 
     HorizontalLayout {
         padding-left: 12px;
@@ -25,14 +60,17 @@ component ShortcutRow inherits Rectangle {
         Rectangle {
             width: 140px;
             height: 20px;
-            background: Theme.background-tertiary;
+            background: root.capturing ? Theme.button-hover : Theme.background-tertiary;
             border-radius: 3px;
             border-width: 1px;
-            border-color: Theme.input-border;
+            border-color: root.capturing ? Theme.accent-blue : Theme.input-border;
 
             Text {
-                text: root.shortcut;
-                color: Theme.text-secondary;
+                text: root.capturing
+                    ? "Press a key…"
+                    : (root.shortcut == "" ? "Not bound" : root.shortcut);
+                color: root.capturing ? Theme.accent-blue
+                     : (root.shortcut == "" ? Theme.text-disabled : Theme.text-secondary);
                 font-size: 10px;
                 font-weight: 500;
                 horizontal-alignment: center;
@@ -66,7 +104,52 @@ component ShortcutSection inherits Rectangle {
 }
 
 export component KeybindingsDialog inherits Rectangle {
+    /// Every row, in render order. Built Rust-side from `KeyBindings`.
+    in property <[ShortcutEntry]> entries: [];
+    /// `action-id` of the row currently capturing a chord, "" when idle.
+    /// In-out because the row click and the Esc key both set it locally, and
+    /// Rust clears it once a rebind lands.
+    in-out property <string> capturing-action: "";
+    /// Rust-supplied error for the last rejected rebind — names the action
+    /// that already owns the chord. Cleared on the next successful rebind.
+    in property <string> conflict-message: "";
+
     callback on-close();
+    /// (action-id, chord) — chord is the human form, e.g. "Ctrl+Shift+K".
+    /// Rust parses it back into a `KeyBinding` and validates for conflicts.
+    callback on-rebind(string, string);
+
+    // Slint encodes special keys as private-use codepoints (`Key.F1`,
+    // `Key.Delete`, …) that mean nothing outside Slint. Spell them out here
+    // so the string crossing into Rust is one the chord parser can read;
+    // ordinary characters pass through untouched.
+    pure function key-token(t: string) -> string {
+        return t == Key.F1 ? "F1"
+             : t == Key.F2 ? "F2"
+             : t == Key.F3 ? "F3"
+             : t == Key.F4 ? "F4"
+             : t == Key.F5 ? "F5"
+             : t == Key.F6 ? "F6"
+             : t == Key.F7 ? "F7"
+             : t == Key.F8 ? "F8"
+             : t == Key.F9 ? "F9"
+             : t == Key.F10 ? "F10"
+             : t == Key.F11 ? "F11"
+             : t == Key.F12 ? "F12"
+             : t == Key.Space ? "Space"
+             : t == Key.Delete ? "Delete"
+             : t == Key.Backspace ? "Backspace"
+             : t == Key.Tab ? "Tab"
+             // Shift+Tab arrives as its own code (0x19), which the Rust parser
+             // would otherwise fold to "Ctrl+Y".
+             : t == Key.Backtab ? "Tab"
+             : t == Key.Return ? "Enter"
+             : t == Key.UpArrow ? "Up"
+             : t == Key.DownArrow ? "Down"
+             : t == Key.LeftArrow ? "Left"
+             : t == Key.RightArrow ? "Right"
+             : t;
+    }
 
     width: 100%;
     height: 100%;
@@ -93,147 +176,187 @@ export component KeybindingsDialog inherits Rectangle {
             scroll-event(event) => { return accept; }
         }
 
-        VerticalLayout {
-            padding: 0px;
-            spacing: 0px;
+        // One FocusScope wraps the whole body: whichever row armed capture,
+        // the chord is caught here, so there is no per-row focus juggling and
+        // no way for a keystroke to land on a row that is no longer armed.
+        //
+        // Explicit 100% sizing: the parent is a Rectangle, not a layout, so a
+        // bare FocusScope would collapse to its content's preferred size and
+        // the dialog would render at the width of its longest row.
+        capture := FocusScope {
+            width: 100%;
+            height: 100%;
 
-            // ── Title bar ──
-            Rectangle {
-                height: 46px;
-                background: Theme.dialog-titlebar-background;
-                border-radius: 8px;
-
-                Text {
-                    width: parent.width;
-                    height: parent.height;
-                    text: "Keyboard Shortcuts";
-                    color: Theme.text-primary;
-                    font-size: 13px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+            key-pressed(event) => {
+                if (root.capturing-action == "") {
+                    return reject;
                 }
+                // A bare modifier is the first half of a chord — keep waiting
+                // for the key it modifies rather than binding "Ctrl" alone.
+                //
+                // The RIGHT-hand variants and the lock keys matter as much as
+                // the left ones: Slint reports every one of them as a C0
+                // control character (ShiftR = 0x15, ControlR = 0x16,
+                // MetaR = 0x18, AltGr = 0x13, CapsLock = 0x14), and the Rust
+                // chord parser folds 0x01..0x1A back to A..Z on the assumption
+                // that a control character means Ctrl+letter. Letting them
+                // through would silently rebind the row to "Ctrl+U" / "Ctrl+V"
+                // / "Ctrl+T" the moment the user brushed right-Shift.
+                if (event.text == Key.Control || event.text == Key.Alt
+                    || event.text == Key.Shift || event.text == Key.Meta
+                    || event.text == Key.ControlR || event.text == Key.ShiftR
+                    || event.text == Key.MetaR || event.text == Key.AltGr
+                    || event.text == Key.CapsLock) {
+                    return accept;
+                }
+                if (event.text == Key.Escape) {
+                    root.capturing-action = "";
+                    return accept;
+                }
+                root.on-rebind(root.capturing-action,
+                    (event.modifiers.control ? "Ctrl+" : "")
+                    + (event.modifiers.alt ? "Alt+" : "")
+                    + (event.modifiers.shift ? "Shift+" : "")
+                    + root.key-token(event.text));
+                return accept;
+            }
 
+            VerticalLayout {
+                padding: 0px;
+                spacing: 0px;
+
+                // ── Title bar ──
                 Rectangle {
-                    x: parent.width - 36px;
-                    y: (parent.height - self.height) / 2;
-                    width: 28px; height: 28px;
-                    border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: dark-red close-button hover tint, no matching surface token
-
-                    close-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.on-close(); }
-                    }
+                    height: 46px;
+                    background: Theme.dialog-titlebar-background;
+                    border-radius: 8px;
 
                     Text {
-                        text: "×";
-                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
-                        font-size: 17px;
+                        width: parent.width;
+                        height: parent.height;
+                        text: "Keyboard Shortcuts";
+                        color: Theme.text-primary;
+                        font-size: 13px;
+                        font-weight: 600;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
-                }
-
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%; height: 1px;
-                    background: Theme.border-color;
-                }
-            }
-
-            // ── Content ──
-            ScrollView {
-                vertical-stretch: 1;
-
-                VerticalLayout {
-                    padding: 16px;
-                    spacing: 2px;
-
-                    ShortcutSection { title: "FILE"; }
-                    ShortcutRow { action: "New Space"; shortcut: "Ctrl + N"; }
-                    ShortcutRow { action: "New Universe"; shortcut: "Ctrl + Shift + N"; }
-                    ShortcutRow { action: "Open File"; shortcut: "Ctrl + O"; }
-                    ShortcutRow { action: "Save"; shortcut: "Ctrl + S"; }
-                    ShortcutRow { action: "Save As"; shortcut: "Ctrl + Shift + S"; }
-                    ShortcutRow { action: "Publish"; shortcut: "Ctrl + P"; }
-
-                    Rectangle { height: 8px; }
-                    ShortcutSection { title: "EDIT"; }
-                    ShortcutRow { action: "Undo"; shortcut: "Ctrl + Z"; }
-                    ShortcutRow { action: "Redo"; shortcut: "Ctrl + Y"; }
-                    ShortcutRow { action: "Cut"; shortcut: "Ctrl + X"; }
-                    ShortcutRow { action: "Copy"; shortcut: "Ctrl + C"; }
-                    ShortcutRow { action: "Paste"; shortcut: "Ctrl + V"; }
-                    ShortcutRow { action: "Delete"; shortcut: "Delete"; }
-                    ShortcutRow { action: "Duplicate"; shortcut: "Ctrl + D"; }
-                    ShortcutRow { action: "Select All"; shortcut: "Ctrl + A"; }
-                    ShortcutRow { action: "Find"; shortcut: "Ctrl + F"; }
-
-                    Rectangle { height: 8px; }
-                    ShortcutSection { title: "TOOLS"; }
-                    ShortcutRow { action: "Select"; shortcut: "Alt + Z"; }
-                    ShortcutRow { action: "Move"; shortcut: "Alt + X"; }
-                    ShortcutRow { action: "Scale"; shortcut: "Alt + C"; }
-                    ShortcutRow { action: "Rotate"; shortcut: "Alt + V"; }
-                    ShortcutRow { action: "Focus Selected"; shortcut: "F"; }
-
-                    Rectangle { height: 8px; }
-                    ShortcutSection { title: "VIEW"; }
-                    ShortcutRow { action: "Toggle Grid"; shortcut: "G"; }
-                    ShortcutRow { action: "Toggle Snap"; shortcut: "T"; }
-                    ShortcutRow { action: "Snap 1 Unit"; shortcut: "1"; }
-                    ShortcutRow { action: "Snap 0.2 Unit"; shortcut: "2"; }
-                    ShortcutRow { action: "Snap Off"; shortcut: "3"; }
-                    ShortcutRow { action: "Front View"; shortcut: "Numpad 1"; }
-                    ShortcutRow { action: "Right View"; shortcut: "Numpad 3"; }
-                    ShortcutRow { action: "Top View"; shortcut: "Numpad 7"; }
-
-                    Rectangle { height: 8px; }
-                    ShortcutSection { title: "SIMULATION"; }
-                    ShortcutRow { action: "Play Solo"; shortcut: "F5"; }
-                    ShortcutRow { action: "Play Here"; shortcut: "F6"; }
-                    ShortcutRow { action: "Pause"; shortcut: "F7"; }
-                    ShortcutRow { action: "Stop"; shortcut: "F8"; }
-                    ShortcutRow { action: "Start Server"; shortcut: "F9"; }
-
-                    Rectangle { height: 8px; }
-                    ShortcutSection { title: "TABS"; }
-                    ShortcutRow { action: "Close Tab"; shortcut: "Ctrl + W"; }
-                    ShortcutRow { action: "New Web Tab"; shortcut: "Ctrl + T"; }
-                }
-            }
-
-            // ── Footer ──
-            Rectangle {
-                height: 1px; background: Theme.border-color;
-            }
-            Rectangle {
-                height: 52px;
-                background: Theme.dialog-titlebar-background;
-                border-radius: 8px;
-
-                HorizontalLayout {
-                    alignment: center;
 
                     Rectangle {
-                        width: 80px; height: 32px;
+                        x: parent.width - 36px;
+                        y: (parent.height - self.height) / 2;
+                        width: 28px; height: 28px;
                         border-radius: 5px;
-                        background: close-btn.has-hover ? Theme.button-hover : Theme.button-background;
-                        border-width: 1px;
-                        border-color: Theme.border-color;
+                        background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: dark-red close-button hover tint, no matching surface token
 
-                        close-btn := TouchArea {
+                        close-ta := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.on-close(); }
                         }
 
                         Text {
-                            text: "Close";
-                            color: Theme.text-primary;
-                            font-size: 12px;
+                            text: "×";
+                            color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
+                            font-size: 17px;
                             horizontal-alignment: center;
                             vertical-alignment: center;
+                        }
+                    }
+
+                    Rectangle {
+                        y: parent.height - 1px;
+                        width: 100%; height: 1px;
+                        background: Theme.border-color;
+                    }
+                }
+
+                // ── Hint / conflict strip ──
+                //
+                // Doubles as the error surface: a rejected rebind names the
+                // action that already owns the chord, in place, right where
+                // the user is looking.
+                Rectangle {
+                    height: 26px;
+                    background: root.conflict-message == ""
+                        ? Theme.background-secondary
+                        : Theme.background-tertiary;
+
+                    Text {
+                        x: 16px;
+                        width: parent.width - 32px;
+                        height: parent.height;
+                        text: root.conflict-message == ""
+                            ? "Click a shortcut to rebind it. Esc cancels."
+                            : root.conflict-message;
+                        color: root.conflict-message == ""
+                            ? Theme.text-secondary
+                            : Theme.text-error;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                // ── Content ──
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        padding: 16px;
+                        padding-top: 8px;
+                        spacing: 2px;
+                        alignment: start;
+
+                        for entry in root.entries: VerticalLayout {
+                            spacing: 0px;
+
+                            if entry.is-section: ShortcutSection {
+                                title: entry.label;
+                            }
+                            if !entry.is-section: ShortcutRow {
+                                action: entry.label;
+                                shortcut: entry.chord;
+                                capturing: root.capturing-action == entry.action-id;
+                                rebind-requested => {
+                                    root.capturing-action = entry.action-id;
+                                    capture.focus();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Footer ──
+                Rectangle {
+                    height: 1px; background: Theme.border-color;
+                }
+                Rectangle {
+                    height: 52px;
+                    background: Theme.dialog-titlebar-background;
+                    border-radius: 8px;
+
+                    HorizontalLayout {
+                        alignment: center;
+
+                        Rectangle {
+                            width: 80px; height: 32px;
+                            border-radius: 5px;
+                            background: close-btn.has-hover ? Theme.button-hover : Theme.button-background;
+                            border-width: 1px;
+                            border-color: Theme.border-color;
+
+                            close-btn := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.on-close(); }
+                            }
+
+                            Text {
+                                text: "Close";
+                                color: Theme.text-primary;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                 }

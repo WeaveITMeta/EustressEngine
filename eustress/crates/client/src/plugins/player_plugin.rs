@@ -76,26 +76,33 @@ pub struct PlayerServicePlugin;
 
 impl Plugin for PlayerServicePlugin {
     fn build(&self, app: &mut App) {
-        // Use the SHARED character plugin from common crate
-        // This ensures 1:1 parity between Client and Engine Play Mode
-        use eustress_common::plugins::character_plugin::SharedCharacterPlugin;
-        
-        app
-            // Add the shared character plugin - provides all movement, camera, input, animation systems
-            .add_plugins(SharedCharacterPlugin)
-            
-            // Client-specific resources
-            .init_resource::<AnimationService>()
-            .insert_resource(CharacterSystemConfig { use_skinned_characters: true })
-            
-            // Client-specific startup systems
-            .add_systems(Startup, (
-                spawn_local_player,
-                lock_cursor,
-            ))
-            
-            // Client-specific update systems (first-person body hiding)
-            .add_systems(Update, update_first_person_mode);
+        // The character itself — spawning, physics, input, camera, facing —
+        // now belongs to `eustress_common::avatar::AvatarRuntimePlugin`, which
+        // both shells add. Nothing character-related may be registered here.
+        //
+        // What was removed and why:
+        //  * `SharedCharacterPlugin` — shared systems by convention while
+        //    leaving entity construction free, which is how Studio came to
+        //    spawn a Female/XBot and the Client a Male/YBot from "the same"
+        //    code. It is now `pub(crate)` inside the runtime.
+        //  * `spawn_local_player` — a second, structurally different character
+        //    (its own capsule dimensions, its own camera with a different FOV
+        //    and tonemapper). Replaced by the `SpawnAvatar` message.
+        //  * `CharacterSystemConfig` — the `use_skinned_characters` flag whose
+        //    two branches produced entirely different entities on the two
+        //    sides.
+        //  * `update_first_person_mode` — keyed on `CharacterBody`, which no
+        //    live path ever inserted. Dead. First-person body hiding is a
+        //    P5 item on the bound rig.
+        //
+        // `PlayerService` DOES stay here. It is a genuine service (spawn
+        // position, cursor state, local-player handle) and is independent of
+        // how the character is implemented — but it was only ever
+        // `init_resource`'d as a side effect of `SharedCharacterPlugin`.
+        // Removing that plugin therefore took `PlayerService` with it, and
+        // `PauseMenuPlugin`'s three systems failed param validation and
+        // panicked the schedule at startup.
+        app.init_resource::<PlayerService>().init_resource::<AnimationService>();
     }
 }
 

@@ -11,11 +11,24 @@
 # client-side/env-var, with KYC-verified-identity → Cloudflare KV role
 # assignment as the documented production path). Submodes: Civil, Criminal,
 # Judge (gated). Civil and Criminal are meant to branch further later.
+#
+# Justice itself is NOT directly selectable in the Modes dropdown — it only
+# expands to its submenu; a submode must be chosen (see ribbon.slint's
+# mode-row-touch handler). Civil and Criminal each carry their OWN Case tab
+# (via [[submode_tabs]] below — see `ModeManifest::effective_custom_tabs`);
+# the top-level [[tabs]] below (Docket + Evidence, no Case) is what Judge and
+# any not-yet-resolved submode fall back to — judges preside over dockets and
+# evidence, they don't build cases themselves.
+#
+# NOTE: this "civil" submode is CIVIL LAW (private disputes) — unrelated to
+# the separate top-level "civil" MODE (civil ENGINEERING: bridges/terrain).
 
 [mode]
 id = "justice"
 name = "Justice"
 icon = "gavel"
+# Mode-selection-menu color - Roblox BrickColor Khaki (347).
+color = "#E2DCBC"
 version = "1.0"
 author = "Eustress"
 
@@ -28,24 +41,32 @@ tabs = ["home", "data", "mindspace", "test"]
 preset = "Scripting"
 
 [theme]
-# Overlays accent-eustress only (selection / active-tool / focus rings) — the
-# rest of the palette stays whatever theme is active. Amber = gavel/justice.
-accent = "#e8912d"
+# Matches [mode].color so the selection ring/active-tool tint reads the same
+# khaki as the mode's own dropdown/header identity color.
+accent = "#E2DCBC"
 
+# Submodes render in the default grey (like every other mode's submenu, e.g.
+# Business's) — no per-submode color override.
 [[submodes]]
 id = "civil"
 name = "Civil"
+icon = "scales"
 
 [[submodes]]
 id = "criminal"
 name = "Criminal"
+icon = "shield"
 
 [[submodes]]
 id = "judge"
 name = "Judge"
+icon = "gavel"
 # Gated: this submode is hidden from Justice's submenu unless the user holds
 # the "judge" role. Justice itself stays open to all.
 required-role = "judge"
+
+# ── Fallback tabs (Judge + unresolved submode) — Docket & Evidence only; see
+# the file header for why Case lives per-submode instead. ──────────────────
 
 [[tabs]]
 id = "docket"
@@ -54,7 +75,15 @@ color = "#e8912d"
 
   [[tabs.sections]]
   name = "Calendar"
-  tools = []
+  tools = ["jus:court_calendar", "jus:smart_schedule", "jus:conflict_detector"]
+
+  [[tabs.sections]]
+  name = "Filings"
+  tools = ["jus:efiling_queue", "jus:service_of_process", "jus:proof_of_service"]
+
+  [[tabs.sections]]
+  name = "Deadlines"
+  tools = ["jus:sol_clock", "jus:speedy_trial_calc", "jus:brady_alerts"]
 
 [[tabs]]
 id = "evidence"
@@ -64,3 +93,562 @@ color = "#ff5470"
   [[tabs.sections]]
   name = "Exhibits"
   tools = ["data:import", "data:record"]
+
+  [[tabs.sections]]
+  name = "Chain of Custody"
+  tools = ["jus:custody_log", "jus:hash_verifier", "jus:redaction_tool"]
+
+  [[tabs.sections]]
+  name = "Analysis"
+  tools = ["data:chart", "data:stats"]
+
+# ── Tech — Integrity Ledger + Open Algorithms (the two user-endorsed
+# engine-native directions; see the 2026-07-21 Integrity-Ledger spec in the
+# session notes). AI Legal Hotline and Sentinel remain deliberately ABSENT
+# — explicit product decision (2026-07-21): they are full external
+# crisis-response/ML products (phone infrastructure, paid voice-AI vendors,
+# hired legal analysts — see E:\Justice\Centralized\Modules\AILegalHotline\
+# AI-Hotline.md and E:\Justice\docs\Sentinel.md), and a button that looks
+# like a working hotline to someone who clicks it expecting real help is a
+# harm, not a placeholder. Do not add them as dream buttons. ────────────────
+
+[[tabs]]
+id = "tech"
+name = "Tech"
+color = "#4fd6ff"
+
+  [[tabs.sections]]
+  name = "Integrity Ledger"
+  tools = ["jus:ledger_viewer", "jus:integrity_verify", "jus:proof_export"]
+
+  [[tabs.sections]]
+  name = "Open Algorithms"
+  tools = ["jus:algorithm_registry", "jus:audit_log", "jus:bias_stress_test"]
+
+# ── Metrics / Reform / Reference — added 2026-07-21 per the user's Justice
+# System Framework ribbon pitch, scoped down via a Fable-5 design consult:
+# the pitch's Compare tab folded into Metrics' "Comparative" section, and
+# Stakeholders + Resources merged into one "Reference" tab (10 proposed
+# top-level tabs would have made the strip unworkably wide). These three
+# apply regardless of which submode is active (a judge, a prosecutor, and a
+# civil attorney all want dashboards/reform-testing/directory access) — so,
+# like Docket and Tech above, they're declared BOTH here (Judge/no-submode
+# fallback) AND duplicated into each of Criminal's and Civil's submode_tabs
+# below, since a submode's set REPLACES the fallback rather than merging
+# with it. `tools = []` throughout except where a section's purpose
+# genuinely matches an already-wired `data:*` action (chart/stats/grid/
+# import) — no synthetic "looks-clickable-but-isn't" button ids, for the
+# same reason Tech's AI-Hotline/Sentinel buttons stay empty above: a button
+# that appears to work but doesn't is a worse failure mode for a judge or
+# advocate than an honest "Coming soon" placeholder. ──────────────────────
+
+[[tabs]]
+id = "metrics"
+name = "Metrics"
+color = "#34d399"
+
+  [[tabs.sections]]
+  name = "Universal Dashboards"
+  tools = ["data:chart", "data:stats", "data:grid"]
+
+  [[tabs.sections]]
+  name = "Real-Time"
+  tools = ["jus:live_monitor", "jus:alert_builder", "jus:disparity_heatmap"]
+
+  [[tabs.sections]]
+  name = "Audit"
+  tools = ["jus:bias_detector", "jus:transparency_report", "jus:open_data_export"]
+
+  [[tabs.sections]]
+  name = "Comparative"
+  tools = ["data:import"]
+
+[[tabs]]
+id = "reform"
+name = "Reform"
+color = "#a3e635"
+
+  [[tabs.sections]]
+  name = "Design"
+  tools = ["jus:hypothesis_wizard", "jus:ab_test_builder", "jus:quasi_experiment"]
+
+  [[tabs.sections]]
+  name = "Tough-on-Crime Track"
+  tools = ["jus:prosecution_effectiveness", "jus:deterrence_metrics", "jus:victim_safety_score"]
+
+  [[tabs.sections]]
+  name = "Rehabilitation Track"
+  tools = ["jus:program_efficacy", "jus:cost_benefit_lab", "jus:desistance_curves"]
+
+  [[tabs.sections]]
+  name = "Systemic Track"
+  tools = ["jus:disparity_audit", "jus:bias_framework", "jus:alt_outcomes"]
+
+[[tabs]]
+id = "reference"
+name = "Reference"
+color = "#94a3b8"
+
+  [[tabs.sections]]
+  name = "Roles"
+  tools = ["jus:role_assigner", "jus:permission_matrix"]
+
+  [[tabs.sections]]
+  name = "Collaboration"
+  tools = ["jus:shared_evidence_room", "jus:case_conference", "jus:restorative_circle"]
+
+  [[tabs.sections]]
+  name = "Oversight"
+  tools = ["jus:review_board_portal", "jus:public_comment_inbox"]
+
+  [[tabs.sections]]
+  name = "Learning & Funding"
+  tools = ["jus:training_modules", "jus:grant_finder"]
+
+  [[tabs.sections]]
+  name = "Community & Export"
+  tools = ["jus:research_library", "jus:dashboard_publisher", "jus:case_archive"]
+
+# ── Criminal submode — the institutional case-lifecycle spine (Entry →
+# Reentry), plus its own Docket + Evidence (same shape as the fallback
+# above, explicit here so Civil/Criminal visibly differ per-submode).
+# Intake is wired to real Data-Platform actions; the rest are declared ahead
+# of their tooling — same "Coming soon" convention used throughout. Corrections
+# and Victims stages are intentionally NOT stubbed yet (deferred, not
+# dropped) until they have concrete tooling to scope against. ──────────────
+
+[[submode_tabs]]
+submode = "criminal"
+id = "case"
+name = "Case"
+color = "#E63946"
+
+  [[submode_tabs.sections]]
+  name = "Intake"
+  tools = ["data:import", "data:record"]
+
+  [[submode_tabs.sections]]
+  name = "Pretrial"
+  tools = ["crim:bail_calculator", "crim:risk_assessment", "crim:diversion_offer", "crim:pretrial_services"]
+
+  [[submode_tabs.sections]]
+  name = "Charging"
+  tools = ["crim:charge_builder", "crim:declination_log", "crim:grand_jury_packet"]
+
+  [[submode_tabs.sections]]
+  name = "Adjudication"
+  tools = ["crim:motion_builder", "crim:voir_dire_tool", "crim:jury_instructions"]
+
+  [[submode_tabs.sections]]
+  name = "Sentencing"
+  tools = ["crim:guideline_calculator", "crim:sanctions_lab", "crim:second_look_petition"]
+
+  [[submode_tabs.sections]]
+  name = "Reentry"
+  tools = ["crim:release_planner", "crim:clean_slate_generator", "crim:collateral_checker"]
+
+[[submode_tabs]]
+submode = "criminal"
+id = "docket"
+name = "Docket"
+color = "#e8912d"
+
+  [[submode_tabs.sections]]
+  name = "Calendar"
+  tools = ["jus:court_calendar", "jus:smart_schedule", "jus:conflict_detector"]
+
+  [[submode_tabs.sections]]
+  name = "Filings"
+  tools = ["jus:efiling_queue", "jus:service_of_process", "jus:proof_of_service"]
+
+  [[submode_tabs.sections]]
+  name = "Deadlines"
+  tools = ["jus:sol_clock", "jus:speedy_trial_calc", "jus:brady_alerts"]
+
+[[submode_tabs]]
+submode = "criminal"
+id = "evidence"
+name = "Evidence"
+color = "#ff5470"
+
+  [[submode_tabs.sections]]
+  name = "Exhibits"
+  tools = ["data:import", "data:record"]
+
+  [[submode_tabs.sections]]
+  name = "Chain of Custody"
+  tools = ["jus:custody_log", "jus:hash_verifier", "jus:redaction_tool"]
+
+  [[submode_tabs.sections]]
+  name = "Analysis"
+  tools = ["data:chart", "data:stats"]
+
+[[submode_tabs]]
+submode = "criminal"
+id = "tech"
+name = "Tech"
+color = "#4fd6ff"
+# Documentation-only vision placeholder — see the file header near the
+# top-level "tech" tab for why this stays `tools = []`.
+
+  [[submode_tabs.sections]]
+  name = "Integrity Ledger"
+  tools = ["jus:ledger_viewer", "jus:integrity_verify", "jus:proof_export"]
+
+  [[submode_tabs.sections]]
+  name = "Open Algorithms"
+  tools = ["jus:algorithm_registry", "jus:audit_log", "jus:bias_stress_test"]
+
+# Metrics/Reform/Reference — duplicated verbatim from the mode-level
+# fallback above (see the 2026-07-21 comment there); submode_tabs REPLACES
+# custom_tabs, so these must be repeated per-submode to stay visible.
+
+[[submode_tabs]]
+submode = "criminal"
+id = "metrics"
+name = "Metrics"
+color = "#34d399"
+
+  [[submode_tabs.sections]]
+  name = "Universal Dashboards"
+  tools = ["data:chart", "data:stats", "data:grid"]
+
+  [[submode_tabs.sections]]
+  name = "Real-Time"
+  tools = ["jus:live_monitor", "jus:alert_builder", "jus:disparity_heatmap"]
+
+  [[submode_tabs.sections]]
+  name = "Audit"
+  tools = ["jus:bias_detector", "jus:transparency_report", "jus:open_data_export"]
+
+  [[submode_tabs.sections]]
+  name = "Comparative"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "criminal"
+id = "reform"
+name = "Reform"
+color = "#a3e635"
+
+  [[submode_tabs.sections]]
+  name = "Design"
+  tools = ["jus:hypothesis_wizard", "jus:ab_test_builder", "jus:quasi_experiment"]
+
+  [[submode_tabs.sections]]
+  name = "Tough-on-Crime Track"
+  tools = ["jus:prosecution_effectiveness", "jus:deterrence_metrics", "jus:victim_safety_score"]
+
+  [[submode_tabs.sections]]
+  name = "Rehabilitation Track"
+  tools = ["jus:program_efficacy", "jus:cost_benefit_lab", "jus:desistance_curves"]
+
+  [[submode_tabs.sections]]
+  name = "Systemic Track"
+  tools = ["jus:disparity_audit", "jus:bias_framework", "jus:alt_outcomes"]
+
+[[submode_tabs]]
+submode = "criminal"
+id = "reference"
+name = "Reference"
+color = "#94a3b8"
+
+  [[submode_tabs.sections]]
+  name = "Roles"
+  tools = ["jus:role_assigner", "jus:permission_matrix"]
+
+  [[submode_tabs.sections]]
+  name = "Collaboration"
+  tools = ["jus:shared_evidence_room", "jus:case_conference", "jus:restorative_circle"]
+
+  [[submode_tabs.sections]]
+  name = "Oversight"
+  tools = ["jus:review_board_portal", "jus:public_comment_inbox"]
+
+  [[submode_tabs.sections]]
+  name = "Learning & Funding"
+  tools = ["jus:training_modules", "jus:grant_finder"]
+
+  [[submode_tabs.sections]]
+  name = "Community & Export"
+  tools = ["jus:research_library", "jus:dashboard_publisher", "jus:case_archive"]
+
+# ── Civil submode — civil-procedure lifecycle (Filing → Judgment &
+# Enforcement) instead of Criminal's Entry→Reentry, and "Discovery" instead
+# of "Evidence" (the civil-procedure term for the same underlying concept).
+# Shares the same Docket shape as Criminal — calendars/filings/deadlines
+# apply to both kinds of courts alike. ──────────────────────────────────────
+
+[[submode_tabs]]
+submode = "civil"
+id = "case"
+name = "Case"
+color = "#FFFFFF"
+
+  [[submode_tabs.sections]]
+  name = "Filing"
+  tools = ["data:import", "data:record"]
+
+  [[submode_tabs.sections]]
+  name = "Motions"
+  tools = ["jciv:motion_drafter", "jciv:hearing_scheduler", "jciv:tentative_rulings", "jciv:oral_argument_scheduler"]
+
+  [[submode_tabs.sections]]
+  name = "Discovery"
+  tools = ["jciv:request_builder", "jciv:privilege_log", "jciv:meet_confer_tracker"]
+
+  [[submode_tabs.sections]]
+  name = "Trial"
+  tools = ["jciv:exhibit_list", "jciv:witness_prep", "jciv:trial_notebook"]
+
+  [[submode_tabs.sections]]
+  name = "Judgment & Enforcement"
+  tools = ["jciv:judgment_calculator", "jciv:enforcement_tracker", "jciv:garnishment_wizard"]
+
+[[submode_tabs]]
+submode = "civil"
+id = "docket"
+name = "Docket"
+color = "#e8912d"
+
+  [[submode_tabs.sections]]
+  name = "Calendar"
+  tools = ["jus:court_calendar", "jus:smart_schedule", "jus:conflict_detector"]
+
+  [[submode_tabs.sections]]
+  name = "Filings"
+  tools = ["jus:efiling_queue", "jus:service_of_process", "jus:proof_of_service"]
+
+  [[submode_tabs.sections]]
+  name = "Deadlines"
+  tools = ["jus:sol_clock", "jus:speedy_trial_calc", "jus:brady_alerts"]
+
+[[submode_tabs]]
+submode = "civil"
+id = "tech"
+name = "Tech"
+color = "#4fd6ff"
+# Documentation-only vision placeholder — see the file header near the
+# top-level "tech" tab for why this stays `tools = []`.
+
+  [[submode_tabs.sections]]
+  name = "Integrity Ledger"
+  tools = ["jus:ledger_viewer", "jus:integrity_verify", "jus:proof_export"]
+
+  [[submode_tabs.sections]]
+  name = "Open Algorithms"
+  tools = ["jus:algorithm_registry", "jus:audit_log", "jus:bias_stress_test"]
+
+# Metrics/Reform/Reference — duplicated verbatim (see the 2026-07-21 comment
+# near the mode-level fallback tabs).
+
+[[submode_tabs]]
+submode = "civil"
+id = "metrics"
+name = "Metrics"
+color = "#34d399"
+
+  [[submode_tabs.sections]]
+  name = "Universal Dashboards"
+  tools = ["data:chart", "data:stats", "data:grid"]
+
+  [[submode_tabs.sections]]
+  name = "Real-Time"
+  tools = ["jus:live_monitor", "jus:alert_builder", "jus:disparity_heatmap"]
+
+  [[submode_tabs.sections]]
+  name = "Audit"
+  tools = ["jus:bias_detector", "jus:transparency_report", "jus:open_data_export"]
+
+  [[submode_tabs.sections]]
+  name = "Comparative"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "civil"
+id = "reform"
+name = "Reform"
+color = "#a3e635"
+
+  [[submode_tabs.sections]]
+  name = "Design"
+  tools = ["jus:hypothesis_wizard", "jus:ab_test_builder", "jus:quasi_experiment"]
+
+  [[submode_tabs.sections]]
+  name = "Tough-on-Crime Track"
+  tools = ["jus:prosecution_effectiveness", "jus:deterrence_metrics", "jus:victim_safety_score"]
+
+  [[submode_tabs.sections]]
+  name = "Rehabilitation Track"
+  tools = ["jus:program_efficacy", "jus:cost_benefit_lab", "jus:desistance_curves"]
+
+  [[submode_tabs.sections]]
+  name = "Systemic Track"
+  tools = ["jus:disparity_audit", "jus:bias_framework", "jus:alt_outcomes"]
+
+[[submode_tabs]]
+submode = "civil"
+id = "reference"
+name = "Reference"
+color = "#94a3b8"
+
+  [[submode_tabs.sections]]
+  name = "Roles"
+  tools = ["jus:role_assigner", "jus:permission_matrix"]
+
+  [[submode_tabs.sections]]
+  name = "Collaboration"
+  tools = ["jus:shared_evidence_room", "jus:case_conference", "jus:restorative_circle"]
+
+  [[submode_tabs.sections]]
+  name = "Oversight"
+  tools = ["jus:review_board_portal", "jus:public_comment_inbox"]
+
+  [[submode_tabs.sections]]
+  name = "Learning & Funding"
+  tools = ["jus:training_modules", "jus:grant_finder"]
+
+  [[submode_tabs.sections]]
+  name = "Community & Export"
+  tools = ["jus:research_library", "jus:dashboard_publisher", "jus:case_archive"]
+
+# ── Judge submode — the Bench tab (chambers/courtroom/sentencing work)
+# plus the same shared set as the fallback. Role-gated like the submode.
+
+[[submode_tabs]]
+submode = "judge"
+id = "bench"
+name = "Bench"
+color = "#D4AF37"
+
+  [[submode_tabs.sections]]
+  name = "Chambers"
+  tools = ["jdg:bench_memo", "jdg:ruling_drafter", "jdg:opinion_editor", "jdg:clerk_workflow"]
+
+  [[submode_tabs.sections]]
+  name = "Courtroom"
+  tools = ["jdg:hearing_console", "jdg:jury_manager", "jdg:objection_log"]
+
+  [[submode_tabs.sections]]
+  name = "Sentencing"
+  tools = ["jdg:guideline_reference", "jdg:sentencing_worksheet", "jdg:departure_log"]
+
+[[submode_tabs]]
+submode = "judge"
+id = "docket"
+name = "Docket"
+color = "#e8912d"
+
+  [[submode_tabs.sections]]
+  name = "Calendar"
+  tools = ["jus:court_calendar", "jus:smart_schedule", "jus:conflict_detector"]
+
+  [[submode_tabs.sections]]
+  name = "Filings"
+  tools = ["jus:efiling_queue", "jus:service_of_process", "jus:proof_of_service"]
+
+  [[submode_tabs.sections]]
+  name = "Deadlines"
+  tools = ["jus:sol_clock", "jus:speedy_trial_calc", "jus:brady_alerts"]
+
+[[submode_tabs]]
+submode = "judge"
+id = "evidence"
+name = "Evidence"
+color = "#ff5470"
+
+  [[submode_tabs.sections]]
+  name = "Exhibits"
+  tools = ["data:import", "data:record"]
+
+  [[submode_tabs.sections]]
+  name = "Chain of Custody"
+  tools = ["jus:custody_log", "jus:hash_verifier", "jus:redaction_tool"]
+
+  [[submode_tabs.sections]]
+  name = "Analysis"
+  tools = ["data:chart", "data:stats"]
+
+[[submode_tabs]]
+submode = "judge"
+id = "tech"
+name = "Tech"
+color = "#4fd6ff"
+
+  [[submode_tabs.sections]]
+  name = "Integrity Ledger"
+  tools = ["jus:ledger_viewer", "jus:integrity_verify", "jus:proof_export"]
+
+  [[submode_tabs.sections]]
+  name = "Open Algorithms"
+  tools = ["jus:algorithm_registry", "jus:audit_log", "jus:bias_stress_test"]
+
+[[submode_tabs]]
+submode = "judge"
+id = "metrics"
+name = "Metrics"
+color = "#34d399"
+
+  [[submode_tabs.sections]]
+  name = "Universal Dashboards"
+  tools = ["data:chart", "data:stats", "data:grid"]
+
+  [[submode_tabs.sections]]
+  name = "Real-Time"
+  tools = ["jus:live_monitor", "jus:alert_builder", "jus:disparity_heatmap"]
+
+  [[submode_tabs.sections]]
+  name = "Audit"
+  tools = ["jus:bias_detector", "jus:transparency_report", "jus:open_data_export"]
+
+  [[submode_tabs.sections]]
+  name = "Comparative"
+  tools = ["data:import"]
+
+[[submode_tabs]]
+submode = "judge"
+id = "reform"
+name = "Reform"
+color = "#a3e635"
+
+  [[submode_tabs.sections]]
+  name = "Design"
+  tools = ["jus:hypothesis_wizard", "jus:ab_test_builder", "jus:quasi_experiment"]
+
+  [[submode_tabs.sections]]
+  name = "Tough-on-Crime Track"
+  tools = ["jus:prosecution_effectiveness", "jus:deterrence_metrics", "jus:victim_safety_score"]
+
+  [[submode_tabs.sections]]
+  name = "Rehabilitation Track"
+  tools = ["jus:program_efficacy", "jus:cost_benefit_lab", "jus:desistance_curves"]
+
+  [[submode_tabs.sections]]
+  name = "Systemic Track"
+  tools = ["jus:disparity_audit", "jus:bias_framework", "jus:alt_outcomes"]
+
+[[submode_tabs]]
+submode = "judge"
+id = "reference"
+name = "Reference"
+color = "#94a3b8"
+
+  [[submode_tabs.sections]]
+  name = "Roles"
+  tools = ["jus:role_assigner", "jus:permission_matrix"]
+
+  [[submode_tabs.sections]]
+  name = "Collaboration"
+  tools = ["jus:shared_evidence_room", "jus:case_conference", "jus:restorative_circle"]
+
+  [[submode_tabs.sections]]
+  name = "Oversight"
+  tools = ["jus:review_board_portal", "jus:public_comment_inbox"]
+
+  [[submode_tabs.sections]]
+  name = "Learning & Funding"
+  tools = ["jus:training_modules", "jus:grant_finder"]
+
+  [[submode_tabs.sections]]
+  name = "Community & Export"
+  tools = ["jus:research_library", "jus:dashboard_publisher", "jus:case_archive"]

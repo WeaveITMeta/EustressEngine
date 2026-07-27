@@ -39,6 +39,12 @@ id = "276638d8157344589cd2a82d4f1865bb"
 binding = "PAYOUTS"
 id = "c1d7016c782641aeba8662e2fa08b28b"
 
+# Engine usage telemetry — anonymous tool-click aggregates + feedback
+# comments (see handleTelemetryUsage/Comment/Summary in src/index.js).
+[[kv_namespaces]]
+binding = "TELEMETRY"
+id = "750bd5aed0d64667af72534b60ffb97e"
+
 [[kv_namespaces]]
 binding = "WORKSHOP_CONTEXT"
 id = "44abf849a950492c8699a3fd3b7e3c27"

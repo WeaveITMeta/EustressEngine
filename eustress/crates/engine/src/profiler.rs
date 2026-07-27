@@ -688,9 +688,10 @@ mod enabled {
         opts.title = "Eustress per-system frame profile".to_string();
         opts.subtitle = Some("total microseconds per system over the sample window".to_string());
         opts.count_name = "µs".to_string();
-        // Keep the original (time-sorted) order so the SVG reads top-down like
-        // the text report rather than alphabetically.
-        opts.no_sort = true;
+        // inferno requires lexically-sorted input when `no_sort` is set (it
+        // rejects unsorted lines outright), so let it sort. The frame widths
+        // still encode the per-system cost, which is the signal that matters.
+        opts.no_sort = false;
 
         let lines = folded.lines();
         match inferno::flamegraph::from_lines(&mut opts, lines, writer) {

@@ -1320,6 +1320,8 @@ fn do_import_gaussian_splat(world: &mut World, source: PathBuf) {
     let overrides = eustress_common::instance_create::InstanceOverrides {
         display_name: Some(entity_name.clone()),
         position: Some([0.0, 2.0, 0.0]),
+        // Land COLMAP-frame splats upright (180° about X) — see the const doc.
+        rotation: Some(eustress_common::instance_create::GAUSSIAN_SPLAT_UPRIGHT_ROTATION),
         ..Default::default()
     };
     let created = match eustress_common::instance_create::create_instance(

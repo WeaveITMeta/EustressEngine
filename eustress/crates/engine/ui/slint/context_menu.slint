@@ -97,6 +97,31 @@ component MenuSeparator inherits Rectangle {
 export component ContextMenu inherits Rectangle {
     in property <[MenuItem]> items: [];
 
+    // Which surface the right-click came from — mirrors
+    // `context-menu-target-type` on the root window. `"viewport"` swaps the
+    // Explorer entity menu for the build-oriented set below; everything
+    // else ("entity", "file", "soul-script", …) keeps the default menu.
+    in property <string> kind: "";
+
+    // Live shortcut text, pushed from `slint_ui::sync_keybindings_to_slint`
+    // and threaded through by main.slint. NOTHING here is hardcoded: the
+    // menu used to spell "Ctrl+Shift+G" for Ungroup while the real binding
+    // was Ctrl+U, and a literal string can never notice a remap. Reading
+    // the same properties the ribbon subtitles read makes that whole class
+    // of drift impossible.
+    in property <string> shortcut-cut: "";
+    in property <string> shortcut-copy: "";
+    in property <string> shortcut-paste: "";
+    in property <string> shortcut-duplicate: "";
+    in property <string> shortcut-delete: "";
+    in property <string> shortcut-rename: "";
+    in property <string> shortcut-copy-path: "";
+    in property <string> shortcut-group: "";
+    in property <string> shortcut-ungroup: "";
+    in property <string> shortcut-focus: "";
+    in property <string> shortcut-anchor: "";
+    in property <string> shortcut-lock: "";
+
     callback on-action(string);
     callback on-close();
 
@@ -144,33 +169,128 @@ export component ContextMenu inherits Rectangle {
                 }
             }
 
+            // ── Viewport build menu ──
+            //
+            // A right-click in the 3D viewport is a BUILD gesture, not a
+            // tree-management gesture, so it gets its own set: put something
+            // where the cursor is, get the camera onto it, then the
+            // per-object toggles a builder reaches for mid-block-out.
+            // `insert-here` / `paste-here` place at the ray hit point the
+            // producer recorded (`ViewportContextTarget.hit_point`); every
+            // other item acts on the current selection, which the producer
+            // has already synced to whatever the click landed on.
+            if root.items.length == 0 && root.kind == "viewport": VerticalLayout {
+                spacing: 1px;
+
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/plus.svg");
+                    label: "Insert Part Here"; shortcut: "";
+                    clicked => { root.on-action("insert-here"); }
+                }
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/paste.svg");
+                    label: "Paste Here"; shortcut: root.shortcut-paste;
+                    clicked => { root.on-action("paste-here"); }
+                }
+
+                MenuSeparator {}
+
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/crosshair.svg");
+                    label: "Focus Selection"; shortcut: root.shortcut-focus;
+                    clicked => { root.on-action("focus-selection"); }
+                }
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/binoculars.svg");
+                    label: "Zoom to Selection"; shortcut: "";
+                    clicked => { root.on-action("zoom-to-selection"); }
+                }
+
+                MenuSeparator {}
+
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/duplicate.svg");
+                    label: "Duplicate"; shortcut: root.shortcut-duplicate;
+                    clicked => { root.on-action("duplicate"); }
+                }
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/copy.svg");
+                    label: "Copy"; shortcut: root.shortcut-copy;
+                    clicked => { root.on-action("copy"); }
+                }
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/cut.svg");
+                    label: "Cut"; shortcut: root.shortcut-cut;
+                    clicked => { root.on-action("cut"); }
+                }
+
+                MenuSeparator {}
+
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/anchor.svg");
+                    label: "Toggle Anchor"; shortcut: root.shortcut-anchor;
+                    clicked => { root.on-action("toggle-anchor"); }
+                }
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/lock.svg");
+                    label: "Toggle Lock"; shortcut: root.shortcut-lock;
+                    clicked => { root.on-action("toggle-lock"); }
+                }
+
+                MenuSeparator {}
+
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/group.svg");
+                    label: "Group"; shortcut: root.shortcut-group;
+                    clicked => { root.on-action("group"); }
+                }
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/ungroup.svg");
+                    label: "Ungroup"; shortcut: root.shortcut-ungroup;
+                    clicked => { root.on-action("ungroup"); }
+                }
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/link.svg");
+                    label: "Copy Path"; shortcut: root.shortcut-copy-path;
+                    clicked => { root.on-action("copy-path"); }
+                }
+
+                MenuSeparator {}
+
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/delete.svg");
+                    label: "Delete"; shortcut: root.shortcut-delete;
+                    clicked => { root.on-action("delete"); }
+                }
+            }
+
             // ── Default entity menu ──
             //
             // Order: edit clipboard ops → identity ops → structure ops →
             // destructive (Delete) last so a misclick can't nuke the node.
             // "Insert Object..." lives in the File menu; we don't duplicate
             // it here.
-            if root.items.length == 0: VerticalLayout {
+            if root.items.length == 0 && root.kind != "viewport": VerticalLayout {
                 spacing: 1px;
 
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/cut.svg");
-                    label: "Cut"; shortcut: "Ctrl+X";
+                    label: "Cut"; shortcut: root.shortcut-cut;
                     clicked => { root.on-action("cut"); }
                 }
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/copy.svg");
-                    label: "Copy"; shortcut: "Ctrl+C";
+                    label: "Copy"; shortcut: root.shortcut-copy;
                     clicked => { root.on-action("copy"); }
                 }
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/paste.svg");
-                    label: "Paste"; shortcut: "Ctrl+V";
+                    label: "Paste"; shortcut: root.shortcut-paste;
                     clicked => { root.on-action("paste"); }
                 }
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/duplicate.svg");
-                    label: "Duplicate"; shortcut: "Ctrl+D";
+                    label: "Duplicate"; shortcut: root.shortcut-duplicate;
                     clicked => { root.on-action("duplicate"); }
                 }
 
@@ -178,7 +298,7 @@ export component ContextMenu inherits Rectangle {
 
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/rename.svg");
-                    label: "Rename"; shortcut: "F2";
+                    label: "Rename"; shortcut: root.shortcut-rename;
                     clicked => { root.on-action("rename"); }
                 }
                 // Copy Path — yields the `@entity:Space/Name` canonical handle
@@ -186,7 +306,7 @@ export component ContextMenu inherits Rectangle {
                 // and @reference the selected entity.
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/link.svg");
-                    label: "Copy Path"; shortcut: "";
+                    label: "Copy Path"; shortcut: root.shortcut-copy-path;
                     clicked => { root.on-action("copy-path"); }
                 }
 
@@ -194,12 +314,12 @@ export component ContextMenu inherits Rectangle {
 
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/group.svg");
-                    label: "Group"; shortcut: "Ctrl+G";
+                    label: "Group"; shortcut: root.shortcut-group;
                     clicked => { root.on-action("group"); }
                 }
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/ungroup.svg");
-                    label: "Ungroup"; shortcut: "Ctrl+Shift+G";
+                    label: "Ungroup"; shortcut: root.shortcut-ungroup;
                     clicked => { root.on-action("ungroup"); }
                 }
 
@@ -207,7 +327,7 @@ export component ContextMenu inherits Rectangle {
 
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/delete.svg");
-                    label: "Delete"; shortcut: "Del";
+                    label: "Delete"; shortcut: root.shortcut-delete;
                     clicked => { root.on-action("delete"); }
                 }
             }

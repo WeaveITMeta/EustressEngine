@@ -2394,6 +2394,20 @@ export component PropertiesPanel inherits Rectangle {
     callback on-tag-select-tagged(string);
     callback on-tag-rename-request(string);   // open the rename modal for this tag
 
+    // Property filter. The typed query lives here (two-way bound to the root
+    // window) and the actual filtering happens Rust-side in
+    // `sync_properties_to_slint`, so a category header whose every child was
+    // filtered out disappears with it — a header floating above nothing reads
+    // as a broken panel. `on-search-changed` only tells Rust to rebuild; the
+    // query itself is read back off this property.
+    in-out property <string> search-query: "";
+    callback on-search-changed(string);
+    // Deliberately NOT `on-input-focus-changed`: that one pauses the whole
+    // properties sync while an editor has focus, which would freeze the very
+    // rebuild the filter is asking for. This one only tells the engine to stop
+    // treating keystrokes as viewport shortcuts.
+    callback on-search-focus-changed(bool);
+
     background: Theme.panel-background;
     
     VerticalLayout {
@@ -2482,6 +2496,95 @@ export component PropertiesPanel inherits Rectangle {
             }
         }
         
+        // Property filter bar. Only shown with a live selection — there is
+        // nothing to filter on the empty state, and an inert search box there
+        // just looks broken. Same layout as the Explorer's search bar so the
+        // two panels read as one system.
+        if root.selected-count > 0: Rectangle {
+            height: 30px;
+            background: Theme.header-background;
+
+            Rectangle {
+                y: parent.height - 1px;
+                width: 100%;
+                height: 1px;
+                background: Theme.border-color;
+            }
+
+            // Escape clears the filter. A LineEdit's internal text input
+            // rejects Escape, so it bubbles to this ancestor scope.
+            //
+            // Explicit 100% sizing: the parent is a Rectangle, not a layout, so
+            // a bare FocusScope would shrink to its content's preferred width
+            // and the field would stop short of the panel edge.
+            FocusScope {
+                width: 100%;
+                height: 100%;
+
+                key-pressed(event) => {
+                    if event.text == Key.Escape && root.search-query != "" {
+                        root.search-query = "";
+                        root.on-search-changed("");
+                        return accept;
+                    }
+                    return reject;
+                }
+
+                HorizontalLayout {
+                    padding: 4px;
+                    spacing: 4px;
+
+                    Rectangle {
+                        width: 22px;
+                        height: 22px;
+
+                        Image {
+                            width: 14px;
+                            height: 14px;
+                            source: @image-url("../../assets/icons/ui/search.svg");
+                            image-fit: contain;
+                            colorize: Theme.text-secondary;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        placeholder-text: "Filter properties...";
+                        text <=> root.search-query;
+                        edited(text) => { root.on-search-changed(text); }
+                        changed has-focus => { root.on-search-focus-changed(self.has-focus); }
+                    }
+
+                    if root.search-query != "": Rectangle {
+                        width: 22px;
+                        height: 22px;
+                        border-radius: 3px;
+                        background: prop-search-clear.has-hover ? Theme.button-hover : transparent;
+
+                        Image {
+                            width: 14px;
+                            height: 14px;
+                            source: @image-url("../../assets/icons/ui/close.svg");
+                            image-fit: contain;
+                            colorize: Theme.text-secondary;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        prop-search-clear := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.search-query = "";
+                                root.on-search-changed("");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Empty state - polished design
         if root.selected-count == 0: Rectangle {
             vertical-stretch: 1;

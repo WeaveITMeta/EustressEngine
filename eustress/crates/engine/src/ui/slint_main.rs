@@ -490,14 +490,28 @@ fn apply_bridge_state(ui: &StudioWindow, state: BridgeState) {
         ui.set_script_output_log(model);
     }
 
-    // Viewport (3D) right-click menu request. We reuse the shared
-    // `show-context-menu` + `context-menu-items = []` path so the result is
-    // identical to an Explorer entity right-click — the same drain handler
-    // catches `on-action` and dispatches Cut/Copy/Delete/Copy Path/etc.
+    // Viewport (3D) right-click menu request. `context-menu-target-type` is
+    // what the Slint `ContextMenu` switches on: `"viewport"` makes it render
+    // the build-oriented item set (Insert Here / Paste Here / Focus / …)
+    // rather than the Explorer entity item set, so `context-menu-items` stays
+    // empty — the component owns that layout, this side only names the kind.
+    // Either way the same drain handler catches `on-action`.
+    //
+    // The target id comes from `VIEWPORT_CONTEXT_NODE_ID`, which the Bevy-side
+    // producer stores before stamping this request onto the bridge. This
+    // function runs on the Slint overlay thread with no World access, so the
+    // atomic is the only way to see which entity the click resolved to;
+    // `Acquire` pairs with the producer's `Release` store (the bridge mutex
+    // already orders the two, so this is belt-and-braces). `-1` means empty
+    // space, or an entity the Explorer has no materialized row for — the same
+    // "no target" sentinel the menu already understands.
     if let Some((cx, cy)) = state.request_viewport_context_menu {
         ui.set_context_menu_x(cx);
         ui.set_context_menu_y(cy);
-        ui.set_context_menu_target_id(-1);
+        ui.set_context_menu_target_id(
+            super::viewport_context_menu::VIEWPORT_CONTEXT_NODE_ID
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
         ui.set_context_menu_target_type("viewport".into());
         let empty: Vec<MenuItem> = Vec::new();
         ui.set_context_menu_items(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(empty))));

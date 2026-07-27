@@ -2,6 +2,25 @@
 # Records, discovery, and scenario work: data-forward with MindSpace for
 # case-relationship graphs and a scripting layout. Case/Discovery tabs are
 # forward-looking (declared ahead of their tooling).
+#
+# Case/Discovery expanded + Research/Draft/Clients/Metrics tabs added
+# 2026-07-21 per the user's Legal ribbon pitch, whose own top design
+# principle is "100% compatible, zero breaking changes" — so this pass adds
+# new tabs/sections only and edits no existing tools list. Scoped down via a
+# Fable-5 design consult: the pitch's "Data → Legal Analytics" expansion
+# moved to a NEW "Metrics" tab instead of touching the built-in Data tab
+# (Data is shared code across all nine modes — a mode manifest can't safely
+# edit it, so "zero disruption" means leaving it alone). The pitch's Trial
+# tab folds into Case as a single "Trial" section (mirroring how Justice's
+# Civil submode already treats Trial as one Case section, for cross-mode
+# consistency), and Ethics folds into Clients as one "Ethics & Conflicts"
+# section, keeping the tab strip to six custom tabs instead of the pitch's
+# eleven. `tools = []` throughout except where a section's purpose genuinely
+# matches an already-wired `data:*` action — no synthetic buttons that look
+# clickable but do nothing; see justice.toml's matching 2026-07-21 comment
+# for the full reasoning (an "AI Research"-style button that appears to work
+# but doesn't is a worse failure mode for a lawyer than an honest
+# "Coming soon" placeholder).
 
 [mode]
 id = "legal"
@@ -19,6 +38,39 @@ preset = "Scripting"
 [theme]
 accent = "#ffd166"
 
+# Legal itself is NOT directly selectable in the Modes dropdown (see
+# ribbon.slint's mode-row-touch handler: any mode with submodes only expands
+# its submenu) — a practice area must be chosen.
+[[submodes]]
+id = "pre-law"
+name = "Pre-Law"
+icon = "book"
+
+[[submodes]]
+id = "small-business"
+name = "Small Business"
+icon = "briefcase"
+
+[[submodes]]
+id = "corporate"
+name = "Corporate"
+icon = "building"
+
+[[submodes]]
+id = "litigation"
+name = "Litigation"
+icon = "gavel"
+
+[[submodes]]
+id = "mediation"
+name = "Mediation"
+icon = "handshake"
+
+[[submodes]]
+id = "arbitration"
+name = "Arbitration"
+icon = "scales"
+
 [[tabs]]
 id = "case"
 name = "Case"
@@ -26,13 +78,990 @@ color = "#ffd166"
 
   [[tabs.sections]]
   name = "Files"
-  tools = []
+  tools = ["data:import"]
+
+  [[tabs.sections]]
+  name = "Parties"
+  tools = ["leg:party_manager", "leg:service_list", "leg:corporate_disclosure"]
+
+  [[tabs.sections]]
+  name = "Chronology"
+  tools = ["leg:timeline_builder", "leg:key_dates", "leg:sol_calculator"]
+
+  [[tabs.sections]]
+  name = "Strategy"
+  tools = ["leg:case_theory_canvas", "leg:strengths_matrix", "leg:risk_assessment"]
+
+  [[tabs.sections]]
+  name = "Claims & Defenses"
+  tools = ["leg:claim_builder", "leg:defense_builder", "leg:elements_checklist"]
+
+  [[tabs.sections]]
+  name = "Team"
+  tools = ["leg:team_assignments", "leg:task_board", "leg:permissions_manager"]
+
+  [[tabs.sections]]
+  name = "Trial"
+  tools = ["leg:trial_notebook", "leg:witness_list", "leg:exhibit_binder"]
 
 [[tabs]]
 id = "discovery"
 name = "Discovery"
 color = "#4fd6ff"
 
+# `data:columns` had no Rust-side handler (a pre-existing dead button shared
+# with the built-in Data tab, see ribbon.slint) — swapped for `data:stats`,
+# which is real and fits "Records" just as well.
   [[tabs.sections]]
   name = "Records"
-  tools = ["data:import", "data:columns"]
+  tools = ["data:import", "data:stats"]
+
+  [[tabs.sections]]
+  name = "Requests"
+  tools = ["leg:interrogatories", "leg:rfp_builder", "leg:rfa_builder"]
+
+  [[tabs.sections]]
+  name = "Production"
+  tools = ["leg:bates_stamper", "leg:privilege_log", "leg:redaction_studio"]
+
+  [[tabs.sections]]
+  name = "Depositions"
+  tools = ["leg:depo_scheduler", "leg:depo_outline", "leg:transcript_sync"]
+
+  [[tabs.sections]]
+  name = "Review"
+  tools = ["leg:linear_review", "leg:predictive_coding", "leg:hot_docs"]
+
+  [[tabs.sections]]
+  name = "Tracking"
+  tools = ["leg:discovery_calendar", "leg:deficiency_tracker", "leg:esi_protocol"]
+
+# ── Research — case law / statute / secondary-source lookup, citation
+# graphs, AI-assisted research. "AI Research" stays `tools = []` — same
+# appears-to-work risk as Justice's Tech AI-Hotline buttons. ───────────────
+
+[[tabs]]
+id = "research"
+name = "Research"
+color = "#60a5fa"
+
+  [[tabs.sections]]
+  name = "Authorities"
+  tools = ["leg:case_law_search", "leg:statute_finder", "leg:regulation_browser"]
+
+  [[tabs.sections]]
+  name = "Knowledge Graph"
+  tools = ["leg:citation_network", "leg:authority_mapper", "leg:good_law_checker"]
+
+  [[tabs.sections]]
+  name = "AI Research"
+  tools = ["leg:research_assistant", "leg:memo_generator", "leg:brief_analyzer"]
+
+  [[tabs.sections]]
+  name = "Comparative"
+  tools = ["leg:multi_jurisdiction", "leg:circuit_split_detector"]
+
+# ── Draft — pleadings, smart drafting, collaborative review, document
+# assembly. ─────────────────────────────────────────────────────────────
+
+[[tabs]]
+id = "draft"
+name = "Draft"
+color = "#fcd34d"
+
+  [[tabs.sections]]
+  name = "Pleadings"
+  tools = ["leg:complaint_template", "leg:answer_template", "leg:motion_template"]
+
+  [[tabs.sections]]
+  name = "Smart Drafting"
+  tools = ["leg:clause_library", "leg:auto_assemble", "leg:bluebook_checker"]
+
+  [[tabs.sections]]
+  name = "Collaboration"
+  tools = ["leg:track_changes", "leg:version_compare", "leg:esign_router"]
+
+  [[tabs.sections]]
+  name = "Assemblies"
+  tools = ["leg:document_set", "leg:exhibit_list", "leg:table_of_authorities"]
+
+# ── Clients — intake, portal, relationship management, plus Ethics &
+# Conflicts folded in as one section (conflict checks live at intake). ────
+
+[[tabs]]
+id = "clients"
+name = "Clients"
+color = "#f472b6"
+
+  [[tabs.sections]]
+  name = "Intake"
+  tools = ["leg:intake_form", "leg:engagement_letter", "leg:conflict_waiver"]
+
+  [[tabs.sections]]
+  name = "Portal"
+  tools = ["leg:client_dashboard", "leg:secure_messaging", "leg:document_share"]
+
+  [[tabs.sections]]
+  name = "Relationship"
+  tools = ["leg:matter_history", "leg:satisfaction_survey", "leg:referral_tracker"]
+
+  [[tabs.sections]]
+  name = "Ethics & Conflicts"
+  tools = ["leg:conflict_checker", "leg:ethical_wall", "leg:trust_accounting"]
+
+# ── Metrics — the pitch's "Data → Legal Analytics" expansion, as its own
+# tab instead of touching the built-in Data tab (shared across all nine
+# modes — editing it per-mode would itself be a breaking change). ─────────
+
+[[tabs]]
+id = "metrics"
+name = "Metrics"
+color = "#34d399"
+
+  [[tabs.sections]]
+  name = "Matter Analytics"
+  tools = ["data:stats", "data:grid"]
+
+  [[tabs.sections]]
+  name = "Outcome Metrics"
+  tools = ["data:chart"]
+
+  [[tabs.sections]]
+  name = "Dashboards"
+  tools = ["data:grid", "data:timeline"]
+
+  [[tabs.sections]]
+  name = "Bias & Audit"
+  tools = ["leg:disparate_impact", "leg:algorithm_audit", "leg:fee_equity_report"]
+
+# ── Per-practice-area submode_tabs — Justice-style hybrid (same convention
+# as justice.toml's Docket/Tech/Metrics/Reform/Reference, duplicated
+# verbatim into both Civil and Criminal): Discovery, Research, Draft,
+# Clients, and Metrics apply regardless of practice area, so all five carry
+# forward VERBATIM into every practice area's block. Case is the one tab
+# that genuinely differs per practice area — same rationale Justice used for
+# its own Case tab being the one thing that differs between Civil/Criminal.
+# `tools = []` throughout except where a section's purpose genuinely matches
+# an already-wired action (identical to the fallback tabs above). ──────────
+
+[[submode_tabs]]
+submode = "pre-law"
+id = "pre-law-fundamentals"
+name = "Legal Foundations"
+color = "#3b82f6"
+  [[submode_tabs.sections]]
+  name = "Case Analysis"
+  tools = ["pl:case_briefer", "pl:irac_organizer", "pl:holding_dicta_sorter", "pl:socratic_prep", "pl:outline_bank"]
+  [[submode_tabs.sections]]
+  name = "Legal Research"
+  tools = ["pl:citator_check", "pl:statute_annotator", "pl:precedent_tracker"]
+  [[submode_tabs.sections]]
+  name = "Legal Reasoning"
+  tools = ["pl:issue_spotter", "pl:argument_mapper", "pl:counterargument_builder"]
+
+[[submode_tabs]]
+submode = "pre-law"
+id = "pre-law-practice"
+name = "Practice & Advocacy"
+color = "#eab308"
+  [[submode_tabs.sections]]
+  name = "Moot Court"
+  tools = ["pl:appellate_brief_drafter", "pl:oral_argument_timer", "pl:bench_memo_builder"]
+  [[submode_tabs.sections]]
+  name = "Legal Writing & Drafting"
+  tools = ["pl:memo_drafter", "pl:motion_template", "pl:contract_clause_builder"]
+  [[submode_tabs.sections]]
+  name = "Internships & Shadowing"
+  tools = ["pl:docket_tracker", "pl:case_log", "pl:mentor_debrief"]
+
+[[submode_tabs]]
+submode = "pre-law"
+id = "pre-law-bar-prep"
+name = "Bar Prep & Mastery"
+color = "#ef4444"
+  [[submode_tabs.sections]]
+  name = "Bar Exam Prep"
+  tools = ["pl:mbe_question_bank", "pl:essay_grader", "pl:mpt_simulator"]
+  [[submode_tabs.sections]]
+  name = "Mock Trial"
+  tools = ["pl:witness_examiner", "pl:objection_drill", "pl:voir_dire_simulator"]
+  [[submode_tabs.sections]]
+  name = "Career Portfolio"
+  tools = ["pl:writing_sample_curator", "pl:networking_tracker"]
+
+[[submode_tabs]]
+submode = "small-business"
+id = "small-business-fundamentals"
+name = "Small Business Fundamentals"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Entity Formation"
+  tools = ["sb:entity_selector", "sb:formation_checklist", "sb:cap_table_builder", "sb:operating_agreement_builder"]
+  [[submode_tabs.sections]]
+  name = "Contract Essentials"
+  tools = ["sb:clause_library", "sb:contract_type_map", "sb:term_glossary"]
+  [[submode_tabs.sections]]
+  name = "Regulatory Landscape"
+  tools = ["sb:jurisdiction_map", "sb:license_requirements", "sb:compliance_calendar"]
+
+[[submode_tabs]]
+submode = "small-business"
+id = "small-business-contract-practice"
+name = "Contract & Client Practice"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Drafting & Negotiation"
+  tools = ["sb:contract_drafter", "sb:redline_tracker", "sb:clause_negotiator"]
+  [[submode_tabs.sections]]
+  name = "Client Advising"
+  tools = ["sb:client_intake", "sb:engagement_letter", "sb:advice_memo"]
+  [[submode_tabs.sections]]
+  name = "Compliance Records"
+  tools = ["data:record", "data:import", "sb:filing_tracker"]
+
+[[submode_tabs]]
+submode = "small-business"
+id = "small-business-risk-mastery"
+name = "Risk, Deals & Mastery"
+color = "#c084fc"
+  [[submode_tabs.sections]]
+  name = "Risk & Disputes"
+  tools = ["sb:liability_analyzer", "sb:dispute_resolution_matrix", "sb:litigation_risk_scorer"]
+  [[submode_tabs.sections]]
+  name = "M&A & Growth"
+  tools = ["sb:due_diligence_checklist", "sb:merger_structurer", "sb:valuation_estimator"]
+  [[submode_tabs.sections]]
+  name = "Practice Assessment"
+  tools = ["sb:case_outcome_tracker", "sb:client_satisfaction_audit"]
+
+[[submode_tabs]]
+submode = "corporate"
+id = "corporate-fundamentals"
+name = "Corporate Fundamentals"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Entity & Governance Structures"
+  tools = ["corp:entity_selector", "corp:cap_table_builder", "corp:bylaws_drafter"]
+  [[submode_tabs.sections]]
+  name = "Deal Theory & Valuation"
+  tools = ["corp:valuation_model", "corp:deal_structure_map", "corp:term_sheet_builder", "corp:merger_model", "corp:hsr_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Regulatory Framework"
+  tools = ["corp:statute_lookup", "corp:jurisdiction_comparator", "corp:fiduciary_duty_map"]
+
+[[submode_tabs]]
+submode = "corporate"
+id = "corporate-transactions"
+name = "Transactions & Deals"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Due Diligence"
+  tools = ["corp:diligence_checklist", "corp:data_room_organizer", "corp:redflag_tracker"]
+  [[submode_tabs.sections]]
+  name = "Deal Documents"
+  tools = ["corp:nda_drafter", "corp:purchase_agreement_builder", "corp:disclosure_schedule"]
+  [[submode_tabs.sections]]
+  name = "Closing Process"
+  tools = ["corp:closing_checklist", "corp:condition_tracker", "corp:signature_tracker"]
+
+[[submode_tabs]]
+submode = "corporate"
+id = "corporate-governance"
+name = "Governance & Strategy"
+color = "#f97316"
+  [[submode_tabs.sections]]
+  name = "Board & Shareholder Relations"
+  tools = ["corp:board_resolution_drafter", "corp:proxy_statement_builder", "corp:shareholder_agreement_analyzer"]
+  [[submode_tabs.sections]]
+  name = "M&A Strategy & Integration"
+  tools = ["corp:synergy_model", "corp:integration_planner", "corp:antitrust_screener"]
+  [[submode_tabs.sections]]
+  name = "Compliance & Risk Assessment"
+  tools = ["corp:compliance_audit", "corp:risk_matrix"]
+
+[[submode_tabs]]
+submode = "litigation"
+id = "litigation-fundamentals"
+name = "Litigation Fundamentals"
+color = "#f59e0b"
+  [[submode_tabs.sections]]
+  name = "Civil Procedure"
+  tools = ["lit:jurisdiction_checker", "lit:pleading_builder", "lit:sol_calculator", "lit:objection_trainer"]
+  [[submode_tabs.sections]]
+  name = "Case Theory & Analysis"
+  tools = ["lit:issue_spotter", "lit:elements_checklist", "lit:burden_of_proof_mapper"]
+  [[submode_tabs.sections]]
+  name = "Legal Research"
+  tools = ["lit:case_law_search", "lit:citator_check", "lit:precedent_tracker"]
+
+[[submode_tabs]]
+submode = "litigation"
+id = "litigation-pretrial-practice"
+name = "Pretrial Practice"
+color = "#ef4444"
+  [[submode_tabs.sections]]
+  name = "Discovery"
+  tools = ["lit:document_request_builder", "lit:deposition_scheduler", "lit:privilege_log"]
+  [[submode_tabs.sections]]
+  name = "Motion Practice"
+  tools = ["lit:motion_drafter", "lit:brief_outline", "lit:motion_calendar", "lit:demonstrative_builder"]
+  [[submode_tabs.sections]]
+  name = "Case Management"
+  tools = ["lit:exhibit_organizer", "lit:witness_list", "lit:deadline_tracker"]
+
+[[submode_tabs]]
+submode = "litigation"
+id = "litigation-trial-resolution"
+name = "Trial & Resolution"
+color = "#8b5cf6"
+  [[submode_tabs.sections]]
+  name = "Trial Strategy"
+  tools = ["lit:voir_dire_planner", "lit:opening_closing_builder", "lit:cross_examination_outline"]
+  [[submode_tabs.sections]]
+  name = "Settlement & ADR"
+  tools = ["lit:settlement_valuator", "lit:mediation_prep", "lit:arbitration_brief"]
+  [[submode_tabs.sections]]
+  name = "Trial Presentation & Assessment"
+  tools = ["lit:exhibit_presenter", "lit:mock_trial_scorer"]
+
+[[submode_tabs]]
+submode = "mediation"
+id = "mediation-fundamentals"
+name = "Mediation Fundamentals"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Conflict Analysis"
+  tools = ["med:conflict_mapping", "med:interests_positions_matrix", "med:conflict_style_inventory", "med:opening_statement_builder"]
+  [[submode_tabs.sections]]
+  name = "Negotiation Theory"
+  tools = ["med:batna_watna_calculator", "med:zopa_analyzer", "med:leverage_assessment"]
+  [[submode_tabs.sections]]
+  name = "Mediation Models"
+  tools = ["med:facilitative_model_guide", "med:evaluative_model_guide", "med:transformative_model_guide"]
+
+[[submode_tabs]]
+submode = "mediation"
+id = "mediation-practice"
+name = "Facilitated Negotiation"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Session Prep"
+  tools = ["med:intake_form", "med:case_timeline", "med:stakeholder_map"]
+  [[submode_tabs.sections]]
+  name = "Caucus & Joint Session"
+  tools = ["med:caucus_notes", "med:joint_session_agenda", "med:shuttle_diplomacy_tracker"]
+  [[submode_tabs.sections]]
+  name = "Moving Toward Agreement"
+  tools = ["med:offer_counteroffer_tracker", "med:reality_testing_worksheet", "med:impasse_breaker"]
+
+[[submode_tabs]]
+submode = "mediation"
+id = "mediation-mastery"
+name = "Settlement & Practice Mastery"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Settlement Drafting"
+  tools = ["med:settlement_agreement_drafter", "med:term_sheet_builder", "med:enforceability_checklist"]
+  [[submode_tabs.sections]]
+  name = "Complex & Multi-Party Cases"
+  tools = ["med:multiparty_coordinator", "med:co_mediation_planner", "med:cross_cultural_protocol"]
+  [[submode_tabs.sections]]
+  name = "Professional Standards"
+  tools = ["med:ethics_compliance_check", "med:outcome_evaluator"]
+
+[[submode_tabs]]
+submode = "arbitration"
+id = "arbitration-fundamentals"
+name = "Arbitration Fundamentals"
+color = "#a78bfa"
+  [[submode_tabs.sections]]
+  name = "Clause & Jurisdiction"
+  tools = ["arb:clause_drafter", "arb:seat_venue_analyzer", "arb:competence_competence_checker", "arb:institutional_rules_matrix"]
+  [[submode_tabs.sections]]
+  name = "Institutional Rules & Governing Law"
+  tools = ["arb:rules_comparator", "arb:applicable_law_matrix", "arb:model_law_reference"]
+  [[submode_tabs.sections]]
+  name = "Arbitrability & Scope"
+  tools = ["arb:arbitrability_screen", "arb:multi_party_consolidator", "arb:confidentiality_classifier"]
+
+[[submode_tabs]]
+submode = "arbitration"
+id = "arbitration-proceedings"
+name = "Proceedings"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Arbitrator Selection"
+  tools = ["arb:arbitrator_profile_search", "arb:conflict_disclosure_checker", "arb:strike_and_rank"]
+  [[submode_tabs.sections]]
+  name = "Hearing Preparation"
+  tools = ["arb:redfern_schedule", "arb:witness_statement_builder", "arb:hearing_bundle_compiler"]
+  [[submode_tabs.sections]]
+  name = "Evidence & Testimony"
+  tools = ["arb:expert_report_manager", "arb:cross_exam_outliner", "arb:exhibit_indexer"]
+
+[[submode_tabs]]
+submode = "arbitration"
+id = "arbitration-award-enforcement"
+name = "Award & Enforcement"
+color = "#ef4444"
+  [[submode_tabs.sections]]
+  name = "Award Drafting"
+  tools = ["arb:award_drafter", "arb:costs_allocator", "arb:dissent_tracker"]
+  [[submode_tabs.sections]]
+  name = "Enforcement & Recognition"
+  tools = ["arb:nyc_enforcement_tracker", "arb:recognition_petition_builder", "arb:asset_tracing_map"]
+  [[submode_tabs.sections]]
+  name = "Challenge & Review"
+  tools = ["arb:vacatur_grounds_checklist", "arb:annulment_precedent_search"]
+
+[[submode_tabs]]
+submode = "pre-law"
+id = "discovery"
+name = "Discovery"
+color = "#4fd6ff"
+  [[submode_tabs.sections]]
+  name = "Records"
+  tools = ["data:import", "data:stats"]
+  [[submode_tabs.sections]]
+  name = "Requests"
+  tools = ["leg:interrogatories", "leg:rfp_builder", "leg:rfa_builder"]
+  [[submode_tabs.sections]]
+  name = "Production"
+  tools = ["leg:bates_stamper", "leg:privilege_log", "leg:redaction_studio"]
+  [[submode_tabs.sections]]
+  name = "Depositions"
+  tools = ["leg:depo_scheduler", "leg:depo_outline", "leg:transcript_sync"]
+  [[submode_tabs.sections]]
+  name = "Review"
+  tools = ["leg:linear_review", "leg:predictive_coding", "leg:hot_docs"]
+  [[submode_tabs.sections]]
+  name = "Tracking"
+  tools = ["leg:discovery_calendar", "leg:deficiency_tracker", "leg:esi_protocol"]
+[[submode_tabs]]
+submode = "pre-law"
+id = "research"
+name = "Research"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Authorities"
+  tools = ["leg:case_law_search", "leg:statute_finder", "leg:regulation_browser"]
+  [[submode_tabs.sections]]
+  name = "Knowledge Graph"
+  tools = ["leg:citation_network", "leg:authority_mapper", "leg:good_law_checker"]
+  [[submode_tabs.sections]]
+  name = "AI Research"
+  tools = ["leg:research_assistant", "leg:memo_generator", "leg:brief_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Comparative"
+  tools = ["leg:multi_jurisdiction", "leg:circuit_split_detector"]
+[[submode_tabs]]
+submode = "pre-law"
+id = "draft"
+name = "Draft"
+color = "#fcd34d"
+  [[submode_tabs.sections]]
+  name = "Pleadings"
+  tools = ["leg:complaint_template", "leg:answer_template", "leg:motion_template"]
+  [[submode_tabs.sections]]
+  name = "Smart Drafting"
+  tools = ["leg:clause_library", "leg:auto_assemble", "leg:bluebook_checker"]
+  [[submode_tabs.sections]]
+  name = "Collaboration"
+  tools = ["leg:track_changes", "leg:version_compare", "leg:esign_router"]
+  [[submode_tabs.sections]]
+  name = "Assemblies"
+  tools = ["leg:document_set", "leg:exhibit_list", "leg:table_of_authorities"]
+[[submode_tabs]]
+submode = "pre-law"
+id = "clients"
+name = "Clients"
+color = "#f472b6"
+  [[submode_tabs.sections]]
+  name = "Intake"
+  tools = ["leg:intake_form", "leg:engagement_letter", "leg:conflict_waiver"]
+  [[submode_tabs.sections]]
+  name = "Portal"
+  tools = ["leg:client_dashboard", "leg:secure_messaging", "leg:document_share"]
+  [[submode_tabs.sections]]
+  name = "Relationship"
+  tools = ["leg:matter_history", "leg:satisfaction_survey", "leg:referral_tracker"]
+  [[submode_tabs.sections]]
+  name = "Ethics & Conflicts"
+  tools = ["leg:conflict_checker", "leg:ethical_wall", "leg:trust_accounting"]
+[[submode_tabs]]
+submode = "pre-law"
+id = "metrics"
+name = "Metrics"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Matter Analytics"
+  tools = ["data:stats", "data:grid"]
+  [[submode_tabs.sections]]
+  name = "Outcome Metrics"
+  tools = ["data:chart"]
+  [[submode_tabs.sections]]
+  name = "Dashboards"
+  tools = ["data:grid", "data:timeline"]
+  [[submode_tabs.sections]]
+  name = "Bias & Audit"
+  tools = ["leg:disparate_impact", "leg:algorithm_audit", "leg:fee_equity_report"]
+
+[[submode_tabs]]
+submode = "small-business"
+id = "discovery"
+name = "Discovery"
+color = "#4fd6ff"
+  [[submode_tabs.sections]]
+  name = "Records"
+  tools = ["data:import", "data:stats"]
+  [[submode_tabs.sections]]
+  name = "Requests"
+  tools = ["leg:interrogatories", "leg:rfp_builder", "leg:rfa_builder"]
+  [[submode_tabs.sections]]
+  name = "Production"
+  tools = ["leg:bates_stamper", "leg:privilege_log", "leg:redaction_studio"]
+  [[submode_tabs.sections]]
+  name = "Depositions"
+  tools = ["leg:depo_scheduler", "leg:depo_outline", "leg:transcript_sync"]
+  [[submode_tabs.sections]]
+  name = "Review"
+  tools = ["leg:linear_review", "leg:predictive_coding", "leg:hot_docs"]
+  [[submode_tabs.sections]]
+  name = "Tracking"
+  tools = ["leg:discovery_calendar", "leg:deficiency_tracker", "leg:esi_protocol"]
+[[submode_tabs]]
+submode = "small-business"
+id = "research"
+name = "Research"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Authorities"
+  tools = ["leg:case_law_search", "leg:statute_finder", "leg:regulation_browser"]
+  [[submode_tabs.sections]]
+  name = "Knowledge Graph"
+  tools = ["leg:citation_network", "leg:authority_mapper", "leg:good_law_checker"]
+  [[submode_tabs.sections]]
+  name = "AI Research"
+  tools = ["leg:research_assistant", "leg:memo_generator", "leg:brief_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Comparative"
+  tools = ["leg:multi_jurisdiction", "leg:circuit_split_detector"]
+[[submode_tabs]]
+submode = "small-business"
+id = "draft"
+name = "Draft"
+color = "#fcd34d"
+  [[submode_tabs.sections]]
+  name = "Pleadings"
+  tools = ["leg:complaint_template", "leg:answer_template", "leg:motion_template"]
+  [[submode_tabs.sections]]
+  name = "Smart Drafting"
+  tools = ["leg:clause_library", "leg:auto_assemble", "leg:bluebook_checker"]
+  [[submode_tabs.sections]]
+  name = "Collaboration"
+  tools = ["leg:track_changes", "leg:version_compare", "leg:esign_router"]
+  [[submode_tabs.sections]]
+  name = "Assemblies"
+  tools = ["leg:document_set", "leg:exhibit_list", "leg:table_of_authorities"]
+[[submode_tabs]]
+submode = "small-business"
+id = "clients"
+name = "Clients"
+color = "#f472b6"
+  [[submode_tabs.sections]]
+  name = "Intake"
+  tools = ["leg:intake_form", "leg:engagement_letter", "leg:conflict_waiver"]
+  [[submode_tabs.sections]]
+  name = "Portal"
+  tools = ["leg:client_dashboard", "leg:secure_messaging", "leg:document_share"]
+  [[submode_tabs.sections]]
+  name = "Relationship"
+  tools = ["leg:matter_history", "leg:satisfaction_survey", "leg:referral_tracker"]
+  [[submode_tabs.sections]]
+  name = "Ethics & Conflicts"
+  tools = ["leg:conflict_checker", "leg:ethical_wall", "leg:trust_accounting"]
+[[submode_tabs]]
+submode = "small-business"
+id = "metrics"
+name = "Metrics"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Matter Analytics"
+  tools = ["data:stats", "data:grid"]
+  [[submode_tabs.sections]]
+  name = "Outcome Metrics"
+  tools = ["data:chart"]
+  [[submode_tabs.sections]]
+  name = "Dashboards"
+  tools = ["data:grid", "data:timeline"]
+  [[submode_tabs.sections]]
+  name = "Bias & Audit"
+  tools = ["leg:disparate_impact", "leg:algorithm_audit", "leg:fee_equity_report"]
+
+[[submode_tabs]]
+submode = "corporate"
+id = "discovery"
+name = "Discovery"
+color = "#4fd6ff"
+  [[submode_tabs.sections]]
+  name = "Records"
+  tools = ["data:import", "data:stats"]
+  [[submode_tabs.sections]]
+  name = "Requests"
+  tools = ["leg:interrogatories", "leg:rfp_builder", "leg:rfa_builder"]
+  [[submode_tabs.sections]]
+  name = "Production"
+  tools = ["leg:bates_stamper", "leg:privilege_log", "leg:redaction_studio"]
+  [[submode_tabs.sections]]
+  name = "Depositions"
+  tools = ["leg:depo_scheduler", "leg:depo_outline", "leg:transcript_sync"]
+  [[submode_tabs.sections]]
+  name = "Review"
+  tools = ["leg:linear_review", "leg:predictive_coding", "leg:hot_docs"]
+  [[submode_tabs.sections]]
+  name = "Tracking"
+  tools = ["leg:discovery_calendar", "leg:deficiency_tracker", "leg:esi_protocol"]
+[[submode_tabs]]
+submode = "corporate"
+id = "research"
+name = "Research"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Authorities"
+  tools = ["leg:case_law_search", "leg:statute_finder", "leg:regulation_browser"]
+  [[submode_tabs.sections]]
+  name = "Knowledge Graph"
+  tools = ["leg:citation_network", "leg:authority_mapper", "leg:good_law_checker"]
+  [[submode_tabs.sections]]
+  name = "AI Research"
+  tools = ["leg:research_assistant", "leg:memo_generator", "leg:brief_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Comparative"
+  tools = ["leg:multi_jurisdiction", "leg:circuit_split_detector"]
+[[submode_tabs]]
+submode = "corporate"
+id = "draft"
+name = "Draft"
+color = "#fcd34d"
+  [[submode_tabs.sections]]
+  name = "Pleadings"
+  tools = ["leg:complaint_template", "leg:answer_template", "leg:motion_template"]
+  [[submode_tabs.sections]]
+  name = "Smart Drafting"
+  tools = ["leg:clause_library", "leg:auto_assemble", "leg:bluebook_checker"]
+  [[submode_tabs.sections]]
+  name = "Collaboration"
+  tools = ["leg:track_changes", "leg:version_compare", "leg:esign_router"]
+  [[submode_tabs.sections]]
+  name = "Assemblies"
+  tools = ["leg:document_set", "leg:exhibit_list", "leg:table_of_authorities"]
+[[submode_tabs]]
+submode = "corporate"
+id = "clients"
+name = "Clients"
+color = "#f472b6"
+  [[submode_tabs.sections]]
+  name = "Intake"
+  tools = ["leg:intake_form", "leg:engagement_letter", "leg:conflict_waiver"]
+  [[submode_tabs.sections]]
+  name = "Portal"
+  tools = ["leg:client_dashboard", "leg:secure_messaging", "leg:document_share"]
+  [[submode_tabs.sections]]
+  name = "Relationship"
+  tools = ["leg:matter_history", "leg:satisfaction_survey", "leg:referral_tracker"]
+  [[submode_tabs.sections]]
+  name = "Ethics & Conflicts"
+  tools = ["leg:conflict_checker", "leg:ethical_wall", "leg:trust_accounting"]
+[[submode_tabs]]
+submode = "corporate"
+id = "metrics"
+name = "Metrics"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Matter Analytics"
+  tools = ["data:stats", "data:grid"]
+  [[submode_tabs.sections]]
+  name = "Outcome Metrics"
+  tools = ["data:chart"]
+  [[submode_tabs.sections]]
+  name = "Dashboards"
+  tools = ["data:grid", "data:timeline"]
+  [[submode_tabs.sections]]
+  name = "Bias & Audit"
+  tools = ["leg:disparate_impact", "leg:algorithm_audit", "leg:fee_equity_report"]
+
+[[submode_tabs]]
+submode = "litigation"
+id = "discovery"
+name = "Discovery"
+color = "#4fd6ff"
+  [[submode_tabs.sections]]
+  name = "Records"
+  tools = ["data:import", "data:stats"]
+  [[submode_tabs.sections]]
+  name = "Requests"
+  tools = ["leg:interrogatories", "leg:rfp_builder", "leg:rfa_builder"]
+  [[submode_tabs.sections]]
+  name = "Production"
+  tools = ["leg:bates_stamper", "leg:privilege_log", "leg:redaction_studio"]
+  [[submode_tabs.sections]]
+  name = "Depositions"
+  tools = ["leg:depo_scheduler", "leg:depo_outline", "leg:transcript_sync"]
+  [[submode_tabs.sections]]
+  name = "Review"
+  tools = ["leg:linear_review", "leg:predictive_coding", "leg:hot_docs"]
+  [[submode_tabs.sections]]
+  name = "Tracking"
+  tools = ["leg:discovery_calendar", "leg:deficiency_tracker", "leg:esi_protocol"]
+[[submode_tabs]]
+submode = "litigation"
+id = "research"
+name = "Research"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Authorities"
+  tools = ["leg:case_law_search", "leg:statute_finder", "leg:regulation_browser"]
+  [[submode_tabs.sections]]
+  name = "Knowledge Graph"
+  tools = ["leg:citation_network", "leg:authority_mapper", "leg:good_law_checker"]
+  [[submode_tabs.sections]]
+  name = "AI Research"
+  tools = ["leg:research_assistant", "leg:memo_generator", "leg:brief_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Comparative"
+  tools = ["leg:multi_jurisdiction", "leg:circuit_split_detector"]
+[[submode_tabs]]
+submode = "litigation"
+id = "draft"
+name = "Draft"
+color = "#fcd34d"
+  [[submode_tabs.sections]]
+  name = "Pleadings"
+  tools = ["leg:complaint_template", "leg:answer_template", "leg:motion_template"]
+  [[submode_tabs.sections]]
+  name = "Smart Drafting"
+  tools = ["leg:clause_library", "leg:auto_assemble", "leg:bluebook_checker"]
+  [[submode_tabs.sections]]
+  name = "Collaboration"
+  tools = ["leg:track_changes", "leg:version_compare", "leg:esign_router"]
+  [[submode_tabs.sections]]
+  name = "Assemblies"
+  tools = ["leg:document_set", "leg:exhibit_list", "leg:table_of_authorities"]
+[[submode_tabs]]
+submode = "litigation"
+id = "clients"
+name = "Clients"
+color = "#f472b6"
+  [[submode_tabs.sections]]
+  name = "Intake"
+  tools = ["leg:intake_form", "leg:engagement_letter", "leg:conflict_waiver"]
+  [[submode_tabs.sections]]
+  name = "Portal"
+  tools = ["leg:client_dashboard", "leg:secure_messaging", "leg:document_share"]
+  [[submode_tabs.sections]]
+  name = "Relationship"
+  tools = ["leg:matter_history", "leg:satisfaction_survey", "leg:referral_tracker"]
+  [[submode_tabs.sections]]
+  name = "Ethics & Conflicts"
+  tools = ["leg:conflict_checker", "leg:ethical_wall", "leg:trust_accounting"]
+[[submode_tabs]]
+submode = "litigation"
+id = "metrics"
+name = "Metrics"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Matter Analytics"
+  tools = ["data:stats", "data:grid"]
+  [[submode_tabs.sections]]
+  name = "Outcome Metrics"
+  tools = ["data:chart"]
+  [[submode_tabs.sections]]
+  name = "Dashboards"
+  tools = ["data:grid", "data:timeline"]
+  [[submode_tabs.sections]]
+  name = "Bias & Audit"
+  tools = ["leg:disparate_impact", "leg:algorithm_audit", "leg:fee_equity_report"]
+
+[[submode_tabs]]
+submode = "mediation"
+id = "discovery"
+name = "Discovery"
+color = "#4fd6ff"
+  [[submode_tabs.sections]]
+  name = "Records"
+  tools = ["data:import", "data:stats"]
+  [[submode_tabs.sections]]
+  name = "Requests"
+  tools = ["leg:interrogatories", "leg:rfp_builder", "leg:rfa_builder"]
+  [[submode_tabs.sections]]
+  name = "Production"
+  tools = ["leg:bates_stamper", "leg:privilege_log", "leg:redaction_studio"]
+  [[submode_tabs.sections]]
+  name = "Depositions"
+  tools = ["leg:depo_scheduler", "leg:depo_outline", "leg:transcript_sync"]
+  [[submode_tabs.sections]]
+  name = "Review"
+  tools = ["leg:linear_review", "leg:predictive_coding", "leg:hot_docs"]
+  [[submode_tabs.sections]]
+  name = "Tracking"
+  tools = ["leg:discovery_calendar", "leg:deficiency_tracker", "leg:esi_protocol"]
+[[submode_tabs]]
+submode = "mediation"
+id = "research"
+name = "Research"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Authorities"
+  tools = ["leg:case_law_search", "leg:statute_finder", "leg:regulation_browser"]
+  [[submode_tabs.sections]]
+  name = "Knowledge Graph"
+  tools = ["leg:citation_network", "leg:authority_mapper", "leg:good_law_checker"]
+  [[submode_tabs.sections]]
+  name = "AI Research"
+  tools = ["leg:research_assistant", "leg:memo_generator", "leg:brief_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Comparative"
+  tools = ["leg:multi_jurisdiction", "leg:circuit_split_detector"]
+[[submode_tabs]]
+submode = "mediation"
+id = "draft"
+name = "Draft"
+color = "#fcd34d"
+  [[submode_tabs.sections]]
+  name = "Pleadings"
+  tools = ["leg:complaint_template", "leg:answer_template", "leg:motion_template"]
+  [[submode_tabs.sections]]
+  name = "Smart Drafting"
+  tools = ["leg:clause_library", "leg:auto_assemble", "leg:bluebook_checker"]
+  [[submode_tabs.sections]]
+  name = "Collaboration"
+  tools = ["leg:track_changes", "leg:version_compare", "leg:esign_router"]
+  [[submode_tabs.sections]]
+  name = "Assemblies"
+  tools = ["leg:document_set", "leg:exhibit_list", "leg:table_of_authorities"]
+[[submode_tabs]]
+submode = "mediation"
+id = "clients"
+name = "Clients"
+color = "#f472b6"
+  [[submode_tabs.sections]]
+  name = "Intake"
+  tools = ["leg:intake_form", "leg:engagement_letter", "leg:conflict_waiver"]
+  [[submode_tabs.sections]]
+  name = "Portal"
+  tools = ["leg:client_dashboard", "leg:secure_messaging", "leg:document_share"]
+  [[submode_tabs.sections]]
+  name = "Relationship"
+  tools = ["leg:matter_history", "leg:satisfaction_survey", "leg:referral_tracker"]
+  [[submode_tabs.sections]]
+  name = "Ethics & Conflicts"
+  tools = ["leg:conflict_checker", "leg:ethical_wall", "leg:trust_accounting"]
+[[submode_tabs]]
+submode = "mediation"
+id = "metrics"
+name = "Metrics"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Matter Analytics"
+  tools = ["data:stats", "data:grid"]
+  [[submode_tabs.sections]]
+  name = "Outcome Metrics"
+  tools = ["data:chart"]
+  [[submode_tabs.sections]]
+  name = "Dashboards"
+  tools = ["data:grid", "data:timeline"]
+  [[submode_tabs.sections]]
+  name = "Bias & Audit"
+  tools = ["leg:disparate_impact", "leg:algorithm_audit", "leg:fee_equity_report"]
+
+[[submode_tabs]]
+submode = "arbitration"
+id = "discovery"
+name = "Discovery"
+color = "#4fd6ff"
+  [[submode_tabs.sections]]
+  name = "Records"
+  tools = ["data:import", "data:stats"]
+  [[submode_tabs.sections]]
+  name = "Requests"
+  tools = ["leg:interrogatories", "leg:rfp_builder", "leg:rfa_builder"]
+  [[submode_tabs.sections]]
+  name = "Production"
+  tools = ["leg:bates_stamper", "leg:privilege_log", "leg:redaction_studio"]
+  [[submode_tabs.sections]]
+  name = "Depositions"
+  tools = ["leg:depo_scheduler", "leg:depo_outline", "leg:transcript_sync"]
+  [[submode_tabs.sections]]
+  name = "Review"
+  tools = ["leg:linear_review", "leg:predictive_coding", "leg:hot_docs"]
+  [[submode_tabs.sections]]
+  name = "Tracking"
+  tools = ["leg:discovery_calendar", "leg:deficiency_tracker", "leg:esi_protocol"]
+[[submode_tabs]]
+submode = "arbitration"
+id = "research"
+name = "Research"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Authorities"
+  tools = ["leg:case_law_search", "leg:statute_finder", "leg:regulation_browser"]
+  [[submode_tabs.sections]]
+  name = "Knowledge Graph"
+  tools = ["leg:citation_network", "leg:authority_mapper", "leg:good_law_checker"]
+  [[submode_tabs.sections]]
+  name = "AI Research"
+  tools = ["leg:research_assistant", "leg:memo_generator", "leg:brief_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Comparative"
+  tools = ["leg:multi_jurisdiction", "leg:circuit_split_detector"]
+[[submode_tabs]]
+submode = "arbitration"
+id = "draft"
+name = "Draft"
+color = "#fcd34d"
+  [[submode_tabs.sections]]
+  name = "Pleadings"
+  tools = ["leg:complaint_template", "leg:answer_template", "leg:motion_template"]
+  [[submode_tabs.sections]]
+  name = "Smart Drafting"
+  tools = ["leg:clause_library", "leg:auto_assemble", "leg:bluebook_checker"]
+  [[submode_tabs.sections]]
+  name = "Collaboration"
+  tools = ["leg:track_changes", "leg:version_compare", "leg:esign_router"]
+  [[submode_tabs.sections]]
+  name = "Assemblies"
+  tools = ["leg:document_set", "leg:exhibit_list", "leg:table_of_authorities"]
+[[submode_tabs]]
+submode = "arbitration"
+id = "clients"
+name = "Clients"
+color = "#f472b6"
+  [[submode_tabs.sections]]
+  name = "Intake"
+  tools = ["leg:intake_form", "leg:engagement_letter", "leg:conflict_waiver"]
+  [[submode_tabs.sections]]
+  name = "Portal"
+  tools = ["leg:client_dashboard", "leg:secure_messaging", "leg:document_share"]
+  [[submode_tabs.sections]]
+  name = "Relationship"
+  tools = ["leg:matter_history", "leg:satisfaction_survey", "leg:referral_tracker"]
+  [[submode_tabs.sections]]
+  name = "Ethics & Conflicts"
+  tools = ["leg:conflict_checker", "leg:ethical_wall", "leg:trust_accounting"]
+[[submode_tabs]]
+submode = "arbitration"
+id = "metrics"
+name = "Metrics"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Matter Analytics"
+  tools = ["data:stats", "data:grid"]
+  [[submode_tabs.sections]]
+  name = "Outcome Metrics"
+  tools = ["data:chart"]
+  [[submode_tabs.sections]]
+  name = "Dashboards"
+  tools = ["data:grid", "data:timeline"]
+  [[submode_tabs.sections]]
+  name = "Bias & Audit"
+  tools = ["leg:disparate_impact", "leg:algorithm_audit", "leg:fee_equity_report"]

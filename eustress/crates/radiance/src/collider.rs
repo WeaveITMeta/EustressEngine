@@ -63,15 +63,17 @@ pub fn extract_colliders(
     strategy: ColliderStrategy,
     voxel_size: f32,
 ) -> CompoundProxy {
-    use std::collections::BTreeSet;
+    use std::collections::HashSet;
     let mut proxy = CompoundProxy { primitives: Vec::new(), strategy };
     if points.is_empty() || !(voxel_size > 0.0) {
         return proxy;
     }
     let inv = 1.0 / voxel_size;
     let half = voxel_size * 0.5;
-    // BTreeSet → deterministic cell ordering (replayable extraction).
-    let mut cells: BTreeSet<(i64, i64, i64)> = BTreeSet::new();
+    // HashSet dedup (O(1) insert beats a per-point BTreeSet by a wide margin on
+    // multi-million-point clouds), then one sort of the ~thousands of occupied
+    // cells — same deterministic ordering, replayable extraction.
+    let mut cells: HashSet<(i64, i64, i64)> = HashSet::new();
     for p in points {
         cells.insert((
             (p[0] * inv).floor() as i64,
@@ -79,6 +81,8 @@ pub fn extract_colliders(
             (p[2] * inv).floor() as i64,
         ));
     }
+    let mut cells: Vec<(i64, i64, i64)> = cells.into_iter().collect();
+    cells.sort_unstable();
     proxy.primitives.reserve(cells.len());
     for (cx, cy, cz) in cells {
         let center = [

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>Eustress Player</title>
+
+  <!--
+    A bare arrow, not a button.
+
+    Sized to sit beside the Studio gear rather than compete with it: the gear's
+    artwork spans 12.5..243.5 of a 256 canvas, so this spans 40..244 x and
+    14..242 y — the same visual footprint.
+
+    Vertically the bounding box is centred exactly on 128. Horizontally it is
+    NOT: a triangle's mass sits toward its base, so a box-centred arrow reads as
+    leaning left. The box centre is pushed to 142, which puts the average of the
+    box centre and the true centroid (112) back on 128 — the standard optical
+    correction for this glyph.
+
+    Corners are rounded by stroking the path with its own fill and
+    `stroke-linejoin: round`, which rounds all three vertices by one radius.
+    That is why the path coordinates are inset by half the stroke width from
+    the numbers above.
+  -->
+
+  <defs>
+    <linearGradient id="body" x1="12%" y1="0%" x2="88%" y2="100%">
+      <stop offset="0%"   stop-color="#5BE58A"/>
+      <stop offset="45%"  stop-color="#22C55E"/>
+      <stop offset="100%" stop-color="#0E7A38"/>
+    </linearGradient>
+
+    <!-- Lit from above-left: a bright edge along the top, falling away before
+         the midline so the lower half stays in the body colour. -->
+    <linearGradient id="sheen" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#FFFFFF" stop-opacity="0.42"/>
+      <stop offset="38%"  stop-color="#FFFFFF" stop-opacity="0.10"/>
+      <stop offset="60%"  stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.18"/>
+    </linearGradient>
+
+    <clipPath id="tri">
+      <path d="M 52 26 L 232 128 L 52 230 Z" stroke="#000" stroke-width="24"
+            stroke-linejoin="round"/>
+    </clipPath>
+  </defs>
+
+  <!-- No drop shadow. A filter's blur counts toward the rendered alpha, so the
+       shadow inflated the icon's bounding box past the canvas edge and pulled
+       its measured vertical centre 7px low — the exact misalignment against
+       the gear this artwork exists to fix. The gear carries no shadow either. -->
+  <g>
+    <path d="M 52 26 L 232 128 L 52 230 Z"
+          fill="url(#body)" stroke="url(#body)" stroke-width="24"
+          stroke-linejoin="round"/>
+    <g clip-path="url(#tri)">
+      <path d="M 52 26 L 232 128 L 52 230 Z"
+            fill="url(#sheen)" stroke="url(#sheen)" stroke-width="24"
+            stroke-linejoin="round"/>
+    </g>
+  </g>
+</svg>

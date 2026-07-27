@@ -164,8 +164,8 @@ pub fn CentralNav(
             </div>
             
             // Hamburger button (mobile only)
-            <button 
-                class="hamburger-btn mobile-only"
+            <button
+                class=move || if menu_open.get() { "hamburger-btn mobile-only is-open" } else { "hamburger-btn mobile-only" }
                 aria-label="Toggle menu"
                 aria-expanded=move || menu_open.get().to_string()
                 on:click=move |_| menu_open.update(|v| *v = !*v)

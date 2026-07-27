@@ -4,6 +4,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 
 use crate::parts::{PartData, PartType};
 use crate::rendering::BevyPartManager;
@@ -204,6 +205,100 @@ pub enum Action {
         folders: Vec<(std::path::PathBuf, std::path::PathBuf)>,
     },
 
+    /// Explorer drag-drop reparent — the ON-DISK half. Each pair is
+    /// `(original_path, new_path)`; undo renames `new_path` back to
+    /// `original_path`, redo renames forward. Both directions also
+    /// rebase every in-memory path reference (`InstanceFile.toml_path` /
+    /// `LoadedFromFile.path` on the moved entity AND every descendant)
+    /// and rekey the `SpaceFileRegistry`, because `do_reparent_node`
+    /// gates the file watcher with `rename_in_progress` for the whole
+    /// move — nothing else in the engine would ever notice it.
+    ///
+    /// Pair it with `ReparentEntities` in a `Batch` when the ECS
+    /// `ChildOf` edge also has to be restored. The two are individually
+    /// idempotent (each checks whether the folder is already where it
+    /// wants it), so either order — and either one alone — is safe.
+    MoveFolders {
+        moves: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+    },
+
+    /// Explorer drag-drop reparent — the ECS half. `do_reparent_node`
+    /// sets `ChildOf(target)` itself and suppresses the watcher for the
+    /// rename, so the hierarchy is NOT re-derived from disk: a
+    /// folder-rename-only undo would leave the entity parented to the
+    /// drop target forever. This variant restores the `ChildOf` edge
+    /// each entity held before the drag (`None` = scene root).
+    ///
+    /// Self-healing: if the folder is still sitting at `new_path` when
+    /// undo runs (no companion `MoveFolders` entry), the rename is
+    /// performed here too — so a lone `ReparentEntities` is complete.
+    ReparentEntities {
+        entries: Vec<ReparentEntry>,
+    },
+
+    /// Ctrl+G — the selection wrapped in a freshly-spawned container
+    /// (`grouping.rs`). Group is a pure-ECS operation with no disk
+    /// footprint: it spawns a `Model`, sets `ChildOf(model)` on each
+    /// member and rewrites each member's LOCAL transform so its world
+    /// transform is preserved. Undo restores every member's previous
+    /// parent + local transform and despawns the wrapper; redo spawns a
+    /// wrapper again and re-applies the grouped locals.
+    ///
+    /// The wrapper's `Entity` is deliberately NOT stored — redo spawns a
+    /// new one, so a stored id would go stale after one undo→redo cycle.
+    /// Undo instead locates it as the current parent of the first live
+    /// member, the same content-match strategy `CadMateCreate` uses.
+    GroupEntities {
+        /// Wrapper `Instance.name` (grouping.rs uses `"Model"`).
+        model_name: String,
+        /// Wrapper `ClassName` in its `as_str()` form, parsed back with
+        /// `ClassName::from_str` so new classes need no changes here.
+        model_class: String,
+        /// The wrapper's own parent at creation time (`None` = root).
+        model_parent_bits: Option<u64>,
+        /// The wrapper's local translation. `grouping.rs` spawns it
+        /// axis-aligned and unit-scaled at the members' mean world
+        /// position, so translation alone round-trips it exactly.
+        model_translation: [f32; 3],
+        /// One entry per grouped member.
+        members: Vec<GroupMember>,
+    },
+
+    /// Ctrl+U — each selected `Model`/`Folder` dissolved: its children
+    /// raised one level with world transforms preserved, the container
+    /// despawned. Undo re-spawns each container (same class, name,
+    /// parent and local transform) and puts its children back with
+    /// their pre-ungroup locals; redo dissolves them again.
+    UngroupEntities {
+        containers: Vec<UngroupedContainer>,
+    },
+
+    /// Objects created by Insert / Paste / Duplicate — the general
+    /// "creation" entry. Undo despawns the recorded entities, purges
+    /// their records from every Fjall store and moves their folders to
+    /// the reserved trash paths; redo renames the folders back and lets
+    /// the space rescan respawn the whole subtree.
+    ///
+    /// This is `SpawnFolders` plus explicit entity ids. Paste/Duplicate
+    /// spawn through `Commands`, so the entity is known at record time
+    /// but its folder may not have reached `SpaceFileRegistry` yet —
+    /// carrying the bits makes the despawn deterministic instead of
+    /// registry-timing dependent.
+    ///
+    /// `paths` holds `(created_folder_path, reserved_trash_path)` pairs
+    /// (identical shape + semantics to `SpawnFolders.folders`).
+    /// `entities` holds `Entity::to_bits()` values, NOT `Entity` —
+    /// `Action` derives `Serialize` and bevy_ecs's `serialize` feature
+    /// is off in this build, so a bare `Entity` would not compile. The
+    /// rest of this enum (`TransformEntities`, `ScaleEntities`, …) uses
+    /// the same `u64` convention. Build one with
+    /// [`Action::create_entities`], which does the conversion and
+    /// reserves the trash paths for you.
+    CreateEntities {
+        paths: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+        entities: Vec<u64>,
+    },
+
     /// Create ONE binary-ECS entity (the scalable Insert default, C1).
     /// Unlike `SpawnFolders`, a binary entity has NO disk folder — its
     /// authoritative state is a rkyv core in Fjall (Morton + identity
@@ -252,6 +347,85 @@ pub enum PropertyValueSnapshot {
     Material(String),
 }
 
+/// One entity's slice of an Explorer drag-drop reparent
+/// (`Action::ReparentEntities`).
+///
+/// Entities are identified by `Entity::to_bits()` rather than `Entity`
+/// because `Action` derives `Serialize` and bevy_ecs's `serialize`
+/// feature is off in this build — the same reason `TransformEntities`
+/// and `ScaleEntities` carry `u64`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReparentEntry {
+    /// The dragged entity, `Entity::to_bits()`.
+    pub entity_bits: u64,
+    /// Its `ChildOf` parent BEFORE the drag (`None` = scene root).
+    pub old_parent_bits: Option<u64>,
+    /// Its `ChildOf` parent AFTER the drag — the drop target
+    /// (`None` = scene root).
+    pub new_parent_bits: Option<u64>,
+    /// The folder/file that was moved, at its pre-drag location. This
+    /// is `src_entry` in `do_reparent_node`: the FOLDER for folder-form
+    /// entities (never the `_instance.toml` inside it), the file itself
+    /// for flat files.
+    pub old_path: std::path::PathBuf,
+    /// The same folder/file at its post-drag location (`dest`).
+    pub new_path: std::path::PathBuf,
+}
+
+/// One member of a Group (`Action::GroupEntities`) or one child raised
+/// out of a dissolved container (`Action::UngroupEntities`).
+///
+/// `old_*` is the LOCAL transform the entity had before the operation,
+/// `new_*` the local transform it was given by it — Group/Ungroup both
+/// rewrite locals so the entity's WORLD transform is preserved across
+/// the reparent, so undo must restore the local, not the world, value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMember {
+    /// The member entity, `Entity::to_bits()`.
+    pub entity_bits: u64,
+    /// The member's `ChildOf` parent before the operation
+    /// (`None` = scene root).
+    ///
+    /// Meaningful for `GroupEntities` only. For `UngroupEntities` the
+    /// pre-op parent is by definition the dissolved container, which
+    /// undo re-spawns under a fresh `Entity` id — so undo reparents to
+    /// the entity it just spawned and ignores this field.
+    pub old_parent_bits: Option<u64>,
+    pub old_translation: [f32; 3],
+    /// Quaternion in `Quat::to_array()` order — `[x, y, z, w]`.
+    pub old_rotation: [f32; 4],
+    pub old_scale: [f32; 3],
+    pub new_translation: [f32; 3],
+    /// Quaternion in `Quat::to_array()` order — `[x, y, z, w]`.
+    pub new_rotation: [f32; 4],
+    pub new_scale: [f32; 3],
+}
+
+/// One container dissolved by Ctrl+U (`Action::UngroupEntities`).
+///
+/// Enough state to re-spawn the container exactly: undo recreates it
+/// from `class_name` + `name` + its local transform, re-parents it to
+/// `parent_bits`, then pulls `children` back inside using each child's
+/// `old_*` local transform.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UngroupedContainer {
+    /// `ClassName::as_str()` of the dissolved container — `"Model"` or
+    /// `"Folder"`. Parsed back with `ClassName::from_str`.
+    pub class_name: String,
+    /// The container's `Instance.name`.
+    pub name: String,
+    /// The container's OWN parent before it was despawned — where its
+    /// children were raised to (`None` = scene root).
+    pub parent_bits: Option<u64>,
+    /// The container's local transform.
+    pub translation: [f32; 3],
+    /// Quaternion in `Quat::to_array()` order — `[x, y, z, w]`.
+    pub rotation: [f32; 4],
+    pub scale: [f32; 3],
+    /// The children it held, with their pre- and post-ungroup locals.
+    pub children: Vec<GroupMember>,
+}
+
 impl Action {
     /// Stable topic key used for Eustress Stream publication + history
     /// panel filtering. One word per variant so subscribers can pattern
@@ -283,6 +457,11 @@ impl Action {
             Action::ScaleEntities { .. }          => "scale",
             Action::TrashEntities { .. }          => "delete",
             Action::SpawnFolders { .. }           => "create",
+            Action::MoveFolders { .. }            => "reparent",
+            Action::ReparentEntities { .. }       => "reparent",
+            Action::GroupEntities { .. }          => "group",
+            Action::UngroupEntities { .. }        => "ungroup",
+            Action::CreateEntities { .. }         => "create",
             Action::CreateBinaryInstance { .. }   => "create",
             Action::CadTreeEdit { .. }            => "cad",
             Action::CadMateCreate { .. }          => "create",
@@ -322,9 +501,68 @@ impl Action {
             Action::ScaleEntities { old_states, .. } => format!("Scale {} objects", old_states.len()),
             Action::TrashEntities { paths, .. } => format!("Delete {} objects", paths.len()),
             Action::SpawnFolders { folders, .. } => format!("Spawn {} objects", folders.len()),
+            Action::MoveFolders { moves } => format!("Move {} objects", moves.len()),
+            Action::ReparentEntities { entries } => format!("Reparent {} objects", entries.len()),
+            Action::GroupEntities { members, .. } => format!("Group {} objects", members.len()),
+            Action::UngroupEntities { containers } => format!(
+                "Ungroup {} container{}",
+                containers.len(),
+                if containers.len() == 1 { "" } else { "s" },
+            ),
+            Action::CreateEntities { paths, entities } => {
+                format!("Create {} objects", paths.len().max(entities.len()))
+            }
             Action::CreateBinaryInstance { .. } => "Create object".to_string(),
             Action::CadTreeEdit { verb, .. } => verb.clone(),
             Action::CadMateCreate { .. } => "Create mate".to_string(),
+        }
+    }
+
+    /// Reserve the trash path a freshly-created folder gets moved to
+    /// when its creation is undone:
+    /// `<space_root>/.eustress/trash/<UTC stamp>/<folder name>`.
+    ///
+    /// Reserving it at RECORD time (rather than searching the trash at
+    /// undo time) is what keeps undo and redo symmetric single-rename
+    /// operations — the same reason `TrashEntities` stores both halves
+    /// of the pair. The stamp has sub-second resolution so two objects
+    /// created in the same second never collide.
+    pub fn reserve_trash_path(space_root: &Path, folder: &Path) -> PathBuf {
+        space_root
+            .join(".eustress")
+            .join("trash")
+            .join(chrono::Utc::now().format("%Y%m%d_%H%M%S_%f").to_string())
+            .join(folder.file_name().unwrap_or_default())
+    }
+
+    /// Build a `SpawnFolders` entry for newly-created folders, reserving
+    /// each trash path. Use this from array tools / Smart Build Tools /
+    /// anything that creates folders but has no entity ids to hand;
+    /// use [`Action::create_entities`] when you DO have them.
+    pub fn spawn_folders(space_root: &Path, folders: &[PathBuf]) -> Action {
+        Action::SpawnFolders {
+            folders: folders
+                .iter()
+                .map(|f| (f.clone(), Self::reserve_trash_path(space_root, f)))
+                .collect(),
+        }
+    }
+
+    /// Build a `CreateEntities` entry — the one undo record Insert,
+    /// Paste and Duplicate should push. Reserves a trash path per
+    /// folder and converts `Entity` → `Entity::to_bits()` so callers
+    /// never have to think about the serialization constraint on the
+    /// variant.
+    ///
+    /// `folders` may be shorter than `entities` (or empty): entities
+    /// with no folder of their own are still despawned by undo.
+    pub fn create_entities(space_root: &Path, folders: &[PathBuf], entities: &[Entity]) -> Action {
+        Action::CreateEntities {
+            paths: folders
+                .iter()
+                .map(|f| (f.clone(), Self::reserve_trash_path(space_root, f)))
+                .collect(),
+            entities: entities.iter().map(|e| e.to_bits()).collect(),
         }
     }
 }
@@ -916,18 +1154,123 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
             }
         }
         Action::SpawnFolders { folders } => {
-            // Undo spawn: move the newly-created folders into the trash.
-            // File watcher detects the removal + despawns the entities.
-            for (original_path, trash_path) in folders {
-                if !original_path.exists() { continue; }
-                if let Some(parent) = trash_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                match std::fs::rename(original_path, trash_path) {
-                    Ok(_) => info!("↶ Moved spawned {:?} to trash", original_path.file_name().unwrap_or_default()),
-                    Err(e) => warn!("Failed to move {:?} to trash: {}", original_path, e),
+            // Undo spawn: move the newly-created folders into the trash
+            // AND despawn everything that lived inside them.
+            //
+            // Originally this was a bare `fs::rename` that left the
+            // despawn to the file watcher — fine for the single-folder
+            // CSG/Smart-Build case it was written for, but the watcher
+            // emits one event per renamed folder, not a recursive
+            // cascade, so any descendant entity (a Label under a
+            // generated Part, an array element's child) survived as an
+            // orphan pointing at a path that no longer exists. Routing
+            // through `trash_created_folder` makes the variant usable
+            // by array tools and Insert as well, with no change to the
+            // payload — existing callers (csg.rs, tools_smart.rs,
+            // cad_plugin.rs) keep working unmodified and simply get the
+            // subtree cleanup for free.
+            for (original_path, trash_path) in folders.iter().rev() {
+                trash_created_folder(world, original_path, trash_path, &[]);
+            }
+        }
+        Action::CreateEntities { paths, entities } => {
+            // Undo create: same as SpawnFolders, plus the explicitly
+            // recorded entity ids so Paste/Duplicate targets whose
+            // folders have not reached the registry yet still go away.
+            for (folder, trash_path) in paths.iter().rev() {
+                trash_created_folder(world, folder, trash_path, entities);
+            }
+            // Entities with no folder of their own (in-memory paste
+            // targets, service children) still have to be despawned.
+            for bits in entities {
+                let entity = Entity::from_bits(*bits);
+                if world.get_entity(entity).is_ok() {
+                    world.despawn(entity);
                 }
             }
+            mark_explorer_dirty(world);
+        }
+        Action::MoveFolders { moves } => {
+            // Undo reparent, disk half: rename each folder back to
+            // where it came from. Reverse order so nested moves unwind
+            // outside-in — a child moved after its parent has to come
+            // home before the parent does.
+            for (original_path, new_path) in moves.iter().rev() {
+                move_folder_and_rebase(world, new_path, original_path);
+            }
+        }
+        Action::ReparentEntities { entries } => {
+            // Undo reparent, ECS half. The disk call is the
+            // self-healing no-op described on the variant: it returns
+            // immediately when a companion `MoveFolders` entry already
+            // put the folder back.
+            for entry in entries.iter().rev() {
+                move_folder_and_rebase(world, &entry.new_path, &entry.old_path);
+                set_parent(world, entry.entity_bits, entry.old_parent_bits);
+            }
+            mark_explorer_dirty(world);
+        }
+        Action::GroupEntities { members, .. } => {
+            // Undo group: detach every member back to its original
+            // parent + local transform FIRST, then despawn the wrapper.
+            // Order matters — Bevy despawns hierarchies recursively, so
+            // despawning a still-populated wrapper would take the
+            // members with it.
+            let wrapper = container_of(world, members);
+            for m in members {
+                set_local_transform(
+                    world,
+                    m.entity_bits,
+                    m.old_translation,
+                    m.old_rotation,
+                    m.old_scale,
+                );
+                set_parent(world, m.entity_bits, m.old_parent_bits);
+            }
+            // Resolved into a `let` first: a temporary closure borrowing
+            // `world` inside the `match` scrutinee would stay alive for
+            // the whole match and collide with the `despawn` below.
+            let live_wrapper = wrapper.filter(|e| world.get_entity(*e).is_ok());
+            match live_wrapper {
+                Some(e) => {
+                    world.despawn(e);
+                    info!("↶ Undo group: despawned wrapper, freed {} members", members.len());
+                }
+                None => warn!("↶ Undo group: wrapper not found (members already reparented?)"),
+            }
+            mark_explorer_dirty(world);
+        }
+        Action::UngroupEntities { containers } => {
+            // Undo ungroup = re-group: re-spawn each dissolved
+            // container and pull its children back inside with the
+            // local transforms they had before the dissolve.
+            for c in containers.iter().rev() {
+                let container = spawn_container(
+                    world,
+                    &c.class_name,
+                    &c.name,
+                    c.parent_bits,
+                    c.translation,
+                    c.rotation,
+                    c.scale,
+                );
+                for child in &c.children {
+                    set_local_transform(
+                        world,
+                        child.entity_bits,
+                        child.old_translation,
+                        child.old_rotation,
+                        child.old_scale,
+                    );
+                    set_parent(world, child.entity_bits, Some(container.to_bits()));
+                }
+                info!(
+                    "↶ Undo ungroup: re-created '{}' with {} children",
+                    c.name,
+                    c.children.len(),
+                );
+            }
+            mark_explorer_dirty(world);
         }
         Action::CreateBinaryInstance { stored_id, def_json } => {
             // Undo create: purge the Fjall core + identity indices, then
@@ -1018,6 +1361,440 @@ fn apply_cad_tree_toml(world: &mut World, entity_bits: u64, toml: &str) {
             warn!("CadTreeEdit: failed to write {:?}: {e}", path);
         }
     }
+}
+
+// ============================================================================
+// Structural-undo helpers (folder moves, hierarchy edits, creation)
+//
+// Every structural variant below — MoveFolders, ReparentEntities,
+// SpawnFolders, CreateEntities, GroupEntities, UngroupEntities — is
+// built out of these. They are deliberately idempotent and
+// "all-or-nothing": if the on-disk half can't be made to happen, the
+// helper logs loudly and returns `false` WITHOUT touching ECS state, so
+// a failed undo leaves the engine consistent with the disk instead of
+// half-applied.
+// ============================================================================
+
+/// Rename `from` → `to`, retrying a few times before giving up.
+///
+/// Windows transiently locks a folder for ~50–200 ms after Bevy's asset
+/// server drops a `.glb` handle; inside that window `fs::rename` returns
+/// `Os { code: 5, kind: PermissionDenied }`. The Delete path
+/// (`keybindings.rs`) learned this the expensive way — its old
+/// `remove_dir_all` fallback "succeeded" against the already-released
+/// handle and destroyed the only copy of the data. So: no fallback, 5
+/// attempts 60 ms apart, and on exhaustion log loudly and return `false`
+/// so the caller leaves everything untouched and the user can retry.
+fn rename_with_retry(from: &Path, to: &Path) -> bool {
+    const ATTEMPTS: u32 = 5;
+    let mut last_err: Option<std::io::Error> = None;
+    for i in 0..ATTEMPTS {
+        match std::fs::rename(from, to) {
+            Ok(_) => {
+                if i > 0 {
+                    info!(
+                        "↔ Renamed {:?} → {:?} after {} retr{}",
+                        from.file_name().unwrap_or_default(),
+                        to.file_name().unwrap_or_default(),
+                        i,
+                        if i == 1 { "y" } else { "ies" },
+                    );
+                }
+                return true;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                if i + 1 < ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(60));
+                }
+            }
+        }
+    }
+    warn!(
+        "❌ Could not rename {:?} → {:?} after {} attempts ({}). \
+         Leaving state untouched — retry the undo/redo.",
+        from,
+        to,
+        ATTEMPTS,
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "<unknown>".to_string()),
+    );
+    false
+}
+
+/// Stage both ends of a rename in `SpaceFileRegistry.rename_in_progress`
+/// so the watcher swallows the delete+create pair `notify` emits on
+/// Windows instead of despawning and respawning the entity. Folder-form
+/// entities are watched via their `_instance.toml`, so that path is
+/// staged too. Mirrors `slint_ui::do_reparent_node`; entries are cleared
+/// by the file_watcher as it processes the events.
+fn guard_rename(world: &mut World, from: &Path, to: &Path, is_dir: bool) {
+    let Some(mut registry) = world.get_resource_mut::<crate::space::SpaceFileRegistry>() else {
+        return;
+    };
+    registry.rename_in_progress.insert(from.to_path_buf());
+    registry.rename_in_progress.insert(to.to_path_buf());
+    if is_dir {
+        registry.rename_in_progress.insert(from.join("_instance.toml"));
+        registry.rename_in_progress.insert(to.join("_instance.toml"));
+    }
+}
+
+/// Undo `guard_rename` — called only when the rename FAILED, so the
+/// watcher resumes tracking the paths it was told to ignore.
+fn unguard_rename(world: &mut World, from: &Path, to: &Path, is_dir: bool) {
+    let Some(mut registry) = world.get_resource_mut::<crate::space::SpaceFileRegistry>() else {
+        return;
+    };
+    registry.rename_in_progress.remove(from);
+    registry.rename_in_progress.remove(to);
+    if is_dir {
+        registry.rename_in_progress.remove(&from.join("_instance.toml"));
+        registry.rename_in_progress.remove(&to.join("_instance.toml"));
+    }
+}
+
+/// Flag the Explorer for an immediate re-sync. Structural undo changes
+/// the tree's shape without going through the file watcher, so nothing
+/// else marks the panel stale.
+fn mark_explorer_dirty(world: &mut World) {
+    if let Some(mut es) = world.get_resource_mut::<crate::ui::slint_ui::UnifiedExplorerState>() {
+        es.dirty = true;
+        es.needs_immediate_sync = true;
+    }
+}
+
+/// Move `from` → `to` on disk and bring every in-memory reference along.
+///
+/// This is the exact inverse of the bookkeeping `do_reparent_node` does
+/// after its forward rename: rebase `InstanceFile.toml_path` /
+/// `LoadedFromFile.path` on the moved entity AND every descendant
+/// (a `SimpleBlock/Label/_instance.toml` under a moved `SimpleBlock`),
+/// then rekey the registry — folder-form entities are DOUBLE-registered
+/// under the folder and its `_instance.toml`, both pointing at the same
+/// entity, and missing either key leaves the Explorer resolving the
+/// entity at its old slot.
+///
+/// Idempotent by design: when the folder is already at `to` (a companion
+/// `Batch` entry beat us to the rename) the move is skipped but the
+/// rebase still runs, which is itself a no-op if already applied. That
+/// is what makes `MoveFolders` and `ReparentEntities` safe to push
+/// together, in either order, or alone.
+///
+/// Returns `false` — having logged — if the rename could not be made, in
+/// which case NOTHING was mutated.
+fn move_folder_and_rebase(world: &mut World, from: &Path, to: &Path) -> bool {
+    if from == to {
+        return true;
+    }
+
+    let needs_move = from.exists();
+    if needs_move && to.exists() {
+        warn!(
+            "↔ Move: destination {:?} already exists — leaving {:?} where it is",
+            to, from,
+        );
+        return false;
+    }
+    if !needs_move && !to.exists() {
+        warn!("↔ Move: neither {:?} nor {:?} exists — nothing to move", from, to);
+        return false;
+    }
+    // `is_dir` must be sampled on whichever side actually exists —
+    // once the entry has moved, `from.is_dir()` reads false even though
+    // it is the same logical folder.
+    let is_dir = if needs_move { from.is_dir() } else { to.is_dir() };
+
+    if needs_move {
+        if let Some(parent) = to.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        guard_rename(world, from, to, is_dir);
+        if !rename_with_retry(from, to) {
+            unguard_rename(world, from, to, is_dir);
+            return false;
+        }
+    }
+
+    // Rebase path references. Iterating the full component set is O(N)
+    // per move, but structural undo is user-initiated and rare — worth
+    // it to avoid maintaining a separate descendant index.
+    {
+        let mut q = world.query::<&mut crate::space::instance_loader::InstanceFile>();
+        for mut f in q.iter_mut(world) {
+            let rebased = if f.toml_path.as_path() == from {
+                Some(to.to_path_buf())
+            } else {
+                f.toml_path.strip_prefix(from).ok().map(|rel| to.join(rel))
+            };
+            if let Some(p) = rebased {
+                f.toml_path = p;
+            }
+        }
+    }
+    {
+        let mut q = world.query::<&mut crate::space::LoadedFromFile>();
+        for mut lff in q.iter_mut(world) {
+            let rebased = if lff.path.as_path() == from {
+                Some(to.to_path_buf())
+            } else {
+                lff.path.strip_prefix(from).ok().map(|rel| to.join(rel))
+            };
+            if let Some(p) = rebased {
+                lff.path = p;
+            }
+        }
+    }
+
+    if let Some(mut registry) = world.get_resource_mut::<crate::space::SpaceFileRegistry>() {
+        let _ = registry.rename_file(from, to.to_path_buf());
+        if is_dir {
+            let _ = registry.rename_file(
+                &from.join("_instance.toml"),
+                to.join("_instance.toml"),
+            );
+        }
+    }
+
+    mark_explorer_dirty(world);
+    true
+}
+
+/// Restore an entity's `ChildOf` edge. `None` = detach to the scene
+/// root, matching `grouping.rs`'s `remove::<ChildOf>()`.
+fn set_parent(world: &mut World, entity_bits: u64, parent_bits: Option<u64>) {
+    let entity = Entity::from_bits(entity_bits);
+    if world.get_entity(entity).is_err() {
+        warn!("↶ Reparent: entity {entity_bits:#x} no longer exists — skipping");
+        return;
+    }
+    match parent_bits {
+        Some(bits) => {
+            let parent = Entity::from_bits(bits);
+            if world.get_entity(parent).is_ok() {
+                world.entity_mut(entity).insert(ChildOf(parent));
+            } else {
+                // The old parent is gone — its own creation was undone
+                // first, or a rescan respawned it under a new id.
+                // Detaching to the root is the honest fallback; keeping
+                // the stale edge would strand the entity inside a
+                // despawned hierarchy where nothing can reach it.
+                warn!("↶ Reparent: parent {bits:#x} is gone — detaching {entity_bits:#x} to root");
+                world.entity_mut(entity).remove::<ChildOf>();
+            }
+        }
+        None => {
+            world.entity_mut(entity).remove::<ChildOf>();
+        }
+    }
+}
+
+/// Restore an entity's LOCAL transform. Group/Ungroup rewrite locals to
+/// preserve world transforms across a reparent, so the local is exactly
+/// what has to be put back — restoring a world transform here would make
+/// the object jump by the container's offset.
+fn set_local_transform(
+    world: &mut World,
+    entity_bits: u64,
+    translation: [f32; 3],
+    rotation: [f32; 4],
+    scale: [f32; 3],
+) {
+    let entity = Entity::from_bits(entity_bits);
+    let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+        return;
+    };
+    entity_mut.insert(Transform {
+        translation: Vec3::from_array(translation),
+        rotation: Quat::from_array(rotation),
+        scale: Vec3::from_array(scale),
+    });
+}
+
+/// Find the container currently wrapping `members` — the `ChildOf`
+/// parent of the first member still alive.
+///
+/// Group/Ungroup containers are found by content rather than by a stored
+/// `Entity`: redo re-spawns the container under a fresh id, so a stored
+/// id would go stale after a single undo→redo cycle. Same strategy
+/// `CadMateCreate` uses to locate its joint.
+fn container_of(world: &World, members: &[GroupMember]) -> Option<Entity> {
+    members.iter().find_map(|m| {
+        let entity = Entity::from_bits(m.entity_bits);
+        world.get::<ChildOf>(entity).map(|c| c.0)
+    })
+}
+
+/// Spawn a Group/Ungroup container (`Model` / `Folder`) with the exact
+/// component set `grouping.rs` gives it, optionally parented.
+fn spawn_container(
+    world: &mut World,
+    class_name: &str,
+    name: &str,
+    parent_bits: Option<u64>,
+    translation: [f32; 3],
+    rotation: [f32; 4],
+    scale: [f32; 3],
+) -> Entity {
+    let class = crate::classes::ClassName::from_str(class_name)
+        .unwrap_or(crate::classes::ClassName::Model);
+    let container = world
+        .spawn((
+            crate::classes::Instance {
+                name: name.to_string(),
+                class_name: class,
+                archivable: true,
+                id: 0,
+                ..Default::default()
+            },
+            Transform {
+                translation: Vec3::from_array(translation),
+                rotation: Quat::from_array(rotation),
+                scale: Vec3::from_array(scale),
+            },
+            Visibility::default(),
+            Name::new(name.to_string()),
+        ))
+        .id();
+    if let Some(bits) = parent_bits {
+        let parent = Entity::from_bits(bits);
+        if world.get_entity(parent).is_ok() {
+            world.entity_mut(container).insert(ChildOf(parent));
+        }
+    }
+    container
+}
+
+/// Undo a creation: move `folder` to its reserved `trash` path and tear
+/// down every entity that lived inside it.
+///
+/// Why not just rename and let the file watcher despawn? Because the
+/// watcher emits ONE event for the folder, not a recursive cascade, so
+/// descendants (a `BillboardGui` under a pasted Part) would survive as
+/// orphans whose queued save-on-`Changed` writes then fail against the
+/// now-missing directory. We therefore despawn the whole registered
+/// subtree ourselves, purge each path from every Fjall store (clearing
+/// only the tree records resurrects the object on the next reconcile),
+/// and stage the paths in `rename_in_progress` so the watcher does not
+/// fire a second, redundant despawn.
+///
+/// `known_bits` covers entities spawned this frame that the registry has
+/// not caught up with yet — Paste/Duplicate go through `Commands`, so
+/// their folder registration can lag the undo record by a frame.
+///
+/// Returns `false` if the rename failed; ECS state is left untouched.
+fn trash_created_folder(
+    world: &mut World,
+    folder: &Path,
+    trash: &Path,
+    known_bits: &[u64],
+) -> bool {
+    if !folder.exists() {
+        // Already gone — a companion entry beat us to it, or the user
+        // deleted the object by hand. Nothing to undo on disk.
+        return false;
+    }
+
+    let registered: Vec<(PathBuf, Entity)> = world
+        .get_resource::<crate::space::SpaceFileRegistry>()
+        .map(|r| r.descendants_of(folder))
+        .unwrap_or_default();
+
+    if let Some(mut registry) = world.get_resource_mut::<crate::space::SpaceFileRegistry>() {
+        for (path, _) in &registered {
+            registry.rename_in_progress.insert(path.clone());
+        }
+        registry.rename_in_progress.insert(folder.to_path_buf());
+    }
+
+    if let Some(parent) = trash.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if !rename_with_retry(folder, trash) {
+        if let Some(mut registry) = world.get_resource_mut::<crate::space::SpaceFileRegistry>() {
+            for (path, _) in &registered {
+                registry.rename_in_progress.remove(path);
+            }
+            registry.rename_in_progress.remove(folder);
+        }
+        return false;
+    }
+
+    // Rename landed — bring ECS + DB down to match the moved subtree.
+    let mut victims: Vec<(Option<PathBuf>, Entity)> = registered
+        .iter()
+        .map(|(p, e)| (Some(p.clone()), *e))
+        .collect();
+    for bits in known_bits {
+        let entity = Entity::from_bits(*bits);
+        if !victims.iter().any(|(_, v)| *v == entity) {
+            victims.push((None, entity));
+        }
+    }
+
+    for (path, entity) in victims {
+        // Capture identity BEFORE the despawn so every uuid-keyed store
+        // can be purged.
+        let (uuid_hex, class) = world
+            .get::<crate::classes::Instance>(entity)
+            .map(|i| (i.uuid.clone(), i.class_name.as_str().to_string()))
+            .unwrap_or_default();
+        if world.get_entity(entity).is_ok() {
+            world.despawn(entity);
+        }
+        match path {
+            Some(p) => {
+                crate::space::active_db::purge_path_all_stores(&p, &uuid_hex, &class);
+                if let Some(mut registry) =
+                    world.get_resource_mut::<crate::space::SpaceFileRegistry>()
+                {
+                    registry.unregister_file(&p);
+                }
+            }
+            None => {
+                if let Some(mut registry) =
+                    world.get_resource_mut::<crate::space::SpaceFileRegistry>()
+                {
+                    registry.unregister_entity(entity);
+                }
+            }
+        }
+    }
+
+    info!(
+        "↶ Undo create: trashed {:?} + despawned its subtree",
+        folder.file_name().unwrap_or_default(),
+    );
+    mark_explorer_dirty(world);
+    true
+}
+
+/// Redo a creation: rename the folder back out of the trash and request
+/// a full `SpaceRescan`.
+///
+/// A rescan rather than trusting the watcher, for the same reason
+/// `TrashEntities` undo does it: a folder rename produces a single
+/// Create event for the destination directory, NOT recursive Creates for
+/// every restored child, so descendant entities would never respawn.
+fn restore_created_folder(world: &mut World, folder: &Path, trash: &Path) -> bool {
+    if !trash.exists() {
+        return false;
+    }
+    if folder.exists() {
+        warn!("↷ Redo create: {:?} already exists — skipping restore", folder);
+        return false;
+    }
+    if let Some(parent) = folder.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if !rename_with_retry(trash, folder) {
+        return false;
+    }
+    info!("↷ Restored {:?} from trash", folder.file_name().unwrap_or_default());
+    world.insert_resource(crate::space::space_ops::SpaceRescanNeeded(true));
+    mark_explorer_dirty(world);
+    true
 }
 
 /// Apply an action using modern ECS (for redo)
@@ -1173,18 +1950,99 @@ fn apply_redo_ecs(action: &Action, world: &mut World) {
             }
         }
         Action::SpawnFolders { folders } => {
-            // Redo spawn: restore from trash back to original location.
-            // File watcher will detect and respawn entities.
+            // Redo spawn: restore from trash back to the original
+            // location. `restore_created_folder` requests a full
+            // SpaceRescan rather than trusting the watcher, so
+            // descendants inside the restored subtree respawn too.
             for (original_path, trash_path) in folders {
-                if !trash_path.exists() { continue; }
-                if let Some(parent) = original_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
+                restore_created_folder(world, original_path, trash_path);
+            }
+        }
+        Action::CreateEntities { paths, .. } => {
+            // Redo create: symmetric to the undo branch. Entity ids are
+            // NOT reused — the rescan spawns fresh entities from the
+            // restored files, so a further undo relies on the registry
+            // lookup inside `trash_created_folder` rather than the
+            // recorded bits (which is exactly why that lookup exists).
+            for (folder, trash_path) in paths {
+                restore_created_folder(world, folder, trash_path);
+            }
+        }
+        Action::MoveFolders { moves } => {
+            // Redo reparent, disk half: rename forward again, in the
+            // original application order.
+            for (original_path, new_path) in moves {
+                move_folder_and_rebase(world, original_path, new_path);
+            }
+        }
+        Action::ReparentEntities { entries } => {
+            for entry in entries {
+                move_folder_and_rebase(world, &entry.old_path, &entry.new_path);
+                set_parent(world, entry.entity_bits, entry.new_parent_bits);
+            }
+            mark_explorer_dirty(world);
+        }
+        Action::GroupEntities {
+            model_name,
+            model_class,
+            model_parent_bits,
+            model_translation,
+            members,
+        } => {
+            // Redo group: spawn a FRESH wrapper — the original died
+            // with the undo — and re-apply each member's grouped local.
+            // `grouping.rs` spawns the wrapper axis-aligned and
+            // unit-scaled, so identity rotation / unit scale here.
+            let wrapper = spawn_container(
+                world,
+                model_class,
+                model_name,
+                *model_parent_bits,
+                *model_translation,
+                Quat::IDENTITY.to_array(),
+                Vec3::ONE.to_array(),
+            );
+            for m in members {
+                set_local_transform(
+                    world,
+                    m.entity_bits,
+                    m.new_translation,
+                    m.new_rotation,
+                    m.new_scale,
+                );
+                set_parent(world, m.entity_bits, Some(wrapper.to_bits()));
+            }
+            info!("↷ Redo group: wrapped {} objects in a {}", members.len(), model_class);
+            mark_explorer_dirty(world);
+        }
+        Action::UngroupEntities { containers } => {
+            // Redo ungroup: raise the children back out to the
+            // container's own parent and despawn the container. It is
+            // located by content (current parent of the first live
+            // child) because undo re-spawned it under a new id.
+            for c in containers {
+                let container = container_of(world, &c.children);
+                for child in &c.children {
+                    set_local_transform(
+                        world,
+                        child.entity_bits,
+                        child.new_translation,
+                        child.new_rotation,
+                        child.new_scale,
+                    );
+                    set_parent(world, child.entity_bits, c.parent_bits);
                 }
-                match std::fs::rename(trash_path, original_path) {
-                    Ok(_) => info!("↷ Respawned {:?}", original_path.file_name().unwrap_or_default()),
-                    Err(e) => warn!("Failed to respawn {:?}: {}", original_path, e),
+                // See the undo branch: resolve before the `match` so no
+                // borrow of `world` outlives the scrutinee.
+                let live_container = container.filter(|e| world.get_entity(*e).is_ok());
+                match live_container {
+                    Some(e) => {
+                        world.despawn(e);
+                    }
+                    None => warn!("↷ Redo ungroup: container '{}' not found", c.name),
                 }
             }
+            mark_explorer_dirty(world);
         }
         Action::CreateBinaryInstance { def_json, .. } => {
             // Redo create: queue the stored def for re-spawn. A dedicated

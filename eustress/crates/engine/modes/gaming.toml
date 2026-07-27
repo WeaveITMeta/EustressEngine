@@ -1,7 +1,7 @@
 # Eustress Mode — "Gaming".
 # World-building + play-testing focus: modeling, terrain, UI, MindSpace for
-# design-note graphs, and live testing. Publish/Economy tabs are
-# forward-looking (declared ahead of their tooling).
+# design-note graphs, and live testing. Design/Publish/LiveOps cover the
+# build → ship → operate loop (aspirational buttons, wired data:* where real).
 
 [mode]
 id = "gaming"
@@ -20,19 +20,48 @@ preset = "Building"
 accent = "#c084fc"
 
 [[tabs]]
-id = "publish"
-name = "Publish"
+id = "design"
+name = "Design"
 color = "#c084fc"
 
   [[tabs.sections]]
-  name = "Release"
-  tools = []
+  name = "World Building"
+  tools = ["insert:part", "gam:level_blockout", "gam:spawn_painter", "gam:terrain_stamper"]
+
+  [[tabs.sections]]
+  name = "Gameplay"
+  tools = ["insert:script", "gam:quest_designer", "gam:dialogue_tree"]
+
+  [[tabs.sections]]
+  name = "Balance"
+  tools = ["gam:loot_table_editor", "gam:balance_curves", "gam:economy_simulator"]
 
 [[tabs]]
-id = "economy"
-name = "Economy"
+id = "publish"
+name = "Publish"
+color = "#a78bfa"
+
+  [[tabs.sections]]
+  name = "Release"
+  tools = ["gam:build_packager", "gam:version_notes", "gam:store_listing"]
+
+  [[tabs.sections]]
+  name = "Compliance"
+  tools = ["gam:content_rating", "gam:accessibility_checker"]
+
+[[tabs]]
+id = "liveops"
+name = "LiveOps"
 color = "#ffd166"
 
   [[tabs.sections]]
-  name = "Balancing"
-  tools = ["data:chart", "data:stats"]
+  name = "Telemetry"
+  tools = ["data:chart", "data:stats", "gam:player_heatmap"]
+
+  [[tabs.sections]]
+  name = "Events"
+  tools = ["gam:event_scheduler", "gam:season_planner"]
+
+  [[tabs.sections]]
+  name = "Community"
+  tools = ["gam:feedback_inbox", "gam:leaderboard_config"]

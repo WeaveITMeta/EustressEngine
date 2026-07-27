@@ -562,6 +562,12 @@ fn main() {
         // its true geometry (not the Aabb box). radiance extracts the proxy;
         // this attaches it.
         app.add_systems(Update, eustress_engine::space::instance_loader::apply_splat_colliders);
+        // PERSISTENCE: DB-primary cold-load spawns instances from binary cores,
+        // but file-natured GaussianSplats have no core (their `[gaussian_splats]`
+        // path can't survive it) — so an imported splat vanished on the next
+        // launch. Re-spawn disk splat folders on Space open (once, gated), the
+        // same way the file-watcher hot-creates them.
+        app.add_systems(Update, eustress_engine::space::instance_loader::load_disk_gaussian_splats_on_open);
     }
 
     // (WorldDbPlugin now comes in with add_core_sim_plugins above.)

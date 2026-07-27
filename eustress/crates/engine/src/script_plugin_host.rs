@@ -395,6 +395,7 @@ fn drain_script_plugin_bridge(
                     buttons: Vec::new(),
                     collapsible: false,
                     collapsed: false,
+                    modes: Vec::new(), // script-plugin sections: every mode
                 });
                 registry.plugins.entry(plugin_id).or_default().section_ids.push(section_id);
             }
@@ -424,6 +425,7 @@ fn drain_script_plugin_bridge(
                     id: button_id.clone(),
                     tooltip: Some(tooltip),
                     action_id: action_id.clone(),
+                    modes: Vec::new(), // script-plugin buttons: every mode
                 });
                 callbacks.by_action_id.insert(action_id.clone(), callback);
                 let entry = registry.plugins.entry(plugin_id).or_default();

@@ -1,0 +1,20 @@
+[package]
+name = "eustress-avatar-schema"
+version = "0.1.0"
+edition = "2021"
+description = "Avatar descriptor + derived body metrics. No Bevy, no glam — compiles to wasm for the web customizer and links natively into the engine."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+
+# Optional: Bevy derives (Component/Reflect) for the engine-side build.
+# The web crate depends on this crate with default-features = false, so
+# `bevy` is never compiled for wasm.
+bevy = { workspace = true, optional = true }
+
+[features]
+default = []
+# Engine-side: adds Component/Reflect derives.
+bevy = ["dep:bevy"]

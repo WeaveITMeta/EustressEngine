@@ -60,13 +60,13 @@ fn main() {
             let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
             resvg::render(&tree, transform, &mut pixmap.as_mut());
             
-            // Convert RGBA to BGRA for ICO format
-            let mut rgba_data = pixmap.take();
-            for chunk in rgba_data.chunks_exact_mut(4) {
-                chunk.swap(0, 2); // Swap R and B
-            }
-            
-            let image = ico::IconImage::from_rgba_data(size, size, rgba_data);
+            // NO channel swap. `ico::IconImage::from_rgba_data` takes RGBA and
+            // does its own conversion; the swap that used to be here fed it
+            // BGRA, so every ICO entry shipped with red and blue transposed.
+            // The gear is #7a8290 blue-grey in the SVG and in icon.png (which
+            // never went through the swap), but the .ico Windows actually
+            // displays measured #7c6d64 brown-grey — the same bytes reversed.
+            let image = ico::IconImage::from_rgba_data(size, size, pixmap.take());
             icon_dir.add_entry(ico::IconDirEntry::encode(&image).unwrap());
         }
         

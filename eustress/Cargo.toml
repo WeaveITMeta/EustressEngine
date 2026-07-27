@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/common",
+    "crates/avatar-schema",
     "crates/common/bevy-camera-controller",
     "crates/common/eustress-networking",
     "crates/runtime",

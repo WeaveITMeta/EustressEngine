@@ -138,6 +138,24 @@ fn hex_byte(c: u8) -> Option<u8> {
     }
 }
 
+/// Default entity-Transform rotation applied to imported Gaussian-splat
+/// clouds so they land upright.
+///
+/// Standard 3DGS `.ply` files (INRIA / graphdeco format, trained on COLMAP
+/// data — e.g. the MipNeRF360 scenes) live in an OpenCV-style world frame:
+/// Y-down, Z-forward. Bringing that into Bevy's Y-up right-handed frame is
+/// the map `(x, y, z) -> (x, -y, -z)` = `diag(1, -1, -1)`, i.e. a 180°
+/// rotation about the X axis. Quaternion is `[x, y, z, w]`, so 180°-about-X
+/// is `[1, 0, 0, 0]`. (A prior 180°-about-Z `[0, 0, 1, 0]` flips the wrong
+/// pair of axes and leaves the cloud mis-oriented.)
+///
+/// This lands in `[transform].rotation`, so a capture authored in a
+/// different convention can still be re-oriented per-cloud with the rotate
+/// gizmo. Both import paths — the Import button's `do_import_gaussian_splat`
+/// and the `insert_gaussian_splats` MCP tool — reference this constant so
+/// they always agree.
+pub const GAUSSIAN_SPLAT_UPRIGHT_ROTATION: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
+
 /// Per-call overrides applied to the root `_instance.toml` after the
 /// template is copied. Every field is optional — `None` means "keep the
 /// template's default".

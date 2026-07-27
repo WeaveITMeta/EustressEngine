@@ -37,7 +37,7 @@ use eustress_common::terrain::road::{build_road_path, conform_terrain_to_road, b
 use avian3d::prelude::{Collider, RigidBody};
 
 use crate::studio_plugins::{StudioPlugin, PluginApi, PluginInfo, PluginCategory, TabButtonSize, PluginActionEvent};
-use crate::modal_tool::{ModalTool, ToolContext, ToolStepResult, ToolOptionControl, ViewportHit, ActiveModalTool};
+use crate::modal_tool::{ModalTool, ModalToolRegistry, ToolContext, ToolStepResult, ToolOptionControl, ViewportHit, ActiveModalTool};
 use crate::rendering::PartEntity;
 
 fn entity_id_str(e: Entity) -> String {
@@ -79,6 +79,7 @@ impl Plugin for RoadToolEnginePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RoadBaseline>()
             .init_resource::<ActiveRoad>()
+            .add_systems(Startup, register_road_tools)
             // Own MessageReader<PluginActionEvent> cursor, independent of
             // the existing `handle_plugin_action_events` — Bevy Messages
             // support multiple independent readers. Runs after Drain for
@@ -87,6 +88,16 @@ impl Plugin for RoadToolEnginePlugin {
             .add_systems(Update, handle_road_tool_actions
                 .after(crate::ui::slint_ui::SlintSystems::Drain));
     }
+}
+
+/// Publish the node placer to [`ModalToolRegistry`] so
+/// `ActivateModalToolEvent { tool_id: "road_add_node" }` actually resolves.
+/// Without this the id lived ONLY inside [`RoadNodePlaceTool::id`] — the
+/// ribbon button reached the tool by constructing it directly, but every
+/// keybound / scripted / MCP activation fell through to
+/// `activate_modal_tool_system`'s "Unknown modal tool id" warn path.
+fn register_road_tools(mut registry: ResMut<ModalToolRegistry>) {
+    registry.register("road_add_node", || Box::new(RoadNodePlaceTool::default()));
 }
 
 // ============================================================================
@@ -119,7 +130,9 @@ impl StudioPlugin for RoadToolPlugin {
         // implemented, so this registers its own tab explicitly instead of
         // relying on it.
         api.register_tab("plugins", "Plugins", None::<String>, 0, "road-tool");
-        api.add_tab_section("plugins", "road", "Road Builder");
+        // Road Builder lives only in the Civil mode's Plugins tab (its terrain
+        // road-conform workflow is civil-engineering-specific).
+        api.add_tab_section_scoped("plugins", "road", "Road Builder", vec!["civil".to_string()]);
         api.add_tab_button("plugins", "road", "road-add-node", "Add Node", Some("+"),
             "Click points on the terrain to lay out the road's S-curve", "road:add_node", TabButtonSize::Normal);
         api.add_tab_button("plugins", "road", "road-apply", "Apply to Terrain", Some("~"),
@@ -152,46 +165,23 @@ fn handle_road_tool_actions(
     for event in events.read() {
         match event.action_id.as_str() {
             "road:add_node" => {
-                let Ok((config, data)) = terrain_query.single() else {
+                // Terrain presence is checked HERE only so the user gets a
+                // useful toast instead of a placer that silently swallows
+                // every click. The tool itself re-resolves the terrain per
+                // click and needs nothing from this query.
+                if terrain_query.single().is_err() {
                     notifications.warning("No active terrain — generate terrain before adding a road");
                     continue;
-                };
+                }
 
-                // Reuse the existing road if one's already being authored;
-                // otherwise start a fresh one.
-                let road_entity = match active_road.0 {
-                    Some(e) => e,
-                    None => {
-                        let instance = Instance {
-                            name: "Road".to_string(),
-                            class_name: ClassName::Model,
-                            archivable: true,
-                            ..Default::default()
-                        };
-                        let e = commands.spawn((
-                            Transform::default(),
-                            Visibility::default(),
-                            instance,
-                            Model::default(),
-                            Name::new("Road"),
-                            Attributes::new(),
-                            {
-                                let mut t = Tags::new();
-                                t.add(TAG_ROAD_ROOT);
-                                t
-                            },
-                        )).id();
-                        active_road.0 = Some(e);
-                        e
-                    }
-                };
-
-                let next_index = node_query.iter()
-                    .filter(|(_, _, _, tags, child_of)| tags.0.iter().any(|t| t == TAG_ROAD_NODE) && child_of.parent() == road_entity)
-                    .count() as u32;
-
+                // The road `Model` and each node's index are resolved per
+                // click inside the tool (see `place_road_node`) rather than
+                // snapshotted here. That's what keeps the tool zero-arg
+                // constructible, so this button arms the EXACT same instance
+                // the `ModalToolRegistry` factory builds — no second,
+                // drift-prone construction path.
                 active_modal_tool.activate(
-                    Box::new(RoadNodePlaceTool::new(config.clone(), data.clone(), road_entity, next_index)),
+                    Box::new(RoadNodePlaceTool::default()),
                     &mut commands,
                 );
                 notifications.info("Click points on the terrain to place road nodes. Right-click or Esc to finish.");
@@ -365,29 +355,22 @@ fn spawn_or_update_ribbon(
 // RoadNodePlaceTool — click-to-place modal tool
 // ============================================================================
 
-/// Click-to-place road control nodes. Caches a snapshot of the active
-/// terrain's `(TerrainConfig, TerrainData)` at construction time (taken by
-/// the calling system, which has query access) because `ToolContext` only
-/// exposes `Commands` + `Time` to `on_click` — not arbitrary component
-/// reads. `ViewportHit::hit_point` is NOT used for placement: it's a
-/// physics-raycast result that falls back to a flat ground plane when
-/// nothing has a collider, which is exactly terrain's situation (terrain
-/// colliders are disabled project-wide) — so it would place every node at
-/// Y=0 on a mountain. This tool re-raycasts the REAL terrain surface from
-/// `hit.ray_origin`/`ray_direction` via `terrain::road_query::raycast_terrain`
-/// instead.
+/// Click-to-place road control nodes.
+///
+/// Carries NO terrain snapshot, no road entity, and no index counter: every
+/// click queues [`place_road_node`], which resolves all three from the World.
+/// That is what makes the tool zero-arg constructible, which in turn is what
+/// [`ModalToolRegistry`] factories require (`Fn() -> Box<dyn ModalTool>`).
+/// The earlier form took `(TerrainConfig, TerrainData, Entity, u32)` up
+/// front, so it could never be registered — `"road_add_node"` existed only
+/// inside [`Self::id`] and the ribbon button was the one and only way in.
+/// Dropping the snapshot also drops a full `TerrainData` heightmap clone per
+/// activation, and makes the placer track terrain edited mid-session.
+#[derive(Default)]
 struct RoadNodePlaceTool {
-    config: TerrainConfig,
-    data: TerrainData,
-    road_entity: Entity,
-    next_index: u32,
+    /// Clicks accepted this session. Drives the step label only — the real
+    /// node index comes from the live child set at placement time.
     placed_this_session: u32,
-}
-
-impl RoadNodePlaceTool {
-    fn new(config: TerrainConfig, data: TerrainData, road_entity: Entity, next_index: u32) -> Self {
-        Self { config, data, road_entity, next_index, placed_this_session: 0 }
-    }
 }
 
 impl ModalTool for RoadNodePlaceTool {
@@ -395,40 +378,20 @@ impl ModalTool for RoadNodePlaceTool {
     fn name(&self) -> &'static str { "Road: Add Node" }
 
     fn step_label(&self) -> String {
-        format!("Click to place road node {} (Esc/right-click to finish)", self.next_index + 1)
+        format!("Click to place a road node ({} placed — Esc/right-click to finish)", self.placed_this_session)
     }
 
     fn options(&self) -> Vec<ToolOptionControl> { Vec::new() }
 
     fn on_click(&mut self, hit: &ViewportHit, ctx: &mut ToolContext) -> ToolStepResult {
-        let ray = Ray3d::new(hit.ray_origin, Dir3::new(hit.ray_direction).unwrap_or(Dir3::NEG_Y));
-        let Some(world_pos) = eustress_common::terrain::height_query::raycast_terrain(&self.config, &self.data, ray, 5000.0, 2.0) else {
-            return ToolStepResult::Continue; // Missed the terrain entirely — stay active, let the user try again.
-        };
-
-        let instance = Instance {
-            name: format!("{}{}", NODE_NAME_PREFIX, self.next_index),
-            class_name: ClassName::Attachment,
-            archivable: true,
-            ..Default::default()
-        };
-        ctx.commands.spawn((
-            Transform::from_translation(world_pos),
-            GlobalTransform::default(),
-            Visibility::default(),
-            instance,
-            Attachment::default(),
-            Name::new(format!("{}{}", NODE_NAME_PREFIX, self.next_index)),
-            Attributes::new(),
-            {
-                let mut t = Tags::new();
-                t.add(TAG_ROAD_NODE);
-                t
-            },
-            ChildOf(self.road_entity),
-        ));
-
-        self.next_index += 1;
+        let (origin, direction) = (hit.ray_origin, hit.ray_direction);
+        ctx.commands.queue(move |world: &mut World| {
+            place_road_node(world, origin, direction);
+        });
+        // Counted optimistically: the closure runs after this returns and
+        // drops clicks that miss the terrain, so the label can read one high
+        // after a stray click at the sky. The label is advisory; round-
+        // tripping the real result back into the tool isn't worth a resource.
         self.placed_this_session += 1;
         ToolStepResult::Continue
     }
@@ -448,4 +411,99 @@ impl ModalTool for RoadNodePlaceTool {
     fn auto_exit_on_commit(&self) -> bool { false }
 
     fn preview_entities(&self) -> Vec<Entity> { Vec::new() }
+}
+
+/// Place ONE road node at the terrain point under the given viewport ray,
+/// resolving the terrain, the road `Model`, and the node index from the World.
+///
+/// Runs as a queued command closure rather than inline in
+/// [`RoadNodePlaceTool::on_click`] because `ToolContext` hands a tool only
+/// `Commands` + `Time` — no component or resource reads at all.
+///
+/// `ViewportHit::hit_point` is deliberately NOT used for placement: it's a
+/// physics-raycast result that falls back to a flat ground plane when nothing
+/// has a collider, which is exactly terrain's situation (terrain colliders are
+/// disabled project-wide) — it would drop every node at Y=0 on a mountain.
+/// This re-raycasts the REAL heightfield via
+/// `terrain::height_query::raycast_terrain` instead.
+fn place_road_node(world: &mut World, ray_origin: Vec3, ray_direction: Vec3) {
+    let ray = Ray3d::new(ray_origin, Dir3::new(ray_direction).unwrap_or(Dir3::NEG_Y));
+
+    // Scoped so the immutable terrain borrow is released before the spawns
+    // below take `&mut World`.
+    let hit = {
+        let mut q = world.query_filtered::<(&TerrainConfig, &TerrainData), With<TerrainRoot>>();
+        let Some((config, data)) = q.iter(world).next() else { return };
+        eustress_common::terrain::height_query::raycast_terrain(config, data, ray, 5000.0, 2.0)
+    };
+    // Missed the terrain entirely — stay silent, the tool is still armed and
+    // the user just clicks again.
+    let Some(world_pos) = hit else { return };
+
+    // Reuse the road being authored, or start one. Liveness is re-checked
+    // because "Remove Road" despawns the Model while this placer can still be
+    // armed — a stale id would parent every later node to nothing.
+    let stored = world.get_resource::<ActiveRoad>().and_then(|r| r.0);
+    let existing = stored.filter(|e| world.get_entity(*e).is_ok());
+    let road_entity = match existing {
+        Some(e) => e,
+        None => {
+            let e = world.spawn((
+                Transform::default(),
+                Visibility::default(),
+                Instance {
+                    name: "Road".to_string(),
+                    class_name: ClassName::Model,
+                    archivable: true,
+                    ..Default::default()
+                },
+                Model::default(),
+                Name::new("Road"),
+                Attributes::new(),
+                {
+                    let mut t = Tags::new();
+                    t.add(TAG_ROAD_ROOT);
+                    t
+                },
+            )).id();
+            if let Some(mut active) = world.get_resource_mut::<ActiveRoad>() {
+                active.0 = Some(e);
+            }
+            e
+        }
+    };
+
+    // Index from the LIVE child set, never a counter carried on the tool:
+    // "Apply to Terrain" orders its control points by parsing this numeric
+    // suffix, so it has to stay dense and unique across tool sessions.
+    let next_index = {
+        let mut q = world.query::<(&Tags, &ChildOf)>();
+        q.iter(world)
+            .filter(|(tags, child_of)| {
+                child_of.parent() == road_entity && tags.0.iter().any(|t| t == TAG_ROAD_NODE)
+            })
+            .count() as u32
+    };
+
+    let node_name = format!("{}{}", NODE_NAME_PREFIX, next_index);
+    world.spawn((
+        Transform::from_translation(world_pos),
+        GlobalTransform::default(),
+        Visibility::default(),
+        Instance {
+            name: node_name.clone(),
+            class_name: ClassName::Attachment,
+            archivable: true,
+            ..Default::default()
+        },
+        Attachment::default(),
+        Name::new(node_name),
+        Attributes::new(),
+        {
+            let mut t = Tags::new();
+            t.add(TAG_ROAD_NODE);
+            t
+        },
+        ChildOf(road_entity),
+    ));
 }

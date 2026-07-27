@@ -98,6 +98,11 @@ pub struct TabSection {
     pub label: String,
     pub collapsible: bool,
     pub collapsed: bool,
+    /// Eustress-Mode affinity: the mode ids this section appears in. EMPTY =
+    /// all modes (backward-compatible default). A section is also hidden if,
+    /// after per-button mode filtering, it has no visible buttons — so a
+    /// section scoped to mode X never dangles an empty header in mode Y.
+    pub modes: Vec<String>,
 }
 
 /// Tab button
@@ -110,6 +115,16 @@ pub struct TabButton {
     pub id: String,
     pub tooltip: Option<String>,
     pub action_id: String,
+    /// Eustress-Mode affinity: the mode ids this button appears in. EMPTY =
+    /// all modes (backward-compatible default — existing plugins show
+    /// everywhere until they opt into mode-scoping).
+    pub modes: Vec<String>,
+}
+
+/// Whether an item with these mode-affinity ids is visible under `active_mode`.
+/// Empty affinity = visible in every mode.
+pub fn mode_scoped_visible(item_modes: &[String], active_mode: &str) -> bool {
+    item_modes.is_empty() || item_modes.iter().any(|m| m == active_mode)
 }
 
 /// Tab button size

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<mask id="kb"><rect x="0" y="0" width="24" height="24" fill="white"/><circle cx="17.6" cy="17.6" r="6.1" fill="black"/></mask>
+<g mask="url(#kb)"><g transform="scale(0.82)"><circle cx="12" cy="12" r="1.4" fill="#d4d4d4" stroke="none"/>
+  <ellipse cx="12" cy="12" rx="9" ry="4" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <ellipse cx="12" cy="12" rx="9" ry="4" transform="rotate(60 12 12)" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <ellipse cx="12" cy="12" rx="9" ry="4" transform="rotate(120 12 12)" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></g></g>
+<circle cx="17.6" cy="17.6" r="4.5" stroke="#d4d4d4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+<circle cx="17.6" cy="17.6" r="1.1" stroke="#d4d4d4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M17.6 15.1v1M17.6 19.1v1M15.1 17.6h1M19.1 17.6h1M15.9 15.9l.7.7M18.6 18.6l.7.7M19.3 15.9l-.7.7M16.6 18.6l-.7.7" stroke="#d4d4d4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>

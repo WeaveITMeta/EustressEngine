@@ -17,6 +17,7 @@
 //!   decomposition physically grounded.
 
 use bevy::prelude::*;
+use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 use bevy_gaussian_splatting::{
     camera::GaussianCameraPlugin,
     gaussian::{cloud::CloudPlugin, formats::planar_3d::PlanarGaussian3d, settings::SettingsPlugin},
@@ -107,70 +108,121 @@ const COLLIDER_MIN_OPACITY: f32 = 0.08;
 /// the cloud's largest extent, clamped to [5 cm, 2 m] — so ANY imported cloud,
 /// tabletop or building, yields a sane collider count instead of exploding on a
 /// large scene. Deterministic (see [`collider::extract_colliders`]).
+/// In-flight background collider extraction for one splat cloud. Result is
+/// `(proxy, voxel_size, extent, solid_point_count)` for the completion log.
+#[derive(Component)]
+struct ColliderProxyTask(Task<(CompoundProxy, f32, f32, usize)>);
+
 fn extract_splat_collider_proxy(
     mut commands: Commands,
     assets: Res<Assets<PlanarGaussian3d>>,
-    query: Query<
-        (Entity, &PlanarGaussian3dHandle),
+    mut query: Query<
+        (Entity, &PlanarGaussian3dHandle, Option<&mut ColliderProxyTask>),
         (With<SplatCloud>, With<FloaterCullApplied>, Without<SplatColliderProxy>),
     >,
 ) {
-    for (entity, handle) in &query {
+    for (entity, handle, task) in &mut query {
+        // Phase 2: a background extraction is in flight — poll it and attach
+        // the proxy when it lands. Everything heavy happened off-thread.
+        if let Some(mut task) = task {
+            let Some((proxy, voxel, extent, solid)) = block_on(future::poll_once(&mut task.0))
+            else {
+                continue; // still crunching — no main-thread cost beyond the poll
+            };
+            let n = proxy.primitives.len();
+            commands
+                .entity(entity)
+                .insert(SplatColliderProxy { proxy })
+                .remove::<ColliderProxyTask>();
+            warn!(
+                "splat collider proxy: {} voxel boxes (voxel={:.3} m, extent={:.2} m, solid pts={}) for {:?}",
+                n, voxel, extent, solid, entity
+            );
+            continue;
+        }
+
+        // Phase 1: cloud resident → snapshot the (position, opacity) pairs and
+        // hand the whole voxel fit to the compute pool. The snapshot is ONE
+        // linear pass; the multi-second part (voxel dedup over millions of
+        // points) never touches the main thread.
         let Some(cloud) = assets.get(&handle.0) else {
             continue; // still loading — retry next frame
         };
-        // Solid splat centers only (skip near-transparent floaters). Detect the
-        // opacity convention the same way the cull does (raw logits ⇒ sigmoid).
-        let looks_logit = cloud
+        let samples: Vec<([f32; 3], f32)> = cloud
             .iter()
-            .take(4096)
-            .any(|g| g.scale_opacity.opacity < -0.001 || g.scale_opacity.opacity > 1.001);
-        let effective = |raw: f32| -> f32 {
-            if looks_logit { 1.0 / (1.0 + (-raw).exp()) } else { raw }
-        };
-        let points: Vec<[f32; 3]> = cloud
-            .iter()
-            .filter(|g| effective(g.scale_opacity.opacity) >= COLLIDER_MIN_OPACITY)
             .map(|g| {
                 let p = g.position_visibility.position;
-                [p[0], p[1], p[2]]
+                ([p[0], p[1], p[2]], g.scale_opacity.opacity)
             })
             .collect();
-        if points.is_empty() {
-            commands.entity(entity).insert(SplatColliderProxy { proxy: CompoundProxy::default() });
-            continue;
-        }
-        // Adaptive voxel size from the cloud extent.
-        let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
-        for p in &points {
-            for i in 0..3 {
-                mn[i] = mn[i].min(p[i]);
-                mx[i] = mx[i].max(p[i]);
+        let task = AsyncComputeTaskPool::get().spawn(async move {
+            // Solid splat centers only (skip near-transparent floaters). Detect
+            // the opacity convention the same way the cull does (logits ⇒ sigmoid).
+            let looks_logit = samples
+                .iter()
+                .take(4096)
+                .any(|(_, o)| *o < -0.001 || *o > 1.001);
+            let effective = |raw: f32| -> f32 {
+                if looks_logit { 1.0 / (1.0 + (-raw).exp()) } else { raw }
+            };
+            let points: Vec<[f32; 3]> = samples
+                .iter()
+                .filter(|(_, o)| effective(*o) >= COLLIDER_MIN_OPACITY)
+                .map(|(p, _)| *p)
+                .collect();
+            if points.is_empty() {
+                return (CompoundProxy::default(), 0.0, 0.0, 0);
             }
-        }
-        let extent = (0..3).map(|i| mx[i] - mn[i]).fold(0.0f32, f32::max);
-        let voxel = (extent / 48.0).clamp(0.05, 2.0);
-        let proxy = collider::extract_colliders(&points, ColliderStrategy::CsgPrimitiveFit, voxel);
-        let n = proxy.primitives.len();
-        commands.entity(entity).insert(SplatColliderProxy { proxy });
-        warn!(
-            "splat collider proxy: {} voxel boxes (voxel={:.3} m, extent={:.2} m, solid pts={}) for {:?}",
-            n, voxel, extent, points.len(), entity
-        );
+            // Adaptive voxel size from the cloud extent.
+            let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for p in &points {
+                for i in 0..3 {
+                    mn[i] = mn[i].min(p[i]);
+                    mx[i] = mx[i].max(p[i]);
+                }
+            }
+            let extent = (0..3).map(|i| mx[i] - mn[i]).fold(0.0f32, f32::max);
+            let voxel = (extent / 48.0).clamp(0.05, 2.0);
+            let proxy =
+                collider::extract_colliders(&points, ColliderStrategy::CsgPrimitiveFit, voxel);
+            (proxy, voxel, extent, points.len())
+        });
+        commands.entity(entity).insert(ColliderProxyTask(task));
     }
 }
 
-/// Minimum EFFECTIVE (post-sigmoid) opacity a Gaussian must keep to survive the
-/// floater cull. Real surface splats sit well above this; the faint "floater"
-/// specks that hang in the air around a capture sit below it. Deliberately
-/// conservative so the solid scene is never touched.
-const FLOATER_MIN_OPACITY: f32 = 0.08;
+/// Floater cull grid resolution: how many voxels span the cloud's ROBUST
+/// (percentile) extent, which sets the adaptive voxel size
+/// (`robust_extent / GRID_RES`). A real floater is a splat that sits ALONE in
+/// empty space; binning to a grid and asking "how much stuff shares my
+/// neighbourhood?" separates isolated specks from dense-but-faint surface detail
+/// (tree foliage) that a pure opacity cut wiped. The ROBUST box (not raw
+/// min/max) is essential: one stray gaussian in the far background/sky shell
+/// otherwise inflates the extent and neuters the cull. ~128 lands near 0.65 m
+/// voxels on a MipNeRF360-scale capture — coarse enough that dense foliage is
+/// never fragmented. Env override: `EUSTRESS_SPLAT_CULL_GRID`.
+const FLOATER_GRID_RES: f32 = 128.0;
 
-/// Safety floor: if the cull would keep FEWER than this fraction of the cloud,
-/// treat it as a mis-read opacity convention (not a real floater storm) and
-/// SKIP — better to leave floaters than to wipe the scene. Retriable by
-/// toggling `cull_floaters` off then on.
-const FLOATER_MIN_KEEP_FRACTION: f32 = 0.25;
+/// A splat survives only if the opacity-WEIGHTED mass in its 3×3×3 voxel
+/// neighbourhood clears this. Mass (Σ post-sigmoid opacity), NOT raw count, so a
+/// puff of near-invisible mist-gaussians (count-dense but mass-light) is culled
+/// while a small solid object or layered low-alpha foliage (mass-heavy) survives.
+/// GENTLE default — expect ~1% removal on a clean capture; raise for a more
+/// aggressive cull. Env override: `EUSTRESS_SPLAT_CULL_MIN_MASS`.
+const FLOATER_MIN_MASS: f32 = 2.5;
+
+/// Unconditional dust floor: a splat with post-sigmoid opacity below this is
+/// removed regardless of isolation. The official 3DGS trainer prunes at ~1/255
+/// alpha, so anything fainter in a shipped `.ply` is dust, never real surface —
+/// safe to drop everywhere (never touches foliage, which is far more opaque).
+/// Env override: `EUSTRESS_SPLAT_CULL_DUST`.
+const FLOATER_DUST_OPACITY: f32 = 0.005;
+
+/// Safety cap: if the parameters would remove MORE than this fraction of the
+/// cloud, treat them as mis-tuned and SKIP the isolation cull (the dust floor
+/// still applies) — better to leave floaters than to wipe the scene. Retriable
+/// by toggling `cull_floaters`. Env override: `EUSTRESS_SPLAT_CULL_MAX_REMOVE`.
+const FLOATER_MAX_REMOVE_FRAC: f32 = 0.15;
 
 /// Remove near-transparent "floater" Gaussians from a [`SplatCloud`] whose
 /// `cull_floaters` is set, and restore the pristine cloud when it is unset.
@@ -189,115 +241,365 @@ const FLOATER_MIN_KEEP_FRACTION: f32 = 0.25;
 /// so we sigmoid before thresholding. This keeps the cull correct either way
 /// and — with [`FLOATER_MIN_KEEP_FRACTION`] — refuses to run if the detection
 /// still looks wrong.
+/// In-flight background floater-cull analysis for one splat cloud. Resolves to
+/// `Some(filtered_cloud)` when splats were removed, `None` for a no-op cull.
+#[derive(Component)]
+struct FloaterCullTask(Task<Option<PlanarGaussian3d>>);
+
+/// A cloud asset that has been loaded (or is loading) but is NOT yet exposed
+/// to the GPU renderer. [`attach_splat_cloud`] parks the handle here instead of
+/// `PlanarGaussian3dHandle`; [`apply_floater_cull`] promotes it once the cull
+/// has produced the smaller cloud. Rationale: exposing the raw multi-million-
+/// splat cloud first meant (a) a full GPU upload + per-frame sort/draw of
+/// splats that were about to be thrown away, (b) a ~2× VRAM spike while raw +
+/// culled clouds coexisted, and (c) on marginal drivers a device-lost (TDR)
+/// during that burst — the GPU should only ever see the final cloud.
+#[derive(Component)]
+pub struct PendingSplatCloud(pub Handle<PlanarGaussian3d>);
+
 fn apply_floater_cull(
     mut assets: ResMut<Assets<PlanarGaussian3d>>,
     asset_server: Res<AssetServer>,
     mut commands: Commands,
-    query: Query<(
+    mut query: Query<(
         Entity,
         &SplatCloud,
-        &PlanarGaussian3dHandle,
+        Option<&PendingSplatCloud>,
+        Option<&PlanarGaussian3dHandle>,
         Option<&FloaterCullApplied>,
+        Option<&mut FloaterCullTask>,
     )>,
 ) {
-    for (entity, cloud, handle, applied) in &query {
-        match (cloud.cull_floaters, applied.is_some()) {
-            // Enabled, not yet applied → filter once the asset is resident.
-            (true, false) => {
-                // Read + filter inside a scope so the immutable asset borrow
-                // ends before the mutable write-back below.
-                let filtered = {
-                    let Some(data) = assets.get(&handle.0) else {
-                        continue; // still loading — retry next frame
-                    };
-                    let total = data.iter().count();
-                    if total == 0 {
-                        continue;
+    for (entity, cloud, pending, live, applied, task) in &mut query {
+        // ── Poll an in-flight analysis (pending- or live-sourced alike). The
+        // multi-second work (percentile boxing, mass grid, rebuild) happens in
+        // the compute pool — this frame only pays the poll + handle swap.
+        if let Some(mut task) = task {
+            let Some(filtered) = block_on(future::poll_once(&mut task.0)) else {
+                continue; // still crunching
+            };
+            match filtered {
+                Some(new_cloud) => {
+                    // Swap in a FRESH asset handle rather than mutating the
+                    // existing asset in place — the upstream GPU planar storage
+                    // only reacts to a NEW handle (see git history: in-place
+                    // mutation rendered nothing). Drop the raw asset so its GPU
+                    // copy (if it ever uploaded) is freed too.
+                    let old_id = pending
+                        .map(|p| p.0.id())
+                        .or_else(|| live.map(|l| l.0.id()));
+                    let new_handle = assets.add(new_cloud);
+                    if let Some(id) = old_id {
+                        assets.remove(id);
                     }
-                    // Convention probe on a bounded sample.
-                    let looks_logit = data
+                    commands
+                        .entity(entity)
+                        .insert(PlanarGaussian3dHandle(new_handle))
+                        .remove::<PendingSplatCloud>();
+                }
+                // No-op cull: promote the pending handle unchanged (live
+                // handles are already exposed — nothing to do).
+                None => {
+                    if let Some(p) = pending {
+                        commands
+                            .entity(entity)
+                            .insert(PlanarGaussian3dHandle(p.0.clone()))
+                            .remove::<PendingSplatCloud>();
+                    }
+                }
+            }
+            // Mark applied either way (a no-op cull must not respawn the task
+            // every frame); toggle off→on clears the marker.
+            commands
+                .entity(entity)
+                .remove::<FloaterCullTask>()
+                .insert(FloaterCullApplied);
+            continue;
+        }
+
+        // ── Pending cloud, cull disabled → expose directly to the GPU.
+        if let Some(p) = pending {
+            if !cloud.cull_floaters {
+                commands
+                    .entity(entity)
+                    .insert(PlanarGaussian3dHandle(p.0.clone()))
+                    .remove::<PendingSplatCloud>();
+                continue;
+            }
+        }
+
+        // ── Arm the analysis once the source asset is resident. Source is the
+        // pending handle when deferred, else the live handle (toggle off→on
+        // re-cull of an already-exposed cloud).
+        if cloud.cull_floaters && applied.is_none() {
+            let Some(handle) = pending.map(|p| &p.0).or_else(|| live.map(|l| &l.0)) else {
+                continue;
+            };
+            let Some(data) = assets.get(handle) else {
+                continue; // still loading — retry next frame
+            };
+            // Snapshot: one linear planar→struct pass (the cheapest part of
+            // the old synchronous stall); everything heavier moves off-thread.
+            let raw: Vec<Gaussian3d> = data.iter().collect();
+            if raw.is_empty() {
+                continue;
+            }
+            let source = cloud.source.clone();
+            let task =
+                AsyncComputeTaskPool::get().spawn(async move { cull_gaussians(raw, source) });
+            commands.entity(entity).insert(FloaterCullTask(task));
+            continue;
+        }
+
+        // ── Cull disabled after being applied → reload the pristine cloud.
+        if !cloud.cull_floaters && applied.is_some() {
+            commands
+                .entity(entity)
+                .insert(PlanarGaussian3dHandle(asset_server.load(cloud.source.clone())))
+                .remove::<FloaterCullApplied>()
+                .remove::<FloaterCullTask>();
+        }
+    }
+}
+
+/// The floater-cull analysis body, run on the [`AsyncComputeTaskPool`]: dust
+/// floor + spatial-isolation mass cull (+ optional `EUSTRESS_SPLAT_BUDGET`
+/// decimation), returning the rebuilt cloud (`None` ⇒ nothing removed). Pure
+/// function of its inputs — no ECS access — so it can run on any thread.
+fn cull_gaussians(raw: Vec<Gaussian3d>, source: String) -> Option<PlanarGaussian3d> {
+    let total = raw.len();
+    let filtered = {
+        {
+
+                    // ── Tunables — env overrides give live tuning with no rebuild ──
+                    let env_f = |k: &str, d: f32| {
+                        std::env::var(k)
+                            .ok()
+                            .and_then(|s| s.parse::<f32>().ok())
+                            .filter(|v| v.is_finite())
+                            .unwrap_or(d)
+                    };
+                    let grid_res = env_f("EUSTRESS_SPLAT_CULL_GRID", FLOATER_GRID_RES).max(1.0);
+                    let min_mass = env_f("EUSTRESS_SPLAT_CULL_MIN_MASS", FLOATER_MIN_MASS).max(0.0);
+                    let dust = env_f("EUSTRESS_SPLAT_CULL_DUST", FLOATER_DUST_OPACITY);
+                    let max_remove = env_f("EUSTRESS_SPLAT_CULL_MAX_REMOVE", FLOATER_MAX_REMOVE_FRAC);
+                    // > 0 ⇒ absolute voxel size in metres (overrides the adaptive size).
+                    let voxel_override = env_f("EUSTRESS_SPLAT_CULL_VOXEL", 0.0);
+
+                    // Opacity is stored either as a RAW logit or an activated [0,1]
+                    // value; probe a bounded sample and sigmoid the logit case so the
+                    // mass weighting + dust floor read the same either way.
+                    let looks_logit = raw
                         .iter()
                         .take(4096)
                         .any(|g| g.scale_opacity.opacity < -0.001 || g.scale_opacity.opacity > 1.001);
-                    let effective = |raw: f32| -> f32 {
-                        if looks_logit {
-                            1.0 / (1.0 + (-raw).exp())
-                        } else {
-                            raw
-                        }
+                    let effective = move |o: f32| -> f32 {
+                        let a = if looks_logit { 1.0 / (1.0 + (-o).exp()) } else { o };
+                        a.clamp(0.0, 1.0)
                     };
-                    let kept: Vec<Gaussian3d> = data
-                        .iter()
-                        .filter(|g| effective(g.scale_opacity.opacity) >= FLOATER_MIN_OPACITY)
-                        .collect();
-                    let keep_frac = kept.len() as f32 / total as f32;
-                    if keep_frac < FLOATER_MIN_KEEP_FRACTION {
-                        warn!(
-                            "SplatCloud floater cull would keep only {:.0}% of {} gaussians \
-                             (opacity convention mis-read?) — skipping to avoid wiping {}",
-                            keep_frac * 100.0,
-                            total,
-                            cloud.source
-                        );
-                        None
+
+                    // ── Robust extent: 2.5–97.5 percentile per axis ──
+                    // Raw min/max is dictated by the sparse far background/sky shell,
+                    // which over-sizes the voxel (→ a no-op cull) and would let the far
+                    // field read as "isolated". Percentile-box the scene, size the
+                    // voxel off THAT, and only cull inside it — everything outside is
+                    // kept unconditionally (sky / background is legitimately sparse).
+                    let mut xs: Vec<f32> = Vec::with_capacity(total);
+                    let mut ys: Vec<f32> = Vec::with_capacity(total);
+                    let mut zs: Vec<f32> = Vec::with_capacity(total);
+                    for g in raw.iter() {
+                        let p = g.position_visibility.position;
+                        xs.push(p[0]);
+                        ys.push(p[1]);
+                        zs.push(p[2]);
+                    }
+                    let pct = |v: &mut Vec<f32>, q: f32| -> f32 {
+                        if v.is_empty() {
+                            return 0.0;
+                        }
+                        let idx = (((v.len() - 1) as f32) * q).round() as usize;
+                        v.select_nth_unstable_by(idx, |a, b| a.total_cmp(b));
+                        v[idx]
+                    };
+                    let box_lo = [pct(&mut xs, 0.025), pct(&mut ys, 0.025), pct(&mut zs, 0.025)];
+                    let box_hi = [pct(&mut xs, 0.975), pct(&mut ys, 0.975), pct(&mut zs, 0.975)];
+                    drop((xs, ys, zs)); // partially reordered by select_nth — do not reuse
+                    let robust_extent =
+                        (0..3).map(|i| box_hi[i] - box_lo[i]).fold(0.0f32, f32::max).max(1e-3);
+                    let voxel = if voxel_override > 0.0 {
+                        voxel_override
                     } else {
-                        let removed = total - kept.len();
-                        // `warn!` (not `info!`) so it survives the engine's
-                        // hardcoded log filter during verification — the
-                        // removal count is the one signal that confirms the
-                        // cull ran and by how much. Drop to `info!` once the
-                        // threshold is settled.
+                        (robust_extent / grid_res).max(1e-3)
+                    };
+                    let inv = 1.0 / voxel;
+                    let key = |p: [f32; 3]| -> (i64, i64, i64) {
+                        (
+                            (p[0] * inv).floor() as i64,
+                            (p[1] * inv).floor() as i64,
+                            (p[2] * inv).floor() as i64,
+                        )
+                    };
+                    let inside_box = |p: [f32; 3]| -> bool {
+                        (0..3).all(|i| p[i] >= box_lo[i] && p[i] <= box_hi[i])
+                    };
+
+                    // ── Pass 1: per-cell opacity-weighted MASS (Σ effective opacity) ──
+                    let mut mass: std::collections::HashMap<(i64, i64, i64), f32> =
+                        std::collections::HashMap::new();
+                    for g in raw.iter() {
+                        *mass.entry(key(g.position_visibility.position)).or_insert(0.0) +=
+                            effective(g.scale_opacity.opacity);
+                    }
+                    // Dilate ONCE per occupied cell into its 3×3×3 neighbourhood mass.
+                    // An isolated floater lands where the whole neighbourhood is nearly
+                    // empty; dense-but-faint foliage does not (500 × 0.1 alpha = mass 50)
+                    // — the distinction a pure opacity threshold could not make.
+                    let mut dilated: std::collections::HashMap<(i64, i64, i64), f32> =
+                        std::collections::HashMap::with_capacity(mass.len());
+                    for &(cx, cy, cz) in mass.keys() {
+                        let mut sum = 0.0f32;
+                        for dx in -1..=1 {
+                            for dy in -1..=1 {
+                                for dz in -1..=1 {
+                                    sum += mass.get(&(cx + dx, cy + dy, cz + dz)).copied().unwrap_or(0.0);
+                                }
+                            }
+                        }
+                        dilated.insert((cx, cy, cz), sum);
+                    }
+
+                    // Removal predicate: dust everywhere, isolation only inside the box.
+                    let is_floater = |g: &Gaussian3d| -> bool {
+                        let p = g.position_visibility.position;
+                        if effective(g.scale_opacity.opacity) < dust {
+                            return true; // dust floor — remove regardless of location
+                        }
+                        if !inside_box(p) {
+                            return false; // outside the robust box → keep (sky / far field)
+                        }
+                        dilated.get(&key(p)).copied().unwrap_or(0.0) < min_mass
+                    };
+
+                    // Neighbourhood-mass histogram (in-box), logged once: the speck and
+                    // surface populations separate cleanly, so `min_mass` can be placed
+                    // by measurement rather than guessed.
+                    {
+                        let mut b = [0usize; 6];
+                        for g in raw.iter() {
+                            let p = g.position_visibility.position;
+                            if !inside_box(p) {
+                                continue;
+                            }
+                            let m = dilated.get(&key(p)).copied().unwrap_or(0.0);
+                            let i = if m < 1.0 {
+                                0
+                            } else if m < 2.5 {
+                                1
+                            } else if m < 5.0 {
+                                2
+                            } else if m < 10.0 {
+                                3
+                            } else if m < 25.0 {
+                                4
+                            } else {
+                                5
+                            };
+                            b[i] += 1;
+                        }
                         warn!(
-                            "SplatCloud floater cull: removed {} / {} gaussians ({:.1}%) from {}",
+                            "SplatCloud floater mass histogram (in-box 3x3x3): <1={} <2.5={} <5={} <10={} <25={} >=25={} (min_mass={})",
+                            b[0], b[1], b[2], b[3], b[4], b[5], min_mass
+                        );
+                    }
+
+                    // ── Pass 2: apply, with a safety cap ──
+                    let kept: Vec<Gaussian3d> =
+                        raw.iter().filter(|g| !is_floater(g)).cloned().collect();
+                    let removed = total - kept.len();
+                    if removed as f32 / total as f32 > max_remove {
+                        // Over the cap → treat the isolation params as mis-tuned: keep
+                        // the isolation floaters but STILL drop dust, and skip the swap.
+                        let kept_dust: Vec<Gaussian3d> = raw
+                            .iter()
+                            .filter(|g| effective(g.scale_opacity.opacity) >= dust)
+                            .cloned()
+                            .collect();
+                        let dust_removed = total - kept_dust.len();
+                        warn!(
+                            "SplatCloud floater cull: isolation pass would remove {:.1}% (> cap {:.0}%) \
+                             at voxel={:.3}m min_mass={} — SKIPPED (dropped {} dust only) for {}",
+                            (removed as f32 / total as f32) * 100.0,
+                            max_remove * 100.0,
+                            voxel,
+                            min_mass,
+                            dust_removed,
+                            source
+                        );
+                        if dust_removed == 0 {
+                            None
+                        } else {
+                            Some(PlanarGaussian3d::from_iter(kept_dust))
+                        }
+                    } else {
+                        // `warn!` (not `info!`) so it survives the engine's hardcoded
+                        // log filter during verification.
+                        warn!(
+                            "SplatCloud floater cull (spatial-mass): removed {} / {} gaussians ({:.2}%) \
+                             — voxel={:.3}m min_mass={} box=[{:.1},{:.1},{:.1}]..[{:.1},{:.1},{:.1}] from {}",
                             removed,
                             total,
                             (removed as f32 / total as f32) * 100.0,
-                            cloud.source
+                            voxel,
+                            min_mass,
+                            box_lo[0], box_lo[1], box_lo[2],
+                            box_hi[0], box_hi[1], box_hi[2],
+                            source
                         );
-                        Some(PlanarGaussian3d::from_iter(kept))
+                        if removed == 0 {
+                            None
+                        } else {
+                            Some(PlanarGaussian3d::from_iter(kept))
+                        }
                     }
-                };
-                if let Some(new_cloud) = filtered {
-                    // Swap in a FRESH asset handle rather than mutating the
-                    // existing asset in place. The upstream GPU planar-storage
-                    // build reacts to a NEW cloud handle (exactly as at load
-                    // time), NOT to an in-place `Assets` mutation — mutating
-                    // the resident asset left the GPU buffers stale and the
-                    // cloud rendered NOTHING ("splat disappeared after cull").
-                    // Adding the filtered cloud as a new asset and re-pointing
-                    // the handle re-runs the same load-time GPU derivation on
-                    // the culled data, so it renders correctly.
-                    let old_id = handle.0.id();
-                    let new_handle = assets.add(new_cloud);
-                    // Force-drop the PRE-cull cloud. `asset_server` keeps a
-                    // strong handle to every path-loaded asset, so swapping the
-                    // entity's handle alone does NOT free the original — its
-                    // GPU planar storage stays resident and KEEPS RENDERING, so
-                    // both the full and culled clouds draw at once (~2× the
-                    // splats → the FPS floor + doubled memory). Explicitly
-                    // removing the old asset drops its GPU version too, leaving
-                    // only the culled cloud. (Single-cloud assumption: if two
-                    // entities ever shared one `.ply` handle this would strand
-                    // the other — revisit with per-entity cloud clones then.)
-                    assets.remove(old_id);
-                    commands
-                        .entity(entity)
-                        .insert(PlanarGaussian3dHandle(new_handle));
-                }
-                // Mark applied either way (a skipped cull must not retry every
-                // frame); a toggle off→on clears the marker to re-evaluate.
-                commands.entity(entity).insert(FloaterCullApplied);
-            }
-            // Disabled after being applied → reload the pristine cloud.
-            (false, true) => {
-                commands
-                    .entity(entity)
-                    .insert(PlanarGaussian3dHandle(asset_server.load(cloud.source.clone())))
-                    .remove::<FloaterCullApplied>();
-            }
-            _ => {}
         }
+    };
+
+    // ── Optional hard splat budget (EUSTRESS_SPLAT_BUDGET, default off) ──
+    // A raw FPS dial for GPU-bound clouds: when set (> 0) and the surviving
+    // cloud still exceeds it, keep the N most-opaque splats. Opt-in because it
+    // trades visual density for frame time — floater culling above is loss-
+    // free by design, this is not.
+    let budget = std::env::var("EUSTRESS_SPLAT_BUDGET")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    if budget == 0 {
+        return filtered;
     }
+    let mut survivors: Vec<Gaussian3d> = match &filtered {
+        Some(c) => c.iter().collect(),
+        None => raw,
+    };
+    if survivors.len() <= budget {
+        return filtered;
+    }
+    let looks_logit = survivors
+        .iter()
+        .take(4096)
+        .any(|g| g.scale_opacity.opacity < -0.001 || g.scale_opacity.opacity > 1.001);
+    let eff = |o: f32| -> f32 {
+        if looks_logit { 1.0 / (1.0 + (-o).exp()) } else { o }
+    };
+    survivors.sort_unstable_by(|a, b| {
+        eff(b.scale_opacity.opacity).total_cmp(&eff(a.scale_opacity.opacity))
+    });
+    let before = survivors.len();
+    survivors.truncate(budget);
+    warn!(
+        "SplatCloud budget: decimated {} → {} splats (EUSTRESS_SPLAT_BUDGET={}) for {}",
+        before, budget, budget, source
+    );
+    Some(PlanarGaussian3d::from_iter(survivors))
 }
 
 /// Marker + display metadata for a Gaussian-splat cloud entity.
@@ -310,10 +612,14 @@ fn apply_floater_cull(
 pub struct SplatCloud {
     /// Source asset path the cloud was loaded from (for display / round-trip).
     pub source: String,
-    /// When true, remove near-transparent "floater" Gaussians (the specks that
-    /// hang in the air around a real capture) once the cloud asset loads. This
-    /// is a GEOMETRIC prune (opacity threshold), distinct from [`Self::ppisp`]'s
-    /// photometric correction. Surfaced as a Properties toggle; default ON.
+    /// When true, remove "floater" Gaussians — the isolated specks that hang in
+    /// the air around a real capture — once the cloud asset loads. This is a
+    /// GEOMETRIC prune by SPATIAL ISOLATION (a splat with almost no neighbours in
+    /// a voxel grid), NOT an opacity cut: dense-but-faint surface detail like
+    /// tree foliage is low-opacity yet must be KEPT, so opacity is the wrong
+    /// signal. Distinct from [`Self::ppisp`]'s photometric correction. Tunable
+    /// via `EUSTRESS_SPLAT_CULL_*` env vars. Surfaced as a Properties toggle;
+    /// default ON.
     pub cull_floaters: bool,
     /// When true, apply the PPISP (Physically-Plausible ISP) photometric
     /// correction to the cloud — the exposure/vignette/color/CRF front-end that
@@ -373,13 +679,14 @@ fn demo_tag_gaussian_cameras(
     cameras: Query<(Entity, &Camera), (With<Camera3d>, Without<GaussianCamera>)>,
 ) {
     for (entity, camera) in &cameras {
-        // The upstream sorter asserts `camera.order >= 0` (it uses the order as a
-        // `usize` index into gaussian cameras — see bevy_gaussian_splatting
-        // sort/mod.rs:166). The engine's offscreen / AI cameras use NEGATIVE
-        // orders, so tagging them panics. Only tag on-screen (order >= 0)
-        // cameras. Production should select the one intended viewport camera
-        // explicitly rather than every order>=0 Camera3d.
-        if camera.order >= 0 {
+        // Tag ONLY the order-0 main viewport camera. The upstream pipeline
+        // builds per-GaussianCamera sort buffers and draws every cloud into
+        // every tagged view, so tagging any additional Camera3d (the engine's
+        // order-300 Slint UI overlay camera is one) re-renders + re-sorts the
+        // full multi-million-splat cloud once more per frame. Negative-order
+        // cameras (AI capture rigs) additionally panic the upstream sorter,
+        // which asserts `camera.order >= 0`.
+        if camera.order == 0 {
             commands.entity(entity).insert(GaussianCamera::default());
         }
     }
@@ -442,8 +749,20 @@ pub fn attach_splat_cloud(
 ) {
     let path = path.into();
     ec.insert((
-        PlanarGaussian3dHandle(asset_server.load(path.clone())),
-        CloudSettings::default(),
+        // Park the handle in `PendingSplatCloud`: the GPU only sees the cloud
+        // once the floater cull has produced the final (smaller) asset — see
+        // the component's docs for why exposing the raw cloud first was a
+        // VRAM/TDR hazard. `apply_floater_cull` promotes it (immediately when
+        // `cull_floaters` is off).
+        PendingSplatCloud(asset_server.load(path.clone())),
+        CloudSettings {
+            // 16-bit depth keys halve the GPU radix-sort passes vs the 32-bit
+            // default. A single captured scene spans metres–hundreds of
+            // metres, so 65K depth buckets are far below visible popping.
+            radix_sort_depth_bits:
+                bevy_gaussian_splatting::gaussian::settings::RadixSortDepthBits::Bits16,
+            ..Default::default()
+        },
         SplatCloud { source: path, cull_floaters, ppisp },
     ));
 }

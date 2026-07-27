@@ -57,13 +57,14 @@ import { SimulationSettingsDialog, WatchpointData, SimOutputBinding } from "simu
 import { ForgeConnectDialog } from "forge_connect.slint";
 import { StressTestDialog } from "stress_test.slint";
 import { DataSourcesDialog } from "data_sources.slint";
-import { KeybindingsDialog } from "keybindings.slint";
+import { KeybindingsDialog, ShortcutEntry } from "keybindings.slint";
 import { AboutDialog } from "about_dialog.slint";
 import { NewUniverseDialog } from "new_universe_dialog.slint";
 import { NewSpaceDialog } from "new_space_dialog.slint";
 import { AddAttributeDialog } from "add_attribute_dialog.slint";
 import { RenameTagDialog } from "rename_tag_dialog.slint";
 import { EditLabelDialog } from "edit_label_dialog.slint";
+import { FeedbackDialog } from "feedback_dialog.slint";
 import { ExitConfirmationDialog } from "exit_confirmation.slint";
 import { SyncDomainDialog } from "sync_domain.slint";
 import { WorkshopPanel, ChatMessage, PipelineStepData, ConversationSummary, MentionItemData } from "workshop_panel.slint";
@@ -195,6 +196,16 @@ export component StudioWindow inherits Window {
     callback browse-identity();
     callback login-with-identity();
     in-out property <bool> show-keybindings-dialog: false;
+    // Keyboard Shortcuts dialog state. `keybinding-entries` is rebuilt by
+    // `sync_keybindings_to_slint` whenever the `KeyBindings` resource changes,
+    // so a successful rebind refreshes the dialog AND every ribbon subtitle
+    // from the same push. `keybinding-conflict` carries the rejection reason
+    // back from `KeyBindings::rebind` (it names the action already holding
+    // the chord).
+    in-out property <[ShortcutEntry]> keybinding-entries: [];
+    in-out property <string> keybinding-capturing: "";
+    in-out property <string> keybinding-conflict: "";
+    callback rebind-shortcut(string, string);
     in-out property <bool> show-about-dialog: false;
     in-out property <string> about-version: "0.4.0";
     in-out property <string> about-commit: "";
@@ -232,6 +243,13 @@ export component StudioWindow inherits Window {
     in-out property <string> active-mode-id: "engineering";
     in property <string> active-mode-icon-id: "gear";
     in property <string> active-mode-name: "Mode";
+    // The active mode's stable identity color (see `ModeManifest.menu_color`
+    // / `Ribbon.active-mode-menu-color`) — drives the collapsed menu-bar
+    // icon/label so it reads the mode's own color, not the live accent ring.
+    in property <color> active-mode-menu-color: #ffffff;
+    // Per-tool composed icon resolver (Rust-side runtime load + cache; see
+    // `Ribbon.tool-icon-image`).
+    pure callback tool-icon-image(string) -> image;
     in property <[RibbonTabData]> ribbon-tabs: [];
     callback select-mode(string);
     // Submodes (Justice's Civil/Criminal/Judge, Military's six branches) +
@@ -246,6 +264,11 @@ export component StudioWindow inherits Window {
     in-out property <bool> show-new-universe-dialog: false;
     in-out property <string> new-universe-name: "";
     in-out property <bool> show-new-space-dialog: false;
+    // Help > Send Feedback (usage-telemetry comments)
+    in-out property <bool> show-feedback-dialog: false;
+    in-out property <string> feedback-about-tool: "";
+    in-out property <string> feedback-text: "";
+    callback feedback-send(string, string);
     in-out property <string> new-space-name: "";
     // Add/Edit Attribute modal (Roblox-style custom attributes)
     in-out property <bool> show-attribute-dialog: false;
@@ -533,8 +556,12 @@ export component StudioWindow inherits Window {
     // Dynamic keyboard shortcuts — pushed from Bevy's KeyBindings resource
     // on startup and on every change. Empty string hides the subtitle.
     in-out property <string> shortcut-new: "";
+    in-out property <string> shortcut-new-universe: "";
     in-out property <string> shortcut-open: "";
     in-out property <string> shortcut-save: "";
+    in-out property <string> shortcut-save-as: "";
+    in-out property <string> shortcut-publish-universe: "";
+    in-out property <string> shortcut-publish-space: "";
     in-out property <string> shortcut-undo: "";
     in-out property <string> shortcut-redo: "";
     in-out property <string> shortcut-cut: "";
@@ -552,6 +579,31 @@ export component StudioWindow inherits Window {
     in-out property <string> shortcut-unlock: "";
     in-out property <string> shortcut-anchor: "";
     in-out property <string> shortcut-focus: "";
+    in-out property <string> shortcut-gap-fill: "";
+    in-out property <string> shortcut-resize-align: "";
+    in-out property <string> shortcut-edge-align: "";
+    in-out property <string> shortcut-part-swap: "";
+    in-out property <string> shortcut-model-reflect: "";
+    in-out property <string> shortcut-linear-array: "";
+    in-out property <string> shortcut-radial-array: "";
+    in-out property <string> shortcut-grid-array: "";
+    in-out property <string> shortcut-path-array: "";
+    in-out property <string> shortcut-play-character: "";
+    in-out property <string> shortcut-play-solo: "";
+    in-out property <string> shortcut-pause-resume: "";
+    in-out property <string> shortcut-stop-play: "";
+    // Rename / Copy Path are context-menu-only today (no ribbon subtitle),
+    // but they still route through the shared `set_shortcut_*` pipeline so
+    // the menu never has to hardcode a chord string.
+    in-out property <string> shortcut-rename: "";
+    in-out property <string> shortcut-copy-path: "";
+    // Explorer hierarchy-selection commands — context-menu-only, and all five
+    // ARE remappable `Action`s, so a literal string here could go stale.
+    in-out property <string> shortcut-select-children: "";
+    in-out property <string> shortcut-select-descendants: "";
+    in-out property <string> shortcut-select-parent: "";
+    in-out property <string> shortcut-select-siblings: "";
+    in-out property <string> shortcut-invert-selection: "";
 
     // Notifications (pushed from Bevy — bottom-right stack above output panel)
     in-out property <[NotificationData]> notifications: [];
@@ -582,6 +634,8 @@ export component StudioWindow inherits Window {
 
     // Notification settings (mirrored into File > Settings > Notifications)
     in-out property <bool> notifications-enabled: true;
+    // Privacy — anonymous usage counting toggle (Settings ▸ Notifications).
+    in-out property <bool> usage-telemetry-enabled: true;
     in-out property <bool> notifications-show-dismiss: true;
     in-out property <bool> notifications-mute-file: false;
     in-out property <bool> notifications-mute-script: false;
@@ -620,6 +674,14 @@ export component StudioWindow inherits Window {
     // to avoid overwriting user input while they're typing. Set by callbacks from input fields.
     in-out property <bool> any-input-has-focus: false;
     out property <bool> command-bar-has-focus: cmd-bar.input-has-focus;
+
+    // Properties-panel filter. Kept apart from `any-input-has-focus` on
+    // purpose: that flag pauses the properties sync, and the filter needs the
+    // sync to RUN in order to re-filter. This one only blocks engine keyboard
+    // handling so typing a filter doesn't drive the camera.
+    in-out property <string> property-search-query: "";
+    in-out property <bool> property-search-has-focus: false;
+    callback property-search-changed(string);
     
     // Panel widths (resizable)
     in-out property <length> left-panel-width: 280px;
@@ -1135,6 +1197,8 @@ export component StudioWindow inherits Window {
             active-mode-id <=> root.active-mode-id;
             active-mode-icon-id: root.active-mode-icon-id;
             active-mode-name: root.active-mode-name;
+            active-mode-menu-color: root.active-mode-menu-color;
+            tool-icon-image(id) => { root.tool-icon-image(id) }
             ribbon-tabs: root.ribbon-tabs;
             select-mode(id) => { root.select-mode(id); }
             available-submodes: root.available-submodes;
@@ -1169,8 +1233,12 @@ export component StudioWindow inherits Window {
 
             // Pipe dynamic keyboard shortcuts into the ribbon subtitles
             shortcut-new: root.shortcut-new;
+            shortcut-new-universe: root.shortcut-new-universe;
             shortcut-open: root.shortcut-open;
             shortcut-save: root.shortcut-save;
+            shortcut-save-as: root.shortcut-save-as;
+            shortcut-publish-universe: root.shortcut-publish-universe;
+            shortcut-publish-space: root.shortcut-publish-space;
             shortcut-undo: root.shortcut-undo;
             shortcut-redo: root.shortcut-redo;
             shortcut-cut: root.shortcut-cut;
@@ -1188,6 +1256,19 @@ export component StudioWindow inherits Window {
             shortcut-unlock: root.shortcut-unlock;
             shortcut-anchor: root.shortcut-anchor;
             shortcut-focus: root.shortcut-focus;
+            shortcut-gap-fill: root.shortcut-gap-fill;
+            shortcut-resize-align: root.shortcut-resize-align;
+            shortcut-edge-align: root.shortcut-edge-align;
+            shortcut-part-swap: root.shortcut-part-swap;
+            shortcut-model-reflect: root.shortcut-model-reflect;
+            shortcut-linear-array: root.shortcut-linear-array;
+            shortcut-radial-array: root.shortcut-radial-array;
+            shortcut-grid-array: root.shortcut-grid-array;
+            shortcut-path-array: root.shortcut-path-array;
+            shortcut-play-character: root.shortcut-play-character;
+            shortcut-play-solo: root.shortcut-play-solo;
+            shortcut-pause-resume: root.shortcut-pause-resume;
+            shortcut-stop-play: root.shortcut-stop-play;
 
             account-name: root.account-name;
             account-status: root.account-status;
@@ -1577,17 +1658,24 @@ export component StudioWindow inherits Window {
 
                                 // Populate menu items based on node type
                                 if node-type == "file" {
+                                    // Shortcut text for every REMAPPABLE command reads
+                                    // the live `shortcut-*` properties (pushed by
+                                    // `sync_keybindings_to_slint`), so a remap can never
+                                    // leave this menu quoting a chord that no longer
+                                    // works. "Enter" and "Alt+Enter" stay literal: they
+                                    // are fixed Explorer keys with no `Action` behind
+                                    // them, so there is nothing that could drift.
                                     root.context-menu-items = [
                                         { id: "open", label: "Open", shortcut: "Enter", icon: @image-url("../../assets/icons/ui/new-file.svg"), enabled: true, separator-after: false },
                                         { id: "open-with", label: "Open With...", shortcut: "", icon: @image-url("../../assets/icons/ui/settings.svg"), enabled: true, separator-after: true },
-                                        { id: "cut", label: "Cut", shortcut: "Ctrl+X", icon: @image-url("../../assets/icons/ui/cut.svg"), enabled: true, separator-after: false },
-                                        { id: "copy", label: "Copy", shortcut: "Ctrl+C", icon: @image-url("../../assets/icons/ui/copy.svg"), enabled: true, separator-after: false },
-                                        { id: "paste", label: "Paste", shortcut: "Ctrl+V", icon: @image-url("../../assets/icons/ui/paste.svg"), enabled: true, separator-after: false },
-                                        { id: "delete", label: "Delete", shortcut: "Del", icon: @image-url("../../assets/icons/ui/delete.svg"), enabled: true, separator-after: true },
-                                        { id: "rename", label: "Rename", shortcut: "F2", icon: @image-url("../../assets/icons/ui/rename.svg"), enabled: true, separator-after: false },
-                                        { id: "duplicate", label: "Duplicate", shortcut: "Ctrl+D", icon: @image-url("../../assets/icons/ui/duplicate.svg"), enabled: true, separator-after: true },
+                                        { id: "cut", label: "Cut", shortcut: root.shortcut-cut, icon: @image-url("../../assets/icons/ui/cut.svg"), enabled: true, separator-after: false },
+                                        { id: "copy", label: "Copy", shortcut: root.shortcut-copy, icon: @image-url("../../assets/icons/ui/copy.svg"), enabled: true, separator-after: false },
+                                        { id: "paste", label: "Paste", shortcut: root.shortcut-paste, icon: @image-url("../../assets/icons/ui/paste.svg"), enabled: true, separator-after: false },
+                                        { id: "delete", label: "Delete", shortcut: root.shortcut-delete, icon: @image-url("../../assets/icons/ui/delete.svg"), enabled: true, separator-after: true },
+                                        { id: "rename", label: "Rename", shortcut: root.shortcut-rename, icon: @image-url("../../assets/icons/ui/rename.svg"), enabled: true, separator-after: false },
+                                        { id: "duplicate", label: "Duplicate", shortcut: root.shortcut-duplicate, icon: @image-url("../../assets/icons/ui/duplicate.svg"), enabled: true, separator-after: true },
                                         { id: "show-in-explorer", label: "Show in File Explorer", shortcut: "", icon: @image-url("../../assets/icons/folder.svg"), enabled: true, separator-after: false },
-                                        { id: "copy-path", label: "Copy Path", shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
+                                        { id: "copy-path", label: "Copy Path", shortcut: root.shortcut-copy-path, icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
                                         { id: "copy-relative-path", label: "Copy Relative Path", shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: true },
                                         { id: "properties", label: "Properties", shortcut: "Alt+Enter", icon: @image-url("../../assets/icons/ui/settings.svg"), enabled: true, separator-after: false },
                                     ];
@@ -1595,26 +1683,31 @@ export component StudioWindow inherits Window {
                                     // Entity menu — selection + hierarchy + edit
                                     // commands. Items match the keybindings wired
                                     // to MenuActionEvent in handle_menu_action_events.
+                                    // Every chord here is read from the live `shortcut-*`
+                                    // properties rather than spelled out — the literals
+                                    // this replaced had already drifted (Select
+                                    // Children/Parent/Siblings each quoted a chord the
+                                    // keybinding table does not hold).
                                     root.context-menu-items = [
-                                        { id: "select_children",    label: "Select Children",     shortcut: "Ctrl+Shift+V", icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true,  separator-after: false },
-                                        { id: "select_descendants", label: "Select Descendants",  shortcut: "Ctrl+Shift+D", icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true,  separator-after: false },
-                                        { id: "select_parent",      label: "Select Parent",       shortcut: "Ctrl+Shift+U", icon: @image-url("../../assets/icons/ui/chevron-up.svg"),    enabled: true,  separator-after: false },
-                                        { id: "select_siblings",    label: "Select Siblings",     shortcut: "Ctrl+Shift+S", icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true,  separator-after: false },
-                                        { id: "invert_selection",   label: "Invert Selection",    shortcut: "Ctrl+I",       icon: @image-url("../../assets/icons/ui/swap.svg"),         enabled: true,  separator-after: true  },
-                                        { id: "cut",       label: "Cut",        shortcut: "Ctrl+X", icon: @image-url("../../assets/icons/ui/cut.svg"),       enabled: true, separator-after: false },
-                                        { id: "copy",      label: "Copy",       shortcut: "Ctrl+C", icon: @image-url("../../assets/icons/ui/copy.svg"),      enabled: true, separator-after: false },
-                                        { id: "paste",     label: "Paste",      shortcut: "Ctrl+V", icon: @image-url("../../assets/icons/ui/paste.svg"),     enabled: true, separator-after: false },
-                                        { id: "duplicate", label: "Duplicate",  shortcut: "Ctrl+D", icon: @image-url("../../assets/icons/ui/duplicate.svg"), enabled: true, separator-after: false },
-                                        { id: "delete",    label: "Delete",     shortcut: "Del",    icon: @image-url("../../assets/icons/ui/delete.svg"),    enabled: true, separator-after: true  },
-                                        { id: "group",     label: "Group",      shortcut: "Ctrl+G", icon: @image-url("../../assets/icons/folder.svg"),    enabled: true, separator-after: false },
-                                        { id: "ungroup",   label: "Ungroup",    shortcut: "Ctrl+U", icon: @image-url("../../assets/icons/ui/folder-open.svg"), enabled: true, separator-after: true },
-                                        { id: "rename",    label: "Rename",     shortcut: "F2",     icon: @image-url("../../assets/icons/ui/rename.svg"),    enabled: true, separator-after: true },
+                                        { id: "select_children",    label: "Select Children",     shortcut: root.shortcut-select-children,    icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true,  separator-after: false },
+                                        { id: "select_descendants", label: "Select Descendants",  shortcut: root.shortcut-select-descendants, icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true,  separator-after: false },
+                                        { id: "select_parent",      label: "Select Parent",       shortcut: root.shortcut-select-parent,      icon: @image-url("../../assets/icons/ui/chevron-up.svg"),    enabled: true,  separator-after: false },
+                                        { id: "select_siblings",    label: "Select Siblings",     shortcut: root.shortcut-select-siblings,    icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true,  separator-after: false },
+                                        { id: "invert_selection",   label: "Invert Selection",    shortcut: root.shortcut-invert-selection,   icon: @image-url("../../assets/icons/ui/swap.svg"),         enabled: true,  separator-after: true  },
+                                        { id: "cut",       label: "Cut",        shortcut: root.shortcut-cut,       icon: @image-url("../../assets/icons/ui/cut.svg"),       enabled: true, separator-after: false },
+                                        { id: "copy",      label: "Copy",       shortcut: root.shortcut-copy,      icon: @image-url("../../assets/icons/ui/copy.svg"),      enabled: true, separator-after: false },
+                                        { id: "paste",     label: "Paste",      shortcut: root.shortcut-paste,     icon: @image-url("../../assets/icons/ui/paste.svg"),     enabled: true, separator-after: false },
+                                        { id: "duplicate", label: "Duplicate",  shortcut: root.shortcut-duplicate, icon: @image-url("../../assets/icons/ui/duplicate.svg"), enabled: true, separator-after: false },
+                                        { id: "delete",    label: "Delete",     shortcut: root.shortcut-delete,    icon: @image-url("../../assets/icons/ui/delete.svg"),    enabled: true, separator-after: true  },
+                                        { id: "group",     label: "Group",      shortcut: root.shortcut-group,     icon: @image-url("../../assets/icons/folder.svg"),    enabled: true, separator-after: false },
+                                        { id: "ungroup",   label: "Ungroup",    shortcut: root.shortcut-ungroup,   icon: @image-url("../../assets/icons/ui/folder-open.svg"), enabled: true, separator-after: true },
+                                        { id: "rename",    label: "Rename",     shortcut: root.shortcut-rename,    icon: @image-url("../../assets/icons/ui/rename.svg"),    enabled: true, separator-after: true },
                                         // Copy the on-disk path (to the
                                         // _instance.toml or parent folder) to
                                         // the clipboard — matches the file
                                         // menu's item + the Soul Panel's
                                         // "Copy Path" shortcut.
-                                        { id: "copy-path",          label: "Copy Path",          shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
+                                        { id: "copy-path",          label: "Copy Path",          shortcut: root.shortcut-copy-path, icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
                                         { id: "copy-relative-path", label: "Copy Relative Path", shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
                                     ];
                                 }
@@ -3023,6 +3116,12 @@ export component StudioWindow inherits Window {
                             properties: root.entity-properties;
                             show-help-icons: root.show-help-icons;
                             help-opens-in-tab: root.help-opens-in-tab;
+                            // Filter. Rust reads the query straight off
+                            // `property-search-query`; the callback only asks
+                            // it to rebuild the rows model.
+                            search-query <=> root.property-search-query;
+                            on-search-changed(q) => { root.property-search-changed(q); }
+                            on-search-focus-changed(f) => { root.property-search-has-focus = f; }
                             // BrickColor wheel picker — Rust pushes all seven
                             // honeycombs once; the drill is local to the row.
                             aether-honeycomb: root.aether-honeycomb;
@@ -3438,11 +3537,35 @@ export component StudioWindow inherits Window {
             clicked => { root.show-context-menu = false; }
         }
 
-        // Context menu — clamped to viewport bounds
+        // Context menu — clamped to viewport bounds using the menu's OWN
+        // measured size (`self.width`/`self.height`), not a fixed guess.
+        // The old clamp assumed a 320px-tall menu, so a taller one (the
+        // entity menu is ~16 rows ≈ 450px) still ran off the bottom. The
+        // `max(4px, …)` upper bound keeps the top on-screen even if a menu
+        // is ever taller than the whole window (bottom would still clip,
+        // but the most-used top items stay reachable).
         ContextMenu {
-            x: min(root.context-menu-x, root.width - 228px);
-            y: min(max(root.context-menu-y, 4px), root.height - 320px);
+            x: min(max(root.context-menu-x, 4px), max(4px, root.width - self.width - 8px));
+            y: min(max(root.context-menu-y, 4px), max(4px, root.height - self.height - 8px));
             items: root.context-menu-items;
+            // `kind` selects the item set: "viewport" gets the build menu,
+            // everything else the Explorer entity menu.
+            kind: root.context-menu-target-type;
+            // Shortcut text comes from the same live bindings the ribbon
+            // subtitles use — see `sync_keybindings_to_slint`. No literal
+            // chord strings live in the menu itself.
+            shortcut-cut: root.shortcut-cut;
+            shortcut-copy: root.shortcut-copy;
+            shortcut-paste: root.shortcut-paste;
+            shortcut-duplicate: root.shortcut-duplicate;
+            shortcut-delete: root.shortcut-delete;
+            shortcut-rename: root.shortcut-rename;
+            shortcut-copy-path: root.shortcut-copy-path;
+            shortcut-group: root.shortcut-group;
+            shortcut-ungroup: root.shortcut-ungroup;
+            shortcut-focus: root.shortcut-focus;
+            shortcut-anchor: root.shortcut-anchor;
+            shortcut-lock: root.shortcut-lock;
             on-action(action) => {
                 root.context-action(action);
                 root.show-context-menu = false;
@@ -3539,6 +3662,7 @@ export component StudioWindow inherits Window {
         soul-api-key-valid: root.soul-api-key-valid;
         soul-xai-api-key <=> root.soul-xai-api-key;
         notifications-enabled <=> root.notifications-enabled;
+        usage-telemetry-enabled <=> root.usage-telemetry-enabled;
         notifications-show-dismiss <=> root.notifications-show-dismiss;
         notifications-mute-file <=> root.notifications-mute-file;
         notifications-mute-script <=> root.notifications-mute-script;
@@ -3698,7 +3822,14 @@ export component StudioWindow inherits Window {
 
     // Keyboard shortcuts dialog
     if root.show-keybindings-dialog: KeybindingsDialog {
-        on-close => { root.show-keybindings-dialog = false; }
+        entries: root.keybinding-entries;
+        capturing-action <=> root.keybinding-capturing;
+        conflict-message: root.keybinding-conflict;
+        on-rebind(action, chord) => { root.rebind-shortcut(action, chord); }
+        on-close => {
+            root.keybinding-capturing = "";
+            root.show-keybindings-dialog = false;
+        }
     }
 
     // About Eustress Engine dialog
@@ -3726,6 +3857,20 @@ export component StudioWindow inherits Window {
     }
 
     // New Space dialog — Step 2: get space name (after universe is created)
+    if root.show-feedback-dialog: FeedbackDialog {
+        about-tool: root.feedback-about-tool;
+        feedback-text <=> root.feedback-text;
+        send(about, text) => {
+            root.show-feedback-dialog = false;
+            root.feedback-send(about, text);
+            root.feedback-text = "";
+        }
+        cancel => {
+            root.show-feedback-dialog = false;
+            root.feedback-text = "";
+        }
+    }
+
     if root.show-new-space-dialog: NewSpaceDialog {
         universe-name: root.new-universe-name;
         space-name <=> root.new-space-name;

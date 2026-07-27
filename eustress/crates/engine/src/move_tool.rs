@@ -396,6 +396,14 @@ fn handle_move_interaction(
     parent_query: Query<&ChildOf>,
     mut undo_stack: ResMut<crate::undo::UndoStack>,
     instance_files: Query<&crate::space::instance_loader::InstanceFile>,
+    // Render-Aabb fallback for BasePart-less selectables (Gaussian Splat
+    // clouds). MUST mirror `draw_move_gizmos`' bounds priority so the
+    // CLICKABLE hit-zones + drag center land exactly where the gizmo is
+    // DRAWN. Without this, a GS cloud whose Aabb.center is offset from
+    // its entity origin (typical for imported 3DGS) draws the gizmo on
+    // the cloud but keeps the axis/plane hit-zones at the origin — the
+    // "Move gizmo breaks / can't be grabbed" bug.
+    aabbs: Query<&bevy::camera::primitives::Aabb>,
     snap: MoveToolSnapCtx,
 ) {
     // Destructure the bundles so the rest of the body uses the same
@@ -452,8 +460,11 @@ fn handle_move_interaction(
             // the marker is still correct so the next gizmo session
             // (without this Escape having happened) writes properly.
             for ent in state.initial_positions.keys() {
-                commands.entity(*ent)
-                    .remove::<crate::space::instance_loader::BeingDragged>();
+                // get_entity: a reconcile (GS clouds especially) can despawn
+                // a dragged entity between grab and release; entity() panics.
+                if let Ok(mut ec) = commands.get_entity(*ent) {
+                    ec.remove::<crate::space::instance_loader::BeingDragged>();
+                }
             }
             state.dragged_axis = None;
             state.dragged_plane = None;
@@ -498,8 +509,20 @@ fn handle_move_interaction(
             if let Ok(bg) = billboards.get(entity) {
                 t.translation = gt.translation() + Vec3::from_array(bg.units_offset);
             }
-            let s = bp.as_ref().map(|b| b.size).unwrap_or(t.scale);
-            let (mn, mx) = calculate_rotated_aabb(t.translation, s * 0.5, t.rotation);
+            // Bounds priority MUST match `draw_move_gizmos`: BasePart.size
+            // → render Aabb (GS clouds) → Transform.scale. Diverging here
+            // is what put the clickable hit-zones off the drawn gizmo.
+            let (obb_center, s) = if let Some(b) = bp.as_ref() {
+                (t.translation, b.size)
+            } else if let Ok(a) = aabbs.get(entity) {
+                (
+                    t.translation + t.rotation * (Vec3::from(a.center) * t.scale),
+                    Vec3::from(a.half_extents) * 2.0 * t.scale,
+                )
+            } else {
+                (t.translation, t.scale)
+            };
+            let (mn, mx) = calculate_rotated_aabb(obb_center, s * 0.5, t.rotation);
             bmin = bmin.min(mn); bmax = bmax.max(mx); cnt += 1;
             if let Ok(children) = children_query.get(entity) {
                 for child in children.iter() {
@@ -630,8 +653,20 @@ fn handle_move_interaction(
         let selected_entities: Vec<Entity> = query.iter().map(|(e, ..)| e).collect();
         for (entity, gt, _, bp) in query.iter() {
             let t = gt.compute_transform();
-            let size = bp.as_ref().map(|b| b.size).unwrap_or(t.scale);
-            if crate::math_utils::ray_intersects_part_rotated(&ray, t.translation, t.rotation, size) {
+            // Aabb-aware body pick so a GS cloud (no BasePart) is grabbable
+            // where it actually renders, not at its 1×1×1 origin box —
+            // otherwise clicking the cloud to free-drag it silently misses.
+            let (obb_center, size) = if let Some(b) = bp.as_ref() {
+                (t.translation, b.size)
+            } else if let Ok(a) = aabbs.get(entity) {
+                (
+                    t.translation + t.rotation * (Vec3::from(a.center) * t.scale),
+                    Vec3::from(a.half_extents) * 2.0 * t.scale,
+                )
+            } else {
+                (t.translation, t.scale)
+            };
+            if crate::math_utils::ray_intersects_part_rotated(&ray, obb_center, t.rotation, size) {
                 state.free_drag = true;
                 state.dragged_axis = None;
                 state.dragged_entity = Some(entity);
@@ -782,10 +817,17 @@ fn handle_move_interaction(
             // and produces half-embedded drops.
             let leader_size = dragged_entity
                 .and_then(|e| query.get(e).ok())
-                .map(|(_, gt, _, bp)| {
-                    bp.as_ref()
-                        .map(|b| b.size)
-                        .unwrap_or_else(|| gt.compute_transform().scale)
+                .map(|(ent, gt, _, bp)| {
+                    let t = gt.compute_transform();
+                    if let Some(b) = bp.as_ref() {
+                        b.size
+                    } else if let Ok(a) = aabbs.get(ent) {
+                        // GS cloud: use render-Aabb extent so drop-snap
+                        // offset isn't computed from a 1×1×1 origin box.
+                        Vec3::from(a.half_extents) * 2.0 * t.scale
+                    } else {
+                        t.scale
+                    }
                 })
                 .unwrap_or(Vec3::ONE);
             let leader_rot = dragged_entity
@@ -1076,8 +1118,11 @@ fn handle_move_interaction(
         // session — defensive against any state.dragged_* clear path we
         // might add later that forgets the marker.
         for ent in state.initial_positions.keys() {
-            commands.entity(*ent)
-                .remove::<crate::space::instance_loader::BeingDragged>();
+            // get_entity: a reconcile (GS clouds especially) can despawn a
+            // dragged entity between grab and release; entity() would panic.
+            if let Ok(mut ec) = commands.get_entity(*ent) {
+                ec.remove::<crate::space::instance_loader::BeingDragged>();
+            }
         }
         state.dragged_axis = None;
         state.dragged_plane = None;
@@ -1164,8 +1209,11 @@ fn finalize_numeric_input_on_move(
 
         // Clear drag state — matches the mouse-released path.
         for ent in state.initial_positions.keys() {
-            commands.entity(*ent)
-                .remove::<crate::space::instance_loader::BeingDragged>();
+            // get_entity: a reconcile (GS clouds especially) can despawn a
+            // dragged entity between grab and release; entity() would panic.
+            if let Ok(mut ec) = commands.get_entity(*ent) {
+                ec.remove::<crate::space::instance_loader::BeingDragged>();
+            }
         }
         state.dragged_axis = None;
         state.dragged_plane = None;

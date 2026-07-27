@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<g transform="translate(0.96 0.96) scale(0.92)"><g transform="scale(1.5000)"><!-- mallet head (cylinder) -->
+  <path d="M2.4 6.6 L6.6 2.4" stroke="#d4d4d4" stroke-width="3" stroke-linecap="round" fill="none"/>
+  <!-- handle -->
+  <path d="M4.5 4.5 L10.8 10.8" stroke="#d4d4d4" stroke-width="1.4" stroke-linecap="round" fill="none"/>
+  <!-- sound block / base -->
+  <path d="M8.6 13.4 L14.4 13.4" stroke="#d4d4d4" stroke-width="2" stroke-linecap="round" fill="none"/></g></g>
+</svg>

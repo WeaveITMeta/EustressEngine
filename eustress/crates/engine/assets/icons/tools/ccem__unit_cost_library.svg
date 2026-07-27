@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<mask id="kb"><rect x="0" y="0" width="24" height="24" fill="white"/><circle cx="17.6" cy="17.6" r="6.1" fill="black"/></mask>
+<g mask="url(#kb)"><g transform="scale(0.82)"><rect x="5" y="2.5" width="14" height="19" rx="2" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="8" y1="7" x2="16" y2="7" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <circle cx="9" cy="11.5" r=".9" fill="#d4d4d4" stroke="none"/>
+  <circle cx="12" cy="11.5" r=".9" fill="#d4d4d4" stroke="none"/>
+  <circle cx="15" cy="11.5" r=".9" fill="#d4d4d4" stroke="none"/>
+  <circle cx="9" cy="15" r=".9" fill="#d4d4d4" stroke="none"/>
+  <circle cx="12" cy="15" r=".9" fill="#d4d4d4" stroke="none"/>
+  <circle cx="15" cy="15" r=".9" fill="#d4d4d4" stroke="none"/>
+  <circle cx="9" cy="18.5" r=".9" fill="#d4d4d4" stroke="none"/>
+  <circle cx="12" cy="18.5" r=".9" fill="#d4d4d4" stroke="none"/>
+  <circle cx="15" cy="18.5" r=".9" fill="#d4d4d4" stroke="none"/></g></g>
+<circle cx="17.6" cy="17.6" r="4.5" stroke="#d4d4d4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+<path d="M15.4 16.2h4.4M15.4 17.8h4.4M15.4 19.4h4.4" stroke="#d4d4d4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>

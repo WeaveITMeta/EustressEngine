@@ -1005,11 +1005,18 @@ impl Plugin for SharedAnimationPlugin {
             apply_directional_blend,
         ).chain().after(update_animation_transitions));
         
-        info!("🎬 SharedAnimationPlugin initialized:");
-        info!("   ✓ Crossfade blending");
-        info!("   ✓ 1D/2D Locomotion blend trees");
-        info!("   ✓ Foot IK with ground adaptation");
-        info!("   ✓ Layered animation (upper/lower body)");
-        info!("   ✓ Root motion extraction");
+        // The five checkmarked "features" that used to print here claimed
+        // crossfade blending, 1D/2D blend trees, foot IK with ground
+        // adaptation, layered animation and root motion. None of the five
+        // functioned: the blend-tree types had zero references, `update_foot_ik`
+        // was never registered and its ground raycast returned an unconditional
+        // `None`, the layer system ended at a TODO, and `apply_root_motion` was
+        // an empty function. A startup banner that asserts capabilities nothing
+        // tests is worse than silence.
+        //
+        // Those capabilities now live in `common::avatar` and are covered by
+        // tests. Each line earns its way back only alongside an assertion on a
+        // measured quantity.
+        info!("🎬 SharedAnimationPlugin initialized (legacy path — see common::avatar)");
     }
 }

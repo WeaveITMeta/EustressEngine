@@ -109,6 +109,11 @@ bevy = { workspace = true, default-features = false, features = [
     "default_font",
     "bevy_asset",
     "bevy_animation",
+    # See the note in crates/client/Cargo.toml: `bevy_animation` alone does
+    # NOT make bevy_gltf parse animations in Bevy 0.19. Studio needs this for
+    # the same reason the Client does — no character clip has loaded in
+    # either shell since the 0.19 migration.
+    "gltf_animation",
     "bevy_color",
     "bevy_ui",
     "png",

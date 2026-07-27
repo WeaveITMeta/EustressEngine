@@ -1,16 +1,24 @@
 //! # Select Tool
 //!
 //! The Select Tool provides base behavior for all transformation tools:
-//! - Click to select entities
-//! - Drag to move selected entities
-//! - R key to rotate 90° on Y axis
-//! - T key to tilt 90° on Z axis
-//! - Box selection for multiple entities
-//! - Physics-based surface detection via Avian3D
+//! - Drag a selected part to move it — surface-snapped against Avian3D
+//!   geometry, or camera-relative for mind-map billboard nodes
+//! - Marquee box selection: the box replaces the selection, or adds to it
+//!   when Shift is held
+//! - `Ctrl+R` rotates the selection 90° about Y, `Ctrl+T` tilts it 90°
+//!   about Z (`Action::RotateY90` / `Action::TiltZ90`). The handler also
+//!   accepts bare `R` / `T` — legacy in-drag behaviour that still works —
+//!   but the bound, remappable form is the Ctrl one.
 //! - Grid snapping support
 //!
-//! Other tools (Move, Scale, Rotate) inherit this base behavior and add
-//! their specific gizmos and interaction modes.
+//! Click-to-select is deliberately NOT here: `part_selection.rs`
+//! (`part_selection_system`) owns the pick raycast, the Ctrl/Shift
+//! modifier model, and the Model-vs-individual-part resolution. The only
+//! selection this module ever mutates is the marquee's.
+//!
+//! Everything above is live in the Select, Move, Scale, and Rotate tool
+//! modes. Those tools layer their own gizmos on top and pre-empt this one
+//! whenever a gizmo handle is actually grabbed.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -1204,7 +1212,14 @@ fn handle_box_selection(
         // clicked part or deselects on empty), and a real drag REPLACES the
         // selection in the active branch below. (Locked parts are still EXCLUDED
         // from the marquee's selection results — see the scan loop.)
-        let handle_grabbed = move_state.as_ref().and_then(|s| s.dragged_axis).is_some()
+        // Move has THREE grab modes — axis arrow, PLANE square, and the
+        // centre free-drag — and only the first sets `dragged_axis`. Checking
+        // just `dragged_axis` let a plane-square (or centre) grab fall through
+        // to the marquee, which then box-selected + deselected instead of
+        // moving (the "planar handles don't register" bug). Cover all three.
+        let handle_grabbed = move_state
+            .as_ref()
+            .map_or(false, |s| s.dragged_axis.is_some() || s.dragged_plane.is_some() || s.free_drag)
             || scale_state.as_ref().and_then(|s| s.dragged_axis).is_some()
             || rotate_state.as_ref().and_then(|s| s.dragged_axis).is_some();
 
@@ -1238,7 +1253,14 @@ fn handle_box_selection(
         // If a transform handle got grabbed after the press (its dragged_axis
         // is set a frame later), abort the pending marquee so it doesn't fight
         // the gizmo drag.
-        let handle_grabbed = move_state.as_ref().and_then(|s| s.dragged_axis).is_some()
+        // Move has THREE grab modes — axis arrow, PLANE square, and the
+        // centre free-drag — and only the first sets `dragged_axis`. Checking
+        // just `dragged_axis` let a plane-square (or centre) grab fall through
+        // to the marquee, which then box-selected + deselected instead of
+        // moving (the "planar handles don't register" bug). Cover all three.
+        let handle_grabbed = move_state
+            .as_ref()
+            .map_or(false, |s| s.dragged_axis.is_some() || s.dragged_plane.is_some() || s.free_drag)
             || scale_state.as_ref().and_then(|s| s.dragged_axis).is_some()
             || rotate_state.as_ref().and_then(|s| s.dragged_axis).is_some();
         if handle_grabbed {

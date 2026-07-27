@@ -85,11 +85,12 @@ fn draw_rotate_gizmos(
         (Without<Selected>, Without<bevy::ui::Node>),
     >,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
+    aabbs: Query<&bevy::camera::primitives::Aabb>,
 ) {
     if !state.active || query.is_empty() { return; }
 
     // Compute group bounding box and center
-    let (center, bbox_extent) = compute_group_center_and_extent(&query, &children_query, &child_transforms);
+    let (center, bbox_extent) = compute_group_center_and_extent(query.iter(), &children_query, &child_transforms, &aabbs);
 
     // Camera-distance-scaled radius, incorporating object bounding extent
     let Some((_, cam_gt, projection)) = cameras.iter().find(|(c, _, _)| c.order == 0) else { return };
@@ -161,11 +162,21 @@ fn handle_rotate_interaction(
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
     mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>), With<Selected>>,
     parent_query: Query<&ChildOf>,
+    // Same child-bounds queries the draw system uses, so the ring HIT-TEST
+    // computes an identical centre/radius to the drawn rings (see
+    // `compute_group_center_and_extent`). Without this the click used a
+    // scale-only bbox and ring-clicks on Gaussian-Splats / sized parts missed.
+    children_query: Query<&Children>,
+    child_transforms: Query<
+        (&GlobalTransform, Option<&crate::classes::BasePart>),
+        (Without<Selected>, Without<bevy::ui::Node>),
+    >,
     mut undo_stack: ResMut<crate::undo::UndoStack>,
     editor_settings: Res<crate::editor_settings::EditorSettings>,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
     studio_state: Option<Res<crate::ui::StudioState>>,
     pivot_state: Option<Res<crate::pivot_mode::PivotState>>,
+    aabbs: Query<&bevy::camera::primitives::Aabb>,
 ) {
     if !state.active { return; }
 
@@ -239,14 +250,16 @@ fn handle_rotate_interaction(
             })
             .collect();
 
-        // Compute group center
-        let mut bmin = Vec3::splat(f32::MAX);
-        let mut bmax = Vec3::splat(f32::MIN);
-        for (_, pos, rot, scale) in &snapshot {
-            let (mn, mx) = calculate_rotated_aabb(*pos, *scale * 0.5, *rot);
-            bmin = bmin.min(mn); bmax = bmax.max(mx);
-        }
-        let group_center = (bmin + bmax) * 0.5;
+        // Compute group center + extent the SAME way the draw system does
+        // (BasePart.size + children), so the ring hit-test matches the drawn
+        // rings exactly — the fix for "ring-clicks deselect on Gaussian
+        // Splats / sized parts". Iterated read-only from the `&mut` query.
+        let (group_center, extent) = compute_group_center_and_extent(
+            query.iter().map(|(e, gt, _t, bp)| (e, gt, bp)),
+            &children_query,
+            &child_transforms,
+            &aabbs,
+        );
         // Phase-1 pivot-mode integration — resolve the effective pivot
         // point through PivotState. Active → use the first-selected
         // entity's origin; Cursor → use the user-placed 3D cursor;
@@ -259,7 +272,7 @@ fn handle_rotate_interaction(
         } else {
             group_center
         };
-        let radius = compute_ring_radius(center, bmax - bmin, camera_transform, projection);
+        let radius = compute_ring_radius(center, extent, camera_transform, projection);
 
         // Gizmo rotation — captures whether we're in World or Local mode.
         // Hit test rotates the canonical ring axes into this frame so
@@ -553,22 +566,46 @@ fn angle_on_ring(ray: &Ray3d, center: Vec3, axis: Axis3d, rotation: Quat) -> f32
 }
 
 /// Compute the world-space center and extent of the combined AABB of all selected entities.
-fn compute_group_center_and_extent(
-    query: &Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>), With<Selected>>,
+/// Group bounds of the current selection (+ their non-UI children), as
+/// `(center, extent)`. Takes the selected entities as an ITERATOR rather
+/// than a concrete `Query` so BOTH the gizmo-draw system (immutable query)
+/// and the click/hit-test system (a `&mut` query, iterated read-only) feed
+/// it the SAME way — the two used to compute bounds differently (draw:
+/// `BasePart.size` + children; click: `Transform.scale` only), so for a
+/// Gaussian-Splat or any part whose size ≠ scale the drawn rings and the
+/// hit-test rings sat at different centres/radii and every ring-click
+/// missed → deselect. One function = they can never diverge again.
+fn compute_group_center_and_extent<'a>(
+    selected: impl Iterator<Item = (Entity, &'a GlobalTransform, Option<&'a crate::classes::BasePart>)>,
     children_query: &Query<&Children>,
     child_transforms: &Query<
         (&GlobalTransform, Option<&crate::classes::BasePart>),
         (Without<Selected>, Without<bevy::ui::Node>),
     >,
+    // Render-Aabb fallback for BasePart-less selectables (Gaussian Splat
+    // clouds). Bounds priority BasePart.size → render Aabb → Transform.scale,
+    // mirroring the move gizmo — so the rotate rings center on the cloud's
+    // visual bounds instead of the entity origin (which for imported 3DGS
+    // sits away from the cloud, making the rings appear/clickable off-target).
+    aabbs: &Query<&bevy::camera::primitives::Aabb>,
 ) -> (Vec3, Vec3) {
     let mut bmin = Vec3::splat(f32::MAX);
     let mut bmax = Vec3::splat(f32::MIN);
     let mut cnt = 0;
 
-    for (entity, gt, bp) in query.iter() {
+    for (entity, gt, bp) in selected {
         let t = gt.compute_transform();
-        let s = bp.map(|b| b.size).unwrap_or(t.scale);
-        let (mn, mx) = calculate_rotated_aabb(t.translation, s * 0.5, t.rotation);
+        let (obb_center, s) = if let Some(b) = bp {
+            (t.translation, b.size)
+        } else if let Ok(a) = aabbs.get(entity) {
+            (
+                t.translation + t.rotation * (Vec3::from(a.center) * t.scale),
+                Vec3::from(a.half_extents) * 2.0 * t.scale,
+            )
+        } else {
+            (t.translation, t.scale)
+        };
+        let (mn, mx) = calculate_rotated_aabb(obb_center, s * 0.5, t.rotation);
         bmin = bmin.min(mn); bmax = bmax.max(mx); cnt += 1;
 
         if let Ok(children) = children_query.get(entity) {

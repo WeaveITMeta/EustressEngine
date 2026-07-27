@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<mask id="kb"><rect x="0" y="0" width="24" height="24" fill="white"/><circle cx="17.6" cy="17.6" r="6.1" fill="black"/></mask>
+<g mask="url(#kb)"><g transform="scale(0.82)"><g transform="scale(1.5000)"><path d="M4 2h5l3 3v9H4V2z" fill="none" stroke="#d4d4d4" stroke-width="1.2" stroke-linejoin="round"/>
+  <path d="M9 2v3h3" fill="none" stroke="#d4d4d4" stroke-width="1" stroke-linejoin="round"/>
+  <line x1="6" y1="8" x2="10" y2="8" stroke="#d4d4d4" stroke-width="0.8" stroke-linecap="round"/>
+  <line x1="6" y1="10" x2="10" y2="10" stroke="#d4d4d4" stroke-width="0.8" stroke-linecap="round"/></g></g></g>
+<circle cx="17.6" cy="17.6" r="4.5" stroke="#d4d4d4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+<path d="M15.6 19.6l.4-1.6 2.9-2.9 1.2 1.2-2.9 2.9-1.6.4z" stroke="#d4d4d4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>

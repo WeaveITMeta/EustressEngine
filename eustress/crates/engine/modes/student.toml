@@ -6,6 +6,8 @@
 id = "student"
 name = "Student"
 icon = "mortarboard"
+# Mode-selection-menu color — Roblox BrickColor Bright blue (23).
+color = "#0D69AC"
 version = "1.0"
 author = "Eustress"
 
@@ -16,7 +18,57 @@ tabs = ["home", "model", "data", "mindspace", "test"]
 preset = "Default"
 
 [theme]
-accent = "#4fd6ff"
+# Matches [mode].color so the selection ring/active-tool tint reads the same
+# deep blue as the mode's own dropdown/header identity color.
+accent = "#0D69AC"
+
+# Student itself is NOT directly selectable in the Modes dropdown (see
+# ribbon.slint's mode-row-touch handler: any mode with submodes only expands
+# its submenu) — a subject must be chosen.
+[[submodes]]
+id = "mathematics"
+name = "Mathematics"
+icon = "sigma"
+
+[[submodes]]
+id = "physics"
+name = "Physics"
+icon = "atom"
+
+[[submodes]]
+id = "chemistry"
+name = "Chemistry"
+icon = "flask"
+
+[[submodes]]
+id = "biology"
+name = "Biology"
+icon = "dna"
+
+[[submodes]]
+id = "computer-science"
+name = "Computer Science"
+icon = "terminal"
+
+[[submodes]]
+id = "history"
+name = "History"
+icon = "book"
+
+[[submodes]]
+id = "classical-languages-literature"
+name = "Classical Languages & Literature"
+icon = "pen"
+
+[[submodes]]
+id = "philosophy"
+name = "Philosophy"
+icon = "brain"
+
+[[submodes]]
+id = "economics"
+name = "Economics"
+icon = "trend-up"
 
 [[tabs]]
 id = "notebook"
@@ -29,7 +81,7 @@ color = "#4fd6ff"
 
   [[tabs.sections]]
   name = "Notes"
-  tools = []
+  tools = ["stu:cornell_notes", "stu:flashcard_deck", "stu:concept_map"]
 
 [[tabs]]
 id = "assignments"
@@ -38,4 +90,620 @@ color = "#ffd166"
 
   [[tabs.sections]]
   name = "Work"
-  tools = []
+  tools = ["stu:assignment_tracker", "stu:due_date_board", "stu:submission_checklist"]
+
+# ── Per-subject submode_tabs — Notebook and Assignments are universal (every
+# subject takes notes and has assignments), so both carry forward verbatim
+# into every subject's block, plus one new subject-specific tab. `tools = []`
+# throughout except where a section's purpose genuinely matches an
+# already-wired action (same honest-placeholder rule as Civil/Justice/Legal
+# above). ────────────────────────────────────────────────────────────────
+
+[[submode_tabs]]
+submode = "mathematics"
+id = "notebook"
+name = "Notebook"
+color = "#4fd6ff"
+  [[submode_tabs.sections]]
+  name = "Study"
+  tools = ["data:timeline", "data:chart"]
+  [[submode_tabs.sections]]
+  name = "Notes"
+  tools = ["stu:cornell_notes", "stu:flashcard_deck", "stu:concept_map"]
+
+[[submode_tabs]]
+submode = "mathematics"
+id = "assignments"
+name = "Assignments"
+color = "#ffd166"
+  [[submode_tabs.sections]]
+  name = "Work"
+  tools = ["stu:assignment_tracker", "stu:due_date_board", "stu:submission_checklist"]
+
+[[submode_tabs]]
+submode = "mathematics"
+id = "mathematics-fundamentals"
+name = "Math Fundamentals"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Algebra & Functions"
+  tools = ["math:equation_solver", "math:function_grapher", "math:factoring_assistant", "math:inequality_solver", "math:polynomial_explorer"]
+  [[submode_tabs.sections]]
+  name = "Proof & Logic"
+  tools = ["math:proof_assistant", "math:induction_builder", "math:counterexample_finder"]
+  [[submode_tabs.sections]]
+  name = "Geometry & Trigonometry"
+  tools = ["math:geometric_constructor", "math:trig_identity_solver", "math:unit_circle_explorer"]
+
+[[submode_tabs]]
+submode = "mathematics"
+id = "mathematics-problem-solving"
+name = "Problem Solving & Modeling"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Graphing & Modeling"
+  tools = ["data:chart", "math:parametric_plotter", "math:function_transformer"]
+  [[submode_tabs.sections]]
+  name = "Problem Sets & Practice"
+  tools = ["math:problem_set_builder", "math:step_by_step_solver", "math:formula_reference"]
+  [[submode_tabs.sections]]
+  name = "Statistics & Probability"
+  tools = ["data:stats", "data:fit", "math:probability_simulator"]
+
+[[submode_tabs]]
+submode = "mathematics"
+id = "mathematics-advanced-mastery"
+name = "Advanced & Mastery"
+color = "#f97316"
+  [[submode_tabs.sections]]
+  name = "Calculus & Analysis"
+  tools = ["math:derivative_visualizer", "math:integral_solver", "math:limit_explorer"]
+  [[submode_tabs.sections]]
+  name = "Linear Algebra & Vectors"
+  tools = ["math:matrix_calculator", "math:vector_field_visualizer", "math:eigenvalue_solver"]
+  [[submode_tabs.sections]]
+  name = "Competition & Assessment"
+  tools = ["math:proof_verifier", "math:timed_problem_challenge"]
+
+[[submode_tabs]]
+submode = "physics"
+id = "notebook"
+name = "Notebook"
+color = "#4fd6ff"
+  [[submode_tabs.sections]]
+  name = "Study"
+  tools = ["data:timeline", "data:chart"]
+  [[submode_tabs.sections]]
+  name = "Notes"
+  tools = ["stu:cornell_notes", "stu:flashcard_deck", "stu:concept_map"]
+
+[[submode_tabs]]
+submode = "physics"
+id = "assignments"
+name = "Assignments"
+color = "#ffd166"
+  [[submode_tabs.sections]]
+  name = "Work"
+  tools = ["stu:assignment_tracker", "stu:due_date_board", "stu:submission_checklist"]
+
+[[submode_tabs]]
+submode = "physics"
+id = "physics-fundamentals"
+name = "Physics Fundamentals"
+color = "#60a5fa"
+  [[submode_tabs.sections]]
+  name = "Mechanics & Motion"
+  tools = ["phys:kinematics_solver", "phys:free_body_diagram", "phys:energy_momentum_calc", "phys:projectile_lab", "phys:friction_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Electricity & Magnetism"
+  tools = ["phys:circuit_builder", "phys:field_line_mapper", "phys:maxwell_visualizer"]
+  [[submode_tabs.sections]]
+  name = "Derivations & Formalism"
+  tools = ["phys:lagrangian_derivor", "phys:dimensional_analyzer", "phys:unit_converter"]
+
+[[submode_tabs]]
+submode = "physics"
+id = "physics-lab-experiments"
+name = "Lab & Experiments"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Data Acquisition"
+  tools = ["data:record", "data:connect", "phys:sensor_calibrator"]
+  [[submode_tabs.sections]]
+  name = "Measurement & Analysis"
+  tools = ["data:fit", "data:stats", "phys:error_propagation"]
+  [[submode_tabs.sections]]
+  name = "Apparatus & Instrumentation"
+  tools = ["phys:optical_bench_builder", "phys:oscilloscope_view", "phys:apparatus_setup_planner", "phys:vernier_caliper"]
+
+[[submode_tabs]]
+submode = "physics"
+id = "physics-simulation-mastery"
+name = "Simulation & Mastery"
+color = "#facc15"
+  [[submode_tabs.sections]]
+  name = "Computational Physics"
+  tools = ["insert:script", "phys:numerical_integrator", "phys:monte_carlo_sim"]
+  [[submode_tabs.sections]]
+  name = "System Modeling"
+  tools = ["phys:n_body_simulator", "phys:wave_propagation_sim", "phys:thermo_state_solver"]
+  [[submode_tabs.sections]]
+  name = "Assessment & Portfolio"
+  tools = ["phys:qualifying_exam_bank", "phys:research_project_tracker"]
+
+[[submode_tabs]]
+submode = "chemistry"
+id = "notebook"
+name = "Notebook"
+color = "#4fd6ff"
+  [[submode_tabs.sections]]
+  name = "Study"
+  tools = ["data:timeline", "data:chart"]
+  [[submode_tabs.sections]]
+  name = "Notes"
+  tools = ["stu:cornell_notes", "stu:flashcard_deck", "stu:concept_map"]
+
+[[submode_tabs]]
+submode = "chemistry"
+id = "assignments"
+name = "Assignments"
+color = "#ffd166"
+  [[submode_tabs.sections]]
+  name = "Work"
+  tools = ["stu:assignment_tracker", "stu:due_date_board", "stu:submission_checklist"]
+
+[[submode_tabs]]
+submode = "chemistry"
+id = "chemistry-fundamentals"
+name = "Chemistry Fundamentals"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Atomic & Molecular Structure"
+  tools = ["chem:periodic_table_explorer", "chem:lewis_structure_builder", "chem:molecular_geometry_viewer"]
+  [[submode_tabs.sections]]
+  name = "Reactions & Stoichiometry"
+  tools = ["chem:equation_balancer", "chem:stoichiometry_calculator", "chem:reaction_predictor", "chem:limiting_reagent_finder"]
+  [[submode_tabs.sections]]
+  name = "Bonding & Thermodynamics"
+  tools = ["chem:bond_energy_calculator", "chem:orbital_hybridization", "chem:thermodynamics_solver"]
+
+[[submode_tabs]]
+submode = "chemistry"
+id = "chemistry-wet-lab"
+name = "Wet Lab"
+color = "#22d3ee"
+  [[submode_tabs.sections]]
+  name = "Data Acquisition & Logging"
+  tools = ["data:record", "data:chart", "data:import"]
+  [[submode_tabs.sections]]
+  name = "Titration & Quantitative Analysis"
+  tools = ["chem:titration_curve", "chem:ph_meter", "chem:concentration_calculator"]
+  [[submode_tabs.sections]]
+  name = "Lab Safety & Procedures"
+  tools = ["chem:sds_lookup", "chem:hazard_checklist", "chem:lab_protocol_builder"]
+
+[[submode_tabs]]
+submode = "chemistry"
+id = "chemistry-research-mastery"
+name = "Research & Mastery"
+color = "#fb7185"
+  [[submode_tabs.sections]]
+  name = "Spectroscopy & Instrumentation"
+  tools = ["chem:nmr_simulator", "chem:mass_spec_analyzer", "chem:ir_spectrum_matcher"]
+  [[submode_tabs.sections]]
+  name = "Kinetics & Equilibrium"
+  tools = ["data:fit", "chem:equilibrium_solver", "chem:reaction_mechanism_animator"]
+  [[submode_tabs.sections]]
+  name = "Lab Notebook & Portfolio"
+  tools = ["chem:lab_report_generator", "chem:literature_search"]
+
+[[submode_tabs]]
+submode = "biology"
+id = "notebook"
+name = "Notebook"
+color = "#4fd6ff"
+  [[submode_tabs.sections]]
+  name = "Study"
+  tools = ["data:timeline", "data:chart"]
+  [[submode_tabs.sections]]
+  name = "Notes"
+  tools = ["stu:cornell_notes", "stu:flashcard_deck", "stu:concept_map"]
+
+[[submode_tabs]]
+submode = "biology"
+id = "assignments"
+name = "Assignments"
+color = "#ffd166"
+  [[submode_tabs.sections]]
+  name = "Work"
+  tools = ["stu:assignment_tracker", "stu:due_date_board", "stu:submission_checklist"]
+
+[[submode_tabs]]
+submode = "biology"
+id = "biology-fundamentals"
+name = "Biology Fundamentals"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Cell & Molecular Biology"
+  tools = ["bio:cell_diagram_builder", "bio:organelle_inspector", "bio:biomolecule_viewer"]
+  [[submode_tabs.sections]]
+  name = "Genetics & Heredity"
+  tools = ["bio:punnett_square", "bio:dna_sequence_viewer", "bio:pedigree_chart", "bio:crispr_explorer", "bio:inheritance_simulator"]
+  [[submode_tabs.sections]]
+  name = "Ecology & Systems"
+  tools = ["bio:food_web_builder", "bio:population_model", "bio:biome_explorer"]
+
+[[submode_tabs]]
+submode = "biology"
+id = "biology-field-lab"
+name = "Field & Lab Work"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Data Collection"
+  tools = ["data:record", "data:import", "bio:specimen_logger"]
+  [[submode_tabs.sections]]
+  name = "Microscopy & Specimens"
+  tools = ["bio:slide_annotator", "bio:specimen_catalog"]
+  [[submode_tabs.sections]]
+  name = "Dissection & Anatomy"
+  tools = ["bio:dissection_guide", "bio:organ_system_mapper", "bio:anatomical_landmark_tagger"]
+
+[[submode_tabs]]
+submode = "biology"
+id = "biology-research-assessment"
+name = "Research & Assessment"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Statistical Analysis"
+  tools = ["data:stats", "data:fit", "data:cluster"]
+  [[submode_tabs.sections]]
+  name = "Phylogenetics & Classification"
+  tools = ["bio:phylogenetic_tree_builder", "bio:taxonomic_key", "bio:cladogram_editor"]
+  [[submode_tabs.sections]]
+  name = "Research & Reporting"
+  tools = ["bio:lab_report_generator", "bio:literature_annotator", "bio:peer_review_tracker"]
+
+[[submode_tabs]]
+submode = "computer-science"
+id = "notebook"
+name = "Notebook"
+color = "#4fd6ff"
+  [[submode_tabs.sections]]
+  name = "Study"
+  tools = ["data:timeline", "data:chart"]
+  [[submode_tabs.sections]]
+  name = "Notes"
+  tools = ["stu:cornell_notes", "stu:flashcard_deck", "stu:concept_map"]
+
+[[submode_tabs]]
+submode = "computer-science"
+id = "assignments"
+name = "Assignments"
+color = "#ffd166"
+  [[submode_tabs.sections]]
+  name = "Work"
+  tools = ["stu:assignment_tracker", "stu:due_date_board", "stu:submission_checklist"]
+
+# ── Computer Science "dream scenario" (2026-07-21, per explicit direction):
+# three tabs spanning Fundamentals -> Programming -> Theory & Mastery,
+# instead of one thin tab, so the discipline actually specializes the
+# layout. Buttons below use invented `cs:*` ids that have NO Rust dispatch
+# yet — explicitly OK per direction ("you do not yet have to make the UI
+# buttons functional... just dream"); they render as real labeled buttons
+# (not "Coming soon" placeholders) but are silently inert when clicked,
+# same as any unrecognized action id elsewhere in this codebase. The one
+# exception is "Projects", which keeps the genuinely-real `insert:script`
+# family. NOTE: true toggle/slider widgets aren't buildable via this
+# tools=[...] mechanism at all today (every entry renders as an IconButton,
+# see ribbon.slint) — that's a separate, larger Slint-component engineering
+# task, not something a tool-id list can express; flagged for the user
+# rather than silently faked. ────────────────────────────────────────────
+
+[[submode_tabs]]
+submode = "computer-science"
+id = "cs-fundamentals"
+name = "CS Fundamentals"
+color = "#a78bfa"
+  [[submode_tabs.sections]]
+  name = "Complexity & Algorithms"
+  tools = ["cs:big_o_analyzer", "cs:algorithm_visualizer", "cs:sorting_comparator", "cs:recursion_visualizer"]
+  [[submode_tabs.sections]]
+  name = "Data Structures"
+  tools = ["cs:tree_builder", "cs:graph_explorer", "cs:hashmap_inspector"]
+  [[submode_tabs.sections]]
+  name = "Discrete Math & Logic"
+  tools = ["cs:truth_table", "cs:set_theory_canvas", "cs:proof_assistant"]
+
+[[submode_tabs]]
+submode = "computer-science"
+id = "cs-programming"
+name = "Programming"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Projects"
+  tools = ["insert:script", "insert:localscript", "insert:modulescript"]
+  [[submode_tabs.sections]]
+  name = "Debugging & Testing"
+  tools = ["cs:breakpoints", "cs:watch_variables", "cs:test_runner", "cs:flamegraph_profiler"]
+  [[submode_tabs.sections]]
+  name = "Systems & Networks"
+  tools = ["cs:process_monitor", "cs:protocol_simulator", "cs:schema_designer"]
+
+[[submode_tabs]]
+submode = "computer-science"
+id = "cs-theory-mastery"
+name = "Theory & Mastery"
+color = "#f472b6"
+  [[submode_tabs.sections]]
+  name = "Automata & Formal Methods"
+  tools = ["cs:state_machine_builder", "cs:turing_simulator", "cs:proof_verifier"]
+  [[submode_tabs.sections]]
+  name = "Challenges & Benchmarks"
+  tools = ["cs:coding_katas", "cs:algorithm_challenges", "cs:performance_profiler"]
+  [[submode_tabs.sections]]
+  name = "Portfolio"
+  tools = ["cs:project_showcase", "cs:code_review"]
+
+[[submode_tabs]]
+submode = "history"
+id = "notebook"
+name = "Notebook"
+color = "#4fd6ff"
+  [[submode_tabs.sections]]
+  name = "Study"
+  tools = ["data:timeline", "data:chart"]
+  [[submode_tabs.sections]]
+  name = "Notes"
+  tools = ["stu:cornell_notes", "stu:flashcard_deck", "stu:concept_map"]
+
+[[submode_tabs]]
+submode = "history"
+id = "assignments"
+name = "Assignments"
+color = "#ffd166"
+  [[submode_tabs.sections]]
+  name = "Work"
+  tools = ["stu:assignment_tracker", "stu:due_date_board", "stu:submission_checklist"]
+
+[[submode_tabs]]
+submode = "history"
+id = "history-fundamentals"
+name = "History Fundamentals"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Chronology & Periodization"
+  tools = ["hist:timeline_builder", "hist:era_mapper", "hist:chronology_checker", "hist:historical_atlas"]
+  [[submode_tabs.sections]]
+  name = "Primary Source Literacy"
+  tools = ["hist:document_annotator", "hist:provenance_tracker", "hist:opvl_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Historical Thinking Skills"
+  tools = ["hist:cause_effect_mapper", "hist:continuity_change_analyzer", "hist:perspective_wheel"]
+
+[[submode_tabs]]
+submode = "history"
+id = "history-research-methods"
+name = "Research & Sources"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Archival Research"
+  tools = ["hist:archive_search", "hist:finding_aid_navigator", "hist:document_digitizer"]
+  [[submode_tabs.sections]]
+  name = "Source Evaluation"
+  tools = ["hist:corroboration_grid", "hist:bias_detector", "hist:reliability_scorer"]
+  [[submode_tabs.sections]]
+  name = "Note-Taking & Citation"
+  tools = ["hist:note_card_organizer", "hist:citation_manager", "hist:bibliography_builder"]
+
+[[submode_tabs]]
+submode = "history"
+id = "history-historiography"
+name = "Historiography & Argument"
+color = "#fb7185"
+  [[submode_tabs.sections]]
+  name = "Historiographical Analysis"
+  tools = ["hist:historiography_tracker", "hist:interpretation_comparator", "hist:schools_of_thought_mapper"]
+  [[submode_tabs.sections]]
+  name = "Quantitative & Digital History"
+  tools = ["data:chart", "data:stats", "data:import"]
+  [[submode_tabs.sections]]
+  name = "Capstone Argument & Assessment"
+  tools = ["hist:dbq_organizer", "hist:rubric_scorer"]
+
+[[submode_tabs]]
+submode = "classical-languages-literature"
+id = "notebook"
+name = "Notebook"
+color = "#4fd6ff"
+  [[submode_tabs.sections]]
+  name = "Study"
+  tools = ["data:timeline", "data:chart"]
+  [[submode_tabs.sections]]
+  name = "Notes"
+  tools = ["stu:cornell_notes", "stu:flashcard_deck", "stu:concept_map"]
+
+[[submode_tabs]]
+submode = "classical-languages-literature"
+id = "assignments"
+name = "Assignments"
+color = "#ffd166"
+  [[submode_tabs.sections]]
+  name = "Work"
+  tools = ["stu:assignment_tracker", "stu:due_date_board", "stu:submission_checklist"]
+
+[[submode_tabs]]
+submode = "classical-languages-literature"
+id = "classical-languages-literature-fundamentals"
+name = "Classical Foundations"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Morphology & Syntax"
+  tools = ["clas:declension_drill", "clas:conjugation_drill", "clas:syntax_tree_diagrammer", "clas:parsing_trainer", "clas:accent_drill"]
+  [[submode_tabs.sections]]
+  name = "Vocabulary & Etymology"
+  tools = ["clas:vocab_builder", "clas:etymology_tracer", "clas:principal_parts_drill"]
+  [[submode_tabs.sections]]
+  name = "Grammar Reference"
+  tools = ["clas:paradigm_charts", "clas:case_usage_guide", "clas:grammar_rule_browser"]
+
+[[submode_tabs]]
+submode = "classical-languages-literature"
+id = "classical-languages-literature-translation-composition"
+name = "Translation & Composition"
+color = "#fb7185"
+  [[submode_tabs.sections]]
+  name = "Translation Workbench"
+  tools = ["clas:parallel_text_viewer", "clas:interlinear_gloss", "clas:sight_translation_timer"]
+  [[submode_tabs.sections]]
+  name = "Composition & Prose"
+  tools = ["clas:prose_composition_editor", "clas:style_checker", "clas:back_translation_drill"]
+  [[submode_tabs.sections]]
+  name = "Reading & Recitation"
+  tools = ["clas:scansion_marker", "clas:oral_recitation_recorder", "clas:reading_fluency_tracker"]
+
+[[submode_tabs]]
+submode = "classical-languages-literature"
+id = "classical-languages-literature-scholarship-mastery"
+name = "Textual Mastery"
+color = "#818cf8"
+  [[submode_tabs.sections]]
+  name = "Textual Criticism"
+  tools = ["clas:manuscript_variant_collator", "clas:critical_apparatus_builder", "clas:stemma_mapper"]
+  [[submode_tabs.sections]]
+  name = "Literary & Rhetorical Analysis"
+  tools = ["clas:rhetorical_device_tagger", "clas:meter_scansion_analyzer", "clas:intertextuality_mapper"]
+  [[submode_tabs.sections]]
+  name = "Assessment & Portfolio"
+  tools = ["clas:sight_reading_exam", "clas:translation_portfolio"]
+
+[[submode_tabs]]
+submode = "philosophy"
+id = "notebook"
+name = "Notebook"
+color = "#4fd6ff"
+  [[submode_tabs.sections]]
+  name = "Study"
+  tools = ["data:timeline", "data:chart"]
+  [[submode_tabs.sections]]
+  name = "Notes"
+  tools = ["stu:cornell_notes", "stu:flashcard_deck", "stu:concept_map"]
+
+[[submode_tabs]]
+submode = "philosophy"
+id = "assignments"
+name = "Assignments"
+color = "#ffd166"
+  [[submode_tabs.sections]]
+  name = "Work"
+  tools = ["stu:assignment_tracker", "stu:due_date_board", "stu:submission_checklist"]
+
+[[submode_tabs]]
+submode = "philosophy"
+id = "philosophy-fundamentals"
+name = "Philosophy Fundamentals"
+color = "#818cf8"
+  [[submode_tabs.sections]]
+  name = "Arguments & Informal Logic"
+  tools = ["phil:argument_mapper", "phil:validity_checker", "phil:fallacy_detector", "phil:counterexample_workshop"]
+  [[submode_tabs.sections]]
+  name = "Core Branches"
+  tools = ["phil:epistemology_primer", "phil:metaphysics_primer", "phil:ethics_primer"]
+  [[submode_tabs.sections]]
+  name = "Concepts & Thought Experiments"
+  tools = ["phil:concept_glossary", "phil:thought_experiment_lab", "phil:definitions_workbench"]
+
+[[submode_tabs]]
+submode = "philosophy"
+id = "philosophy-textual-practice"
+name = "Textual Practice"
+color = "#34d399"
+  [[submode_tabs.sections]]
+  name = "Primary Texts"
+  tools = ["phil:close_reading_annotator", "phil:passage_timeline", "phil:citation_tracker"]
+  [[submode_tabs.sections]]
+  name = "Seminar & Discussion"
+  tools = ["phil:socratic_dialogue", "phil:discussion_prompts", "phil:objection_response_builder"]
+  [[submode_tabs.sections]]
+  name = "Essay Workshop"
+  tools = ["phil:thesis_statement_builder", "phil:essay_outliner", "phil:peer_review_annotator"]
+
+[[submode_tabs]]
+submode = "philosophy"
+id = "philosophy-mastery"
+name = "Formal Logic & Mastery"
+color = "#fb923c"
+  [[submode_tabs.sections]]
+  name = "Symbolic Logic & Proofs"
+  tools = ["phil:propositional_calculus", "phil:predicate_logic_solver", "phil:natural_deduction_prover"]
+  [[submode_tabs.sections]]
+  name = "Traditions & Schools"
+  tools = ["phil:tradition_comparator", "phil:historical_timeline", "phil:philosopher_profiles"]
+  [[submode_tabs.sections]]
+  name = "Thesis & Assessment"
+  tools = ["phil:thesis_defense_simulator", "phil:comprehensive_exam_prep"]
+
+[[submode_tabs]]
+submode = "economics"
+id = "notebook"
+name = "Notebook"
+color = "#4fd6ff"
+  [[submode_tabs.sections]]
+  name = "Study"
+  tools = ["data:timeline", "data:chart"]
+  [[submode_tabs.sections]]
+  name = "Notes"
+  tools = ["stu:cornell_notes", "stu:flashcard_deck", "stu:concept_map"]
+
+[[submode_tabs]]
+submode = "economics"
+id = "assignments"
+name = "Assignments"
+color = "#ffd166"
+  [[submode_tabs.sections]]
+  name = "Work"
+  tools = ["stu:assignment_tracker", "stu:due_date_board", "stu:submission_checklist"]
+
+[[submode_tabs]]
+submode = "economics"
+id = "economics-fundamentals"
+name = "Econ Fundamentals"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Microeconomic Models"
+  tools = ["econ:supply_demand_grapher", "econ:elasticity_calculator", "econ:utility_maximizer", "econ:marginal_analysis", "econ:consumer_surplus_grapher"]
+  [[submode_tabs.sections]]
+  name = "Macroeconomic Models"
+  tools = ["econ:is_lm_model", "econ:phillips_curve", "econ:business_cycle_tracker"]
+  [[submode_tabs.sections]]
+  name = "Market Structures & Game Theory"
+  tools = ["econ:market_structure_simulator", "econ:game_theory_matrix", "econ:nash_equilibrium_solver"]
+
+[[submode_tabs]]
+submode = "economics"
+id = "economics-data-econometrics"
+name = "Data & Econometrics"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Data Collection"
+  tools = ["data:import", "data:connect", "data:record"]
+  [[submode_tabs.sections]]
+  name = "Graphing & Visualization"
+  tools = ["data:chart", "econ:indifference_curve_plotter", "econ:ppf_grapher"]
+  [[submode_tabs.sections]]
+  name = "Econometric Analysis"
+  tools = ["data:stats", "data:fit", "econ:time_series_analyzer"]
+
+[[submode_tabs]]
+submode = "economics"
+id = "economics-policy-mastery"
+name = "Policy & Case Studies"
+color = "#fb7185"
+  [[submode_tabs.sections]]
+  name = "Case Study Analysis"
+  tools = ["econ:case_study_library", "econ:swot_market_analyzer", "econ:cost_benefit_analyzer"]
+  [[submode_tabs.sections]]
+  name = "Policy Simulation"
+  tools = ["econ:fiscal_policy_simulator", "econ:monetary_policy_simulator", "econ:tax_incidence_calculator"]
+  [[submode_tabs.sections]]
+  name = "Assessment & Portfolio"
+  tools = ["econ:economic_indicator_dashboard", "econ:forecast_challenge"]

@@ -19,10 +19,17 @@
 //!
 //! ## Controls
 //!
-//! - F5: Play (with character)
-//! - F6: Pause
-//! - F7: Play Solo (no character)
-//! - F8: Stop
+//! The first four are remappable — they arrive as `MenuActionEvent`, and the
+//! keys shown are `keybindings.rs`'s defaults, not fixed wiring:
+//!
+//! - F5 (`Action::PlayWithCharacter`): Play (with character)
+//! - F6 (`Action::PauseResume`): Pause / Resume
+//! - F7 (`Action::PlaySolo`): Play Solo (no character)
+//! - F8 (`Action::StopPlay`): Stop
+//!
+//! Read as raw keys here, not rebindable:
+//!
+//! - Escape: Stop
 //! - Ctrl+Shift+S: Create save point
 //! - Ctrl+Shift+R: Restore to last save point
 
@@ -614,6 +621,10 @@ struct PlayStartResources<'w> {
     meshes: ResMut<'w, Assets<Mesh>>,
     materials: ResMut<'w, Assets<StandardMaterial>>,
     lighting: Option<Res<'w, eustress_common::services::LightingService>>,
+    /// The ONLY way this crate can create a play character. Bundled here
+    /// rather than added as a bare param because `handle_start_play` already
+    /// sits at Bevy's 16-`SystemParam` ceiling.
+    spawn_avatar: MessageWriter<'w, eustress_common::avatar::SpawnAvatar>,
 }
 
 /// Handle start play event - captures full world snapshot and spawns client-like character
@@ -806,27 +817,31 @@ fn handle_start_play(
                     info!("🛡️ Spawn protection: {:.1}s", spawn_protection);
                 }
 
-                // Spawn full character with physics (like server would)
-                let character = spawn_play_mode_character(
-                    &mut commands,
-                    &mut res.meshes,
-                    &mut res.materials,
-                    &res.asset_server,
-                    spawn_pos,
-                    &mut runtime,
-                    &char_config,
+                // Spawn through the sealed avatar runtime — the SAME path the
+                // Client uses. Studio cannot pass a model or a sex here, which
+                // is what let it default Female/XBot while the Client defaulted
+                // Male/YBot out of "shared" code.
+                //
+                // TODO(P6): load the signed-in user's saved descriptor.
+                res.spawn_avatar.write(
+                    eustress_common::avatar::SpawnAvatar::new(
+                        eustress_common::avatar::AvatarDescriptor::default(),
+                        spawn_pos,
+                    ),
                 );
-                
-                play_mode.player_character = Some(character);
-                
-                // Spawn play mode camera (like client would after receiving character)
-                spawn_play_mode_camera(&mut commands, character, &mut runtime);
-                
-                // Disable ALL existing cameras during play
+
+                // The runtime owns the play camera (order 10 via HostSeams), so
+                // the editor camera only needs deactivating.
+                //
+                // `is_active = false` rather than inserting a fresh `Camera`:
+                // the old loop REPLACED the component, which clobbered the
+                // Slint overlay camera's `order: 300` and premultiplied-alpha
+                // output mode and never restored them.
                 for (cam_entity, _) in cameras.iter() {
-                    commands.entity(cam_entity).insert(Camera {
-                        is_active: false,
-                        ..default()
+                    commands.queue(move |world: &mut World| {
+                        if let Some(mut cam) = world.get_mut::<Camera>(cam_entity) {
+                            cam.is_active = false;
+                        }
                     });
                 }
                 
@@ -1375,60 +1390,86 @@ fn handle_pause_toggle(
 /// Keyboard shortcuts for play mode
 fn play_mode_shortcuts(
     keyboard: Res<ButtonInput<KeyCode>>,
+    // Play / Pause / Solo / Stop arrive as `MenuActionEvent`, NOT as raw
+    // `KeyCode::F5..F8`. `keybindings.rs` owns the F5–F8 defaults as
+    // `Action::PlayWithCharacter / PauseResume / PlaySolo / StopPlay`, so
+    // routing through the message buys three things a raw read can't: the
+    // keys show up in the Keyboard Shortcuts dialog, they're rebindable, and
+    // they inherit that dispatcher's `text_input_focused` gate instead of
+    // firing while the user types in a field. The ribbon Play/Stop buttons
+    // already reach the same flags via `StudioState`, so both paths converge.
+    mut menu_events: MessageReader<crate::ui::MenuActionEvent>,
+    // Only the raw-key Escape path below needs this: everything coming in
+    // through `MenuActionEvent` was already focus-gated upstream.
+    ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
     current_state: Res<State<PlayModeState>>,
     // Drive the SAME StudioState request flags the Slint Play/Stop buttons
-    // set. Previously these shortcuts wrote StartPlayEvent/StopPlayEvent
-    // messages that NOTHING consumes, so F5/F6/F7/F8/Escape were silently
-    // dead (handle_start_play / handle_stop_play / handle_pause_toggle all
-    // read StudioState flags, not those events). Routing through the flags
-    // makes the shortcuts work AND sends Stop through handle_stop_play, which
-    // is the path that restores the pre-play world snapshot.
+    // set. An earlier version wrote StartPlayEvent/StopPlayEvent messages
+    // that NOTHING consumes, so F5/F6/F7/F8/Escape were silently dead
+    // (handle_start_play / handle_stop_play / handle_pause_toggle all read
+    // StudioState flags, not those events). Do not "simplify" this back into
+    // writing those events directly: the flags are what makes the shortcuts
+    // work AND what sends Stop through handle_stop_play, the path that
+    // restores the pre-play world snapshot.
     mut studio_state: ResMut<crate::ui::StudioState>,
     mut save_point_events: MessageWriter<CreateSavePointEvent>,
     mut restore_events: MessageWriter<RestoreToSavePointEvent>,
     snapshot_stack: Res<SnapshotStack>,
 ) {
+    use crate::keybindings::Action;
+
     let ctrl = keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight);
     let shift = keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
-    
-    // F5: Play with character
-    if keyboard.just_pressed(KeyCode::F5) {
-        if matches!(current_state.get(), PlayModeState::Editing) {
-            info!("▶️ F5: Play with Character");
-            studio_state.play_with_character_requested = true;
+
+    // Bound play actions (F5–F8 by default). Each still checks the current
+    // PlayModeState so a stray Stop while editing — or a Play while already
+    // playing — is a no-op rather than a half-applied transition.
+    for event in menu_events.read() {
+        match event.action {
+            Action::PlayWithCharacter => {
+                if matches!(current_state.get(), PlayModeState::Editing) {
+                    info!("▶️ Play with Character");
+                    studio_state.play_with_character_requested = true;
+                }
+            }
+            Action::PauseResume => {
+                if matches!(current_state.get(), PlayModeState::Playing | PlayModeState::Paused) {
+                    studio_state.pause_requested = true;
+                }
+            }
+            Action::PlaySolo => {
+                if matches!(current_state.get(), PlayModeState::Editing) {
+                    info!("▶️ Play Solo");
+                    studio_state.play_solo_requested = true;
+                }
+            }
+            Action::StopPlay => {
+                if matches!(current_state.get(), PlayModeState::Playing | PlayModeState::Paused) {
+                    info!("⏹️ Stop");
+                    studio_state.stop_requested = true;
+                }
+            }
+            _ => {}
         }
     }
 
-    // F6: Pause/Resume
-    if keyboard.just_pressed(KeyCode::F6) {
+    // Typing in a Slint text field must not reach any raw-key branch below.
+    // `MenuActionEvent`-driven actions are already gated in
+    // `dispatch_keyboard_shortcuts`; these raw reads are not, so they need
+    // their own check. Default to "not focused" when the resource is absent
+    // (pre-UI-init frames, headless) so Escape still works there.
+    let text_focused = ui_focus.as_ref().map(|f| f.text_input_focused).unwrap_or(false);
+
+    // Escape: Stop (alternative). Deliberately NOT promoted to an `Action` —
+    // Escape is a universal "get me out" key that also cancels modal tools and
+    // closes dialogs, and making it rebindable would let a user strand
+    // themselves in play mode. It stays raw, gated on text focus.
+    if keyboard.just_pressed(KeyCode::Escape) && !text_focused {
         if matches!(current_state.get(), PlayModeState::Playing | PlayModeState::Paused) {
-            studio_state.pause_requested = true;
-        }
-    }
-
-    // F7: Play solo (no character)
-    if keyboard.just_pressed(KeyCode::F7) {
-        if matches!(current_state.get(), PlayModeState::Editing) {
-            info!("▶️ F7: Play Solo");
-            studio_state.play_solo_requested = true;
-        }
-    }
-
-    // F8: Stop
-    if keyboard.just_pressed(KeyCode::F8) {
-        if matches!(current_state.get(), PlayModeState::Playing | PlayModeState::Paused) {
-            info!("⏹️ F8: Stop");
             studio_state.stop_requested = true;
         }
     }
 
-    // Escape: Stop (alternative)
-    if keyboard.just_pressed(KeyCode::Escape) {
-        if matches!(current_state.get(), PlayModeState::Playing | PlayModeState::Paused) {
-            studio_state.stop_requested = true;
-        }
-    }
-    
     // Ctrl+Shift+S: Create save point
     if ctrl && shift && keyboard.just_pressed(KeyCode::KeyS) {
         match current_state.get() {
@@ -1509,14 +1550,28 @@ pub struct PlayModeCorePlugin;
 
 impl Plugin for PlayModeCorePlugin {
     fn build(&self, app: &mut App) {
-        // Add the SHARED character plugin - same code as client!
-        // This ensures identical gameplay behavior in Studio play mode
-        app.add_plugins(eustress_common::plugins::SharedCharacterPlugin);
+        // ── The sealed avatar runtime ──────────────────────────────────────
+        //
+        // Replaces `SharedCharacterPlugin`, which shared *systems* while
+        // leaving entity construction, plugin composition, Bevy features and
+        // environment free — and drifted into 48 divergences with 17 blockers
+        // while its own doc comment claimed it "ensures identical gameplay
+        // behavior in both contexts". Four of its systems were commented out
+        // of registration, so the character had no physics body and could not
+        // move at all.
+        //
+        // The Client adds this exact plugin with `AvatarHost::Client`.
+        // Everything that legitimately differs lives in `HostSeams`.
+        app.add_plugins(eustress_common::avatar::AvatarRuntimePlugin::new(
+            eustress_common::avatar::AvatarHost::Studio,
+        ));
 
-        // Add skinned character support (GLB models)
+        // Legacy skinned/animation plugins. Inert on avatar-runtime entities
+        // (their systems gate on `SkinnedCharacter` / `PlayModeCharacter`,
+        // which the runtime does not insert) and still used by authored
+        // non-player characters. Removed in P2 when rig-driven animation
+        // lands.
         app.add_plugins(eustress_common::plugins::SkinnedCharacterPlugin);
-
-        // Add AAA animation system (crossfade blending, locomotion blend tree)
         app.add_plugins(eustress_common::plugins::SharedAnimationPlugin);
 
         // Add the runtime plugin for play mode specific handling

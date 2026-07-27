@@ -1,0 +1,491 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="126" onload="init(evt)" viewBox="0 0 1200 126" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:fg="http://github.com/jonhoo/inferno"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:monospace; font-size:12px }
+#title { text-anchor:middle; font-size:17px; }
+#matched { text-anchor:end; }
+#search { text-anchor:end; opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[
+        var nametype = 'Function:';
+        var fontsize = 12;
+        var fontwidth = 0.59;
+        var xpad = 10;
+        var inverted = false;
+        var searchcolor = 'rgb(230,0,230)';
+        var fluiddrawing = true;
+        var truncate_text_right = false;
+    ]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames, known_font_width;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    known_font_width = get_monospace_width(frames);
+    total_samples = parseInt(frames.attributes.total_samples.value);
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[*|x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+            svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            update_text_for_elements(frames.children);
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad;
+            matchedtxt.attributes.x.value = svgWidth - xpad;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes["fg:x"]) {
+            var params = get_params()
+            params.x = el.attributes["fg:x"].value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["fg:orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("fg:orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["fg:orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["fg:orig_" + attr].value;
+    e.removeAttribute("fg:orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function get_monospace_width(frames) {
+    // Given the id="frames" element, return the width of text characters if
+    // this is a monospace font, otherwise return 0.
+    text = find_child(frames.children[0], "text");
+    originalContent = text.textContent;
+    text.textContent = "!";
+    bangWidth = text.getComputedTextLength();
+    text.textContent = "W";
+    wWidth = text.getComputedTextLength();
+    text.textContent = originalContent;
+    if (bangWidth === wWidth) {
+        return bangWidth;
+    } else {
+        return 0;
+    }
+}
+function update_text_for_elements(elements) {
+    // In order to render quickly in the browser, you want to do one pass of
+    // reading attributes, and one pass of mutating attributes. See
+    // https://web.dev/avoid-large-complex-layouts-and-layout-thrashing/ for details.
+
+    // Fall back to inefficient calculation, if we're variable-width font.
+    // TODO This should be optimized somehow too.
+    if (known_font_width === 0) {
+        for (var i = 0; i < elements.length; i++) {
+            update_text(elements[i]);
+        }
+        return;
+    }
+
+    var textElemNewAttributes = [];
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var r = find_child(e, "rect");
+        var t = find_child(e, "text");
+        var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+        var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+        var newX = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+        // Smaller than this size won't fit anything
+        if (w < 2 * known_font_width) {
+            textElemNewAttributes.push([newX, ""]);
+            continue;
+        }
+
+        // Fit in full text width
+        if (txt.length * known_font_width < w) {
+            textElemNewAttributes.push([newX, txt]);
+            continue;
+        }
+
+        var substringLength = Math.floor(w / known_font_width) - 2;
+        if (truncate_text_right) {
+            // Truncate the right side of the text.
+            textElemNewAttributes.push([newX, txt.substring(0, substringLength) + ".."]);
+            continue;
+        } else {
+            // Truncate the left side of the text.
+            textElemNewAttributes.push([newX, ".." + txt.substring(txt.length - substringLength, txt.length)]);
+            continue;
+        }
+    }
+
+    console.assert(textElemNewAttributes.length === elements.length, "Resize failed, please file a bug at https://github.com/jonhoo/inferno/");
+
+    // Now that we know new textContent, set it all in one go so we don't refresh a bazillion times.
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var values = textElemNewAttributes[i];
+        var t = find_child(e, "text");
+        t.attributes.x.value = values[0];
+        t.textContent = values[1];
+    }
+}
+
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * parseInt(e.attributes["fg:x"].value) / total_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / total_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, zoomed_width_samples) {
+    if (e.tagName == "text") {
+        var parent_x = parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value);
+        e.attributes.x.value = format_percent(parent_x + (100 * 3 / frames.attributes.width.value));
+    } else if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * (parseInt(e.attributes["fg:x"].value) - x) / zoomed_width_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / zoomed_width_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, zoomed_width_samples);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseInt(attr["fg:w"].value);
+    var xmin = parseInt(attr["fg:x"].value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    var to_update_text = [];
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseInt(a["fg:x"].value);
+        var ew = parseInt(a["fg:w"].value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                to_update_text.push(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, width);
+                to_update_text.push(e);
+            }
+        }
+    }
+    update_text_for_elements(to_update_text);
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+    }
+    update_text_for_elements(el);
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        // Skip over frames which are either not visible, or below the zoomed-to frame
+        if (e.classList.contains("hide") || e.classList.contains("parent")) {
+            continue;
+        }
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseInt(rect.attributes["fg:w"].value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseInt(rect.attributes["fg:x"].value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    for (var k in keys) {
+        var x = parseInt(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="126" fill="url(#background)"/><text id="title" fill="rgb(0,0,0)" x="50.0000%" y="24.00">Eustress per-system frame profile</text><text id="subtitle" x="50.0000%" y="48.00">total microseconds per system over the sample window</text><text id="details" fill="rgb(0,0,0)" x="10" y="109.00"> </text><text id="unzoom" class="hide" fill="rgb(0,0,0)" x="10" y="24.00">Reset Zoom</text><text id="search" fill="rgb(0,0,0)" x="1190" y="24.00">Search</text><text id="matched" fill="rgb(0,0,0)" x="1190" y="109.00"> </text><svg id="frames" x="10" width="1180" total_samples="21385675"><g><title>avian3d::schedule::assert_components_finite (2,376 µs, 0.01%)</title><rect x="0.0719%" y="61" width="0.0111%" height="15" fill="rgb(227,0,7)" fg:x="15384" fg:w="2376"/><text x="0.3219%" y="71.50"></text></g><g><title>avian3d::schedule::run_physics_schedule (2,651 µs, 0.01%)</title><rect x="0.0830%" y="61" width="0.0124%" height="15" fill="rgb(217,0,24)" fg:x="17760" fg:w="2651"/><text x="0.3330%" y="71.50"></text></g><g><title>bevy_anti_alias::contrast_adaptive_sharpening::node::cas (9,551 µs, 0.04%)</title><rect x="0.1302%" y="61" width="0.0447%" height="15" fill="rgb(221,193,54)" fg:x="27834" fg:w="9551"/><text x="0.3802%" y="71.50"></text></g><g><title>bevy_anti_alias::fxaa::node::fxaa (6,306 µs, 0.03%)</title><rect x="0.1775%" y="61" width="0.0295%" height="15" fill="rgb(248,212,6)" fg:x="37966" fg:w="6306"/><text x="0.4275%" y="71.50"></text></g><g><title>bevy_anti_alias::smaa::smaa (8,924 µs, 0.04%)</title><rect x="0.2211%" y="61" width="0.0417%" height="15" fill="rgb(208,68,35)" fg:x="47286" fg:w="8924"/><text x="0.4711%" y="71.50"></text></g><g><title>bevy_anti_alias::taa::extract_taa_settings (3,993 µs, 0.02%)</title><rect x="0.2628%" y="61" width="0.0187%" height="15" fill="rgb(232,128,0)" fg:x="56210" fg:w="3993"/><text x="0.5128%" y="71.50"></text></g><g><title>bevy_anti_alias::taa::temporal_anti_alias (9,779 µs, 0.05%)</title><rect x="0.2906%" y="61" width="0.0457%" height="15" fill="rgb(207,160,47)" fg:x="62157" fg:w="9779"/><text x="0.5406%" y="71.50"></text></g><g><title>bevy_camera::visibility::calculate_bounds (19,099 µs, 0.09%)</title><rect x="0.4823%" y="61" width="0.0893%" height="15" fill="rgb(228,23,34)" fg:x="103146" fg:w="19099"/><text x="0.7323%" y="71.50"></text></g><g><title>bevy_camera::visibility::check_visibility_cpu_culling (35,998 µs, 0.17%)</title><rect x="0.5720%" y="61" width="0.1683%" height="15" fill="rgb(218,30,26)" fg:x="122334" fg:w="35998"/><text x="0.8220%" y="71.50"></text></g><g><title>bevy_camera::visibility::mark_newly_hidden_entities_invisible (9,512 µs, 0.04%)</title><rect x="0.7429%" y="61" width="0.0445%" height="15" fill="rgb(220,122,19)" fg:x="158882" fg:w="9512"/><text x="0.9929%" y="71.50"></text></g><g><title>bevy_camera::visibility::range::check_visibility_ranges (12,744 µs, 0.06%)</title><rect x="0.7874%" y="61" width="0.0596%" height="15" fill="rgb(250,228,42)" fg:x="168394" fg:w="12744"/><text x="1.0374%" y="71.50"></text></g><g><title>bevy_camera::visibility::reset_view_visibility (12,427 µs, 0.06%)</title><rect x="0.8470%" y="61" width="0.0581%" height="15" fill="rgb(240,193,28)" fg:x="181138" fg:w="12427"/><text x="1.0970%" y="71.50"></text></g><g><title>bevy_camera::visibility::visibility_propagate_system (4,764 µs, 0.02%)</title><rect x="0.9123%" y="61" width="0.0223%" height="15" fill="rgb(216,20,37)" fg:x="195096" fg:w="4764"/><text x="1.1623%" y="71.50"></text></g><g><title>bevy_core_pipeline::core_3d::extract_core_3d_camera_phases (4,280 µs, 0.02%)</title><rect x="0.9566%" y="61" width="0.0200%" height="15" fill="rgb(206,188,39)" fg:x="204585" fg:w="4280"/><text x="1.2066%" y="71.50"></text></g><g><title>bevy_core_pipeline::core_3d::main_opaque_pass_3d_node::main_opaque_pass_3d (19,649 µs, 0.09%)</title><rect x="0.9767%" y="61" width="0.0919%" height="15" fill="rgb(217,207,13)" fg:x="208865" fg:w="19649"/><text x="1.2267%" y="71.50"></text></g><g><title>bevy_core_pipeline::core_3d::main_transparent_pass_3d_node::main_transparent_pass_3d (157,859 µs, 0.74%)</title><rect x="1.0685%" y="61" width="0.7382%" height="15" fill="rgb(231,73,38)" fg:x="228514" fg:w="157859"/><text x="1.3185%" y="71.50"></text></g><g><title>bevy_core_pipeline::core_3d::prepare_core_3d_depth_textures (2,181 µs, 0.01%)</title><rect x="1.8067%" y="61" width="0.0102%" height="15" fill="rgb(225,20,46)" fg:x="386373" fg:w="2181"/><text x="2.0567%" y="71.50"></text></g><g><title>bevy_core_pipeline::deferred::copy_lighting_id::copy_deferred_lighting_id (7,784 µs, 0.04%)</title><rect x="1.8352%" y="61" width="0.0364%" height="15" fill="rgb(210,31,41)" fg:x="392471" fg:w="7784"/><text x="2.0852%" y="71.50"></text></g><g><title>bevy_core_pipeline::deferred::node::early_deferred_prepass (6,765 µs, 0.03%)</title><rect x="1.8743%" y="61" width="0.0316%" height="15" fill="rgb(221,200,47)" fg:x="400827" fg:w="6765"/><text x="2.1243%" y="71.50"></text></g><g><title>bevy_core_pipeline::deferred::node::late_deferred_prepass (8,830 µs, 0.04%)</title><rect x="1.9059%" y="61" width="0.0413%" height="15" fill="rgb(226,26,5)" fg:x="407592" fg:w="8830"/><text x="2.1559%" y="71.50"></text></g><g><title>bevy_core_pipeline::mip_generation::experimental::depth::early_downsample_depth (7,220 µs, 0.03%)</title><rect x="1.9498%" y="61" width="0.0338%" height="15" fill="rgb(249,33,26)" fg:x="416971" fg:w="7220"/><text x="2.1998%" y="71.50"></text></g><g><title>bevy_core_pipeline::mip_generation::experimental::depth::late_downsample_depth (9,671 µs, 0.05%)</title><rect x="1.9835%" y="61" width="0.0452%" height="15" fill="rgb(235,183,28)" fg:x="424191" fg:w="9671"/><text x="2.2335%" y="71.50"></text></g><g><title>bevy_core_pipeline::oit::resolve::node::oit_resolve (8,831 µs, 0.04%)</title><rect x="2.0509%" y="61" width="0.0413%" height="15" fill="rgb(221,5,38)" fg:x="438601" fg:w="8831"/><text x="2.3009%" y="71.50"></text></g><g><title>bevy_core_pipeline::oit::resolve::prepare_oit_resolve_bind_group (5,259 µs, 0.02%)</title><rect x="2.0922%" y="61" width="0.0246%" height="15" fill="rgb(247,18,42)" fg:x="447432" fg:w="5259"/><text x="2.3422%" y="71.50"></text></g><g><title>bevy_core_pipeline::prepass::node::early_prepass (17,954 µs, 0.08%)</title><rect x="2.1351%" y="61" width="0.0840%" height="15" fill="rgb(241,131,45)" fg:x="456603" fg:w="17954"/><text x="2.3851%" y="71.50"></text></g><g><title>bevy_core_pipeline::prepass::node::late_prepass (11,022 µs, 0.05%)</title><rect x="2.2190%" y="61" width="0.0515%" height="15" fill="rgb(249,31,29)" fg:x="474557" fg:w="11022"/><text x="2.4690%" y="71.50"></text></g><g><title>bevy_core_pipeline::schedule::camera_driver (3,442,555 µs, 16.10%)</title><rect x="2.2706%" y="61" width="16.0975%" height="15" fill="rgb(225,111,53)" fg:x="485579" fg:w="3442555"/><text x="2.5206%" y="71.50">bevy_core_pipeline::sched..</text></g><g><title>bevy_core_pipeline::schedule::handle_uncovered_swap_chains (2,330 µs, 0.01%)</title><rect x="18.3681%" y="61" width="0.0109%" height="15" fill="rgb(238,160,17)" fg:x="3928134" fg:w="2330"/><text x="18.6181%" y="71.50"></text></g><g><title>bevy_core_pipeline::schedule::submit_pending_command_buffers (655,062 µs, 3.06%)</title><rect x="18.3790%" y="61" width="3.0631%" height="15" fill="rgb(214,148,48)" fg:x="3930464" fg:w="655062"/><text x="18.6290%" y="71.50">bev..</text></g><g><title>bevy_core_pipeline::skybox::prepare_skybox_bind_groups (6,548 µs, 0.03%)</title><rect x="21.4472%" y="61" width="0.0306%" height="15" fill="rgb(232,36,49)" fg:x="4586627" fg:w="6548"/><text x="21.6972%" y="71.50"></text></g><g><title>bevy_core_pipeline::tonemapping::node::tonemapping (14,423 µs, 0.07%)</title><rect x="21.4904%" y="61" width="0.0674%" height="15" fill="rgb(209,103,24)" fg:x="4595861" fg:w="14423"/><text x="21.7404%" y="71.50"></text></g><g><title>bevy_core_pipeline::upscaling::bevy_ecs::schedule::condition::common_conditions::any_match_filter&lt;(bevy_ecs::query::filter::With&lt;bevy_pbr::render::gpu_preprocess::PreprocessBindGroups&gt;, bevy_ecs::query::filter::Without&bevy_diagnostic::entity_count_diagnostics_plugin::EntityCountDiagnosticsPlugin::diagnostic_system (2,169 µs, 0.01%)</title><rect x="21.6712%" y="61" width="0.0101%" height="15" fill="rgb(213,181,19)" fg:x="4634531" fg:w="2169"/><text x="21.9212%" y="71.50"></text></g><g><title>bevy_ecs::schedule::condition::common_conditions::any_match_filter&lt;(bevy_ecs::query::filter::With&lt;bevy_pbr::render::gpu_preprocess::PreprocessBindGroups&gt;, bevy_ecs::query::filter::Without&lt;bevy_pbr::render::gpu_preprocess::SkipGpuPreprocess&gt;, bevy_ecs::query::filter::Without&lt;bevy_render::view::NoIndirectDrawing&gt;)&gt; (4,799 µs, 0.02%)</title><rect x="21.6930%" y="61" width="0.0224%" height="15" fill="rgb(254,191,54)" fg:x="4639194" fg:w="4799"/><text x="21.9430%" y="71.50"></text></g><g><title>bevy_ecs::schedule::condition::common_conditions::any_match_filter&lt;(bevy_ecs::query::filter::With&lt;bevy_pbr::render::gpu_preprocess::PreprocessBindGroups&gt;, bevy_ecs::query::filter::Without&lt;bevy_pbr::render::gpu_preprocess::SkipGpuPreprocess&gt;, bevy_ecs::query::filter::Without&lt;bevy_render::view::NoIndirectDrawing&gt;, bevy_ecs::query::filter::Or&lt;(bevy_ecs::query::filter::Or&lt;(bevy_ecs::query::filter::With&lt;bevy_core_pipeline::prepass::DepthPrepass&gt;, bevy_ecs::query::filter::With&lt;bevy_core_pipeline::prepass::NormalPrepass&gt;, bevy_ecs::query::filter::With&lt;bevy_core_pipeline::prepass::MotionVectorPrepass&gt;, bevy_ecs::query::filter::With&lt;bevy_core_pipeline::prepass::DeferredPrepass&gt;)&gt;, bevy_ecs::query::filter::With&lt;bevy_pbr::render::light::ShadowView&gt;)&gt;)&gt; (3,970 µs, 0.02%)</title><rect x="21.7154%" y="61" width="0.0186%" height="15" fill="rgb(241,83,37)" fg:x="4643993" fg:w="3970"/><text x="21.9654%" y="71.50"></text></g><g><title>bevy_ecs::schedule::condition::common_conditions::any_match_filter&lt;(bevy_ecs::query::filter::With&lt;bevy_pbr::render::gpu_preprocess::PreprocessBindGroups&gt;, bevy_ecs::query::filter::Without&lt;bevy_pbr::render::gpu_preprocess::SkipGpuPreprocess&gt;, bevy_ecs::query::filter::Without&lt;bevy_render::view::NoIndirectDrawing&gt;, bevy_ecs::query::filter::Or&lt;(bevy_ecs::query::filter::Or&lt;(bevy_ecs::query::filter::With&lt;bevy_core_pipeline::prepass::DepthPrepass&gt;, bevy_ecs::query::filter::With&lt;bevy_core_pipeline::prepass::NormalPrepass&gt;, bevy_ecs::query::filter::With&lt;bevy_core_pipeline::prepass::MotionVectorPrepass&gt;, bevy_ecs::query::filter::With&lt;bevy_core_pipeline::prepass::DeferredPrepass&gt;)&gt;, bevy_ecs::query::filter::With&lt;bevy_pbr::render::light::ShadowView&gt;)&gt;, bevy_ecs::query::filter::With&lt;bevy_render::occlusion_culling::OcclusionCulling&gt;)&gt; (3,924 µs, 0.02%)</title><rect x="21.7340%" y="61" width="0.0183%" height="15" fill="rgb(233,36,39)" fg:x="4647963" fg:w="3924"/><text x="21.9840%" y="71.50"></text></g><g><title>bevy_ecs::schedule::condition::common_conditions::resource_exists&lt;bevy_render::batching::gpu_preprocessing::BatchedInstanceBuffers&lt;bevy_pbr::render::mesh::MeshUniform, bevy_pbr::render::mesh::MeshInputUniform&gt;&gt; (4,104 µs, 0.02%)</title><rect x="21.7644%" y="61" width="0.0192%" height="15" fill="rgb(226,3,54)" fg:x="4654465" fg:w="4104"/><text x="22.0144%" y="71.50"></text></g><g><title>bevy_gaussian_splatting::render::queue_gaussian_compute_view_bind_groups&lt;bevy_gaussian_splatting::gaussian::formats::planar_3d::Gaussian3d&gt; (4,860 µs, 0.02%)</title><rect x="21.8281%" y="61" width="0.0227%" height="15" fill="rgb(245,192,40)" fg:x="4668084" fg:w="4860"/><text x="22.0781%" y="71.50"></text></g><g><title>bevy_gaussian_splatting::render::queue_gaussian_compute_view_bind_groups&lt;bevy_gaussian_splatting::gaussian::formats::planar_4d::Gaussian4d&gt; (4,419 µs, 0.02%)</title><rect x="21.8544%" y="61" width="0.0207%" height="15" fill="rgb(238,167,29)" fg:x="4673704" fg:w="4419"/><text x="22.1044%" y="71.50"></text></g><g><title>bevy_gaussian_splatting::render::queue_gaussian_view_bind_groups&lt;bevy_gaussian_splatting::gaussian::formats::planar_3d::Gaussian3d&gt; (5,298 µs, 0.02%)</title><rect x="21.8774%" y="61" width="0.0248%" height="15" fill="rgb(232,182,51)" fg:x="4678621" fg:w="5298"/><text x="22.1274%" y="71.50"></text></g><g><title>bevy_gaussian_splatting::render::queue_gaussian_view_bind_groups&lt;bevy_gaussian_splatting::gaussian::formats::planar_4d::Gaussian4d&gt; (4,703 µs, 0.02%)</title><rect x="21.9068%" y="61" width="0.0220%" height="15" fill="rgb(231,60,39)" fg:x="4684910" fg:w="4703"/><text x="22.1568%" y="71.50"></text></g><g><title>bevy_gaussian_splatting::sort::radix::run_radix_sort&lt;bevy_gaussian_splatting::gaussian::formats::planar_3d::Gaussian3d&gt; (18,540 µs, 0.09%)</title><rect x="21.9674%" y="61" width="0.0867%" height="15" fill="rgb(208,69,12)" fg:x="4697867" fg:w="18540"/><text x="22.2174%" y="71.50"></text></g><g><title>bevy_gizmos::collect_requested_gizmos&lt;eustress_engine::gizmo_tools::TransformGizmoGroup, bevy_time::fixed::Fixed&gt; (2,890 µs, 0.01%)</title><rect x="22.1202%" y="61" width="0.0135%" height="15" fill="rgb(235,93,37)" fg:x="4730557" fg:w="2890"/><text x="22.3702%" y="71.50"></text></g><g><title>bevy_interleave_interface::storage::extract_planar_handles&lt;bevy_gaussian_splatting::gaussian::formats::planar_4d::Gaussian4d&gt; (2,812 µs, 0.01%)</title><rect x="22.2264%" y="61" width="0.0131%" height="15" fill="rgb(213,116,39)" fg:x="4753266" fg:w="2812"/><text x="22.4764%" y="71.50"></text></g><g><title>bevy_light::check_dir_light_mesh_visibility (66,201 µs, 0.31%)</title><rect x="22.2585%" y="61" width="0.3096%" height="15" fill="rgb(222,207,29)" fg:x="4760135" fg:w="66201"/><text x="22.5085%" y="71.50"></text></g><g><title>bevy_light::check_dir_light_mesh_visibility [apply_deferred] (18,207 µs, 0.09%)</title><rect x="22.5681%" y="61" width="0.0851%" height="15" fill="rgb(206,96,30)" fg:x="4826336" fg:w="18207"/><text x="22.8181%" y="71.50"></text></g><g><title>bevy_light::check_point_light_mesh_visibility (86,165 µs, 0.40%)</title><rect x="22.6532%" y="61" width="0.4029%" height="15" fill="rgb(218,138,4)" fg:x="4844543" fg:w="86165"/><text x="22.9032%" y="71.50"></text></g><g><title>bevy_mesh::components::mark_3d_meshes_as_changed_if_their_assets_changed (6,243 µs, 0.03%)</title><rect x="23.0892%" y="61" width="0.0292%" height="15" fill="rgb(250,191,14)" fg:x="4937773" fg:w="6243"/><text x="23.3392%" y="71.50"></text></g><g><title>bevy_pbr::atmosphere::environment::atmosphere_environment (7,816 µs, 0.04%)</title><rect x="23.1197%" y="61" width="0.0365%" height="15" fill="rgb(239,60,40)" fg:x="4944301" fg:w="7816"/><text x="23.3697%" y="71.50"></text></g><g><title>bevy_pbr::atmosphere::node::atmosphere_luts (8,240 µs, 0.04%)</title><rect x="23.1711%" y="61" width="0.0385%" height="15" fill="rgb(206,27,48)" fg:x="4955299" fg:w="8240"/><text x="23.4211%" y="71.50"></text></g><g><title>bevy_pbr::atmosphere::node::render_sky (9,817 µs, 0.05%)</title><rect x="23.2096%" y="61" width="0.0459%" height="15" fill="rgb(225,35,8)" fg:x="4963539" fg:w="9817"/><text x="23.4596%" y="71.50"></text></g><g><title>bevy_pbr::cluster::gpu::cluster_on_gpu (18,771 µs, 0.09%)</title><rect x="23.2753%" y="61" width="0.0878%" height="15" fill="rgb(250,213,24)" fg:x="4977586" fg:w="18771"/><text x="23.5253%" y="71.50"></text></g><g><title>bevy_pbr::cluster::gpu::extract_clusters_for_gpu_clustering (2,437 µs, 0.01%)</title><rect x="23.3631%" y="61" width="0.0114%" height="15" fill="rgb(247,123,22)" fg:x="4996357" fg:w="2437"/><text x="23.6131%" y="71.50"></text></g><g><title>bevy_pbr::cluster::gpu::prepare_clustering_bind_groups (31,622 µs, 0.15%)</title><rect x="23.3844%" y="61" width="0.1479%" height="15" fill="rgb(231,138,38)" fg:x="5000905" fg:w="31622"/><text x="23.6344%" y="71.50"></text></g><g><title>bevy_pbr::cluster::gpu::prepare_clusters_for_gpu_clustering (106,846 µs, 0.50%)bevy_pbr::cluster::gpu::prepare_clusters_for_gpu_clustering [apply_deferred] (6,224 µs, 0.03%)</title><rect x="24.1182%" y="61" width="0.0291%" height="15" fill="rgb(231,145,46)" fg:x="5158701" fg:w="6224"/><text x="24.3682%" y="71.50"></text></g><g><title>bevy_pbr::crect x="24.0495%" y="61" width="0.0260%" height="15" fill="rgb(251,118,11)" fg:x="5143152" fg:w="5551"/><text x="24.2995%" y="71.50"></text></g><g><title>bevy_pbr::cluster::gpu::upload_view_gpu_clustering_buffers (13,339 µs, 0.06%)</title><rect x="24.0755%" y="61" width="0.0624%" height="15" fill="rgb(217,147,25)" fg:x="5148703" fg:w="13339"/><text x="24.3255%" y="71.50"></text></g><g><title>bevy_pbr::cluster::gpu_clustering_is_enabled (6,425 µs, 0.03%)</title><rect x="24.1378%" y="61" width="0.0300%" height="15" fill="rgb(247,81,37)" fg:x="5162042" fg:w="6425"/><text x="24.3878%" y="71.50"></text></g><g><title>bevy_pbr::decal::clustered::upload_decals (2,740 µs, 0.01%)</title><rect x="24.1826%" y="61" width="0.0128%" height="15" fill="rgb(209,12,38)" fg:x="5171605" fg:w="2740"/><text x="24.4326%" y="71.50"></text></g><g><title>bevy_pbr::deferred::deferred_lighting (8,493 µs, 0.04%)</title><rect x="24.1954%" y="61" width="0.0397%" height="15" fill="rgb(227,1,9)" fg:x="5174345" fg:w="8493"/><text x="24.4454%" y="71.50"></text></g><g><title>bevy_pbr::light_probe::upload_light_probes (7,858 µs, 0.04%)</title><rect x="24.2771%" y="61" width="0.0367%" height="15" fill="rgb(248,47,43)" fg:x="5191827" fg:w="7858"/><text x="24.5271%" y="71.50"></text></g><g><title>bevy_pbr::material::check_entities_needing_specialization&lt;bevy_pbr::pbr_material::StandardMaterial&gt; (20,039 µs, 0.09%)</title><rect x="24.3268%" y="61" width="0.0937%" height="15" fill="rgb(221,10,30)" fg:x="5202461" fg:w="20039"/><text x="24.5768%" y="71.50"></text></g><g><title>bevy_pbr::material::extract_mesh_materials&lt;bevy_pbr::pbr_material::StandardMaterial&gt; (4,024 µs, 0.02%)</title><rect x="24.4342%" y="61" width="0.0188%" height="15" fill="rgb(210,229,1)" fg:x="5225411" fg:w="4024"/><text x="24.6842%" y="71.50"></text></g><g><title>bevy_pbr::material::mark_meshes_as_changed_if_their_materials_changed&lt;bevy_pbr::pbr_material::StandardMaterial&gt; (10,768 µs, 0.05%)</title><rect x="24.4570%" y="61" width="0.0504%" height="15" fill="rgb(222,148,37)" fg:x="5230285" fg:w="10768"/><text x="24.7070%" y="71.50"></text></g><g><title>bevy_pbr::material::prepare_material_bind_groups (16,249 µs, 0.08%)</title><rect x="24.5073%" y="61" width="0.0760%" height="15" fill="rgb(234,67,33)" fg:x="5241053" fg:w="16249"/><text x="24.7573%" y="71.50"></text></g><g><title>bevy_pbr::material::write_material_bind_group_buffers (11,816 µs, 0.06%)</title><rect x="24.5987%" y="61" width="0.0553%" height="15" fill="rgb(247,98,35)" fg:x="5260599" fg:w="11816"/><text x="24.8487%" y="71.50"></text></g><g><title>bevy_pbr::prepass::prepare_prepass_view_bind_group (9,815 µs, 0.05%)</title><rect x="24.6652%" y="61" width="0.0459%" height="15" fill="rgb(247,138,52)" fg:x="5274822" fg:w="9815"/><text x="24.9152%" y="71.50"></text></g><g><title>bevy_pbr::prepass::prepare_previous_view_uniforms (4,629 µs, 0.02%)</title><rect x="24.7111%" y="61" width="0.0216%" height="15" fill="rgb(213,79,30)" fg:x="5284637" fg:w="4629"/><text x="24.9611%" y="71.50"></text></g><g><title>bevy_pbr::prepass::specialize_prepass_material_meshes (2,316 µs, 0.01%)</title><rect x="24.7458%" y="61" width="0.0108%" height="15" fill="rgb(246,177,23)" fg:x="5292047" fg:w="2316"/><text x="24.9958%" y="71.50"></text></g><g><title>bevy_pbr::prepass::update_mesh_previous_global_transforms (13,978 µs, 0.07%)</title><rect x="24.7566%" y="61" width="0.0654%" height="15" fill="rgb(230,62,27)" fg:x="5294363" fg:w="13978"/><text x="25.0066%" y="71.50"></text></g><g><title>bevy_pbr::render::fog::prepare_fog (3,520 µs, 0.02%)</title><rect x="24.8307%" y="61" width="0.0165%" height="15" fill="rgb(216,154,8)" fg:x="5310221" fg:w="3520"/><text x="25.0807%" y="71.50"></text></g><g><title>bevy_pbr::render::gpu_preprocess::clear_indirect_parameters_metadata (30,790 µs, 0.14%)</title><rect x="24.8490%" y="61" width="0.1440%" height="15" fill="rgb(244,35,45)" fg:x="5314121" fg:w="30790"/><text x="25.0990%" y="71.50"></text></g><g><title>bevy_pbr::render::gpu_preprocess::early_gpu_preprocess (35,014 µs, 0.16%)</title><rect x="24.9929%" y="61" width="0.1637%" height="15" fill="rgb(251,115,12)" fg:x="5344911" fg:w="35014"/><text x="25.2429%" y="71.50"></text></g><g><title>bevy_pbr::render::gpu_preprocess::early_prepass_build_indirect_parameters (34,463 µs, 0.16%)</title><rect x="25.1567%" y="61" width="0.1611%" height="15" fill="rgb(240,54,50)" fg:x="5379925" fg:w="34463"/><text x="25.4067%" y="71.50"></text></g><g><title>bevy_pbr::render::gpu_preprocess::late_gpu_preprocess (8,870 µs, 0.04%)</title><rect x="25.3178%" y="61" width="0.0415%" height="15" fill="rgb(233,84,52)" fg:x="5414388" fg:w="8870"/><text x="25.5678%" y="71.50"></text></g><g><title>bevy_pbr::render::gpu_preprocess::main_build_indirect_parameters (11,184 µs, 0.05%)</title><rect x="25.3593%" y="61" width="0.0523%" height="15" fill="rgb(207,117,47)" fg:x="5423258" fg:w="11184"/><text x="25.6093%" y="71.50"></text></g><g><title>bevy_pbr::render::gpu_preprocess::prepare_preprocess_bind_groups (164,294 µs, 0.77%)</title><rect x="25.4116%" y="61" width="0.7682%" height="15" fill="rgb(249,43,39)" fg:x="5434442" fg:w="164294"/><text x="25.6616%" y="71.50"></text></g><g><title>bevy_pbr::render::gpu_preprocess::prepare_preprocess_bind_groups [apply_deferred] (6,061 µs, 0.03%)</title><rect x="26.1798%" y="61" width="0.0283%" height="15" fill="rgb(209,38,44)" fg:x="5598736" fg:w="6061"/><text x="26.4298%" y="71.50"></text></g><g><title>bevy_pbr::render::gpu_preprocess::unpack_bins (51,925 µs, 0.24%)</title><rect x="26.2124%" y="61" width="0.2428%" height="15" fill="rgb(236,212,23)" fg:x="5605708" fg:w="51925"/><text x="26.4624%" y="71.50"></text></g><g><title>bevy_pbr::render::light::extract_lights (22,770 µs, 0.11%)</title><rect x="26.4709%" y="61" width="0.1065%" height="15" fill="rgb(242,79,21)" fg:x="5660973" fg:w="22770"/><text x="26.7209%" y="71.50"></text></g><g><title>bevy_pbr::render::light::extract_lights [apply_deferred] (2,680 µs, 0.01%)</title><rect x="26.5773%" y="61" width="0.0125%" height="15" fill="rgb(211,96,35)" fg:x="5683743" fg:w="2680"/><text x="26.8273%" y="71.50"></text></g><g><title>bevy_pbr::render::light::extract_shadow_lod_origin (6,468 µs, 0.03%)</title><rect x="26.5928%" y="61" width="0.0302%" height="15" fill="rgb(253,215,40)" fg:x="5687052" fg:w="6468"/><text x="26.8428%" y="71.50"></text></g><g><title>bevy_pbr::render::light::per_view_shadow_pass&lt;false&gt; (26,033 µs, 0.12%)</title><rect x="26.6231%" y="61" width="0.1217%" height="15" fill="rgb(211,81,21)" fg:x="5693520" fg:w="26033"/><text x="26.8731%" y="71.50"></text></g><g><title>bevy_pbr::render::light::per_view_shadow_pass&lt;true&gt; (6,824 µs, 0.03%)</title><rect x="26.7448%" y="61" width="0.0319%" height="15" fill="rgb(208,190,38)" fg:x="5719553" fg:w="6824"/><text x="26.9948%" y="71.50"></text></g><g><title>bevy_pbr::render::light::prepare_lights (36,144 µs, 0.17%)</title><rect x="26.7767%" y="61" width="0.1690%" height="15" fill="rgb(235,213,38)" fg:x="5726377" fg:w="36144"/><text x="27.0267%" y="71.50"></text></g><g><title>bevy_pbr::render::light::prepare_lights [apply_deferred] (6,067 µs, 0.03%)</title><rect x="26.9457%" y="61" width="0.0284%" height="15" fill="rgb(237,122,38)" fg:x="5762521" fg:w="6067"/><text x="27.1957%" y="71.50"></text></g><g><title>bevy_pbr::render::light::queue_shadows (2,744 µs, 0.01%)</title><rect x="26.9741%" y="61" width="0.0128%" height="15" fill="rgb(244,218,35)" fg:x="5768588" fg:w="2744"/><text x="27.2241%" y="71.50"></text></g><g><title>bevy_pbr::render::light::shared_shadow_pass&lt;false&gt; (113,966 µs, 0.53%)</title><rect x="26.9869%" y="61" width="0.5329%" height="15" fill="rgb(240,68,47)" fg:x="5771332" fg:w="113966"/><text x="27.2369%" y="71.50"></text></g><g><title>bevy_pbr::render::light::shared_shadow_pass&lt;true&gt; (10,748 µs, 0.05%)<bevy_pbr::render::light::specialize_shadows (3,159 µs, 0.01%)</title><rect x="27.6552%" y="61" width="0.0148%" height="15" fill="rgb(210,16,53)" fg:x="5915247" fg:w="3159"/><text x="27.9052%" y="71.50"></text></g><g><title>bevy_pbr:rect x="27.5701%" y="61" width="0.0153%" height="15" fill="rgb(235,124,12)" fg:x="5896046" fg:w="3263"/><text x="27.8201%" y="71.50"></text></g><g><title>bevy_pbr::render::mesh::collect_gpu_culled_meshes (2,379 µs, 0.01%)</title><rect x="27.5909%" y="61" width="0.0111%" height="15" fill="rgb(224,169,11)" fg:x="5900507" fg:w="2379"/><text x="27.8409%" y="71.50"></text></g><g><title>bevy_pbr::render::mesh::collect_meshes_for_gpu_building (11,885 µs, 0.06%)</title><rect x="27.6021%" y="61" width="0.0556%" height="15" fill="rgb(250,166,2)" fg:x="5902886" fg:w="11885"/><text x="27.8521%" y="71.50"></text></g><g><title>bevy_pbr::render::mesh::extract_meshes_for_gpu_building (19,165 µs, 0.09%)</title><rect x="27.6576%" y="61" width="0.0896%" height="15" fill="rgb(242,216,29)" fg:x="5914771" fg:w="19165"/><text x="27.9076%" y="71.50"></text></g><g><title>bevy_pbr::render::mesh::prepare_mesh_bind_groups (25,331 µs, 0.12%)</title><rect x="27.7472%" y="61" width="0.1184%" height="15" fill="rgb(230,116,27)" fg:x="5933936" fg:w="25331"/><text x="27.9972%" y="71.50"></text></g><g><title>bevy_pbr::render::mesh::prepare_mesh_bind_groups [apply_deferred] (3,801 µs, 0.02%)</title><rect x="27.8657%" y="61" width="0.0178%" height="15" fill="rgb(228,99,48)" fg:x="5959267" fg:w="3801"/><text x="28.1157%" y="71.50"></text></g><g><title>bevy_pbr::render::mesh_view_bindings::prepare_mesh_view_bind_groups (36,669 µs, 0.17%)</title><rect x="27.8849%" y="61" width="0.1715%" height="15" fill="rgb(253,11,6)" fg:x="5963374" fg:w="36669"/><text x="28.1349%" y="71.50"></text></g><g><title>bevy_pbr::ssao::ssao (7,147 µs, 0.03%)</title><rect x="28.0967%" y="61" width="0.0334%" height="15" fill="rgb(247,143,39)" fg:x="6008661" fg:w="7147"/><text x="28.3467%" y="71.50"></text></g><g><title>bevy_pbr::ssr::screen_space_reflections (9,536 µs, 0.04%)</title><rect x="28.1363%" y="61" width="0.0446%" height="15" fill="rgb(236,97,10)" fg:x="6017137" fg:w="9536"/><text x="28.3863%" y="71.50"></text></g><g><title>bevy_pbr::transmission::node::main_transmissive_pass_3d (7,681 µs, 0.04%)</title><rect x="28.1809%" y="61" width="0.0359%" height="15" fill="rgb(233,208,19)" fg:x="6026673" fg:w="7681"/><text x="28.4309%" y="71.50"></text></g><g><title>bevy_pbr::volumetric_fog::render::volumetric_fog (9,484 µs, 0.04%)</title><rect x="28.2408%" y="61" width="0.0443%" height="15" fill="rgb(216,164,2)" fg:x="6039496" fg:w="9484"/><text x="28.4908%" y="71.50"></text></g><g><title>bevy_post_process::bloom::bloom (6,340 µs, 0.03%)</title><rect x="28.2852%" y="61" width="0.0296%" height="15" fill="rgb(220,129,5)" fg:x="6048980" fg:w="6340"/><text x="28.5352%" y="71.50"></text></g><g><title>bevy_post_process::dof::depth_of_field (7,550 µs, 0.04%)</title><rect x="28.3276%" y="61" width="0.0353%" height="15" fill="rgb(242,17,10)" fg:x="6058057" fg:w="7550"/><text x="28.5776%" y="71.50"></text></g><g><title>bevy_post_process::effect_stack::post_processing (8,422 µs, 0.04%)</title><rect x="28.3776%" y="61" width="0.0394%" height="15" fill="rgb(242,107,0)" fg:x="6068744" fg:w="8422"/><text x="28.6276%" y="71.50"></text></g><g><title>bevy_post_process::motion_blur::motion_blur (6,261 µs, 0.03%)</title><rect x="28.4245%" y="61" width="0.0293%" height="15" fill="rgb(251,28,31)" fg:x="6078776" fg:w="6261"/><text x="28.6745%" y="71.50"></text></g><g><title>bevy_post_process::msaa_writeback::msaa_writeback (12,432 µs, 0.06%)</title><rect x="28.4577%" y="61" width="0.0581%" height="15" fill="rgb(233,223,10)" fg:x="6085873" fg:w="12432"/><text x="28.7077%" y="71.50"></text></g><g><title>bevy_render::batching::gpu_preprocessing::batch_and_prepare_binned_render_phase&lt;bevy_core_pipeline::core_3d::Opaque3d, bevy_pbr::render::mesh::MeshPipeline&gt; (2,382 µs, 0.01%)</title><rect x="28.5278%" y="61" width="0.0111%" height="15" fill="rgb(215,21,27)" fg:x="6100856" fg:w="2382"/><text x="28.7778%" y="71.50"></text></g><g><title>bevy_render::batching::gpu_preprocessing::batch_and_prepare_binned_render_phase&lt;bevy_pbr::render::light::Shadow, bevy_pbr::render::mesh::MeshPipeline&gt; (13,886 µs, 0.06%)</title><rect x="28.5623%" y="61" width="0.0649%" height="15" fill="rgb(232,23,21)" fg:x="6108239" fg:w="13886"/><text x="28.8123%" y="71.50"></text></g><g><title>bevy_render::batching::gpu_preprocessing::batch_and_prepare_sorted_render_phase&lt;bevy_core_pipeline::core_3d::Transparent3d, bevy_pbr::render::mesh::MeshPipeline&gt; (3,950 µs, 0.02%)</title><rect x="28.6272%" y="61" width="0.0185%" height="15" fill="rgb(244,5,23)" fg:x="6122125" fg:w="3950"/><text x="28.8772%" y="71.50"></text></g><g><title>bevy_render::batching::gpu_preprocessing::delete_old_work_item_buffers&lt;bevy_pbr::render::mesh::MeshPipeline&gt; (2,144 µs, 0.01%)</title><rect x="28.6872%" y="61" width="0.0100%" height="15" fill="rgb(226,81,46)" fg:x="6134956" fg:w="2144"/><text x="28.9372%" y="71.50"></text></g><g><title>bevy_render::batching::gpu_preprocessing::write_batched_instance_buffers&lt;bevy_pbr::render::mesh::MeshPipeline&gt; (26,098 µs, 0.12%)</title><rect x="28.6972%" y="61" width="0.1220%" height="15" fill="rgb(247,70,30)" fg:x="6137100" fg:w="26098"/><text x="28.9472%" y="71.50"></text></g><g><title>bevy_render::batching::gpu_preprocessing::write_binned_instance_buffers&lt;bevy_core_pipeline::core_3d::Opaque3d, bevy_pbr::render::mesh::MeshPipeline&gt; (9,760 µs, 0.05%)</title><rect x="28.8280%" y="61" width="0.0456%" height="15" fill="rgb(212,68,19)" fg:x="6165073" fg:w="9760"/><text x="29.0780%" y="71.50"></text></g><g><title>bevy_render::batching::gpu_preprocessing::write_binned_instance_buffers&lt;bevy_core_pipeline::prepass::Opaque3dPrepass, bevy_pbr::render::mesh::MeshPipeline&gt; (5,894 µs, 0.03%)</title><rect x="28.8909%" y="61" width="0.0276%" height="15" fill="rgb(240,187,13)" fg:x="6178513" fg:w="5894"/><text x="29.1409%" y="71.50"></text></g><g><title>bevy_render::batching::gpu_preprocessing::write_binned_instance_buffers&lt;bevy_pbr::render::light::Shadow, bevy_pbr::render::mesh::MeshPipeline&gt; (113,767 µs, 0.53%)</title><rect x="28.9185%" y="61" width="0.5320%" height="15" fill="rgb(223,113,26)" fg:x="6184407" fg:w="113767"/><text x="29.1685%" y="71.50"></text></g><g><title>bevy_render::batching::gpu_preprocessing::write_indirect_parameters_buffers (29,303 µs, 0.14%)</title><rect x="29.4504%" y="61" width="0.1370%" height="15" fill="rgb(206,192,2)" fg:x="6298174" fg:w="29303"/><text x="29.7004%" y="71.50"></text></g><g><title>bevy_render::batching::sort_binned_render_phase&lt;bevy_pbr::render::light::Shadow&gt; (2,228 µs, 0.01%)</title><rect x="29.5996%" y="61" width="0.0104%" height="15" fill="rgb(241,108,4)" fg:x="6330081" fg:w="2228"/><text x="29.8496%" y="71.50"></text></g><g><title>bevy_render::camera::extract_cameras (3,694 µs, 0.02%)</title><rect x="29.6375%" y="61" width="0.0173%" height="15" fill="rgb(247,173,49)" fg:x="6338185" fg:w="3694"/><text x="29.8875%" y="71.50"></text></g><g><title>bevy_render::erased_render_asset::prepare_erased_assets&lt;bevy_pbr::mesh_material::MeshMaterial3d&lt;bevy_pbr::pbr_material::StandardMaterial&gt;&gt; (10,883 µs, 0.05%)</title><rect x="29.6905%" y="61" width="0.0509%" height="15" fill="rgb(224,114,35)" fg:x="6349512" fg:w="10883"/><text x="29.9405%" y="71.50"></text></g><g><title>bevy_render::extract_component::extract_components&lt;eustress_engine::billboard_pipeline::BillboardDepth, ()&gt; (5,263 µs, 0.02%)</title><rect x="29.8317%" y="61" width="0.0246%" height="15" fill="rgb(245,159,27)" fg:x="6379705" fg:w="5263"/><text x="30.0817%" y="71.50"></text></g><g><title>bevy_render::extract_component::extract_components&lt;eustress_engine::billboard_pipeline::BillboardDepth, ()&gt; [apply_deferred] (2,529 µs, 0.01%)</title><rect x="29.8563%" y="61" width="0.0118%" height="15" fill="rgb(245,172,44)" fg:x="6384968" fg:w="2529"/><text x="30.1063%" y="71.50"></rect x="29.8967%" y="61" width="0.0122%" height="15" fill="rgb(245,172,44)" fg:x="6394697" fg:w="2602"/><text x="30.1467%" y="71.50"></text></g><g><title>bevy_render::extract_plugin::apply_extract_commands (50,819 µs, 0.24%)</title><rect x="29.9146%" y="61" width="0.2376%" height="15" fill="rgb(text></g><g><title>bevy_render::extract_plugin::apply_extract_commands (51,555 µs, 0.24%)</title><rect x="29.8866%" y="61" width="0.2411%" height="15" fill="rgb(205,117,38)" fg:x="6391459" fg:w="51555"/><text x="30.1366%" y="71.50"></text></g><g><title>bevy_render::extract_resource::extract_resource&lt;eustress_engine::billboard_gui::PendingAtlasTiles, ()&gt; (3,266 µs, 0.02%)</title><rect x="30.1430%" y="61" width="0.0153%" height="15" fill="rgb(237,72,25)" fg:x="6446285" fg:w="3266"/><text x="30.3930%" y="71.50"></text></g><g><title>bevy_render::globals::prepare_globals_buffer (2,560 µs, 0.01%)</title><rect x="30.1658%" y="61" width="0.0120%" height="15" fill="rgb(244,70,9)" fg:x="6451152" fg:w="2560"/><text x="30.4158%" y="71.50"></text></g><g><title>bevy_render::mesh::allocator::allocate_and_free_meshes (20,144 µs, 0.09%)</title><rect x="30.1854%" y="61" width="0.0942%" height="15" fill="rgb(217,125,39)" fg:x="6455355" fg:w="20144"/><text x="30.4354%" y="71.50"></text></g><g><title>bevy_render::render_asset::extract_render_asset&lt;bevy_render::mesh::RenderMesh&gt; (3,312 µs, 0.02%)</title><rect x="30.3032%" y="61" width="0.0155%" height="15" fill="rgb(235,36,10)" fg:x="6480551" fg:w="3312"/><text x="30.5532%" y="71.50"></text></g><g><title>bevy_render::render_phase::sort_phase_system&lt;bevy_core_pipeline::core_3d::Transparent3d&gt; (4,125 µs, 0.02%)</title><rect x="30.3652%" y="61" width="0.0193%" height="15" fill="rgb(251,123,47)" fg:x="6493813" fg:w="4125"/><text x="30.6152%" y="71.50"></text></g><g><title>bevy_render::renderer::render_system (4,180,916 µs, 19.55%)</title><rect x="30.3981%" y="61" width="19.5501%" height="15" fill="rgb(221,13,13)" fg:x="6500839" fg:w="4180916"/><text x="30.6481%" y="71.50">bevy_render::renderer::render_s..</text></g><g><title>bevy_render::run_render_schedule (5,255,614 µs, 24.58%)</title><rect x="49.9497%" y="61" width="24.5754%" height="15" fill="rgb(238,131,9)" fg:x="10682079" fg:w="5255614"/><text x="50.1997%" y="71.50">bevy_render::run_render_schedule</text></g><g><title>bevy_render::uniform::prepare_uniform_components&lt;bevy_core_pipeline::skybox::SkyboxUniforms&gt; (3,577 µs, 0.02%)</title><rect x="74.5374%" y="61" width="0.0167%" height="15" fill="rgb(211,50,8)" fg:x="15940334" fg:w="3577"/><text x="74.7874%" y="71.50"></text></g><g><title>bevy_render::uniform::prepare_uniform_components&lt;eustress_engine::billboard_pipeline::BillboardUniform&gt; (11,148 µs, 0.05%)</title><rect x="74.5764%" y="61" width="0.0521%" height="15" fill="rgb(245,182,24)" fg:x="15948667" fg:w="11148"/><text x="74.8264%" y="71.50"></text></g><g><title>bevy_render::uniform::prepare_uniform_components&lt;eustress_engine::billboard_pipeline::BillboardUniform&gt; [apply_deferred] (3,954 µs, 0.02%)</title><rect x="74.6285%" y="61" width="0.0185%" height="15" fill="rgb(242,14,37)" fg:x="15959815" fg:w="3954"/><text x="74.8785%" y="71.50"></text></g><g><title>bevy_render::uniform::prepare_uniform_components&lt;eustress_engine::billboard_pipeline::BillboardUv&gt; (13,743 µs, 0.06%)</title><rect x="74.6470%" y="61" width="0.0643%" height="15" fill="rgb(246,228,12)" fg:x="15963769" fg:w="13743"/><text x="74.8970%" y="71.50"></text></g><g><title>bevy_render::uniform::prepare_uniform_components&lt;eustress_engine::billboard_pipeline::BillboardUv&gt; [apply_deferred] (2,960 µs, 0.01%)</title><rect x="74.7113%" y="61" width="0.0138%" height="15" fill="rgb(213,55,15)" fg:x="15977512" fg:w="2960"/><text x="74.9613%" y="71.50"></text></g><g><title>bevy_render::view::prepare_view_targets (2,906 µs, 0.01%)</title><rect x="74.7365%" y="61" width="0.0136%" height="15" fill="rgb(209,9,3)" fg:x="15982910" fg:w="2906"/><text x="74.9865%" y="71.50"></text></g><g><title>bevy_render::view::prepare_view_uniforms (6,101 µs, 0.03%)</title><rect x="74.7579%" y="61" width="0.0285%" height="15" fill="rgb(230,59,30)" fg:x="15987478" fg:w="6101"/><text x="75.0079%" y="71.50"></text></g><g><title>bevy_render::view::visibility::collect_visible_cpu_culled_entities (23,551 µs, 0.11%)</title><rect x="74.7954%" y="61" width="0.1101%" height="15" fill="rgb(209,121,21)" fg:x="15995502" fg:w="23551"/><text x="75.0454%" y="71.50"></text></g><g><title>bevy_render::view::window::prepare_windows (7,581 µs, 0.04%)</title><rect x="74.9216%" y="61" width="0.0354%" height="15" fill="rgb(220,109,13)" fg:x="16022492" fg:w="7581"/><text x="75.1716%" y="71.50"></text></g><g><title>bevy_scene::spawn::spawn_queued (2,390 µs, 0.01%)</title><rect x="74.9766%" y="61" width="0.0112%" height="15" fill="rgb(232,18,1)" fg:x="16034261" fg:w="2390"/><text x="75.2266%" y="71.50"></text></g><g><title>bevy_state::condition::in_state&lt;eustress_engine::play_mode::PlayModeState&gt;::{{closure}} (8,045 µs, 0.04%)</title><rect x="75.0057%" y="61" width="0.0376%" height="15" fill="rgb(215,41,42)" fg:x="16040476" fg:w="8045"/><text x="75.2557%" y="71.50"></text></g><g><title>bevy_state::state::freely_mutable_state::apply_state_transition&lt;eustress_engine::play_mode::PlayModeState&gt; (2,317 µs, 0.01%)</title><rect x="75.0433%" y="61" width="0.0108%" height="15" fill="rgb(224,123,36)" fg:x="16048521" fg:w="2317"/><text x="75.2933%" y="71.50"></text></g><g><title>bevy_state::state::transitions::last_transition&lt;eustress_engine::play_mode::PlayModeState&gt; (3,579 µs, 0.02%)</title><rect x="75.0554%" y="61" width="0.0167%" height="15" fill="rgb(240,125,3)" fg:x="16051100" fg:w="3579"/><text x="75.3054%" y="71.50"></text></g><g><title>bevy_time::fixed::run_fixed_main_schedule (197,252 µs, 0.92%)</title><rect x="75.1732%" y="61" width="0.9224%" height="15" fill="rgb(205,98,50)" fg:x="16076304" fg:w="197252"/><text x="75.4232%" y="71.50"></text></g><g><title>bevy_transform::systems::mark_dirty_trees (21,472 µs, 0.10%)</title><rect x="76.1010%" y="61" width="0.1004%" height="15" fill="rgb(205,185,37)" fg:x="16274702" fg:w="21472"/><text x="76.3510%" y="71.50"></text></g><g><title>bevy_transform::systems::parallel::propagate_parent_transforms (3,560 µs, 0.02%)</title><rect x="76.2014%" y="61" width="0.0166%" height="15" fill="rgb(238,207,15)" fg:x="16296174" fg:w="3560"/><text x="76.4514%" y="71.50"></text></g><g><title>bevy_transform::systems::sync_simple_transforms (4,688 µs, 0.02%)</title><rect x="76.2180%" y="61" width="0.0219%" height="15" fill="rgb(213,199,42)" fg:x="16299734" fg:w="4688"/><text x="76.4680%" y="71.50"></text></g><g><title>bevy_ui::layout::ui_layout_system (2,197 µs, 0.01%)</title><rect x="76.3120%" y="61" width="0.0103%" height="15" fill="rgb(235,201,11)" fg:x="16319843" fg:w="2197"/><text x="76.5620%" y="71.50"></text></g><g><title>eustress_common::change_queue::emit_scene_change_deltas (53,095 µs, 0.25%)</title><rect x="76.3982%" y="61" width="0.2483%" height="15" fill="rgb(207,46,11)" fg:x="16338272" fg:w="53095"/><text x="76.6482%" y="71.50"></text></g><g><title>eustress_common::change_queue::emit_transform_deltas (4,907 µs, 0.02%)</title><rect x="76.6465%" y="61" width="0.0229%" height="15" fill="rgb(241,35,35)" fg:x="16391367" fg:w="4907"/><text x="76.8965%" y="71.50"></text></g><g><title>eustress_common::gui::gui_bridge::snapshot_gui_state (4,394 µs, 0.02%)</title><rect x="76.6977%" y="61" width="0.0205%" height="15" fill="rgb(243,32,47)" fg:x="16402320" fg:w="4394"/><text x="76.9477%" y="71.50"></text></g><g><title>eustress_common::gui::input::handle_gui_input (2,757 µs, 0.01%)</title><rect x="76.7182%" y="61" width="0.0129%" height="15" fill="rgb(247,202,23)" fg:x="16406714" fg:w="2757"/><text x="76.9682%" y="71.50"></text></g><g><title>eustress_common::gui::renderer::render_slint_guis (2,977 µs, 0.01%)</title><rect x="76.7363%" y="61" width="0.0139%" height="15" fill="rgb(219,102,11)" fg:x="16410586" fg:w="2977"/><text x="76.9863%" y="71.50"></text></g><g><title>eustress_common::realism::deformation::systems::text x="77.0519%" y="71.50"></text></g><g><title>eustress_common::realism::deformation::systems::init_deformable_meshes (7,791 µs, 0.04%)</title><rect x="76.9959%" y="61" width="0.0364%" height="15" fill="rgb(243,110,44)" fg:x="16468874" fg:w="7791"/><text x="77.2459%" y="71.50"></trect x="77.0638%" y="61" width="0.0145%" height="15" fill="rgb(222,74,54)" fg:x="16480618" fg:w="3096"/><text x="77.3138%" y="71.50"></text></g><g><title>eustress_common::realism::particles::systems::update_kinematics (2,206 µs, 0.01%)</title><rect x="77.1550%" y="61" width="0.0103%" height="15" fill="rgb(216,99,12)" fg:x="16500119" fg:w="2206"/><text x="77.4050%" y="71.50"></text></g><g><title>eustress_common::services::team::handle_team_changes (2,799 µs, 0.01%)</title><rect x="77.2133%" y="61" width="0.0131%" height="15" fill="rgb(226,22,26)" fg:x="16512583" fg:w="2799"/><text x="77.4633%" y="71.50"></text></g><g><title>eustress_common::streaming::plugin::sys_radius_gate (23,974 µs, 0.11%)</title><rect x="77.2537%" y="61" width="0.1121%" height="15" fill="rgb(217,163,10)" fg:x="16521232" fg:w="23974"/><text x="77.5037%" y="71.50"></text></g><g><title>eustress_common::terrain::chunk::chunk_spawn_system (2,498 µs, 0.01%)</title><rect x="77.4007%" y="61" width="0.0117%" height="15" fill="rgb(213,25,53)" fg:x="16552670" fg:w="2498"/><text x="77.6507%" y="71.50"></text></g><g><title>eustress_common::terrain::lod::update_lod_system (2,323 µs, 0.01%)</title><rect x="77.4129%" y="61" width="0.0109%" height="15" fill="rgb(252,105,26)" fg:x="16555280" fg:w="2323"/><text x="77.6629%" y="71.50"></text></g><g><title>eustress_engine::app_core::avian_prepare_needed (8,280 µs, 0.04%)</title><rect x="77.5177%" y="61" width="0.0387%" height="15" fill="rgb(220,39,43)" fg:x="16577683" fg:w="8280"/><text x="77.7677%" y="71.50"></text></g><g><title>eustress_engine::billboard_gui::cull_billboards_by_distance (2,870 µs, 0.01%)</title><rect x="77.5687%" y="61" width="0.0134%" height="15" fill="rgb(229,68,48)" fg:x="16588583" fg:w="2870"/><text x="77.8187%" y="71.50"></text></g><g><title>eustress_engine::billboard_gui::enter_billboard_edit_on_double_click (2,524 µs, 0.01%)</title><rect x="77.5877%" y="61" width="0.0118%" height="15" fill="rgb(252,8,32)" fg:x="16592664" fg:w="2524"/><text x="77.8377%" y="71.50"></text></g><g><title>eustress_engine::billboard_gui::maintain_billboard_spatial_grid (3,406 µs, 0.02%)</title><rect x="77.5996%" y="61" width="0.0159%" height="15" fill="rgb(223,20,43)" fg:x="16595188" fg:w="3406"/><text x="77.8496%" y="71.50"></text></g><g><title>eustress_engine::billboard_gui::process_billboard_edit_keyboard (2,251 µs, 0.01%)</title><rect x="77.6155%" y="61" width="0.0105%" height="15" fill="rgb(229,81,49)" fg:x="16598594" fg:w="2251"/><text x="77.8655%" y="71.50"></text></g><g><title>eustress_engine::billboard_gui::recycle_offscreen_billboard_slots (17,772 µs, 0.08%)</title><rect x="77.6260%" y="61" width="0.0831%" height="15" fill="rgb(236,28,36)" fg:x="16600845" fg:w="17772"/><text x="77.8760%" y="71.50"></text></g><g><title>eustress_engine::billboard_gui::spawn_billboard_render_state (13,120 µs, 0.06%)</title><rect x="77.7131%" y="61" width="0.0613%" height="15" fill="rgb(249,185,26)" fg:x="16619466" fg:w="13120"/><text x="77.9631%" y="71.50"></text></g><g><title>eustress_engine::billboard_gui::sync_billboard_class_to_marker (3,045 µs, 0.01%)</title><rect x="77.7750%" y="61" width="0.0142%" height="15" fill="rgb(249,174,33)" fg:x="16632701" fg:w="3045"/><text x="78.0250%" y="71.50"></text></g><g><title>eustress_engine::billboard_gui::sync_billboard_properties (3,377 µs, 0.02%)</title><rect x="77.7892%" y="61" width="0.0158%" height="15" fill="rgb(233,201,37)" fg:x="16635746" fg:w="3377"/><text x="78.0392%" y="71.50"></text></g><g><title>eustress_engine::billboard_gui::sync_textlabel_to_display (2,263 µs, 0.01%)</title><rect x="77.8192%" y="61" width="0.0106%" height="15" fill="rgb(221,78,26)" fg:x="16642154" fg:w="2263"/><text x="78.0692%" y="71.50"></text></g><g><title>eustress_engine::billboard_gui::update_and_render_billboards (10,617 µs, 0.05%)</title><rect x="77.8297%" y="61" width="0.0496%" height="15" fill="rgb(250,127,30)" fg:x="16644417" fg:w="10617"/><text x="78.0797%" y="71.50"></text></g><g><title>eustress_engine::billboard_pipeline::extract_billboards (10,917 µs, 0.05%)</title><rect x="77.8852%" y="61" width="0.0510%" height="15" fill="rgb(230,49,44)" fg:x="16656282" fg:w="10917"/><text x="78.1352%" y="71.50"></text></g><g><title>eustress_engine::billboard_pipeline::extract_billboards [apply_deferred] (6,994 µs, 0.03%)</title><rect x="77.9363%" y="61" width="0.0327%" height="15" fill="rgb(229,67,23)" fg:x="16667199" fg:w="6994"/><text x="78.1863%" y="71.50"></text></g><g><title>eustress_engine::billboard_pipeline::prepare_billboard_bind_group (5,819 µs, 0.03%)</title><rect x="77.9690%" y="61" width="0.0272%" height="15" fill="rgb(249,83,47)" fg:x="16674193" fg:w="5819"/><text x="78.2190%" y="71.50"></text></g><g><title>eustress_engine::billboard_pipeline::prepare_billboard_view_bind_groups (41,693 µs, 0.19%)</title><rect x="78.0015%" y="61" width="0.1950%" height="15" fill="rgb(215,43,3)" fg:x="16681155" fg:w="41693"/><text x="78.2515%" y="71.50"></text></g><g><title>eustress_engine::billboard_pipeline::prepare_billboard_view_bind_groups [apply_deferred] (17,326 µs, 0.08%)</title><rect x="78.1965%" y="61" width="0.0810%" height="15" fill="rgb(238,154,13)" fg:x="16722848" fg:w="17326"/><text x="78.4465%" y="71.50"></text></g><g><title>eustress_engine::billboard_pipeline::queue_billboards (43,153 µs, 0.20%)</title><rect x="78.2775%" y="61" width="0.2018%" height="15" fill="rgb(219,56,2)" fg:x="16740174" fg:w="43153"/><text x="78.5275%" y="71.50"></text></g><g><title>eustress_engine::bliss_tracker::drain_net_events (2,399 µs, 0.01%)</title><rect x="78.4861%" y="61" width="0.0112%" height="15" fill="rgb(233,0,4)" fg:x="16784775" fg:w="2399"/><text x="78.7361%" y="71.50"></text></g><g><title>eustress_engine::bliss_tracker::track_activity (3,093 µs, 0.01%)</title><rect x="78.5160%" y="61" width="0.0145%" height="15" fill="rgb(235,30,7)" fg:x="16791174" fg:w="3093"/><text x="78.7660%" y="71.50"></text></g><g><title>eustress_engine::cad_assembly::handle_create_mate (2,531 µs, 0.01%)</title><rect x="78.5305%" y="61" width="0.0118%" height="15" fill="rgb(250,79,13)" fg:x="16794267" fg:w="2531"/><text x="78.7805%" y="71.50"></text></g><g><title>eustress_engine::cad_plugin::handle_cad_export_glb (2,294 µs, 0.01%)</title><rect x="78.5641%" y="61" width="0.0107%" height="15" fill="rgb(211,146,34)" fg:x="16801473" fg:w="2294"/><text x="78.8141%" y="71.50"></text></g><g><title>eustress_engine::cad_plugin::handle_cad_insert (2,229 µs, 0.01%)</title><rect x="78.5749%" y="61" width="0.0104%" height="15" fill="rgb(228,22,38)" fg:x="16803767" fg:w="2229"/><text x="78.8249%" y="71.50"></text></g><g><title>eustress_engine::cad_plugin::handle_cad_set_variable (2,142 µs, 0.01%)</title><rect x="78.5858%" y="61" width="0.0100%" height="15" fill="rgb(235,168,5)" fg:x="16806096" fg:w="2142"/><text x="78.8358%" y="71.50"></text></g><g><title>eustress_engine::camera_controller::eustress_camera_controls (4,315 µs, 0.02%)</title><rect x="78.6640%" y="61" width="0.0202%" height="15" fill="rgb(221,155,16)" fg:x="16822825" fg:w="4315"/><text x="78.9140%" y="71.50"></text></g><g><title>eustress_engine::clipboard::handle_copy_event (2,353 µs, 0.01%)</title><rect x="78.7360%" y="61" width="0.0110%" height="15" fill="rgb(215,215,53)" fg:x="16838226" fg:w="2353"/><text x="78.9860%" y="71.50"></text></g><g><title>eustress_engine::clipboard::handle_paste_event (3,175 µs, 0.01%)</title><rect x="78.7560%" y="61" width="0.0148%" height="15" fill="rgb(223,4,10)" fg:x="16842504" fg:w="3175"/><text x="79.0060%" y="71.50"></text></g><g><title>eustress_engine::csg::handle_csg_actions (2,205 µs, 0.01%)</title><rect x="78.7875%" y="61" width="0.0103%" height="15" fill="rgb(234,103,6)" fg:x="16849246" fg:w="2205"/><text x="79.0375%" y="71.50"></text></g><g><title>eustress_engine::decal_place_tool::run_surface_placement (2,546 µs, 0.01%)</title><rect x="78.8eustress_engine::editor_settings::draw_grid_overlay (9,392 µs, 0.04%)</title><rect x="78.8925%" y="61" width="0.0439%" height="15" fill="rgb(227,97,0)" fg:x="16874525" fg:w="9392"/><text x="79.1425%" y="71.50"></text></rect x="78.8461%" y="61" width="0.0429%" height="15" fill="rgb(234,150,53)" fg:x="16861771" fg:w="9175"/><text x="79.0961%" y="71.50"></text></g><g><title>eustress_engine::interaction::appearance::apply_character_mesh_system (2,271 µs, 0.01%)</title><rect x="78.9673%" y="61" width="0.0106%" height="15" fill="rgb(228,201,54)" fg:x="16887690" fg:w="2271"/><text x="79.2173%" y="71.50"></text></g><g><title>eustress_engine::interaction::appearance::apply_clothing_system (2,824 µs, 0.01%)</title><rect x="78.9779%" y="61" width="0.0132%" height="15" fill="rgb(222,22,37)" fg:x="16889961" fg:w="2824"/><text x="79.2279%" y="71.50"></text></g><g><title>eustress_engine::interaction::equip::weld_equipped_tools_system (2,793 µs, 0.01%)</title><rect x="78.9911%" y="61" width="0.0131%" height="15" fill="rgb(237,53,32)" fg:x="16892785" fg:w="2793"/><text x="79.2411%" y="71.50"></text></g><g><title>eustress_engine::keybindings::dispatch_keyboard_shortcuts (5,051 µs, 0.02%)</title><rect x="79.0047%" y="61" width="0.0236%" height="15" fill="rgb(233,25,53)" fg:x="16895678" fg:w="5051"/><text x="79.2547%" y="71.50"></text></g><g><title>eustress_engine::keybindings::handle_menu_action_events (6,700 µs, 0.03%)</title><rect x="79.0283%" y="61" width="0.0313%" height="15" fill="rgb(210,40,34)" fg:x="16900729" fg:w="6700"/><text x="79.2783%" y="71.50"></text></g><g><title>eustress_engine::keybindings::handle_nudge_keys (2,419 µs, 0.01%)</title><rect x="79.0600%" y="61" width="0.0113%" height="15" fill="rgb(241,220,44)" fg:x="16907523" fg:w="2419"/><text x="79.3100%" y="71.50"></text></g><g><title>eustress_engine::lasso_paint_select::handle_lasso_select (2,878 µs, 0.01%)</title><rect x="79.0714%" y="61" width="0.0135%" height="15" fill="rgb(235,28,35)" fg:x="16909942" fg:w="2878"/><text x="79.3214%" y="71.50"></text></g><g><title>eustress_engine::lasso_paint_select::handle_paint_select (2,942 µs, 0.01%)</title><rect x="79.0848%" y="61" width="0.0138%" height="15" fill="rgb(210,56,17)" fg:x="16912820" fg:w="2942"/><text x="79.3348%" y="71.50"></text></g><g><title>eustress_engine::light_cull::cull_lights_to_nearest (2,139 µs, 0.01%)</title><rect x="79.0986%" y="61" width="0.0100%" height="15" fill="rgb(224,130,29)" fg:x="16915762" fg:w="2139"/><text x="79.3486%" y="71.50"></text></g><g><title>eustress_engine::lock_tool::lock_tool_toggle_click (2,346 µs, 0.01%)</title><rect x="79.1640%" y="61" width="0.0110%" height="15" fill="rgb(235,212,8)" fg:x="16929750" fg:w="2346"/><text x="79.4140%" y="71.50"></text></g><g><title>eustress_engine::lsp_launcher::maybe_spawn_lsp_child (30,108 µs, 0.14%)</title><rect x="79.1815%" y="61" width="0.1408%" height="15" fill="rgb(223,33,50)" fg:x="16933505" fg:w="30108"/><text x="79.4315%" y="71.50"></text></g><g><title>eustress_engine::material_sync::sync_basepart_to_material (8,221 µs, 0.04%)</title><rect x="79.3414%" y="61" width="0.0384%" height="15" fill="rgb(219,149,13)" fg:x="16967695" fg:w="8221"/><text x="79.5914%" y="71.50"></text></g><g><title>eustress_engine::mesh_import::scan_for_new_sources (245,672 µs, 1.15%)</title><rect x="79.3965%" y="61" width="1.1488%" height="15" fill="rgb(250,156,29)" fg:x="16979473" fg:w="245672"/><text x="79.6465%" y="71.50"></text></g><g><title>eustress_engine::mesh_optimizer::optimize_loaded_meshes (123,276 µs, 0.58%)</title><rect x="80.5452%" y="61" width="0.5764%" height="15" fill="rgb(216,193,19)" fg:x="17225145" fg:w="123276"/><text x="80.7952%" y="71.50"></text></g><g><title>eustress_engine::modal_tool::run_active_modal_tool (3,131 µs, 0.01%)</title><rect x="81.1549%" y="61" width="0.0146%" height="15" fill="rgb(216,135,14)" fg:x="17355533" fg:w="3131"/><text x="81.4049%" y="71.50"></text></g><g><title>eustress_engine::move_tool::handle_move_interaction (4,565 µs, 0.02%)</title><rect x="81.1993%" y="61" width="0.0213%" height="15" fill="rgb(241,47,5)" fg:x="17365026" fg:w="4565"/><text x="81.4493%" y="71.50"></text></g><g><title>eustress_engine::part_selection::hover_resize_system (2,323 µs, 0.01%)</title><rect x="81.2648%" y="61" width="0.0109%" height="15" fill="rgb(233,42,35)" fg:x="17379018" fg:w="2323"/><text x="81.5148%" y="71.50"></text></g><g><title>eustress_engine::part_selection::part_selection_system (5,011 µs, 0.02%)</title><rect x="81.2756%" y="61" width="0.0234%" height="15" fill="rgb(231,13,6)" fg:x="17381341" fg:w="5011"/><text x="81.5256%" y="71.50"></text></g><g><title>eustress_engine::part_to_terrain::handle_part_to_terrain (2,206 µs, 0.01%)</title><rect x="81.2991%" y="61" width="0.0103%" height="15" fill="rgb(207,181,40)" fg:x="17386352" fg:w="2206"/><text x="81.5491%" y="71.50"></text></g><g><title>eustress_engine::play_mode::handle_start_play (4,093 µs, 0.02%)</title><rect x="81.3833%" y="61" width="0.0191%" height="15" fill="rgb(254,173,49)" fg:x="17404378" fg:w="4093"/><text x="81.6333%" y="71.50"></text></g><g><title>eustress_engine::play_mode::handle_stop_play (3,318 µs, 0.02%)</title><rect x="81.4030%" y="61" width="0.0155%" height="15" fill="rgb(221,1,38)" fg:x="17408572" fg:w="3318"/><text x="81.6530%" y="71.50"></text></g><g><title>eustress_engine::plugins::lighting_plugin::hydrate_lighting_entities (43,952 µs, 0.21%)</title><rect x="81.4869%" y="61" width="0.2055%" height="15" fill="rgb(206,124,46)" fg:x="17426519" fg:w="43952"/><text x="81.7369%" y="71.50"></text></g><g><title>eustress_engine::plugins::lighting_plugin::sync_atmosphere_to_rendering (2,850 µs, 0.01%)</title><rect x="81.6929%" y="61" width="0.0133%" height="15" fill="rgb(249,21,11)" fg:x="17470569" fg:w="2850"/><text x="81.9429%" y="71.50"></text></g><g><title>eustress_engine::plugins::lighting_plugin::sync_service_properties_to_lighting (3,283 µs, 0.02%)</title><rect x="81.7062%" y="61" width="0.0154%" height="15" fill="rgb(222,201,40)" fg:x="17473419" fg:w="3283"/><text x="81.9562%" y="71.50"></text></g><g><title>eustress_engine::profiler::enabled::tick_and_maybe_dump (1,272,144 µs, 5.95%)</title><rect x="81.7323%" y="61" width="5.9486%" height="15" fill="rgb(235,61,29)" fg:x="17478998" fg:w="1272144"/><text x="81.9823%" y="71.50">eustress..</text></g><g><title>eustress_engine::profiler::phase_frame_end (1,257,598 µs, 5.88%)</title><rect x="87.6893%" y="61" width="5.8806%" height="15" fill="rgb(219,207,3)" fg:x="18752957" fg:w="1257598"/><text x="87.9393%" y="71.50">eustres..</text></g><g><title>eustress_engine::road_tool::handle_road_tool_actions (2,483 µs, 0.01%)</title><rect x="93.6027%" y="61" width="0.0116%" height="15" fill="rgb(222,56,46)" fg:x="20017575" fg:w="2483"/><text x="93.8527%" y="71.50"></text></g><g><title>eustress_engine::rotate_handles::sync_rotate_handle_root (2,297 µs, 0.01%)</title><rect x="93.6148%" y="61" width="0.0107%" height="15" fill="rgb(239,76,54)" fg:x="20020161" fg:w="2297"/><text x="93.8648%" y="71.50"></text></g><g><title>eustress_engine::rotate_tool::handle_rotate_interaction (2,658 µs, 0.01%)</title><rect x="93.6403%" y="61" width="0.0124%" height="15" fill="rgb(231,124,27)" fg:x="20025604" fg:w="2658"/><text x="93.8903%" y="71.50"></text></g><g><title>eustress_engine::scale_tool::finalize_numeric_input_on_scale (2,477 µs, 0.01%)</title><rect x="93.7045%" y="61" width="0.0116%" height="15" fill="rgb(249,195,6)" fg:x="20039335" fg:w="2477"/><text x="93.9545%" y="71.50"></text></g><g><title>eustress_engine::scale_tool::handle_scale_interaction (2,721 µs, 0.01%)</title><rect x="93.7255%" y="61" width="0.0127%" height="15" fill="rgb(237,174,47)" fg:x="20043840" fg:w="2721"/><text x="93.9755%" y="71.50"></text></g><g><title>eustress_engine::scale_tool::rebuild_collider_on_size_change (2,324 µs, 0.01%)</title><rect x="93.7387%" y="61" width="0.0109%" height="15" fill="rgb(206,201,31)" fg:x="20046657" fg:w="2324"/><text x="93.9887%" y="71.50"></text></g><g><title>eustress_engine::script_editor::runtime_snapshot::engine_writer::write_runtime_snapshot (37,641 µs, 0.18%)</title><reustress_engine::script_plugin_host::handle_reload_plugins_action (2,469 µs, 0.01%)</title><rect x="93.9643%" y="61" width="0.0115%" height="15" fill="rgb(231,57,52)" fg:x="20098286" fg:w="2469"/><text x="94.2143%" y="71.50"></text></g><g><trect x="93.9490%" y="61" width="0.0105%" height="15" fill="rgb(248,177,22)" fg:x="20091633" fg:w="2245"/><text x="94.1990%" y="71.50"></text></g><g><title>eustress_engine::script_plugin_host::handle_reload_plugins_action (2,450 µs, 0.01%)</title><rect x="93.9681%" y="61" width="0.0115%" height="15" fill="rgb(215,211,37)" fg:x="20095702" fg:w="2450"/><text x="94.2181%" y="71.50"></text></g><g><title>eustress_engine::select_tool::handle_box_selection (2,899 µs, 0.01%)</title><rect x="94.0013%" y="61" width="0.0136%" height="15" fill="rgb(241,128,51)" fg:x="20102820" fg:w="2899"/><text x="94.2513%" y="71.50"></text></g><g><title>eustress_engine::select_tool::handle_select_drag (3,559 µs, 0.02%)</title><rect x="94.0217%" y="61" width="0.0166%" height="15" fill="rgb(227,165,31)" fg:x="20107166" fg:w="3559"/><text x="94.2717%" y="71.50"></text></g><g><title>eustress_engine::selection_box::spawn_hover_adornments (2,351 µs, 0.01%)</title><rect x="94.0634%" y="61" width="0.0110%" height="15" fill="rgb(228,167,24)" fg:x="20116091" fg:w="2351"/><text x="94.3134%" y="71.50"></text></g><g><title>eustress_engine::selection_box::spawn_selection_adornments (2,475 µs, 0.01%)</title><rect x="94.0756%" y="61" width="0.0116%" height="15" fill="rgb(228,143,12)" fg:x="20118697" fg:w="2475"/><text x="94.3256%" y="71.50"></text></g><g><title>eustress_engine::selection_box::update_changed_adornments (2,614 µs, 0.01%)</title><rect x="94.0877%" y="61" width="0.0122%" height="15" fill="rgb(249,149,8)" fg:x="20121288" fg:w="2614"/><text x="94.3377%" y="71.50"></text></g><g><title>eustress_engine::shaders::sync_moon_disc_transform (3,305 µs, 0.02%)</title><rect x="94.1994%" y="61" width="0.0155%" height="15" fill="rgb(243,35,44)" fg:x="20145173" fg:w="3305"/><text x="94.4494%" y="71.50"></text></g><g><title>eustress_engine::shaders::update_moon_phase (3,651 µs, 0.02%)</title><rect x="94.2216%" y="61" width="0.0171%" height="15" fill="rgb(246,89,9)" fg:x="20149915" fg:w="3651"/><text x="94.4716%" y="71.50"></text></g><g><title>eustress_engine::simulation::plugin::drain_sim_commands (43,473 µs, 0.20%)</title><rect x="94.2386%" y="61" width="0.2033%" height="15" fill="rgb(233,213,13)" fg:x="20153566" fg:w="43473"/><text x="94.4886%" y="71.50"></text></g><g><title>eustress_engine::soul::build_pipeline::handle_command_bar_builds (2,345 µs, 0.01%)</title><rect x="94.4614%" y="61" width="0.0110%" height="15" fill="rgb(233,141,41)" fg:x="20201202" fg:w="2345"/><text x="94.7114%" y="71.50"></text></g><g><title>eustress_engine::soul::rune_api::drain_script_errors_to_output (2,599 µs, 0.01%)</title><rect x="94.5239%" y="61" width="0.0122%" height="15" fill="rgb(239,167,4)" fg:x="20214564" fg:w="2599"/><text x="94.7739%" y="71.50"></text></g><g><title>eustress_engine::space::data_recorder::drain_and_flush_recorder (2,209 µs, 0.01%)</title><rect x="94.5536%" y="61" width="0.0103%" height="15" fill="rgb(209,217,16)" fg:x="20220915" fg:w="2209"/><text x="94.8036%" y="71.50"></text></g><g><title>eustress_engine::space::file_loader::drain_pending_spawns (2,632 µs, 0.01%)</title><rect x="94.5802%" y="61" width="0.0123%" height="15" fill="rgb(219,88,35)" fg:x="20226607" fg:w="2632"/><text x="94.8302%" y="71.50"></text></g><g><title>eustress_engine::space::file_watcher::process_file_changes (5,589 µs, 0.03%)</title><rect x="94.6077%" y="61" width="0.0261%" height="15" fill="rgb(220,193,23)" fg:x="20232493" fg:w="5589"/><text x="94.8577%" y="71.50"></text></g><g><title>eustress_engine::space::instance_loader::sanitize_part_transforms_safety_net (7,855 µs, 0.04%)</title><rect x="94.6948%" y="61" width="0.0367%" height="15" fill="rgb(230,90,52)" fg:x="20251127" fg:w="7855"/><text x="94.9448%" y="71.50"></text></g><g><title>eustress_engine::space::residency::sys_entity_count_diag (234,415 µs, 1.10%)</title><rect x="94.7490%" y="61" width="1.0961%" height="15" fill="rgb(252,106,19)" fg:x="20262706" fg:w="234415"/><text x="94.9990%" y="71.50"></text></g><g><title>eustress_engine::space::residency::sys_residency_evict (2,650 µs, 0.01%)</title><rect x="95.8451%" y="61" width="0.0124%" height="15" fill="rgb(206,74,20)" fg:x="20497121" fg:w="2650"/><text x="96.0951%" y="71.50"></text></g><g><title>eustress_engine::space::residency::sys_residency_load (2,493 µs, 0.01%)</title><rect x="95.8580%" y="61" width="0.0117%" height="15" fill="rgb(230,138,44)" fg:x="20499881" fg:w="2493"/><text x="96.1080%" y="71.50"></text></g><g><title>eustress_engine::space::space_ops::apply_space_rescan (2,705 µs, 0.01%)</title><rect x="95.8735%" y="61" width="0.0126%" height="15" fill="rgb(235,182,43)" fg:x="20503202" fg:w="2705"/><text x="96.1235%" y="71.50"></text></g><g><title>eustress_engine::space::universe_registry::periodic_scan (17,274 µs, 0.08%)</title><rect x="95.8945%" y="61" width="0.0808%" height="15" fill="rgb(242,16,51)" fg:x="20507686" fg:w="17274"/><text x="96.1445%" y="71.50"></text></g><g><title>eustress_engine::space::world_db_binary::load_binary_ecs_instances (2,966 µs, 0.01%)</title><rect x="95.9845%" y="61" width="0.0139%" height="15" fill="rgb(248,9,4)" fg:x="20526943" fg:w="2966"/><text x="96.2345%" y="71.50"></text></g><g><title>eustress_engine::space::world_db_binary::mirror_binary_ecs_changes (3,204 µs, 0.01%)</title><rect x="95.9989%" y="61" width="0.0150%" height="15" fill="rgb(210,31,22)" fg:x="20530008" fg:w="3204"/><text x="96.2489%" y="71.50"></text></g><g><title>eustress_engine::space::world_db_binary::sys_stream_in_on_select (2,556 µs, 0.01%)</title><rect x="96.0139%" y="61" width="0.0120%" height="15" fill="rgb(239,54,39)" fg:x="20533212" fg:w="2556"/><text x="96.2639%" y="71.50"></text></g><g><title>eustress_engine::space::world_db_plugin::drain_change_stream (2,663 µs, 0.01%)</title><rect x="96.0263%" y="61" width="0.0125%" height="15" fill="rgb(230,99,41)" fg:x="20535874" fg:w="2663"/><text x="96.2763%" y="71.50"></text></g><g><title>eustress_engine::space::world_db_plugin::mirror_transform_changes (13,738 µs, 0.06%)</title><rect x="96.0388%" y="61" width="0.0642%" height="15" fill="rgb(253,106,12)" fg:x="20538537" fg:w="13738"/><text x="96.2888%" y="71.50"></text></g><g><title>eustress_engine::studio_plugins::handle_plugin_action_events (3,042 µs, 0.01%)</title><rect x="96.1331%" y="61" width="0.0142%" height="15" fill="rgb(213,46,41)" fg:x="20558708" fg:w="3042"/><text x="96.3831%" y="71.50"></text></g><g><title>eustress_engine::studio_plugins::process_plugin_actions (2,229 µs, 0.01%)</title><rect x="96.1551%" y="61" width="0.0104%" height="15" fill="rgb(215,133,35)" fg:x="20563412" fg:w="2229"/><text x="96.4051%" y="71.50"></text></g><g><title>eustress_engine::studio_plugins::update_plugins (3,427 µs, 0.02%)</title><rect x="96.1815%" y="61" width="0.0160%" height="15" fill="rgb(213,28,5)" fg:x="20569054" fg:w="3427"/><text x="96.4315%" y="71.50"></text></g><g><title>eustress_engine::tools_smart::apply_pending_material_uv_ops (2,610 µs, 0.01%)</title><rect x="96.3325%" y="61" width="0.0122%" height="15" fill="rgb(215,77,49)" fg:x="20601364" fg:w="2610"/><text x="96.5825%" y="71.50"></text></g><g><title>eustress_engine::ui::slint_ui::drain_slint_actions (21,388 µs, 0.10%)</title><rect x="96.4436%" y="61" width="0.1000%" height="15" fill="rgb(248,100,22)" fg:x="20625108" fg:w="21388"/><text x="96.6936%" y="71.50"></text></g><g><title>eustress_engine::ui::slint_ui::generate_workshop_titles (349,722 µs, 1.64%)</title><rect x="96.5584%" y="61" width="1.6353%" height="15" fill="rgb(208,67,9)" fg:x="20649657" fg:w="349722"/><text x="96.8084%" y="71.50"></text></g><g><title>eustress_engine::ui::slint_ui::handle_window_close_request (2,750 µs, 0.01%)</title><rect x="98.2019%" y="61" width="0.0129%" height="15" fill="rgb(219,133,21)" fg:x="21001137" fg:w="2750"/><text x="98.4519%" y="71.50"></text></g><g><title>eustress_engine::ui::slint_ui::handle_window_resize (2,741 µs, 0.0eustress_engine::ui::slint_ui::sync_gui_elements_to_slint (5,155 µs, 0.02%)</title><rect x="98.3480%" y="61" width="0.0241%" height="15" fill="rgb(246,46,29)" fg:x="21035920" fg:w="5155"/><text x="98.5980%" y="71.50"></text></g><g><title>eustress_engrect x="98.2376%" y="61" width="0.0116%" height="15" fill="rgb(246,185,52)" fg:x="21008773" fg:w="2476"/><text x="98.4876%" y="71.50"></text></g><g><title>eustress_engine::ui::slint_ui::sync_bevy_to_slint (4,474 µs, 0.02%)</title><rect x="98.2969%" y="61" width="0.0209%" height="15" fill="rgb(252,136,11)" fg:x="21021454" fg:w="4474"/><text x="98.5469%" y="71.50"></text></g><g><title>eustress_engine::ui::slint_ui::sync_center_tabs_to_slint (4,953 µs, 0.02%)</title><rect x="98.3178%" y="61" width="0.0232%" height="15" fill="rgb(219,138,53)" fg:x="21025928" fg:w="4953"/><text x="98.5678%" y="71.50"></text></g><g><title>eustress_engine::ui::slint_ui::sync_gui_elements_to_slint (5,166 µs, 0.02%)</title><rect x="98.3573%" y="61" width="0.0242%" height="15" fill="rgb(211,51,23)" fg:x="21034367" fg:w="5166"/><text x="98.6073%" y="71.50"></text></g><g><title>eustress_engine::ui::slint_ui::sync_plugin_tabs_to_slint (2,472 µs, 0.01%)</title><rect x="98.3964%" y="61" width="0.0116%" height="15" fill="rgb(247,221,28)" fg:x="21042730" fg:w="2472"/><text x="98.6464%" y="71.50"></text></g><g><title>eustress_engine::ui::slint_ui::sync_properties_to_slint (5,605 µs, 0.03%)</title><rect x="98.4079%" y="61" width="0.0262%" height="15" fill="rgb(251,222,45)" fg:x="21045202" fg:w="5605"/><text x="98.6579%" y="71.50"></text></g><g><title>eustress_engine::ui::slint_ui::sync_soul_panel_to_slint (5,981 µs, 0.03%)</title><rect x="98.4586%" y="61" width="0.0280%" height="15" fill="rgb(217,162,53)" fg:x="21056029" fg:w="5981"/><text x="98.7086%" y="71.50"></text></g><g><title>eustress_engine::ui::slint_ui::sync_tags_to_slint (9,713 µs, 0.05%)</title><rect x="98.4907%" y="61" width="0.0454%" height="15" fill="rgb(229,93,14)" fg:x="21062904" fg:w="9713"/><text x="98.7407%" y="71.50"></text></g><g><title>eustress_engine::ui::slint_ui::sync_unified_explorer_to_slint (45,126 µs, 0.21%)</title><rect x="98.5452%" y="61" width="0.2110%" height="15" fill="rgb(209,67,49)" fg:x="21074547" fg:w="45126"/><text x="98.7952%" y="71.50"></text></g><g><title>eustress_engine::ui::slint_ui::sync_workshop_sessions_to_slint (15,601 µs, 0.07%)</title><rect x="98.7673%" y="61" width="0.0730%" height="15" fill="rgb(213,87,29)" fg:x="21122062" fg:w="15601"/><text x="99.0173%" y="71.50"></text></g><g><title>eustress_engine::ui::slint_ui::update_slint_ui_focus (3,390 µs, 0.02%)</title><rect x="98.8521%" y="61" width="0.0159%" height="15" fill="rgb(205,151,52)" fg:x="21140199" fg:w="3390"/><text x="99.1021%" y="71.50"></text></g><g><title>eustress_engine::ui::spawn_events::handle_set_terrain_brush (2,202 µs, 0.01%)</title><rect x="98.9012%" y="61" width="0.0103%" height="15" fill="rgb(253,215,39)" fg:x="21150693" fg:w="2202"/><text x="99.1512%" y="71.50"></text></g><g><title>eustress_engine::ui::spawn_events::handle_spawn_part_events (3,204 µs, 0.01%)</title><rect x="98.9115%" y="61" width="0.0150%" height="15" fill="rgb(221,220,41)" fg:x="21152895" fg:w="3204"/><text x="99.1615%" y="71.50"></text></g><g><title>eustress_engine::ui::world_view::apply_ui_actions (3,757 µs, 0.02%)</title><rect x="98.9864%" y="61" width="0.0176%" height="15" fill="rgb(218,133,21)" fg:x="21168910" fg:w="3757"/><text x="99.2364%" y="71.50"></text></g><g><title>eustress_engine::ui::world_view::extract_world_snapshot (3,384 µs, 0.02%)</title><rect x="99.0044%" y="61" width="0.0158%" height="15" fill="rgb(221,193,43)" fg:x="21172765" fg:w="3384"/><text x="99.2544%" y="71.50"></text></g><g><title>eustress_engine::viga::pipeline::tick_viga_pipeline (3,228 µs, 0.02%)</title><rect x="99.1078%" y="61" width="0.0151%" height="15" fill="rgb(240,128,52)" fg:x="21194869" fg:w="3228"/><text x="99.3578%" y="71.50"></text></g><g><title>eustress_engine::workshop::handle_approve_mcp (2,378 µs, 0.01%)</title><rect x="99.1693%" y="61" width="0.0111%" height="15" fill="rgb(253,114,12)" fg:x="21208016" fg:w="2378"/><text x="99.4193%" y="71.50"></text></g><g><title>eustress_engine::workshop::mention::update_mention_index_live (14,908 µs, 0.07%)</title><rect x="99.2318%" y="61" width="0.0697%" height="15" fill="rgb(215,223,47)" fg:x="21221398" fg:w="14908"/><text x="99.4818%" y="71.50"></text></g><g><title>eustress_engine::workshop::mention_persistence::autosave_index (26,128 µs, 0.12%)</title><rect x="99.3015%" y="61" width="0.1222%" height="15" fill="rgb(248,225,23)" fg:x="21236306" fg:w="26128"/><text x="99.5515%" y="71.50"></text></g><g><title>eustress_engine::workshop::mention_scanner::trigger_rescan_on_universe_change (112,800 µs, 0.53%)</title><rect x="99.4288%" y="61" width="0.5275%" height="15" fill="rgb(250,108,0)" fg:x="21263529" fg:w="112800"/><text x="99.6788%" y="71.50"></text></g><g><title>eustress_radiance::apply_floater_cull (3,246 µs, 0.02%)</title><rect x="99.9680%" y="61" width="0.0152%" height="15" fill="rgb(228,208,7)" fg:x="21378833" fg:w="3246"/><text x="100.2180%" y="71.50"></text></g><g><title>all (21,385,675 µs, 100%)</title><rect x="0.0000%" y="77" width="100.0000%" height="15" fill="rgb(244,45,10)" fg:x="0" fg:w="21385675"/><text x="0.2500%" y="87.50"></text></g></svg></svg>
