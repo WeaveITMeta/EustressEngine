@@ -19,6 +19,25 @@ use crate::play_mode::PlayModeState;
 #[derive(Resource, Default)]
 pub struct SimValuesResource(pub std::collections::HashMap<String, f64>);
 
+/// Sim values written THIS FRAME by a script (`set_sim_value` from Rune) or by
+/// the MCP `set_sim_value` command — as opposed to the much larger set the
+/// engine publishes out of the ECS every frame.
+///
+/// The distinction is load-bearing. `apply_sim_values_to_ecs` maps sim values
+/// onto `ElectrochemicalState`, and its `battery.mode` default is "discharge at
+/// 0.5C" — which it re-applies every single frame. Without knowing that a
+/// script explicitly wrote `battery.current`, that default silently overwrites
+/// the write on the very next frame, and comparing against the ECS value can't
+/// tell "script wrote 0.5" from "engine published 0.5" once the loop reaches
+/// steady state. So the writer records its keys here and the consumer checks
+/// them.
+///
+/// Replaced (not merged) once per frame by the Rune driver, so a key only
+/// counts for the frame it was written in; stop writing and normal mode
+/// behaviour resumes.
+#[derive(Resource, Default)]
+pub struct ScriptSimWrites(pub std::collections::HashMap<String, f64>);
+
 /// Tracks MCP-requested auto-stop target (simulation time in seconds).
 /// Set by `run_simulation` command when `duration_s` is provided;
 /// cleared on stop or when the threshold is crossed.
@@ -36,6 +55,7 @@ impl Plugin for SimulationPlugin {
         app.init_resource::<SimulationClock>()
             .init_resource::<SimulationState>()
             .init_resource::<SimValuesResource>()
+            .init_resource::<ScriptSimWrites>()
             .init_resource::<SimAutoStop>()
             .init_resource::<WatchPointRegistry>()
             .init_resource::<BreakPointRegistry>()
@@ -465,6 +485,7 @@ fn record_and_stream_watchpoints(
 fn drain_sim_commands(
     space_root: Option<Res<crate::space::SpaceRoot>>,
     mut sim_values_res: ResMut<SimValuesResource>,
+    mut script_writes: ResMut<ScriptSimWrites>,
     mut clock: ResMut<SimulationClock>,
     mut next_play_state: ResMut<NextState<PlayModeState>>,
     mut auto_stop: ResMut<SimAutoStop>,
@@ -508,6 +529,11 @@ fn drain_sim_commands(
                     cmd.get("value").and_then(|v| v.as_f64()),
                 ) {
                     sim_values_res.0.insert(key.to_string(), value);
+                    // Count as an explicit write so `apply_sim_values_to_ecs`
+                    // honours it over the default mode behaviour — an MCP
+                    // `set_sim_value("battery.current", 0)` should stop the
+                    // cell, not be overwritten on the same frame.
+                    script_writes.0.insert(key.to_string(), value);
                     // Also write to thread-local so Rune scripts see it
                     crate::soul::rune_ecs_module::SIM_VALUES.with(|sv| {
                         sv.borrow_mut().insert(key.to_string(), value);

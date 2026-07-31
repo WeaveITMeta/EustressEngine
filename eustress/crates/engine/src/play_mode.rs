@@ -1603,6 +1603,7 @@ impl Plugin for PlayModeCorePlugin {
             // Rune runtime: register engine modules + init resources
             .init_resource::<crate::soul::rune_api::RuneRuntimeState>()
             .init_resource::<crate::soul::rune_api::RuneModuleRegistry>()
+            .init_resource::<crate::soul::rune_play::RunePlayBridges>()
             .add_systems(Startup, crate::soul::rune_api::register_engine_rune_modules)
 
             // Message-driven play/pause/stop handlers — see PlayModeSystems doc.
@@ -1623,6 +1624,11 @@ impl Plugin for PlayModeCorePlugin {
             .add_systems(OnEnter(PlayModeState::Playing), activate_physics_for_unanchored_parts)
             .add_systems(OnEnter(PlayModeState::Playing), start_play_server_if_server_mode)
             .add_systems(OnEnter(PlayModeState::Playing), crate::soul::rune_api::compile_scripts_on_play)
+            // Fresh `Instance::new()` registry + clean raycast state per Play
+            // session (both Play-with-character and Run — they share
+            // PlayModeState::Playing, so scripts behave identically in each).
+            .add_systems(OnEnter(PlayModeState::Playing), crate::soul::rune_play::start_rune_session
+                .after(crate::soul::rune_api::compile_scripts_on_play))
             // Luau analogue of compile_scripts_on_play: spawn each Luau script
             // body as a live scheduler coroutine (task.wait / Heartbeat / input
             // become real). Runs after Rune compile so ordering is deterministic.
@@ -1634,10 +1640,14 @@ impl Plugin for PlayModeCorePlugin {
             // Tear down live Luau coroutines / connections so Stop fully stops
             // script activity and the next Play starts from a clean VM.
             .add_systems(OnExit(PlayModeState::Playing), crate::soul::rune_api::stop_luau_scripts_on_exit)
-            // on_exit() on all scripts before cleanup (Godot-style _exit_tree)
-            .add_systems(OnEnter(PlayModeState::Editing), crate::soul::rune_api::run_script_exit)
+            // on_exit() on all scripts before cleanup (Godot-style _exit_tree).
+            // Goes through `stop_rune_session` rather than the bare
+            // `run_script_exit` so `on_exit` runs with the script bridges still
+            // installed — otherwise a script's cleanup hit empty thread-locals
+            // and silently did nothing.
+            .add_systems(OnEnter(PlayModeState::Editing), crate::soul::rune_play::stop_rune_session)
             .add_systems(OnEnter(PlayModeState::Editing), crate::soul::rune_api::cleanup_scripts_on_stop
-                .after(crate::soul::rune_api::run_script_exit))
+                .after(crate::soul::rune_play::stop_rune_session))
             .add_systems(OnEnter(PlayModeState::Editing), restore_gui_on_stop)
             // Safety-net world restore for EVERY stop path (MCP stop_simulation,
             // sim auto-stop, keyboard F8/Escape) — not just the Slint Stop
@@ -1688,25 +1698,22 @@ impl Plugin for PlayModeCorePlugin {
                 // Translate Avian collisions into Luau Touched/TouchEnded.
                 crate::soul::rune_api::read_luau_collisions
                     .after(eustress_common::luau::drive_luau_frame),
-                crate::soul::rune_api::prepare_script_bindings
+                // Keep the live-hierarchy + tag snapshots the `Instance`
+                // handle API resolves against fresh. Change-gated, so a
+                // static scene costs one empty query.
+                crate::soul::rune_play::refresh_rune_scene_snapshot
                     .after(crate::soul::rune_api::hot_recompile_dirty_rune_scripts),
-                crate::soul::rune_api::run_script_init
-                    .after(crate::soul::rune_api::prepare_script_bindings),
-                crate::soul::rune_api::run_script_ready
-                    .after(crate::soul::rune_api::run_script_init),
-                crate::soul::rune_api::run_script_update
-                    .after(crate::soul::rune_api::run_script_ready),
-                // `dispatch_gui_button_clicks` lives in `PlayModeUiPlugin` — it
-                // reads `SlintUIFocus`, populated by the viewport click
-                // pipeline, so it has no meaning in a headless runner.
-                // `cleanup_script_bindings` no longer orders off it directly;
-                // when the UI tier IS present it re-inserts itself between
-                // `run_script_update` and this system (see `PlayModeUiPlugin`),
-                // preserving the exact ordering Core has here alone.
-                crate::soul::rune_api::cleanup_script_bindings
-                    .after(crate::soul::rune_api::run_script_update),
+                // THE Rune frame: install bridges → on_init / on_ready /
+                // on_update → drain created instances, destroys, property
+                // writes and sim values → tear down. Deliberately ONE system:
+                // every bridge is a thread-local, and split across systems
+                // Bevy's multi-threaded executor installs them on one worker
+                // thread and reads them from another, which is why scripts
+                // used to tick without being able to affect anything.
+                crate::soul::rune_play::drive_rune_frame
+                    .after(crate::soul::rune_play::refresh_rune_scene_snapshot),
                 crate::soul::rune_api::drain_script_logs_to_output
-                    .after(crate::soul::rune_api::run_script_update),
+                    .after(crate::soul::rune_play::drive_rune_frame),
             ).run_if(in_state(PlayModeState::Playing)))
 
             // Real-time anchored state sync during play mode
@@ -1739,12 +1746,13 @@ impl Plugin for PlayModeUiPlugin {
                 drain_studio_state_play_requests.after(play_mode_shortcuts),
             ).before(PlayModeSystems))
             // In-viewport ScreenGui button clicks -> Rune on_button_click().
-            // Reinserted between run_script_update and cleanup_script_bindings
-            // to reproduce the exact ordering PlayModeCorePlugin has when it
-            // runs alone (see the comment there).
+            // Runs after the Rune frame so a click lands on the same compiled
+            // unit `on_update` just ran against. It installs its own bridges
+            // (it builds its own VM), so it does not need to sit inside
+            // `drive_rune_frame`'s install/teardown window — which is good,
+            // because that window is a single system by design.
             .add_systems(Update, dispatch_gui_button_clicks
-                .after(crate::soul::rune_api::run_script_update)
-                .before(crate::soul::rune_api::cleanup_script_bindings)
+                .after(crate::soul::rune_play::drive_rune_frame)
                 .run_if(in_state(PlayModeState::Playing)));
     }
 }
@@ -2133,27 +2141,64 @@ fn deactivate_physics_for_parts(
 /// Dispatch ScreenGui button clicks to Rune scripts via on_button_click(name).
 /// Reads gui_clicked_button from SlintUIFocus (set by update_slint_ui_focus when
 /// a TextButton is left-clicked in the viewport during play mode).
+///
+/// Installs the script bridges itself: this is a separate system from
+/// `drive_rune_frame`, so it runs on its own thread and would otherwise call
+/// into empty thread-locals — a handler could log, and nothing more. Install,
+/// call, drain, clear all happen here, in this one system.
 fn dispatch_gui_button_clicks(
     ui_focus: Res<crate::ui::SlintUIFocus>,
     runtime: Res<eustress_common::soul::rune_runtime::RuneRuntimeState>,
+    mut sim_values: ResMut<crate::simulation::plugin::SimValuesResource>,
+    mut script_writes: ResMut<crate::simulation::plugin::ScriptSimWrites>,
+    bridges: Res<crate::soul::rune_play::RunePlayBridges>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    spatial: Option<Res<crate::spatial_query_bridge::ScriptSpatialQuery>>,
+    ecs_bindings: Option<Res<crate::ui::rune_ecs_bindings::ECSBindings>>,
 ) {
     let Some(ref button_name) = ui_focus.gui_clicked_button else { return };
 
-    for (_idx, compiled) in runtime.compiled.iter() {
-        let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
-        match vm.call(["on_button_click"], (button_name.clone(),)) {
-            Ok(_) => {
-                info!("📜 on_button_click('{}') dispatched to '{}'", button_name, compiled.name);
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                // Silently ignore "missing function" — not all scripts handle buttons
-                if !msg.contains("missing") && !msg.contains("not found") {
-                    warn!("⚠ on_button_click error in '{}': {}", compiled.name, msg);
+    #[cfg(feature = "realism-scripting")]
+    crate::soul::rune_play::with_bridges_installed(
+        &bridges,
+        space_root.as_deref(),
+        spatial.as_deref(),
+        ecs_bindings.as_deref(),
+        Some(&sim_values.0),
+        || {
+            for (_idx, compiled) in runtime.compiled.iter() {
+                let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
+                match vm.call(["on_button_click"], (button_name.clone(),)) {
+                    Ok(_) => {
+                        info!("📜 on_button_click('{}') dispatched to '{}'", button_name, compiled.name);
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        // Not every script handles buttons — an absent callback
+                        // is normal, anything else is a real script bug.
+                        if !msg.starts_with("Missing entry ") {
+                            warn!("⚠ on_button_click error in '{}': {}", compiled.name, msg);
+                        }
+                    }
                 }
             }
-        }
+        },
+    );
+
+    // Publish anything the handler wrote so a button press can drive the sim.
+    // Merged into (not replacing) `ScriptSimWrites`: `drive_rune_frame` already
+    // set this frame's assertions and a click handler adds to them.
+    #[cfg(feature = "realism-scripting")]
+    for (key, value) in crate::soul::rune_ecs_module::drain_script_sim_writes() {
+        sim_values.0.insert(key.clone(), value);
+        script_writes.0.insert(key, value);
     }
+
+    #[cfg(not(feature = "realism-scripting"))]
+    let _ = (
+        &runtime, &mut sim_values, &mut script_writes, &bridges, &space_root, &spatial,
+        &ecs_bindings,
+    );
 }
 
 /// Sync BasePart.anchored changes to RigidBody in real-time during play mode

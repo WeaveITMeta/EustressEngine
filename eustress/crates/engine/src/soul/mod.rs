@@ -29,6 +29,10 @@ pub mod rune_api;
 pub mod error_tracker;
 pub mod vm_pool;
 pub mod rune_ecs_module;
+/// Per-frame Rune execution for Play / Run mode — bridge install, lifecycle
+/// callbacks, and effect drain, all inside ONE Bevy system. See the module
+/// docs for why the previous multi-system split could not work.
+pub mod rune_play;
 pub mod physics_bridge;
 pub mod gui_bridge;
 pub mod parallel_execution;

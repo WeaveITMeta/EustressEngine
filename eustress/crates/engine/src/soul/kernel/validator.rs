@@ -158,19 +158,40 @@ fn check_capabilities(
                 if call.is_receiver_call {
                     continue;
                 }
-                // A bare free-function call that is neither a local helper
-                // (filtered in `extract_call_symbols`) nor catalogued IS an
-                // unknown capability.
+                // Rune's own prelude (`print`, `format`, `Vec::new`, …) is part
+                // of the LANGUAGE, not of the Eustress universe vocabulary, and
+                // was never going to be in the catalog.
+                if is_rune_builtin(&call.symbol) {
+                    continue;
+                }
+                // Anything left is a bare free-function call that resolves
+                // nowhere we know about. That is ADVISORY, not fatal.
+                //
+                // It used to be fatal, which made the catalog — a hand-maintained
+                // mirror of `create_ecs_module`, whose own docs flag the drift
+                // risk — a hard gate: every function registered in the module
+                // but missing an entry here became "unknown" and its caller was
+                // rejected outright. That is a catalog-drift failure being
+                // reported as a law violation.
+                //
+                // Nothing is lost by softening it: the REAL vocabulary boundary
+                // is what `engine_rune_modules()` installs into the Rune
+                // `Context`. A call to a function that exists in neither the
+                // catalog nor a module fails to link at compile time anyway, so
+                // an un-catalogued symbol is not an escape hatch. The gate that
+                // actually enforces universe policy — `WithheldCapability`
+                // below — stays fatal.
                 let (line, column) = byte_offset_to_linecol(source, call.offset);
                 out.push(LawViolation {
                     law_id: "UNKNOWN_CAPABILITY".into(),
                     message: format!(
-                        "call to `{}` is not in the universe vocabulary",
+                        "call to `{}` is not in the universe vocabulary \
+                         (advisory — the Rune linker is the authority on whether it resolves)",
                         call.symbol
                     ),
                     line,
                     column,
-                    severity: ViolationSeverity::Fatal,
+                    severity: ViolationSeverity::Advisory,
                     kind: ViolationKind::UnknownCapability,
                 });
             }
@@ -451,6 +472,53 @@ fn is_keyword(symbol: &str) -> bool {
     matches!(
         last_segment(symbol),
         "if" | "for" | "while" | "match" | "loop" | "fn" | "return" | "let" | "else" | "yield"
+    )
+}
+
+/// Free functions from Rune's own prelude / default modules. These are part of
+/// the LANGUAGE, not of the Eustress universe vocabulary — a universe cannot
+/// meaningfully "withhold" `print`, and the capability catalog was never going
+/// to list them. Flagging them was pure false-positive noise.
+fn is_rune_builtin(symbol: &str) -> bool {
+    matches!(
+        last_segment(symbol),
+        "print"
+            | "println"
+            | "dbg"
+            | "format"
+            | "panic"
+            | "assert"
+            | "assert_eq"
+            | "is_readable"
+            | "is_writable"
+            | "drop"
+            | "clone"
+            | "new"
+            | "default"
+            | "from"
+            | "into"
+            | "min"
+            | "max"
+            | "abs"
+            | "sqrt"
+            | "floor"
+            | "ceil"
+            | "round"
+            | "pow"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "range"
+            | "char"
+            | "int"
+            | "float"
+            | "string"
+            | "bool"
+            | "vec"
+            | "some"
+            | "none"
+            | "ok"
+            | "err"
     )
 }
 

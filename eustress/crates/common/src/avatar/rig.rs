@@ -33,6 +33,14 @@
 //! [`RigBindPlugin`] is the pass that was missing.
 
 use bevy::prelude::*;
+// Logging macros come in explicitly, not through `bevy::prelude::*`.
+// The prelude only re-exports them when Bevy's `bevy_log` feature is on, and
+// feature unification across the test target can turn it off — which made
+// `cargo test -p eustress-common --lib` fail to compile this module while the
+// ordinary lib build succeeded. Importing from `tracing` (what `bevy_log`
+// re-exports anyway) makes the module build under every feature combination.
+// An explicit import also shadows the glob, so there is no ambiguity.
+use tracing::{debug, error, info, warn};
 // Bevy 0.19 replaced the old `bevy_scene` glTF scene with `WorldAsset`;
 // `WorldInstanceReady` is the "graph is fully spawned" trigger.
 use bevy::world_serialization::WorldInstanceReady;

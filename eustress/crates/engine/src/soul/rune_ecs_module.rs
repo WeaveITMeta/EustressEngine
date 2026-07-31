@@ -121,6 +121,26 @@ where
 /// Rune source; with `Module::new()` (the previous behaviour) the
 /// items were at root and every `use eustress::…` diagnostic fired
 /// "Missing item eustress::X" false positives.
+///
+/// # Every `Any` type below MUST carry `#[rune(item = ::eustress)]`
+///
+/// `Module::with_crate("eustress")` sets where *functions* land. It does NOT
+/// set where a TYPE lands: an `#[derive(rune::Any)]` type is placed by its own
+/// `#[rune(item = …)]` attribute, defaulting to the crate root. Registering a
+/// root-item type into a namespaced module leaves its associated functions
+/// unreachable — `module.ty::<Vector3>()` + `module.function_meta(Vector3::new)`
+/// compiles fine and installs cleanly, but a script calling `Vector3::new(…)`
+/// fails to resolve with `Missing item ::eustress::Vector3::new`, because the
+/// compiler looks for the associated item under the type's own path and the
+/// type is not there.
+///
+/// Rune's own modules do this correctly — see `rune::modules::collections`,
+/// where `HashMap` carries `#[rune(item = ::std::collections::hash_map)]`.
+///
+/// The failure mode is silent and total: it takes out every constructor at
+/// once (`Vector3::new`, `Color3::new`, `UDim2::new`, `Instance::new`, …) while
+/// free functions like `log_info` keep working, so the module looks installed.
+/// When adding a new `Any` type here, add the attribute with it.
 #[cfg(feature = "realism-scripting")]
 pub fn create_ecs_module() -> Result<Module, ContextError> {
     let mut module: Module = Module::with_crate("eustress")?;
@@ -161,21 +181,55 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     
     // Data types — Roblox-compatible.
     //
-    // `Vector3::new`/`Color3::new` are the CONSTRUCTORS — without
-    // registering these, scripts have no way to build a value to pass
-    // into `Instance:Set()` at all (`module.ty::<T>()?` alone only
-    // installs the `#[rune(get, set)]` FIELD protocol on already-built
-    // values; it does not pull in a type's `impl` methods — see the note
-    // on the Instance API block below). Found and fixed while wiring
-    // `Instance:Set()`'s Vector3/Color3 argument construction; the same
-    // math methods on these types (`.dot()`, `.cross()`, `.add()`, …)
-    // have the identical gap but are out of this phase's scope — flagged
-    // for a follow-up pass over the whole file.
+    // `module.ty::<T>()?` alone only installs the `#[rune(get, set)]` FIELD
+    // protocol on already-built values; it does not pull in a type's `impl`
+    // methods. EVERY `#[rune::function]` on these types has to be registered
+    // by hand, constructors and instance methods alike — an unregistered one
+    // compiles fine on the Rust side and fails only when a script calls it
+    // ("Missing instance function … for ::eustress::Vector3").
+    //
+    // Keep these lists exhaustive: `Vector3` without `.magnitude()` / `.dot()`
+    // is not a usable vector type. `rune_value_type_registration` in the test
+    // module at the bottom of this file asserts every declared function is
+    // registered.
     module.ty::<Vector3>()?;
     module.function_meta(Vector3::new)?;
+    module.function_meta(Vector3::magnitude)?;
+    module.function_meta(Vector3::unit)?;
+    module.function_meta(Vector3::dot)?;
+    module.function_meta(Vector3::cross)?;
+    module.function_meta(Vector3::lerp)?;
+    module.function_meta(Vector3::add)?;
+    module.function_meta(Vector3::sub)?;
+    module.function_meta(Vector3::mul)?;
+    module.function_meta(Vector3::div)?;
+    module.function_meta(Vector3::neg)?;
+
     module.ty::<Color3>()?;
     module.function_meta(Color3::new)?;
+    module.function_meta(Color3::from_rgb)?;
+    module.function_meta(Color3::from_hsv)?;
+    module.function_meta(Color3::lerp)?;
+    module.function_meta(Color3::to_hsv)?;
+
     module.ty::<CFrame>()?;
+    module.function_meta(CFrame::new)?;
+    module.function_meta(CFrame::from_position)?;
+    module.function_meta(CFrame::angles)?;
+    module.function_meta(CFrame::look_at)?;
+    module.function_meta(CFrame::x)?;
+    module.function_meta(CFrame::y)?;
+    module.function_meta(CFrame::z)?;
+    module.function_meta(CFrame::look_vector)?;
+    module.function_meta(CFrame::right_vector)?;
+    module.function_meta(CFrame::up_vector)?;
+    module.function_meta(CFrame::inverse)?;
+    module.function_meta(CFrame::point_to_world_space)?;
+    module.function_meta(CFrame::point_to_object_space)?;
+    module.function_meta(CFrame::lerp)?;
+    module.function_meta(CFrame::mul)?;
+    module.function_meta(CFrame::add)?;
+    module.function_meta(CFrame::sub)?;
 
     // Raycasting — workspace:Raycast equivalent for Rune
     module.ty::<RaycastResultRune>()?;
@@ -240,10 +294,17 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     // `Instance:Set("Size", …)` on a BillboardGui/GuiObject expects.
     module.ty::<UDim>()?;
     module.function_meta(UDim::new)?;
+    module.function_meta(UDim::add)?;
+    module.function_meta(UDim::sub)?;
     module.ty::<UDim2>()?;
     module.function_meta(UDim2::new)?;
     module.function_meta(UDim2::from_scale)?;
     module.function_meta(UDim2::from_offset)?;
+    module.function_meta(UDim2::x)?;
+    module.function_meta(UDim2::y)?;
+    module.function_meta(UDim2::add)?;
+    module.function_meta(UDim2::sub)?;
+    module.function_meta(UDim2::lerp)?;
 
     // P2: DataStoreService API
     module.ty::<DataStoreRune>()?;
@@ -409,6 +470,28 @@ thread_local! {
     /// Set by scripts via set_sim_value(), read by scripts and MCP tools.
     pub static SIM_VALUES: std::cell::RefCell<std::collections::HashMap<String, f64>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+
+    /// Keys a SCRIPT wrote this run, as opposed to the (much larger) set the
+    /// engine seeded into `SIM_VALUES` before the run.
+    ///
+    /// `SIM_VALUES` is a thread-local: a `set_sim_value` from Rune used to land
+    /// there and stop — nothing ever copied it back into
+    /// `simulation::plugin::SimValuesResource`, which is what watchpoints,
+    /// recordings, `runtime-snapshot.json`, and the MCP `get_sim_value` /
+    /// `list_sim_values` tools actually read. Scripts could therefore not
+    /// publish a single number to the rest of the engine. This side-table is
+    /// drained by [`drain_script_sim_writes`] each frame and merged into the
+    /// resource, so only genuine script writes propagate (seeded engine values
+    /// are not echoed back, which would let a stale copy overwrite a fresher
+    /// engine-side one).
+    static SIM_VALUE_WRITES: std::cell::RefCell<std::collections::HashMap<String, f64>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Take the sim values written by scripts since the last call.
+/// See [`SIM_VALUE_WRITES`] for why this exists.
+pub fn drain_script_sim_writes() -> std::collections::HashMap<String, f64> {
+    SIM_VALUE_WRITES.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
 }
 
 /// Get a simulation watchpoint value by key.
@@ -425,6 +508,11 @@ fn get_sim_value(key: &str) -> f64 {
 #[rune::function]
 fn set_sim_value(key: &str, value: f64) {
     SIM_VALUES.with(|sv| {
+        sv.borrow_mut().insert(key.to_string(), value);
+    });
+    // Record the write so the play-mode driver can merge it into
+    // `SimValuesResource` — see the SIM_VALUE_WRITES doc comment.
+    SIM_VALUE_WRITES.with(|sv| {
         sv.borrow_mut().insert(key.to_string(), value);
     });
 }
@@ -680,6 +768,7 @@ fn log_error(message: &str) {
 /// 3D vector matching Roblox Vector3 API.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, Copy, rune::Any)]
+#[rune(item = ::eustress)]
 pub struct Vector3 {
     #[rune(get, set)]
     pub x: f64,
@@ -787,6 +876,7 @@ impl Vector3 {
 /// RGB color matching Roblox Color3 API.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, Copy, rune::Any)]
+#[rune(item = ::eustress)]
 pub struct Color3 {
     #[rune(get, set)]
     pub r: f64,
@@ -877,6 +967,7 @@ impl Color3 {
 /// Coordinate frame (position + rotation) matching Roblox CFrame API.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, Copy, rune::Any)]
+#[rune(item = ::eustress)]
 pub struct CFrame {
     #[rune(get)]
     pub position: Vector3,
@@ -1193,6 +1284,7 @@ impl CFrame {
 /// Raycast hit result matching Roblox RaycastResult API.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, rune::Any)]
+#[rune(item = ::eustress)]
 pub struct RaycastResultRune {
     /// Entity name (closest to Roblox Instance)
     #[rune(get)]
@@ -1228,6 +1320,7 @@ impl rune::alloc::clone::TryClone for RaycastResultRune {
 /// Raycast filter parameters matching Roblox RaycastParams API.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, rune::Any)]
+#[rune(item = ::eustress)]
 pub struct RaycastParamsRune {
     /// Filter mode: true = exclude listed, false = include only listed
     #[rune(get, set)]
@@ -1306,10 +1399,13 @@ fn workspace_raycast(
     let origin_arr = origin.to_array();
     let direction_arr = direction.to_array();
 
-    // Submit request and poll (result available from previous frame's processing)
+    // Queue this frame's cast and read back the answer to the same call slot
+    // from last frame. See `ScriptSpatialQuery`'s type docs for why the result
+    // is one frame old (Avian's `SpatialQuery` is a `SystemParam` and cannot be
+    // reached from inside the VM).
+    let slot = crate::spatial_query_bridge::next_raycast_slot();
     let result: Option<RaycastResult> = with_spatial_bridge(None, |bridge| {
-        let request_id = bridge.submit_raycast(origin_arr, direction_arr, bridge_params);
-        bridge.poll_raycast(request_id).flatten()
+        bridge.raycast(slot, origin_arr, direction_arr, bridge_params)
     });
 
     result.map(|hit| RaycastResultRune {
@@ -1346,9 +1442,9 @@ fn workspace_raycast_all(
     let direction_arr = direction.to_array();
     let max = max_hits.max(1) as u32;
 
+    let slot = crate::spatial_query_bridge::next_raycast_all_slot();
     let results: Vec<RaycastResult> = with_spatial_bridge(Vec::new(), |bridge| {
-        let request_id = bridge.submit_raycast_all(origin_arr, direction_arr, bridge_params, max);
-        bridge.poll_raycast_all(request_id).unwrap_or_default()
+        bridge.raycast_all(slot, origin_arr, direction_arr, bridge_params, max)
     });
 
     results.into_iter().map(|hit| RaycastResultRune {
@@ -1463,17 +1559,41 @@ struct SnapshotNode {
 /// Thread-local hierarchy snapshot of the LIVE World, seeded before each
 /// script run. See the module doc comment above for why this exists
 /// instead of direct `World` access.
+///
+/// Held behind an `Arc` so play mode — which re-seeds EVERY frame, not once
+/// per command-bar invocation — pays a refcount bump instead of rebuilding a
+/// 100K-entry map 60 times a second. [`RuneHierarchySnapshot`] is the cached
+/// handle the caller keeps.
 #[cfg(feature = "realism-scripting")]
 thread_local! {
-    static HIERARCHY_SNAPSHOT: std::cell::RefCell<Option<std::collections::HashMap<Entity, SnapshotNode>>> =
+    static HIERARCHY_SNAPSHOT: std::cell::RefCell<Option<std::sync::Arc<std::collections::HashMap<Entity, SnapshotNode>>>> =
         std::cell::RefCell::new(None);
 }
 
-/// Seed the live-world snapshot for the current thread before Rune
-/// execution. Call from the same system that calls `execute_rune_oneshot`
-/// (mirrors `seed_existing_tags`).
+/// A built, shareable hierarchy snapshot. Build once with
+/// [`build_instance_snapshot`], then install it on the script thread with
+/// [`seed_instance_snapshot_shared`] as often as you like — installing is an
+/// `Arc` clone.
 #[cfg(feature = "realism-scripting")]
-pub fn seed_instance_snapshot(entries: Vec<InstanceSnapshotEntry>) {
+#[derive(Clone, Default)]
+pub struct RuneHierarchySnapshot(std::sync::Arc<std::collections::HashMap<Entity, SnapshotNode>>);
+
+#[cfg(feature = "realism-scripting")]
+impl RuneHierarchySnapshot {
+    /// Number of entities captured.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    /// Whether the snapshot holds no entities.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Build a shareable snapshot from the caller's live `Instance` + `ChildOf`
+/// query results.
+#[cfg(feature = "realism-scripting")]
+pub fn build_instance_snapshot(entries: Vec<InstanceSnapshotEntry>) -> RuneHierarchySnapshot {
     let mut map: std::collections::HashMap<Entity, SnapshotNode> =
         std::collections::HashMap::with_capacity(entries.len());
     for e in &entries {
@@ -1492,7 +1612,21 @@ pub fn seed_instance_snapshot(entries: Vec<InstanceSnapshotEntry>) {
             }
         }
     }
-    HIERARCHY_SNAPSHOT.with(|cell| *cell.borrow_mut() = Some(map));
+    RuneHierarchySnapshot(std::sync::Arc::new(map))
+}
+
+/// Install an already-built snapshot on the current thread.
+#[cfg(feature = "realism-scripting")]
+pub fn seed_instance_snapshot_shared(snapshot: &RuneHierarchySnapshot) {
+    HIERARCHY_SNAPSHOT.with(|cell| *cell.borrow_mut() = Some(snapshot.0.clone()));
+}
+
+/// Seed the live-world snapshot for the current thread before Rune
+/// execution. Call from the same system that calls `execute_rune_oneshot`
+/// (mirrors `seed_existing_tags`).
+#[cfg(feature = "realism-scripting")]
+pub fn seed_instance_snapshot(entries: Vec<InstanceSnapshotEntry>) {
+    seed_instance_snapshot_shared(&build_instance_snapshot(entries));
 }
 
 /// Clear the live-world snapshot after Rune execution completes.
@@ -1508,7 +1642,7 @@ where
 {
     HIERARCHY_SNAPSHOT.with(|cell| {
         match cell.borrow().as_ref() {
-            Some(map) => f(map),
+            Some(map) => f(map.as_ref()),
             None => {
                 warn!("[Rune Script] Live-world instance snapshot not available");
                 fallback
@@ -1677,7 +1811,7 @@ fn resolve_instance(entity_id: i64) -> Option<ResolvedInstance> {
 /// Exposed to Rune as `Instance` (not `InstanceRune`).
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, rune::Any)]
-#[rune(name = Instance)]
+#[rune(item = ::eustress, name = Instance)]
 pub struct InstanceRune {
     /// `entity.to_bits() as i64` for a real World entity (Live), or the
     /// legacy `InstanceRegistry` counter id (Pending) for an instance
@@ -2114,12 +2248,51 @@ fn euler_deg_to_quat(deg_x: f64, deg_y: f64, deg_z: f64) -> [f32; 4] {
 
 /// Execute a Rune script from the command bar with full ECS module support.
 /// Sets up a temporary InstanceRegistry, runs the script, drains created instances.
+///
+/// `space_root` installs the Space-root bridge for the duration of the run.
+/// Without it every filesystem-backed API in this module (`read_space_file`,
+/// `write_space_file`, `query_workspace_entities`, and the whole `part_set_*`
+/// family, which persist through `update_part_toml`) silently does nothing —
+/// nothing ever called `set_space_root`, so the thread-local was always `None`.
 #[cfg(feature = "realism-scripting")]
-pub fn execute_rune_oneshot(source: &str) -> Result<Vec<eustress_common::luau::runtime::LuauCreatedInstance>, String> {
+pub fn execute_rune_oneshot(
+    source: &str,
+    space_root: Option<std::path::PathBuf>,
+) -> Result<Vec<eustress_common::luau::runtime::LuauCreatedInstance>, String> {
     let instance_registry = std::sync::Arc::new(std::sync::RwLock::new(
         eustress_common::scripting::InstanceRegistry::default()
     ));
     set_instance_registry(instance_registry.clone());
+    match space_root {
+        Some(root) => set_space_root(root),
+        None => clear_space_root(),
+    }
+    // The command bar is a single synchronous run, so raycast call slots start
+    // from zero — see `spatial_query_bridge::reset_raycast_slots`.
+    crate::spatial_query_bridge::reset_raycast_slots();
+
+    // A command bar takes EXPRESSIONS, not programs. Rune has no top-level
+    // statements, so `log_info("hi")` was a parse error and the Kernel's
+    // entrypoint contract rejected it before it ever reached the compiler.
+    // Wrap bare input in `pub fn main() { … }`; anything that already declares
+    // items passes through untouched.
+    //
+    // A wrapped snippet also gets `use eustress::*;` prepended. Every Eustress
+    // function lives under the `eustress` crate namespace, so without it a
+    // one-liner still fails — `log_info("hi")` reports "Missing item log_info"
+    // and the user has to type an import before every command. A `.rune` FILE
+    // should be explicit about its imports; a command bar should not. The glob
+    // goes first so an explicit `use eustress::log_info;` in the same snippet
+    // shadows it rather than colliding with it.
+    let wrapped = eustress_common::soul::rune_runtime::wrap_bare_snippet(source);
+    let owned;
+    let source: &str = match &wrapped {
+        std::borrow::Cow::Owned(text) => {
+            owned = format!("use eustress::*;\n{text}");
+            &owned
+        }
+        std::borrow::Cow::Borrowed(text) => text,
+    };
 
     // L12 GATE — validate the one-shot program against the active universe's
     // Kernel laws BEFORE building the VM, so a law-violating command-bar script
@@ -2137,28 +2310,49 @@ pub fn execute_rune_oneshot(source: &str) -> Result<Vec<eustress_common::luau::r
                 .collect::<Vec<_>>()
                 .join("\n");
             clear_instance_registry();
+            clear_space_root();
             return Err(format!("Kernel validation failed:\n{}", msg));
         }
     }
 
-    let modules: Vec<rune::Module> = match create_ecs_module() {
-        Ok(m) => vec![m],
-        Err(e) => { warn!("Failed to create ECS module: {:?}", e); vec![] }
-    };
+    // The SAME module set play mode compiles against — see
+    // `crate::soul::rune_api::engine_rune_modules`. Previously this path
+    // installed the ECS module alone, so a snippet that worked in a `.rune`
+    // script (realism laws) or that the editor autocompleted (`event_bus`)
+    // failed to compile only in the command bar.
+    let modules: Vec<rune::Module> = crate::soul::rune_api::engine_rune_modules();
 
     let r = eustress_common::soul::rune_runtime::execute_oneshot(&modules, source, "command_bar");
 
+    let created = drain_created_instances(&instance_registry);
+    clear_instance_registry();
+    clear_space_root();
+
+    r.map(|_| created)
+}
+
+/// Convert everything a script created via `Instance::new()` in the supplied
+/// registry into the engine-facing [`LuauCreatedInstance`] bridge struct, and
+/// EMPTY the registry.
+///
+/// Shared by the command-bar one-shot path ([`execute_rune_oneshot`]) and the
+/// play-mode driver ([`crate::soul::rune_play`]) so both materialize
+/// script-created instances identically. Tags set through
+/// `CollectionService::AddTag` are drained here too and attached per instance.
+#[cfg(feature = "realism-scripting")]
+pub fn drain_created_instances(
+    instance_registry: &std::sync::Arc<std::sync::RwLock<eustress_common::scripting::InstanceRegistry>>,
+) -> Vec<eustress_common::luau::runtime::LuauCreatedInstance> {
     // Drain tags first so the per-instance lookup below picks them up
-    // without races against `clear_instance_registry`. The map is keyed by
+    // without races against the registry clear. The map is keyed by
     // i64 entity-id (the same value `InstanceRune.entity_id` exposes to
     // Rune scripts), so it matches `InstanceRegistry::iter()`'s `&u64` key
     // when the latter is cast.
     let mut tag_map = drain_entity_tags();
 
-    // Drain created instances
     let mut created = Vec::new();
     {
-        let reg = instance_registry.read().unwrap();
+        let Ok(reg) = instance_registry.read() else { return created };
         for (id, inst_data) in reg.iter() {
             use eustress_common::scripting::PropertyValue as PV;
             let pos = inst_data.properties.get("Position")
@@ -2219,14 +2413,18 @@ pub fn execute_rune_oneshot(source: &str) -> Result<Vec<eustress_common::luau::r
             });
         }
     }
-    clear_instance_registry();
-
-    r.map(|_| created)
+    if let Ok(mut reg) = instance_registry.write() {
+        reg.clear();
+    }
+    created
 }
 
 /// Stub when realism-scripting is disabled
 #[cfg(not(feature = "realism-scripting"))]
-pub fn execute_rune_oneshot(_source: &str) -> Result<Vec<eustress_common::luau::runtime::LuauCreatedInstance>, String> {
+pub fn execute_rune_oneshot(
+    _source: &str,
+    _space_root: Option<std::path::PathBuf>,
+) -> Result<Vec<eustress_common::luau::runtime::LuauCreatedInstance>, String> {
     Err("Rune scripting requires the realism-scripting feature. Use Luau instead.".to_string())
 }
 
@@ -2279,6 +2477,7 @@ where
 /// Rune-compatible TweenInfo.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, Copy, rune::Any)]
+#[rune(item = ::eustress)]
 pub struct TweenInfoRune {
     #[rune(get)]
     pub time: f64,
@@ -2382,6 +2581,7 @@ fn tween_info_full(
 /// Rune-compatible Tween handle.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, rune::Any)]
+#[rune(item = ::eustress)]
 pub struct TweenRune {
     #[rune(get)]
     pub id: i64,
@@ -2577,6 +2777,7 @@ pub fn update_input_state(
 /// Rune-compatible InputObject.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, rune::Any)]
+#[rune(item = ::eustress)]
 pub struct InputObjectRune {
     #[rune(get)]
     pub key_code: i32,
@@ -2654,6 +2855,7 @@ fn get_mouse_delta() -> (f64, f64) {
 /// UDim — Single dimension with scale and offset.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, Copy, rune::Any)]
+#[rune(item = ::eustress)]
 pub struct UDim {
     #[rune(get)]
     pub scale: f64,
@@ -2697,6 +2899,7 @@ impl UDim {
 /// UDim2 — 2D dimension with X and Y UDims.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, Copy, rune::Any)]
+#[rune(item = ::eustress)]
 pub struct UDim2 {
     #[rune(get)]
     pub x_scale: f64,
@@ -2827,6 +3030,7 @@ where
 /// Rune-compatible DataStore handle.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, rune::Any)]
+#[rune(item = ::eustress)]
 pub struct DataStoreRune {
     #[rune(get)]
     pub name: String,
@@ -2842,6 +3046,7 @@ impl rune::alloc::clone::TryClone for DataStoreRune {
 /// Rune-compatible OrderedDataStore handle.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, rune::Any)]
+#[rune(item = ::eustress)]
 pub struct OrderedDataStoreRune {
     #[rune(get)]
     pub name: String,
@@ -2937,6 +3142,7 @@ fn datastore_increment(store: &DataStoreRune, key: &str, delta: i64) -> i64 {
 /// Rune-compatible DataStoreEntry for sorted results.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, rune::Any)]
+#[rune(item = ::eustress)]
 pub struct DataStoreEntryRune {
     #[rune(get)]
     pub key: String,
@@ -3006,6 +3212,7 @@ fn http_post_async(url: &str, body: &str) -> Option<String> {
 /// Rune-compatible HTTP response object.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, rune::Any)]
+#[rune(item = ::eustress)]
 pub struct HttpResponseRune {
     #[rune(get)]
     pub success: bool,
@@ -3208,7 +3415,29 @@ thread_local! {
     /// Engine-supplied snapshot of `{ tag -> [entity_id, ...] }` tags from
     /// the live ECS, populated before each `execute_rune_oneshot`. Cleared
     /// alongside `ENTITY_TAGS`.
-    static EXISTING_TAGS: std::cell::RefCell<std::collections::HashMap<String, Vec<i64>>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    static EXISTING_TAGS: std::cell::RefCell<std::sync::Arc<std::collections::HashMap<String, Vec<i64>>>> =
+        std::cell::RefCell::new(std::sync::Arc::new(std::collections::HashMap::new()));
+}
+
+/// A built, shareable `{ tag -> [entity_id, …] }` snapshot. Same rationale as
+/// [`RuneHierarchySnapshot`]: play mode re-seeds every frame, so installing
+/// must be an `Arc` clone rather than a map rebuild.
+#[cfg(feature = "realism-scripting")]
+#[derive(Clone, Default)]
+pub struct RuneTagSnapshot(std::sync::Arc<std::collections::HashMap<String, Vec<i64>>>);
+
+#[cfg(feature = "realism-scripting")]
+impl RuneTagSnapshot {
+    /// Build from a `{ tag -> [entity_id, …] }` map.
+    pub fn new(map: std::collections::HashMap<String, Vec<i64>>) -> Self {
+        Self(std::sync::Arc::new(map))
+    }
+}
+
+/// Install an already-built tag snapshot on the current thread.
+#[cfg(feature = "realism-scripting")]
+pub fn seed_existing_tags_shared(snapshot: &RuneTagSnapshot) {
+    EXISTING_TAGS.with(|cell| *cell.borrow_mut() = snapshot.0.clone());
 }
 
 /// Drain all script-set tags keyed by entity-id. Called from the
@@ -3232,13 +3461,13 @@ pub fn drain_entity_tags() -> std::collections::HashMap<i64, Vec<String>> {
 /// `CollectionService::GetTagged` can see real ECS tags.
 #[cfg(feature = "realism-scripting")]
 pub fn seed_existing_tags(snapshot: std::collections::HashMap<String, Vec<i64>>) {
-    EXISTING_TAGS.with(|cell| *cell.borrow_mut() = snapshot);
+    seed_existing_tags_shared(&RuneTagSnapshot::new(snapshot));
 }
 
 /// Clear the engine-supplied snapshot. Pair with [`seed_existing_tags`].
 #[cfg(feature = "realism-scripting")]
 pub fn clear_existing_tags() {
-    EXISTING_TAGS.with(|cell| cell.borrow_mut().clear());
+    EXISTING_TAGS.with(|cell| *cell.borrow_mut() = std::sync::Arc::new(std::collections::HashMap::new()));
 }
 
 // ── Plain-Rust helpers (the actual implementations) ──────────────────────
@@ -3358,6 +3587,7 @@ fn collection_get_tagged(tag: &str) -> Vec<i64> {
 /// Rune-compatible Sound handle.
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, rune::Any)]
+#[rune(item = ::eustress)]
 pub struct SoundRune {
     #[rune(get)]
     pub entity_id: i64,
@@ -3428,6 +3658,7 @@ fn sound_set_volume(sound: &mut SoundRune, volume: f64) {
 /// Product info returned by MarketplaceService:GetProductInfo()
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, rune::Any)]
+#[rune(item = ::eustress)]
 struct ProductInfoRune {
     #[rune(get)] product_id: i64,
     #[rune(get)] name: String,
@@ -3440,6 +3671,7 @@ struct ProductInfoRune {
 /// Player info for scripting
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, rune::Any)]
+#[rune(item = ::eustress)]
 struct PlayerRune {
     #[rune(get)] user_id: i64,
     #[rune(get)] name: String,
@@ -4434,4 +4666,352 @@ fn plugin_get_selection() -> Vec<String> {
 #[cfg(not(feature = "realism-scripting"))]
 pub fn create_ecs_module() -> Result<(), ()> {
     Ok(())
+}
+
+// ============================================================================
+// Registration guards
+// ============================================================================
+
+#[cfg(all(test, feature = "realism-scripting"))]
+mod registration_tests {
+    /// Compile a Rune program against the real engine module set and return the
+    /// first diagnostic, or `None` when it compiles clean.
+    fn compile(source: &str) -> Option<String> {
+        let mut ctx = rune::Context::with_default_modules().expect("default modules");
+        for module in crate::soul::rune_api::engine_rune_modules() {
+            ctx.install(module).expect("engine module installs");
+        }
+
+        let mut sources = rune::Sources::new();
+        sources
+            .insert(rune::Source::memory(source).expect("source"))
+            .expect("insert");
+
+        let mut diagnostics = rune::Diagnostics::new();
+        let built = rune::prepare(&mut sources)
+            .with_context(&ctx)
+            .with_diagnostics(&mut diagnostics)
+            .build();
+        if built.is_ok() {
+            return None;
+        }
+        let mut buf = rune::termcolor::Buffer::no_color();
+        let _ = diagnostics.emit(&mut buf, &sources);
+        Some(String::from_utf8_lossy(buf.as_slice()).trim().to_string())
+    }
+
+    /// Every value-type CONSTRUCTOR must resolve as `Type::fn(...)`.
+    ///
+    /// Guards the `#[rune(item = ::eustress)]` requirement documented on
+    /// `create_ecs_module`. `Module::with_crate` places functions, not types;
+    /// an `Any` type without that attribute lands at the crate root and ALL of
+    /// its associated functions become unreachable — a silent, total failure
+    /// that leaves free functions working, so the module still looks healthy.
+    #[test]
+    fn value_type_constructors_resolve() {
+        let program = r#"
+use eustress::{Vector3, Color3, CFrame, UDim, UDim2, Instance};
+
+pub fn main() {
+    let v = Vector3::new(1.0, 2.0, 3.0);
+    let c = Color3::new(0.1, 0.2, 0.3);
+    let c2 = Color3::from_rgb(10, 20, 30);
+    let c3 = Color3::from_hsv(0.5, 0.5, 0.5);
+    let f = CFrame::new(0.0, 1.0, 2.0);
+    let f2 = CFrame::from_position(v);
+    let f3 = CFrame::angles(0.0, 0.0, 0.0);
+    let f4 = CFrame::look_at(v, v);
+    let u = UDim::new(0.5, 4.0);
+    let u2 = UDim2::new(0.0, 1.0, 0.0, 1.0);
+    let u3 = UDim2::from_scale(1.0, 1.0);
+    let u4 = UDim2::from_offset(2.0, 2.0);
+    let i = Instance::new("Part");
+}
+"#;
+        assert_eq!(compile(program), None, "a constructor failed to resolve");
+    }
+
+    /// Every value-type INSTANCE METHOD must resolve.
+    ///
+    /// `module.ty::<T>()` installs field access only — each `#[rune::function]`
+    /// needs its own `module.function_meta` line. An unregistered method fails
+    /// at CALL time ("Missing instance function"), not at compile time, so
+    /// nothing but an executed call catches it.
+    #[test]
+    fn value_type_methods_resolve() {
+        let program = r#"
+use eustress::{Vector3, Color3, CFrame, UDim, UDim2};
+
+pub fn main() {
+    let a = Vector3::new(1.0, 2.0, 3.0);
+    let b = Vector3::new(4.0, 5.0, 6.0);
+    let _ = a.magnitude();
+    let _ = a.unit();
+    let _ = a.dot(b);
+    let _ = a.cross(b);
+    let _ = a.lerp(b, 0.5);
+    let _ = a.add(b);
+    let _ = a.sub(b);
+    let _ = a.mul(2.0);
+    let _ = a.div(2.0);
+    let _ = a.neg();
+
+    let c = Color3::new(0.1, 0.2, 0.3);
+    let _ = c.lerp(c, 0.5);
+    let _ = c.to_hsv();
+
+    let f = CFrame::new(0.0, 0.0, 0.0);
+    let _ = f.x();
+    let _ = f.y();
+    let _ = f.z();
+    let _ = f.look_vector();
+    let _ = f.right_vector();
+    let _ = f.up_vector();
+    let _ = f.inverse();
+    let _ = f.point_to_world_space(a);
+    let _ = f.point_to_object_space(a);
+    let _ = f.lerp(f, 0.5);
+    let _ = f.mul(f);
+    let _ = f.add(a);
+    let _ = f.sub(a);
+
+    let u = UDim::new(0.0, 1.0);
+    let _ = u.add(u);
+    let _ = u.sub(u);
+
+    let d = UDim2::new(0.0, 1.0, 0.0, 1.0);
+    let _ = d.x();
+    let _ = d.y();
+    let _ = d.add(d);
+    let _ = d.sub(d);
+    let _ = d.lerp(d, 0.5);
+}
+"#;
+        // Rune resolves instance calls at runtime, so compiling is not enough —
+        // run it. `main` returning cleanly means every method dispatched.
+        let mut ctx = rune::Context::with_default_modules().expect("default modules");
+        for module in crate::soul::rune_api::engine_rune_modules() {
+            ctx.install(module).expect("engine module installs");
+        }
+        let mut sources = rune::Sources::new();
+        sources
+            .insert(rune::Source::memory(program).expect("source"))
+            .expect("insert");
+        let mut diagnostics = rune::Diagnostics::new();
+        let unit = rune::prepare(&mut sources)
+            .with_context(&ctx)
+            .with_diagnostics(&mut diagnostics)
+            .build()
+            .expect("value-method program compiles");
+
+        let mut vm = rune::Vm::new(
+            std::sync::Arc::new(ctx.runtime().expect("runtime")),
+            std::sync::Arc::new(unit),
+        );
+        if let Err(e) = vm.call(["main"], ()) {
+            panic!("a value-type method is not registered: {e}");
+        }
+    }
+
+    /// The free-function surface the existing `.rune` scripts depend on.
+    #[test]
+    fn free_functions_resolve() {
+        let program = r#"
+use eustress::{log_info, log_warn, log_error, get_sim_value, set_sim_value,
+               list_sim_values, query_workspace_entities, read_space_file,
+               write_space_file, query_material_properties, workspace_raycast,
+               workspace_get_gravity, camera_get_position, is_key_down};
+
+pub fn on_update(dt) {
+    log_info("x"); log_warn("x"); log_error("x");
+    let _ = get_sim_value("k");
+    set_sim_value("k", 1.0);
+    let _ = list_sim_values();
+    let _ = query_workspace_entities(None);
+    let _ = read_space_file("a.toml");
+    let _ = write_space_file("a.toml", "x");
+    let _ = query_material_properties("Plastic");
+    let _ = workspace_get_gravity();
+    let _ = camera_get_position();
+    let _ = is_key_down(0);
+}
+"#;
+        assert_eq!(compile(program), None, "a free function failed to resolve");
+    }
+
+    /// The realism law namespaces and the event bus must be installed in the
+    /// SAME context as the ECS module — the analyzer and the runtime share
+    /// `engine_rune_modules()` precisely so the editor cannot disagree with
+    /// what actually compiles.
+    #[test]
+    fn realism_and_event_bus_share_the_context() {
+        let program = r#"
+use eustress::realism::electrical;
+use eustress::realism::mechanics;
+
+pub fn main() {
+    let _ = electrical::ohm_current(12.0, 4.0);
+    let _ = mechanics::escape_velocity(5.972e24, 6.371e6);
+    event_bus::fire("topic", "payload");
+    event_bus::fire_number("topic", 1.0);
+}
+"#;
+        assert_eq!(compile(program), None, "realism/event_bus not in the context");
+    }
+}
+
+#[cfg(all(test, feature = "realism-scripting"))]
+mod oneshot_tests {
+    use super::execute_rune_oneshot;
+
+    /// A private scratch directory for one test, removed on drop.
+    struct TempSpace(std::path::PathBuf);
+
+    impl TempSpace {
+        fn new(tag: &str) -> Self {
+            let mut p = std::env::temp_dir();
+            p.push(format!("eustress-rune-oneshot-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).expect("scratch dir");
+            Self(p)
+        }
+    }
+
+    impl Drop for TempSpace {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The command bar takes EXPRESSIONS. A bare statement must run, with no
+    /// `use` line and no function wrapper typed by the user.
+    ///
+    /// Rune has no top-level statements and the Kernel's one-shot entrypoint
+    /// contract requires `main` / `on_init`, so an un-wrapped `log_info("hi")`
+    /// is rejected before it ever reaches the compiler — and every Eustress
+    /// function lives under `eustress::`, so even once wrapped it needs an
+    /// import to resolve. A command bar that requires both is not a command bar.
+    #[test]
+    fn bare_expression_runs() {
+        let created = execute_rune_oneshot(r#"log_info("from the command bar")"#, None)
+            .expect("bare expression should run");
+        assert!(created.is_empty(), "no instances expected");
+    }
+
+    /// A bare snippet may also use TYPES without importing them.
+    #[test]
+    fn bare_expression_reaches_types() {
+        execute_rune_oneshot(
+            r#"let v = Vector3::new(1.0, 2.0, 3.0); log_info(`mag=${v.magnitude()}`)"#,
+            None,
+        )
+        .expect("types should resolve in a bare snippet");
+    }
+
+    /// An explicit import inside a snippet must shadow the injected glob, not
+    /// collide with it.
+    #[test]
+    fn explicit_import_in_a_snippet_still_works() {
+        execute_rune_oneshot(
+            "use eustress::log_info;\nlog_info(\"explicit import\")",
+            None,
+        )
+        .expect("explicit import alongside the prelude glob should compile");
+    }
+
+    /// A full program keeps working unchanged — and is left alone: it declares
+    /// items, so it is passed through verbatim, prelude included. A program is
+    /// expected to be explicit about its imports, exactly like a `.rune` file
+    /// on disk; only bare snippets get the convenience treatment.
+    #[test]
+    fn explicit_entrypoint_runs() {
+        execute_rune_oneshot(
+            "use eustress::log_info;\npub fn main() { log_info(\"explicit\"); }",
+            None,
+        )
+        .expect("explicit main should run");
+    }
+
+    /// `Instance::new` + `set` must survive the drain with its properties.
+    #[test]
+    fn created_instances_carry_their_properties() {
+        let created = execute_rune_oneshot(
+            r#"
+            let p = Instance::new("Part").unwrap();
+            p.set_name("BarPart");
+            p.set("Position", Vector3::new(1.0, 2.0, 3.0));
+            p.set("Anchored", true);
+            "#,
+            None,
+        )
+        .expect("instance script should run");
+
+        assert_eq!(created.len(), 1, "expected exactly one created instance");
+        let inst = &created[0];
+        assert_eq!(inst.name, "BarPart");
+        assert_eq!(inst.class_name, "Part");
+        assert_eq!(inst.position, [1.0, 2.0, 3.0]);
+        assert!(inst.anchored, "Anchored=true should survive the drain");
+    }
+
+    /// The Space root must be installed for the run, or every filesystem-backed
+    /// API in this module is a silent no-op.
+    #[test]
+    fn space_root_is_installed_for_the_run() {
+        let space = TempSpace::new("spaceroot");
+
+        execute_rune_oneshot(
+            r#"write_space_file("probe.txt", "written by the command bar")"#,
+            Some(space.0.clone()),
+        )
+        .expect("write_space_file script should run");
+
+        let written = std::fs::read_to_string(space.0.join("probe.txt"))
+            .expect("the script's file should exist on disk");
+        assert_eq!(written, "written by the command bar");
+    }
+
+    /// The Space root must NOT leak past the run — a later run with no Space
+    /// must not still be able to write into the previous one.
+    #[test]
+    fn space_root_is_cleared_after_the_run() {
+        let space = TempSpace::new("leak");
+        execute_rune_oneshot(
+            r#"write_space_file("first.txt", "a")"#,
+            Some(space.0.clone()),
+        )
+        .expect("first run");
+
+        // No Space this time: the write must fail (returns false), not land in
+        // the directory the previous run was pointed at.
+        execute_rune_oneshot(r#"write_space_file("second.txt", "b")"#, None)
+            .expect("second run should still execute");
+        assert!(
+            !space.0.join("second.txt").exists(),
+            "space root leaked across runs"
+        );
+    }
+
+    /// A compile error must surface as an Err, not be swallowed.
+    #[test]
+    fn compile_errors_surface() {
+        let err = execute_rune_oneshot("let x = ;", None)
+            .expect_err("a syntax error must not report success");
+        assert!(
+            err.to_lowercase().contains("error"),
+            "unhelpful error text: {err}"
+        );
+    }
+
+    /// The path-traversal scope rule is enforced BEFORE execution.
+    #[test]
+    fn path_traversal_is_rejected() {
+        let space = TempSpace::new("traversal");
+        let err = execute_rune_oneshot(
+            r#"write_space_file("../escaped.txt", "nope")"#,
+            Some(space.0.clone()),
+        )
+        .expect_err("path traversal must be rejected");
+        assert!(err.contains("Kernel validation failed"), "unexpected: {err}");
+    }
 }

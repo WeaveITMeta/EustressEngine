@@ -491,22 +491,19 @@ fn eustress_context() -> Option<&'static rune::Context> {
 fn build_analyzer_context() -> Option<std::sync::Arc<rune::Context>> {
     let mut ctx = rune::Context::with_default_modules().ok()?;
 
-    // The engine's single ECS module exposes the full Eustress API
-    // surface — `get_sim_value`, `set_sim_value`, `gui_set_text`,
-    // Instance, TweenService, raycast helpers, task utilities, UDim,
-    // and the Vector3/Color3/CFrame types. Building it is pure metadata
-    // registration; the thread-local ECS bindings it consults at call
-    // time aren't needed for compilation. A missing installation here
-    // falls back to "default modules only" — still better than the old
-    // behaviour of no context at all.
+    // EXACTLY the module set play mode and the command bar compile against
+    // (`soul::rune_api::engine_rune_modules`) — ECS + event_bus + the realism
+    // law namespaces. Analyzing against a different set is worse than
+    // analyzing against none: this context is what draws the squiggles and
+    // feeds the Problems panel, and it used to omit the realism laws (so
+    // valid `eustress::realism::*` calls were flagged) while including
+    // `event_bus` (which the runtime did not install, so autocompleted calls
+    // failed to compile). Building the modules is pure metadata registration;
+    // the thread-local bridges they consult at call time aren't needed to
+    // compile. A failed install falls back to "default modules only".
     #[cfg(feature = "realism-scripting")]
-    {
-        if let Ok(module) = crate::soul::rune_ecs_module::create_ecs_module() {
-            let _ = ctx.install(module);
-        }
-        if let Ok(module) = crate::soul::rune_ecs_module::create_event_bus_module() {
-            let _ = ctx.install(module);
-        }
+    for module in crate::soul::rune_api::engine_rune_modules() {
+        let _ = ctx.install(module);
     }
 
     Some(std::sync::Arc::new(ctx))

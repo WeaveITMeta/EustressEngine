@@ -9422,7 +9422,12 @@ fn drain_slint_actions(
                     crate::soul::rune_ecs_module::seed_existing_tags(tag_snapshot.clone());
                     #[cfg(feature = "realism-scripting")]
                     crate::soul::rune_ecs_module::seed_instance_snapshot(instance_snapshot);
-                    let r = crate::soul::rune_ecs_module::execute_rune_oneshot(&script);
+                    // Hand the Space root in so the filesystem-backed API
+                    // (read/write_space_file, query_workspace_entities,
+                    // part_set_*) resolves against the open Space instead of
+                    // silently no-oping.
+                    let script_space_root = res.space_root.as_ref().map(|sr| sr.0.clone());
+                    let r = crate::soul::rune_ecs_module::execute_rune_oneshot(&script, script_space_root);
                     #[cfg(feature = "realism-scripting")]
                     crate::soul::rune_ecs_module::clear_existing_tags();
                     #[cfg(feature = "realism-scripting")]

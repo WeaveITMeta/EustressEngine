@@ -71,27 +71,71 @@ pub struct PhysicsData {
 // Engine-specific systems — query SoulScriptData + install ECS module
 // ============================================================================
 
-/// System: register the engine's ECS module into the RuneModuleRegistry.
+/// The canonical Rune module set for the engine — THE single definition of
+/// "what an Eustress Rune script can call".
+///
+/// One list, four consumers: play-mode compilation
+/// ([`register_engine_rune_modules`]), the command-bar one-shot
+/// ([`super::rune_ecs_module::execute_rune_oneshot`]), the script-editor
+/// analyzer that draws the squiggles, and the LSP server. They used to build
+/// their own contexts and had genuinely different vocabularies — the analyzer
+/// knew `event_bus` but play mode didn't install it, and play mode knew the
+/// realism laws but the analyzer flagged them as unresolved. So the editor
+/// reported errors for code that ran fine, and reported clean for code that
+/// failed to compile at runtime. Add a module HERE and every surface gets it.
+///
+/// Note `eustress_common::soul::rune_gui_module::create_gui_module` is
+/// deliberately absent: its `gui_*` / `log_*` functions are already registered
+/// by `create_ecs_module` under the same `eustress` crate namespace, and
+/// installing both makes `Context::install` fail on the duplicates. The client
+/// installs the common GUI module instead because it has no ECS module.
+#[cfg(feature = "realism-scripting")]
+pub fn engine_rune_modules() -> Vec<rune::Module> {
+    let mut modules = Vec::new();
+
+    match super::rune_ecs_module::create_ecs_module() {
+        Ok(module) => modules.push(module),
+        Err(e) => error!("Failed to create engine ECS module: {}", e),
+    }
+
+    // EventBus — `event_bus::fire(...)` / `connect(...)`. Registered in the
+    // analyzer since forever, never in the runtime context, so every
+    // `event_bus::` call the editor autocompleted was a link error at compile
+    // time.
+    match super::rune_ecs_module::create_event_bus_module() {
+        Ok(module) => modules.push(module),
+        Err(e) => error!("Failed to create event_bus Rune module: {}", e),
+    }
+
+    // Realism law sub-namespaces: eustress::realism::<domain>::<fn>
+    modules.extend(eustress_common::realism::scripting::laws::realism_law_modules());
+
+    modules
+}
+
+/// Stub for builds without the scripting feature.
+#[cfg(not(feature = "realism-scripting"))]
+pub fn engine_rune_modules() -> Vec<()> {
+    Vec::new()
+}
+
+/// System: register the engine's Rune modules into the RuneModuleRegistry.
 /// Called once at startup so modules are ready when play mode starts.
 pub fn register_engine_rune_modules(
     mut module_registry: ResMut<RuneModuleRegistry>,
 ) {
     #[cfg(feature = "realism-scripting")]
     {
-        match super::rune_ecs_module::create_ecs_module() {
-            Ok(module) => {
-                module_registry.add_module(module);
-                info!("✅ Registered engine ECS module for Rune runtime");
-            }
-            Err(e) => {
-                error!("Failed to create engine ECS module: {}", e);
-            }
-        }
-
-        // Realism law sub-namespaces: eustress::realism::<domain>::<fn>
-        for module in eustress_common::realism::scripting::laws::realism_law_modules() {
+        let modules = engine_rune_modules();
+        let count = modules.len();
+        for module in modules {
             module_registry.add_module(module);
         }
+        info!("✅ Registered {count} Rune module(s) for the engine runtime");
+    }
+    #[cfg(not(feature = "realism-scripting"))]
+    {
+        let _ = &mut module_registry;
     }
 }
 
@@ -594,8 +638,18 @@ pub fn compile_scripts_on_play(
 // Engine wrapper systems — populate thread-locals before script execution
 // ============================================================================
 
-/// System: populate ECS bindings + SIM_VALUES thread-locals before Rune scripts run.
-/// Must run BEFORE run_script_init / run_script_update each frame.
+/// SUPERSEDED by [`crate::soul::rune_play::drive_rune_frame`] — do NOT
+/// re-register this as a standalone system.
+///
+/// It installs thread-local bridges intended to be read by
+/// `run_script_init` / `run_script_update`, which are *different Bevy systems*.
+/// `.after()` orders systems; it does not pin them to a thread. On the
+/// multi-threaded executor the install and the read routinely landed on
+/// different workers, so scripts saw empty bridges and every side-effecting
+/// call silently did nothing. Install and use must happen inside ONE system —
+/// which is what `drive_rune_frame` does.
+///
+/// Kept for the client tier, which drives scripts on its own schedule.
 /// Frame counter for periodic debug logging (every 60 frames = ~1s)
 static SCRIPT_LOG_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -646,7 +700,7 @@ pub fn prepare_script_bindings(
 }
 
 /// System: clear thread-local bindings after Rune scripts have run.
-/// Must run AFTER run_script_update each frame.
+/// SUPERSEDED alongside [`prepare_script_bindings`] — see its doc comment.
 pub fn cleanup_script_bindings() {
     #[cfg(feature = "realism-scripting")]
     {

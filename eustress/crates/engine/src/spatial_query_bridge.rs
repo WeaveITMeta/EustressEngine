@@ -37,7 +37,7 @@ use std::collections::HashMap;
 /// params.add_exclude("Baseplate");
 /// params.ignore_water = true;
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RaycastParams {
     /// Filter mode: true = exclude listed entities, false = include only listed entities
     pub exclude_mode: bool,
@@ -53,6 +53,19 @@ pub struct RaycastParams {
     pub respect_can_collide: bool,
     /// Maximum distance for the ray (studs/meters)
     pub max_distance: f32,
+}
+
+/// `Default` MUST delegate to [`RaycastParams::new`], never be derived.
+///
+/// A derived `Default` gives `max_distance: 0.0` — a zero-length ray that can
+/// never hit anything. `workspace_raycast(origin, direction, None)` (the common
+/// no-filter call, from both Rune and Luau) resolves its params through
+/// `unwrap_or_default()`, so a derived default silently makes every unfiltered
+/// raycast in the engine return nothing.
+impl Default for RaycastParams {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RaycastParams {
@@ -141,29 +154,47 @@ pub struct ShapecastResult {
 /// needed to resolve raycast results (Entity → name, material, etc.).
 /// Scripts read from this; the sync system writes to it each frame.
 ///
-/// Also contains a request/response queue so scripts can submit raycasts
-/// and receive results within the same frame (processed by a Bevy system).
+/// # Why raycasts answer with one frame of latency
+///
+/// Avian's [`SpatialQuery`](avian3d::prelude::SpatialQuery) is a pure
+/// `SystemParam` over ECS queries — it cannot be captured into an `Arc` and
+/// handed to a Rune/Luau native function, and the script VM never holds
+/// `&World`. So a script's raycast is a REQUEST: it is queued here, executed
+/// by [`process_script_raycast_requests`] later the same frame, and read back
+/// by the script on its next call.
+///
+/// The original code submitted a request and polled the *same* `request_id`
+/// on the very next line — which could never have been filled yet, so
+/// `workspace_raycast` returned `None` 100% of the time. Requests and results
+/// are now keyed by **call slot** (the Nth raycast a script performs in a
+/// frame; the driver resets the counter each frame), so the Nth call reads the
+/// answer to the Nth call of the previous frame. For the overwhelmingly common
+/// shape — a fixed number of raycasts per `on_update` — that is exact, just
+/// one frame stale. `staleness_guard_m` rejects an answer whose recorded
+/// origin has moved implausibly far, so a script that branches into a
+/// different number of raycasts gets `None` rather than a wrong hit.
 #[derive(Resource, Clone)]
 pub struct ScriptSpatialQuery {
     /// Entity metadata: Bevy Entity bits → (name, material_name, can_collide)
     pub entity_metadata: Arc<RwLock<HashMap<u64, EntityMetadata>>>,
-    /// Pending raycast requests from scripts, processed each frame
-    pub raycast_requests: Arc<RwLock<Vec<RaycastRequest>>>,
-    /// Completed raycast results, keyed by request_id
-    pub raycast_results: Arc<RwLock<HashMap<u64, Option<RaycastResult>>>>,
-    /// Pending raycast-all requests from scripts
-    pub raycast_all_requests: Arc<RwLock<Vec<RaycastAllRequest>>>,
-    /// Completed raycast-all results, keyed by request_id
-    pub raycast_all_results: Arc<RwLock<HashMap<u64, Vec<RaycastResult>>>>,
-    /// Monotonically increasing request ID counter
-    pub next_request_id: Arc<RwLock<u64>>,
+    /// Pending raycast requests from scripts, keyed by call slot
+    pub raycast_requests: Arc<RwLock<HashMap<u32, RaycastRequest>>>,
+    /// Most recent raycast results, keyed by call slot
+    pub raycast_results: Arc<RwLock<HashMap<u32, (RaycastRequest, Option<RaycastResult>)>>>,
+    /// Pending raycast-all requests from scripts, keyed by call slot
+    pub raycast_all_requests: Arc<RwLock<HashMap<u32, RaycastAllRequest>>>,
+    /// Most recent raycast-all results, keyed by call slot
+    pub raycast_all_results: Arc<RwLock<HashMap<u32, (RaycastAllRequest, Vec<RaycastResult>)>>>,
+    /// How far (metres) a cached result's recorded origin may be from the
+    /// current request's origin before the cached answer is discarded.
+    pub staleness_guard_m: f32,
 }
 
 /// A raycast request submitted by a script for processing by the Bevy system.
 #[derive(Debug, Clone)]
 pub struct RaycastRequest {
-    /// Unique ID for correlating request → result
-    pub request_id: u64,
+    /// Which call in the script's per-frame raycast sequence this is
+    pub slot: u32,
     /// Ray origin in world space
     pub origin: [f32; 3],
     /// Ray direction (will be normalized)
@@ -175,8 +206,8 @@ pub struct RaycastRequest {
 /// A raycast-all request submitted by a script for processing by the Bevy system.
 #[derive(Debug, Clone)]
 pub struct RaycastAllRequest {
-    /// Unique ID for correlating request → result
-    pub request_id: u64,
+    /// Which call in the script's per-frame raycast-all sequence this is
+    pub slot: u32,
     /// Ray origin in world space
     pub origin: [f32; 3],
     /// Ray direction (will be normalized)
@@ -185,6 +216,11 @@ pub struct RaycastAllRequest {
     pub params: RaycastParams,
     /// Maximum number of hits to return
     pub max_hits: u32,
+}
+
+/// Distance in metres between two positions.
+fn origin_drift(a: [f32; 3], b: [f32; 3]) -> f32 {
+    Vec3::from(a).distance(Vec3::from(b))
 }
 
 /// Cached metadata for a single entity, synced from ECS each frame.
@@ -200,11 +236,11 @@ impl Default for ScriptSpatialQuery {
     fn default() -> Self {
         Self {
             entity_metadata: Arc::new(RwLock::new(HashMap::new())),
-            raycast_requests: Arc::new(RwLock::new(Vec::new())),
+            raycast_requests: Arc::new(RwLock::new(HashMap::new())),
             raycast_results: Arc::new(RwLock::new(HashMap::new())),
-            raycast_all_requests: Arc::new(RwLock::new(Vec::new())),
+            raycast_all_requests: Arc::new(RwLock::new(HashMap::new())),
             raycast_all_results: Arc::new(RwLock::new(HashMap::new())),
-            next_request_id: Arc::new(RwLock::new(1)),
+            staleness_guard_m: 2.0,
         }
     }
 }
@@ -216,68 +252,114 @@ impl ScriptSpatialQuery {
             .and_then(|map| map.get(&entity_bits).cloned())
     }
 
-    /// Allocate a new unique request ID
-    pub fn next_id(&self) -> u64 {
-        let mut id = self.next_request_id.write().unwrap();
-        let current = *id;
-        *id += 1;
-        current
-    }
-
-    /// Submit a single raycast request. Returns the request_id for polling the result.
-    pub fn submit_raycast(
+    /// Queue a raycast for this frame and return the answer to the same call
+    /// slot from the previous frame (see the type-level docs for why the
+    /// result is one frame old).
+    ///
+    /// `slot` is the ordinal of this raycast within the script's frame — the
+    /// play-mode driver resets the counter each frame.
+    pub fn raycast(
         &self,
+        slot: u32,
         origin: [f32; 3],
         direction: [f32; 3],
         params: RaycastParams,
-    ) -> u64 {
-        let request_id = self.next_id();
-        if let Ok(mut requests) = self.raycast_requests.write() {
-            requests.push(RaycastRequest {
-                request_id,
-                origin,
-                direction,
-                params,
+    ) -> Option<RaycastResult> {
+        let request = RaycastRequest { slot, origin, direction, params };
+
+        let cached = self
+            .raycast_results
+            .read()
+            .ok()
+            .and_then(|map| map.get(&slot).cloned())
+            .and_then(|(prev, result)| {
+                // Reject an answer that plainly belongs to a different query
+                // (a branchy script shifting its slot ordering).
+                if origin_drift(prev.origin, origin) > self.staleness_guard_m {
+                    None
+                } else {
+                    result
+                }
             });
+
+        if let Ok(mut requests) = self.raycast_requests.write() {
+            requests.insert(slot, request);
         }
-        request_id
+        cached
     }
 
-    /// Submit a raycast-all request. Returns the request_id for polling the result.
-    pub fn submit_raycast_all(
+    /// Queue a raycast-all for this frame and return the previous frame's
+    /// answer for the same call slot. Same latency contract as [`Self::raycast`].
+    pub fn raycast_all(
         &self,
+        slot: u32,
         origin: [f32; 3],
         direction: [f32; 3],
         params: RaycastParams,
         max_hits: u32,
-    ) -> u64 {
-        let request_id = self.next_id();
+    ) -> Vec<RaycastResult> {
+        let request = RaycastAllRequest { slot, origin, direction, params, max_hits };
+
+        let cached = self
+            .raycast_all_results
+            .read()
+            .ok()
+            .and_then(|map| map.get(&slot).cloned())
+            .and_then(|(prev, results)| {
+                if origin_drift(prev.origin, origin) > self.staleness_guard_m {
+                    None
+                } else {
+                    Some(results)
+                }
+            })
+            .unwrap_or_default();
+
         if let Ok(mut requests) = self.raycast_all_requests.write() {
-            requests.push(RaycastAllRequest {
-                request_id,
-                origin,
-                direction,
-                params,
-                max_hits,
-            });
+            requests.insert(slot, request);
         }
-        request_id
+        cached
     }
 
-    /// Poll for a single raycast result.
-    /// Returns `Some(Some(result))` if hit, `Some(None)` if processed but no hit,
-    /// `None` if the request hasn't been processed yet.
-    pub fn poll_raycast(&self, request_id: u64) -> Option<Option<RaycastResult>> {
-        let Ok(mut map) = self.raycast_results.write() else { return None };
-        map.remove(&request_id)
-            .map(|result| result)
+    /// Drop every queued request and cached answer. Called when play mode
+    /// stops so the next session starts clean.
+    pub fn clear_raycast_state(&self) {
+        if let Ok(mut m) = self.raycast_requests.write() { m.clear(); }
+        if let Ok(mut m) = self.raycast_results.write() { m.clear(); }
+        if let Ok(mut m) = self.raycast_all_requests.write() { m.clear(); }
+        if let Ok(mut m) = self.raycast_all_results.write() { m.clear(); }
     }
+}
 
-    /// Poll for a raycast-all result. Returns Some(results) if processed, None if pending.
-    pub fn poll_raycast_all(&self, request_id: u64) -> Option<Vec<RaycastResult>> {
-        self.raycast_all_results.write().ok()
-            .and_then(|mut map| map.remove(&request_id))
-    }
+/// Per-thread counter handing out raycast call slots. Reset once per frame by
+/// the play-mode driver via [`reset_raycast_slots`].
+thread_local! {
+    static RAYCAST_SLOT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static RAYCAST_ALL_SLOT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Reset the per-frame raycast call-slot counters. Call before running script
+/// callbacks for a frame (and before a one-shot command-bar run).
+pub fn reset_raycast_slots() {
+    RAYCAST_SLOT.with(|c| c.set(0));
+    RAYCAST_ALL_SLOT.with(|c| c.set(0));
+}
+
+/// Take the next raycast call slot for this frame.
+pub fn next_raycast_slot() -> u32 {
+    RAYCAST_SLOT.with(|c| {
+        let n = c.get();
+        c.set(n.wrapping_add(1));
+        n
+    })
+}
+
+/// Take the next raycast-all call slot for this frame.
+pub fn next_raycast_all_slot() -> u32 {
+    RAYCAST_ALL_SLOT.with(|c| {
+        let n = c.get();
+        c.set(n.wrapping_add(1));
+        n
+    })
 }
 
 // ============================================================================
@@ -566,14 +648,16 @@ fn process_script_raycast_requests(
     spatial_query: avian3d::prelude::SpatialQuery,
     name_query: Query<(Entity, Option<&Name>, Option<&eustress_common::classes::BasePart>)>,
 ) {
-    // Process single-raycast requests
+    // Process single-raycast requests. Results REPLACE the previous map so a
+    // slot the script stopped using doesn't linger and leak.
     let requests: Vec<RaycastRequest> = {
         let Ok(mut queue) = bridge.raycast_requests.write() else { return };
-        std::mem::take(&mut *queue)
+        std::mem::take(&mut *queue).into_values().collect()
     };
 
     if !requests.is_empty() {
-        let Ok(mut results_map) = bridge.raycast_results.write() else { return };
+        let mut fresh: HashMap<u32, (RaycastRequest, Option<RaycastResult>)> =
+            HashMap::with_capacity(requests.len());
         for request in requests {
             let origin = Vec3::from(request.origin);
             let direction = Vec3::from(request.direction);
@@ -585,18 +669,22 @@ fn process_script_raycast_requests(
                 &bridge,
                 &name_query,
             );
-            results_map.insert(request.request_id, result);
+            fresh.insert(request.slot, (request, result));
+        }
+        if let Ok(mut results_map) = bridge.raycast_results.write() {
+            *results_map = fresh;
         }
     }
 
     // Process raycast-all requests
     let all_requests: Vec<RaycastAllRequest> = {
         let Ok(mut queue) = bridge.raycast_all_requests.write() else { return };
-        std::mem::take(&mut *queue)
+        std::mem::take(&mut *queue).into_values().collect()
     };
 
     if !all_requests.is_empty() {
-        let Ok(mut results_map) = bridge.raycast_all_results.write() else { return };
+        let mut fresh: HashMap<u32, (RaycastAllRequest, Vec<RaycastResult>)> =
+            HashMap::with_capacity(all_requests.len());
         for request in all_requests {
             let origin = Vec3::from(request.origin);
             let direction = Vec3::from(request.direction);
@@ -609,7 +697,10 @@ fn process_script_raycast_requests(
                 &bridge,
                 &name_query,
             );
-            results_map.insert(request.request_id, results);
+            fresh.insert(request.slot, (request, results));
+        }
+        if let Ok(mut results_map) = bridge.raycast_all_results.write() {
+            *results_map = fresh;
         }
     }
 }

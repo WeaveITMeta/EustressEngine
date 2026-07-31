@@ -234,6 +234,16 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
         .add_plugins(crate::soul::EngineSoulPlugin)
         .add_plugins(crate::soul::physics_bridge::RunePhysicsBridgePlugin)
         .add_plugins(crate::ui::rune_ecs_bindings::RuneECSBindingsPlugin)
+        // Script raycasting (`workspace_raycast` / `workspace_raycast_all`).
+        // This plugin owns the `ScriptSpatialQuery` resource AND the systems
+        // that execute queued casts — it was never added to the app, so the
+        // resource did not exist and every script raycast returned nothing.
+        .add_plugins(crate::spatial_query_bridge::SpatialQueryBridgePlugin)
+        // EventBus — the firing surface `event_bus::fire(...)` and
+        // `EventBus:Connect(...)` reach from scripts. `InteractionPlugin`
+        // init_resources it too, but that plugin lives in the Slint tier, so
+        // headless runs had no bus at all. `init_resource` is idempotent.
+        .init_resource::<eustress_common::events::EventBusResource>()
         // Universe registry (periodic Universe→Space tree scan)
         .add_plugins(crate::space::UniverseRegistryPlugin)
         // Attribute + Tag migration (event-driven)

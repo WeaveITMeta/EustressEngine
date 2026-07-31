@@ -31,7 +31,11 @@ impl Plugin for ElectrochemistryPlugin {
         app.add_systems(
             Update,
             (
-                apply_sim_values_to_ecs,
+                // Runs AFTER the Rune frame so a script's `set_sim_value`
+                // reaches the cell in the SAME frame it was written, rather
+                // than a frame later (or never — see the fixes documented on
+                // `apply_sim_values_to_ecs`).
+                apply_sim_values_to_ecs.after(crate::soul::rune_play::drive_rune_frame),
                 electrochemical_tick.after(apply_sim_values_to_ecs),
                 publish_echem_to_sim_values.after(electrochemical_tick),
             ).run_if(in_state(PlayModeState::Playing)),
@@ -105,48 +109,67 @@ fn set_default_discharge(
     });
 }
 
-/// Read script-set values from SIM_VALUES and apply to ECS components.
+/// Read script-set values and apply them to ECS components.
 ///
-/// Scripts call set_sim_value("battery.mode", 1.0) etc. to control the
+/// Scripts call `set_sim_value("battery.mode", 1.0)` etc. to control the
 /// simulation. This system reads those values and maps them to ECS fields.
 ///
 /// Modes: 0 = idle, 1 = charging, 2 = discharging
+///
+/// # Two fixes live here
+///
+/// **Source of truth.** This read from the `SIM_VALUES` *thread-local*, which
+/// is per-worker-thread: a script running on thread A wrote values this system
+/// could not see from thread B. It now reads [`SimValuesResource`], the
+/// cross-thread map the Rune driver merges script writes into.
+///
+/// **Explicit current beats the mode default.** `mode` defaults to `2.0`
+/// (discharge at 0.5C) and was re-applied unconditionally every frame, so a
+/// script writing `set_sim_value("battery.current", 0.0)` — which is exactly
+/// what the V-Cell safety controllers do — had its value stomped on the next
+/// frame. A direct `battery.current` write now short-circuits the mode logic
+/// for as long as the script keeps asserting it ([`ScriptSimWrites`] carries
+/// "written this frame", which an ECS-value comparison cannot express once the
+/// control loop reaches steady state).
 fn apply_sim_values_to_ecs(
     mut query: Query<&mut ElectrochemicalState>,
+    sim_values: Res<crate::simulation::plugin::SimValuesResource>,
+    script_writes: Res<crate::simulation::plugin::ScriptSimWrites>,
 ) {
-    let (mode, target_current) = crate::soul::rune_ecs_module::SIM_VALUES.with(|sv| {
-        let sv = sv.borrow();
-        (
-            sv.get("battery.mode").copied().unwrap_or(2.0), // default discharge
-            sv.get("battery.target_current").copied(),
-        )
-    });
-
-    // Apply mode only to the cell stack entity (highest capacity_ah).
+    // Apply to the cell stack entity only (highest capacity_ah). Passive
+    // components (anode slice, electrolyte, …) have capacity_ah = 0 and must
+    // stay at zero current — they are not independent cells.
     let Some(mut echem) = query.iter_mut()
         .filter(|e| e.capacity_ah > 0.0)
         .max_by(|a, b| a.capacity_ah.partial_cmp(&b.capacity_ah).unwrap_or(std::cmp::Ordering::Equal))
     else { return };
+    let echem = &mut *echem;
 
-    {
-        let echem = &mut *echem;
-        match mode as i32 {
-            0 => {
-                // Idle — no current
-                echem.current = 0.0;
-            }
-            1 => {
-                // Charging — negative current (convention: positive = discharge)
-                let rate = target_current.unwrap_or((echem.capacity_ah * 1.0) as f64);
-                echem.current = -(rate as f32);
-            }
-            2 => {
-                // Discharging — positive current
-                let rate = target_current.unwrap_or((echem.capacity_ah * 0.5) as f64);
-                echem.current = rate as f32;
-            }
-            _ => {}
+    // Explicit current assertion wins outright.
+    if let Some(current) = script_writes.0.get("battery.current").copied() {
+        echem.current = current as f32;
+        return;
+    }
+
+    let mode = sim_values.0.get("battery.mode").copied().unwrap_or(2.0); // default discharge
+    let target_current = sim_values.0.get("battery.target_current").copied();
+
+    match mode as i32 {
+        0 => {
+            // Idle — no current
+            echem.current = 0.0;
         }
+        1 => {
+            // Charging — negative current (convention: positive = discharge)
+            let rate = target_current.unwrap_or((echem.capacity_ah * 1.0) as f64);
+            echem.current = -(rate as f32);
+        }
+        2 => {
+            // Discharging — positive current
+            let rate = target_current.unwrap_or((echem.capacity_ah * 0.5) as f64);
+            echem.current = rate as f32;
+        }
+        _ => {}
     }
 }
 

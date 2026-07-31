@@ -397,6 +397,88 @@ pub fn hot_recompile_one_script(
 }
 
 // ============================================================================
+// Bare-snippet support — the command bar takes expressions, not programs
+// ============================================================================
+
+/// The callback names any Eustress Rune program may define as an entrypoint.
+/// Kept in lock-step with `engine::soul::kernel::laws::EntrypointContract`.
+pub const RUNE_ENTRYPOINTS: &[&str] = &["main", "on_init", "on_update", "on_ready", "on_exit"];
+
+/// Wrap a bare command-bar snippet in `pub fn main() { … }` so it is a valid
+/// Rune *program*.
+///
+/// Rune has no top-level statements: a `Source` is a list of items, and
+/// `execute_oneshot` invokes `main` / `on_init`. Typing `log_info("hi")` into
+/// the command bar therefore failed to parse — the bar only ever accepted a
+/// full function definition, which is not what a command bar is for.
+///
+/// Leading `use …;` lines are kept at item level (they are items, not
+/// statements); everything else becomes the body. A source that already
+/// defines any of [`RUNE_ENTRYPOINTS`] is returned unchanged, so existing
+/// scripts and pasted programs behave exactly as before.
+pub fn wrap_bare_snippet(source: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+
+    if source.trim().is_empty() {
+        return Cow::Borrowed(source);
+    }
+
+    // A source that declares ANY item is a program, not a snippet — an
+    // entrypoint, a helper `fn`, a `struct` + `impl`, a `const`. Wrapping one
+    // would nest items inside a function body and break code that compiles
+    // today, so only genuinely statement-shaped input gets wrapped.
+    //
+    // This is a purely textual check on purpose: `rune` is an optional
+    // dependency of this crate, so a parse-based guard would silently stop
+    // guarding in builds without the scripting feature — exactly where a wrong
+    // answer is hardest to notice.
+    const ITEM_HEADS: &[&str] = &[
+        "fn ", "pub fn ", "async fn ", "pub async fn ", "struct ", "pub struct ", "enum ",
+        "pub enum ", "impl ", "const ", "pub const ", "mod ", "pub mod ",
+    ];
+    let declares_an_item = source.lines().any(|line| {
+        let t = line.trim_start();
+        ITEM_HEADS.iter().any(|head| t.starts_with(head))
+    });
+    if declares_an_item {
+        return Cow::Borrowed(source);
+    }
+
+    // Hoist leading `use` items so the wrapped body stays legal.
+    let mut uses: Vec<&str> = Vec::new();
+    let mut body: Vec<&str> = Vec::new();
+    let mut still_leading = true;
+    for line in source.lines() {
+        let t = line.trim_start();
+        if still_leading && (t.starts_with("use ") || t.is_empty() || t.starts_with("//")) {
+            if t.starts_with("use ") {
+                uses.push(line);
+                continue;
+            }
+            // Blank/comment lines before the first statement can go either
+            // way; keep them with the body so line numbers stay close.
+            body.push(line);
+            continue;
+        }
+        still_leading = false;
+        body.push(line);
+    }
+
+    let mut out = String::with_capacity(source.len() + 32);
+    for u in uses {
+        out.push_str(u);
+        out.push('\n');
+    }
+    out.push_str("pub fn main() {\n");
+    for line in body {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str("\n}\n");
+    Cow::Owned(out)
+}
+
+// ============================================================================
 // One-shot execution — run a script immediately outside simulation mode
 // ============================================================================
 
@@ -498,10 +580,18 @@ pub fn execute_oneshot(
         std::sync::Arc::new(unit),
     );
 
-    // Try calling main() first, fall back to on_init()
-    let result = vm.call(["main"], ())
-        .or_else(|_| vm.call(["on_init"], ()))
-        .map_err(|e| format!("Runtime error: {}", e))?;
+    // Try `main()` first, fall back to `on_init()` — but ONLY when `main`
+    // is genuinely absent. Blindly `or_else`-ing swallowed a real runtime
+    // error inside `main` and reported the (usually "Missing entry
+    // `on_init`") fallback error instead, so a broken script looked like a
+    // missing-entrypoint problem.
+    let result = match vm.call(["main"], ()) {
+        Ok(v) => v,
+        Err(e) if is_missing_callback(&e.to_string()) => vm
+            .call(["on_init"], ())
+            .map_err(|e2| format!("Runtime error: {}", e2))?,
+        Err(e) => return Err(format!("Runtime error: {}", e)),
+    };
 
     Ok(format!("{:?}", result))
 }
@@ -520,11 +610,33 @@ pub fn execute_oneshot(
 // Execution systems — run during play mode
 // ============================================================================
 
-/// Call on_init() for any scripts that haven't been initialized yet.
-/// Run this every frame during play mode — it tracks which scripts have been init'd.
-pub fn run_script_init(
-    mut runtime: ResMut<RuneRuntimeState>,
-) {
+/// True when a Rune `VmError` just means the script didn't define the
+/// callback we tried to call. Rune's wording is
+/// `Missing entry \`on_update\` with hash \`0x…\``.
+///
+/// Everything else — "method not found on f64", "field missing on <obj>",
+/// a panic inside the script — is a REAL script bug and must surface. The
+/// original filter (`msg.contains("missing") || msg.contains("not found")`)
+/// was far too broad and silently ate genuine errors.
+#[cfg(feature = "realism-scripting")]
+fn is_missing_callback(msg: &str) -> bool {
+    msg.starts_with("Missing entry ")
+}
+
+// ── Plain-Rust callback drivers ──────────────────────────────────────────────
+//
+// These are the real implementations. They take `&mut RuneRuntimeState`
+// instead of `ResMut<…>` so the engine can call the whole
+// init → ready → update sequence from inside ONE Bevy system, which is what
+// keeps every thread-local script bridge (space root, spatial query,
+// instance registry, sim values, …) installed on the SAME thread the VM
+// runs on. Split across separate systems the bridges would be installed on
+// one worker thread and read on another — the cause of "ECS bindings not
+// available" and silently inert scripts. The `run_script_*` systems below
+// are thin wrappers kept for the client, which drives scripts standalone.
+
+/// Call `on_init()` once per compiled script. Tracks which have run.
+pub fn call_script_init(runtime: &mut RuneRuntimeState) {
     #[cfg(feature = "realism-scripting")]
     {
         let keys: Vec<u32> = runtime.compiled.keys().cloned().collect();
@@ -538,129 +650,187 @@ pub fn run_script_init(
             let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
 
             match vm.call(["on_init"], ()) {
-                Ok(_) => {
-                    info!("📜 on_init() called for '{}'", compiled.name);
-                }
+                Ok(_) => info!("📜 on_init() called for '{}'", compiled.name),
                 Err(e) => {
                     let msg = e.to_string();
-                    if !msg.contains("missing") && !msg.contains("not found") {
-                        warn!("⚠ on_init() error in '{}': {}", compiled.name, msg);
+                    if !is_missing_callback(&msg) {
+                        let name = compiled.name.clone();
+                        warn!("⚠ on_init() error in '{}': {}", name, msg);
+                        runtime.last_errors.push((name, format!("on_init: {msg}")));
                     }
                 }
             }
         }
     }
+    let _ = runtime;
 }
 
-/// Call on_update(dt) on all compiled scripts.
-/// Run this every frame during play mode, after run_script_init.
-pub fn run_script_update(
-    mut runtime: ResMut<RuneRuntimeState>,
-    time: Res<Time>,
-) {
-    let dt = time.delta_secs() as f64;
-
+/// Call `on_ready()` one frame after `on_init()` (Godot `_ready()` parity).
+pub fn call_script_ready(runtime: &mut RuneRuntimeState) {
     #[cfg(feature = "realism-scripting")]
     {
-        // Collect errors separately to avoid borrow conflict
+        let keys: Vec<u32> = runtime.compiled.keys().cloned().collect();
+        for idx in keys {
+            let init_done = runtime.initialized.get(&idx).copied().unwrap_or(false);
+            let ready_key = idx + 1_000_000; // offset key tracks ready separately
+            let ready_done = runtime.initialized.get(&ready_key).copied().unwrap_or(false);
+            if !init_done || ready_done {
+                continue;
+            }
+            runtime.initialized.insert(ready_key, true);
+
+            let compiled = &runtime.compiled[&idx];
+            let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
+            match vm.call(["on_ready"], ()) {
+                Ok(_) => info!("📜 on_ready() called for '{}'", compiled.name),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !is_missing_callback(&msg) {
+                        let name = compiled.name.clone();
+                        warn!("⚠ on_ready() error in '{}': {}", name, msg);
+                        runtime.last_errors.push((name, format!("on_ready: {msg}")));
+                    }
+                }
+            }
+        }
+    }
+    let _ = runtime;
+}
+
+/// Call `on_update(dt)` on every compiled script.
+pub fn call_script_update(runtime: &mut RuneRuntimeState, dt: f64) {
+    #[cfg(feature = "realism-scripting")]
+    {
+        // Collect errors separately to avoid borrowing `runtime` twice.
         let mut errors = Vec::new();
 
         for (_idx, compiled) in runtime.compiled.iter() {
             let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
-
-            match vm.call(["on_update"], (dt,)) {
-                Ok(_) => {}
-                Err(e) => {
-                    let msg = e.to_string();
-                    // ONLY drop "missing entry" errors — those mean the
-                    // script legitimately didn't define `on_update` (the
-                    // canonical signature check). Any other error
-                    // (including runtime "method not found on f64",
-                    // "field missing on <obj>", etc.) must surface —
-                    // previously the filter `msg.contains("missing") ||
-                    // msg.contains("not found")` was too broad, silently
-                    // eating script bugs so the UI stayed frozen with
-                    // no log trail. `Missing entry` is Rune's specific
-                    // wording for an absent callback.
-                    let is_missing_callback =
-                        msg.contains("Missing entry `on_update`")
-                        || msg.starts_with("Missing entry ");
-                    if !is_missing_callback {
-                        errors.push((compiled.name.clone(), msg));
-                    }
+            if let Err(e) = vm.call(["on_update"], (dt,)) {
+                let msg = e.to_string();
+                if !is_missing_callback(&msg) {
+                    errors.push((compiled.name.clone(), msg));
                 }
             }
         }
 
         // Errors surface via `runtime.last_errors` →
-        // `drain_script_errors_to_output` → Eustress Output panel.
-        // No `warn!` / terminal duplication — the Output panel is the
-        // user-facing channel for script errors; the terminal is for
-        // engine-internal diagnostics only.
-        runtime.last_errors = errors;
+        // `drain_script_errors_to_output` → Eustress Output panel. Append
+        // rather than overwrite so an `on_init` error raised earlier in the
+        // same frame isn't lost before the drainer sees it.
+        runtime.last_errors.extend(errors);
     }
-
-    let _ = dt;
+    let _ = (runtime, dt);
 }
 
-/// Call on_exit() on all scripts before cleanup. Mirrors Godot's _exit_tree().
-/// Run this when stopping play mode, BEFORE cleanup_scripts().
-pub fn run_script_exit(
-    runtime: Res<RuneRuntimeState>,
-) {
+/// Call `on_exit()` on every compiled script. Run before `cleanup_scripts`.
+pub fn call_script_exit(runtime: &RuneRuntimeState) {
     #[cfg(feature = "realism-scripting")]
     {
         for (_idx, compiled) in runtime.compiled.iter() {
             let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
             match vm.call(["on_exit"], ()) {
-                Ok(_) => {
-                    info!("📜 on_exit() called for '{}'", compiled.name);
-                }
+                Ok(_) => info!("📜 on_exit() called for '{}'", compiled.name),
                 Err(e) => {
                     let msg = e.to_string();
-                    if !msg.contains("missing") && !msg.contains("not found") {
+                    if !is_missing_callback(&msg) {
                         warn!("⚠ on_exit() error in '{}': {}", compiled.name, msg);
                     }
                 }
             }
         }
     }
+    let _ = runtime;
+}
+
+// ── Bevy-system wrappers ─────────────────────────────────────────────────────
+
+/// Call on_init() for any scripts that haven't been initialized yet.
+/// Run this every frame during play mode — it tracks which scripts have been init'd.
+pub fn run_script_init(mut runtime: ResMut<RuneRuntimeState>) {
+    call_script_init(&mut runtime);
+}
+
+/// Call on_update(dt) on all compiled scripts.
+/// Run this every frame during play mode, after run_script_init.
+pub fn run_script_update(mut runtime: ResMut<RuneRuntimeState>, time: Res<Time>) {
+    call_script_update(&mut runtime, time.delta_secs() as f64);
+}
+
+/// Call on_exit() on all scripts before cleanup. Mirrors Godot's _exit_tree().
+/// Run this when stopping play mode, BEFORE cleanup_scripts().
+pub fn run_script_exit(runtime: Res<RuneRuntimeState>) {
+    call_script_exit(&runtime);
 }
 
 /// Call on_ready() for scripts whose entity subtree is complete.
 /// Unlike on_init() which fires immediately, on_ready() waits one frame
 /// to ensure all ChildOf relationships are applied (deferred commands).
 /// Mirrors Godot's _ready().
-pub fn run_script_ready(
-    mut runtime: ResMut<RuneRuntimeState>,
-) {
-    #[cfg(feature = "realism-scripting")]
-    {
-        let keys: Vec<u32> = runtime.compiled.keys().cloned().collect();
-        for idx in keys {
-            // on_ready fires one frame after on_init (initialized == true means init ran)
-            let init_done = runtime.initialized.get(&idx).copied().unwrap_or(false);
-            let ready_key = idx + 1_000_000; // Use offset key to track ready separately
-            let ready_done = runtime.initialized.get(&ready_key).copied().unwrap_or(false);
+pub fn run_script_ready(mut runtime: ResMut<RuneRuntimeState>) {
+    call_script_ready(&mut runtime);
+}
 
-            if init_done && !ready_done {
-                runtime.initialized.insert(ready_key, true);
+#[cfg(test)]
+mod wrap_tests {
+    use super::wrap_bare_snippet;
 
-                let compiled = &runtime.compiled[&idx];
-                let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
-                match vm.call(["on_ready"], ()) {
-                    Ok(_) => {
-                        info!("📜 on_ready() called for '{}'", compiled.name);
-                    }
-                    Err(e) => {
-                        let msg = e.to_string();
-                        if !msg.contains("missing") && !msg.contains("not found") {
-                            warn!("⚠ on_ready() error in '{}': {}", compiled.name, msg);
-                        }
-                    }
-                }
-            }
+    #[test]
+    fn bare_statement_gets_wrapped() {
+        let out = wrap_bare_snippet(r#"log_info("hi")"#);
+        assert!(out.contains("pub fn main()"), "expected a wrapper, got: {out}");
+        assert!(out.contains(r#"log_info("hi")"#));
+    }
+
+    #[test]
+    fn use_items_stay_at_item_level() {
+        let out = wrap_bare_snippet("use eustress::log_info;\nlog_info(\"hi\")");
+        let use_at = out.find("use eustress::log_info;").expect("use kept");
+        let fn_at = out.find("pub fn main()").expect("wrapper added");
+        assert!(use_at < fn_at, "`use` must precede the wrapper:\n{out}");
+    }
+
+    #[test]
+    fn existing_entrypoints_pass_through_untouched() {
+        for src in [
+            "pub fn main() { }",
+            "pub fn on_init() { }",
+            "pub fn on_update(dt) { }",
+            "fn on_ready() { }",
+            "pub fn on_exit() { }",
+        ] {
+            assert_eq!(wrap_bare_snippet(src), src, "should be untouched: {src}");
         }
+    }
+
+    #[test]
+    fn any_item_declaration_prevents_wrapping() {
+        // None of these define a recognized entrypoint, but all declare items —
+        // wrapping would nest an item inside a function body.
+        for src in [
+            "pub fn main_menu() { }",
+            "fn helper() { }",
+            "struct Foo { a: i64 }",
+            "const LIMIT = 5;",
+            "impl Foo { }",
+        ] {
+            assert_eq!(wrap_bare_snippet(src), src, "should be untouched: {src}");
+        }
+    }
+
+    #[test]
+    fn multiline_statement_snippet_gets_wrapped() {
+        let src = "let n = 1;\nlog_info(`n=${n}`);";
+        let out = wrap_bare_snippet(src);
+        assert!(out.contains("pub fn main()"), "expected a wrapper, got: {out}");
+        assert!(out.contains("let n = 1;"));
+        assert!(out.contains("log_info"));
+    }
+
+    #[test]
+    fn empty_input_is_untouched() {
+        assert_eq!(wrap_bare_snippet(""), "");
+        assert_eq!(wrap_bare_snippet("   \n "), "   \n ");
     }
 }
 

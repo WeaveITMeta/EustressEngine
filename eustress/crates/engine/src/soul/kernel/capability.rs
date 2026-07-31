@@ -154,6 +154,8 @@ impl CapabilityCatalog {
             Capability::new("CFrame::new", ValueConstructor),
             Capability::new("UDim::new", ValueConstructor),
             Capability::new("UDim2::new", ValueConstructor),
+            Capability::new("UDim2::from_scale", ValueConstructor),
+            Capability::new("UDim2::from_offset", ValueConstructor),
             // --- Raycasting ---
             Capability::new("workspace_raycast", ReadSim),
             Capability::new("workspace_raycast_all", ReadSim),
