@@ -53,11 +53,15 @@ jobs:
 
       - name: cargo-deny (advisories, bans, sources)
         # deny.toml lives at the repo root, one level above the workspace.
+        # `--config` is a COMMON option and must precede the subcommand —
+        # `cargo deny check --config …` is rejected with "unexpected
+        # argument '--config' found".
+        #
         # NOTE: cargo-audit was removed from this job — it scans the same
         # RustSec DB as `cargo deny check advisories` but reads no config,
         # so it cannot honour the no-reachable-fix ignores documented in
         # deny.toml and would hard-fail on them forever.
-        run: cargo deny check --config ../deny.toml advisories bans sources
+        run: cargo deny --config ../deny.toml check advisories bans sources
 
   shader-validate:
     name: WGSL Validation (naga)
@@ -141,15 +145,18 @@ jobs:
           # not the test graph). No feature flags are passed, so default features
           # are used.
           #
-          # NOTE: this job silently failed on every push since 2026-06-25
-          # (18+ consecutive runs) with the misleading "eustress-data is
-          # missing" message below, even though the feature wiring in
-          # Cargo.toml is correct and a local `cargo tree` reproduces the
-          # leaf fine. `cargo tree` itself was never checked for its own
-          # exit code, so a resolution failure on a clean CI checkout (no
-          # committed Cargo.lock — see .gitignore) would produce empty/
-          # partial `$tree` and get blamed on the data feature instead of
-          # whatever actually failed. Surface that honestly.
+          # `cargo tree`'s own exit code is checked separately below, so a
+          # dependency-resolution failure on a clean CI checkout (no
+          # committed Cargo.lock — see .gitignore) reports itself instead of
+          # being blamed on the data feature.
+          #
+          # The membership test uses a here-string, NOT `printf … | grep -q`.
+          # This job runs under `shell: bash`, which GitHub invokes with
+          # `-eo pipefail`. `grep -q` exits the moment it matches, closing
+          # the pipe; `printf` then dies with EPIPE, and `pipefail` promotes
+          # that write error to the pipeline's status — so a SUCCESSFUL match
+          # inverted to "missing" and failed the job. A here-string has no
+          # pipeline, so only grep's own status is observed.
           set +e
           tree="$(cargo tree -p eustress-engine -e normal,build 2>tree-stderr.log)"
           tree_exit=$?
@@ -159,7 +166,7 @@ jobs:
             cat tree-stderr.log
             exit 1
           fi
-          if ! printf '%s\n' "$tree" | grep -Eiq ' eustress-data v[0-9]'; then
+          if ! grep -Eiq ' eustress-data v[0-9]' <<< "$tree"; then
             echo "::error::eustress-data is missing from the default eustress-engine graph (cargo tree itself succeeded); the default 'data' feature wiring is broken."
             exit 1
           fi
