@@ -883,6 +883,37 @@ Source: `crates/engine/src/soul/rune_ecs_module.rs`. These three functions
 are the ONLY way a Rune script publishes a number to the rest of the
 engine — there is no other telemetry-emission call.
 
+**Verified against a live engine run** (not just read from source): a
+script using the exact form below was hot-loaded, compiled, executed in
+play mode, and its value was read back successfully over the engine
+bridge (`sim.read`). Two things are easy to get wrong and will silently
+fail if skipped — both included below.
+
+## Required: import + entrypoint
+
+The functions are registered under `Module::with_crate("eustress")`
+(`crates/engine/src/soul/rune_ecs_module.rs`), so they are NOT ambient —
+a bare `set_sim_value(...)` call fails to compile with
+`error: Missing item set_sim_value` unless you import it first.
+
+Separately, a play-mode script's entrypoints are validated by a kernel
+law (`crates/engine/src/soul/kernel/laws.rs`) that only recognizes
+`on_init/0`, `on_update/1`, `on_ready/0`, `on_exit/0` — a bare `update(dt)`
+or `init()` (no `on_` prefix) fails with `NO_ENTRYPOINT`. Both mistakes
+produce a compile-time error surfaced via `query_stream_events` on the
+`rune.compile.error` topic (see `execute_rune`'s own docs), not a silent
+no-op — but the error can be easy to miss if you're not polling that
+topic.
+
+```rune
+use eustress::set_sim_value;
+
+pub fn on_update(dt) {
+    set_sim_value("concentration_u", 0.42);
+    set_sim_value("cell_12_v", 0.87);
+}
+```
+
 ## set_sim_value(key: String, value: Float)
 
 Write (or overwrite) a simulation watchpoint value. Call this once per
@@ -890,17 +921,13 @@ tick (or whenever a value changes) with the result of your in-script
 computation — e.g. a PDE solver's field value at a given cell, an
 aggregate concentration, an error metric.
 
-```rune
-set_sim_value("concentration_u", 0.42);
-set_sim_value("cell_12_v", 0.87);
-```
-
 Writes are merged into the engine's `SimValuesResource` once per frame
 by the play-mode driver — from there they reach:
 - `runtime-snapshot.json` (`.eustress/runtime-snapshot.json` under the
   live Space)
 - Watchpoints (Simulation panel in the Studio UI)
 - The MCP tools `get_sim_value` / `list_sim_values`
+- The engine bridge's `sim.read` method
 - Recordings
 
 A key only counts for the frame it was written in — call `set_sim_value`
@@ -917,6 +944,8 @@ parameter) and then publishing a derived result back under a different
 key.
 
 ```rune
+use eustress::get_sim_value;
+
 let diffusion_rate = get_sim_value("param_diffusion_rate");
 ```
 
@@ -927,6 +956,8 @@ for a script that wants to snapshot or iterate the full sim-value table
 rather than reading known keys one at a time.
 
 ```rune
+use eustress::list_sim_values;
+
 for pair in list_sim_values() {
     let key = pair.0;
     let value = pair.1;
@@ -951,24 +982,30 @@ API documentation.
             success: true,
             content: content.to_string(),
             structured_data: Some(serde_json::json!({
+                "module_path": "eustress",
+                "required_entrypoints": ["on_init/0", "on_update/1", "on_ready/0", "on_exit/0"],
                 "functions": [
                     {
                         "signature": "set_sim_value(key: String, value: Float)",
+                        "import": "use eustress::set_sim_value;",
                         "returns": null,
-                        "description": "Write/overwrite a simulation watchpoint value. Merged into SimValuesResource once per frame; reaches runtime-snapshot.json, watchpoints, and the get_sim_value/list_sim_values MCP tools."
+                        "description": "Write/overwrite a simulation watchpoint value. Merged into SimValuesResource once per frame; reaches runtime-snapshot.json, watchpoints, the engine bridge's sim.read, and the get_sim_value/list_sim_values MCP tools."
                     },
                     {
                         "signature": "get_sim_value(key: String) -> Float",
+                        "import": "use eustress::get_sim_value;",
                         "returns": "Float",
                         "description": "Read a currently-set watchpoint value. Returns 0.0 if the key does not exist."
                     },
                     {
                         "signature": "list_sim_values() -> Vec<(String, Float)>",
+                        "import": "use eustress::list_sim_values;",
                         "returns": "Vec<(String, Float)>",
                         "description": "Return every currently-set key/value pair."
                     }
                 ],
-                "source_file": "crates/engine/src/soul/rune_ecs_module.rs"
+                "source_file": "crates/engine/src/soul/rune_ecs_module.rs",
+                "verified": "Live-tested: hot-loaded, compiled, executed in play mode, value read back via the engine bridge sim.read method."
             })),
             stream_topic: None,
         }
