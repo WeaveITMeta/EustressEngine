@@ -96,6 +96,7 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(script_tools::ImageToGeometryTool);
     registry.register(script_tools::DocumentToCodeTool);
     registry.register(script_tools::GenerateDocsTool);
+    registry.register(script_tools::RuneApiReferenceTool);
 
     // Persistent memory + rule / workflow introspection.
     registry.register(memory_tools::RememberTool);
