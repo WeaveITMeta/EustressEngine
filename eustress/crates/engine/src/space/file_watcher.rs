@@ -381,14 +381,26 @@ pub fn process_file_changes(
             continue;
         }
 
-        // Skip dot-prefixed engine-internal paths. `.eustress/` holds the
-        // trash bin, undo cache, per-folder metadata — none of it is
+        // Skip dot-prefixed engine-internal paths WITHIN the Space. `.eustress/`
+        // holds the trash bin, undo cache, per-folder metadata — none of it is
         // scene state. Without this guard, a delete-then-restore cycle
         // (which trashes files to `.eustress/trash/<name>/`) would
         // hot-load each trashed `_instance.toml` as a fresh workspace
         // entity. Symptom: copy-paste of a parent that had ever held
         // trashed children spawns ghost entries with the trashed names.
-        if event.path
+        //
+        // MUST check only components RELATIVE to the Space root, not the
+        // full absolute path: `event.path` is absolute (`notify` always
+        // reports absolute paths), and a Space living under a dot-prefixed
+        // ancestor directory — e.g. a sandboxed MCP connector's workspace
+        // at `~/.claude-science/orgs/<uuid>/workspaces/...` — would
+        // otherwise trip this guard on every single file event, silently
+        // disabling hot-reload for the entire Space. Checking the absolute
+        // path was never actually necessary for the guard's stated intent
+        // (skipping `.eustress/`-internal churn), only convenient when
+        // Space roots happened to never live under a dot-prefixed directory.
+        let relative_path = event.path.strip_prefix(&space_root.0).unwrap_or(&event.path);
+        if relative_path
             .components()
             .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
         {
@@ -868,7 +880,18 @@ fn handle_file_created(
     if !is_instance_marker {
         if let Some(parent) = event.path.parent() {
             let instance_toml = parent.join("_instance.toml");
-            if instance_toml.exists() {
+            // Require the parent to have actually been REGISTERED (spawned),
+            // not merely present on disk. `spawns_entity_in_service` returns
+            // false for (Toml, "SoulService") — a SoulScript's `_instance.toml`
+            // create event never spawns anything on its own; the `.rune`/
+            // `.soul` file's own Soul|Rune branch is what actually creates the
+            // entity. Skipping the source file just because a sibling
+            // `_instance.toml` exists on disk — without checking it ever
+            // caused a spawn — silently dropped every hot-created script:
+            // `_instance.toml` writes first (normal authoring order), which
+            // made this skip fire for the `.rune` file every time, so NEITHER
+            // file ever produced a SoulScriptData entity.
+            if instance_toml.exists() && registry.is_loaded(&instance_toml) {
                 if let Ok(content) = std::fs::read_to_string(&instance_toml) {
                     if content.contains("\"Script\"") || content.contains("\"SoulScript\"")
                         || content.contains("\"Part\"")
