@@ -32,6 +32,55 @@ fn primitive_mesh_path(shape: &str) -> Option<&'static str> {
     }
 }
 
+/// Recursively search `workspace` for a folder named `safe_name` that
+/// contains `_instance.toml` — i.e. a live entity, at any nesting depth
+/// under Model folders. `create_entity`'s `parent` argument lets callers
+/// nest entities arbitrarily deep (`Workspace/Plant/Stage2Reactor/…`),
+/// but `update_entity`/`delete_entity` used to only ever check
+/// `Workspace/<name>/` directly — any entity created with a `parent` was
+/// silently unreachable by name afterward, so a mistake in ONE
+/// `create_entity` call (wrong shape, wrong color) had no in-place fix;
+/// the only recovery was deleting and rebuilding the whole subtree.
+///
+/// Depth-first, returns the first match — a exact-depth match at the
+/// current level always wins over a deeper one, so the common case
+/// (entity directly under `Workspace/`) doesn't pay for a full walk.
+/// Skips hidden directories (`.eustress`, `.git`, …) so trash/undo
+/// scaffolding never shadows a real entity of the same name.
+fn find_entity_folder(workspace: &std::path::Path, safe_name: &str) -> Option<std::path::PathBuf> {
+    fn walk(dir: &std::path::Path, safe_name: &str) -> Option<std::path::PathBuf> {
+        let entries = std::fs::read_dir(dir).ok()?;
+        let mut subdirs = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let is_hidden = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with('.'))
+                .unwrap_or(true);
+            if is_hidden {
+                continue;
+            }
+            if path.file_name().and_then(|n| n.to_str()) == Some(safe_name)
+                && path.join("_instance.toml").exists()
+            {
+                return Some(path);
+            }
+            subdirs.push(path);
+        }
+        for sub in subdirs {
+            if let Some(found) = walk(&sub, safe_name) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(workspace, safe_name)
+}
+
 impl ToolHandler for CreateEntityTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
@@ -81,7 +130,7 @@ impl ToolHandler for CreateEntityTool {
         let position = parse_vec3(&input, "position", [0.0, 0.0, 0.0]);
         let size = parse_vec3(&input, "size", [1.0, 1.0, 1.0]);
         let material = input.get("material").and_then(|v| v.as_str()).map(str::to_string);
-        let color = parse_vec3(&input, "color", [0.639, 0.635, 0.647]);
+        let color = normalize_color(parse_vec3(&input, "color", [0.639, 0.635, 0.647]));
         let anchored = input.get("anchored").and_then(|v| v.as_bool());
         let can_collide = input.get("can_collide").and_then(|v| v.as_bool());
 
@@ -491,7 +540,7 @@ impl ToolHandler for UpdateEntityTool {
                     "position": { "type": "array", "items": { "type": "number" }, "description": "[x, y, z] new position" },
                     "size": { "type": "array", "items": { "type": "number" }, "description": "[x, y, z] new size" },
                     "material": { "type": "string", "description": "New material preset" },
-                    "color": { "type": "array", "items": { "type": "number" }, "description": "[r, g, b] new color (0-1)" },
+                    "color": { "type": "array", "items": { "type": "number" }, "description": "[r, g, b] new color — either 0.0-1.0 floats or 0-255 integers" },
                     "transparency": { "type": "number", "description": "Transparency (0.0 = opaque, 1.0 = invisible)" },
                     "anchored": { "type": "boolean", "description": "Whether the entity is anchored (immovable)" },
                     "can_collide": { "type": "boolean", "description": "Whether the entity participates in collision" },
@@ -513,15 +562,20 @@ impl ToolHandler for UpdateEntityTool {
         let safe_name = name.replace(' ', "_").replace('/', "_");
         let workspace = ctx.space_root.join("Workspace");
 
-        // Find the entity file: folder/_instance.toml or legacy flat files
-        let folder_path = workspace.join(&safe_name).join("_instance.toml");
-        let candidates = [
-            folder_path,
-            workspace.join(format!("{}.part.toml", safe_name)),
-            workspace.join(format!("{}.glb.toml", safe_name)),
-        ];
-        let filepath = match candidates.iter().find(|p| p.exists()) {
-            Some(p) => p.clone(),
+        // Find the entity file. Recursive folder search first (handles
+        // entities created under a `parent` Model at any depth), then
+        // legacy flat files at the Workspace root.
+        let filepath = if let Some(folder) = find_entity_folder(&workspace, &safe_name) {
+            Some(folder.join("_instance.toml"))
+        } else {
+            let legacy_candidates = [
+                workspace.join(format!("{}.part.toml", safe_name)),
+                workspace.join(format!("{}.glb.toml", safe_name)),
+            ];
+            legacy_candidates.into_iter().find(|p| p.exists())
+        };
+        let filepath = match filepath {
+            Some(p) => p,
             None => return ToolResult {
                 tool_name: "update_entity".to_string(), tool_use_id: String::new(),
                 success: false, content: format!("Entity '{}' not found in Workspace", name),
@@ -604,8 +658,18 @@ impl ToolHandler for UpdateEntityTool {
                 changes.push("material");
             }
             if let Some(color) = input.get("color").and_then(|v| v.as_array()) {
-                let mut arr: Vec<toml::Value> = color.iter().map(|v| toml::Value::Float(v.as_f64().unwrap_or(0.5))).collect();
-                if arr.len() == 3 { arr.push(toml::Value::Float(1.0)); }
+                let raw = [
+                    color.get(0).and_then(|v| v.as_f64()).unwrap_or(0.5) as f32,
+                    color.get(1).and_then(|v| v.as_f64()).unwrap_or(0.5) as f32,
+                    color.get(2).and_then(|v| v.as_f64()).unwrap_or(0.5) as f32,
+                ];
+                let normalized = normalize_color(raw);
+                let arr = vec![
+                    toml::Value::Float(normalized[0] as f64),
+                    toml::Value::Float(normalized[1] as f64),
+                    toml::Value::Float(normalized[2] as f64),
+                    toml::Value::Float(1.0),
+                ];
                 props.insert("color".to_string(), toml::Value::Array(arr));
                 changes.push("color");
             }
@@ -679,9 +743,9 @@ impl ToolHandler for DeleteEntityTool {
         let safe_name = name.replace(' ', "_").replace('/', "_");
         let workspace = ctx.space_root.join("Workspace");
 
-        // Try folder-based first, then legacy flat files
-        let folder_path = workspace.join(&safe_name);
-        if folder_path.is_dir() && folder_path.join("_instance.toml").exists() {
+        // Try folder-based first (recursive — handles entities created
+        // under a `parent` Model at any depth), then legacy flat files.
+        if let Some(folder_path) = find_entity_folder(&workspace, &safe_name) {
             match std::fs::remove_dir_all(&folder_path) {
                 Ok(_) => return ToolResult {
                     tool_name: "delete_entity".to_string(), tool_use_id: String::new(),
@@ -734,6 +798,31 @@ impl ToolHandler for DeleteEntityTool {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Normalize a color triple to the engine's 0.0-1.0 linear range.
+/// `create_entity`'s schema documents `color` as accepting EITHER
+/// 0.0-1.0 floats OR 0-255 integers, but the value used to be written to
+/// `_instance.toml` verbatim while the renderer always treats it as
+/// 0.0-1.0 — so any 0-255 input silently clamped every channel above 1.0
+/// to pure white, with no error. A 157-entity scene authored entirely in
+/// 0-255 (the schema's second documented form) rendered entirely white.
+///
+/// If any component exceeds 1.0, the WHOLE triple is assumed to be
+/// 0-255 and divided down together — scaling only the out-of-range
+/// channel would desaturate the color instead of just rescaling it.
+/// `[1,1,1]` is genuinely ambiguous between float white and near-black
+/// 0-255; resolved as float white here, matching the schema's
+/// float-first documentation order (callers who want near-black 0-255
+/// should pass `[1.0, 1.0, 1.0]` won't hit this path anyway since no
+/// component exceeds 1.0 — use `[2, 2, 2]` or similar if a true 0-255
+/// near-black is intended, or just pass the float form directly).
+fn normalize_color(c: [f32; 3]) -> [f32; 3] {
+    if c[0] > 1.0 || c[1] > 1.0 || c[2] > 1.0 {
+        [c[0] / 255.0, c[1] / 255.0, c[2] / 255.0]
+    } else {
+        c
+    }
+}
+
 fn parse_vec3(input: &serde_json::Value, key: &str, default: [f32; 3]) -> [f32; 3] {
     input.get(key).and_then(|v| v.as_array()).map(|a| {
         [
@@ -742,4 +831,114 @@ fn parse_vec3(input: &serde_json::Value, key: &str, default: [f32; 3]) -> [f32; 
             a.get(2).and_then(|v| v.as_f64()).unwrap_or(default[2] as f64) as f32,
         ]
     }).unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_color_passes_through_float_range() {
+        assert_eq!(normalize_color([0.541, 0.549, 0.518]), [0.541, 0.549, 0.518]);
+    }
+
+    #[test]
+    fn normalize_color_scales_0_255_range() {
+        let got = normalize_color([138.0, 140.0, 132.0]);
+        assert!((got[0] - 138.0 / 255.0).abs() < 1e-6);
+        assert!((got[1] - 140.0 / 255.0).abs() < 1e-6);
+        assert!((got[2] - 132.0 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normalize_color_treats_all_ones_as_float_white() {
+        // Documented ambiguous case: [1,1,1] resolves to float white,
+        // not near-black 0-255 — matches the schema's float-first order.
+        assert_eq!(normalize_color([1.0, 1.0, 1.0]), [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn normalize_color_scales_whole_triple_not_per_channel() {
+        // One channel over 1.0 must scale ALL three together, not clamp
+        // just the offending channel (which would desaturate the color).
+        let got = normalize_color([255.0, 0.0, 0.0]);
+        assert!((got[0] - 1.0).abs() < 1e-6);
+        assert_eq!(got[1], 0.0);
+        assert_eq!(got[2], 0.0);
+    }
+
+    #[test]
+    fn find_entity_folder_locates_directly_nested_entity() {
+        let tmp = std::env::temp_dir().join(format!(
+            "eustress-entity-tools-test-{}-direct",
+            std::process::id()
+        ));
+        let workspace = tmp.join("Workspace");
+        let entity = workspace.join("TopLevelPart");
+        std::fs::create_dir_all(&entity).unwrap();
+        std::fs::write(entity.join("_instance.toml"), "").unwrap();
+
+        let found = find_entity_folder(&workspace, "TopLevelPart");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(found, Some(entity));
+    }
+
+    #[test]
+    fn find_entity_folder_locates_deeply_nested_entity() {
+        let tmp = std::env::temp_dir().join(format!(
+            "eustress-entity-tools-test-{}-nested",
+            std::process::id()
+        ));
+        let workspace = tmp.join("Workspace");
+        // Mirrors the report's exact repro shape:
+        // Workspace/Plant/Stage2_Reactor/S2_PlasmaCore/_instance.toml
+        let entity = workspace.join("Plant").join("Stage2_Reactor").join("S2_PlasmaCore");
+        std::fs::create_dir_all(&entity).unwrap();
+        std::fs::write(entity.join("_instance.toml"), "").unwrap();
+        // A sibling folder without _instance.toml must NOT match — proves
+        // the search checks for a real entity marker, not just a name.
+        let decoy = workspace.join("Plant").join("S2_PlasmaCore");
+        std::fs::create_dir_all(&decoy).unwrap();
+
+        let found = find_entity_folder(&workspace, "S2_PlasmaCore");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(found, Some(entity));
+    }
+
+    #[test]
+    fn find_entity_folder_skips_hidden_directories() {
+        let tmp = std::env::temp_dir().join(format!(
+            "eustress-entity-tools-test-{}-hidden",
+            std::process::id()
+        ));
+        let workspace = tmp.join("Workspace");
+        // A trashed entity under `.eustress/trash/` must not be found by
+        // a live-entity lookup — mirrors the file watcher's own hidden-dir
+        // skip convention.
+        let trashed = workspace.join(".eustress").join("trash").join("GhostPart");
+        std::fs::create_dir_all(&trashed).unwrap();
+        std::fs::write(trashed.join("_instance.toml"), "").unwrap();
+
+        let found = find_entity_folder(&workspace, "GhostPart");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn find_entity_folder_returns_none_when_absent() {
+        let tmp = std::env::temp_dir().join(format!(
+            "eustress-entity-tools-test-{}-absent",
+            std::process::id()
+        ));
+        let workspace = tmp.join("Workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let found = find_entity_folder(&workspace, "DoesNotExist");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(found, None);
+    }
 }
