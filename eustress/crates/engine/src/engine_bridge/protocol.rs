@@ -949,26 +949,45 @@ pub mod handlers {
             }
 
             // Resident-first (note binary vs FileSystem).
-            let mut q = world.query::<(Entity, &Instance, Option<&BinaryEcsInstance>)>();
-            let found = q.iter(world).find_map(|(e, inst, bin)| {
+            //
+            // Two different components carry the on-disk path depending on
+            // which loader spawned the entity: `LoadedFromFile` (the
+            // file-watcher hot-create path) or `InstanceFile` (the
+            // Toml/instance_loader path — `ecs.inspect`'s own `source`
+            // field reads THIS one, not `LoadedFromFile`, which is why the
+            // first version of this fix never actually found a path for
+            // any Fjall-loaded migrated-Space entity and always fell
+            // through to "routed: filesystem").
+            let mut q = world.query::<(
+                Entity,
+                &Instance,
+                Option<&BinaryEcsInstance>,
+                Option<&crate::space::file_loader::LoadedFromFile>,
+                Option<&crate::space::instance_loader::InstanceFile>,
+            )>();
+            let found = q.iter(world).find_map(|(e, inst, bin, loaded, inst_file)| {
                 let hit = match (&uuid, &name) {
                     (Some(u), _) => &inst.uuid == u,
                     (None, Some(n)) => &inst.name == n,
                     _ => false,
                 };
                 if hit {
+                    let path = loaded
+                        .map(|l| l.path.clone())
+                        .or_else(|| inst_file.map(|f| f.toml_path.clone()));
                     Some((
                         e,
                         bin.map(|b| (b.stored_id, b.morton_pos)),
                         inst.class_name.as_str().to_string(),
                         inst.uuid.clone(),
+                        path,
                     ))
                 } else {
                     None
                 }
             });
 
-            if let Some((entity, bin_opt, class, uuid_hex)) = found {
+            if let Some((entity, bin_opt, class, uuid_hex, loaded_path)) = found {
                 match bin_opt {
                     Some((stored_id, morton_pos)) => {
                         let uuid_bytes = uuid_hex_to_bytes(&uuid_hex).unwrap_or([0u8; 16]);
@@ -986,11 +1005,51 @@ pub mod handlers {
                             serde_json::json!({ "deleted": true, "resident": true, "uuid": uuid_hex }),
                         );
                     }
-                    // Resident FileSystem (TOML) entity → disk tool deletes it.
+                    // Resident FileSystem (TOML) entity in a migrated Space.
+                    //
+                    // `active_db::purge_path_all_stores` clears every Fjall
+                    // store the one-shot `migrate_identity` pass populated
+                    // for this path — a migrated Space keeps a full
+                    // uuid-keyed core in `entities_uuid` PLUS `path_to_uuid`/
+                    // `uuid_to_path`/`class_index` indices alongside the
+                    // on-disk TOML. The scene loader is Fjall-first for a
+                    // migrated Space (`load_instance_definition` tries
+                    // `active_db::get_instance` before ever touching disk),
+                    // so deleting only the TOML file changes nothing — the
+                    // next Space load re-materializes the entity straight
+                    // from Fjall as if nothing happened. This function
+                    // existed, correctly documented, with zero callers
+                    // anywhere in the codebase before this fix — every
+                    // deletion path (this bridge method, the MCP
+                    // `delete_entity` tool) only ever removed the disk
+                    // file/folder and told the caller that was sufficient.
                     None => {
+                        let Some(path) = loaded_path else {
+                            // No LoadedFromFile — nothing on disk we can
+                            // resolve a path from. Fall back to the old
+                            // behavior rather than guessing.
+                            return BridgeResponse::ok(
+                                req.id.clone(),
+                                serde_json::json!({ "routed": "filesystem" }),
+                            );
+                        };
+                        crate::space::active_db::purge_path_all_stores(&path, &uuid_hex, &class);
+                        // Remove the on-disk entity folder too, mirroring
+                        // the MCP `delete_entity` tool's
+                        // `std::fs::remove_dir_all` — a caller that only
+                        // checks the filesystem should see the same result.
+                        if let Some(folder) = path.parent() {
+                            let _ = std::fs::remove_dir_all(folder);
+                        }
+                        world.despawn(entity);
                         return BridgeResponse::ok(
                             req.id.clone(),
-                            serde_json::json!({ "routed": "filesystem" }),
+                            serde_json::json!({
+                                "deleted": true,
+                                "resident": true,
+                                "uuid": uuid_hex,
+                                "purged_fjall": true,
+                            }),
                         );
                     }
                 }
