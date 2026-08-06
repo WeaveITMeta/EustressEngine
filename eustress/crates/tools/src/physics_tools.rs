@@ -43,7 +43,32 @@ impl ToolHandler for QueryMaterialTool {
         // the table below in lock-step. The engine's own PBR path is
         // still the canonical source for runtime rendering; this copy
         // exists only for tool introspection.
-        let (roughness, metallic, reflectance, description) = pbr_entry(material_name);
+        //
+        // Case-insensitive: `pbr_entry` previously matched the raw string
+        // exactly, so `query_material("gold")` missed the table's `"Gold"`
+        // entry and silently fell through to the Plastic default — same
+        // shape, same `success: true`, indistinguishable from a real
+        // match. `metallic: 0.0` for a caller who asked for gold is
+        // actively misleading, not just unhelpful. Unmatched names now
+        // return an explicit failure with the known-preset list instead
+        // of a plausible-looking wrong answer.
+        let Some((roughness, metallic, reflectance, description)) = pbr_entry(material_name) else {
+            return ToolResult {
+                tool_name: "query_material".to_string(),
+                tool_use_id: String::new(),
+                success: false,
+                content: format!(
+                    "Unknown material preset '{}'. Known presets: {}",
+                    material_name,
+                    KNOWN_MATERIALS.join(", "),
+                ),
+                structured_data: Some(serde_json::json!({
+                    "material": material_name,
+                    "known_presets": KNOWN_MATERIALS,
+                })),
+                stream_topic: None,
+            };
+        };
         // Round to 3 decimals before JSON emission. The table stores
         // f32 (cheap, close to the rendering path's precision), but
         // serde_json promotes f32 → f64 literally, so `0.3_f32`
@@ -75,37 +100,51 @@ impl ToolHandler for QueryMaterialTool {
     }
 }
 
+const KNOWN_MATERIALS: &[&str] = &[
+    "Plastic", "SmoothPlastic", "Wood", "WoodPlanks", "Metal", "CorrodedMetal",
+    "DiamondPlate", "Foil", "Grass", "Concrete", "Brick", "Granite", "Marble",
+    "Slate", "Sand", "Fabric", "Glass", "Neon", "Ice", "Gold", "Silver", "Bronze",
+];
+
 /// PBR material table — lookup mirroring
 /// `eustress_common::classes::Material::pbr_params`. Kept inline here
-/// so the shared `eustress-tools` crate stays Bevy-free. Unknown
-/// material names fall back to Plastic defaults rather than erroring —
-/// the LLM can still produce a useful tool result.
-fn pbr_entry(name: &str) -> (f32, f32, f32, &'static str) {
-    match name {
-        "Plastic"        => (0.80, 0.00, 0.50, "Standard ABS-like plastic, matte finish"),
-        "SmoothPlastic"  => (0.40, 0.00, 0.50, "Polished plastic, slight gloss"),
-        "Wood"           => (0.80, 0.00, 0.30, "Natural wood grain, warm tone"),
-        "WoodPlanks"     => (0.85, 0.00, 0.30, "Plank-patterned wood, rustic"),
-        "Metal"          => (0.30, 1.00, 0.70, "Brushed steel, high reflectance"),
-        "CorrodedMetal"  => (0.70, 0.80, 0.50, "Oxidized metal, rough pitted surface"),
-        "DiamondPlate"   => (0.50, 1.00, 0.60, "Textured anti-slip metal plate"),
-        "Foil"           => (0.10, 1.00, 0.90, "Mirror-polished metallic foil"),
-        "Grass"          => (1.00, 0.00, 0.20, "Natural grass, high roughness"),
-        "Concrete"       => (0.95, 0.00, 0.30, "Poured concrete, very rough"),
-        "Brick"          => (0.90, 0.00, 0.30, "Clay brick, rough textured"),
-        "Granite"        => (0.40, 0.00, 0.40, "Polished granite stone"),
-        "Marble"         => (0.20, 0.00, 0.50, "Smooth marble, slight veining"),
-        "Slate"          => (0.70, 0.00, 0.30, "Layered slate rock"),
-        "Sand"           => (1.00, 0.00, 0.20, "Loose sand, maximum roughness"),
-        "Fabric"         => (1.00, 0.00, 0.20, "Woven textile, diffuse scatter"),
-        "Glass"          => (0.05, 0.00, 0.80, "Transparent glass, specular transmission, IOR 1.5"),
-        "Neon"           => (0.30, 0.00, 0.50, "Self-illuminating, emissive glow"),
-        "Ice"            => (0.10, 0.00, 0.60, "Translucent ice, very smooth"),
-        "Gold"           => (0.15, 1.00, 0.95, "Pure gold, highly reflective, dense 19300 kg/m³"),
-        "Silver"         => (0.10, 1.00, 0.97, "Polished silver, highest reflectance of any metal"),
-        "Bronze"         => (0.35, 0.90, 0.70, "Copper-tin alloy, warm patina, medium roughness"),
-        _                => (0.80, 0.00, 0.50, "Standard ABS-like plastic, matte finish"),
-    }
+/// so the shared `eustress-tools` crate stays Bevy-free.
+///
+/// Case-insensitive (matched against the lowercased name) so
+/// `query_material("gold")` finds the same entry as `"Gold"` — the
+/// `material` enum callers see elsewhere (e.g. `create_entity`'s
+/// `material` field) is case-sensitive PascalCase, but an AI caller
+/// can't be expected to always guess the exact casing right, and a
+/// case-mismatch used to silently fall through to the Plastic default
+/// (see the call site's comment) rather than erroring or matching.
+/// Returns `None` for names with no known preset at all — the caller
+/// decides how to surface that.
+fn pbr_entry(name: &str) -> Option<(f32, f32, f32, &'static str)> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "plastic"        => (0.80, 0.00, 0.50, "Standard ABS-like plastic, matte finish"),
+        "smoothplastic"  => (0.40, 0.00, 0.50, "Polished plastic, slight gloss"),
+        "wood"           => (0.80, 0.00, 0.30, "Natural wood grain, warm tone"),
+        "woodplanks"     => (0.85, 0.00, 0.30, "Plank-patterned wood, rustic"),
+        "metal"          => (0.30, 1.00, 0.70, "Brushed steel, high reflectance"),
+        "corrodedmetal"  => (0.70, 0.80, 0.50, "Oxidized metal, rough pitted surface"),
+        "diamondplate"   => (0.50, 1.00, 0.60, "Textured anti-slip metal plate"),
+        "foil"           => (0.10, 1.00, 0.90, "Mirror-polished metallic foil"),
+        "grass"          => (1.00, 0.00, 0.20, "Natural grass, high roughness"),
+        "concrete"       => (0.95, 0.00, 0.30, "Poured concrete, very rough"),
+        "brick"          => (0.90, 0.00, 0.30, "Clay brick, rough textured"),
+        "granite"        => (0.40, 0.00, 0.40, "Polished granite stone"),
+        "marble"         => (0.20, 0.00, 0.50, "Smooth marble, slight veining"),
+        "slate"          => (0.70, 0.00, 0.30, "Layered slate rock"),
+        "sand"           => (1.00, 0.00, 0.20, "Loose sand, maximum roughness"),
+        "fabric"         => (1.00, 0.00, 0.20, "Woven textile, diffuse scatter"),
+        "glass"          => (0.05, 0.00, 0.80, "Transparent glass, specular transmission, IOR 1.5"),
+        "neon"           => (0.30, 0.00, 0.50, "Self-illuminating, emissive glow"),
+        "ice"            => (0.10, 0.00, 0.60, "Translucent ice, very smooth"),
+        "gold"           => (0.15, 1.00, 0.95, "Pure gold, highly reflective, dense 19300 kg/m³"),
+        "silver"         => (0.10, 1.00, 0.97, "Polished silver, highest reflectance of any metal"),
+        "bronze"         => (0.35, 0.90, 0.70, "Copper-tin alloy, warm patina, medium roughness"),
+        _                => return None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +264,42 @@ impl ToolHandler for CalculatePhysicsTool {
                 "params": params,
             })),
             stream_topic: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pbr_entry_matches_regardless_of_case() {
+        // The reported bug: query_material("gold") missed the table's
+        // "Gold" entry because the match was case-sensitive, silently
+        // falling through to the Plastic default instead.
+        let pascal = pbr_entry("Gold").expect("Gold should match");
+        let lower = pbr_entry("gold").expect("lowercase gold should also match");
+        let upper = pbr_entry("GOLD").expect("uppercase GOLD should also match");
+        assert_eq!(pascal, lower);
+        assert_eq!(pascal, upper);
+        // Sanity: gold is metallic, not the Plastic fallback.
+        assert_eq!(pascal.1, 1.00);
+    }
+
+    #[test]
+    fn pbr_entry_returns_none_for_unknown_material() {
+        assert_eq!(pbr_entry("tungsten"), None);
+        assert_eq!(pbr_entry("completely_made_up"), None);
+    }
+
+    #[test]
+    fn pbr_entry_known_materials_all_resolve() {
+        for name in KNOWN_MATERIALS {
+            assert!(
+                pbr_entry(name).is_some(),
+                "KNOWN_MATERIALS entry '{}' has no pbr_entry match — lists have drifted apart",
+                name
+            );
         }
     }
 }

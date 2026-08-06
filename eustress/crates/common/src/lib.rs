@@ -132,8 +132,36 @@ pub mod streaming;
 
 /// Path to the `common/assets/` directory — the single source of truth for
 /// bundled engine templates (class schemas, service templates, service
-/// properties). Resolves from this crate's manifest dir at compile time.
+/// properties).
+///
+/// Resolution order:
+///   1. `EUSTRESS_ASSETS_DIR` env var — explicit override for packaging /
+///      CI / non-standard installs.
+///   2. A directory named `assets` next to the running executable — what
+///      a packaged/distributed build ships (binary + `assets/` copied
+///      together), so this is the path that actually exists on an
+///      end-user machine.
+///   3. `CARGO_MANIFEST_DIR/assets` (this crate's source tree) — a
+///      compile-time constant baked into the binary. Correct ONLY when
+///      the binary runs on the same machine, at the same absolute path,
+///      it was built at (a local dev build run from a full source
+///      checkout). Kept as the last-resort fallback for that case, but
+///      it's the reason `new_space` failed with "service templates not
+///      found at .../crates/common/assets/service_templates" on any
+///      other machine — a baked-in compile-time path is never valid
+///      once the binary is copied anywhere else.
 pub fn assets_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("EUSTRESS_ASSETS_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let candidate = exe_dir.join("assets");
+            if candidate.is_dir() {
+                return candidate;
+            }
+        }
+    }
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets")
 }
 
