@@ -480,12 +480,59 @@ pub fn discover_universes(roots: &[PathBuf]) -> Vec<PathBuf> {
 /// advertises itself with exactly one port file. Naming/sorting/`.default_
 /// universe` don't enter into it — we follow the port file to the engine.
 pub fn find_live_engine_universe(roots: &[PathBuf]) -> Option<PathBuf> {
-    for u in discover_universes(roots) {
-        if u.join(".eustress").join("engine.port").is_file() {
-            return Some(u);
-        }
+    // The doc above assumes "exactly one port file". In practice that does not
+    // hold: the engine rewrites `.eustress/engine.port` when the active Space
+    // changes and the previous file is left behind, so several Universes end up
+    // advertising a port at once. Observed 2026-08-09 with `Summit Studios` and
+    // `Weave` both holding 58754, while the Universe whose engine had actually
+    // been launched held a different port entirely.
+    //
+    // Taking the first hit in sorted order therefore resolves alphabetically,
+    // not to the live engine, and every bridge tool (`inspect_scene`,
+    // `capture_viewport`, …) then reports "engine is not running" while naming
+    // a Universe the user never launched. Two guards fix it:
+    //   1. prefer a port that something is actually LISTENING on,
+    //   2. break ties by most-recently-written port file.
+    let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = discover_universes(roots)
+        .into_iter()
+        .filter_map(|u| {
+            let p = u.join(".eustress").join("engine.port");
+            let meta = std::fs::metadata(&p).ok()?;
+            if !meta.is_file() {
+                return None;
+            }
+            Some((u, meta.modified().unwrap_or(std::time::UNIX_EPOCH)))
+        })
+        .collect();
+
+    // Newest first, so a stale file never shadows a fresh one.
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+
+    if let Some((u, _)) = candidates.iter().find(|(u, _)| engine_port_is_live(u)) {
+        return Some(u.clone());
     }
-    None
+
+    // Nothing answered. Fall back to the newest port file rather than the
+    // alphabetically-first one — if the engine is mid-startup its listener may
+    // not be accepting yet, and the newest file is the best available guess.
+    candidates.into_iter().next().map(|(u, _)| u)
+}
+
+/// Whether a Universe's advertised bridge port currently accepts connections.
+///
+/// A port *file* only proves an engine once ran. This proves one is there now.
+fn engine_port_is_live(universe: &Path) -> bool {
+    let path = universe.join(".eustress").join("engine.port");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(port) = raw.trim().parse::<u16>() else {
+        return false;
+    };
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    // Short timeout: this runs on the resolution path for every bridge tool
+    // call, so it must not stall the request when a port file is stale.
+    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).is_ok()
 }
 
 /// Parse `EUSTRESS_UNIVERSES_PATH` (OS path-separator delimited).
