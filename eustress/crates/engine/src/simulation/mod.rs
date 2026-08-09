@@ -10,6 +10,7 @@
 pub mod plugin;
 pub mod rune_bindings;
 pub mod electrochemistry;
+pub mod data_binding;
 
 pub use plugin::SimulationPlugin;
 pub use rune_bindings::SimulationRuneBindings;

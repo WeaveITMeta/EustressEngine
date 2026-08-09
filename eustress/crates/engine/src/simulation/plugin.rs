@@ -59,6 +59,7 @@ impl Plugin for SimulationPlugin {
             .init_resource::<SimAutoStop>()
             .init_resource::<WatchPointRegistry>()
             .init_resource::<BreakPointRegistry>()
+            .init_resource::<super::data_binding::DataBindingRegistry>()
             .init_resource::<ActiveRecording>()
             .init_resource::<TelemetryWriterState>()
             .register_type::<SimulationClock>()
@@ -81,6 +82,16 @@ impl Plugin for SimulationPlugin {
             .add_systems(
                 PreUpdate,
                 check_auto_stop
+                    .run_if(in_state(PlayModeState::Playing))
+                    .after(advance_simulation_clock),
+            )
+            // Data → Sim: drive bound parameters from Dataset columns. Runs
+            // after the clock (so `ByTime` samples the current sim time) and in
+            // PreUpdate so Update's `apply_sim_values_to_ecs` sees the value the
+            // same frame it is written.
+            .add_systems(
+                PreUpdate,
+                super::data_binding::advance_data_bindings
                     .run_if(in_state(PlayModeState::Playing))
                     .after(advance_simulation_clock),
             )
