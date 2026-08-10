@@ -9,7 +9,6 @@ members = [
     "crates/client",
     "crates/server",
     "crates/web",
-    "crates/backend",
     "crates/forge",
     "crates/forge-sdk",
     "crates/mcp",

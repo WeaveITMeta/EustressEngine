@@ -36,6 +36,7 @@ eustress-networking = { path = "../common/eustress-networking", features = ["ser
 clap = { version = "4.4", features = ["derive"] }
 toml = "0.8"
 serde = { workspace = true }
+serde_json = { workspace = true }
 uuid = { workspace = true }
 
 # Async runtime
