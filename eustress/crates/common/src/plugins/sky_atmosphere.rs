@@ -846,13 +846,24 @@ fn warn_once_on_multiface(path: &str) {
 
 /// Resolution of one star-cubemap face.
 ///
-/// 512 rather than the old 1024 because stars are splatted with a sub-pixel
-/// kernel now instead of thresholded per pixel, so they stay crisp at half the
-/// resolution for a quarter of the memory (6.3 MB against 25 MB).
-pub const STAR_FIELD_SIZE: u32 = 512;
+/// A cubemap face spans 90 degrees, so this sets the *angular* size of a star:
+/// at 1024 one texel is 0.088 degrees. That matters more than memory here. At
+/// 512 the smallest drawable star was 0.18 degrees and the brightest, with the
+/// splat radius the first version used, reached a full degree — twice the width
+/// of the moon — which bloom then smeared into visible orange discs.
+pub const STAR_FIELD_SIZE: u32 = 1024;
 
 /// Edge length in pixels of one star candidate cell.
 const STAR_CELL: u32 = 8;
+
+/// Peak radius of the very brightest star, in texels.
+///
+/// Real stars are point sources: even Sirius is under a thousandth of a degree,
+/// far below one texel. A star is therefore drawn as a sub-texel core with just
+/// enough spill to anti-alias it, and its *brightness* — not its size — is what
+/// carries magnitude. Bloom supplies the halo, which is what the eye actually
+/// sees around a bright star.
+const STAR_MAX_RADIUS: f32 = 0.62;
 
 /// Build the star cubemap once at startup.
 fn build_star_field(mut images: ResMut<Assets<Image>>, mut stars: ResMut<StarField>) {
@@ -967,20 +978,28 @@ pub fn create_star_field(star_count: u32) -> Image {
 
                 // Distance from the galactic plane, 0 on the plane.
                 let off = dir.dot(galactic_normal).abs();
-                let band = (-(off * off) / (2.0 * 0.11 * 0.11)).exp();
+                let band = (-(off * off) / (2.0 * 0.09 * 0.09)).exp();
                 if band < 0.004 {
                     continue;
                 }
-                // Mottled rather than a clean stripe: the band is dust, not a
-                // painted line.
-                let n = value_noise(dir * 9.0) * 0.55 + value_noise(dir * 23.0) * 0.45;
-                let intensity = band * (0.30 + 0.70 * n) * 0.13;
+                // Dust, not a painted stripe: three octaves so the band breaks
+                // up at the scale the eye lands on rather than reading as a
+                // smooth airbrushed smear.
+                let n = value_noise(dir * 14.0) * 0.5
+                    + value_noise(dir * 37.0) * 0.32
+                    + value_noise(dir * 91.0) * 0.18;
+                // Squared so the faint edges fall away fast and the band has a
+                // core instead of a uniform glow across a third of the sky.
+                let mottle = n * n;
+                let intensity = band * (0.12 + 0.88 * mottle) * 0.052;
 
                 let i = face_base + (py * size + px) * 4;
-                // Slightly warm, very desaturated.
-                data[i] = to_u8(intensity * 0.95);
-                data[i + 1] = to_u8(intensity * 0.93);
-                data[i + 2] = to_u8(intensity * 1.00);
+                // Very close to neutral. The Milky Way is not orange; the first
+                // version's warm tint is what made the lower sky read as amber
+                // haze.
+                data[i] = to_u8(intensity * 1.00);
+                data[i + 1] = to_u8(intensity * 0.99);
+                data[i + 2] = to_u8(intensity * 0.97);
                 data[i + 3] = 255;
             }
         }
@@ -997,22 +1016,27 @@ pub fn create_star_field(star_count: u32) -> Image {
                 let fx = cx as f32 * STAR_CELL as f32 + rand01(seed ^ 0x9e37_79b9) * STAR_CELL as f32;
                 let fy = cy as f32 * STAR_CELL as f32 + rand01(seed ^ 0x85eb_ca6b) * STAR_CELL as f32;
 
-                // Magnitude: mostly faint, a few bright. Cubing the uniform
-                // draw gives the heavy tail real skies have.
+                // Magnitude. Real skies gain roughly 3x as many stars per step
+                // fainter, so the visible population is overwhelmingly faint
+                // with a handful of bright ones. The fifth power gives that
+                // tail: half of all stars land under 4% of peak brightness.
                 let m = rand01(seed ^ 0xc2b2_ae35);
-                let magnitude = m * m * m;
-                let peak = 0.16 + magnitude * 2.6;
-                let radius = 0.75 + magnitude * 1.9;
+                let magnitude = m * m * m * m * m;
 
-                // Colour temperature: blue-white hot through amber cool.
-                let warmth = rand01(seed ^ 0x27d4_eb2f);
-                let (sr, sg, sb) = (
-                    0.72 + warmth * 0.28,
-                    0.78 + (1.0 - (warmth - 0.5).abs() * 2.0) * 0.20,
-                    1.00 - warmth * 0.32,
-                );
+                // Brightness carries magnitude; size barely moves. Letting size
+                // track magnitude is what produced moon-sized discs.
+                let peak = 0.05 + magnitude * 2.75;
+                let radius = 0.34 + magnitude * (STAR_MAX_RADIUS - 0.34);
 
-                let reach = (radius * 2.5).ceil() as i32;
+                // Colour. Stars span blue-white to amber in principle, but at
+                // night-adapted vision almost all read white — only the very
+                // brightest show any tint at all, so saturation scales with
+                // magnitude and stays subtle even there.
+                let warmth = rand01(seed ^ 0x27d4_eb2f) * 2.0 - 1.0; // -1 cool .. +1 warm
+                let tint = warmth * 0.10 * (0.35 + 0.65 * magnitude);
+                let (sr, sg, sb) = (1.0 + tint, 1.0 - tint.abs() * 0.25, 1.0 - tint);
+
+                let reach = (radius * 2.5).ceil().max(1.0) as i32;
                 let cxi = fx as i32;
                 let cyi = fy as i32;
                 for oy in -reach..=reach {
@@ -1406,6 +1430,72 @@ mod tests {
         assert!(
             (zenith - nadir).abs() < 2.0,
             "zenith {zenith:.2} vs nadir {nadir:.2} — a vertical gradient means a baked sky"
+        );
+    }
+
+    #[test]
+    fn a_star_is_smaller_than_the_moon() {
+        // The bug this guards, and the one the pixel-count tests all missed:
+        // stars were drawn at up to 2.65 texels on a 512px face. A cubemap face
+        // spans 90 degrees, so that is a full degree across — twice the width of
+        // the full moon — and bloom turned them into visible orange discs.
+        //
+        // Checking angular size is the discriminating measure. "How many pixels
+        // are lit" cannot tell a sky of many small stars from a sky of a few
+        // enormous ones.
+        const DEGREES_PER_FACE: f32 = 90.0;
+        let degrees_per_texel = DEGREES_PER_FACE / STAR_FIELD_SIZE as f32;
+        let brightest_diameter = 2.0 * STAR_MAX_RADIUS * degrees_per_texel;
+
+        const MOON_DEGREES: f32 = 0.52;
+        assert!(
+            brightest_diameter < MOON_DEGREES / 4.0,
+            "brightest star is {brightest_diameter:.3} deg across; the moon is {MOON_DEGREES} \
+             and a star should be a point"
+        );
+    }
+
+    #[test]
+    fn faint_stars_vastly_outnumber_bright_ones() {
+        // A real sky gains roughly 3x more stars per magnitude step fainter. A
+        // uniform distribution gives a flat field of equally-bright dots, which
+        // reads as noise rather than as a sky.
+        let image = create_star_field(9000);
+        let data = image.data.as_ref().unwrap();
+        let lit: Vec<u8> = data
+            .chunks_exact(4)
+            .map(|p| p[0].max(p[1]).max(p[2]))
+            .filter(|v| *v > 12)
+            .collect();
+        assert!(!lit.is_empty(), "no stars were drawn at all");
+
+        let bright = lit.iter().filter(|v| **v > 180).count();
+        assert!(
+            bright * 8 < lit.len(),
+            "{bright} of {} lit texels are near-peak; the tail is too flat",
+            lit.len()
+        );
+    }
+
+    #[test]
+    fn stars_read_as_white_not_amber() {
+        // The first version's colour ramp reached (1.0, 0.78, 0.68), which is
+        // why the night sky came out full of orange blobs. Night-adapted vision
+        // sees almost all stars as white.
+        let image = create_star_field(9000);
+        let data = image.data.as_ref().unwrap();
+        let worst = data
+            .chunks_exact(4)
+            .filter(|p| p[0].max(p[1]).max(p[2]) > 60)
+            .map(|p| {
+                let (r, g, b) = (p[0] as i32, p[1] as i32, p[2] as i32);
+                (r - b).abs().max((r - g).abs()).max((g - b).abs())
+            })
+            .max()
+            .unwrap_or(0);
+        assert!(
+            worst < 60,
+            "a visible star deviates {worst}/255 between channels — too saturated to read as white"
         );
     }
 

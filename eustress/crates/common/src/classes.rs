@@ -6725,7 +6725,11 @@ impl Default for Sky {
                 up: String::new(),
                 down: String::new(),
             },
-            star_count: 3000,
+            // Roughly the naked-eye population down to magnitude 6.5 across the
+            // whole sphere. 3000 is what a decent suburban sky shows and reads
+            // sparse once stars are drawn at their true (sub-pixel) size rather
+            // than as discs.
+            star_count: 9000,
             celestial_bodies_shown: true,
         }
     }
