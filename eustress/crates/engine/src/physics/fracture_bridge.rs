@@ -89,6 +89,17 @@ pub struct FractureCooldown(pub f32);
 #[derive(Component, Clone, Copy, Debug)]
 pub struct FracturedOriginal;
 
+/// Marks a piece this module spawned, so it can be cleaned up on Stop.
+///
+/// Fragments also carry [`SpawnedDuringPlayMode`], and the engine's
+/// `handle_stop_play` / `restore_scene_on_enter_edit` DO despawn everything
+/// with that marker — but only on the stop paths those systems run on. A
+/// duration-based auto-stop exits `Playing` without them, so fragments
+/// survived into Edit mode and the scene did not reset. Owning the cleanup
+/// here makes it independent of which stop path fires.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct FractureFragment;
+
 // ── helpers ──────────────────────────────────────────────────────────────
 
 /// Longest axis of a mesh's bounding box, and its centroid.
@@ -326,6 +337,7 @@ pub fn apply_fracture(
                     FractureCooldown(FRACTURE_COOLDOWN_SECS),
                     // Ephemeral: despawned on Stop, never persisted.
                     SpawnedDuringPlayMode,
+                    FractureFragment,
                     Name::new("Fragment"),
                 ))
                 .id();
@@ -372,6 +384,7 @@ pub fn apply_fracture(
 pub fn restore_fractured_originals(
     mut commands: Commands,
     query: Query<Entity, With<FracturedOriginal>>,
+    fragments: Query<Entity, With<FractureFragment>>,
 ) {
     let mut restored = 0usize;
     for entity in query.iter() {
@@ -382,8 +395,21 @@ pub fn restore_fractured_originals(
             .remove::<FracturedOriginal>();
         restored += 1;
     }
-    if restored > 0 {
-        info!("Restored {restored} fractured part(s) on stop");
+
+    // Despawn our own fragments rather than trusting the engine's
+    // `SpawnedDuringPlayMode` sweep, which only runs on SOME stop paths — a
+    // duration-based auto-stop leaves `Playing` without it, and the fragments
+    // were surviving into Edit mode next to the restored original.
+    let mut removed = 0usize;
+    for entity in fragments.iter() {
+        if commands.get_entity(entity).is_ok() {
+            commands.entity(entity).despawn();
+            removed += 1;
+        }
+    }
+
+    if restored > 0 || removed > 0 {
+        info!("Restored {restored} fractured part(s) and despawned {removed} fragment(s) on stop");
     }
 }
 

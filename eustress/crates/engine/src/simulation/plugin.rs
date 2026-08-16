@@ -11,7 +11,7 @@ use eustress_common::simulation::{
     SimulationRecording, TimeSeries, WatchPoint, BreakPoint, Comparison,
 };
 
-use crate::play_mode::PlayModeState;
+use crate::play_mode::{PlayModeState, PlayModeType, StartPlayEvent, StopPlayEvent};
 
 /// Bevy Resource mirror of SIM_VALUES thread-local.
 /// Written by `publish_echem_to_sim_values` (Update), read by `record_and_stream_watchpoints` (PostUpdate).
@@ -255,13 +255,18 @@ fn advance_simulation_clock(
 fn check_auto_stop(
     clock: Res<SimulationClock>,
     mut auto_stop: ResMut<SimAutoStop>,
-    mut next_state: ResMut<NextState<PlayModeState>>,
+    mut stop_play_writer: MessageWriter<StopPlayEvent>,
 ) {
     if let Some(stop_at) = auto_stop.stop_at_sim_s {
         if clock.simulation_time_s >= stop_at {
             info!("⏹ Auto-stop: sim time {:.3}s reached target {:.3}s", clock.simulation_time_s, stop_at);
             auto_stop.stop_at_sim_s = None;
-            next_state.set(PlayModeState::Editing);
+            // Send the Stop MESSAGE rather than setting the state. Setting
+            // `Editing` directly skipped `handle_stop_play` — the system that
+            // actually restores transforms and despawns play-spawned entities
+            // — so a duration-limited run ended with parts left wherever
+            // physics dropped them.
+            stop_play_writer.write(StopPlayEvent);
         }
     }
 }
@@ -500,6 +505,8 @@ fn drain_sim_commands(
     mut clock: ResMut<SimulationClock>,
     mut next_play_state: ResMut<NextState<PlayModeState>>,
     mut auto_stop: ResMut<SimAutoStop>,
+    mut start_play_writer: MessageWriter<StartPlayEvent>,
+    mut stop_play_writer: MessageWriter<StopPlayEvent>,
 ) {
     let Some(sr) = space_root.as_deref() else { return };
 
@@ -563,7 +570,23 @@ fn drain_sim_commands(
                     auto_stop.stop_at_sim_s = None;
                     info!("MCP: run_simulation (time_scale={:.1}x, indefinite)", scale);
                 }
-                next_play_state.set(PlayModeState::Playing);
+                // Drive the SAME message the Play button sends instead of
+                // setting the state directly.
+                //
+                // Setting `PlayModeState::Playing` here skipped
+                // `handle_start_play`, which is the ONLY place a pre-play
+                // snapshot is captured. With no snapshot, the stop-side
+                // `restore_scene_on_enter_edit` hits its
+                // `let Some(snapshot) = ... else { return }` and bails BEFORE
+                // restoring transforms and BEFORE despawning
+                // `SpawnedDuringPlayMode` entities — so an MCP-driven session
+                // left parts wherever physics dropped them and leaked every
+                // runtime-spawned entity into Edit mode. Routing through the
+                // message gives MCP/agent-driven play exactly the same
+                // lifecycle as a human pressing the button.
+                start_play_writer.write(StartPlayEvent {
+                    play_type: PlayModeType::default(),
+                });
             }
             "pause_simulation" => {
                 next_play_state.set(PlayModeState::Paused);
@@ -571,7 +594,10 @@ fn drain_sim_commands(
             }
             "stop_simulation" => {
                 auto_stop.stop_at_sim_s = None;
-                next_play_state.set(PlayModeState::Editing);
+                // Same reasoning as run_simulation: `handle_stop_play` owns the
+                // full restore (transforms, BasePart flags, despawns) and is
+                // gated on this message.
+                stop_play_writer.write(StopPlayEvent);
                 info!("MCP: stop_simulation");
             }
             _ => {
