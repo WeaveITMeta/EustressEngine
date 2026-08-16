@@ -68,6 +68,12 @@ export struct PropertyData {
     // "Vector3", "Color3"). Shown as a small badge and used to prefill the
     // edit dialog's type dropdown.
     attribute-type: string,
+    // Range for `property-type == "slider"`, read from the schema's min/max.
+    slider-min: float,
+    slider-max: float,
+    // Text shown beside a slider instead of the raw number, so a value with a
+    // domain the user does not think in (hours past 6am) can read as a clock.
+    slider-display: string,
 }
 
 // Help icon button — shown left of property label when description is present.
@@ -487,6 +493,75 @@ component MaterialDropdown inherits Rectangle {
 }
 
 // Generic property row with label + value editor - polished design
+// A numeric property shown as a drag slider with a formatted readout.
+//
+// Used where the underlying number has a domain the user does not naturally
+// think in — the time-of-day slider runs 6..30 hours so that a day reads left
+// to right from dawn, and `display-text` renders it back as a clock.
+component SliderRow inherits Rectangle {
+    in property <string> label: "";
+    in property <float> value: 0;
+    in property <float> minimum: 0;
+    in property <float> maximum: 1;
+    // Pre-formatted readout from Rust. Empty falls back to the rounded number,
+    // so the row is still usable for a plain range.
+    in property <string> display-text: "";
+    in property <bool> editable: true;
+    in property <string> description: "";
+    in property <string> learn-url: "";
+    in property <bool> show-help-icons: true;
+
+    callback value-changed(string);
+    callback open-learn-url(string);
+
+    height: 28px;
+    border-radius: 2px;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 10px;
+        spacing: 4px;
+
+        HelpIcon {
+            description: root.description;
+            learn-url: root.learn-url;
+            show-help-icons: root.show-help-icons;
+            open-learn-url(url) => { root.open-learn-url(url); }
+        }
+
+        Text {
+            width: 110px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        slider := Slider {
+            horizontal-stretch: 1;
+            enabled: root.editable;
+            minimum: root.minimum;
+            maximum: root.maximum;
+            value: root.value;
+            // Fires continuously while dragging, so the sun moves under the
+            // cursor rather than only on release.
+            changed(v) => { root.value-changed(v); }
+        }
+
+        // Readout. Fixed width so the slider does not resize as the text
+        // changes width while dragging.
+        Text {
+            width: 62px;
+            text: root.display-text == "" ? round(slider.value) : root.display-text;
+            color: Theme.text-primary;
+            font-size: 11px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+    }
+}
+
 component PropRow inherits Rectangle {
     in property <string> label: "";
     in property <string> value: "";
@@ -2835,8 +2910,22 @@ export component PropertiesPanel inherits Rectangle {
                         find-material-by-key(key, current-idx) => { root.on-find-material-by-key(key, current-idx) }
                     }
 
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type == "slider": SliderRow {
+                        label: prop.name;
+                        value: prop.value.to-float();
+                        minimum: prop.slider-min;
+                        maximum: prop.slider-max;
+                        display-text: prop.slider-display;
+                        editable: prop.editable;
+                        description: prop.description;
+                        learn-url: prop.learn-url;
+                        show-help-icons: root.show-help-icons;
+                        value-changed(val) => { root.on-property-changed(prop.name, val); }
+                        open-learn-url(url) => { root.on-open-learn-url(url); }
+                    }
+
                     // String / float / int / enum — generic row
-                    if !prop.is-header && !prop.section-collapsed && prop.property-type != "vec2" && prop.property-type != "vec3" && prop.property-type != "rotation" && prop.property-type != "color" && prop.property-type != "brickcolor" && prop.property-type != "bool" && prop.property-type != "material" && prop.property-type != "unit" && prop.property-type != "udim2": PropRow {
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type != "vec2" && prop.property-type != "vec3" && prop.property-type != "rotation" && prop.property-type != "color" && prop.property-type != "brickcolor" && prop.property-type != "bool" && prop.property-type != "material" && prop.property-type != "unit" && prop.property-type != "udim2" && prop.property-type != "slider": PropRow {
                         label: prop.name;
                         value: prop.value;
                         prop-type: prop.property-type;

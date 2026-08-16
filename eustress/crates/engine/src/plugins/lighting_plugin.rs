@@ -333,6 +333,26 @@ fn sync_sun_with_lighting_service(
     }
 }
 
+/// Parse `"HH:MM:SS"`, `"HH:MM"`, or a bare decimal hour into hours.
+///
+/// Wraps into `[0, 24)` rather than clamping, so 25:00 reads as 01:00 instead of
+/// pinning to midnight.
+fn parse_hours(text: &str) -> Option<f32> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if !text.contains(':') {
+        return text.parse::<f32>().ok().map(|h| h.rem_euclid(24.0));
+    }
+    let mut parts = text.split(':');
+    let h: f32 = parts.next()?.trim().parse().ok()?;
+    let m: f32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+    let s: f32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+    (h.is_finite() && m.is_finite() && s.is_finite())
+        .then(|| (h + m / 60.0 + s / 3600.0).rem_euclid(24.0))
+}
+
 /// Parse clock time string "HH:MM:SS" to (hours, minutes)
 fn parse_clock_time(clock_time: &str) -> Option<(u32, u32)> {
     let parts: Vec<&str> = clock_time.split(':').collect();
@@ -400,13 +420,23 @@ fn sync_service_properties_to_lighting(
 
         let props = &service.properties;
 
-        if let Some(PropertyValue::Float(v)) = props.get("clock_time") {
-            let new_tod = (*v as f32) / 24.0; // ClockTime is hours (0-24), time_of_day is 0-1
+        // `clock_time` is hours (0-24). Accept a string too: the panel used to
+        // write it as `PropertyValue::String`, which this arm matched only as
+        // Float and therefore dropped on the floor, so the edit reached the TOML
+        // but never the renderer. Authored Spaces may still carry either shape.
+        let clock_hours = match props.get("clock_time") {
+            Some(PropertyValue::Float(v)) => Some(*v as f32),
+            Some(PropertyValue::Int(v)) => Some(*v as f32),
+            Some(PropertyValue::String(s)) => parse_hours(s),
+            _ => None,
+        };
+        if let Some(hours) = clock_hours {
+            let new_tod = (hours / 24.0).rem_euclid(1.0);
             if (lighting.time_of_day - new_tod).abs() > 0.001 {
-                lighting.time_of_day = new_tod.clamp(0.0, 1.0);
-                let hours = (lighting.time_of_day * 24.0) as u32;
-                let minutes = ((lighting.time_of_day * 24.0 * 60.0) % 60.0) as u32;
-                lighting.clock_time = format!("{:02}:{:02}:00", hours, minutes);
+                lighting.time_of_day = new_tod;
+                let total = (new_tod * 24.0 * 3600.0).round() as u32 % 86_400;
+                lighting.clock_time =
+                    format!("{:02}:{:02}:{:02}", total / 3600, (total / 60) % 60, total % 60);
             }
         }
         if let Some(PropertyValue::Float(v)) = props.get("brightness") {

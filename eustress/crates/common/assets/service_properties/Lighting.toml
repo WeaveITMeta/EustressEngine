@@ -16,8 +16,16 @@ EnvironmentDiffuseScale = { type = "float", value = 1.0, description = "Environm
 EnvironmentSpecularScale = { type = "float", value = 1.0, description = "Environment specular lighting scale" }
 
 [Time]
-ClockTime = { type = "float", value = 14.0, description = "Time of day (0-24 hours)" }
-TimeOfDay = { type = "string", value = "14:00:00", description = "Time of day string" }
+# ClockTime and TimeOfDay are two VIEWS of one stored number, `clock_time` in
+# hours. `source` points both at it, so they cannot drift apart: editing either
+# one writes `clock_time`, and both re-render from it.
+#
+# ClockTime is the readout, edited as text.
+ClockTime = { type = "string", source = "clock_time", display = "clock_hms", value = 14.0, description = "Time of day as HH:MM:SS. Drives the sun position and sky colour." }
+# TimeOfDay is the same value as a slider. Its domain is 6..30 rather than 0..24
+# so the handle sweeps a whole day left to right starting at dawn — 06:00 at the
+# far left through 05:59 at the far right — instead of wrapping mid-track.
+TimeOfDay = { type = "slider", source = "clock_time", display = "clock", min = 6.0, max = 30.0, value = 14.0, description = "Drag to scrub the day, 06:00 through 05:59." }
 GeographicLatitude = { type = "float", value = 41.73, description = "Geographic latitude for sun position" }
 
 [Atmosphere] # AAA This will be in the atmosphere.toml object, not in lighting itself.

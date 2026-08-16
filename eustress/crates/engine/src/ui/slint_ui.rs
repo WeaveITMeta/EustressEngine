@@ -9288,32 +9288,40 @@ fn drain_slint_actions(
                                 service.description = val.clone();
                                 changed = true;
                             }
-                            // Sync ClockTime (0-24) ↔ TimeOfDay (HH:MM:SS) bidirectionally
-                            "ClockTime" | "clock_time" => {
-                                // ClockTime is 0-24 hours → convert to TimeOfDay "HH:MM:SS"
-                                if let Ok(hours) = val.parse::<f64>() {
-                                    let hours = hours.clamp(0.0, 24.0);
-                                    let h = hours as u32 % 24;
-                                    let m = ((hours.fract()) * 60.0) as u32;
-                                    let s = ((hours.fract() * 60.0).fract() * 60.0) as u32;
-                                    service.properties.insert("clock_time".to_string(),
-                                        crate::space::service_loader::PropertyValue::String(val.clone()));
-                                    service.properties.insert("time_of_day".to_string(),
-                                        crate::space::service_loader::PropertyValue::String(format!("{:02}:{:02}:{:02}", h, m, s)));
-                                    changed = true;
-                                }
-                            }
-                            "TimeOfDay" | "time_of_day" => {
-                                // TimeOfDay is "HH:MM:SS" → convert to ClockTime 0-24
-                                let parts: Vec<&str> = val.split(':').collect();
-                                if let Some(h) = parts.first().and_then(|s| s.trim().parse::<f64>().ok()) {
-                                    let m = parts.get(1).and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(0.0);
-                                    let s = parts.get(2).and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(0.0);
-                                    let hours = (h + m / 60.0 + s / 3600.0).clamp(0.0, 24.0);
-                                    service.properties.insert("time_of_day".to_string(),
-                                        crate::space::service_loader::PropertyValue::String(val.clone()));
-                                    service.properties.insert("clock_time".to_string(),
-                                        crate::space::service_loader::PropertyValue::String(format!("{:.2}", hours)));
+                            // ClockTime (HH:MM:SS text) and TimeOfDay (day slider)
+                            // are two views of ONE stored number. Both resolve to
+                            // clock hours and write `clock_time`; nothing else
+                            // stores a time, so they cannot fall out of step.
+                            //
+                            // `clock_time` is written as a Float. It used to be
+                            // written as a String, which `sync_service_properties_to_lighting`
+                            // silently ignored because it matches only
+                            // `PropertyValue::Float` — so this edit reached the
+                            // TOML but never the renderer.
+                            "ClockTime" | "clock_time" | "TimeOfDay" | "time_of_day" => {
+                                let hours = if key.eq_ignore_ascii_case("timeofday")
+                                    || key == "time_of_day"
+                                {
+                                    // Slider handle position in 6..30.
+                                    val.trim().parse::<f64>().ok().map(slider_to_clock_hours)
+                                } else {
+                                    // Text readout, or a bare decimal hour.
+                                    parse_clock_hours(&val)
+                                };
+
+                                if let Some(hours) = hours {
+                                    service.properties.insert(
+                                        "clock_time".to_string(),
+                                        crate::space::service_loader::PropertyValue::Float(hours),
+                                    );
+                                    // Kept for compatibility with Spaces and
+                                    // importers that read a time string.
+                                    service.properties.insert(
+                                        "time_of_day".to_string(),
+                                        crate::space::service_loader::PropertyValue::String(
+                                            format_clock_hms(hours),
+                                        ),
+                                    );
                                     changed = true;
                                 }
                             }
@@ -9413,26 +9421,22 @@ fn drain_slint_actions(
                             if let Some(ref mut lighting) = res.lighting {
                                 match key.as_str() {
                                     "Brightness" | "brightness" => { if let Ok(v) = val.parse::<f32>() { lighting.brightness = v; } }
-                                    "ClockTime" | "clock_time" => {
-                                        // ClockTime is 0-24 hours
-                                        if let Ok(hours) = val.parse::<f32>() {
-                                            let hours = hours.clamp(0.0, 24.0);
-                                            lighting.time_of_day = hours / 24.0;
-                                            let h = hours as u32 % 24;
-                                            let m = ((hours.fract()) * 60.0) as u32;
-                                            let s = ((hours.fract() * 60.0).fract() * 60.0) as u32;
-                                            lighting.clock_time = format!("{:02}:{:02}:{:02}", h, m, s);
-                                        }
-                                    }
-                                    "TimeOfDay" | "time_of_day" => {
-                                        // TimeOfDay is "HH:MM:SS"
-                                        let parts: Vec<&str> = val.split(':').collect();
-                                        if let Some(h) = parts.first().and_then(|s| s.trim().parse::<f32>().ok()) {
-                                            let m = parts.get(1).and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(0.0);
-                                            let sec = parts.get(2).and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(0.0);
-                                            let hours = h + m / 60.0 + sec / 3600.0;
-                                            lighting.time_of_day = (hours / 24.0).clamp(0.0, 1.0);
-                                            lighting.clock_time = val.clone();
+                                    // Both time rows land here. The slider sends a
+                                    // handle position in 6..30; the readout sends
+                                    // HH:MM:SS. Each becomes the same clock hour,
+                                    // so whichever the user touches, the sun and
+                                    // the other row agree immediately.
+                                    "ClockTime" | "clock_time" | "TimeOfDay" | "time_of_day" => {
+                                        let hours = if key.eq_ignore_ascii_case("timeofday")
+                                            || key == "time_of_day"
+                                        {
+                                            val.trim().parse::<f64>().ok().map(slider_to_clock_hours)
+                                        } else {
+                                            parse_clock_hours(&val)
+                                        };
+                                        if let Some(hours) = hours {
+                                            lighting.time_of_day = (hours / 24.0) as f32;
+                                            lighting.clock_time = format_clock_hms(hours);
                                         }
                                     }
                                     "GeographicLatitude" => { if let Ok(v) = val.parse::<f32>() { lighting.geographic_latitude = v; } }
@@ -19774,6 +19778,7 @@ fn sync_properties_to_slint(
             learn_url: slint::SharedString::default(),
             is_attribute: false,
             attribute_type: slint::SharedString::default(),
+            slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
         });
 
         // Insert properties in this category (sorted A-Z by name)
@@ -19856,6 +19861,7 @@ fn sync_properties_to_slint(
                     learn_url: slint::SharedString::default(),
                     is_attribute: is_attr,
                     attribute_type: attr_type.as_str().into(),
+            slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
                 });
             }
         }
@@ -19972,6 +19978,7 @@ fn build_dataset_properties(
         y_offset: slint::SharedString::default(), color_value: placeholder,
         description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
         is_attribute: false, attribute_type: slint::SharedString::default(),
+            slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
     };
     let rowf = |cat: &str, name: &str, value: &str| PropertyData {
         name: name.into(), value: value.into(), property_type: "string".into(),
@@ -19983,6 +19990,7 @@ fn build_dataset_properties(
         y_offset: slint::SharedString::default(), color_value: placeholder,
         description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
         is_attribute: false, attribute_type: slint::SharedString::default(),
+            slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
     };
 
     let mut out: Vec<PropertyData> = Vec::new();
@@ -20066,6 +20074,7 @@ fn data_hdr(cat: &str, collapsed: &std::collections::HashSet<String>) -> Propert
         y_offset: slint::SharedString::default(), color_value: slint::Color::from_rgb_u8(0x80, 0x80, 0x80),
         description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
         is_attribute: false, attribute_type: slint::SharedString::default(),
+            slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
     }
 }
 /// Value row for a data-class Properties panel.
@@ -20080,6 +20089,7 @@ fn data_row(cat: &str, name: &str, value: &str, collapsed: &std::collections::Ha
         y_offset: slint::SharedString::default(), color_value: slint::Color::from_rgb_u8(0x80, 0x80, 0x80),
         description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
         is_attribute: false, attribute_type: slint::SharedString::default(),
+            slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
     }
 }
 
@@ -20852,6 +20862,71 @@ fn resolve_service_property_key(
         .unwrap_or(snake)
 }
 
+// ============================================================================
+// Time of day
+// ============================================================================
+//
+// One stored number, `clock_time` in hours, presented two ways: a HH:MM:SS
+// readout and a slider. Deriving both from the same value is what keeps them in
+// step — there is no second copy to fall behind.
+
+/// Left end of the day slider: 06:00.
+pub const DAY_SLIDER_MIN: f64 = 6.0;
+/// Right end of the day slider: 06:00 the following morning, so the last
+/// reachable minute is 05:59.
+pub const DAY_SLIDER_MAX: f64 = 30.0;
+
+/// Slider handle position to clock hours in `[0, 24)`.
+///
+/// The slider domain runs 6..30 rather than 0..24 so a day reads left to right
+/// from dawn. `rem_euclid` (not `%`) so a negative position still lands in
+/// range rather than producing a negative hour.
+pub fn slider_to_clock_hours(position: f64) -> f64 {
+    position.rem_euclid(24.0)
+}
+
+/// Clock hours to slider handle position in `[6, 30)`.
+pub fn clock_hours_to_slider(hours: f64) -> f64 {
+    let h = hours.rem_euclid(24.0);
+    if h < DAY_SLIDER_MIN { h + 24.0 } else { h }
+}
+
+/// Clock hours to `"HH:MM:SS"`.
+pub fn format_clock_hms(hours: f64) -> String {
+    // Round to whole seconds FIRST, then split. Splitting before rounding lets
+    // 13.999999 render as "13:59:60".
+    let total = (hours.rem_euclid(24.0) * 3600.0).round() as u32 % 86_400;
+    format!("{:02}:{:02}:{:02}", total / 3600, (total / 60) % 60, total % 60)
+}
+
+/// Clock hours to `"HH:MM"`, for the compact readout beside a slider.
+pub fn format_clock_hm(hours: f64) -> String {
+    let total = (hours.rem_euclid(24.0) * 60.0).round() as u32 % 1_440;
+    format!("{:02}:{:02}", total / 60, total % 60)
+}
+
+/// Parse `"HH:MM:SS"`, `"HH:MM"`, `"HH"`, or a bare decimal hour.
+///
+/// Accepts a plain number so a Space that still stores `clock_time = 14.0`, or
+/// a user who types `14.5`, keeps working.
+pub fn parse_clock_hours(text: &str) -> Option<f64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if !text.contains(':') {
+        return text.parse::<f64>().ok().map(|h| h.rem_euclid(24.0));
+    }
+    let mut parts = text.split(':');
+    let h: f64 = parts.next()?.trim().parse().ok()?;
+    let m: f64 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+    let s: f64 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+    if !(h.is_finite() && m.is_finite() && s.is_finite()) {
+        return None;
+    }
+    Some((h + m / 60.0 + s / 3600.0).rem_euclid(24.0))
+}
+
 /// `ColorShift_Bottom` → `color_shift_bottom`, `Brightness` → `brightness`.
 /// Already-snake_case input passes through unchanged.
 fn to_snake_case(name: &str) -> String {
@@ -21039,6 +21114,7 @@ fn build_file_properties(ui: &StudioWindow, path: &std::path::Path) {
             learn_url: slint::SharedString::default(),
             is_attribute: false,
             attribute_type: slint::SharedString::default(),
+            slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
         }
     };
 
@@ -21137,6 +21213,7 @@ fn build_streaming_in_properties(ui: &StudioWindow, uuid: &str) {
         learn_url: slint::SharedString::default(),
         is_attribute: false,
         attribute_type: slint::SharedString::default(),
+            slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
     };
     props.push(mk("Status", "Streaming in…"));
     // Short uuid prefix so the user can confirm which row is loading.
@@ -21199,10 +21276,20 @@ fn build_service_properties(
             learn_url: slint::SharedString::default(),
             is_attribute: false,
             attribute_type: slint::SharedString::default(),
+            slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
         }
     };
 
     let mut props: Vec<PropertyData> = Vec::new();
+
+    // The live service, if it is loaded. The schema below supplies each row's
+    // type, description and range; the CURRENT value has to come from here.
+    //
+    // Previously the schema's `value` was rendered directly, so the panel showed
+    // static defaults: editing ClockTime updated its own row to 18 while
+    // TimeOfDay still read the schema's "14:00:00", and rebuilding the panel
+    // reverted both to 14. Two rows describing one quantity could never agree.
+    let live = service_components.iter().find(|sc| sc.class_name == service_name);
 
     // Try to load properties from TOML definition file first (Roblox-style)
     if let Some(toml_data) = load_service_properties_from_toml(service_name) {
@@ -21250,9 +21337,67 @@ fn build_service_properties(
                                 .unwrap_or("")
                                 .to_string();
 
-                            let mut prop_data = make_prop(prop_name, &value_str, type_str, section_name, false);
+                            // `source` lets several rows present ONE stored
+                            // value. ClockTime and TimeOfDay both read
+                            // `clock_time`, which is what makes it structurally
+                            // impossible for them to disagree — they are two
+                            // views of a single number, not two numbers that
+                            // have to be kept in step.
+                            let source_key = prop_table
+                                .get("source")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(prop_name);
+
+                            // Live value wins over the schema default. Resolved
+                            // through the same snake_case mapping the write path
+                            // uses, so `EnvironmentDiffuseScale` finds
+                            // `environment_diffuse_scale`.
+                            let raw = live
+                                .and_then(|sc| {
+                                    let key =
+                                        resolve_service_property_key(&sc.properties, source_key);
+                                    sc.properties.get(&key).map(|v| v.to_display_string())
+                                })
+                                .unwrap_or(value_str);
+
+                            let display_fmt =
+                                prop_table.get("display").and_then(|v| v.as_str()).unwrap_or("");
+                            let as_hours = raw.trim().parse::<f64>().ok();
+
+                            // What the row's editable value holds.
+                            let value_str = match (display_fmt, as_hours) {
+                                // A clock readout: store the text the user reads.
+                                ("clock_hms", Some(h)) => format_clock_hms(h),
+                                // A day slider: store the handle position, which
+                                // runs 6..30 so a day reads left to right from
+                                // dawn instead of wrapping in the middle.
+                                ("clock", Some(h)) => format!("{:.4}", clock_hours_to_slider(h)),
+                                _ => raw,
+                            };
+
+                            let mut prop_data =
+                                make_prop(prop_name, &value_str, type_str, section_name, false);
                             prop_data.editable = !readonly;
                             prop_data.description = description_str.as_str().into();
+
+                            if type_str == "slider" {
+                                // Range comes from the schema so the widget stays
+                                // declarative rather than hardcoded per property.
+                                prop_data.slider_min = prop_table
+                                    .get("min")
+                                    .and_then(|v| v.as_float())
+                                    .unwrap_or(0.0) as f32;
+                                prop_data.slider_max = prop_table
+                                    .get("max")
+                                    .and_then(|v| v.as_float())
+                                    .unwrap_or(1.0) as f32;
+                                if display_fmt == "clock" {
+                                    let pos: f64 = value_str.trim().parse().unwrap_or(0.0);
+                                    prop_data.slider_display =
+                                        format_clock_hm(slider_to_clock_hours(pos)).as_str().into();
+                                }
+                            }
+
                             props.push(prop_data);
                         }
                     }
@@ -23515,5 +23660,84 @@ mod property_key_tests {
         // not in the panel's display casing.
         let props: HashMap<String, PropertyValue> = HashMap::new();
         assert_eq!(resolve_service_property_key(&props, "SomeNewThing"), "some_new_thing");
+    }
+}
+
+#[cfg(test)]
+mod time_of_day_tests {
+    use super::*;
+
+    #[test]
+    fn the_slider_spans_exactly_one_day_starting_at_dawn() {
+        assert_eq!(DAY_SLIDER_MIN, 6.0);
+        assert_eq!(DAY_SLIDER_MAX - DAY_SLIDER_MIN, 24.0, "the slider must cover a full day");
+        // Far left is 06:00, far right wraps back to 06:00, so the last
+        // reachable minute is 05:59.
+        assert_eq!(format_clock_hm(slider_to_clock_hours(DAY_SLIDER_MIN)), "06:00");
+        assert_eq!(format_clock_hm(slider_to_clock_hours(DAY_SLIDER_MAX)), "06:00");
+        let last_minute = DAY_SLIDER_MAX - 1.0 / 60.0;
+        assert_eq!(format_clock_hm(slider_to_clock_hours(last_minute)), "05:59");
+    }
+
+    #[test]
+    fn the_slider_runs_forward_through_the_day() {
+        // Left to right must read dawn, noon, dusk, midnight — never jumping.
+        let at = |pos: f64| format_clock_hm(slider_to_clock_hours(pos));
+        assert_eq!(at(6.0), "06:00");
+        assert_eq!(at(12.0), "12:00");
+        assert_eq!(at(18.0), "18:00");
+        assert_eq!(at(24.0), "00:00");
+        assert_eq!(at(29.0), "05:00");
+    }
+
+    #[test]
+    fn slider_and_clock_round_trip() {
+        // Both rows derive from one number, so the mapping has to be lossless
+        // or dragging the slider would slowly drift the readout.
+        for hours in [0.0, 5.99, 6.0, 6.01, 12.5, 18.75, 23.999] {
+            let back = slider_to_clock_hours(clock_hours_to_slider(hours));
+            assert!((back - hours).abs() < 1e-9, "{hours} round-tripped to {back}");
+        }
+    }
+
+    #[test]
+    fn every_clock_hour_maps_into_the_slider_domain() {
+        for step in 0..2400 {
+            let hours = step as f64 / 100.0;
+            let pos = clock_hours_to_slider(hours);
+            assert!(
+                (DAY_SLIDER_MIN..DAY_SLIDER_MAX).contains(&pos),
+                "{hours}h mapped to {pos}, outside the slider"
+            );
+        }
+    }
+
+    #[test]
+    fn clock_text_parses_every_shape_a_user_might_type() {
+        assert_eq!(parse_clock_hours("14:30:00"), Some(14.5));
+        assert_eq!(parse_clock_hours("14:30"), Some(14.5));
+        assert_eq!(parse_clock_hours("14"), Some(14.0));
+        // A bare decimal, so a Space still storing `clock_time = 14.0` works.
+        assert_eq!(parse_clock_hours("14.5"), Some(14.5));
+        assert_eq!(parse_clock_hours(""), None);
+        assert_eq!(parse_clock_hours("lunchtime"), None);
+        // Wraps rather than clamping.
+        assert_eq!(parse_clock_hours("25:00"), Some(1.0));
+    }
+
+    #[test]
+    fn formatting_rounds_before_splitting() {
+        // Splitting before rounding renders 13.999999 as "13:59:60".
+        assert_eq!(format_clock_hms(13.999_999), "14:00:00");
+        assert_eq!(format_clock_hms(0.0), "00:00:00");
+        assert_eq!(format_clock_hms(23.999_999), "00:00:00");
+        assert_eq!(format_clock_hms(14.5), "14:30:00");
+    }
+
+    #[test]
+    fn a_negative_position_still_lands_on_a_real_time() {
+        // `%` would yield a negative hour and format as garbage.
+        assert_eq!(format_clock_hm(slider_to_clock_hours(-1.0)), "23:00");
+        assert!(clock_hours_to_slider(-3.0) >= DAY_SLIDER_MIN);
     }
 }
