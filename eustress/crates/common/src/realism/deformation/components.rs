@@ -31,6 +31,15 @@ pub struct DeformableMesh {
     /// frame over frame into unbounded drift, no matter what the dirty flag
     /// does. It also removes a full position-buffer clone from every write.
     pub original_positions: Vec<Vec3>,
+    /// Undeformed vertex normals, captured alongside the positions.
+    ///
+    /// Used as the FALLBACK when a recomputed normal comes out degenerate.
+    /// Relying on `Mesh::compute_normals` alone produced visibly shattered
+    /// shading — a single-coloured part rendering as a patchwork of sky-blue,
+    /// sun-white and black shards, because any vertex whose accumulated face
+    /// normal cancels to ~zero normalizes to NaN and the shader then lights
+    /// that triangle from an arbitrary direction.
+    pub original_normals: Vec<Vec3>,
     /// Number of vertices
     pub vertex_count: usize,
     /// Whether mesh needs GPU sync
@@ -45,6 +54,7 @@ impl Default for DeformableMesh {
             original_mesh: Handle::default(),
             deformed_mesh: Handle::default(),
             original_positions: Vec::new(),
+            original_normals: Vec::new(),
             vertex_count: 0,
             dirty: false,
             quality: DeformationQuality::Medium,
@@ -348,7 +358,7 @@ impl Default for DeformationConfig {
             use_gpu: true,
             gpu_threshold: 10000,
             update_interval: 1,
-            target_edge_m: 0.2,
+            target_edge_m: 0.12,
             max_subdivision_levels: 5,
         }
     }

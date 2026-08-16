@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 use tracing::info;
-use bevy::mesh::{Mesh, PrimitiveTopology, VertexAttributeValues};
+use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 
 use super::components::*;
 use crate::classes::BasePart;
@@ -88,6 +88,13 @@ pub fn init_deformable_meshes(
             .iter()
             .map(|p| Vec3::new(p[0], p[1], p[2]))
             .collect();
+        // Keep the undeformed normals as a fallback for degenerate recomputes.
+        let original_normals: Vec<Vec3> = match source_mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
+            Some(VertexAttributeValues::Float32x3(n)) => {
+                n.iter().map(|v| Vec3::new(v[0], v[1], v[2])).collect()
+            }
+            _ => Vec::new(),
+        };
         let vertex_count = original_positions.len();
         if vertex_count == 0 {
             // A real, loaded, but empty mesh can never deform — stop retrying.
@@ -113,6 +120,7 @@ pub fn init_deformable_meshes(
                     original_mesh: source_handle.clone(),
                     deformed_mesh: deformed_handle.clone(),
                     original_positions,
+                    original_normals,
                     vertex_count,
                     dirty: false,
                     quality: DeformationQuality::Medium,
@@ -499,19 +507,117 @@ pub fn update_mesh_vertices(
             continue;
         };
 
-        // Update mesh
+        // Lighting has to follow the deformed surface — without this a dented
+        // panel keeps shading as though it were still flat.
+        //
+        // This does NOT use `Mesh::compute_normals`. On a subdivided mesh that
+        // produced visibly shattered shading: a single-coloured plate rendered
+        // as a patchwork of sky-blue / sun-white / black shards. Any vertex
+        // whose accumulated face normals cancel toward zero normalizes to NaN,
+        // and the shader then lights those triangles from arbitrary
+        // directions. Positions stayed finite, so the part never vanished —
+        // it just looked shattered, which reads as "deformation is broken".
+        //
+        // Accumulate face normals manually and fall back to the vertex's
+        // ORIGINAL normal whenever the result is degenerate or non-finite, so
+        // a bad vertex degrades to flat shading instead of garbage.
+        if mesh.primitive_topology() == PrimitiveTopology::TriangleList {
+            let indices: Vec<u32> = match mesh.indices() {
+                Some(Indices::U32(v)) => v.clone(),
+                Some(Indices::U16(v)) => v.iter().map(|i| *i as u32).collect(),
+                None => Vec::new(),
+            };
+
+            if !indices.is_empty() {
+                let n_verts = deform_mesh.original_positions.len();
+                let mut acc = vec![Vec3::ZERO; n_verts];
+
+                for tri in indices.chunks_exact(3) {
+                    let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+                    if a >= n_verts || b >= n_verts || c >= n_verts {
+                        continue;
+                    }
+                    let pa = Vec3::from(new_positions[a]);
+                    let pb = Vec3::from(new_positions[b]);
+                    let pc = Vec3::from(new_positions[c]);
+                    // UNnormalized cross product: its magnitude is twice the
+                    // triangle area, which correctly weights large faces more
+                    // and makes degenerate triangles contribute nothing
+                    // instead of a NaN.
+                    let face = (pb - pa).cross(pc - pa);
+                    if face.is_finite() {
+                        acc[a] += face;
+                        acc[b] += face;
+                        acc[c] += face;
+                    }
+                }
+
+                let mut flipped = 0usize;
+                let mut fellback = 0usize;
+
+                let out: Vec<[f32; 3]> = acc
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| {
+                        let orig = deform_mesh
+                            .original_normals
+                            .get(i)
+                            .copied()
+                            .unwrap_or(Vec3::Y);
+
+                        let mut v = n.normalize_or_zero();
+
+                        if v == Vec3::ZERO || !v.is_finite() {
+                            // Degenerate — keep the undeformed normal.
+                            fellback += 1;
+                            v = orig;
+                        } else if orig != Vec3::ZERO && v.dot(orig) < 0.0 {
+                            // ORIENTATION GUARD. A recomputed normal can come
+                            // out pointing INTO the surface if the mesh winds
+                            // clockwise rather than counter-clockwise — the
+                            // cross-product order below assumes CCW. An
+                            // inverted normal is finite and non-zero, so the
+                            // degenerate check above waves it through, and the
+                            // surface then faces away from every light and
+                            // self-shadows: a fine speckle of sky-blue /
+                            // sun-white / black across the whole part, which
+                            // reads as shattered geometry rather than a
+                            // lighting bug. Anchor to the undeformed normal's
+                            // hemisphere so orientation is winding-independent.
+                            flipped += 1;
+                            v = -v;
+                        }
+
+                        [v.x, v.y, v.z]
+                    })
+                    .collect();
+
+                // One line per deformation, not per frame — `dirty` gates this
+                // whole system. Tells us which branch actually fired instead of
+                // leaving it to inference.
+                if flipped > 0 || fellback > 0 {
+                    info!(
+                        "deform-normals: {} of {} flipped (winding), {} fell back (degenerate)",
+                        flipped,
+                        acc.len(),
+                        fellback
+                    );
+                }
+
+                mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, out);
+            }
+        }
+
+        // Positions are written LAST, after the normal pass above has read them.
+        // Writing them first moves the buffer into the mesh, so the normal pass
+        // is left borrowing a moved value. Cloning would also compile, but this
+        // is a per-deformation vertex buffer and the reorder costs nothing: the
+        // normal pass only reads `indices` and `primitive_topology`, neither of
+        // which depends on the new positions being in the mesh yet.
         mesh.insert_attribute(
             Mesh::ATTRIBUTE_POSITION,
             VertexAttributeValues::Float32x3(new_positions),
         );
-
-        // Lighting has to follow the deformed surface — without this a dented
-        // panel keeps shading as though it were still flat, which reads as
-        // "deformation isn't working" even when the geometry did move.
-        // `compute_normals` asserts a triangle-list topology, so check first.
-        if mesh.primitive_topology() == PrimitiveTopology::TriangleList {
-            mesh.compute_normals();
-        }
 
         deform_mesh.dirty = false;
     }

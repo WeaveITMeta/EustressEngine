@@ -138,7 +138,12 @@ New-Part -Name 'Baseplate' -Pos @(0.0, -0.5, 0.0) -Size @(80.0, 1.0, 40.0) `
     -Color @(0.16, 0.17, 0.19, 1.0) -Anchored $true -MaterialName 'Concrete'
 
 # ------------------------------------------------- Station A — DENT (no crack)
-New-Part -Name 'A_DentPlate_Soft' -Pos @(-14.0, 1.0, 0.0) -Size @(6.0, 0.6, 4.0) `
+# Deliberately SMALLER than the fracture plate. Dent depth comes out of contact
+# mechanics (~0.15 m here) and the crater radius is ~0.4 m; on a 6 m slab that
+# is a dimple you have to hunt for. On a 3 m plate it reads as real damage, and
+# the subdivision (which targets a world-space edge length) resolves it with
+# roughly twice the vertex density for the same triangle budget.
+New-Part -Name 'A_DentPlate_Soft' -Pos @(0.0, 1.0, 0.0) -Size @(3.0, 0.5, 2.5) `
     -Color @(0.85, 0.62, 0.20, 1.0) -Anchored $true -Deformation $true `
     -MaterialName 'Metal' -Material @{
         name               = '"SoftAlloy"'
@@ -151,12 +156,12 @@ New-Part -Name 'A_DentPlate_Soft' -Pos @(-14.0, 1.0, 0.0) -Size @(6.0, 0.6, 4.0)
         density            = '2700.0'
     }
 
-New-Part -Name 'A_Dropper' -Pos @(-14.0, 10.0, 0.0) -Size @(0.8, 0.8, 0.8) `
+New-Part -Name 'A_Dropper' -Pos @(0.0, 10.0, 0.0) -Size @(0.8, 0.8, 0.8) `
     -Color @(0.80, 0.15, 0.15, 1.0) -Anchored $false -MaterialName 'Metal' `
     -Density 2000 -PhysicsDensity 2000
 
 # ------------------------------------------------------ Station B — FRACTURE
-New-Part -Name 'B_FracturePlate_Concrete' -Pos @(0.0, 1.0, 0.0) -Size @(6.0, 0.6, 4.0) `
+New-Part -Name 'B_FracturePlate_Concrete' -Pos @(-14.0, 1.0, 0.0) -Size @(6.0, 0.6, 4.0) `
     -Color @(0.72, 0.72, 0.70, 1.0) -Anchored $true -Deformation $true `
     -MaterialName 'Concrete' -Density 2400 -Material @{
         name               = '"Concrete"'
@@ -169,7 +174,7 @@ New-Part -Name 'B_FracturePlate_Concrete' -Pos @(0.0, 1.0, 0.0) -Size @(6.0, 0.6
         density            = '2400.0'
     }
 
-New-Part -Name 'B_Dropper' -Pos @(0.0, 10.0, 0.0) -Size @(0.8, 0.8, 0.8) `
+New-Part -Name 'B_Dropper' -Pos @(-14.0, 10.0, 0.0) -Size @(0.8, 0.8, 0.8) `
     -Color @(0.80, 0.15, 0.15, 1.0) -Anchored $false -MaterialName 'Metal' `
     -Density 2000 -PhysicsDensity 2000
 

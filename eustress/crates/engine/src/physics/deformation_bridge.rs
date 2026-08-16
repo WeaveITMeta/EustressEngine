@@ -314,10 +314,15 @@ pub fn bridge_collisions_to_deformation(
             continue; // resting or separating, not an impact
         }
 
+        // Impulse is recorded for diagnostics ONLY — it must not gate anything.
+        //
+        // Requiring `impulse > 0` in the same step as a high approach speed is
+        // a race that silently drops most impacts: the approach speed is only
+        // large on the FIRST step of contact, while the accumulated normal
+        // impulse is still ~0 until the solver has acted on it. One plate
+        // fractured and an identical one never dented purely on which step
+        // happened to satisfy both.
         let impulse = pair.total_normal_impulse_magnitude();
-        if !(impulse > 0.0) {
-            continue;
-        }
 
         let ev = pair;
 
@@ -518,11 +523,27 @@ impl Plugin for DeformationBridgePlugin {
             )
             .add_systems(
                 Update,
-                (
-                    enable_collision_events_for_deformables,
-                    bridge_collisions_to_deformation,
-                )
-                    .chain()
+                enable_collision_events_for_deformables.run_if(in_state(PlayModeState::Playing)),
+            )
+            // Sample contacts at PHYSICS rate, not render rate.
+            //
+            // Polling from `Update` (~30 FPS against a 60 Hz sim) meant the
+            // contact was often first observed a step or two AFTER it began,
+            // by which point the solver had already absorbed much of it. The
+            // same 9 m drop was measured at -13.08 m/s on one plate and
+            // -3.76 m/s on another purely from which frame the poll landed on
+            // — and since energy goes as approach², that is a ~12x difference
+            // in dent depth decided by luck.
+            //
+            // `PhysicsSystems::Last` runs immediately after all of Avian's
+            // physics systems inside `FixedPostUpdate`, so this observes every
+            // step with final impulses. The first step of a contact is also
+            // the hardest (it decelerates from there), so first-qualifying-step
+            // plus the cooldown naturally captures the peak.
+            .add_systems(
+                FixedPostUpdate,
+                bridge_collisions_to_deformation
+                    .in_set(PhysicsSystems::Last)
                     .run_if(in_state(PlayModeState::Playing)),
             );
     }
