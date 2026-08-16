@@ -120,7 +120,17 @@ fn update_sun_position(
     lighting: Option<ResMut<LightingService>>,
     mut sun_query: Query<(&mut DirectionalLight, &mut Transform), With<SunMarker>>,
     sun_class_query: Query<&SunClass, With<SunMarker>>,
+    // The Sun appears LONG after startup: the file loader spawns it when the
+    // Space finishes loading, and the engine hydrates `SunClass` onto it a frame
+    // later. Both happen well after `LightingService`'s initial change tick, so
+    // gating only on `lighting.is_changed()` meant this system had already
+    // stopped running by the time there was a sun to drive. The light kept
+    // whatever illuminance the loader gave it and `sun_intensity` reached
+    // nothing — measured: raising it from 15,000 to 130,000 lux changed not one
+    // pixel of the scene.
+    sun_dirty: Query<(), (With<SunMarker>, Or<(Added<SunMarker>, Changed<SunClass>)>)>,
     time: Res<Time>,
+    mut last_reported: Local<f32>,
 ) {
     let Some(mut lighting) = lighting else { return };
 
@@ -142,8 +152,11 @@ fn update_sun_position(
     // `Sun.instance.toml` to disk every frame, which trips the file watcher,
     // which re-runs the class-schema self-heal every couple of seconds. The
     // symptom is a visible FPS stutter with no obvious cause.
-    let sun_class_changed = !sun_class_query.is_empty() && lighting.is_changed();
-    if !lighting.is_changed() && !lighting.cycle_enabled && !sun_class_changed {
+    //
+    // `sun_dirty` is what makes the guard correct rather than merely cheap: the
+    // sun arriving is itself a change, and it arrives after the resource has
+    // gone quiet.
+    if !lighting.is_changed() && !lighting.cycle_enabled && sun_dirty.is_empty() {
         return;
     }
 
@@ -174,6 +187,16 @@ fn update_sun_position(
 
     sun_transform.translation = sun_dir * 100.0;
     sun_transform.look_at(Vec3::ZERO, Vec3::Y);
+
+    // Report the sun's resolved illuminance whenever it moves materially. The
+    // scene's exposure is calibrated in physical lux, so this number is the one
+    // that decides whether the render is correctly lit; when it silently kept
+    // the loader's placeholder there was nothing to read that said so.
+    let lux = sun_light.illuminance;
+    if (lux - *last_reported).abs() > (*last_reported * 0.05).max(1.0) {
+        *last_reported = lux;
+        info!("☀️ Sun illuminance {lux:.0} lux (elevation {:.1}°)", sun_dir.y.asin().to_degrees());
+    }
 }
 
 /// Keep `SunDisk::angular_size` in step with the authored `Sun.angular_size`.
@@ -281,18 +304,36 @@ fn brightness_scale(lighting: &LightingService) -> f32 {
     (lighting.brightness / BRIGHTNESS_REFERENCE).clamp(0.0, 64.0)
 }
 
-/// Ambient fill when image-based lighting is carrying the scene.
+/// Skylight fill as a fraction of the sun, when the environment map is also
+/// lighting the scene.
 ///
-/// With a working environment map the sky is the primary source of ambient
-/// light, so this term is a small fill on top rather than the main event.
-const AMBIENT_FILL_BASE: f32 = 80.0;
+/// Ambient has to be a **fraction of the sun**, not a fixed number. Outdoors a
+/// shadowed surface still receives skylight, which is why real shadows are dark
+/// but not black. A constant cannot hold that relationship: with the sun at
+/// 130,000 lux and ambient pinned at 80, shadows crushed to near-black.
+/// Anchoring to the sun keeps it true at any time of day, any authored
+/// `sun_intensity`, and any Brightness.
+///
+/// The value is **calibrated against measured output, not derived**. Bevy hands
+/// `ambient_color = colour * brightness` to the shader as radiance and then puts
+/// it through `EnvBRDFApprox`, which attenuates it several times below what a
+/// naive irradiance model predicts. Deriving this from the physical sky/sun
+/// ratio gave 0.08 and measured a sunlit-to-shadow ratio of 46x against a target
+/// of 6-10x; this value is that measurement corrected.
+const SKY_FILL_FRACTION: f32 = 0.45;
 
-/// Ambient when there is no environment map to lean on.
+/// Skylight fill when there is no environment map to lean on.
 ///
 /// If the author disables the environment map (or the GPU cannot run bevy's
-/// filtering compute pipelines), ambient has to carry the scene alone or
-/// everything not directly lit goes black.
-const AMBIENT_NO_IBL_BASE: f32 = 500.0;
+/// filtering compute pipelines) this term carries every unlit surface alone, so
+/// it takes over the share the sky would have contributed.
+const SKY_FILL_FRACTION_NO_IBL: f32 = 0.75;
+
+/// Minimum ambient, in lux, so a night scene is legible rather than pitch black.
+///
+/// Roughly moonlight plus skyglow. Without it, ambient anchored to the sun would
+/// fall to exactly zero the moment the sun set.
+const NIGHT_FLOOR_LUX: f32 = 40.0;
 
 /// The one and only writer of `GlobalAmbientLight`.
 ///
@@ -312,34 +353,57 @@ const AMBIENT_NO_IBL_BASE: f32 = 500.0;
 fn update_ambient_light(
     lighting: Res<LightingService>,
     scene_atmosphere: Res<SceneAtmosphere>,
-    sun_class_query: Query<&SunClass, With<SunMarker>>,
+    sun_query: Query<&DirectionalLight, With<SunMarker>>,
     mut ambient: ResMut<GlobalAmbientLight>,
 ) {
-    let sun_dir = sun_class_query
+    // Read the sun's *actual* illuminance rather than re-deriving it. That is
+    // what the scene is really lit by, so anchoring to it keeps the fill correct
+    // even when something else has adjusted the light.
+    let sun_lux = sun_query
         .iter()
         .next()
-        .map(|sc| sc.direction())
-        .unwrap_or_else(|| lighting.sun_direction());
-    let sun_y = sun_dir.y;
-
-    // 1.0 in daylight, easing to 0.02 once the sun is well below the horizon.
-    let night_factor = if sun_y > 0.1 {
-        1.0
-    } else if sun_y > -0.15 {
-        ((sun_y + 0.15) / 0.25).clamp(0.02, 1.0)
-    } else {
-        0.02
-    };
+        .map(|light| light.illuminance)
+        .unwrap_or(lighting.sun_intensity);
 
     let ibl_active = scene_atmosphere.atmosphere.environment_map_enabled
         && scene_atmosphere.atmosphere.environment_intensity > 0.0;
-    let base = if ibl_active { AMBIENT_FILL_BASE } else { AMBIENT_NO_IBL_BASE };
+    let fraction = if ibl_active { SKY_FILL_FRACTION } else { SKY_FILL_FRACTION_NO_IBL };
 
-    ambient.color = arr_to_color(lighting.ambient);
-    ambient.brightness = base
-        * brightness_scale(&lighting)
-        * night_factor
-        * lighting.environment_diffuse_scale.max(0.0);
+    // The sun's own intensity already falls away at dusk, so the fill follows it
+    // down without a separate night curve. The floor keeps night legible.
+    let fill = (sun_lux * fraction).max(NIGHT_FLOOR_LUX);
+
+    ambient.color = arr_to_color(sky_fill_color(&lighting));
+    ambient.brightness =
+        fill * brightness_scale(&lighting) * lighting.environment_diffuse_scale.max(0.0);
+}
+
+/// The colour that skylight fills shadows with.
+///
+/// This is `outdoor_ambient`, not `ambient`. The two are the Roblox pair this
+/// service models: `Ambient` is the global/indoor floor and is **black by
+/// default**, while `OutdoorAmbient` is the sky-lit outdoor fill and defaults to
+/// mid grey. Reading `ambient` meant the fill was multiplied by black, so no
+/// amount of brightness could lift a shadow — raising it 130x moved the darkest
+/// shadow pixel from 24 to 25 — and `outdoor_ambient` was parsed into
+/// `LightingService` and read by nothing at all.
+///
+/// Falls back to `ambient` when `outdoor_ambient` is black, so a Space that
+/// deliberately drives only the indoor term still gets it, and an author who
+/// blacks out both genuinely gets no flat ambient.
+fn sky_fill_color(lighting: &LightingService) -> [f32; 4] {
+    let is_black = |c: &[f32; 4]| c[0] <= 1e-4 && c[1] <= 1e-4 && c[2] <= 1e-4;
+    if is_black(&lighting.outdoor_ambient) {
+        lighting.ambient
+    } else {
+        lighting.outdoor_ambient
+    }
+}
+
+/// The ambient fill for a given sun, exposed for testing.
+fn sky_fill_lux(sun_lux: f32, ibl_active: bool) -> f32 {
+    let fraction = if ibl_active { SKY_FILL_FRACTION } else { SKY_FILL_FRACTION_NO_IBL };
+    (sun_lux * fraction).max(NIGHT_FLOOR_LUX)
 }
 
 // ============================================================================
@@ -433,11 +497,78 @@ mod tests {
     }
 
     #[test]
-    fn ambient_drops_to_a_fill_once_ibl_is_carrying_the_scene() {
-        // The regression this guards: before the environment map worked, ambient
-        // was 500x and doing all the work. With real IBL that would double-light
-        // everything.
-        assert!(AMBIENT_FILL_BASE < AMBIENT_NO_IBL_BASE);
+    fn ambient_carries_more_when_there_is_no_environment_map() {
+        assert!(SKY_FILL_FRACTION < SKY_FILL_FRACTION_NO_IBL);
+    }
+
+    #[test]
+    fn the_fill_is_a_real_share_of_the_sun_not_a_token() {
+        // The report this guards: "generally it's too dark". A fixed ambient of
+        // 80 beside a 130,000 lux sun is five thousandths of a percent, so every
+        // shadow crushed to black.
+        //
+        // Deliberately NOT asserting a physical sky:sun ratio. Bevy runs ambient
+        // through `EnvBRDFApprox`, so the shader-side result is several times
+        // below what irradiance alone predicts and the constant is calibrated
+        // against measured pixels instead. What is worth pinning is that the
+        // fill stays a substantial, sane share of the sun.
+        let sun = bevy::light::light_consts::lux::RAW_SUNLIGHT;
+        let share = sky_fill_lux(sun, true) / sun;
+        assert!(
+            (0.1..=1.0).contains(&share),
+            "a fill of {share:.3} of the sun is either invisible or brighter than daylight"
+        );
+    }
+
+    #[test]
+    fn ambient_tracks_the_sun_instead_of_being_a_fixed_number() {
+        // A constant cannot hold the sun:sky relationship across time of day or
+        // an edited sun_intensity — which is exactly how it broke.
+        let bright = sky_fill_lux(130_000.0, true);
+        let dim = sky_fill_lux(13_000.0, true);
+        assert!((bright / dim - 10.0).abs() < 0.01, "fill must scale with the sun");
+    }
+
+    #[test]
+    fn skylight_fills_with_outdoor_ambient_not_the_black_indoor_one() {
+        // The bug this guards: `ambient` is black by default (correctly — it is
+        // the indoor term), so multiplying the fill by it zeroed the whole thing
+        // and shadows could not be lifted by any brightness value.
+        let mut lighting = LightingService::default();
+        lighting.ambient = [0.0, 0.0, 0.0, 1.0];
+        lighting.outdoor_ambient = [0.5, 0.5, 0.5, 1.0];
+        let c = sky_fill_color(&lighting);
+        assert_eq!(c, [0.5, 0.5, 0.5, 1.0], "outdoor ambient must light outdoor shadows");
+        assert!(c[0] > 0.0, "a black fill colour makes brightness meaningless");
+    }
+
+    #[test]
+    fn a_black_outdoor_ambient_falls_back_to_the_indoor_term() {
+        let mut lighting = LightingService::default();
+        lighting.ambient = [0.2, 0.2, 0.25, 1.0];
+        lighting.outdoor_ambient = [0.0, 0.0, 0.0, 1.0];
+        assert_eq!(sky_fill_color(&lighting), [0.2, 0.2, 0.25, 1.0]);
+    }
+
+    #[test]
+    fn a_mid_grey_outdoor_ambient_still_lifts_shadows() {
+        // The shipped Space pairs a 130,000 lux sun with a 0.5 grey
+        // `outdoor_ambient`. Halving the fill via the colour must still leave a
+        // meaningful amount of light — this is the product that actually reaches
+        // the shader, and it was zero when the colour came from `ambient`.
+        let sun = bevy::light::light_consts::lux::RAW_SUNLIGHT;
+        let reaching_shader = 0.5 * sky_fill_lux(sun, true);
+        assert!(
+            reaching_shader > sun * 0.05,
+            "{reaching_shader:.0} against a {sun:.0} lux sun is back to crushed shadows"
+        );
+    }
+
+    #[test]
+    fn night_never_goes_completely_black() {
+        // Anchoring to the sun would otherwise reach exactly zero at sunset.
+        assert_eq!(sky_fill_lux(0.0, true), NIGHT_FLOOR_LUX);
+        assert!(sky_fill_lux(0.0, true) > 0.0);
     }
 
     #[test]
