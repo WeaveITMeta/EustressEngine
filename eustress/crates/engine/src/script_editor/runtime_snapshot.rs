@@ -23,10 +23,16 @@
 //!
 //! - [`RuntimeSnapshot::play_state`] — editing / playing / paused so
 //!   hovers can tag themselves "live" vs. "edit-time".
-//! - [`RuntimeSnapshot::sim_values`] — every `SimValuesResource` key,
-//!   deduped, stable-sorted. Used for hover-over-`get_sim_value("X")`
-//!   to show the current value, and for future string-literal
-//!   completion inside `get_sim_value("|")`.
+//! - [`RuntimeSnapshot::sim_values`] — every `SimValuesResource` key
+//!   MERGED with the current value of every enabled `WatchPointRegistry`
+//!   watchpoint, deduped and stable-sorted. Both stores are exported
+//!   because subsystems use whichever suits them: scripts and
+//!   `set_sim_value` write `SimValuesResource`, while self-contained
+//!   simulations (e.g. the ARC-1 nuclear model) record straight into the
+//!   watchpoint registry. `SimValuesResource` wins any key collision.
+//!   Used for hover-over-`get_sim_value("X")` to show the current value,
+//!   for `list_sim_values`, and for string-literal completion inside
+//!   `get_sim_value("|")`.
 //! - [`RuntimeSnapshot::generated_at`] — RFC-3339 timestamp. Helps
 //!   humans reading the JSON directly and lets the LSP detect obvious
 //!   clock-skew scenarios (future-dated snapshots from an older host).
@@ -192,6 +198,17 @@ mod engine_writer {
         mut state: ResMut<SnapshotState>,
         play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
         sim_values: Option<Res<crate::simulation::plugin::SimValuesResource>>,
+        // Watchpoints are a SECOND, independent store. Subsystems that own
+        // their own physics (the ARC-1 nuclear sim, for one) call
+        // `WatchPointRegistry::record` directly and never touch
+        // `SimValuesResource`, so exporting only the latter left every such
+        // value invisible to the MCP `get_sim_value` / `list_sim_values`
+        // tools and to LSP hovers. The single bridge that exists —
+        // `record_and_stream_watchpoints` — copies SimValues INTO
+        // watchpoints, which is the wrong direction for export (and it
+        // early-returns when SimValues is empty). Merge the registry in
+        // here so anything recorded as a watchpoint reaches the snapshot.
+        watchpoints: Option<Res<eustress_common::simulation::WatchPointRegistry>>,
         space_root: Option<Res<crate::space::SpaceRoot>>,
     ) {
         // Throttle — write at most every `interval`. Cheap guard; we
@@ -218,10 +235,31 @@ mod engine_writer {
                 Some(crate::play_mode::PlayModeState::Paused) => PlayState::Paused,
                 _ => PlayState::Editing,
             },
-            sim_values: sim_values
-                .as_deref()
-                .map(|r| r.0.iter().map(|(k, v)| (k.clone(), *v)).collect())
-                .unwrap_or_default(),
+            sim_values: {
+                // `SimValuesResource` first — it is what `set_sim_value`
+                // writes, so it stays authoritative for any shared key and
+                // existing behaviour is unchanged.
+                let mut merged: BTreeMap<String, f64> = sim_values
+                    .as_deref()
+                    .map(|r| r.0.iter().map(|(k, v)| (k.clone(), *v)).collect())
+                    .unwrap_or_default();
+
+                // Then fill in every watchpoint the registry knows about.
+                // Disabled watchpoints are skipped: `WatchPoint::record`
+                // early-returns while disabled, so `current` is stale.
+                // Non-finite values are skipped too — serde_json renders
+                // NaN/±inf as `null`, which the MCP reader silently drops
+                // and which would make the file misleading to read by hand.
+                if let Some(reg) = watchpoints.as_deref() {
+                    for (name, wp) in &reg.watchpoints {
+                        if !wp.enabled || !wp.current.is_finite() {
+                            continue;
+                        }
+                        merged.entry(name.clone()).or_insert(wp.current);
+                    }
+                }
+                merged
+            },
             // ECS schema fields are populated by the extended writer
             // system below; kept empty here to avoid querying the full
             // World on every 250ms tick. A separate 2-second timer

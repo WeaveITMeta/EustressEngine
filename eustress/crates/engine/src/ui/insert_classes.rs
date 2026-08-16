@@ -77,7 +77,7 @@ pub fn category_for(class: ClassName) -> &'static str {
 
         // ── Lighting ──
         PointLight | SpotLight | SurfaceLight | DirectionalLight | Lighting
-        | Atmosphere | Sky | Clouds | Star | Moon => "Lighting",
+        | Atmosphere | Sky | Clouds | Star | Moon | ReflectionProbe => "Lighting",
 
         // ── Constraints / movers / joints ──
         Attachment | WeldConstraint | Motor6D | HingeConstraint

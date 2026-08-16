@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 use tracing::info;
-use bevy::mesh::{Mesh, VertexAttributeValues};
+use bevy::mesh::{Mesh, PrimitiveTopology, VertexAttributeValues};
 
 use super::components::*;
 use crate::classes::BasePart;
@@ -34,57 +34,147 @@ pub fn init_deformable_meshes(
     mut commands: Commands,
     query: Query<
         (Entity, &BasePart, &Mesh3d),
-        (Changed<BasePart>, Without<DeformableMesh>, Without<crate::classes::ColdStreamed>),
+        (
+            Or<(Changed<BasePart>, With<DeformInitPending>)>,
+            Without<DeformableMesh>,
+            Without<crate::classes::ColdStreamed>,
+        ),
     >,
-    meshes: Res<Assets<Mesh>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    config: Res<DeformationConfig>,
 ) {
     for (entity, base_part, mesh3d) in query.iter() {
         if !base_part.deformation {
+            // Covers the disable-before-init case: drop any pending retry.
+            commands.entity(entity).remove::<DeformInitPending>();
             continue;
         }
-        
-        // Get vertex count from mesh
-        let mesh_handle = &mesh3d.0;
-        let vertex_count = if let Some(mesh) = meshes.get(mesh_handle) {
-            mesh.count_vertices()
-        } else {
-            0
+
+        let source_handle = &mesh3d.0;
+
+        // The mesh asset may still be streaming in (GLB parts load async).
+        // Mark for retry rather than dropping the part on the floor — the
+        // `Changed<BasePart>` tick that got us here does not come back.
+        let Some(source_mesh) = meshes.get(source_handle) else {
+            commands.entity(entity).insert(DeformInitPending);
+            continue;
         };
-        
+
+        // Subdivide first. An authored cube has 24 vertices, ALL at corners —
+        // a dent in the middle of a face would have nothing within its radius
+        // to displace, so the part would look completely unreactive no matter
+        // how correct the contact model is. Subdividing is what gives the
+        // deformation somewhere to push; it is planar, so the shape is
+        // unchanged.
+        let levels = super::vertex::subdivision_levels_for(
+            base_part.size,
+            config.target_edge_m,
+            config.max_subdivision_levels,
+        );
+        let subdivided = super::vertex::subdivide_mesh(source_mesh, levels);
+        let source_mesh: &Mesh = subdivided.as_ref().unwrap_or(source_mesh);
+
+        // Capture the undeformed reference pose. Every later vertex write is
+        // absolute against this snapshot, which is what makes drift
+        // structurally impossible rather than merely unlikely.
+        let Some(VertexAttributeValues::Float32x3(src_positions)) =
+            source_mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            // No float3 position attribute — nothing this pipeline can deform.
+            commands.entity(entity).remove::<DeformInitPending>();
+            continue;
+        };
+        let original_positions: Vec<Vec3> = src_positions
+            .iter()
+            .map(|p| Vec3::new(p[0], p[1], p[2]))
+            .collect();
+        let vertex_count = original_positions.len();
         if vertex_count == 0 {
+            // A real, loaded, but empty mesh can never deform — stop retrying.
+            commands.entity(entity).remove::<DeformInitPending>();
             continue;
         }
-        
-        // Create deformation state
-        let mut deformation_state = DeformationState::default();
-        deformation_state.init(vertex_count);
-        
-        // Add components
-        commands.entity(entity).insert((
-            DeformableMesh {
-                original_mesh: mesh_handle.clone(),
-                deformed_mesh: mesh_handle.clone(), // Will be replaced with clone
-                vertex_count,
-                dirty: false,
-                quality: DeformationQuality::Medium,
-            },
-            deformation_state,
-        ));
-        
+
+        // Give this entity its OWN mesh asset to deform into. Primitive parts
+        // share one cached source mesh (`PrimitiveMeshCache`), so writing
+        // deformed vertices into that asset would deform every part sharing
+        // it. Bind the clone to a local first so the read borrow of `meshes`
+        // ends before the insert.
+        let mesh_clone = source_mesh.clone();
+        let deformed_handle = meshes.add(mesh_clone);
+
+        let mut displacements = VertexDisplacements::default();
+        displacements.init(vertex_count);
+
+        commands
+            .entity(entity)
+            .insert((
+                DeformableMesh {
+                    original_mesh: source_handle.clone(),
+                    deformed_mesh: deformed_handle.clone(),
+                    original_positions,
+                    vertex_count,
+                    dirty: false,
+                    quality: DeformationQuality::Medium,
+                },
+                displacements,
+                // Render the deformable copy, not the shared source — without
+                // this the entity keeps drawing the pristine cached mesh and
+                // deformation is computed but never visible.
+                Mesh3d(deformed_handle),
+            ))
+            .remove::<DeformInitPending>();
+
         info!("Initialized deformable mesh with {} vertices", vertex_count);
     }
 }
 
-/// Remove deformation components when deformation is disabled
+/// Remove deformation components when deformation is disabled.
+///
+/// Also restores `Mesh3d` to the undeformed source asset. Dropping the
+/// components alone would leave the entity rendering its deformed per-entity
+/// copy forever — the part would keep its dents after deformation was switched
+/// off, with nothing left in the world able to undo them.
+///
+/// NOTE: this system was written but never registered in `DeformationPlugin`,
+/// so toggling `deformation = false` previously did nothing at all.
 pub fn cleanup_deformable_meshes(
     mut commands: Commands,
-    query: Query<(Entity, &BasePart), (Changed<BasePart>, With<DeformableMesh>)>,
+    query: Query<(Entity, &BasePart, &DeformableMesh), Changed<BasePart>>,
 ) {
-    for (entity, base_part) in query.iter() {
+    for (entity, base_part, deform_mesh) in query.iter() {
         if !base_part.deformation {
-            commands.entity(entity).remove::<DeformableMesh>();
-            commands.entity(entity).remove::<DeformationState>();
+            commands
+                .entity(entity)
+                .insert(Mesh3d(deform_mesh.original_mesh.clone()))
+                .remove::<DeformableMesh>()
+                .remove::<VertexDisplacements>();
         }
+    }
+}
+
+/// Tear down every deformable back to its undeformed source mesh.
+///
+/// The engine calls this on play-stop so runtime damage never leaks into Edit
+/// mode or into a save: "stop always restores" is an engine invariant, and a
+/// dented mesh that survived Stop would be indistinguishable from authored
+/// geometry. Re-entering Play re-initialises from the pristine source.
+pub fn restore_all_deformables(
+    mut commands: Commands,
+    query: Query<(Entity, &DeformableMesh)>,
+) {
+    let mut restored = 0usize;
+    for (entity, deform_mesh) in query.iter() {
+        commands
+            .entity(entity)
+            .insert(Mesh3d(deform_mesh.original_mesh.clone()))
+            .remove::<DeformableMesh>()
+            .remove::<VertexDisplacements>()
+            .remove::<DeformInitPending>();
+        restored += 1;
+    }
+    if restored > 0 {
+        info!("Restored {restored} deformable mesh(es) to undeformed source");
     }
 }
 
@@ -98,7 +188,7 @@ pub fn update_stress_deformation(
         &BasePart,
         &StressTensor,
         &MaterialProperties,
-        &mut DeformationState,
+        &mut VertexDisplacements,
         &mut DeformableMesh,
     )>,
     config: Res<DeformationConfig>,
@@ -124,30 +214,38 @@ pub fn update_stress_deformation(
         
         let strain_vec = Vec3::new(strain_x, strain_y, strain_z) * config.scale;
         
-        // Apply strain to vertices (simplified: uniform strain field)
-        // In full implementation, would interpolate stress field across mesh
-        for i in 0..vertex_count {
-            // Estimate vertex position from index (would use actual positions)
-            let t = i as f32 / vertex_count as f32;
-            let local_pos = Vec3::new(
-                (t * 2.0 - 1.0) * base_part.size.x * 0.5,
-                ((i % 100) as f32 / 100.0 * 2.0 - 1.0) * base_part.size.y * 0.5,
-                ((i % 10) as f32 / 10.0 * 2.0 - 1.0) * base_part.size.z * 0.5,
-            );
-            
+        // An unstressed part with nothing already displaced has no work to do.
+        // Falling through would re-mark `dirty` every frame and rewrite +
+        // renormal the entire vertex buffer forever for a zero-magnitude
+        // strain field.
+        if strain_vec.length_squared() < 1e-24 && deform_state.max_displacement <= f32::EPSILON {
+            continue;
+        }
+
+        // Apply strain to vertices (uniform strain field; a fuller model would
+        // interpolate the stress field across the mesh).
+        //
+        // Positions come from the reference-pose snapshot. The previous code
+        // FABRICATED each vertex position from its INDEX (`i as f32 / count`,
+        // `i % 100`, `i % 10`) — an index has no relationship to where the
+        // vertex actually sits, so `displacement = strain × position` produced
+        // geometric noise instead of expansion along the strain axes.
+        let max_disp = base_part.size.min_element() * config.max_displacement_ratio;
+        let count = vertex_count.min(deform_mesh.original_positions.len());
+
+        for i in 0..count {
+            let local_pos = deform_mesh.original_positions[i];
+
             // Displacement = strain × position
             let displacement = strain_vec * local_pos;
-            
-            // Clamp to max displacement
-            let max_disp = base_part.size.min_element() * config.max_displacement_ratio;
             let clamped = displacement.clamp_length_max(max_disp);
-            
+
             deform_state.elastic_displacement[i] = clamped;
-            
+
             // Check for plastic yield
             deform_state.check_yield(i, base_part.size);
         }
-        
+
         deform_state.update_total();
         deform_mesh.dirty = true;
     }
@@ -162,7 +260,7 @@ pub fn update_thermal_deformation(
     mut query: Query<(
         &BasePart,
         &ThermodynamicState,
-        &mut DeformationState,
+        &mut VertexDisplacements,
         &mut DeformableMesh,
     )>,
     config: Res<DeformationConfig>,
@@ -181,20 +279,25 @@ pub fn update_thermal_deformation(
         let delta_t = temperature - deform_state.reference_temperature;
         let thermal_strain = deform_state.thermal_expansion_coeff * delta_t;
         
-        // Apply thermal expansion (isotropic)
-        for i in 0..vertex_count {
-            // Estimate vertex position
-            let t = i as f32 / vertex_count as f32;
-            let local_pos = Vec3::new(
-                (t * 2.0 - 1.0) * base_part.size.x * 0.5,
-                ((i % 100) as f32 / 100.0 * 2.0 - 1.0) * base_part.size.y * 0.5,
-                ((i % 10) as f32 / 10.0 * 2.0 - 1.0) * base_part.size.z * 0.5,
-            );
-            
-            // Thermal expansion is radial
+        // A part at reference temperature with nothing displaced has no work.
+        // Without this the system re-marks `dirty` every frame and rewrites the
+        // whole vertex buffer for a zero-magnitude expansion.
+        if thermal_strain.abs() < 1e-12 && deform_state.max_displacement <= f32::EPSILON {
+            continue;
+        }
+
+        // Apply thermal expansion (isotropic, radial about the mesh origin).
+        //
+        // Positions come from the reference-pose snapshot; the previous code
+        // fabricated them from the vertex INDEX, so "radial" expansion pushed
+        // vertices along axes unrelated to where they actually were.
+        let count = vertex_count.min(deform_mesh.original_positions.len());
+
+        for i in 0..count {
+            let local_pos = deform_mesh.original_positions[i];
             deform_state.thermal_displacement[i] = local_pos * thermal_strain * config.scale;
         }
-        
+
         deform_state.update_total();
         deform_mesh.dirty = true;
     }
@@ -207,44 +310,131 @@ pub fn update_thermal_deformation(
 /// Apply deformation from impact events
 pub fn apply_impact_deformation(
     mut events: MessageReader<ImpactDeformEvent>,
-    mut query: Query<(&BasePart, &mut DeformationState, &mut DeformableMesh)>,
-    meshes: Res<Assets<Mesh>>,
+    mut query: Query<(&BasePart, &mut VertexDisplacements, &mut DeformableMesh)>,
     config: Res<DeformationConfig>,
 ) {
     for event in events.read() {
-        let Ok((_base_part, mut deform_state, mut deform_mesh)) = query.get_mut(event.entity) else {
+        let Ok((base_part, mut deform_state, mut deform_mesh)) = query.get_mut(event.entity) else {
             continue;
         };
-        
-        let Some(mesh) = meshes.get(&deform_mesh.original_mesh) else {
+
+        // `Vec3::normalize` returns NaN for a zero vector, and a single NaN
+        // vertex poisons the whole mesh (NaN bounds → the part vanishes or the
+        // renderer chokes). A zero-force impact is simply a no-op.
+        let direction = event.force.normalize_or_zero();
+        if direction == Vec3::ZERO || event.radius <= 0.0 {
             continue;
-        };
-        
-        let Some(VertexAttributeValues::Float32x3(positions)) = 
-            mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
-            continue;
-        };
-        
-        // Apply radial deformation from impact point
-        for (i, pos) in positions.iter().enumerate() {
-            let vertex_pos = Vec3::new(pos[0], pos[1], pos[2]);
-            let dist = (vertex_pos - event.point).length();
-            
-            if dist < event.radius {
-                let falloff = 1.0 - (dist / event.radius);
-                let displacement = event.force.normalize() * falloff * event.force.length() * config.scale;
-                
-                if event.permanent {
-                    // Directly add to plastic displacement
-                    if i < deform_state.plastic_displacement.len() {
-                        deform_state.plastic_displacement[i] += displacement;
-                    }
-                } else {
-                    deform_state.apply_elastic(i, displacement);
+        }
+
+        // `event.force` carries the dent DEPTH IN METRES in its length, and
+        // `event.radius` is likewise metres. Mesh vertices, however, live in
+        // the primitive's unit-cube local space, so every comparison below has
+        // to be converted with the part's size — which IS the local→world
+        // scale for these parts.
+        //
+        // Doing this in local units instead was subtly wrong on any
+        // non-uniformly scaled part: a 6 x 0.6 x 4 plate would spread the
+        // falloff 10x further along X than along Y for the same local radius,
+        // so the "dent" was a smeared ellipsoid rather than a crater.
+        let size = base_part.size;
+        let peak_m = event.force.length() * config.scale;
+
+        // Metres travelled per unit of local displacement along the dent
+        // direction, used to convert the depth back into local units.
+        let size_along = (direction * size).length().max(1.0e-6);
+
+        // Never let one impact (or an accumulation of them) turn the part
+        // inside out. Clamp in METRES, then convert.
+        let max_depth_m = size.min_element() * config.max_displacement_ratio;
+        let peak_m = peak_m.min(max_depth_m);
+        let peak_local = peak_m / size_along;
+        let max_disp_local = max_depth_m / size_along;
+
+        // Apply radial deformation from the impact point, using the
+        // reference-pose snapshot so repeated impacts all measure distance
+        // from the SAME undeformed geometry rather than from the running
+        // deformed result.
+        for (i, original) in deform_mesh.original_positions.iter().enumerate() {
+            // Local offset → world metres, so the falloff sphere is a real
+            // sphere in world space regardless of the part's aspect ratio.
+            let dist = ((*original - event.point) * size).length();
+            if dist >= event.radius {
+                continue;
+            }
+
+            let falloff = 1.0 - (dist / event.radius);
+            let displacement = direction * (peak_local * falloff);
+
+            if event.permanent {
+                // Directly add to plastic displacement
+                if i < deform_state.plastic_displacement.len() {
+                    let acc = (deform_state.plastic_displacement[i] + displacement)
+                        .clamp_length_max(max_disp_local);
+                    deform_state.plastic_displacement[i] = acc;
+                }
+            } else {
+                deform_state.apply_elastic(i, displacement);
+                if i < deform_state.elastic_displacement.len() {
+                    deform_state.elastic_displacement[i] =
+                        deform_state.elastic_displacement[i].clamp_length_max(max_disp_local);
                 }
             }
         }
-        
+
+        deform_state.update_total();
+        deform_mesh.dirty = true;
+    }
+}
+
+// ============================================================================
+// Elastic Recovery
+// ============================================================================
+
+/// Relax elastic (recoverable) displacement back toward the reference pose.
+///
+/// Without this, an "elastic" dent is indistinguishable from a plastic one:
+/// [`VertexDisplacements::reset_elastic`] existed but nothing ever called it,
+/// and `DeformationConfig::damping` was dead config. Plastic displacement is
+/// deliberately untouched — permanent means permanent.
+///
+/// Only touches entities that actually carry elastic displacement, and marks
+/// the mesh dirty only while it is still relaxing, so a settled part costs one
+/// comparison per frame.
+pub fn relax_elastic_deformation(
+    mut query: Query<(&mut VertexDisplacements, &mut DeformableMesh)>,
+    config: Res<DeformationConfig>,
+    time: Res<Time>,
+) {
+    // Exponential decay at `damping` per second, so recovery looks identical
+    // at 30 and 144 fps. `reset_elastic` multiplies by `1 - shed`, so pass it
+    // the fraction removed this frame.
+    let dt = time.delta_secs();
+    if config.damping <= 0.0 || dt <= 0.0 {
+        return;
+    }
+    let shed = (1.0 - (-config.damping * dt).exp()).clamp(0.0, 1.0);
+    if shed <= 0.0 {
+        return;
+    }
+
+    for (mut deform_state, mut deform_mesh) in query.iter_mut() {
+        // O(1) reject for a settled part — `max_elastic_sq` is maintained by
+        // `update_total`, so this costs one comparison rather than a full
+        // per-vertex scan every frame.
+        if deform_state.max_elastic_sq <= 1e-12 {
+            continue;
+        }
+
+        deform_state.reset_elastic(shed);
+
+        // Snap residuals to zero so the check above eventually rejects and the
+        // part stops re-uploading its vertex buffer.
+        for d in deform_state.elastic_displacement.iter_mut() {
+            if d.length_squared() <= 1e-12 {
+                *d = Vec3::ZERO;
+            }
+        }
+
         deform_state.update_total();
         deform_mesh.dirty = true;
     }
@@ -255,54 +445,75 @@ pub fn apply_impact_deformation(
 // ============================================================================
 
 /// Apply total displacement to mesh vertices
+///
+/// Writes `original + total_displacement` into the entity's own deformed mesh
+/// asset, recomputes normals so lighting follows the new surface, and clears
+/// `dirty`. Clearing is why the query takes `&mut DeformableMesh`: with the
+/// previous immutable borrow the flag could never be lowered, so every
+/// deformable re-uploaded its whole vertex buffer every frame forever.
 pub fn update_mesh_vertices(
-    mut query: Query<(&DeformableMesh, &DeformationState)>,
+    mut query: Query<(&mut DeformableMesh, &VertexDisplacements)>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut warned_aliased: Local<bool>,
 ) {
-    for (deform_mesh, deform_state) in query.iter_mut() {
+    for (mut deform_mesh, deform_state) in query.iter_mut() {
         if !deform_mesh.dirty {
             continue;
         }
-        
-        // First, get original positions from the original mesh
-        let original_positions: Vec<[f32; 3]> = {
-            let Some(original_mesh) = meshes.get(&deform_mesh.original_mesh) else {
-                continue;
-            };
-            
-            let Some(VertexAttributeValues::Float32x3(positions)) = 
-                original_mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
-                continue;
-            };
-            
-            positions.clone()
-        };
-        
-        // Calculate new positions
-        let mut new_positions: Vec<[f32; 3]> = Vec::with_capacity(original_positions.len());
-        
-        for (i, pos) in original_positions.iter().enumerate() {
-            let displacement = deform_state.get_displacement(i);
-            new_positions.push([
-                pos[0] + displacement.x,
-                pos[1] + displacement.y,
-                pos[2] + displacement.z,
-            ]);
+
+        // Defensive: `init_deformable_meshes` always allocates a distinct
+        // per-entity asset. A hand-built `DeformableMesh` that aliased the two
+        // handles would write deformed vertices straight into the SHARED
+        // source mesh and visibly deform every other part using it. (Aliasing
+        // can no longer cause drift now that writes are absolute against
+        // `original_positions`, but corrupting the shared asset is reason
+        // enough to refuse.)
+        if deform_mesh.original_mesh.id() == deform_mesh.deformed_mesh.id() {
+            if !*warned_aliased {
+                *warned_aliased = true;
+                tracing::warn!(
+                    "DeformableMesh has original_mesh == deformed_mesh; skipping vertex \
+                     write to avoid corrupting the shared source mesh. Build it via \
+                     init_deformable_meshes."
+                );
+            }
+            deform_mesh.dirty = false;
+            continue;
         }
-        
+
+        // Absolute write against the captured reference pose — never a
+        // read-back of this system's own previous output.
+        let mut new_positions: Vec<[f32; 3]> =
+            Vec::with_capacity(deform_mesh.original_positions.len());
+
+        for (i, original) in deform_mesh.original_positions.iter().enumerate() {
+            let p = *original + deform_state.get_displacement(i);
+            new_positions.push([p.x, p.y, p.z]);
+        }
+
+
         // Now get mutable reference to deformed mesh and update it
         let Some(mut mesh) = meshes.get_mut(&deform_mesh.deformed_mesh) else {
+            // Asset not resolvable this frame — leave `dirty` set so the write
+            // is retried rather than silently dropped.
             continue;
         };
-        
+
         // Update mesh
         mesh.insert_attribute(
             Mesh::ATTRIBUTE_POSITION,
             VertexAttributeValues::Float32x3(new_positions),
         );
-        
-        // Recalculate normals
-        // mesh.compute_normals(); // Would need to be called
+
+        // Lighting has to follow the deformed surface — without this a dented
+        // panel keeps shading as though it were still flat, which reads as
+        // "deformation isn't working" even when the geometry did move.
+        // `compute_normals` asserts a triangle-list topology, so check first.
+        if mesh.primitive_topology() == PrimitiveTopology::TriangleList {
+            mesh.compute_normals();
+        }
+
+        deform_mesh.dirty = false;
     }
 }
 
@@ -310,49 +521,30 @@ pub fn update_mesh_vertices(
 // Fracture Mesh
 // ============================================================================
 
-/// Handle mesh fracture events
-pub fn handle_fracture_mesh(
-    mut events: MessageReader<FractureMeshEvent>,
-    _commands: Commands,
-    _query: Query<(&BasePart, &DeformableMesh, &Transform)>,
-    _meshes: ResMut<Assets<Mesh>>,
-) {
+/// Diagnostic trace for fracture events.
+///
+/// The actual split — cutting the mesh and spawning the two halves as
+/// independent dynamic bodies — is performed engine-side by
+/// `eustress_engine::physics::fracture_bridge`, because it needs Avian
+/// (colliders, rigid bodies, velocities) and `eustress-common` only carries
+/// avian3d as an optional dependency. The geometry math itself lives in
+/// [`super::fracture_mesh::split_mesh_by_plane`] and is pure, so a host
+/// without physics can still cut meshes; it just has nothing to spawn them
+/// into.
+pub fn handle_fracture_mesh(mut events: MessageReader<FractureMeshEvent>) {
     for event in events.read() {
-        // TODO: Implement mesh splitting along fracture plane
-        // For now, log the fracture event
-        tracing::info!("Fracture event on entity {:?} at {:?} along {:?}", 
-            event.entity, event.origin, event.direction);
+        tracing::debug!(
+            "Fracture event on entity {:?} at {:?} along {:?} (energy {:.3})",
+            event.entity,
+            event.origin,
+            event.direction,
+            event.energy
+        );
     }
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/// Get vertex position from mesh
-fn get_vertex_position(mesh: &Mesh, index: usize) -> Option<Vec3> {
-    if let Some(VertexAttributeValues::Float32x3(positions)) = 
-        mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
-        positions.get(index).map(|p| Vec3::new(p[0], p[1], p[2]))
-    } else {
-        None
-    }
-}
-
-/// Split mesh by plane (simplified - returns None for now)
-/// Full implementation would use mesh boolean operations
-fn split_mesh_by_plane(
-    _mesh: &Mesh,
-    _origin: Vec3,
-    _normal: Vec3,
-) -> (Option<Mesh>, Option<Mesh>) {
-    // TODO: Implement proper mesh splitting
-    // This would involve:
-    // 1. Classify vertices as above/below plane
-    // 2. Find edges that cross the plane
-    // 3. Create new vertices at intersection points
-    // 4. Triangulate the cut surface
-    // 5. Build two separate meshes
-    
-    (None, None)
-}
+// NOTE: a private `split_mesh_by_plane` stub used to live here returning
+// `(None, None)`, shadowing the REAL implementation in
+// `super::fracture_mesh`. It had no callers and guaranteed that anything
+// wired to it could never fracture. Removed — use
+// `fracture_mesh::split_mesh_by_plane`.

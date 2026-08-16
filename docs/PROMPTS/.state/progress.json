@@ -1,0 +1,142 @@
+{
+  "schema": "eustress.gauntlet.progress/1",
+  "updated_utc": "2026-08-08T01:55:00Z",
+  "build_slot": { "held_by": null, "item_id": null, "since_utc": null, "command": null },
+  "items": {
+    "G1.01": {
+      "status": "PASSED",
+      "approach": "D",
+      "iteration": 3,
+      "builds_consumed": 6,
+      "envelope_builds": 6,
+      "artifact_path": "docs/PROMPTS/artifacts/G1.01/workspace_build.json",
+      "artifact_sha256": "sha256:5e3ee45cad7ceb75",
+      "last_measurement": {
+        "command": "cd eustress && cargo build --workspace",
+        "value": "BUILD_EXIT=0",
+        "rerun_value": "BUILD_EXIT_RERUN=0",
+        "members": 40,
+        "pass": true
+      },
+      "critic_gate": [],
+      "updated_utc": "2026-08-08T00:20:00Z"
+    },
+    "G1.02": {
+      "status": "PASSED",
+      "approach": "A",
+      "iteration": 1,
+      "builds_consumed": 0,
+      "envelope_builds": 0,
+      "artifact_path": "docs/PROMPTS/harness/reference_machines.json",
+      "last_measurement": {
+        "command": "pwsh -NoProfile -File docs/PROMPTS/harness/verify_reference_machine.ps1 -Id RM-1",
+        "value": "RM_EXIT=0 / gpu_match=True / driver_match=True",
+        "pass": true
+      },
+      "critic_gate": [],
+      "note": "RM-1 = GTX 1080 Ti (2017). All seven T1 frame-cost triggers now resolve to it. Pinning is not a judgement that a 1.5ms budget is achievable there.",
+      "updated_utc": "2026-08-08T01:55:00Z"
+    },
+    "G6.01": {
+      "status": "PASSED",
+      "approach": "A",
+      "iteration": 1,
+      "builds_consumed": 0,
+      "envelope_builds": 0,
+      "artifact_path": "docs/PROMPTS/artifacts/G6.01/ux_baseline_census.json",
+      "last_measurement": {
+        "command": "pwsh -NoProfile -File docs/PROMPTS/harness/checkers/G6.01_check.ps1",
+        "value": "CENSUS_OK EXIT=0; 60/1999/30/1 all reproduced",
+        "pass": true
+      },
+      "critic_gate": [],
+      "updated_utc": "2026-08-08T01:55:00Z"
+    },
+    "G1.30": {
+      "status": "PASSED",
+      "approach": "A",
+      "iteration": 1,
+      "builds_consumed": 0,
+      "envelope_builds": 0,
+      "artifact_path": "docs/PROMPTS/artifacts/G1.30/claim_ledger.json",
+      "last_measurement": {
+        "command": "python docs/PROMPTS/harness/checkers/claim_ledger_check.py --ledger docs/PROMPTS/artifacts/G1.30/claim_ledger.json --min-claims 60 --require-repro-for MEASURED",
+        "value": "EXIT=0; total_claims=104; MEASURED=12 TARGET=19 CONFIG_DEFAULT=9 UNSUPPORTED=64",
+        "pass": true,
+        "note": "The mechanical criterion PASSED. The stall is the item's own escalation trigger."
+      },
+      "critic_gate": [],
+      "stall": {
+        "trigger": "item-specific: >40% UNSUPPORTED",
+        "measured": "61.5% (64 of 104)",
+        "decision_requested": "DEFER remediation behind G1.31",
+        "recommendation": "DEFER",
+        "escalated_utc": "2026-08-08T01:55:00Z",
+        "resolved_utc": "2026-08-08T02:10:00Z",
+        "human_decision": "DEFER",
+        "outcome": "Ledger accepted as complete. Remediation of 64 UNSUPPORTED claims deferred behind G1.31 and carried as an open debt. The 40% floor was NOT lowered — the trigger stays armed for future runs."
+      },
+      "open_debt": {
+        "owed_by": "G1.31",
+        "description": "Remediate 64 UNSUPPORTED customer-facing claims catalogued in docs/PROMPTS/artifacts/G1.30/claim_ledger.json, including 4 licence-conflict records in docs/marketing/UofA_Center_For_Innovation_Pilot.html (:476, :592, :642, :665), the '72 countries' figure at LAUNCH_PLAN.md:59 against a measured 46, and 'Bevy 0.18' at START.md:15 against the 0.19 pin.",
+        "note": "G0.06 independently owns the licence-misstatement subset and runs in this wave."
+      },
+      "updated_utc": "2026-08-08T01:55:00Z"
+    },
+    "G0.06": {
+      "status": "PASSED",
+      "approach": "A",
+      "iteration": 1,
+      "builds_consumed": 2,
+      "envelope_builds": 6,
+      "artifact_path": "docs/PROMPTS/artifacts/G0.06/licence_phrasing.json",
+      "verifier": "docs/PROMPTS/harness/checkers/licence_phrasing.py",
+      "last_measurement": {
+        "l1_reverified": {
+          "command": "python docs/PROMPTS/harness/checkers/licence_phrasing.py --repo-root . --allowlist docs/PROMPTS/harness/checkers/licence_phrasing_allowlist.json --max-allowlist 6 --min-reason-chars 20",
+          "PHRASING_EXIT": 0,
+          "unallowlisted_hits": 0,
+          "allowlist_entries": 6,
+          "scanned_files": 6315
+        },
+        "l1_reverified_build": {
+          "command": "cd eustress/crates/web && trunk build --release",
+          "WEB_BUILD_EXIT": 0
+        },
+        "accepted_on_evidence_not_reverified": {
+          "field": "baseline_unallowlisted_hits >= 9",
+          "recorded_value": 27,
+          "why_not_reverified": "The item's measurement derives the baseline by git stash-ing the corrections away. The working tree carries 91 uncommitted founder paths including staged deletions; L1 declined to stash them to re-derive a recorded number. Corroborated independently: L1 directly observed two of the 27 hits (UofA_Center_For_Innovation_Pilot.html:592 and :665) earlier in this session, before the item ran."
+        },
+        "pass": true
+      },
+      "critic_gate": [],
+      "agent_death": "The executing agent died on 'API Error: Connection closed mid-response' after 69 minutes and 110 tool uses, AFTER completing the work and writing the artifact. The wave's null-result fallback labelled it STALLED; investigation showed a completed item, not a stall.",
+      "scope_extensions_declared": [
+        "eustress/crates/web/index.html:179 — schema.org JSON-LD carried a machine-readable false MIT claim ('license': 'https://opensource.org/licenses/MIT'). Outside the declared in-scope list; fixed and recorded with a revert command rather than done quietly. A grep for 'open source' does not match 'opensource.org', which is why the item's own catalogue missed it.",
+        "docs/development/UNIFIED_EXPLORER_PLAN.md:24,1231 — section retitled 'Open Source References' to 'Third-Party References'."
+      ],
+      "updated_utc": "2026-08-09T18:00:00Z"
+    },
+    "G7.30": {
+      "status": "PARTIAL",
+      "approach": "A",
+      "iteration": 1,
+      "builds_consumed": 1,
+      "envelope_builds": 6,
+      "artifact_path": "docs/PROMPTS/artifacts/G7.30/crash_free_baseline.json",
+      "artifact_written": false,
+      "code_written": [
+        "eustress/crates/engine/src/usage_telemetry.rs — 475 lines: EndReason enum, panic beacon, orphan detection, session ledger",
+        "eustress/crates/engine/src/bin/session-baseline.rs — 388 lines",
+        "eustress/crates/engine/Cargo.toml — [[bin]] session-baseline declared"
+      ],
+      "compiles": true,
+      "compile_evidence": "cargo build --workspace produced zero rustc errors and built the session-baseline bin. It exited 101 only because eustress-engine.exe and eustress-lsp.exe were locked by running processes (os error 5), which is an environment condition, not a code defect.",
+      "remaining": "Criterion needs sessions_total >= 20 and sessions_unclean >= 3. The telemetry sessions directory currently holds 1 file. Sessions must be generated and the baseline tool run.",
+      "note": "UsageTelemetryPlugin is registered at app_core.rs:164 inside add_core_sim_plugins, called from BOTH main.rs:241 and bin/headless.rs:275 with no cfg fork — so headless runs emit session records and no GUI launches are required. eustress-headless requires --features world-db.",
+      "updated_utc": "2026-08-10T21:00:00Z"
+    },
+    "G1.40": { "status": "READY", "note": "NOT_STARTED — wave W0 halted at G1.30" }
+  }
+}

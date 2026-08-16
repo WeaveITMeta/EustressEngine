@@ -3,7 +3,7 @@
 //! Low-level vertex manipulation for deformation.
 
 use bevy::prelude::*;
-use bevy::mesh::{Mesh, VertexAttributeValues, Indices};
+use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 
 // ============================================================================
 // Vertex Data
@@ -120,6 +120,129 @@ impl VertexData {
         let sum: Vec3 = self.positions.iter().sum();
         sum / self.positions.len() as f32
     }
+}
+
+// ============================================================================
+// Subdivision
+// ============================================================================
+
+/// How many times a mesh must be subdivided for a dent to be representable.
+///
+/// Vertex deformation can only MOVE existing vertices — it cannot create them.
+/// The authored primitives are 24-vertex cubes whose vertices all sit at the
+/// eight corners, so a localized dent in the middle of a face has literally
+/// nothing to displace: the nearest vertex is further away than the impact
+/// radius and every vertex fails the falloff test. The part appears completely
+/// unreactive even though the contact model computed a correct dent depth.
+///
+/// Chooses a level from the part's WORLD size so the resulting edge length is
+/// near `target_edge_m`, i.e. small enough that a typical impact radius spans
+/// several vertices. Capped, because each level quadruples triangle count.
+pub fn subdivision_levels_for(size: Vec3, target_edge_m: f32, max_levels: u32) -> u32 {
+    let longest = size.abs().max_element();
+    if !(longest > 0.0) || !(target_edge_m > 0.0) {
+        return 0;
+    }
+    let ratio = longest / target_edge_m;
+    if ratio <= 1.0 {
+        return 0;
+    }
+    (ratio.log2().ceil().max(0.0) as u32).min(max_levels)
+}
+
+/// Linearly subdivide every triangle into four, `levels` times.
+///
+/// Midpoints are shared between adjacent triangles via a cache keyed on the
+/// undirected edge, so the result stays indexed and watertight rather than
+/// exploding into a triangle soup with cracks along every shared edge.
+///
+/// This is PLANAR subdivision — it adds vertices without changing the surface,
+/// so a subdivided cube is still exactly a cube. That is what we want: the
+/// extra vertices exist purely to give deformation somewhere to push.
+pub fn subdivide_mesh(mesh: &Mesh, levels: u32) -> Option<Mesh> {
+    if levels == 0 {
+        return None;
+    }
+    if mesh.primitive_topology() != PrimitiveTopology::TriangleList {
+        return None;
+    }
+
+    let data = VertexData::from_mesh(mesh);
+    if data.positions.is_empty() || data.indices.len() < 3 {
+        return None;
+    }
+
+    let has_normals = data.normals.len() == data.positions.len();
+    let has_uvs = data.uvs.len() == data.positions.len();
+
+    let mut positions = data.positions.clone();
+    let mut normals = if has_normals { data.normals.clone() } else { Vec::new() };
+    let mut uvs = if has_uvs { data.uvs.clone() } else { Vec::new() };
+    let mut indices = data.indices.clone();
+
+    for _ in 0..levels {
+        let mut cache: std::collections::HashMap<(u32, u32), u32> =
+            std::collections::HashMap::new();
+        let mut next: Vec<u32> = Vec::with_capacity(indices.len() * 4);
+
+        // Split an edge once and reuse the vertex for the neighbouring triangle.
+        let mut midpoint =
+            |a: u32,
+             b: u32,
+             positions: &mut Vec<Vec3>,
+             normals: &mut Vec<Vec3>,
+             uvs: &mut Vec<Vec2>| -> u32 {
+                let key = if a < b { (a, b) } else { (b, a) };
+                if let Some(&i) = cache.get(&key) {
+                    return i;
+                }
+                let (ia, ib) = (a as usize, b as usize);
+                let pos = (positions[ia] + positions[ib]) * 0.5;
+                positions.push(pos);
+                if has_normals {
+                    let n = (normals[ia] + normals[ib]).normalize_or_zero();
+                    normals.push(n);
+                }
+                if has_uvs {
+                    uvs.push((uvs[ia] + uvs[ib]) * 0.5);
+                }
+                let idx = (positions.len() - 1) as u32;
+                cache.insert(key, idx);
+                idx
+            };
+
+        for tri in indices.chunks_exact(3) {
+            let (a, b, c) = (tri[0], tri[1], tri[2]);
+            let ab = midpoint(a, b, &mut positions, &mut normals, &mut uvs);
+            let bc = midpoint(b, c, &mut positions, &mut normals, &mut uvs);
+            let ca = midpoint(c, a, &mut positions, &mut normals, &mut uvs);
+            next.extend_from_slice(&[a, ab, ca]);
+            next.extend_from_slice(&[b, bc, ab]);
+            next.extend_from_slice(&[c, ca, bc]);
+            next.extend_from_slice(&[ab, bc, ca]);
+        }
+        indices = next;
+    }
+
+    let mut out = Mesh::new(PrimitiveTopology::TriangleList, mesh.asset_usage);
+    out.insert_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        positions.iter().map(|p| [p.x, p.y, p.z]).collect::<Vec<_>>(),
+    );
+    if has_normals {
+        out.insert_attribute(
+            Mesh::ATTRIBUTE_NORMAL,
+            normals.iter().map(|n| [n.x, n.y, n.z]).collect::<Vec<_>>(),
+        );
+    }
+    if has_uvs {
+        out.insert_attribute(
+            Mesh::ATTRIBUTE_UV_0,
+            uvs.iter().map(|t| [t.x, t.y]).collect::<Vec<_>>(),
+        );
+    }
+    out.insert_indices(Indices::U32(indices));
+    Some(out)
 }
 
 // ============================================================================

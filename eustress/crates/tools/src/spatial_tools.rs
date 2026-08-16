@@ -14,6 +14,11 @@ use crate::modes::WorkshopMode;
 pub struct MeasureDistanceTool;
 
 impl ToolHandler for MeasureDistanceTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "measure_distance",
@@ -64,6 +69,11 @@ impl ToolHandler for MeasureDistanceTool {
 pub struct ListSpaceContentsTool;
 
 impl ToolHandler for ListSpaceContentsTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "list_space_contents",

@@ -238,6 +238,27 @@ pub trait WorldDb: Send + Sync + 'static {
     /// bake path and by tooling. Not `Send` (fjall iterator borrow).
     fn iter_tree(&self) -> Result<Box<dyn Iterator<Item = Result<(String, Vec<u8>)>> + '_>>;
 
+    /// Keys-only iteration of the tree partition.
+    ///
+    /// The disk→tree reconcile needs to know WHICH paths exist, not what they
+    /// contain. Asking per-path with [`WorldDb::has_file`] costs one backend
+    /// round-trip each, and those serialise internally — on a Space whose disk
+    /// tree holds ~1.3M files that is the dominant cost of opening it, and it
+    /// blocks the main thread. One sequential key scan replaces every probe.
+    ///
+    /// Keys are returned in the backend's stored form (already normalised),
+    /// so a caller comparing against a filesystem path must put it through
+    /// [`crate::normalise_rel`] first rather than hand-rolling separator
+    /// fixes — otherwise every file looks absent and the reconcile re-ingests
+    /// the entire tree.
+    ///
+    /// The default implementation falls back to [`WorldDb::iter_tree`] and
+    /// discards the values, which reads bytes it does not need; a backend
+    /// that can iterate keys natively should override it.
+    fn iter_tree_keys(&self) -> Result<Box<dyn Iterator<Item = Result<String>> + '_>> {
+        Ok(Box::new(self.iter_tree()?.map(|r| r.map(|(k, _)| k))))
+    }
+
     // ── DataStore partition — Roblox-parity script persistence ───────
     //
     // Phase 8. Backs `DataStoreService` / `OrderedDataStore` /

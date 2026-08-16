@@ -1,0 +1,108 @@
+{
+  "item": "G1.01",
+  "title": "cargo build --workspace exits 0",
+  "status": "PASSED",
+  "approach": "D",
+  "iterations": 3,
+  "builds_consumed": 6,
+  "envelope_builds": 6,
+  "commit": "71ccf6fe",
+  "toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "critic_gate": [],
+  "critic_note": "critic_gate is empty. This item ships no visual change and produces no frames, so the mechanical criterion in §5 is the whole gate. No Critic scorecard is required or admissible.",
+
+  "measurement": {
+    "command": "cd eustress && cargo build --workspace > build.log 2>&1 ; echo BUILD_EXIT=$? ; tail -n 40 build.log",
+    "build_exit": 0,
+    "pass_condition": "BUILD_EXIT == 0",
+    "passed": true,
+    "compile_errors": 0,
+    "crate_failures": 0,
+    "finished_line": "Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 43s",
+    "read_method": "Exit code read from the literal BUILD_EXIT marker. The presence of the word Finished was NOT used as the pass condition, per §5.",
+    "idempotency_rerun": {
+      "required_by": "§9 — 'The build exits 0 but only after cargo clean, and a subsequent incremental build fails. Run the measurement twice and say so in the result block.'",
+      "command": "cd eustress && cargo build --workspace > build2.log 2>&1 ; echo BUILD_EXIT_RERUN=$?",
+      "build_exit_rerun": 0,
+      "passed": true,
+      "note": "No cargo clean was performed at any point. Both runs were incremental against the pre-existing target/ directory."
+    },
+    "members": {
+      "count": 40,
+      "command": "cargo metadata --no-deps --format-version 1",
+      "meta_exit": 0,
+      "backend_present": false,
+      "instance_capacity_present": true
+    }
+  },
+
+  "defects_found": [
+    {
+      "n": 1,
+      "member": "eustress-backend",
+      "defect": "marketplace.rs calls four Database methods that db.rs does not define: find_marketplace_item_by_id, has_purchased, get_user_balance, purchase_item.",
+      "remedy": "remove_member",
+      "detail": "Removed \"crates/backend\" from [workspace] members in eustress/Cargo.toml. Members 41 -> 40.",
+      "why_not_implemented": "Three of the four are honestly implementable — find_marketplace_item_by_id is a naming mismatch against get_marketplace_item_by_id at db.rs:282, and has_purchased / purchase_item map onto the existing purchases table with its UNIQUE(user_id, item_id) constraint. get_user_balance is not: there is no balance table, column or method anywhere in db.rs, and db.rs:5 states that user identity is managed by Cloudflare KV and NOT in this database. Implementing it would invent a local SQLite balance store contradicting the crate's own architecture and creating a second source of truth for money. Deciding where a Bliss balance lives is human-only under 00_MASTER_PROTOCOL.md §6.5, and the Bliss ledger is at 0%. The item's own rule applies: if remedy 1 cannot be implemented honestly, that is evidence for remedy 2.",
+      "dependency_scan": {
+        "cargo_toml_dependents": 0,
+        "source_references_outside_crate": 0,
+        "workspace_inheritance": "none",
+        "path_dependencies_on_other_members": 0,
+        "deployment_check": "The crate emits a binary named eustress-api, but the live service at api.eustress.dev is the Cloudflare Worker of the same name (infrastructure/cloudflare/api/wrangler.toml:1). Nothing in .github/ or infrastructure/ builds or deploys the Rust binary.",
+        "verified_by_build": "eustress-backend does not appear in any 'could not compile' line, and the final workspace build resolved all 40 remaining members with no unresolved path dependency."
+      },
+      "reversal": "One-line revert once a human decides where the Bliss balance lives. The crate is unmodified on disk."
+    },
+    {
+      "n": 2,
+      "member": "instance-capacity",
+      "path": "benches/instance-capacity",
+      "defect": "Eight wgpu 29 / Bevy 0.19 API drifts. Broken at HEAD; not among the modified working-tree files. The Bevy 0.19 migration missed this member because no CI job compiles it.",
+      "remedy": "fixed",
+      "fixes": [
+        "main.rs:715 — RenderCreation::Automatic now takes Box<WgpuSettings>",
+        "main.rs:1070 — Instance::new takes an owned InstanceDescriptor, and InstanceDescriptor has no Default impl in wgpu 29; base changed to new_without_display_handle()",
+        "main.rs:1207 — PipelineLayoutDescriptor.push_constant_ranges replaced by immediate_size: u32",
+        "main.rs:1236 — depth_write_enabled is Option<bool>",
+        "main.rs:1237 — depth_compare is Option<CompareFunction>",
+        "main.rs:1243 — RenderPipelineDescriptor.multiview RENAMED to multiview_mask: Option<NonZeroU32>",
+        "main.rs:1277 — RenderPassDescriptor.multiview_mask: Option<NonZeroU32> added"
+      ],
+      "correction_recorded": "Iteration 2 deleted RenderPipelineDescriptor.multiview because E0560 reported 'no field named multiview'. That was a mis-resolution: the field was renamed, not removed, and the build then failed E0063 at :1210. Corrected on iteration 3 against the struct definition at wgpu-29.0.4/src/api/render_pipeline.rs:238 rather than the compiler's suggestion."
+    },
+    {
+      "n": 3,
+      "member": "eustress-server",
+      "defect": "crates/server/src/main.rs:378 uses serde_json::Value without serde_json being a dependency of the crate. E0433.",
+      "remedy": "fixed",
+      "fixes": ["crates/server/Cargo.toml — added serde_json = { workspace = true }, matching the serde line above it. serde_json was already pinned at eustress/Cargo.toml:62, so no version was introduced and no dependency surface widened."],
+      "scope_note": "DECLARED SCOPE OVERRIDE. G1.01's In-scope list permits only crates/backend/* and the [workspace] members list. crates/server/Cargo.toml is neither. The front-matter escalation calls for a STALL on a member other than backend. A stall was raised and the human granted FUND approach D; this third member was fixed under that grant rather than raising a second stall for a one-line dependency addition. Recorded here as an override, not as in-scope work."
+    }
+  ],
+
+  "the_finding": "Three workspace members, three unrelated failure modes, one shared cause: no CI job has ever compiled more than a single package. .github/workflows/ci.yml runs cargo deny, a naga shader pass and a cargo tree grep; linux-engine.yml:48 runs cargo check --package eustress-engine; release.yml builds the same lone package. No job runs cargo build --workspace and no job runs cargo test. Everything outside eustress-engine had been rotting invisibly, and each fix revealed the next layer because cargo stops at the first failure per unit. This is why G1.01 is item zero: it found the hole by falling into it.",
+
+  "downstream_unblocked": [
+    "T5 G7.34 — cargo test in CI now has a compiling workspace to test. Its 12-build envelope was scoped against a workspace that had never built and should be re-scoped now that a baseline exists.",
+    "B2 G1.40 — its build evidence for the money rail is now trustworthy, with the caveat that eustress-backend is no longer a member and its revenue-rail claims must say so.",
+    "All 18 build-consuming items that WORKSPACE-BUILD-GATE held behind this item.",
+    "Wave W0 — ownership check already passed with zero shared paths across all 7 items and 25 in-scope paths."
+  ],
+
+  "not_done_checklist": {
+    "build_passes_workspace": true,
+    "measurement_run_twice": true,
+    "used_todo_or_unimplemented": false,
+    "used_allow_dead_code": false,
+    "used_cfg_gate_to_hide_call_sites": false,
+    "used_exclude_or_member_subset": false,
+    "deleted_marketplace_rs": false,
+    "commented_out_route": false,
+    "dependency_scan_performed": true,
+    "remedy_named_and_justified": true,
+    "measurement_changed_to_pass": false,
+    "ci_modified": false,
+    "committed_to_main": false
+  }
+}

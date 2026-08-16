@@ -53,6 +53,11 @@ fn git(ctx: &ToolContext, args: &[&str]) -> Result<String, String> {
 pub struct GitStatusTool;
 
 impl ToolHandler for GitStatusTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "git_status",
@@ -179,6 +184,11 @@ impl ToolHandler for GitCommitTool {
 pub struct GitLogTool;
 
 impl ToolHandler for GitLogTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "git_log",
@@ -227,6 +237,11 @@ impl ToolHandler for GitLogTool {
 pub struct GitDiffTool;
 
 impl ToolHandler for GitDiffTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "git_diff",
@@ -442,6 +457,11 @@ impl ToolHandler for GitBranchTool {
 pub struct FeedbackDiffTool;
 
 impl ToolHandler for FeedbackDiffTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "feedback_diff",

@@ -1000,11 +1000,15 @@ from origin and start hitting the wall.
 
 ### Existing infrastructure
 
-The `HybridPosition` system from HYBRID_COORDINATES.md already
-provides **DVec3 absolute + Vec3 relative** with auto-switching at
-100km — but that's solar-system scale, not render-cascade scale.
-It's overkill for "I'm 4km from where I started" and doesn't
-trigger automatically at render-cascade distances.
+None. There is no origin-rebasing system in the engine today, so
+the camera accumulates error against a fixed world origin.
+
+The planned fix is the grid-cell coordinate system in
+[ORBITAL_GRID.md](./ORBITAL_GRID.md) — `i32` cell index plus a
+cell-local `f32` offset, rendered camera-relative. That gives
+uniform ~0.03 mm precision at any extent, so it covers the
+render-cascade case and the planetary case with one mechanism
+rather than needing a separate near-field scheme.
 
 ### Solution: discrete origin shifts
 

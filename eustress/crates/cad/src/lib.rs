@@ -53,6 +53,7 @@ pub mod eval;
 pub mod error;
 pub mod parts_csg;
 pub mod export_glb;
+pub mod measure;
 pub mod solver;
 pub mod templates;
 
@@ -73,6 +74,10 @@ pub use eval::{
     EvalOutput, EvalMesh, EntryStatus, DEFAULT_MESH_TOLERANCE,
 };
 pub use parts_csg::{boolean_oriented_solids, OrientedShape, OrientedSolid};
+// Measurement — the read half of the loop. Mass properties and the
+// edge census are kernel concerns, not tool-surface ones: the Studio
+// panel, the MCP tools and the exporter all need the same numbers.
+pub use measure::{mass_properties, min_distance, topology, MassProps, TopoReport};
 pub use export_glb::{encode_glb, write_glb};
 pub use solver::{apply_solve, solve_or_err, solve_sketch, SolveReport, SolveStatus};
 

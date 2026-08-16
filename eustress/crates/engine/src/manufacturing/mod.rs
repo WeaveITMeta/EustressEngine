@@ -24,6 +24,14 @@
 //! - **AI allocation via Claude (BYOK)**: Scoring is deterministic Rust; the final
 //!   narrative rationale and confidence explanation come from Claude at ~$0.04/call.
 
+/// Purchase orders and RFQs — Odoo's `purchase` model ported to Rust, with
+/// the vendor bound to this module's [`Manufacturer`] registry.
+pub mod purchase;
+
+pub use purchase::{
+    InvoiceStatus, PurchaseError, PurchaseOrder, PurchaseOrderLine, PurchaseOrderState,
+};
+
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 

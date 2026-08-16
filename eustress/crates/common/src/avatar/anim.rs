@@ -525,11 +525,19 @@ fn drive_motion_weights(
     time: Res<Time>,
     mut graphs: ResMut<Assets<AnimationGraph>>,
     mut players: Query<&mut AnimationPlayer>,
-    q: Query<(&AvatarMotionGraph, &AvatarLocomotion, &AvatarBody), With<SpawnedByAvatarRuntime>>,
+    q: Query<
+        (
+            &AvatarMotionGraph,
+            &AvatarLocomotion,
+            &AvatarBody,
+            Option<&super::climb::AvatarClimb>,
+        ),
+        With<SpawnedByAvatarRuntime>,
+    >,
 ) {
     let dt = time.delta_secs();
 
-    for (g, loco, body) in q.iter() {
+    for (g, loco, body, climb) in q.iter() {
         let Ok(mut player) = players.get_mut(g.player) else { continue };
 
         // One-time start. `play` is idempotent per node, and every node stays
@@ -548,6 +556,28 @@ fn drive_motion_weights(
         // hardcoded 0.016 and changed behaviour with framerate.
         let alpha = 1.0 - (-14.0 * dt).exp();
         let want_ground = if loco.grounded { 1.0 } else { 0.0 };
+
+        // ── Climbing holds the GROUND branch as a base pose ────────────────
+        //
+        // `locomotion` reports `grounded = false` while attached to a wall, so
+        // the air blend saturates — and jump is air's only child. The player
+        // watched a LOOPING JUMP CLIP through every hang, shimmy and mantle
+        // while `solve_climb_limbs` dragged the arms back onto the ledge each
+        // frame. The two fought at frame rate, and that is what read as the
+        // character wiggling on the ledge.
+        //
+        // Blending to *nothing* fixed the fight and introduced a worse
+        // problem: with no clip driving them, every bone the IK does not touch
+        // froze, and the character became a mannequin with animated arms.
+        //
+        // The right shape is a base pose plus an IK layer. Pinning the ground
+        // branch gives idle — `planar_speed` is forced to zero while attached,
+        // so the gait blend inside that branch resolves to idle on its own —
+        // which keeps the spine, neck and head breathing while the limb solve
+        // overrides the arms and legs it actually owns. Idle is the only clip
+        // in the library that composes sanely underneath a limb solve.
+        let climbing = climb.map(|c| c.is_climbing()).unwrap_or(false);
+        let want_ground = if climbing { 1.0 } else { want_ground };
 
         // Ground/air are Blend nodes: their weights live in the graph asset.
         if let Some(mut graph) = graphs.get_mut(&g.handle) {

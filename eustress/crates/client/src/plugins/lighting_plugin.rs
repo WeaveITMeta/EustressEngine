@@ -7,10 +7,7 @@ use bevy::prelude::*;
 
 // Re-export shared plugin and types
 #[allow(unused_imports)]
-pub use eustress_common::plugins::lighting_plugin::{
-    SharedLightingPlugin, SkyboxHandle,
-    create_procedural_skybox, regenerate_skybox,
-};
+pub use eustress_common::plugins::lighting_plugin::{SharedLightingPlugin, StarField};
 #[allow(unused_imports)]
 pub use eustress_common::services::lighting::LightingService;
 #[allow(unused_imports)]

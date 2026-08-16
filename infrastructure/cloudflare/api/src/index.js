@@ -19,11 +19,161 @@
  *   JWT_SECRET — persistent JWT signing key
  */
 
-// KYC jurisdiction data — inline fallback (was external JSON, removed)
+// ═══════════════════════════════════════════════════════════════════════════
+// KYC jurisdiction ontology
+// ═══════════════════════════════════════════════════════════════════════════
+// Per-country accepted identity documents + the local age of majority.
+//
+// `age_of_majority` is ONLY ever used to raise the bar. The effective minimum
+// is max(MIN_AGE_FINANCE, age_of_majority), so a jurisdiction can require an
+// older applicant than 18 but can never lower the global floor. See
+// `minimumAgeFor()`.
+//
+// Countries not listed fall through to `fallback`, which accepts a passport
+// and flags the application for manual review rather than silently approving.
+
+/// Global floor for any money-touching flow (Bliss earning / cash out).
+/// Nothing in this Worker may approve an applicant younger than this.
+const MIN_AGE_FINANCE = 18;
+
 const JURISDICTIONS = {
-  jurisdictions: {},
+  jurisdictions: {
+    // ── North America ──────────────────────────────────────────────────────
+    US: { name: 'United States', natural_ids: ['Passport', "Driver's license", 'State ID card'], r2_prefix: 'kyc-us-', age_of_majority: 18, notes: 'IRS QI: government photo ID' },
+    CA: { name: 'Canada', natural_ids: ['Passport', "Driver's licence", 'Provincial ID card'], r2_prefix: 'kyc-ca-', age_of_majority: 19, notes: 'Age of majority is 19 in BC, NB, NL, NS, NT, NU, YT' },
+    MX: { name: 'Mexico', natural_ids: ['Passport', 'INE/IFE voter card', "Driver's licence"], r2_prefix: 'kyc-mx-', age_of_majority: 18 },
+
+    // ── Europe ─────────────────────────────────────────────────────────────
+    GB: { name: 'United Kingdom', natural_ids: ['Passport', "Driver's licence", 'National ID card'], r2_prefix: 'kyc-gb-', age_of_majority: 18 },
+    IE: { name: 'Ireland', natural_ids: ['Passport', "Driver's licence", 'Public Services Card'], r2_prefix: 'kyc-ie-', age_of_majority: 18 },
+    DE: { name: 'Germany', natural_ids: ['Passport', 'Personalausweis', "Driver's licence"], r2_prefix: 'kyc-de-', age_of_majority: 18 },
+    FR: { name: 'France', natural_ids: ['Passport', "Carte nationale d'identité", "Driver's licence"], r2_prefix: 'kyc-fr-', age_of_majority: 18 },
+    ES: { name: 'Spain', natural_ids: ['Passport', 'DNI', 'NIE', "Driver's licence"], r2_prefix: 'kyc-es-', age_of_majority: 18 },
+    IT: { name: 'Italy', natural_ids: ['Passport', "Carta d'identità", "Driver's licence"], r2_prefix: 'kyc-it-', age_of_majority: 18 },
+    NL: { name: 'Netherlands', natural_ids: ['Passport', 'Identiteitskaart', "Driver's licence"], r2_prefix: 'kyc-nl-', age_of_majority: 18 },
+    BE: { name: 'Belgium', natural_ids: ['Passport', 'eID card', "Driver's licence"], r2_prefix: 'kyc-be-', age_of_majority: 18 },
+    PL: { name: 'Poland', natural_ids: ['Passport', 'Dowód osobisty', "Driver's licence"], r2_prefix: 'kyc-pl-', age_of_majority: 18 },
+    SE: { name: 'Sweden', natural_ids: ['Passport', 'National ID card', "Driver's licence"], r2_prefix: 'kyc-se-', age_of_majority: 18 },
+    NO: { name: 'Norway', natural_ids: ['Passport', 'National ID card', "Driver's licence"], r2_prefix: 'kyc-no-', age_of_majority: 18 },
+    DK: { name: 'Denmark', natural_ids: ['Passport', "Driver's licence"], r2_prefix: 'kyc-dk-', age_of_majority: 18 },
+    FI: { name: 'Finland', natural_ids: ['Passport', 'National ID card', "Driver's licence"], r2_prefix: 'kyc-fi-', age_of_majority: 18 },
+    CH: { name: 'Switzerland', natural_ids: ['Passport', 'Identity card', "Driver's licence"], r2_prefix: 'kyc-ch-', age_of_majority: 18 },
+    AT: { name: 'Austria', natural_ids: ['Passport', 'Personalausweis', "Driver's licence"], r2_prefix: 'kyc-at-', age_of_majority: 18 },
+    PT: { name: 'Portugal', natural_ids: ['Passport', 'Cartão de Cidadão', "Driver's licence"], r2_prefix: 'kyc-pt-', age_of_majority: 18 },
+    CZ: { name: 'Czechia', natural_ids: ['Passport', 'Občanský průkaz', "Driver's licence"], r2_prefix: 'kyc-cz-', age_of_majority: 18 },
+    RO: { name: 'Romania', natural_ids: ['Passport', 'Carte de identitate', "Driver's licence"], r2_prefix: 'kyc-ro-', age_of_majority: 18 },
+    GR: { name: 'Greece', natural_ids: ['Passport', 'Identity card', "Driver's licence"], r2_prefix: 'kyc-gr-', age_of_majority: 18 },
+    UA: { name: 'Ukraine', natural_ids: ['Passport', 'ID card'], r2_prefix: 'kyc-ua-', age_of_majority: 18, flag: 'enhanced_dd' },
+
+    // ── Asia-Pacific ───────────────────────────────────────────────────────
+    AU: { name: 'Australia', natural_ids: ['Passport', "Driver's licence", 'Proof of Age card'], r2_prefix: 'kyc-au-', age_of_majority: 18, minors: { note: 'Birth certificate accepted under 21' } },
+    NZ: { name: 'New Zealand', natural_ids: ['Passport', "Driver's licence", 'Kiwi Access card'], r2_prefix: 'kyc-nz-', age_of_majority: 18 },
+    JP: { name: 'Japan', natural_ids: ['Passport', 'My Number card', "Driver's licence"], r2_prefix: 'kyc-jp-', age_of_majority: 18, notes: 'Lowered from 20 to 18 in April 2022' },
+    KR: { name: 'South Korea', natural_ids: ['Passport', 'Resident registration card', "Driver's licence"], r2_prefix: 'kyc-kr-', age_of_majority: 19 },
+    SG: { name: 'Singapore', natural_ids: ['Passport', 'NRIC', "Driver's licence"], r2_prefix: 'kyc-sg-', age_of_majority: 21, notes: 'Contractual age of majority is 21' },
+    IN: { name: 'India', natural_ids: ['Passport', 'Aadhaar', 'PAN card', "Driver's licence"], r2_prefix: 'kyc-in-', age_of_majority: 18 },
+    PH: { name: 'Philippines', natural_ids: ['Passport', 'UMID', "Driver's licence"], r2_prefix: 'kyc-ph-', age_of_majority: 18 },
+    ID: { name: 'Indonesia', natural_ids: ['Passport', 'KTP', "Driver's licence"], r2_prefix: 'kyc-id-', age_of_majority: 21 },
+    TH: { name: 'Thailand', natural_ids: ['Passport', 'National ID card', "Driver's licence"], r2_prefix: 'kyc-th-', age_of_majority: 20 },
+    MY: { name: 'Malaysia', natural_ids: ['Passport', 'MyKad', "Driver's licence"], r2_prefix: 'kyc-my-', age_of_majority: 18 },
+    TW: { name: 'Taiwan', natural_ids: ['Passport', 'National ID card', "Driver's licence"], r2_prefix: 'kyc-tw-', age_of_majority: 18, notes: 'Lowered from 20 to 18 in January 2023' },
+    HK: { name: 'Hong Kong', natural_ids: ['Passport', 'HKID card'], r2_prefix: 'kyc-hk-', age_of_majority: 18 },
+
+    // ── Latin America ──────────────────────────────────────────────────────
+    BR: { name: 'Brazil', natural_ids: ['Passport', 'RG', 'CPF', 'CNH'], r2_prefix: 'kyc-br-', age_of_majority: 18 },
+    AR: { name: 'Argentina', natural_ids: ['Passport', 'DNI', "Driver's licence"], r2_prefix: 'kyc-ar-', age_of_majority: 18 },
+    CL: { name: 'Chile', natural_ids: ['Passport', 'Cédula de identidad'], r2_prefix: 'kyc-cl-', age_of_majority: 18 },
+    CO: { name: 'Colombia', natural_ids: ['Passport', 'Cédula de ciudadanía'], r2_prefix: 'kyc-co-', age_of_majority: 18 },
+
+    // ── Middle East / Africa ───────────────────────────────────────────────
+    AE: { name: 'United Arab Emirates', natural_ids: ['Passport', 'Emirates ID'], r2_prefix: 'kyc-ae-', age_of_majority: 21 },
+    IL: { name: 'Israel', natural_ids: ['Passport', 'Teudat Zehut', "Driver's licence"], r2_prefix: 'kyc-il-', age_of_majority: 18 },
+    SA: { name: 'Saudi Arabia', natural_ids: ['Passport', 'National ID card'], r2_prefix: 'kyc-sa-', age_of_majority: 18 },
+    ZA: { name: 'South Africa', natural_ids: ['Passport', 'Smart ID card', "Driver's licence"], r2_prefix: 'kyc-za-', age_of_majority: 18 },
+    NG: { name: 'Nigeria', natural_ids: ['Passport', 'NIN slip', "Driver's licence"], r2_prefix: 'kyc-ng-', age_of_majority: 18, flag: 'enhanced_dd' },
+    EG: { name: 'Egypt', natural_ids: ['Passport', 'National ID card'], r2_prefix: 'kyc-eg-', age_of_majority: 21 },
+    KE: { name: 'Kenya', natural_ids: ['Passport', 'National ID card'], r2_prefix: 'kyc-ke-', age_of_majority: 18 },
+  },
   fallback: { require: ['passport', 'national_id', 'drivers_license'] },
 };
+
+/// Effective minimum age for an applicant in `iso2`.
+/// Never returns below MIN_AGE_FINANCE — a jurisdiction may only raise it.
+function minimumAgeFor(iso2) {
+  const j = JURISDICTIONS.jurisdictions[iso2];
+  return Math.max(MIN_AGE_FINANCE, j?.age_of_majority || 0);
+}
+
+/// Gate for any money-touching action (linking a payout account, cashing out).
+///
+/// Requires a COMPLETED KYC verification whose age check passed against the
+/// document's own date of birth. A self-entered birthday is never sufficient:
+/// `user.birthday` is an unverified claim, so it is deliberately not consulted.
+///
+/// Returns `{ ok: true, kyc }` or `{ ok: false, status, error, reason }`.
+async function requireVerifiedAdult(userId, env) {
+  const raw = await env.KYC_STATUS.get(`kyc-${userId}-front`);
+  if (!raw) {
+    return {
+      ok: false, status: 403,
+      error: 'Identity verification required',
+      reason: 'Complete identity verification before using payout features.',
+      code: 'kyc_required',
+    };
+  }
+
+  const kyc = JSON.parse(raw);
+
+  // 'linked' is what registration writes when it attaches a session to a user;
+  // it preserves the original verification outcome in the same record.
+  const passedDocs = kyc.status === 'verified' || kyc.status === 'linked';
+  if (!passedDocs) {
+    return {
+      ok: false, status: 403,
+      error: 'Identity verification incomplete',
+      reason: 'Your identity documents have not been verified yet.',
+      code: 'kyc_incomplete',
+    };
+  }
+
+  // Records written before age verification existed have no age fields. Treat
+  // them as unproven rather than grandfathering them past the gate.
+  if (kyc.age_verified !== true) {
+    return {
+      ok: false, status: 403,
+      error: 'Age verification required',
+      reason: kyc.age_status === 'underage'
+        ? `You must be at least ${kyc.minimum_age || MIN_AGE_FINANCE} to use payout features.`
+        : 'Your age could not be confirmed from your identity document. Please re-verify.',
+      code: kyc.age_status === 'underage' ? 'underage' : 'age_unverified',
+    };
+  }
+
+  return { ok: true, kyc };
+}
+
+/// Whole years elapsed from `dob` (YYYY-MM-DD) to now, in UTC.
+/// Returns null when the date is absent, malformed, or not a real calendar
+/// date. Callers MUST treat null as "age unknown" and refuse, never approve.
+function ageFromDob(dob) {
+  if (typeof dob !== 'string') return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dob.trim());
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const t = Date.UTC(y, mo - 1, d);
+  const dt = new Date(t);
+  // Reject dates that rolled over (e.g. 2009-02-30) or are impossible.
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d)
+    return null;
+  const now = new Date();
+  if (t > now.getTime()) return null; // born in the future
+  let age = now.getUTCFullYear() - y;
+  const beforeBirthday =
+    now.getUTCMonth() < mo - 1 ||
+    (now.getUTCMonth() === mo - 1 && now.getUTCDate() < d);
+  if (beforeBirthday) age -= 1;
+  return age;
+}
 
 // Desktop gear icon (icon.png from `crates/engine/assets/`) embedded as
 // base64. Served by `/assets/eustress-gear.png` so identity-registration
@@ -410,6 +560,13 @@ export default {
         return handleKycSubmit(request, env, cors);
       if (url.pathname.startsWith('/api/kyc/status/'))
         return handleKycStatus(url.pathname.split('/').pop(), env, cors);
+      // Desktop → mobile handoff (QR code flow)
+      if (url.pathname === '/api/kyc/handoff' && request.method === 'POST')
+        return handleKycHandoffCreate(request, env, cors);
+      if (url.pathname.startsWith('/api/kyc/handoff/'))
+        return handleKycHandoffGet(url.pathname.split('/').pop(), env, cors);
+      if (url.pathname.startsWith('/api/kyc/session/'))
+        return handleKycSessionStatus(url.pathname.split('/').pop(), env, cors);
 
       // Co-sign
       if (url.pathname === '/api/cosign' && request.method === 'POST')
@@ -624,6 +781,44 @@ async function handleRegister(request, env, cors) {
     if (existingByHash) return json({ error: 'This ID has already been used to register' }, 409, cors);
   }
 
+  // ── Age gate ─────────────────────────────────────────────────────────────
+  // Two layers. First the self-declared birthday, which catches the obvious
+  // case cheaply. Then, when a KYC session exists, the document-verified age,
+  // which is the one that actually counts.
+  const regCountry = request.headers.get('cf-ipcountry') || 'XX';
+  let kycRecord = null;
+  if (kyc_session_id) {
+    const raw = await env.KYC_STATUS.get(`kyc-${kyc_session_id}-front`);
+    if (raw) kycRecord = JSON.parse(raw);
+  }
+  const regMinAge = minimumAgeFor(kycRecord?.iso2 || regCountry);
+
+  const declaredAge = ageFromDob(birthday);
+  if (declaredAge === null)
+    return json({ error: 'A valid date of birth (YYYY-MM-DD) is required' }, 400, cors);
+  if (declaredAge < regMinAge)
+    return json({
+      error: `You must be at least ${regMinAge} years old to create an account`,
+      code: 'underage', minimum_age: regMinAge,
+    }, 403, cors);
+
+  // A client that supplies a KYC session must supply one that actually passed.
+  // Without this the browser could simply skip the upload step and register.
+  if (kyc_session_id) {
+    if (!kycRecord)
+      return json({ error: 'Identity verification session not found', code: 'kyc_missing' }, 400, cors);
+    if (kycRecord.status !== 'verified')
+      return json({ error: 'Identity verification has not passed', code: 'kyc_incomplete' }, 403, cors);
+    if (kycRecord.age_verified !== true)
+      return json({
+        error: kycRecord.age_status === 'underage'
+          ? `You must be at least ${kycRecord.minimum_age || regMinAge} years old to create an account`
+          : 'Your age could not be confirmed from your identity document',
+        code: kycRecord.age_status === 'underage' ? 'underage' : 'age_unverified',
+        minimum_age: kycRecord.minimum_age || regMinAge,
+      }, 403, cors);
+  }
+
   // AI Screening — reuse the result from KYC submit (single Grok call did
   // document verification + OCR + criminal screening together).
   // Only call performScreening as a fallback if KYC submit wasn't done.
@@ -669,6 +864,13 @@ async function handleRegister(request, env, cors) {
     bliss_balance: 0,
     created_at: now,
     email: email || null,
+    // Identity + age verification state. `age_verified` is true only when a
+    // government document was read and its date of birth cleared the minimum,
+    // so payout features can gate on it without re-deriving anything.
+    kyc_verified: kycRecord?.status === 'verified',
+    age_verified: kycRecord?.age_verified === true,
+    verified_dob: kycRecord?.extracted_dob || null,
+    minimum_age: regMinAge,
     avatar_url: null,
     discord_id: null,
     // Screening
@@ -1008,11 +1210,44 @@ async function handleKycUpload(request, env, cors) {
   if (!file || !(file instanceof File))
     return json({ error: 'Missing document file' }, 400, cors);
 
+  // Validate before touching R2. Without this the endpoint is an open,
+  // unauthenticated write into the KYC bucket at any size or type.
+  const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+  const MAX_BYTES = 12 * 1024 * 1024; // 12 MB — well above a cleaned phone capture
+
+  const declaredType = (file.type || '').toLowerCase().split(';')[0].trim();
+  if (!ALLOWED_TYPES.includes(declaredType))
+    return json({
+      error: 'Unsupported document format. Use JPEG, PNG, WebP, or PDF.',
+      received: declaredType || 'unknown',
+    }, 415, cors);
+
+  if (file.size > MAX_BYTES)
+    return json({
+      error: `Document too large (${(file.size / 1048576).toFixed(1)} MB). Maximum is 12 MB.`,
+    }, 413, cors);
+
+  if (file.size === 0)
+    return json({ error: 'Document is empty' }, 400, cors);
+
+  if (side !== 'front' && side !== 'back')
+    return json({ error: 'side must be "front" or "back"' }, 400, cors);
+
   // Authenticated user → use real user ID; registration → use session_id
   let userId = await verifyAuth(request, env);
   const uploadId = userId || `session-${sessionId}`;
 
   const fileData = await file.arrayBuffer();
+
+  // The declared Content-Type is attacker-controlled, so confirm the bytes
+  // actually are what they claim before persisting them.
+  const sniffed = sniffFileType(fileData);
+  if (sniffed !== declaredType)
+    return json({
+      error: 'Document contents do not match the declared format',
+      declared: declaredType, detected: sniffed || 'unrecognized',
+    }, 415, cors);
+
   const hashBuffer = await crypto.subtle.digest('SHA-256', fileData);
   const hashHex = hexEncode(new Uint8Array(hashBuffer));
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1048,6 +1283,104 @@ async function handleKycStatus(verificationId, env, cors) {
   return json(JSON.parse(data), 200, cors);
 }
 
+// ── Desktop → mobile handoff ─────────────────────────────────────────────────
+// A desktop browser usually has a poor camera (or none). The applicant scans a
+// QR code, finishes document capture on their phone, and the desktop tab polls
+// until the session completes.
+//
+// The session id in the QR acts as a bearer token, so the handoff record is
+// short-lived and carries no personal data back to the phone. The applicant's
+// name and birthday stay server-side and are read directly by /api/kyc/submit.
+
+const HANDOFF_TTL_SECONDS = 30 * 60; // 30 minutes to photograph two sides
+
+async function handleKycHandoffCreate(request, env, cors) {
+  let body;
+  try { body = await request.json(); }
+  catch { return json({ error: 'Invalid JSON body' }, 400, cors); }
+
+  const sessionId = body.session_id;
+  if (!sessionId || typeof sessionId !== 'string' || sessionId.length < 8)
+    return json({ error: 'A session_id of at least 8 characters is required' }, 400, cors);
+
+  const country = request.headers.get('cf-ipcountry') || 'XX';
+  const jurisdiction = JURISDICTIONS.jurisdictions[country];
+  const expiresAt = new Date(Date.now() + HANDOFF_TTL_SECONDS * 1000).toISOString();
+
+  await env.KYC_STATUS.put(`handoff:${sessionId}`, JSON.stringify({
+    session_id: sessionId,
+    id_type: body.id_type || 'unknown',
+    needs_back: body.needs_back !== false,
+    // Held server-side so the phone never receives personal data over the QR.
+    full_name: body.full_name || '',
+    birthday: body.birthday || '',
+    username: body.username || '',
+    iso2: country,
+    minimum_age: minimumAgeFor(country),
+    accepted_ids: jurisdiction?.natural_ids || JURISDICTIONS.fallback.require,
+    created_at: new Date().toISOString(),
+    expires_at: expiresAt,
+  }), { expirationTtl: HANDOFF_TTL_SECONDS });
+
+  return json({
+    session_id: sessionId,
+    verify_url: `https://eustress.dev/verify?s=${encodeURIComponent(sessionId)}`,
+    expires_at: expiresAt,
+    expires_in: HANDOFF_TTL_SECONDS,
+  }, 200, cors);
+}
+
+/// Context the phone needs to run the capture flow. Deliberately excludes the
+/// applicant's name and date of birth.
+async function handleKycHandoffGet(sessionId, env, cors) {
+  const raw = await env.KYC_STATUS.get(`handoff:${sessionId}`);
+  // A missing key means the TTL lapsed — KV removes it for us.
+  if (!raw)
+    return json({ error: 'This verification link has expired', code: 'expired' }, 404, cors);
+
+  const h = JSON.parse(raw);
+  return json({
+    session_id: h.session_id,
+    id_type: h.id_type,
+    needs_back: h.needs_back,
+    iso2: h.iso2,
+    minimum_age: h.minimum_age,
+    accepted_ids: h.accepted_ids,
+    expires_at: h.expires_at,
+  }, 200, cors);
+}
+
+/// Whole-session progress for the polling desktop tab.
+async function handleKycSessionStatus(sessionId, env, cors) {
+  const [frontRaw, backRaw] = await Promise.all([
+    env.KYC_STATUS.get(`kyc-${sessionId}-front`),
+    env.KYC_STATUS.get(`kyc-${sessionId}-back`),
+  ]);
+
+  if (!frontRaw && !backRaw)
+    return json({
+      session_id: sessionId, status: 'pending',
+      front_uploaded: false, back_uploaded: false,
+    }, 200, cors);
+
+  const front = frontRaw ? JSON.parse(frontRaw) : null;
+
+  return json({
+    session_id: sessionId,
+    // 'uploaded' means documents arrived but verification has not run yet.
+    status: front?.status || 'uploaded',
+    front_uploaded: !!frontRaw,
+    back_uploaded: !!backRaw,
+    age_verified: front?.age_verified === true,
+    age_status: front?.age_status || null,
+    minimum_age: front?.minimum_age || null,
+    ocr_name: front?.ocr_name || '',
+    reason: front?.status === 'rejected'
+      ? (front?.grok_analysis?.doc_reason || 'Verification did not pass')
+      : null,
+  }, 200, cors);
+}
+
 /// Submit KYC for verification after documents are uploaded.
 /// Fetches ALL document images from R2, sends them to Grok in a SINGLE call
 /// that performs document verification + OCR + criminal background screening.
@@ -1055,10 +1388,21 @@ async function handleKycSubmit(request, env, cors) {
   try {
     const body = await request.json();
     const sessionId = body.session_id;
-    const needsBack = body.needs_back !== false;
 
     if (!sessionId)
       return json({ error: 'Missing session_id' }, 400, cors);
+
+    // When the capture happened on a phone via the QR handoff, the identity
+    // claims live server-side in the handoff record. Prefer those so the phone
+    // never has to receive or re-send the applicant's name and birthday.
+    const handoffRaw = await env.KYC_STATUS.get(`handoff:${sessionId}`);
+    const handoff = handoffRaw ? JSON.parse(handoffRaw) : null;
+
+    const needsBack = body.needs_back !== undefined
+      ? body.needs_back !== false
+      : (handoff ? handoff.needs_back !== false : true);
+    const claimedName = body.full_name || handoff?.full_name || '';
+    const claimedBirthday = body.birthday || handoff?.birthday || '';
 
     // Check front is uploaded
     const frontKey = `kyc-${sessionId}-front`;
@@ -1084,8 +1428,8 @@ async function handleKycSubmit(request, env, cors) {
     const grokResult = await performFullKycVerification(
       front.r2_key,
       back?.r2_key || null,
-      body.full_name || '',
-      body.birthday || '',
+      claimedName,
+      claimedBirthday,
       front.id_type || '',
       env,
     );
@@ -1104,17 +1448,56 @@ async function handleKycSubmit(request, env, cors) {
       model: 'grok-4.20-reasoning',
     }), { expirationTtl: 86400 * 365 * 7 });
 
-    // Determine final decision: DENY if document fails OR screening denies
+    // ── Age verification ───────────────────────────────────────────────────
+    // The DOCUMENT's date of birth is authoritative. A self-typed birthday is
+    // an unverified claim and can never be the basis for passing the age gate,
+    // so if OCR could not read a DOB we refuse rather than fall back to it.
+    const iso2 = front.iso2 || 'XX';
+    const minAge = minimumAgeFor(iso2);
+    const documentDob = grokResult.extracted_dob || '';
+    const documentAge = ageFromDob(documentDob);
+    const claimedAge = ageFromDob(claimedBirthday);
+
+    let ageStatus;      // 'verified' | 'underage' | 'unreadable' | 'mismatch'
+    let ageReason = '';
+
+    if (documentAge === null) {
+      ageStatus = 'unreadable';
+      ageReason = 'Date of birth could not be read from the document';
+    } else if (documentAge < minAge) {
+      ageStatus = 'underage';
+      ageReason = `Applicant is ${documentAge}; minimum age is ${minAge}`;
+    } else if (claimedAge !== null && Math.abs(claimedAge - documentAge) > 1) {
+      // Tolerate a 1-year drift (timezone / birthday-today edge), reject beyond.
+      ageStatus = 'mismatch';
+      ageReason = `Stated age (${claimedAge}) does not match the document (${documentAge})`;
+    } else {
+      ageStatus = 'verified';
+    }
+
+    const ageApproved = ageStatus === 'verified';
+
+    // Determine final decision: every gate must pass. Age is a hard gate —
+    // a clean document and a clean background do not admit a minor.
     const docApproved = grokResult.doc_decision === 'APPROVE';
     const screenApproved = grokResult.screening_decision !== 'DENY';
-    const finalStatus = (docApproved && screenApproved) ? 'verified' : 'rejected';
+    const finalStatus = (docApproved && screenApproved && ageApproved)
+      ? 'verified'
+      : 'rejected';
 
     const verifiedRecord = {
       ...front,
       status: finalStatus,
       verified_at: new Date().toISOString(),
-      ocr_name: grokResult.extracted_name || body.full_name || '',
-      extracted_dob: grokResult.extracted_dob || '',
+      ocr_name: grokResult.extracted_name || claimedName,
+      extracted_dob: documentDob,
+      // Age facts are stored so registration can re-check them server-side
+      // without trusting anything the client sends back.
+      age_status: ageStatus,
+      age_verified: ageApproved,
+      document_age: documentAge,
+      minimum_age: minAge,
+      jurisdiction: iso2,
       grok_analysis: grokResult,
     };
 
@@ -1126,18 +1509,68 @@ async function handleKycSubmit(request, env, cors) {
       return json({
         status: 'verified',
         verification_id: verificationId,
-        ocr_name: grokResult.extracted_name || body.full_name || '',
+        ocr_name: grokResult.extracted_name || claimedName,
+        age_verified: true,
+        minimum_age: minAge,
       }, 200, cors);
     } else {
+      // Surface WHY in a form the UI can show the applicant. Age failures get
+      // a plain-language reason; document and screening failures keep theirs.
+      const reason = !ageApproved
+        ? ageReason
+        : (!docApproved
+            ? (grokResult.doc_reason || 'Document could not be verified')
+            : (grokResult.screening_reason || 'Application requires review'));
+
       return json({
         status: 'rejected',
         verification_id: verificationId,
+        reason,
+        age_status: ageStatus,
+        age_verified: ageApproved,
+        minimum_age: minAge,
         decision: grokResult,
       }, 200, cors);
     }
   } catch (e) {
     return json({ error: 'Submit failed: ' + e.message }, 500, cors);
   }
+}
+
+/// Identify a file from its leading bytes, independent of any declared type.
+/// Returns a MIME string for the formats KYC accepts, or null if unrecognized.
+function sniffFileType(buf) {
+  const b = new Uint8Array(buf.slice(0, 12));
+  if (b.length < 4) return null;
+  // JPEG: FF D8 FF
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47)
+    return 'image/png';
+  // PDF: %PDF
+  if (b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46)
+    return 'application/pdf';
+  // WebP: "RIFF" .... "WEBP"
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+      b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50)
+    return 'image/webp';
+  return null;
+}
+
+/// Base64-encode an ArrayBuffer without blowing the call stack.
+///
+/// `btoa(String.fromCharCode(...new Uint8Array(buf)))` spreads every byte as a
+/// separate argument, which throws RangeError once the array passes the engine's
+/// argument limit (~100k). A phone camera photo is 2-5 MB, so that form threw on
+/// essentially every real mobile KYC upload. Chunked conversion has no such limit.
+function bytesToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  const CHUNK = 0x8000; // 32 KB per fromCharCode call, well under any limit
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
 }
 
 /**
@@ -1152,27 +1585,36 @@ async function handleKycSubmit(request, env, cors) {
  * Falls back to APPROVE if Grok is unavailable.
  */
 async function performFullKycVerification(frontR2Key, backR2Key, claimedName, claimedBirthday, idType, env) {
+  // Fail CLOSED. This decision gates access to money (Bliss earning and cash
+  // out), so "we could not check" must never read as "approved". Without a
+  // verification backend the applicant stays unverified and goes to a human.
   if (!env.GROK_API_KEY) {
     return {
-      doc_decision: 'APPROVE', screening_decision: 'APPROVE',
-      reason: 'Verification unavailable', extracted_name: claimedName,
-      risk_score: 0, screening_flags: [], confidence: 0,
+      doc_decision: 'DENY', screening_decision: 'REVIEW',
+      doc_reason: 'Automated document verification is not configured',
+      reason: 'Verification unavailable', extracted_name: '',
+      extracted_dob: '', risk_score: 0, screening_flags: ['verification_unavailable'],
+      confidence: 0, requires_manual_review: true,
     };
   }
 
   try {
     // Fetch front image from R2
     const frontObj = await env.KYC_BUCKET.get(frontR2Key);
+    // No document in storage means there is nothing to verify. Approving here
+    // would let a caller reach "verified" without ever presenting an ID.
     if (!frontObj) {
       return {
-        doc_decision: 'APPROVE', screening_decision: 'APPROVE',
-        reason: 'Front document not found in storage', extracted_name: claimedName,
-        risk_score: 0, screening_flags: [], confidence: 0,
+        doc_decision: 'DENY', screening_decision: 'REVIEW',
+        doc_reason: 'Front document missing from storage',
+        reason: 'Front document not found in storage', extracted_name: '',
+        extracted_dob: '', risk_score: 0, screening_flags: ['document_missing'],
+        confidence: 0, requires_manual_review: true,
       };
     }
     const frontBytes = await frontObj.arrayBuffer();
     const frontType = frontObj.httpMetadata?.contentType || 'image/jpeg';
-    const frontB64 = btoa(String.fromCharCode(...new Uint8Array(frontBytes)));
+    const frontB64 = bytesToBase64(frontBytes);
 
     // Fetch back image from R2 (if available)
     let backB64 = null;
@@ -1182,7 +1624,7 @@ async function performFullKycVerification(frontR2Key, backR2Key, claimedName, cl
       if (backObj) {
         const backBytes = await backObj.arrayBuffer();
         backType = backObj.httpMetadata?.contentType || 'image/jpeg';
-        backB64 = btoa(String.fromCharCode(...new Uint8Array(backBytes)));
+        backB64 = bytesToBase64(backBytes);
       }
     }
 
@@ -1643,7 +2085,14 @@ async function handleCommunityLeaderboard(env, cors) {
     const user = JSON.parse(userData);
     if (user.banned) continue;
 
-    let hours = user.total_hours || 0;
+    // All-time hours now live in SOCIAL `hours_total:{id}` — the heartbeat
+    // stopped writing them back onto the user record (a stale whole-record
+    // PUT there could erase distributed BLS). Fall back to the legacy field
+    // for accounts that predate the split.
+    const hoursTotalRaw = await env.SOCIAL.get(`hours_total:${user.id}`);
+    let hours = hoursTotalRaw !== null && hoursTotalRaw !== undefined
+      ? parseFloat(hoursTotalRaw) || 0
+      : (user.total_hours || 0);
 
     // For time-filtered periods, sum daily hour entries
     if (period !== 'alltime') {
@@ -2647,13 +3096,18 @@ async function handleAdminScreeningReport(request, env, cors) {
 // STRIPE — Treasury funding + Connect payouts
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function stripeRequest(method, endpoint, body, env) {
+/// `idempotencyKey` (optional) makes a retried POST safe: Stripe returns the
+/// ORIGINAL result instead of performing the action again. Required for
+/// anything that moves money (see runDailyPayout).
+async function stripeRequest(method, endpoint, body, env, idempotencyKey) {
+  const headers = {
+    'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`,
+    'Content-Type': 'application/x-www-form-urlencoded',
+  };
+  if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
   const resp = await fetch(`https://api.stripe.com/v1${endpoint}`, {
     method,
-    headers: {
-      'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
+    headers,
     body: body ? new URLSearchParams(body).toString() : undefined,
   });
   return resp.json();
@@ -2736,11 +3190,57 @@ async function handleStripeCheckout(request, env, cors) {
 }
 
 // Stripe webhook — handle successful payments
-async function handleStripeWebhook(request, env) {
-  // In production, verify webhook signature with STRIPE_WEBHOOK_SECRET
-  const body = await request.text();
-  let event;
+/// Verify a Stripe webhook signature (scheme v1: HMAC-SHA256 over
+/// `{timestamp}.{raw body}` keyed by the endpoint secret).
+///
+/// Constant-time compare, and a 5-minute timestamp tolerance so a captured
+/// delivery can't be replayed indefinitely.
+async function stripeSignatureValid(rawBody, sigHeader, secret) {
+  if (!sigHeader || !secret) return false;
+  const parts = Object.fromEntries(
+    sigHeader.split(',').map((kv) => {
+      const i = kv.indexOf('=');
+      return [kv.slice(0, i).trim(), kv.slice(i + 1).trim()];
+    })
+  );
+  const t = parts['t'];
+  const v1 = parts['v1'];
+  if (!t || !v1) return false;
 
+  const age = Math.abs(Date.now() / 1000 - Number(t));
+  if (!Number.isFinite(age) || age > 300) return false;
+
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const mac = await crypto.subtle.sign('HMAC', key, enc.encode(`${t}.${rawBody}`));
+  const expected = hexEncode(new Uint8Array(mac));
+
+  if (expected.length !== v1.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ v1.charCodeAt(i);
+  return diff === 0;
+}
+
+async function handleStripeWebhook(request, env) {
+  const body = await request.text();
+
+  // SECURITY: this endpoint mints Tickets and credits the USD treasury, so an
+  // unverified body is a direct "print money" primitive — previously anyone
+  // could POST a fake checkout.session.completed and inflate the treasury.
+  // Fail CLOSED: if the signing secret isn't configured we refuse rather than
+  // silently trusting the caller.
+  if (!env.STRIPE_WEBHOOK_SECRET) {
+    console.error('stripe webhook rejected: STRIPE_WEBHOOK_SECRET not configured');
+    return new Response('Webhook not configured', { status: 503 });
+  }
+  const sig = request.headers.get('Stripe-Signature');
+  if (!(await stripeSignatureValid(body, sig, env.STRIPE_WEBHOOK_SECRET))) {
+    return new Response('Invalid signature', { status: 400 });
+  }
+
+  let event;
   try {
     event = JSON.parse(body);
   } catch {
@@ -2808,7 +3308,12 @@ async function handleStripeWebhook(request, env) {
       }));
 
     } else {
-      // TREASURY FUNDING — direct treasury deposit (existing flow)
+      // TREASURY FUNDING — direct treasury deposit (existing flow).
+      // Stripe delivers at-least-once and retries on any non-2xx or timeout,
+      // so without this guard a redelivered $500 session credited $1000.
+      const existingFund = await env.PAYOUTS.get(`deposit:${session.id}`);
+      if (existingFund) return new Response('OK', { status: 200 });
+
       await env.PAYOUTS.put(`deposit:${session.id}`, JSON.stringify({
         id: session.id, type: 'treasury_fund', amount_usd: amount,
         user_id: userId || 'anonymous', timestamp: new Date().toISOString(),
@@ -2841,13 +3346,19 @@ async function handleStripeConnectOnboard(request, env, cors) {
   if (!userData) return json({ error: 'User not found' }, 404, cors);
   const user = JSON.parse(userData);
 
+  // Money gate: verified identity AND a document-confirmed age at or above the
+  // jurisdiction minimum. This is the point where a person becomes able to
+  // receive real USD, so it is the point that must not admit a minor.
+  const gate = await requireVerifiedAdult(userId, env);
+  if (!gate.ok)
+    return json({ error: gate.error, reason: gate.reason, code: gate.code }, gate.status, cors);
+
   // Check if user already has a Connect account
   let connectId = user.stripe_connect_id;
 
   if (!connectId) {
-    // Detect country from KYC data
-    const kycFront = await env.KYC_STATUS.get(`kyc-${userId}-front`);
-    const kycCountry = kycFront ? JSON.parse(kycFront).iso2 || 'US' : 'US';
+    // Country comes from the verified KYC record loaded by the gate above.
+    const kycCountry = gate.kyc.iso2 || 'US';
 
     // Create Connect Custom account with pre-filled identity info
     const clientIp = request.headers.get('cf-connecting-ip') || '0.0.0.0';
@@ -2867,11 +3378,15 @@ async function handleStripeConnectOnboard(request, env, cors) {
     if (user.email) accountParams['email'] = user.email;
     // Don't set first_name to username — Stripe will reject if it doesn't match the ID photo
     // Name comes from the ID document uploaded via R2 sync or Stripe's own onboarding
-    if (user.birthday) {
-      const [y, m, d] = user.birthday.split('-');
+    // Prefer the date of birth READ FROM THE DOCUMENT over the one the user
+    // typed. Stripe rejects a Connect account whose DOB contradicts the ID
+    // photo, and the document value is the one that passed the age gate.
+    const verifiedDob = gate.kyc.extracted_dob || user.birthday;
+    if (verifiedDob && /^\d{4}-\d{2}-\d{2}$/.test(verifiedDob)) {
+      const [y, m, d] = verifiedDob.split('-');
       accountParams['individual[dob][year]'] = y;
-      accountParams['individual[dob][month]'] = parseInt(m).toString();
-      accountParams['individual[dob][day]'] = parseInt(d).toString();
+      accountParams['individual[dob][month]'] = parseInt(m, 10).toString();
+      accountParams['individual[dob][day]'] = parseInt(d, 10).toString();
     }
 
     const account = await stripeRequest('POST', '/accounts', accountParams, env);
@@ -3207,9 +3722,23 @@ async function handleTicketHistory(request, env, cors) {
 
 async function handleNodeHeartbeat(request, env, cors) {
   const body = await request.json();
-  const { node_id, mode, players, uptime_secs, fork_id, user_id } = body;
+  const { node_id, mode, players, uptime_secs, fork_id } = body;
 
   if (!node_id) return json({ error: 'node_id required' }, 400, cors);
+
+  // IDENTITY — BEARER TOKEN ONLY. Do not reintroduce a body-supplied id.
+  //
+  // This endpoint writes `presence:{date}:{id}` and `node-mode:{id}`, which
+  // handleCosign trusts as its integrity anchors (the ActiveTime ceiling and
+  // the Full-node bonus). Accepting an id from the request body made those
+  // anchors writable by anyone: a public key is a PUBLIC identifier, so an
+  // unauthenticated curl loop could grant itself the Full-node bonus and
+  // presence headroom, or pin a competitor's mode to Light to strip theirs.
+  //
+  // The id therefore comes from the JWT and nowhere else. Anonymous beats are
+  // still accepted for node telemetry (the `node:` key below), but they carry
+  // no user-scoped effects.
+  const user_id = await verifyAuth(request, env);
 
   await env.SOCIAL.put(`node:${node_id}`, JSON.stringify({
     node_id, mode: mode || 'light', players: players || 0,
@@ -3239,8 +3768,7 @@ async function handleNodeHeartbeat(request, env, cors) {
     await env.SOCIAL.put(`node-mode:${user_id}`, normMode, { expirationTtl: 86400 * 2 });
   }
 
-  // Return current BLS balance if user_id provided (engine polls this)
-  // Also accumulate session hours from uptime_secs
+  // Return current BLS balance if authenticated (engine polls this)
   let bliss_balance = 0;
   let pending_score = 0;
   if (user_id) {
@@ -3248,42 +3776,45 @@ async function handleNodeHeartbeat(request, env, cors) {
     if (userData) {
       const user = JSON.parse(userData);
       bliss_balance = user.bliss_balance || 0;
-
-      // Accumulate session hours from heartbeat uptime
-      // Track per-day, per-week, per-month, and all-time hours
-      const now = new Date();
-      const today = now.toISOString().split('T')[0];
-      const heartbeatHours = (uptime_secs || 0) / 3600;
-
-      // Store per-period hours (overwrite with latest session uptime per node)
-      const hourKey = `hours:${user_id}:${node_id}`;
-      const prevData = await env.SOCIAL.get(hourKey);
-      const prev = prevData ? JSON.parse(prevData) : { date: '', hours: 0 };
-
-      // Only accumulate if this is a new day or growing session
-      if (prev.date !== today) {
-        // New day — add previous session to totals, start fresh
-        if (prev.hours > 0) {
-          user.total_hours = (user.total_hours || 0) + prev.hours;
-          // Per-period accumulators
-          const dKey = `hours_daily:${user_id}:${prev.date}`;
-          const existing = parseFloat(await env.SOCIAL.get(dKey) || '0');
-          await env.SOCIAL.put(dKey, String(existing + prev.hours), { expirationTtl: 86400 * 90 });
-        }
-        await env.SOCIAL.put(hourKey, JSON.stringify({ date: today, hours: heartbeatHours }), { expirationTtl: 86400 * 2 });
-      } else if (heartbeatHours > prev.hours) {
-        // Same day, session grew — update
-        await env.SOCIAL.put(hourKey, JSON.stringify({ date: today, hours: heartbeatHours }), { expirationTtl: 86400 * 2 });
-      }
-
-      // Update user record with cumulative hours
-      user.total_hours = (user.total_hours || 0);
-      user.last_active = now.toISOString();
-      await env.USERS.put(`user:${user_id}`, JSON.stringify(user));
     }
+
+    // SESSION HOURS — written to dedicated keys, NEVER back into `user:`.
+    //
+    // This handler used to read the whole user record, mutate two fields, and
+    // PUT the entire object back every ~90s. Workers KV has no compare-and-set
+    // and serves cached reads, so that PUT carried a stale snapshot and
+    // last-write-wins would silently erase BLS credited by the midnight
+    // distribution cron — and could resurrect a just-banned account. A
+    // high-frequency endpoint must never rewrite the account record.
+    const now = new Date();
+    const today = now.toISOString().split('T')[0];
+    // Clamp: uptime is self-reported and was previously unbounded, so a single
+    // request could bank ~10^8 hours and pin the public leaderboard forever.
+    // One day is the most a single session can legitimately contribute.
+    const uptimeSecsSafe = Math.max(0, Math.min(Number(uptime_secs) || 0, 86400));
+    const heartbeatHours = uptimeSecsSafe / 3600;
+
+    const hourKey = `hours:${user_id}:${node_id}`;
+    const prevData = await env.SOCIAL.get(hourKey);
+    const prev = prevData ? JSON.parse(prevData) : { date: '', hours: 0 };
+
+    if (prev.date !== today) {
+      // New day — bank the previous session into the durable totals.
+      if (prev.hours > 0) {
+        const dKey = `hours_daily:${user_id}:${prev.date}`;
+        const existing = parseFloat(await env.SOCIAL.get(dKey) || '0');
+        await env.SOCIAL.put(dKey, String(existing + prev.hours), { expirationTtl: 86400 * 90 });
+        const tKey = `hours_total:${user_id}`;
+        const tPrev = parseFloat(await env.SOCIAL.get(tKey) || '0');
+        await env.SOCIAL.put(tKey, String(tPrev + prev.hours));
+      }
+      await env.SOCIAL.put(hourKey, JSON.stringify({ date: today, hours: heartbeatHours }), { expirationTtl: 86400 * 2 });
+    } else if (heartbeatHours > prev.hours) {
+      await env.SOCIAL.put(hourKey, JSON.stringify({ date: today, hours: heartbeatHours }), { expirationTtl: 86400 * 2 });
+    }
+    await env.SOCIAL.put(`last-active:${user_id}`, now.toISOString(), { expirationTtl: 86400 * 30 });
     // Check today's pending contributions (written by handleCosign;
     // date-first key so the distribution cron can prefix-scan a day)
-    const today = new Date().toISOString().split('T')[0];
     const pendingKey = `contrib:${today}:${user_id}`;
     const pendingData = await env.INVENTORY.get(pendingKey);
     if (pendingData) {
@@ -3900,22 +4431,39 @@ function blissEmissionRate(yearsSinceGenesis) {
 }
 
 /// Collect one day's contributors from the contrib:{date}:{user} records.
-/// Returns { entries: [{userId, score}], totalScore }.
+/// Returns { entries: [{userId, score}], totalScore, truncated }.
+///
+/// Pages through the full keyspace with a cursor — a bare
+/// `list({limit:1000})` silently dropped every contributor past the first
+/// 1000, which would under-pay them with no error anywhere. `truncated`
+/// is only ever true if we hit the hard safety bound below.
 async function collectDayScores(env, date) {
   const prefix = `contrib:${date}:`;
-  const list = await env.INVENTORY.list({ prefix, limit: 1000 });
   const entries = [];
   let totalScore = 0;
-  for (const key of list.keys) {
-    const data = await env.INVENTORY.get(key.name);
-    if (!data) continue;
-    const rec = JSON.parse(data);
-    const score = rec.total_score || 0;
-    if (score <= 0) continue;
-    entries.push({ userId: key.name.slice(prefix.length), score });
-    totalScore += score;
+  let cursor = undefined;
+  let truncated = false;
+  // Safety bound so a pathological keyspace can't run the cron past its
+  // CPU limit. 100k contributors/day is far beyond current scale; if this
+  // ever trips, the distribution must move to a queue/Durable Object.
+  const MAX_KEYS = 100_000;
+
+  while (true) {
+    const list = await env.INVENTORY.list({ prefix, limit: 1000, cursor });
+    for (const key of list.keys) {
+      const data = await env.INVENTORY.get(key.name);
+      if (!data) continue;
+      const rec = JSON.parse(data);
+      const score = rec.total_score || 0;
+      if (score <= 0) continue;
+      entries.push({ userId: key.name.slice(prefix.length), score });
+      totalScore += score;
+    }
+    if (list.list_complete || !list.cursor) break;
+    if (entries.length >= MAX_KEYS) { truncated = true; break; }
+    cursor = list.cursor;
   }
-  return { entries, totalScore };
+  return { entries, totalScore, truncated };
 }
 
 /// Daily BLS emission distribution — mints the day's emission and
@@ -3936,7 +4484,7 @@ async function runDailyDistribution(env) {
   const rate = blissEmissionRate(years);
   const dailyEmission = supply * rate / 365;
 
-  const { entries, totalScore } = await collectDayScores(env, yesterday);
+  const { entries, totalScore, truncated } = await collectDayScores(env, yesterday);
 
   const record = {
     date: yesterday,
@@ -3944,13 +4492,41 @@ async function runDailyDistribution(env) {
     annual_rate: rate,
     supply_before: supply,
     total_score: totalScore,
+    contributor_count: entries.length,
+    // True only if the 100k safety bound was hit — means some contributors
+    // were NOT paid and the distribution needs re-architecting, not a retry.
+    truncated,
+    // Observability, deliberately NOT a penalty. A per-account share CAP was
+    // considered and rejected: it would strip earnings from the single most
+    // productive contributor (10 people, one does half the work → capped to
+    // a tenth), violating "you earn what you contribute" — and it cannot stop
+    // sybil anyway, since N accounts each get their own cap. Per-account abuse
+    // is bounded in ABSOLUTE terms by MAX_DAILY_SCORE at cosign time, and the
+    // cash-out rail is KYC'd via Stripe Connect. This flag just surfaces
+    // unusual concentration for human review.
+    concentration_flag: false,
+    top_share: 0,
     recipients: [],
     minted: 0,
   };
 
+  if (totalScore > 0 && entries.length > 0) {
+    const topScore = entries.reduce((m, e) => Math.max(m, e.score), 0);
+    record.top_share = topScore / totalScore;
+    // Flag when one account takes >50% of a day that had real breadth.
+    record.concentration_flag = entries.length >= 5 && record.top_share > 0.5;
+  }
+
   if (totalScore > 0) {
     let minted = 0;
     for (const e of entries) {
+      // PER-USER IDEMPOTENCY. The whole-run guard (`distribution:{date}`) is
+      // only written after the loop, so a run cut short mid-way (KV error,
+      // CPU limit) previously re-credited everyone who already got paid on
+      // the retry. This marker makes each credit exactly-once per day.
+      const creditKey = `distcredit:${yesterday}:${e.userId}`;
+      if (await env.PAYOUTS.get(creditKey)) continue;
+
       const userData = await env.USERS.get(`user:${e.userId}`);
       if (!userData) continue;
       const user = JSON.parse(userData);
@@ -3958,15 +4534,20 @@ async function runDailyDistribution(env) {
       const bls = dailyEmission * (e.score / totalScore);
       user.bliss_balance = (user.bliss_balance || 0) + bls;
       await env.USERS.put(`user:${e.userId}`, JSON.stringify(user));
+      await env.PAYOUTS.put(creditKey, String(bls), { expirationTtl: 86400 * 30 });
+      // Advance the supply counters per credit rather than once at the end,
+      // so an interrupted run leaves supply consistent with balances instead
+      // of silently under-counting minted BLS.
+      const supplyNow = parseFloat(await env.PAYOUTS.get('bliss:current_supply') || String(BLISS_INITIAL_SUPPLY));
+      await env.PAYOUTS.put('bliss:current_supply', String(supplyNow + bls));
+      const distNow = parseFloat(await env.PAYOUTS.get('bliss:total_distributed') || '0');
+      await env.PAYOUTS.put('bliss:total_distributed', String(distNow + bls));
       record.recipients.push({ user_id: e.userId, score: e.score, bls });
       minted += bls;
     }
+    // NOTE: supply/total_distributed are advanced INSIDE the loop, per
+    // credit. Do not also add `minted` here — that would double-count.
     record.minted = minted;
-    // Only what was actually credited is minted — supply never inflates
-    // toward banned/deleted accounts or empty days.
-    await env.PAYOUTS.put('bliss:current_supply', (supply + minted).toString());
-    const distributed = parseFloat(await env.PAYOUTS.get('bliss:total_distributed') || '0');
-    await env.PAYOUTS.put('bliss:total_distributed', (distributed + minted).toString());
   }
 
   await env.PAYOUTS.put(`distribution:${yesterday}`, JSON.stringify(record), { expirationTtl: 86400 * 365 * 5 });
@@ -3994,13 +4575,6 @@ async function runDailyPayout(env) {
   const scarce = treasuryUsd <= hwm * TREASURY_SCARCITY_RATIO;
   const dripRate = scarce ? TREASURY_SCARCITY_RATE : TREASURY_DRIP_RATE;
   const dailyDripUsd = treasuryUsd * dripRate;
-
-  // Decay the high-water mark toward remaining so a one-time large
-  // deposit can't pin the system in scarcity mode forever.
-  if (hwm > treasuryUsd) {
-    hwm = Math.max(treasuryUsd, hwm * (1 - TREASURY_HWM_DECAY));
-  }
-  await env.PAYOUTS.put('treasury:hwm', hwm.toString());
 
   if (dailyDripUsd < 0.50) return null; // below Stripe's practical floor
 
@@ -4042,6 +4616,11 @@ async function runDailyPayout(env) {
     if (amountCents < 50) continue; // Stripe minimum: $0.50
 
     try {
+      // Deterministic idempotency key: if this cron is retried (or a manual
+      // admin run overlaps), Stripe replays the original transfer instead of
+      // sending a SECOND real payment. Without it, an error late in the loop
+      // re-paid everyone already paid on the next attempt.
+      const idemKey = `bliss-payout-${yesterday}-${c.user_id}`;
       const transfer = await stripeRequest('POST', '/transfers', {
         'amount': amountCents.toString(),
         'currency': 'usd',
@@ -4049,20 +4628,32 @@ async function runDailyPayout(env) {
         'description': `Bliss daily payout - ${c.username}`,
         'metadata[user_id]': c.user_id,
         'metadata[date]': yesterday,
-      }, env);
+      }, env, idemKey);
 
       if (!transfer.error) {
         payouts.push({ user_id: c.user_id, username: c.username, amount_usd: amountCents / 100, transfer_id: transfer.id });
         totalPaid += amountCents / 100;
+        // Debit incrementally so an interrupted run leaves the treasury
+        // consistent with money that actually left. Re-read each time: a
+        // deposit webhook landing mid-loop would otherwise be erased by a
+        // stale end-of-loop write.
+        const tNow = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
+        await env.PAYOUTS.put('treasury:total_usd', String(Math.max(0, tNow - amountCents / 100)));
+        const pNow = parseFloat(await env.PAYOUTS.get('payouts:total_paid') || '0');
+        await env.PAYOUTS.put('payouts:total_paid', String(pNow + amountCents / 100));
       }
     } catch (e) { /* skip failed transfer, continue with others */ }
   }
 
-  // Debit only what was actually transferred (skipped sub-minimum
-  // shares stay in the treasury for future cycles).
-  await env.PAYOUTS.put('treasury:total_usd', (treasuryUsd - totalPaid).toString());
-  const paidTotal = parseFloat(await env.PAYOUTS.get('payouts:total_paid') || '0');
-  await env.PAYOUTS.put('payouts:total_paid', (paidTotal + totalPaid).toString());
+  // Decay the high-water mark toward remaining so a one-time large deposit
+  // can't pin the system in scarcity mode forever. Applied HERE — after a
+  // payout actually ran — because doing it before the early returns meant
+  // every no-op day (empty treasury, sub-$0.50 drip, no eligible
+  // contributors) still compounded the decay.
+  if (hwm > treasuryUsd) {
+    hwm = Math.max(treasuryUsd, hwm * (1 - TREASURY_HWM_DECAY));
+  }
+  await env.PAYOUTS.put('treasury:hwm', hwm.toString());
 
   const record = {
     date: new Date().toISOString(), score_date: yesterday,
@@ -4087,6 +4678,10 @@ function publicUser(user) {
     avatar_url: user.avatar_url || null,
     discord_id: user.discord_id || null,
     bliss_balance: user.bliss_balance || 0,
+    // The web app deserializes this into User.ticket_balance. Omitting it
+    // meant every /api/auth/me refresh reset the displayed Ticket balance to
+    // zero and re-persisted that zero to localStorage.
+    ticket_balance: user.ticket_balance || 0,
     created_at: user.created_at,
   };
 }

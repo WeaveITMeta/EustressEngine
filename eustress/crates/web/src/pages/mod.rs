@@ -62,6 +62,7 @@ pub mod terms;
 pub mod tickets;
 pub mod trust_registry;
 pub mod kyc;
+pub mod verify;
 pub mod license;
 pub mod support;
 
@@ -119,5 +120,6 @@ pub use terms::TermsPage;
 pub use tickets::TicketsPage;
 pub use trust_registry::TrustRegistryPage;
 pub use kyc::KycPage;
+pub use verify::VerifyPage;
 pub use license::LicensePage;
 pub use support::SupportPage;

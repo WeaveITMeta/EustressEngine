@@ -1,0 +1,47 @@
+{
+  "app_version_histogram": {
+    "0.1.0": 30
+  },
+  "beacon_startup_cost_us": {
+    "budget": 20000,
+    "max": 179815,
+    "mean": 18562,
+    "note": "Microseconds spent in begin_session (ledger scan + orphan reconcile + fsynced append). Budget is the item's 20 ms startup ceiling.",
+    "sessions_measured": 26
+  },
+  "crash_free_rate": 0.7666666666666666,
+  "date_range_utc": {
+    "first_session_start": "2026-08-13T05:39:16Z",
+    "last_session_end": "2026-08-13T14:18:39Z"
+  },
+  "detector_proof": {
+    "clean_exits": 23,
+    "hard_deaths_reconciled_as_orphans": 4,
+    "induced_panics_recorded": 3
+  },
+  "end_reason_histogram": {
+    "clean": 23,
+    "orphaned": 4,
+    "panic": 3
+  },
+  "end_records_without_start_ignored": 0,
+  "engine_commit_histogram": {
+    "unknown": 30
+  },
+  "generated_at": "2026-08-13T16:26:35Z",
+  "item": "G7.30",
+  "ledger_files_read": 1,
+  "malformed_lines_ignored": 0,
+  "os_histogram": {
+    "windows/x86_64": 30
+  },
+  "sessions_total": 30,
+  "sessions_unclean": 7,
+  "sessions_unreconciled_at_read": 0,
+  "surface_histogram": {
+    "headless": 30
+  },
+  "telemetry_dir_requested": "C:/Users/miksu/Eustress/telemetry",
+  "telemetry_dir_used": "C:\\Users\\miksu\\AppData\\Local\\Eustress\\telemetry",
+  "what": "Crash-free-session baseline computed from the local session ledger."
+}

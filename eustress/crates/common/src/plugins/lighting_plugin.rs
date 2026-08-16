@@ -1,157 +1,121 @@
 //! # Shared Lighting Plugin
-//! 
-//! Common lighting implementation for both Engine and Client.
-//! Provides:
-//! - Procedural skybox generation
-//! - Sun/DirectionalLight setup and updates
-//! - Time of day system
-//! - Ambient lighting
-//! - Global fog (affects all entities: BaseParts, Terrain, Models)
-//! - Realtime-filtered environment maps with AtmosphereEnvironmentMapLight
+//!
+//! Common lighting for both Engine and Client: the sun, the moon, ambient fill,
+//! and global distance fog.
+//!
+//! Sky rendering, atmospheric scattering and image-based lighting live in
+//! [`crate::plugins::sky_atmosphere`]; local reflections live in
+//! [`crate::plugins::reflections`]. This plugin pulls both in, so adding
+//! `SharedLightingPlugin` still gets you the whole lighting stack.
+//!
+//! ## One writer per resource
+//!
+//! Every value here has exactly one system that owns it. That is not a style
+//! preference: three unordered systems used to write `GlobalAmbientLight` with
+//! scales that differed by three orders of magnitude (`brightness * 500 *
+//! night`, `brightness * 500 * exposure`, and `0.3 + 0.4 * elevation`), so which
+//! one you got depended on schedule order. Two more fought over the sun's
+//! `DirectionalLight` with different intensity curves.
+//!
+//! - `GlobalAmbientLight` is owned by [`update_ambient_light`] and nothing else.
+//!   Time of day, exposure compensation and the diffuse environment scale are
+//!   all folded into that one write.
+//! - The sun's `DirectionalLight` is owned by [`update_sun_position`].
+//! - The moon's `DirectionalLight` is owned by [`update_moon_position`].
 
 use bevy::prelude::*;
+use bevy::light::{GlobalAmbientLight, SunDisk};
 use bevy::pbr::{DistanceFog, FogFalloff};
-// 0.19: Atmosphere, ScatteringMedium and Skybox all moved to bevy_light.
-use bevy::light::{Atmosphere as BevyAtmosphere, Skybox, GlobalAmbientLight, SunDisk};
-use bevy::light::atmosphere::ScatteringMedium; // pub via the atmosphere module, not the bevy_light root
-use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension, Extent3d, TextureDimension, TextureFormat};
 use tracing::info;
 
-use crate::services::lighting::{LightingService, Sun as SunMarker, Moon as MoonMarker, FillLight, EustressAtmosphere, AtmosphereRenderingMode};
-use crate::classes::{Sky, Sun as SunClass, Moon as MoonClass};
+use crate::classes::{Moon as MoonClass, Sky, Sun as SunClass};
+use crate::plugins::reflections::ReflectionsPlugin;
+use crate::plugins::sky_atmosphere::SkyAtmospherePlugin;
+use crate::services::lighting::{
+    EustressAtmosphere, FillLight, LightingService, Moon as MoonMarker, Sun as SunMarker,
+};
+
+// Re-exported so existing call sites keep working now that these live in the
+// sky module. `NoAtmosphere` in particular is used by the engine's AI camera and
+// the Slint overlay camera to opt out of sky handling entirely.
+// `SkyConfig`, not `SkySettings`: `services::lighting` already owns that name
+// for a different thing (procedural/sun-visible/star-visible toggles).
+pub use crate::plugins::sky_atmosphere::{
+    create_gradient_skybox, create_star_field, ActiveSkyMode, NoAtmosphere, SceneAtmosphere,
+    SkyCamera, SkyConfig, SkyMode, StarField,
+};
 
 // ============================================================================
 // Plugin
 // ============================================================================
 
-/// Shared lighting plugin for Engine and Client
-/// 
-/// Registers:
-/// - LightingService resource
-/// - Sky, Atmosphere, Sun, FillLight components
-/// - Lighting setup and update systems
+/// Shared lighting plugin for Engine and Client.
 pub struct SharedLightingPlugin;
 
 impl Plugin for SharedLightingPlugin {
     fn build(&self, app: &mut App) {
         app
-            // Resources
+            // Sky, atmosphere and image-based lighting.
+            .add_plugins(SkyAtmospherePlugin)
+            // Local reflection probes and (opt-in) screen-space reflections.
+            .add_plugins(ReflectionsPlugin)
             .init_resource::<LightingService>()
-            .init_resource::<SkyboxHandle>()
-            .init_resource::<SceneAtmosphere>()
             .register_type::<LightingService>()
-            
-            // Components
             .register_type::<Sky>()
             .register_type::<SunMarker>()
             .register_type::<SunClass>()
             .register_type::<MoonClass>()
             .register_type::<FillLight>()
-            .register_type::<EustressAtmosphere>()
-            .register_type::<AtmosphereRenderingMode>()
-            
-            // Systems
             .add_systems(Startup, setup_lighting)
-            .add_systems(Update, (
-                update_sun_position,
-                update_moon_position,
-                update_ambient_light,
-                update_exposure_compensation,
-                update_fog_settings,
-                // Regenerate skybox after sun position updates so the sun disk tracks time of day
-                regenerate_skybox_on_sun_change.after(update_sun_position),
-                attach_skybox_to_cameras,
-                apply_atmosphere_to_cameras.after(attach_skybox_to_cameras),
-                update_atmosphere_effects,
-                sync_sun_class_to_sundisk,
-                sync_clock_time_to_sun,
-            ));
+            .add_systems(
+                Update,
+                (
+                    sync_clock_time_to_sun,
+                    update_sun_position.after(sync_clock_time_to_sun),
+                    update_moon_position.after(sync_clock_time_to_sun),
+                    // Sole owner of GlobalAmbientLight. Ordered after the sun so
+                    // it reads this frame's elevation, not last frame's.
+                    update_ambient_light.after(update_sun_position),
+                    update_fog_settings,
+                    sync_sun_class_to_sundisk,
+                ),
+            );
     }
 }
 
 // ============================================================================
-// Scene Atmosphere Resource
+// Setup
 // ============================================================================
 
-// Note: Bevy's built-in Atmosphere component was removed; using custom EustressAtmosphere instead
-// #[derive(Component)]
-// pub struct SceneAtmosphere {
-//     pub atmosphere: BevyAtmosphere,
-// }
-
-/// Global scene atmosphere configuration
-/// Applied to all cameras that don't have their own EustressAtmosphere component
-#[derive(Resource, Clone, Debug)]
-pub struct SceneAtmosphere {
-    pub atmosphere: EustressAtmosphere,
-}
-
-impl Default for SceneAtmosphere {
-    fn default() -> Self {
-        Self {
-            // Default to a pleasant day with light haze
-            atmosphere: EustressAtmosphere {
-                density: 0.35,
-                haze: 0.15,  // Light haze for depth perception
-                glare: 0.05,
-                color: [0.529, 0.808, 0.922, 1.0],  // Sky blue matching skybox
-                decay: [0.7, 0.8, 0.9, 1.0],        // Light blue-gray horizon
-                ..EustressAtmosphere::default()
-            },
-        }
-    }
-}
-
-// ============================================================================
-// Resources
-// ============================================================================
-
-/// Stores the skybox image handle
-#[derive(Resource, Default)]
-pub struct SkyboxHandle {
-    pub handle: Option<Handle<Image>>,
-}
-
-// ============================================================================
-// Systems
-// ============================================================================
-
-/// Helper to convert [f32; 4] to Color
 fn arr_to_color(arr: [f32; 4]) -> Color {
     Color::srgba(arr[0], arr[1], arr[2], arr[3])
 }
 
-/// Setup initial lighting (sun, fill light, ambient, skybox)
-fn setup_lighting(
-    mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-    mut skybox_handle: ResMut<SkyboxHandle>,
-    lighting: Res<LightingService>,
-) {
-    info!("💡 SharedLightingPlugin: Setting up Bevy Atmosphere lighting...");
-
-    // Keep procedural skybox as fallback / for editor preview
-    let handle = create_procedural_skybox(&mut images, &lighting);
-    skybox_handle.handle = Some(handle);
-
-    // Sun and Moon entities are NOT spawned here. Each Space owns its
-    // lighting via Lighting/*.instance.toml files. The file loader spawns
-    // bare Instance entities; the engine-side hydrate_lighting_entities
-    // system attaches DirectionalLight, SunMarker, SunClass, MoonMarker,
-    // MoonClass, cascade shadows, SunDisk, etc. on the next Update frame.
-    //
-    // This avoids duplicates on Space switch (old entities are despawned,
-    // new TOMLs are loaded, hydration fires) and lets each Space carry
-    // its own lighting configuration (time of day, latitude, etc.).
-
-    // No fill lights — Bevy's Atmosphere + Environment Map handles ambient
+/// Set the ambient baseline. Everything else is loaded per Space.
+///
+/// Sun and Moon entities are deliberately not spawned here: each Space owns its
+/// lighting through `Lighting/*.instance.toml`. The file loader spawns bare
+/// `Instance` entities and the engine's `hydrate_lighting_entities` attaches
+/// `DirectionalLight`, `SunMarker`, cascade shadows and `SunDisk` on the next
+/// frame. That keeps a Space switch from leaving duplicates behind, and lets
+/// each Space carry its own time of day and latitude.
+fn setup_lighting(mut commands: Commands) {
     commands.insert_resource(GlobalAmbientLight::NONE);
-
-    info!("✅ Skybox + ambient setup complete (lighting entities loaded from Space)");
+    info!("💡 SharedLightingPlugin ready (lighting entities load from the Space)");
 }
 
-/// Update sun position and properties based on LightingService
-/// Includes real-time shadow softness control
+// ============================================================================
+// Sun
+// ============================================================================
+
+/// Advance the day/night cycle and drive the sun's `DirectionalLight`.
+///
+/// The single owner of the sun light. The engine used to run a second system
+/// over the same entity with a different intensity curve
+/// (`lighting.sun_intensity * elevation^0.4` here against
+/// `SunClass::current_intensity()` there); the two are merged, with `SunClass`
+/// winning because its noon/horizon interpolation is the better model and it is
+/// what the Properties panel edits.
 fn update_sun_position(
     lighting: Option<ResMut<LightingService>>,
     mut sun_query: Query<(&mut DirectionalLight, &mut Transform), With<SunMarker>>,
@@ -164,69 +128,106 @@ fn update_sun_position(
         let day_length_secs = lighting.day_length_minutes * 60.0;
         if day_length_secs > 0.0 {
             lighting.time_of_day += time.delta_secs() / day_length_secs;
-            if lighting.time_of_day > 1.0 { lighting.time_of_day -= 1.0; }
+            if lighting.time_of_day > 1.0 {
+                lighting.time_of_day -= 1.0;
+            }
         }
     } else {
         lighting.bypass_change_detection();
     }
 
-    // Only update the Sun entity when LightingService actually changed (or the
-    // cycle is running). Without this guard every frame mutably borrows
-    // `sun_transform`, which marks `Changed<Transform>` on the Sun entity and
-    // causes `write_instance_changes_system` to flush `Sun.instance.toml` to
-    // disk every frame → file-watcher loop → class_schema self-heal every ~2 s
-    // → visible FPS stutter.
-    if !lighting.is_changed() && !lighting.cycle_enabled {
+    // Only touch the Sun entity when something actually changed. Without this
+    // guard every frame mutably borrows `sun_transform`, which marks
+    // `Changed<Transform>` and makes `write_instance_changes_system` flush
+    // `Sun.instance.toml` to disk every frame, which trips the file watcher,
+    // which re-runs the class-schema self-heal every couple of seconds. The
+    // symptom is a visible FPS stutter with no obvious cause.
+    let sun_class_changed = !sun_class_query.is_empty() && lighting.is_changed();
+    if !lighting.is_changed() && !lighting.cycle_enabled && !sun_class_changed {
         return;
     }
 
-    if let Ok((mut sun_light, mut sun_transform)) = sun_query.single_mut() {
-        // Use SunClass direction if available (proper solar math with latitude),
-        // otherwise fall back to LightingService's simple formula.
-        let sun_dir = sun_class_query.iter().next()
-            .map(|sc| sc.direction())
-            .unwrap_or_else(|| lighting.sun_direction());
+    let Ok((mut sun_light, mut sun_transform)) = sun_query.single_mut() else {
+        return;
+    };
 
-        sun_light.color = arr_to_color(lighting.sun_color);
-        let elevation = sun_dir.y;
-        let intensity_factor = elevation.max(0.0).powf(0.4);
-        sun_light.illuminance = lighting.sun_intensity * intensity_factor;
-        sun_light.shadow_maps_enabled = elevation > 0.05;
+    let sun_class = sun_class_query.iter().next();
+    let sun_dir = sun_class
+        .map(|sc| sc.direction())
+        .unwrap_or_else(|| lighting.sun_direction());
 
-        let sun_distance = 100.0;
-        sun_transform.translation = sun_dir * sun_distance;
-        sun_transform.look_at(Vec3::ZERO, Vec3::Y);
+    let scale = brightness_scale(&lighting);
+    match sun_class {
+        // SunClass models colour and intensity against solar elevation, so a
+        // low sun reddens and dims the way it should.
+        Some(sc) => {
+            sun_light.color = arr_to_color(sc.current_color());
+            sun_light.illuminance = sc.current_intensity() * scale;
+            sun_light.shadow_maps_enabled = sc.cast_shadows && sun_dir.y > 0.05;
+        }
+        None => {
+            sun_light.color = arr_to_color(lighting.sun_color);
+            sun_light.illuminance = lighting.sun_intensity * sun_dir.y.max(0.0).powf(0.4) * scale;
+            sun_light.shadow_maps_enabled = lighting.shadows_enabled && sun_dir.y > 0.05;
+        }
+    }
+
+    sun_transform.translation = sun_dir * 100.0;
+    sun_transform.look_at(Vec3::ZERO, Vec3::Y);
+}
+
+/// Keep `SunDisk::angular_size` in step with the authored `Sun.angular_size`.
+///
+/// The disc is drawn by bevy's atmosphere from this component, so it is the one
+/// place the sun's apparent size is set.
+fn sync_sun_class_to_sundisk(mut sun_query: Query<(&SunClass, &mut SunDisk), Changed<SunClass>>) {
+    for (sun_class, mut sun_disk) in sun_query.iter_mut() {
+        let new_angular_size = sun_class.angular_size.to_radians();
+        if (sun_disk.angular_size - new_angular_size).abs() > 0.001 {
+            sun_disk.angular_size = new_angular_size;
+            info!(
+                "☀️ Sun angular_size synced: {:.1}° → {:.4} rad",
+                sun_class.angular_size, new_angular_size
+            );
+        }
     }
 }
 
-/// Update ambient light based on LightingService and sun elevation.
-/// At night, ambient drops to near-zero so the sky darkens properly.
-fn update_ambient_light(
+/// Parse `LightingService.clock_time` into `Sun.time_of_day`.
+fn sync_clock_time_to_sun(
     lighting: Res<LightingService>,
-    sun_class_query: Query<&SunClass, With<SunMarker>>,
-    mut ambient: ResMut<GlobalAmbientLight>,
+    mut sun_query: Query<&mut SunClass, With<SunMarker>>,
 ) {
-    let sun_dir = sun_class_query.iter().next()
-        .map(|sc| sc.direction())
-        .unwrap_or_else(|| lighting.sun_direction());
-    let sun_y = sun_dir.y;
-
-    // Night factor: 1.0 at day, fades to 0.02 at night
-    let night_factor = if sun_y > 0.1 { 1.0 }
-        else if sun_y > -0.15 { ((sun_y + 0.15) / 0.25).clamp(0.02, 1.0) }
-        else { 0.02 };
-
-    ambient.color = arr_to_color(lighting.ambient);
-    ambient.brightness = lighting.brightness * 500.0 * night_factor;
+    if !lighting.is_changed() {
+        return;
+    }
+    let time_of_day =
+        parse_clock_time(&lighting.clock_time).unwrap_or(lighting.time_of_day * 24.0);
+    for mut sun in sun_query.iter_mut() {
+        if (sun.time_of_day - time_of_day).abs() > 0.01 {
+            sun.time_of_day = time_of_day;
+        }
+    }
 }
 
-/// Update moon position and properties using realistic orbital mechanics
-/// 
-/// The Moon follows a realistic orbital path:
-/// - Position is based on elongation from Sun (not simply opposite)
-/// - Orbital inclination of ~5.1° to the ecliptic
-/// - Phase is determined by Sun-Moon angle (elongation)
-/// - Geographic latitude affects the Moon's path just like the Sun
+/// Parse `"HH:MM:SS"`, `"HH:MM"` or `"HH"` into hours.
+fn parse_clock_time(clock_time: &str) -> Option<f32> {
+    let parts: Vec<&str> = clock_time.split(':').collect();
+    let hours: f32 = parts.first()?.trim().parse().ok()?;
+    let minutes: f32 = parts.get(1).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+    let seconds: f32 = parts.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+    Some(hours + minutes / 60.0 + seconds / 3600.0)
+}
+
+// ============================================================================
+// Moon
+// ============================================================================
+
+/// Drive the moon's `DirectionalLight` from real orbital mechanics.
+///
+/// The sole owner of the moon light. The engine's celestial plugin used to
+/// reach it too, through a `Without<Sun>` query that matched every directional
+/// light that was not the sun, and drove it with *sun* data.
 fn update_moon_position(
     lighting: Res<LightingService>,
     mut moon_query: Query<(&mut DirectionalLight, &mut Transform, &MoonClass), With<MoonMarker>>,
@@ -235,575 +236,273 @@ fn update_moon_position(
     if !lighting.is_changed() && !lighting.cycle_enabled {
         return;
     }
-    
-    // Get Sun data for realistic moon positioning
-    let sun_data = sun_query.iter().next().map(|s| s.clone()).unwrap_or_else(|| {
-        // Create a default Sun based on LightingService if no Sun entity exists
-        crate::classes::Sun {
-            time_of_day: lighting.time_of_day * 24.0,
-            latitude: lighting.geographic_latitude,
-            ..Default::default()
-        }
+
+    let sun_data = sun_query.iter().next().cloned().unwrap_or_else(|| SunClass {
+        time_of_day: lighting.time_of_day * 24.0,
+        latitude: lighting.geographic_latitude,
+        ..Default::default()
     });
-    
+
     if let Ok((mut moon_light, mut moon_transform, moon_data)) = moon_query.single_mut() {
-        // Calculate moon direction using realistic orbital mechanics
         let moon_dir = moon_data.direction_realistic(&sun_data);
-        
-        // Get sun elevation for intensity calculations
         let sun_elevation = sun_data.elevation();
-        
-        // Moon illumination based on phase (elongation from sun)
         let phase_illumination = moon_data.illumination();
-        
-        // Moon visibility based on sun position
-        let moon_intensity = moon_data.current_intensity(sun_elevation) * phase_illumination;
-        
-        moon_light.illuminance = moon_intensity.max(0.01); // Minimum visibility
-        moon_light.shadow_maps_enabled = sun_elevation < -0.1 && phase_illumination > 0.3;
-        
-        // Position moon in sky
-        let moon_distance = 100.0;
-        moon_transform.translation = moon_dir * moon_distance;
+
+        moon_light.color = arr_to_color(moon_data.color);
+        moon_light.illuminance =
+            (moon_data.current_intensity(sun_elevation) * phase_illumination).max(0.01);
+        moon_light.shadow_maps_enabled =
+            moon_data.cast_shadows && sun_elevation < -0.1 && phase_illumination > 0.3;
+
+        moon_transform.translation = moon_dir * 100.0;
         moon_transform.look_at(Vec3::ZERO, Vec3::Y);
     }
 }
 
-/// Update exposure compensation
-/// Affects overall scene brightness/exposure via ambient light adjustment
-fn update_exposure_compensation(
-    lighting: Res<LightingService>,
-    mut ambient: ResMut<GlobalAmbientLight>,
-) {
-    if !lighting.is_changed() {
-        return;
-    }
-    // Adjust ambient brightness based on exposure compensation
-    let exposure_factor = 2.0_f32.powf(lighting.exposure_compensation);
-    ambient.brightness = lighting.brightness * 500.0 * exposure_factor;
+// ============================================================================
+// Ambient
+// ============================================================================
+
+/// The `brightness` value that means "no change".
+///
+/// 2.0, matching the shipped Lighting `_service.toml` and Roblox's own
+/// `Lighting.Brightness` default, so an untouched Space renders at exactly its
+/// authored sun intensity.
+const BRIGHTNESS_REFERENCE: f32 = 2.0;
+
+/// How much `LightingService.brightness` scales the scene.
+///
+/// It scales the **sun**, not just the ambient fill. Previously it multiplied
+/// only ambient, which — once image-based lighting became the primary ambient
+/// source and the fill dropped to a fraction of its old value — left the slider
+/// with almost no visible authority. Sunlight is what a brightness control is
+/// expected to move.
+fn brightness_scale(lighting: &LightingService) -> f32 {
+    (lighting.brightness / BRIGHTNESS_REFERENCE).clamp(0.0, 64.0)
 }
 
-/// Update global fog settings based on LightingService
-/// Affects ALL entities: BaseParts, Terrain, Models, etc.
+/// Ambient fill when image-based lighting is carrying the scene.
+///
+/// With a working environment map the sky is the primary source of ambient
+/// light, so this term is a small fill on top rather than the main event.
+const AMBIENT_FILL_BASE: f32 = 80.0;
+
+/// Ambient when there is no environment map to lean on.
+///
+/// If the author disables the environment map (or the GPU cannot run bevy's
+/// filtering compute pipelines), ambient has to carry the scene alone or
+/// everything not directly lit goes black.
+const AMBIENT_NO_IBL_BASE: f32 = 500.0;
+
+/// The one and only writer of `GlobalAmbientLight`.
+///
+/// Folds in the inputs that used to be spread across three competing systems:
+/// time of day and `environment_diffuse_scale` (which was parsed out of the
+/// Properties panel into `LightingService` and then read by nothing at all).
+///
+/// `exposure_compensation` is deliberately NOT applied here. It is a camera
+/// property, and [`crate::plugins::sky_atmosphere`] now sets a real
+/// `Exposure` on every managed camera from it. Scaling ambient by it as well
+/// would apply it twice.
+///
+/// `environment_specular_scale` is likewise not applied here; it scales the
+/// environment map itself. Bevy exposes a single intensity that drives diffuse
+/// and specular IBL together, so the split is "specular scales the sky
+/// reflection, diffuse scales this fill".
+fn update_ambient_light(
+    lighting: Res<LightingService>,
+    scene_atmosphere: Res<SceneAtmosphere>,
+    sun_class_query: Query<&SunClass, With<SunMarker>>,
+    mut ambient: ResMut<GlobalAmbientLight>,
+) {
+    let sun_dir = sun_class_query
+        .iter()
+        .next()
+        .map(|sc| sc.direction())
+        .unwrap_or_else(|| lighting.sun_direction());
+    let sun_y = sun_dir.y;
+
+    // 1.0 in daylight, easing to 0.02 once the sun is well below the horizon.
+    let night_factor = if sun_y > 0.1 {
+        1.0
+    } else if sun_y > -0.15 {
+        ((sun_y + 0.15) / 0.25).clamp(0.02, 1.0)
+    } else {
+        0.02
+    };
+
+    let ibl_active = scene_atmosphere.atmosphere.environment_map_enabled
+        && scene_atmosphere.atmosphere.environment_intensity > 0.0;
+    let base = if ibl_active { AMBIENT_FILL_BASE } else { AMBIENT_NO_IBL_BASE };
+
+    ambient.color = arr_to_color(lighting.ambient);
+    ambient.brightness = base
+        * brightness_scale(&lighting)
+        * night_factor
+        * lighting.environment_diffuse_scale.max(0.0);
+}
+
+// ============================================================================
+// Fog
+// ============================================================================
+
+/// Apply global distance fog to the primary 3D camera.
+///
+/// Affects every entity: BaseParts, Terrain, Models.
 fn update_fog_settings(
     lighting: Res<LightingService>,
     mut camera_query: Query<(Entity, &Camera, Option<&mut DistanceFog>), With<Camera3d>>,
     mut commands: Commands,
 ) {
-    // Only update when lighting changes
     if !lighting.is_changed() {
         return;
     }
-    
+
     for (entity, camera, fog) in camera_query.iter_mut() {
-        // Only apply fog to the main 3D camera, not Slint overlay or other cameras
-        if camera.order != 0 { continue; }
-        if lighting.fog_enabled {
-            let fog_color = Color::srgba(
-                lighting.fog_color[0],
-                lighting.fog_color[1],
-                lighting.fog_color[2],
-                lighting.fog_color[3],
-            );
+        // Only the main 3D camera, not the Slint overlay or the AI camera.
+        if camera.order != 0 {
+            continue;
+        }
 
-            // Normalize fog range: `end` must be strictly greater than `start`
-            // for FogFalloff::Linear to produce a sensible fade. The values
-            // flow in from many sources — TOML service files, the Properties
-            // panel, Rune scripts, atmosphere sync — and any of them can get
-            // the pair reversed (the user reported `start: 5000, end: 2000`).
-            // Auto-swap reversed pairs, and if they're equal nudge `end`
-            // forward so the falloff math doesn't divide by zero.
-            let (fog_start, fog_end) = if lighting.fog_end > lighting.fog_start {
-                (lighting.fog_start, lighting.fog_end)
-            } else if lighting.fog_end < lighting.fog_start {
-                tracing::warn!(
-                    "🌫️ Fog range reversed (start: {}, end: {}) — swapping so end > start",
-                    lighting.fog_start, lighting.fog_end
-                );
-                (lighting.fog_end, lighting.fog_start)
-            } else {
-                (lighting.fog_start, lighting.fog_start + 1.0)
-            };
-
-            let new_fog = DistanceFog {
-                color: fog_color,
-                falloff: FogFalloff::Linear {
-                    start: fog_start,
-                    end: fog_end,
-                },
-                ..default()
-            };
-
-            if let Some(mut existing_fog) = fog {
-                // Update existing fog
-                existing_fog.color = new_fog.color;
-                existing_fog.falloff = new_fog.falloff;
-            } else {
-                // Add fog to camera
-                commands.entity(entity).insert(new_fog);
-                info!("🌫️ Global fog enabled (start: {}, end: {})", fog_start, fog_end);
-            }
-        } else {
-            // Remove fog if disabled
+        if !lighting.fog_enabled {
             if fog.is_some() {
                 commands.entity(entity).remove::<DistanceFog>();
                 info!("🌫️ Global fog disabled");
             }
-        }
-    }
-}
-
-// ============================================================================
-// Skybox Generation
-// ============================================================================
-
-/// Create a procedural gradient skybox cubemap
-/// 
-/// Generates a 6-face cubemap with realistic sky gradient:
-/// - Zenith (top): deep blue
-/// - Mid-sky: lighter blue  
-/// - Horizon: warm haze/white
-/// - Ground (below horizon): dark ground color
-/// Each face pixel is mapped to a 3D direction, then colored by elevation angle.
-pub fn create_procedural_skybox(
-    images: &mut Assets<Image>,
-    lighting: &LightingService,
-) -> Handle<Image> {
-    create_procedural_skybox_with_sun(images, lighting, None)
-}
-
-/// Inner skybox builder — accepts an optional explicit sun direction.
-/// When `sun_dir_override` is `Some`, it is used instead of `lighting.sun_direction()`
-/// so the live `SunClass::direction()` can be passed in for accurate tracking.
-pub fn create_procedural_skybox_with_sun(
-    images: &mut Assets<Image>,
-    lighting: &LightingService,
-    sun_dir_override: Option<Vec3>,
-) -> Handle<Image> {
-    const SIZE: u32 = 1024;
-    
-    // Time-of-day sky palette — lerp between day and night based on sun elevation
-    let sun_dir = sun_dir_override.unwrap_or_else(|| lighting.sun_direction());
-    let night_t = (-sun_dir.y).clamp(0.0, 0.3) / 0.3; // 0=day, 1=deep night
-
-    // Day palette
-    let day_zenith: [f32; 3] = [0.16, 0.32, 0.75];
-    let day_mid: [f32; 3] = [0.40, 0.60, 0.92];
-    let day_horizon: [f32; 3] = [0.75, 0.82, 0.90];
-
-    // Night palette — very dark for stars to show through atmosphere
-    let night_zenith: [f32; 3] = [0.01, 0.01, 0.03];
-    let night_mid: [f32; 3] = [0.02, 0.02, 0.06];
-    let night_horizon: [f32; 3] = [0.04, 0.04, 0.08];
-
-    let lerp3 = |a: [f32; 3], b: [f32; 3], t: f32| -> [f32; 3] {
-        [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
-    };
-
-    let zenith = lerp3(day_zenith, night_zenith, night_t);
-    let mid_sky = lerp3(day_mid, night_mid, night_t);
-    let horizon = lerp3(day_horizon, night_horizon, night_t);
-    let ground: [f32; 3] = [0.22 * (1.0 - night_t * 0.7), 0.22 * (1.0 - night_t * 0.7), 0.20 * (1.0 - night_t * 0.7)];
-    
-    let sun_angular_radius = lighting.sun_angular_radius.to_radians().max(0.005); // degrees → radians
-    let sun_color: [f32; 3] = [lighting.sun_color[0], lighting.sun_color[1], lighting.sun_color[2]];
-    // Corona extends 4x the sun disc radius for a soft glow
-    let corona_radius = sun_angular_radius * 4.0;
-    
-    let mut data = Vec::with_capacity((SIZE * SIZE * 6 * 4) as usize);
-    
-    // Cubemap face order: +X, -X, +Y, -Y, +Z, -Z
-    for face in 0..6u32 {
-        for py in 0..SIZE {
-            for px in 0..SIZE {
-                // Map pixel to [-1, 1] UV
-                let u = (px as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
-                let v = (py as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
-                
-                // Map face + UV to 3D direction
-                let (dx, dy, dz) = match face {
-                    0 => ( 1.0,  -v,  -u),  // +X
-                    1 => (-1.0,  -v,   u),  // -X
-                    2 => (   u, 1.0,   v),  // +Y (top)
-                    3 => (   u, -1.0, -v),  // -Y (bottom)
-                    4 => (   u,  -v, 1.0),  // +Z
-                    _ => (  -u,  -v, -1.0), // -Z
-                };
-                
-                // Normalize direction and get elevation
-                let len = (dx * dx + dy * dy + dz * dz).sqrt();
-                let nx = dx / len;
-                let ny = dy / len; // -1 (nadir) to +1 (zenith)
-                let nz = dz / len;
-                
-                // Sky gradient based on elevation
-                let (mut r, mut g, mut b) = if ny > 0.15 {
-                    // Above horizon: blend mid_sky → zenith
-                    let t = ((ny - 0.15) / 0.85).min(1.0);
-                    let t = t * t; // Ease-in for deeper blue at top
-                    (
-                        mid_sky[0] + (zenith[0] - mid_sky[0]) * t,
-                        mid_sky[1] + (zenith[1] - mid_sky[1]) * t,
-                        mid_sky[2] + (zenith[2] - mid_sky[2]) * t,
-                    )
-                } else if ny > -0.05 {
-                    // Horizon band: blend horizon ↔ mid_sky
-                    let t = ((ny + 0.05) / 0.20).min(1.0).max(0.0);
-                    (
-                        horizon[0] + (mid_sky[0] - horizon[0]) * t,
-                        horizon[1] + (mid_sky[1] - horizon[1]) * t,
-                        horizon[2] + (mid_sky[2] - horizon[2]) * t,
-                    )
-                } else {
-                    // Below horizon: blend horizon → ground
-                    let t = ((-ny - 0.05) / 0.35).min(1.0);
-                    let t = t.sqrt(); // Quick falloff to ground
-                    (
-                        horizon[0] + (ground[0] - horizon[0]) * t,
-                        horizon[1] + (ground[1] - horizon[1]) * t,
-                        horizon[2] + (ground[2] - horizon[2]) * t,
-                    )
-                };
-                
-                // Sun/Moon discs are rendered by the analytical SunDiscShader
-                // (resolution-independent, pixel-perfect at any distance).
-                // Cubemap only contains sky gradient + stars.
-
-                // Stars — visible at night, fade in during twilight
-                let pixel_faces_sky = ny > -0.02;
-                let sun_below = sun_dir.y < 0.0;
-                if sun_below && pixel_faces_sky {
-                    // Hash for pseudo-random star positions across the sphere
-                    let h1 = (nx * 127.1 + ny * 311.7 + nz * 74.7).sin() * 43758.5453;
-                    let star_seed = h1.fract().abs();
-                    let h2 = (nx * 269.5 + ny * 183.3 + nz * 421.1).sin() * 28947.7231;
-                    let star_seed2 = h2.fract().abs();
-                    let h3 = (nx * 419.2 + ny * 67.3 + nz * 253.9).sin() * 17654.3219;
-                    let star_seed3 = h3.fract().abs();
-
-                    // Star density: ~0.8% bright stars + ~2% dim stars
-                    let star_threshold = if star_seed3 > 0.5 { 0.992 } else { 0.980 };
-                    if star_seed > star_threshold {
-                        // Fade in as sun goes below horizon
-                        let night_factor = (-sun_dir.y).clamp(0.0, 0.2) * 5.0; // 0→1 over 0.2 sun_dir.y range
-                        let twinkle = 0.4 + 0.6 * star_seed2;
-
-                        // Brightness varies by star "magnitude"
-                        let magnitude = if star_seed > 0.998 { 1.5 } // bright stars
-                            else if star_seed > 0.995 { 1.0 }        // medium stars
-                            else { 0.5 };                              // dim stars
-                        let star_brightness = night_factor * twinkle * magnitude;
-
-                        // Color: blue-white (hot) to warm yellow (cool)
-                        let warmth = star_seed2;
-                        r = r + star_brightness * (0.85 + warmth * 0.15);
-                        g = g + star_brightness * (0.88 + (1.0 - warmth) * 0.12);
-                        b = b + star_brightness * (1.0 - warmth * 0.1);
-                    }
-                }
-
-                data.push((r.clamp(0.0, 1.0) * 255.0) as u8);
-                data.push((g.clamp(0.0, 1.0) * 255.0) as u8);
-                data.push((b.clamp(0.0, 1.0) * 255.0) as u8);
-                data.push(255);
-            }
-        }
-    }
-    
-    let mut image = Image::new(
-        Extent3d {
-            width: SIZE,
-            height: SIZE,
-            depth_or_array_layers: 6,
-        },
-        TextureDimension::D2,
-        data,
-        TextureFormat::Rgba8UnormSrgb,
-        bevy::asset::RenderAssetUsages::RENDER_WORLD,
-    );
-    
-    // Configure as cubemap
-    image.texture_view_descriptor = Some(TextureViewDescriptor {
-        dimension: Some(TextureViewDimension::Cube),
-        ..default()
-    });
-    
-    images.add(image)
-}
-
-/// Regenerate skybox when lighting colors change
-pub fn regenerate_skybox(
-    images: &mut Assets<Image>,
-    lighting: &LightingService,
-    skybox_handle: &mut SkyboxHandle,
-) {
-    let handle = create_procedural_skybox(images, lighting);
-    skybox_handle.handle = Some(handle);
-}
-
-// ============================================================================
-// Skybox Attachment System
-// ============================================================================
-
-/// Marker component for cameras that have had skybox attached
-#[derive(Component)]
-pub struct SkyboxAttached;
-
-/// Automatically attach skybox to any Camera3d that doesn't have one
-/// This ensures both Engine and Client cameras get the skybox
-fn attach_skybox_to_cameras(
-    mut commands: Commands,
-    skybox_handle: Res<SkyboxHandle>,
-    cameras_without_skybox: Query<Entity, (With<Camera3d>, Without<Skybox>, Without<SkyboxAttached>, Without<NoAtmosphere>)>,
-) {
-    // Only proceed if we have a skybox handle
-    let Some(ref skybox_image) = skybox_handle.handle else {
-        return;
-    };
-
-    for camera_entity in cameras_without_skybox.iter() {
-        // Skip cameras that will get Atmosphere (Atmosphere replaces Skybox for sky rendering)
-        info!("🌅 Attaching skybox to camera {:?}", camera_entity);
-
-        commands.entity(camera_entity).insert((
-            Skybox {
-                image: Some(skybox_image.clone()),
-                brightness: 1000.0,
-                rotation: Quat::IDENTITY,
-            },
-            EnvironmentMapLight {
-                diffuse_map: skybox_image.clone(),
-                specular_map: skybox_image.clone(),
-                intensity: 400.0,
-                rotation: Quat::IDENTITY,
-                affects_lightmapped_mesh_diffuse: false,
-            },
-            // SSAO requires Msaa::Off which conflicts with MSAA anti-aliasing.
-            // MSAA is more important for visual quality, so SSAO is disabled.
-            // bevy::pbr::ScreenSpaceAmbientOcclusion::default(),
-            SkyboxAttached, // Mark as processed
-        ));
-    }
-}
-
-// ============================================================================
-// Atmosphere System (Bevy 0.17 Raymarched Atmosphere)
-// ============================================================================
-
-/// Marker for cameras that have had atmosphere applied
-#[derive(Component)]
-pub struct AtmosphereApplied;
-
-/// Marker to exclude a camera from atmosphere/skybox systems (e.g. overlay cameras)
-#[derive(Component)]
-pub struct NoAtmosphere;
-
-/// Apply EustressAtmosphere settings to cameras
-/// 
-/// This system:
-/// 1. Applies scene-level atmosphere to cameras without custom atmosphere
-/// 2. Converts EustressAtmosphere to Bevy's Atmosphere component
-/// 3. Sets up AtmosphereSettings for raymarching mode
-/// 4. Enables AtmosphereEnvironmentMapLight for dynamic reflections
-/// 
-/// Note: Bevy 0.17's Atmosphere and AtmosphereSettings components are used
-/// when available. This provides a compatibility layer.
-fn apply_atmosphere_to_cameras(
-    mut commands: Commands,
-    scene_atmosphere: Res<SceneAtmosphere>,
-    mut mediums: ResMut<Assets<ScatteringMedium>>,
-    mut cached_medium: Local<Option<Handle<ScatteringMedium>>>,
-    cameras_without_atmosphere: Query<
-        Entity,
-        (With<Camera3d>, Without<AtmosphereApplied>, Without<NoAtmosphere>)
-    >,
-    cameras_with_custom: Query<
-        (Entity, &EustressAtmosphere),
-        (With<Camera3d>, Without<AtmosphereApplied>, Without<NoAtmosphere>)
-    >,
-) {
-    // Early exit if no cameras need atmosphere
-    if cameras_without_atmosphere.is_empty() && cameras_with_custom.is_empty() {
-        return;
-    }
-
-    // Create the scattering medium once and cache the handle
-    let medium_handle = cached_medium.get_or_insert_with(|| {
-        mediums.add(ScatteringMedium::earth(256, 256))
-    }).clone();
-
-    // Apply custom atmosphere to cameras that have EustressAtmosphere component
-    for (camera_entity, atmosphere) in cameras_with_custom.iter() {
-        apply_atmosphere_settings(&mut commands, camera_entity, atmosphere, &medium_handle);
-    }
-
-    // Apply scene atmosphere to cameras without custom atmosphere
-    for camera_entity in cameras_without_atmosphere.iter() {
-        if cameras_with_custom.iter().any(|(e, _)| e == camera_entity) {
             continue;
         }
-        apply_atmosphere_settings(&mut commands, camera_entity, &scene_atmosphere.atmosphere, &medium_handle);
+
+        let fog_color = arr_to_color(lighting.fog_color);
+
+        // `end` must be strictly greater than `start` for a linear falloff to
+        // mean anything. These values arrive from TOML service files, the
+        // Properties panel, Rune scripts and the atmosphere sync, and any of
+        // those can get the pair backwards. Swap a reversed pair rather than
+        // rendering nonsense, and nudge an equal pair so the falloff maths does
+        // not divide by zero.
+        let (fog_start, fog_end) = if lighting.fog_end > lighting.fog_start {
+            (lighting.fog_start, lighting.fog_end)
+        } else if lighting.fog_end < lighting.fog_start {
+            tracing::warn!(
+                "🌫️ Fog range reversed (start: {}, end: {}) — swapping so end > start",
+                lighting.fog_start,
+                lighting.fog_end
+            );
+            (lighting.fog_end, lighting.fog_start)
+        } else {
+            (lighting.fog_start, lighting.fog_start + 1.0)
+        };
+
+        let falloff = FogFalloff::Linear { start: fog_start, end: fog_end };
+
+        if let Some(mut existing_fog) = fog {
+            existing_fog.color = fog_color;
+            existing_fog.falloff = falloff;
+        } else {
+            commands
+                .entity(entity)
+                .insert(DistanceFog { color: fog_color, falloff, ..default() });
+            info!("🌫️ Global fog enabled (start: {fog_start}, end: {fog_end})");
+        }
     }
 }
 
-/// Apply Bevy's built-in Atmosphere to a camera entity.
-/// The Atmosphere shader renders raymarched sky + sun disc (via SunDisk on DirectionalLight).
-fn apply_atmosphere_settings(
-    commands: &mut Commands,
-    camera_entity: Entity,
-    _atmosphere: &EustressAtmosphere,
-    medium_handle: &Handle<ScatteringMedium>,
-) {
-    commands.entity(camera_entity).insert((
-        BevyAtmosphere::earth(medium_handle.clone()),
-        AtmosphereApplied,
-    ));
-    info!("🌍 Applied Bevy Atmosphere to camera {:?}", camera_entity);
-}
-
-/// Update atmosphere effects
-/// Note: Bevy's Atmosphere component was removed; atmosphere is simulated via fog + skybox
-fn update_atmosphere_effects(
-    _commands: Commands,
-    _scene_atmosphere: Res<SceneAtmosphere>,
-) {
-    // Atmosphere effects are handled via fog settings and skybox colors
-}
-
 // ============================================================================
-// Atmosphere Presets (convenience functions)
+// Atmosphere presets
 // ============================================================================
 
 impl SceneAtmosphere {
-    /// Set to clear day atmosphere
-    pub fn clear_day() -> Self {
-        Self {
-            atmosphere: EustressAtmosphere::clear_day(),
-        }
-    }
-    
-    /// Set to sunset atmosphere
-    pub fn sunset() -> Self {
-        Self {
-            atmosphere: EustressAtmosphere::sunset(),
-        }
-    }
-    
-    /// Set to foggy atmosphere
-    pub fn foggy() -> Self {
-        Self {
-            atmosphere: EustressAtmosphere::foggy(),
-        }
-    }
-    
-    /// Set to space view (raymarched)
-    pub fn space_view() -> Self {
-        Self {
-            atmosphere: EustressAtmosphere::space_view(),
-        }
-    }
-    
-    /// Set to flight simulator (raymarched)
-    pub fn flight_sim() -> Self {
-        Self {
-            atmosphere: EustressAtmosphere::flight_sim(),
-        }
+    /// Build a scene atmosphere from an authored [`EustressAtmosphere`].
+    pub fn from_atmosphere(atmosphere: EustressAtmosphere) -> Self {
+        Self { atmosphere }
     }
 }
 
-// ============================================================================
-// Sun/Moon Class Property Sync Systems
-// ============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Regenerate the procedural skybox cubemap whenever the sun position changes.
-/// This ensures the sun disk in the skybox tracks the time-of-day cycle.
-fn regenerate_skybox_on_sun_change(
-    lighting: Res<LightingService>,
-    sun_query: Query<&SunClass, With<SunMarker>>,
-    changed_sun_query: Query<&SunClass, (With<SunMarker>, Changed<SunClass>)>,
-    mut images: ResMut<Assets<Image>>,
-    mut skybox_handle: ResMut<SkyboxHandle>,
-    mut camera_query: Query<&mut Skybox, With<Camera3d>>,
-) {
-    // Rebuild when SunClass changes or LightingService changes.
-    // Throttle to every 60 frames (~1 second) to avoid regenerating 512x512x6 cubemap every frame.
-    static REGEN_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let frame = REGEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let has_changes = !changed_sun_query.is_empty() || lighting.is_changed();
-    if !has_changes || frame % 60 != 0 {
-        return;
+    #[test]
+    fn clock_time_parses_every_authored_shape() {
+        assert_eq!(parse_clock_time("14:30:00"), Some(14.5));
+        assert_eq!(parse_clock_time("14:30"), Some(14.5));
+        assert_eq!(parse_clock_time("14"), Some(14.0));
+        assert_eq!(parse_clock_time("06:15:36"), Some(6.26));
+        assert_eq!(parse_clock_time(""), None);
+        assert_eq!(parse_clock_time("not a time"), None);
     }
-    
-    // Get the live sun direction from SunClass (uses proper latitude/time_of_day solar math)
-    // and the current sun color for accurate disc rendering
-    let (sun_dir_override, sun_color_override) = if let Some(sun) = sun_query.iter().next() {
-        let dir = sun.direction();
-        let color = sun.current_color();
-        (Some(dir), Some(color))
-    } else {
-        (None, None)
-    };
-    
-    // Build snapshot with overridden sun color if available
-    let mut lighting_snapshot = lighting.clone();
-    if let Some(color) = sun_color_override {
-        lighting_snapshot.sun_color = color;
-    }
-    
-    let new_handle = create_procedural_skybox_with_sun(&mut images, &lighting_snapshot, sun_dir_override);
-    skybox_handle.handle = Some(new_handle.clone());
-    
-    // Update all cameras that already have a Skybox component
-    for mut skybox in camera_query.iter_mut() {
-        skybox.image = Some(new_handle.clone());
-    }
-}
 
-/// Sync Sun class angular_size property to SunDisk component in real-time
-fn sync_sun_class_to_sundisk(
-    mut sun_query: Query<(&SunClass, &mut SunDisk), Changed<SunClass>>,
-) {
-    for (sun_class, mut sun_disk) in sun_query.iter_mut() {
-        let new_angular_size = sun_class.angular_size.to_radians();
-        if (sun_disk.angular_size - new_angular_size).abs() > 0.001 {
-            sun_disk.angular_size = new_angular_size;
-            info!("☀️ Sun angular_size synced: {:.1}° → {:.4} rad",
-                  sun_class.angular_size, new_angular_size);
-        }
+    #[test]
+    fn ambient_drops_to_a_fill_once_ibl_is_carrying_the_scene() {
+        // The regression this guards: before the environment map worked, ambient
+        // was 500x and doing all the work. With real IBL that would double-light
+        // everything.
+        assert!(AMBIENT_FILL_BASE < AMBIENT_NO_IBL_BASE);
     }
-}
 
-/// Sync LightingService.clock_time to Sun.time_of_day for day/night cycle
-fn sync_clock_time_to_sun(
-    lighting: Res<LightingService>,
-    mut sun_query: Query<&mut SunClass, With<SunMarker>>,
-) {
-    if !lighting.is_changed() {
-        return;
+    #[test]
+    fn the_shipped_brightness_is_neutral() {
+        // An untouched Space must render at exactly its authored sun intensity,
+        // so the default `brightness` and `BRIGHTNESS_REFERENCE` have to agree.
+        let lighting = LightingService::default();
+        assert_eq!(lighting.brightness, BRIGHTNESS_REFERENCE);
+        assert!((brightness_scale(&lighting) - 1.0).abs() < 1e-6);
     }
-    
-    // Parse clock_time string (format: "HH:MM:SS" or "HH:MM") to time_of_day (0-24)
-    let time_of_day = parse_clock_time(&lighting.clock_time)
-        .unwrap_or(lighting.time_of_day * 24.0);
-    
-    for mut sun in sun_query.iter_mut() {
-        if (sun.time_of_day - time_of_day).abs() > 0.01 {
-            sun.time_of_day = time_of_day;
-        }
-    }
-}
 
-/// Parse clock time string to hours (0-24)
-/// Supports formats: "14:30:00", "14:30", "14"
-fn parse_clock_time(clock_time: &str) -> Option<f32> {
-    let parts: Vec<&str> = clock_time.split(':').collect();
-    if parts.is_empty() {
-        return None;
+    #[test]
+    fn brightness_has_real_authority_over_the_sun() {
+        // The report this guards: "changing lighting properties does not seem to
+        // have an impact". Brightness used to scale only the ambient fill, which
+        // is a small fraction of the light once image-based lighting carries the
+        // scene, so the slider looked broken.
+        let mut lighting = LightingService::default();
+        lighting.brightness = 4.0;
+        assert!((brightness_scale(&lighting) - 2.0).abs() < 1e-6, "double brightness = double sun");
+        lighting.brightness = 1.0;
+        assert!((brightness_scale(&lighting) - 0.5).abs() < 1e-6);
+        // Negative or absurd values must not invert or explode the sun.
+        lighting.brightness = -5.0;
+        assert_eq!(brightness_scale(&lighting), 0.0);
     }
-    
-    let hours: f32 = parts.first()?.parse().ok()?;
-    let minutes: f32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    let seconds: f32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    
-    Some(hours + minutes / 60.0 + seconds / 3600.0)
+
+    #[test]
+    fn the_sun_is_physical_sunlight() {
+        // The scene renders at ev100 13, bevy's calibration for RAW_SUNLIGHT.
+        // A sun authored in some other unit scale silently mismatches it: the
+        // old 15,000 lux was ~3.1 EV under, which read as "everything is dark".
+        let lighting = LightingService::default();
+        assert_eq!(lighting.sun_intensity, bevy::light::light_consts::lux::RAW_SUNLIGHT);
+        assert!(
+            lighting.sun_intensity > bevy::light::light_consts::lux::FULL_DAYLIGHT,
+            "direct sun must exceed diffuse full daylight"
+        );
+    }
+
+    #[test]
+    fn fog_range_normalisation_handles_a_reversed_pair() {
+        // The user-reported case was start: 5000, end: 2000.
+        let (start, end) = (5000.0f32, 2000.0f32);
+        let (s, e) = if end > start {
+            (start, end)
+        } else if end < start {
+            (end, start)
+        } else {
+            (start, start + 1.0)
+        };
+        assert!(e > s, "a reversed pair must come out ordered");
+        assert_eq!((s, e), (2000.0, 5000.0));
+    }
+
+    #[test]
+    fn fog_range_normalisation_handles_an_equal_pair() {
+        let (start, end) = (1000.0f32, 1000.0f32);
+        let (s, e) = if end > start {
+            (start, end)
+        } else if end < start {
+            (end, start)
+        } else {
+            (start, start + 1.0)
+        };
+        assert!(e > s, "an equal pair must not divide by zero");
+    }
 }

@@ -20,7 +20,7 @@ The Eustress architecture (designed in [CHUNKED_STORAGE.md](../development/CHUNK
 
 - **Cold tier** — disk-resident `.echk` binary chunks, indexed by `(chunk_x, chunk_z)`. Compressed (LZ4 / Zstd). No frame cost.
 - **Hot tier** — in-RAM `DashMap<ChunkCoord, ChunkData>` cache. Decompressed + parsed, ready for spawn. No ECS / GPU cost.
-- **Active tier** — Bevy ECS entities with full `Transform`, `Mesh3d`, materials, physics. Counted against an `active_cap` (default 2.10M for the benchmark envelope).
+- **Active tier** — Bevy ECS entities with full `Transform`, `Mesh3d`, materials, physics. Counted against an `active_cap` whose **CONFIG DEFAULT** is 2.10M. That figure is a ceiling the configuration permits, not an entity count anyone has reached, and it is paired with no measured frame rate. Cite it only as a config default. Phase `G5` replaces it with a measured entity count at a measured frame rate on the fixed harness.
 
 Promotion (`Cold → Hot → Active`) and demotion (`Active → Hot → Cold`) is **hysteresis-driven**: an entity activates when within `active_radius` (default 500 m) and only demotes once outside `evict_radius` (default 600 m). The 100 m gap kills oscillation at the boundary.
 

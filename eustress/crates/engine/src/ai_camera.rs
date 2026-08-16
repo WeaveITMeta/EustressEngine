@@ -53,11 +53,22 @@ pub struct PendingCapture {
     pub path: PathBuf,
 }
 
+/// Frames to let the AI camera render before screenshotting it.
+///
+/// The camera is powered down between captures (see [`process_ai_capture`]),
+/// so its render target holds a stale frame — or none at all on the first
+/// capture — at the moment a request arrives. The render graph needs a couple
+/// of frames to produce a current image before the readback is meaningful.
+const CAPTURE_WARMUP_FRAMES: u32 = 3;
+
 /// Off-screen render-target handle + pending-capture state for the AI camera.
 #[derive(Resource, Default)]
 pub struct AiCameraState {
     pub image: Option<Handle<Image>>,
     pub pending: Option<PendingCapture>,
+    /// Frames the camera has been powered up for the current request; 0 when
+    /// idle (camera inactive). See [`CAPTURE_WARMUP_FRAMES`].
+    warmup: u32,
 }
 
 pub struct AiCameraPlugin;
@@ -123,7 +134,11 @@ fn spawn_ai_camera(
         // made select/move/scale/rotate cast their picking ray from the AI
         // camera's pose, so selection was offset for every tool. -1 renders this
         // image pass before the window camera and keeps it out of order 0.
-        Camera { order: -1, ..default() },
+        // `is_active: false` — the camera is powered up only for the few frames
+        // of an actual capture (see `process_ai_capture`). Bevy's default is
+        // `true`, which had this off-screen 1280×720 camera rendering the whole
+        // scene every frame for the entire session.
+        Camera { order: -1, is_active: false, ..default() },
         AiCamera,
         // Off-screen: render to our image, never the window — so it can't
         // displace the editor camera. R1: MSAA is now Off (inherited from
@@ -159,12 +174,55 @@ pub fn request_capture(state: &mut AiCameraState, path: PathBuf) {
     state.pending = Some(PendingCapture { path });
 }
 
-/// On a queued request, screenshot the off-screen image (the camera renders it
-/// every frame, so it's always current) and save it to the requested path.
-fn process_ai_capture(mut commands: Commands, mut state: ResMut<AiCameraState>) {
+/// Drive a queued capture: power the camera up, let it render, screenshot the
+/// off-screen image, then power it back down.
+///
+/// PERF — this is why the camera is not simply left on. It was spawned with
+/// Bevy's default `is_active: true` and nothing ever cleared it, so this
+/// off-screen 1280×720 camera rendered a COMPLETE second view of the scene
+/// every frame for the entire session: depth prepass, shadows, opaque,
+/// transparent, and (once the post stack landed) SMAA + bloom as well. On a
+/// 3,348-entity Space that doubled render cost permanently — `06_render+
+/// present` measured 33.9 ms/frame on a scene with almost nothing in it —
+/// to keep a render target warm for the rare `ai_camera.capture` call. The
+/// tool's own documentation already promised the opposite ("the off-screen
+/// camera powers up only for this shot, so it doesn't tax the user's
+/// framerate"); this makes that true.
+fn process_ai_capture(
+    mut commands: Commands,
+    mut state: ResMut<AiCameraState>,
+    mut cam: Query<&mut Camera, With<AiCamera>>,
+) {
+    if state.pending.is_none() {
+        return; // idle: camera stays powered down, costing nothing
+    }
+
+    // Power up on the first frame of a request, then yield so the render graph
+    // actually runs with the camera active.
+    if state.warmup == 0 {
+        if let Ok(mut c) = cam.single_mut() {
+            c.is_active = true;
+        }
+        state.warmup = 1;
+        return;
+    }
+
+    // Give it a few frames to produce a current image before reading back.
+    if state.warmup < CAPTURE_WARMUP_FRAMES {
+        state.warmup += 1;
+        return;
+    }
+
+    // Ready: consume the request and power the camera back down. Both happen
+    // before the screenshot is queued so an early return below can never leave
+    // the camera stuck on.
     let Some(pending) = state.pending.take() else {
         return;
     };
+    state.warmup = 0;
+    if let Ok(mut c) = cam.single_mut() {
+        c.is_active = false;
+    }
     let Some(image) = state.image.clone() else {
         return;
     };

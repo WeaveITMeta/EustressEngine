@@ -430,20 +430,36 @@ fn hide_head_in_first_person(
     cameras: Query<&AvatarCamera>,
     rigs: Query<&super::rig::AvatarRig, With<SpawnedByAvatarRuntime>>,
     mut bones: Query<&mut Transform, Without<SpawnedByAvatarRuntime>>,
+    mut was_first_person: Local<bool>,
 ) {
     use super::rig::HumanoidBone;
 
     let first_person = cameras.iter().next().map(|c| c.first_person).unwrap_or(false);
 
+    // Restoring on the FALLING EDGE rather than every third-person frame: the
+    // shrink had no `else` at all, so zooming back out left the head at 1e-4
+    // forever and the character was permanently decapitated. Writing
+    // `Vec3::ONE` unconditionally would instead stomp whatever scale the clips
+    // author on these bones every frame, so the write happens once, on the
+    // transition, and the animation owns the value from the next frame on.
+    let leaving_first_person = *was_first_person && !first_person;
+    *was_first_person = first_person;
+
+    if !first_person && !leaving_first_person {
+        return;
+    }
+
     for rig in rigs.iter() {
         for bone in [HumanoidBone::Head, HumanoidBone::HeadTop] {
             let Some(e) = rig.bone(bone) else { continue };
             let Ok(mut t) = bones.get_mut(e) else { continue };
-            if first_person {
+            t.scale = if first_person {
                 // Not exactly zero: a zero-scale joint produces a degenerate
                 // matrix, which some skinning paths turn into NaN vertices.
-                t.scale = Vec3::splat(1.0e-4);
-            }
+                Vec3::splat(1.0e-4)
+            } else {
+                Vec3::ONE
+            };
         }
     }
 }
@@ -454,10 +470,21 @@ fn hide_head_in_first_person(
 /// transform.
 pub(crate) fn face_movement_direction(
     time: Res<Time>,
-    mut q: Query<(&mut Transform, &AvatarIntent), With<SpawnedByAvatarRuntime>>,
+    mut q: Query<
+        (&mut Transform, &AvatarIntent, Option<&super::climb::AvatarClimb>),
+        With<SpawnedByAvatarRuntime>,
+    >,
 ) {
     let dt = time.delta_secs();
-    for (mut tf, intent) in q.iter_mut() {
+    for (mut tf, intent, climb) in q.iter_mut() {
+        // A climbing avatar's facing is owned by the ledge, not by input.
+        // This runs in PostAnim, strictly AFTER `drive_climb`'s face-the-wall
+        // slerp in Update, so without this guard any held direction during a
+        // hang rotated the body off the wall while the IK kept the hands
+        // welded to the ledge frame.
+        if climb.is_some_and(|c| c.is_climbing()) {
+            continue;
+        }
         let mut d = intent.direction;
         d.y = 0.0;
         if d.length_squared() < 1e-4 {

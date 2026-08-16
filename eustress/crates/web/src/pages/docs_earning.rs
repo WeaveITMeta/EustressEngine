@@ -311,7 +311,7 @@ pub fn DocsEarningPage() -> impl IntoView {
                                     <h4>"Transparent Economics"</h4>
                                     <p>
                                         "Every payout, every drip, every contribution score is auditable. "
-                                        "The ledger is public. The math is open source."
+                                        "The ledger is public. The math is in the source, and the source is readable."
                                     </p>
                                 </div>
                             </div>
@@ -1143,6 +1143,14 @@ fn daily_drip(treasury_balance: f64) -> f64 {
                     // ─────────────────────────────────────────────────────
                     <section id="marketplace" class="docs-section">
                         <h2 class="section-anchor">"8. Marketplace"</h2>
+
+                        <div class="docs-callout warning">
+                            <strong>"Not yet live:"</strong>
+                            " The marketplace is specified but not implemented — the API "
+                            "currently returns no listings, and no Tickets change hands. "
+                            "Bliss earning and daily distribution (sections 1–4) ARE live. "
+                            "This section describes the intended design, not shipped behavior."
+                        </div>
 
                         <div id="marketplace-selling" class="docs-block">
                             <h3>"Selling Items"</h3>

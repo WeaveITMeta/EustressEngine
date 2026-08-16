@@ -1,0 +1,50 @@
+{
+  "$comment": [
+    "Allowlist for docs/PROMPTS/harness/checkers/licence_phrasing.py.",
+    "An entry is permitted only where the banned phrasing is TRUE as written: a fact about a",
+    "third party's licence, or a contrastive sentence that explains why Eustress is not on those",
+    "terms. No entry here describes Eustress's own licence. Eustress is source-available under",
+    "PolyForm Shield 1.0.0 (LICENSE), dual-licensed against LICENSE-COMMERCIAL.md.",
+    "The ceiling is 6 entries and every entry needs a reason of at least 20 characters. Entries",
+    "match on path + line + exact text, so if the line is edited the entry stops matching and the",
+    "hit resurfaces for a fresh decision. That is deliberate."
+  ],
+  "entries": [
+    {
+      "path": "eustress/crates/web/src/pages/license.rs",
+      "line": 60,
+      "text": "Why not plain open source?",
+      "reason": "Contrastive heading on the licence page: it names the alternative in order to explain why Eustress is source-available under PolyForm Shield instead. Removing it would delete the explanation, not a claim."
+    },
+    {
+      "path": "docs/AUDIT/04_ASSET_PIPELINE.md",
+      "line": 330,
+      "text": "Autodesk FBX SDK or open-source (`fbxcel`)",
+      "reason": "Describes the licensing of two third-party FBX libraries the pipeline could adopt. True about fbxcel; says nothing about the Eustress licence."
+    },
+    {
+      "path": "docs/AUDIT/04_ASSET_PIPELINE.md",
+      "line": 514,
+      "text": "FBX licensing path (Autodesk SDK / open source)?",
+      "reason": "An open engineering question about which third-party FBX SDK to license. It is about Autodesk's terms, not about the terms Eustress is offered on."
+    },
+    {
+      "path": "docs/architecture/ROBLOX_IMPORT_SPEC.md",
+      "line": 220,
+      "text": "(MIT-licensed; same project ownership and release cadence)",
+      "reason": "States the actual licence of the rojo-rbx crates the importer depends on. That fact is accurate and is exactly what a dependency-licence review needs to read."
+    },
+    {
+      "path": "docs/assets/ASSET_DEVELOPER_GUIDE.md",
+      "line": 353,
+      "text": "MinIO is an open-source, S3-compatible object storage.",
+      "reason": "MinIO is a third-party storage server and the sentence is true about MinIO. Rewording it would make the self-hosting guide wrong about the software it is recommending."
+    },
+    {
+      "path": "eustress/crates/common/src/assets/s3.rs",
+      "line": 7,
+      "text": "MinIO is an open-source, S3-compatible object storage server.",
+      "reason": "The same true statement about the third-party MinIO server, in the module docs of the S3 asset backend that talks to it."
+    }
+  ]
+}

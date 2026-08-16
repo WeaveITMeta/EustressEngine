@@ -1,0 +1,17 @@
+{
+  "item": "G1.48",
+  "title": "Licence decision-forcing memo",
+  "decision": "POLYFORM_SHIELD_UNCHANGED",
+  "decided_by": "founder",
+  "decided_utc": "2026-08-10T21:30:00Z",
+  "decision_text": "The licence is PolyForm Shield 1.0.0, dual-licensed against LICENSE-COMMERCIAL.md. No change. Recorded as a human decision; no agent selected it.",
+  "gate": "PROGRAM-LICENCE-GATE is now CLEARED. The eleven items blocked on a null decision may proceed, under PolyForm Shield terms.",
+  "unblocked_items": ["G1.49","G1.50","G1.51","G1.52","G7.12","G7.22","G7.24","G0.04","G0.07","G0.10","G0.12"],
+  "consequences_the_decision_carries": {
+    "w5_framing": "W5 is not an open-source community strategy and must never be described as one. Under PolyForm Shield the available surface is: an extension surface (plugins, Rune and Luau scripts, MCP tools, and end-products built WITH Eustress, all royalty-free per LICENSE-COMMERCIAL.md), a published merit ladder, contributor licensing via a CONTRIBUTING file plus a DCO or CLA (still absent, and the cheapest unblocked W5 item), and a defined route from free adopter to a negotiated commercial licence.",
+    "adoption_obstacle_to_state_plainly": "PolyForm Shield's Noncompete clause bars providing any product that competes with the software, and its Competition clause is judged across differing interfaces and platforms and applies even when the competing product is provided free of charge. Any external artifact aimed at a frontier lab — the .etask format (G7.12), the EUSTRESS-PHYS-12 benchmark (G7.22), the lab integration guide (G7.24) — will be read by that lab's counsel before an engineer runs it. Those three items must carry explicit third-party use terms, and G0.04 owns the data-rights question for episodes, the benchmark, and models trained on them. This is a real obstacle to the agentic-training-substrate wedge and it is now a known cost of the decision, not an open question.",
+    "ospo_blocked_adopters": "Organisations whose open-source programme office blocks non-OSI licences remain unable to adopt. That is accepted, not solved.",
+    "distro_packaging": "Packaging under open-source distribution norms remains unavailable."
+  },
+  "still_agent_work_not_blocked_by_this": "Describing the project accurately. G0.06 already corrected every licensing misstatement across 6,315 scanned files and left a verifier at docs/PROMPTS/harness/checkers/licence_phrasing.py that exits non-zero on a regression."
+}

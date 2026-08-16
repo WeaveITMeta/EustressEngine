@@ -7,7 +7,14 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 /// Classes that are abstract/non-visual and should not show selection boxes
-const ABSTRACT_CLASSES: &[ClassName] = &[
+/// Classes that are hierarchy anchors or backdrop, never selection targets.
+///
+/// `pub` so Select All (`keybindings.rs`) filters on the SAME list the
+/// hierarchy commands here use. When the two kept private copies they drifted:
+/// a class added to one stayed selectable by the other, which is how Select All
+/// ended up with an entirely different idea of "selectable" than Select
+/// Children.
+pub const ABSTRACT_CLASSES: &[ClassName] = &[
     ClassName::Atmosphere,
     ClassName::Star,
     ClassName::Moon,

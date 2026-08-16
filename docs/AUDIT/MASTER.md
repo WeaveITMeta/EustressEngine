@@ -5,6 +5,48 @@
 > as many forecasted-feedback and implication bullets as you can per item,
 > then iterate.
 
+## Ground truth — the state every row below is measured against
+
+Five facts about the tree itself. They bound how much of this audit is checkable, so they precede it.
+
+**1. The workspace compiles.** `cargo build --workspace` exits 0 as of 2026-08-08 at commit
+`71ccf6fe`, across **40 members**, and exits 0 again on an immediate incremental rerun with no
+`cargo clean` between them. Three members were broken, from three unrelated causes:
+
+| Member | Cause | Remedy |
+| --- | --- | --- |
+| `eustress-backend` | `crates/backend/src/marketplace.rs` calls four `Database` methods that `crates/backend/src/db.rs` never defines — `find_marketplace_item_by_id`, `has_purchased`, `get_user_balance`, `purchase_item` | Removed from `[workspace] members`; 41 → 40. Unmodified on disk, no longer built. See [09_ECONOMY](09_ECONOMY.md) |
+| `benches/instance-capacity` | Eight wgpu-29 API drifts the Bevy 0.19 migration missed | Fixed in place |
+| `eustress-server` | Uses `serde_json::Value` without declaring the dependency | Fixed in place |
+
+**2. The root cause is CI, and it is shared by all three.** No CI job compiles more than one package.
+`.github/workflows/ci.yml` runs `cargo deny`, a naga shader pass, and a `cargo tree` grep;
+`.github/workflows/linux-engine.yml:48` runs `cargo check --package eustress-engine`;
+`release.yml` builds the same lone package. **No CI job runs `cargo test` at any point**, so the
+workspace's **2,070 `#[test]` and `#[tokio::test]` functions** across `eustress/crates` and
+`eustress/benches` have never executed in continuous integration. Three of forty members could rot
+unnoticed because nothing ever built them, and any subsystem state in this audit that rests on "the
+tests cover it" rests on tests no automated system has ever run.
+
+**3. A control the code says is wired is not necessarily a control a user can reach.**
+`eustress/crates/engine/src/tool_metadata.rs:1479` marks `insert:script` as `wired: true`, and that
+flag is honest about what it asserts — a handler exists. It asserts nothing about reachability.
+**Insert Script has a measured click-depth of −1: there is no mouse route to creating a script from a
+cold start at all.** Reachability and wiring are two different audits, and only the first is a
+statement about users. See [02_STUDIO_ENGINE](02_STUDIO_ENGINE.md).
+
+**4. 64 of 104 customer-facing quantitative claims are UNSUPPORTED** — 61.5%, against 12 MEASURED,
+19 TARGET and 9 CONFIG_DEFAULT. Any figure quoted outward is presumed unsupported until it is
+classified. Remediation is deferred and carried as an open debt; it is not written off, and the
+threshold that caught it was deliberately not relaxed.
+
+**5. Licence phrasing is correct everywhere and the check is not automated.** Every licensing
+misstatement is corrected across 6,315 scanned files — 27 unallowlisted hits reduced to 0 — and the
+licence is stated as **PolyForm Shield 1.0.0, source-available**, never as open source. A verifier at
+`docs/PROMPTS/harness/checkers/licence_phrasing.py` exits 5 on any unallowlisted hit. **It is
+CI-ready and unwired**, so today the correctness is a fact about the tree, not a property it is
+prevented from losing.
+
 ---
 
 ## Iteration tracker
@@ -24,19 +66,21 @@ P4 dispatched 3 critique agents over 07–20. Key state corrections + missing fe
 
 **07_AI_PLATFORM** — MCP `SubscribeTopic` confirmed absent (no variant in `BridgeRequest::MethodName`). FoundationModelDispatcher is **fully absent** (not "pseudocode") — `APEX_ENGINE.md` referenced but missing. Spatial-LLM is **stub** (no Claude calls); should be 🔴 not 🟡. Image-to-Code two-step flow remains fragile.
 
-**08_IDENTITY_TRUST** — Cloudflare Worker `JURISDICTIONS = { jurisdictions: {}, fallback: ... }` — **`jurisdictions` dict is EMPTY**. The "72 countries" claim is spec-only. Succession `create()` + `verify()` are signature-complete but **activation logic (inactivity timer, heir-claim window, proof-of-life) is 0%** — true state is ~40%, not 80%. `.pak` signing dependency for asset chain not yet wired.
+**08_IDENTITY_TRUST** — The Cloudflare Worker's `JURISDICTIONS` ontology is **populated**: **46 country entries** at `infrastructure/cloudflare/api/src/index.js:39-98`, each carrying `name`, `natural_ids`, `r2_prefix`, and `age_of_majority`, plus a `fallback` requiring one of passport / national ID / driver's licence for anything unlisted. The "72 countries" claim overstates coverage by 26 and must be restated as 46-plus-fallback; the data itself is real and KYC is not blocked on it. Succession `create()` + `verify()` are signature-complete but **activation logic (inactivity timer, heir-claim window, proof-of-life) is 0%** — true state is ~40%, not 80%. `.pak` signing dependency for asset chain not yet wired.
 
-**09_ECONOMY** — **Marketplace state inflated**: P2/P3 said 75% but `purchase_item` handler calls `state.db.purchase_item()` with no Bliss-debit logic — true state is **🟡 40%**. Stripe Connect (Feature 3) is **gated by KYC (Feature 14 in [08])** — not independent 5%; effective state is **🔴 0%** until [08] lands. Bliss dual-nature (arcade token + Proof-of-Contribution crypto) carries **regulatory arbitrage risk** if BLS gains market value — needs legal counsel before public launch.
+**09_ECONOMY** — **Marketplace state inflated**: P2/P3 said 75% but `purchase_item` handler calls `state.db.purchase_item()` with no Bliss-debit logic — true state is **🟡 40%**. Stripe Connect (Feature 3) is **gated by KYC (Feature 14 in [08])** — not independent 5%; effective state is **🔴 0%** until [08] lands. Bliss dual-nature (arcade token + Proof-of-Contribution crypto) carries **regulatory arbitrage risk** if BLS gains market value — needs legal counsel before public launch. **The marketplace backend no longer builds and is unlisted from the workspace**: `crates/backend/src/marketplace.rs` calls `find_marketplace_item_by_id`, `has_purchased`, `get_user_balance` and `purchase_item` on `state.db`, none of which `crates/backend/src/db.rs` defines. Three of the four are mechanically implementable — the first is a naming mismatch against `get_marketplace_item_by_id` at `db.rs:282`, and the other two map onto the existing purchases table. `get_user_balance` is not: there is **no balance table, column or method anywhere in `db.rs`**, and `db.rs:5` records that user identity lives in Cloudflare KV rather than in this database. **Where a Bliss balance lives is an unmade design decision, and the marketplace's 40% state is blocked on it, not on code.** The crate is unmodified on disk; re-listing it in `[workspace] members` is a one-line revert once that decision exists.
 
 **10_TELEMETRY** — Doc **contradicts itself**: line 56 says "default off"; line 264 mitigation M2.1 says "default `history.*` + `workshop.tool.*` persistent". Resolve to: **per-topic opt-in; `history.*` + `workshop.tool.*` default persistent; everything else opt-in**. At claimed 85M msg/sec throughput with 1 KB avg msg + 7-day retention → 73 TB/week — persistence plan is missing. Sampling strategy undefined per-topic.
 
-**11_SIMULATION_DEBUGGER** — Watchman cooldown is **wall-time, not sim-time** — at 10⁶x scale, miss sub-30-second spikes. V-Cell electrochemistry is **lumped 0-D** (no spatial electrochemistry / ion transport) — validation gap vs. real cells not flagged. ParticleECS `ElectrochemicalState` + `ThermodynamicState` are **decoupled** (no thermal-effect-on-rate coupling). Symbolica `use symbolica::atom::Atom` in `causal.rs` — **partially wired**, not "concept only"; solver.rs line 95 says "Full implementation requires Symbolica" but scaffold exists.
+**11_SIMULATION_DEBUGGER** — Watchman cooldown is **wall-time, not sim-time** — at 10⁶x scale, miss sub-30-second spikes. V-Cell electrochemistry is **lumped 0-D** (no spatial electrochemistry / ion transport) — validation gap vs. real cells not flagged. `ElectrochemicalState` and `ThermodynamicState` are **coupled in both directions**: `eustress/crates/engine/src/simulation/electrochemistry.rs:208-219` reads `ThermodynamicState.temperature` into the kinetics and passes it to the temperature-dependent Nernst, Butler-Volmer, and Tafel terms in `eustress/crates/common/src/realism/laws/electrochemistry.rs`, and `:279-292` feeds `heat_generation` back into the temperature with a Newton cooling term. The real gap is that the thermal node is lumped and its constants are hardcoded — `thermal_mass` at `:281` and `r_thermal` at `:288` — so there is no spatial gradient and no temperature dependence of the transport properties. Symbolica `use symbolica::atom::Atom` in `causal.rs` — **partially wired**, not "concept only"; solver.rs line 95 says "Full implementation requires Symbolica" but scaffold exists.
 
-**12_INFRASTRUCTURE** — Vault references in Nomad job specs but cluster **not deployed** — true state is "10% (references in code, no functional)" not 0%. Consul directory **empty** (verified); needs explicit acknowledgement. macOS notarisation 0% **confirmed** (P3 was right).
+**02_STUDIO_ENGINE** — There is **no duplicate `StudioState`**. It is defined exactly once, at `eustress/crates/engine/src/ui/mod.rs:253`, and `eustress/crates/engine/src/ui/slint_ui.rs:218` carries a standing comment forbidding a local redefinition. Drain failures in this surface are a wiring class, not a duplicate-type class, and must be diagnosed as such. **The duplicate that does exist is a plugin, not a state.** `StudioUiPlugin` is defined twice — `slint_ui.rs:1230` (impl at `:1235`) and `ui/mod.rs:1017` (impl at `:1022`) — and **neither is mounted**. The live UI plugin is `SlintUiPlugin`, defined at `slint_ui.rs:1292` with its impl at `:1294`, added exactly once at `main.rs:277`. A registration that lands in `StudioUiPlugin` therefore executes never, which is the mechanism behind two historical whole-UI outages; the tree now carries standing comments at `lib.rs:177`, `class_registry/mod.rs:31` and `ui/spawn_events.rs:540` naming `SlintUiPlugin::build` as the only correct mount point. The **post-processing stack is not blocked on crate availability**: `eustress/crates/engine/Cargo.toml:133-134` declares `bevy_anti_alias` and `bevy_post_process` as live Bevy features, with an adjacent comment recording that `DefaultPlugins` registers them but no camera carries the components, so they are **inert rather than absent**. The work is attaching components to a camera and accepting a Bevy rebuild — not waiting on an upstream release. **Reachability is a separate audit from wiring.** A baseline census of the editor surface — 60 `.slint` files, 32,577 `.slint` lines, 37,533 lines of `ui/*.rs`, largest single file `ui/slint_ui.rs` at 23,103 lines, one `.slint` file carrying an accessibility role — puts **1,999 declared ribbon tools against 30 wired**. Of the top 20 commands most sit at click-depth 1 or 2, but **Insert Script is −1: no mouse route exists from a cold start.** The Insert menu's static items are Part/Sphere/Cylinder/Wedge/Model/Folder; its dynamic tail comes from `ui/insert_classes.rs::build_catalog`, which drops any class without a registered spawner, and `ClassName::LuauScript` has none; neither the viewport nor the Explorer context menu offers a script insert; and `modes/engineering.toml:145` carries `insert:script` only as a mode-manifest tool while `studio_modes.rs:570` leaves `ModeRegistry.active_id` empty at cold start. `tool_metadata.rs:1479` marks it `wired: true` and is not lying — that flag asserts a handler exists, never that a user can reach it.
+
+**12_INFRASTRUCTURE** — Vault references in Nomad job specs but cluster **not deployed** — true state is "10% (references in code, no functional)" not 0%. Consul directory **empty** (verified); needs explicit acknowledgement. macOS notarisation 0% **confirmed** (P3 was right). **CI's coverage is one package and zero tests** — `ci.yml` gates `cargo deny`, a naga shader pass and a `cargo tree` grep; `linux-engine.yml:48` and `release.yml` each build `--package eustress-engine` alone; **no job runs `cargo build --workspace` and no job runs `cargo test`**. That is why three of forty workspace members were found broken from three unrelated causes the first time the whole workspace was compiled (see *Ground truth* above), and why the tree's 2,070 test functions have never run in continuous integration. "Release pipeline production" describes the packaging half accurately and says nothing about verification: the pipeline reliably ships a binary nothing has tested.
 
 **13_TERRAIN_VOXEL** — Heightmap **export** missing (import works, round-trip broken). Brush overlay terrain-normal transform absent (visual artifact). Biome paint: `config.rs` has `splatmap` / `splat_cache` but no painting logic. Brush dirty-rect → [05] chunk re-bake coupling undefined; no throttle contract.
 
-**14_GEO_COORDINATES** — `HybridPosition` Component **DOES exist** with `PRECISION_THRESHOLD = 100km`, but **no auto-rebase system runs**. Time-of-day → sun/moon driver not wired from clock. f64 doubles per-entity memory; OOM audit at 2.1M instances missing.
+**14_GEO_COORDINATES** — `common/src/orbital/` removed 2026-08-01 as unreachable (no plugin ever registered it). No origin-rebase capability exists in any form. Replacement design is grid-cell coordinates (`i32` cell + cell-local `f32`), specified in [ORBITAL_GRID.md](../architecture/ORBITAL_GRID.md), not implemented. Time-of-day → sun/moon driver not wired from clock.
 
 **15_MOBILE_PLATFORM** — Cargo.toml iOS section is **placeholder comment only** (`# iOS-specific dependencies as needed`); no actual deps. No JNI bridge file. No CI smoke-test for cross-compile.
 
@@ -46,7 +90,7 @@ P4 dispatched 3 critique agents over 07–20. Key state corrections + missing fe
 
 **18_CAD_MESHGEOMETRY** — Bevel + loop-cut have **different walker needs** (edge-ring vs. vertex-ring); doc treats as single blocker. Extrude direction options limited: `both_sides` flag exists but "one-side" (single-direction) missing. FeatureTree re-compute is full-replay on any parameter change → cost concern at 10+ feature trees.
 
-**19_REALISM_PHYSICS** — Symbolica is **partially wired** (`use symbolica` imports + feature flag in ARCHITECTURE.md); state should be 🟡 not 🔴. V-Cell `Nernst + Butler-Volmer` are **lumped 0-D models**; no spatial electrochemistry. Particle ECS thermal + electrochemistry are **decoupled** (no thermal-effect-on-reaction-rate). Fracture mechanics has `fracture_mesh.rs` but **no integration path to Avian** (visualisation only?).
+**19_REALISM_PHYSICS** — Symbolica is **partially wired** (`use symbolica` imports + feature flag in ARCHITECTURE.md); state should be 🟡 not 🔴. V-Cell `Nernst + Butler-Volmer` are **lumped 0-D models**; no spatial electrochemistry. Thermal and electrochemistry are **coupled both ways** — temperature enters the rate laws at `eustress/crates/engine/src/simulation/electrochemistry.rs:208-219,245` and heat returns to the thermal state at `:279-292`. What is missing is a spatially resolved thermal model and temperature-dependent transport, not the coupling itself. Fracture mechanics has `fracture_mesh.rs` but **no integration path to Avian** (visualisation only?).
 
 **20_SEARCH_DISCOVERY** — Hash embeddings "useless" overstated — work for *some* applications (deterministic, fast); they're **suboptimal**, not useless. HNSW `M=16 / efConstruction=200 / efSearch=50` tuned for ≤1M vectors; **break-even at higher scale unanalysed**. Per-namespace isolation correct architecturally; **cross-namespace queries** (similar asset to entity?) non-trivial.
 
@@ -65,13 +109,13 @@ P4 dispatched 3 critique agents over 07–20. Key state corrections + missing fe
 
 1. **Publish & server-download is real** — Studio publish flow (panel + thumbnail + tar+zstd + multipart R2 upload) works; server load works; no delta updates; no client direct download path needed. *(P5 update 2026-05-16: the upload mechanism is unchanged, but the archived payload is now the `.eustress` world container — Fjall database + baked `.echk` chunks — not the old `.pak` per-instance-TOML tar. See #1' in P2 corrections.)*
 2. **Multiplayer Studio scaffold is shockingly complete** — `collaboration.slint` panel, `CollaborationState`, Loro CRDT, `presence_ws.rs`, `HostManager` chunk authority all exist. The wiring (event capture → CRDT op → server broadcast) is the missing layer.
-3. **Space Streaming is fully designed and zero-wired** — `.echk` 56-byte packed-instance format, manifest layout, hysteresis radii (500/600/2000 m), and benchmark (2.10M entities @ 24 FPS) all in code/docs. No encoder, no decoder, no dispatcher, no client spawner.
+3. **Space Streaming is fully designed and zero-wired** — `.echk` 56-byte packed-instance format, manifest layout, hysteresis radii (500/600/2000 m), and an `active_cap` **CONFIG DEFAULT** of 2.10M entities (never a measured entity count, and paired with no measured frame rate) all in code/docs. No encoder, no decoder, no dispatcher, no client spawner.
 4. **AI Platform has 52 tools across 9 Workshop modes** — embedvec HNSW DB ready but no ML embedder; spatial-llm modules drafted; Project Korah architecture only; FoundationModelDispatcher pseudocode.
 5. **Identity core crypto is 95% done; recovery / MFA / OAuth / CSAM detection / age gating are 0–20%.**
 6. **Economy frontend is 90% complete; backend is 5–10%** — Steam IAP, Stripe Connect, subscription lifecycle, refund handling all stubs.
 7. **Telemetry library + TCP/SHM brokers are production** (~85M msg/s in-process); ~80% of producers (Workshop tool, file-watcher, simulation, play-mode) unwired; no Sentry / Prometheus / Grafana.
 8. **Simulation is 70% mature** — SimulationClock, watchpoints, breakpoints, V-Cell physics, Watchman alerts all production; script debugger UI, replay/seek, cross-platform determinism absent.
-9. **Infrastructure 55%** — release pipeline production; macOS notarisation + Windows authenticode + Vault + Prometheus + multi-region all incomplete.
+9. **Infrastructure 55%** — release pipeline production; macOS notarisation + Windows authenticode + Vault + Prometheus + multi-region all incomplete. The 55% is a packaging figure: CI compiles one package, never the workspace, and runs no tests at all, so nothing in the pipeline verifies what it ships.
 
 ---
 
@@ -93,7 +137,7 @@ Cumulative totals after each pass. Refining an existing row counts toward "refin
 | Cross-cutting concerns (C1–CN) | 10 | 12 | 12 | **16** *(+ C13 `eustress://`, C14 OAuth-deferred-KYC, C15 WASM-sandbox, C16 per-platform variants)* — **17 at P5** *(+ C17 WorldDb storage standard; C3/C11/C12 rewritten)* |
 | Open questions | 25 | ≈ 80 | ≈ 130 | **≈ 160** |
 | **P0 escalations** | — | — | 3 | **3** *(JWT auth: HTTP backend enforcement VERIFIED on every protected handler 2026-05-22 (extract_token + validate_token, claims.sub, projects.rs owner_id checks; browse endpoints public by design) — only the QUIC-handshake JWT remains (play_server with_no_client_auth), sequenced to V1.1 multiplayer · Play button · macOS notarisation)* |
-| **State corrections in P4 critique** | — | — | — | **10** *(07 Spatial-LLM, 08 jurisdictions, 08 succession, 09 marketplace, 09 Stripe, 10 persistence, 11 Watchman, 12 Vault, 14 HybridPosition, 16 DataStoreService, 19 Symbolica)* |
+| **State corrections in P4 critique** | — | — | — | **13** *(02 StudioState, 02 post-stack, 07 Spatial-LLM, 08 jurisdictions, 08 succession, 09 marketplace, 09 Stripe, 10 persistence, 11 Watchman, 11/19 electrochemistry-thermal coupling, 12 Vault, 14 HybridPosition, 16 DataStoreService, 19 Symbolica)* |
 
 ### P2 per-doc deltas
 
@@ -103,7 +147,7 @@ Cumulative totals after each pass. Refining an existing row counts toward "refin
 | 02_STUDIO_ENGINE | Add Feature 15: Multiplayer Studio (Loro CRDT, presence WS, collaboration panel) | +1 | UI scaffold 80% / wiring 0% |
 | 03_MULTIPLAYER | (untouched in P2 — pass 3 to deepen) | 0 | |
 | 04_ASSET_PIPELINE | Fact-check: `.pak` publish flow inserted; remove vague `.eustress` references | 0 new, 2 corrected | |
-| 05_STREAMING → 05_SPACE_STREAMING | **Full rewrite.** Server→client chunked content delivery, `.echk` binary, hysteresis radii, 2.10M-entity envelope | +9 | Old content moved to 10_TELEMETRY |
+| 05_STREAMING → 05_SPACE_STREAMING | **Full rewrite.** Server→client chunked content delivery, `.echk` binary, hysteresis radii, 2.10M-entity `active_cap` **CONFIG DEFAULT** | +9 | Old content moved to 10_TELEMETRY |
 | 06_WEBSITE | (untouched in P2 — pass 3 to deepen) | 0 | |
 | **07_AI_PLATFORM** *(new)* | Workshop, Claude, FLUX, TripoSR, embedvec, spatial-llm, Korah, MCP server | +15 | |
 | **08_IDENTITY_TRUST** *(new)* | Ed25519, KYC, OAuth gap, succession, witness, moderation, anti-cheat, CSAM | +15 | |
@@ -122,7 +166,7 @@ Cumulative totals after each pass. Refining an existing row counts toward "refin
 | 02 | Studio Engine | [02_STUDIO_ENGINE.md](02_STUDIO_ENGINE.md) | **+ Multiplayer Studio:** Loro CRDT scaffold, collaboration panel, presence WS, 0% wired |
 | 03 | Multiplayer (replication, scripts, Forge) | [03_MULTIPLAYER.md](03_MULTIPLAYER.md) | Server-auth + script distribution still core gaps |
 | 04 | Asset Pipeline (`.eustress` world container, R2, materials) | [04_ASSET_PIPELINE.md](04_ASSET_PIPELINE.md) | Published payload = `.eustress` (Fjall database + baked `.echk` chunks); full publish + server-download flow documented *(was `.pak` zstd-tar pre-P5)* |
-| 05 | **Space Streaming** *(rewritten)* | [05_SPACE_STREAMING.md](05_SPACE_STREAMING.md) | `.echk` 56-byte packed instances; 2.10M-entity envelope; 0% wired |
+| 05 | **Space Streaming** *(rewritten)* | [05_SPACE_STREAMING.md](05_SPACE_STREAMING.md) | `.echk` 56-byte packed instances; 2.10M-entity `active_cap` **CONFIG DEFAULT**, not a measurement; 0% wired |
 | 06 | Website | [06_WEBSITE.md](06_WEBSITE.md) | KYC-first sign-up, Play button + checkout still missing |
 | **07** | **AI Platform** *(new)* | [07_AI_PLATFORM.md](07_AI_PLATFORM.md) | Workshop (52 tools), embedvec (no ML embedder), Korah (0%) |
 | **08** | **Identity & Trust** *(new)* | [08_IDENTITY_TRUST.md](08_IDENTITY_TRUST.md) | Ed25519 production; recovery / OAuth / CSAM / MFA missing |
@@ -206,7 +250,7 @@ P3 will retrofit this format to 01–06.
 ## How to read this
 
 - **For the project director:** start with the [Iteration tracker](#iteration-tracker) and the per-doc deltas above. The metric dashboard shows totals across passes.
-- **For Claude (next pass):** every system file has a changelog at top; pick a system that hasn't been deepened recently or a cross-cutting concern bottlenecking multiple systems. P6 candidates: trace C17 (WorldDb) end-to-end through 01 / 02 / 04 / 05 / 16; resolve the `.echk` vs. 56-byte-packed-instance format convergence (flagged in C17, [04], [05]); audit the Properties-panel-no-persist gap (C17, [02], [16]); retrofit per-feature-card format to 01–06.
+- **For Claude (next pass):** every system file has a changelog at top; pick a system that hasn't been deepened recently or a cross-cutting concern bottlenecking multiple systems. P6 candidates: trace C17 (WorldDb) end-to-end through 01 / 02 / 04 / 05 / 16; resolve the `.echk` vs. 56-byte-packed-instance format convergence (flagged in C17, [04], [05]); audit the Properties-panel-no-persist gap (C17, [02], [16]); retrofit per-feature-card format to 01–06; and re-derive every state percentage in 01–20 against the two facts in *Ground truth* that most of them silently assume — that the code builds, and that its tests run.
 - **For external readers:** the [Cross-cutting concerns](#cross-cutting-concerns-c1c17) table is the fastest summary of platform invariants. **C17 (WorldDb storage standard) is the P5 headline** — it supersedes the old "file-system-first" model and reframes C11 (`.eustress` is now the world container, not `.pak`) and C12 (single-author storage is now Fjall WorldDb).
 
 ---

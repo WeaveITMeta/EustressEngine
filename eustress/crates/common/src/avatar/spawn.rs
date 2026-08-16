@@ -78,7 +78,18 @@ pub struct AvatarLocomotion {
     pub air_time: f32,
     pub yaw_rate: f32,
     /// Latched on the grounding edge, 0..1, from touchdown vertical speed.
+    ///
+    /// Normalised over [`LAND_IMPACT_FULL_MPS`]. The old divisor of 8 m/s
+    /// saturated after a 3.3 m fall, so a 4 m drop and a 200 m drop produced
+    /// an identical value and nothing downstream could tell them apart.
     pub land_impact: f32,
+    /// Raw downward speed at touchdown, m/s. Kept unnormalised because
+    /// thresholds (roll, stumble, damage) are naturally expressed in real
+    /// units, and a normalised signal cannot express one above its ceiling.
+    pub land_speed_mps: f32,
+    /// True for exactly the frame the avatar touches down. The edge itself —
+    /// `land_impact` decays, so it cannot be used to detect the transition.
+    pub just_landed: bool,
 }
 
 /// How far below the capsule bottom the sole is planted.

@@ -1,0 +1,425 @@
+{
+  "item": "G1.40",
+  "title": "Revenue-rail truth ledger with per-capability build evidence",
+  "generated_at": "2026-08-13T16:55:00Z",
+  "commit": "fd19289171063ed6779740933ff3cb2e3a2a466d",
+  "jurisdiction_count": 46,
+
+  "how_to_read_this": {
+    "state": "Describes whether the CAPABILITY can execute today, not whether source text exists. A file full of code that nothing builds and nothing calls is 'absent', because no customer action can reach it. 'spec_only' means a design or marketing document describes it and no implementation exists. 'partial' means part of the path works and a named piece is missing. 'live' means it was observed working in this item, by a build or a run. 'unknown' means it could not be resolved from here at all, and carries blocked_reason.",
+    "verified_by": "How THIS item established the state. 'build' = a cargo invocation whose exit code is in log_path. 'run' = a process, a live tool call, or a read-only HTTP GET whose transcript is in log_path. 'source_read' = the file was read. 'external' = an outside registry or service. 'blocked' = could not be established.",
+    "chargeable_today": "TRUE only when the capability was verified working in this item AND a customer paying for it would receive that working value, so the sole remaining obstacle is the corporate rail tracked by the nevada_llc / ein / business_banking rows. Internal instrumentation is never chargeable even when it is live, because nobody buys it. Unfinished and paper-only capabilities are never chargeable. Under this rule exactly three rows are chargeable today; see 'chargeable_today_set'.",
+    "evidence_path": "Repo-relative, forward slashes, resolves at verification time. For code capabilities it points at code or at deployed-worker source. Audit documents are never cited as evidence that code works.",
+    "log_path": "Raw transcript of the build or run, under logs/. Each begins with the literal command line."
+  },
+
+  "measurement_environment": {
+    "note": "The founder's engine was running throughout this item: eustress-engine.exe pid 52252 and eustress-lsp.exe pid 52580, started 2026-08-09. Windows locks a running .exe, so no workspace-wide build was attempted and neither process was terminated. Every cargo invocation below targeted a single package that is not one of those two binaries.",
+    "builds_consumed": 5,
+    "builds_allowed": 6
+  },
+
+  "builds": {
+    "eustress-backend": {
+      "command": "cd eustress && cargo build -p eustress-backend",
+      "exit": 101,
+      "second_command": "cd eustress && cargo build --manifest-path crates/backend/Cargo.toml",
+      "second_exit": 101,
+      "log_path": "docs/PROMPTS/artifacts/B2/G1.40/logs/build_eustress_backend.log",
+      "result": "UNBUILDABLE. `error: package ID specification `eustress-backend` did not match any packages` — the crate was removed from [workspace] members in commit fd192891. Building it by manifest path instead fails with `current package believes it's in a workspace when it's not`. Neither failure is a compile error and neither is environmental (no toolchain, network or disk fault); both commands ran to completion and returned a determinate answer, so the item's environmental-stall clause does not fire. The determinate answer is that the crate holding the marketplace purchase handler is in no build graph anywhere in this repository."
+    },
+    "eustress-tools": {
+      "command": "cd eustress && cargo build -p eustress-tools",
+      "exit": 0,
+      "duration": "9m 00s",
+      "log_path": "docs/PROMPTS/artifacts/B2/G1.40/logs/build_eustress_tools.log",
+      "result": "Compiles clean (warnings only, all from eustress-common). Carries the whole MCP/Workshop tool registry including the three CAD Tier-1 read tools."
+    },
+    "eustress-cad": {
+      "command": "cd eustress && cargo build -p eustress-cad",
+      "exit": 0,
+      "duration": "1m 17s",
+      "log_path": "docs/PROMPTS/artifacts/B2/G1.40/logs/build_eustress_cad.log",
+      "result": "Compiles clean (1 warning). truck-based geometry kernel behind cad_measure / cad_validate_part."
+    },
+    "eustress-bliss": {
+      "command": "cd eustress && cargo build -p eustress-bliss",
+      "exit": 0,
+      "duration": "1m 16s",
+      "log_path": "docs/PROMPTS/artifacts/B2/G1.40/logs/build_eustress_bliss.log",
+      "result": "Compiles clean (3 warnings). Public surface scanned in the same log: node control, cosign, heartbeat, and a single `set_balance` that mirrors the witness value. No debit, spend, withdraw or deduct operation exists."
+    },
+    "eustress-identity": {
+      "command": "cd eustress && cargo build -p eustress-identity",
+      "exit": 0,
+      "duration": "49.91s",
+      "log_path": "docs/PROMPTS/artifacts/B2/G1.40/logs/build_eustress_identity.log",
+      "result": "Compiles clean. Client half of the identity/KYC path."
+    }
+  },
+
+  "runs": {
+    "desktop_studio_live": "docs/PROMPTS/artifacts/B2/G1.40/logs/run_desktop_studio_live.log",
+    "mcp_tool_surface_live": "docs/PROMPTS/artifacts/B2/G1.40/logs/run_mcp_tool_surface_live.log",
+    "kyc_jurisdiction_rederive": "docs/PROMPTS/artifacts/B2/G1.40/logs/run_kyc_jurisdiction_rederive.log",
+    "api_health_probe": "docs/PROMPTS/artifacts/B2/G1.40/logs/run_api_health_probe.log",
+    "releases_and_kyc_probe": "docs/PROMPTS/artifacts/B2/G1.40/logs/run_releases_and_kyc_probe.log",
+    "probe_discipline": "Every HTTP probe was a read-only GET against production. No POST was issued, nothing was written to production KV, and no Stripe object was created. The Stripe checkout and Connect routes were deliberately NOT exercised, because exercising them would create real objects in a live account."
+  },
+
+  "headline_measurements": [
+    "The money rail has never carried a payment. https://api.eustress.dev/api/payouts/rate returns deposit_count 0, treasury_usd 0, platform_usd 0, bls_to_usd_rate 0, rate_display 'No treasury funds'. Measured 2026-08-13, read-only GET.",
+    "The Cloudflare Worker that owns the entire money rail IS deployed and serving: GET https://api.eustress.dev/health -> 200 {\"status\":\"ok\",\"service\":\"eustress-api\",\"fork_id\":\"eustress.dev\"}.",
+    "The crate holding the marketplace purchase handler cannot be built by any invocation: both `cargo build -p eustress-backend` and `cargo build --manifest-path crates/backend/Cargo.toml` exit 101.",
+    "There is no BLS debit anywhere. Every one of the ten bliss_balance sites in the deployed Worker is an init, a read, a sum, or a credit (index.js:4535 `+ bls`). No site subtracts.",
+    "The JURISDICTIONS dict holds 46 country entries at infrastructure/cloudflare/api/src/index.js:39, consumed by minimumAgeFor() at :102 behind a fallback. The deployed endpoint serves them.",
+    "releases.eustress.dev does not resolve. curl exits 6, 'Could not resolve host'. Every shipped copy's updater points at a host that does not exist.",
+    "No workflow in .github/workflows/ contains signtool, codesign, notarytool, or any certificate step. Windows and macOS artefacts ship unsigned."
+  ],
+
+  "documents_that_disagree_with_the_measurement": [
+    {
+      "claim": "The Cloudflare Worker JURISDICTIONS dict is empty.",
+      "where": "docs/AUDIT/08_IDENTITY_TRUST.md, docs/PROMPTS/00_MASTER_PROTOCOL.md:206-209",
+      "measured": "46 entries at infrastructure/cloudflare/api/src/index.js:39-97, each with accepted identity documents, an R2 prefix and an age of majority. Re-derived in logs/run_kyc_jurisdiction_rederive.log.",
+      "verdict": "DOCUMENT WRONG"
+    },
+    {
+      "claim": "KYC covers 72 countries.",
+      "where": "LAUNCH_PLAN.md:59",
+      "measured": "46. Already recorded UNSUPPORTED in docs/PROMPTS/artifacts/G1.30/claim_ledger.json; this ledger is consistent with that finding.",
+      "verdict": "DOCUMENT WRONG"
+    },
+    {
+      "claim": "The marketplace purchase handler 'calls state.db.purchase_item() with no actual SQL'.",
+      "where": "docs/AUDIT/09_ECONOMY.md",
+      "measured": "It calls four Database methods — find_marketplace_item_by_id (:194), has_purchased (:199), get_user_balance (:207, :215) and purchase_item (:213) — and eustress/crates/backend/src/db.rs defines none of them. db.rs defines get_marketplace_item_by_id, a different name. The audit understates the defect: the handler cannot compile, and since fd192891 the crate is not even in the workspace.",
+      "verdict": "DOCUMENT UNDERSTATES"
+    },
+    {
+      "claim": "docs/monetization/CURRENCY.md:44-48 prices Bliss packs at $0.99 to $49.99.",
+      "where": "the G1.40 item text, quoting an older revision of that file",
+      "measured": "CURRENCY.md has been rewritten. Line 43 now reads 'Do not add a purchase path for BLS' and the properties table records BLS as Purchasable: No. The purchasable currency is Tickets (TKT), and CURRENCY.md:127-131 lists $4.99 / $9.99 / $19.99 / $49.99 / $99.99 — which matches the deployed Worker's TICKET_PACKAGES at index.js:3585-3591 and the live GET /api/tickets/packages exactly.",
+      "verdict": "ITEM TEXT STALE; DOC AND CODE AGREE"
+    },
+    {
+      "claim": "The engine posts usage telemetry from usage_telemetry.rs:193.",
+      "where": "the G1.40 item text",
+      "measured": "The endpoint constant is at eustress/crates/engine/src/usage_telemetry.rs:576 (comment at :28, comment endpoint at :614). The file has grown; the capability is unchanged.",
+      "verdict": "LINE NUMBER STALE"
+    },
+    {
+      "claim": "'Open source, MIT-friendly licensing'.",
+      "where": "docs/marketing/UofA_Center_For_Innovation_Pilot.html",
+      "measured": "LICENSE is PolyForm Shield 1.0.0, dual-licensed against LICENSE-COMMERCIAL.md. Eustress is source-available, not open source. Out of scope to edit here; owned by the licence-phrasing verifier at docs/PROMPTS/harness/checkers/licence_phrasing.py.",
+      "verdict": "DOCUMENT WRONG"
+    },
+    {
+      "claim": "GET /api/kyc/jurisdiction selects a country.",
+      "where": "implied by the endpoint's shape",
+      "measured": "It does not read any query parameter. handleJurisdiction (index.js:1177) keys off the cf-ipcountry header, so ?country=KE and ?country=ZZ both returned the US entry from this machine. The 46-entry dict is live and served; only the caller's own geo selects the row.",
+      "verdict": "BEHAVIOUR NARROWER THAN IT LOOKS"
+    }
+  ],
+
+  "chargeable_today_set": ["commercial_licence", "desktop_studio", "mcp_tool_surface"],
+
+  "rows": [
+    {
+      "capability": "desktop_studio",
+      "surface": "eustress/crates/engine (Bevy + Slint desktop application)",
+      "state": "live",
+      "evidence_path": "eustress/crates/engine/src/main.rs",
+      "evidence_line": 277,
+      "verified_by": "run",
+      "log_path": "docs/PROMPTS/artifacts/B2/G1.40/logs/run_desktop_studio_live.log",
+      "chargeable_today": true,
+      "blocks": ["cad_tier1_mcp", "mcp_tool_surface", "paid_pilot", "commercial_licence"],
+      "revenue_blocker": "corporate rail only (nevada_llc, ein, business_banking); plus releases_r2_bucket for any customer who is not handed a build directly",
+      "note": "Verified by running, not by reading: eustress-engine.exe pid 52252 has been resident since 2026-08-09 with a 473 MB working set, launched from eustress/target/debug/eustress-engine.exe, and answered live tool calls during this item. main.rs:277 registers SlintUiPlugin, the live UI plugin (StudioUiPlugin at slint_ui.rs:1235 is dead code)."
+    },
+    {
+      "capability": "mcp_tool_surface",
+      "surface": "eustress/crates/tools + eustress/crates/mcp-server over the Engine Bridge",
+      "state": "live",
+      "evidence_path": "eustress/crates/tools/src/lib.rs",
+      "evidence_line": 64,
+      "verified_by": "run",
+      "log_path": "docs/PROMPTS/artifacts/B2/G1.40/logs/run_mcp_tool_surface_live.log",
+      "chargeable_today": true,
+      "blocks": ["cad_tier1_mcp"],
+      "revenue_blocker": "corporate rail only",
+      "note": "Two read-only calls were issued to the running engine and answered by it: get_editor_state returned the live active tool ('move') and selection, list_spaces returned the live Universe root on this machine. Neither value exists anywhere in the repository, so a source read could not have produced them. eustress-tools also builds clean, exit 0, in logs/build_eustress_tools.log."
+    },
+    {
+      "capability": "kyc_jurisdictions",
+      "surface": "infrastructure/cloudflare (Worker, deployed at api.eustress.dev)",
+      "state": "live",
+      "evidence_path": "infrastructure/cloudflare/api/src/index.js",
+      "evidence_line": 39,
+      "verified_by": "run",
+      "log_path": "docs/PROMPTS/artifacts/B2/G1.40/logs/run_kyc_jurisdiction_rederive.log",
+      "chargeable_today": false,
+      "blocks": ["stripe_connect", "payout_ledger", "bliss_ledger_debit"],
+      "revenue_blocker": "not itself sellable; it is a gate on payouts",
+      "note": "46 entries: AE AR AT AU BE BR CA CH CL CO CZ DE DK EG ES FI FR GB GR HK ID IE IL IN IT JP KE KR MX MY NG NL NO NZ PH PL PT RO SA SE SG TH TW UA US ZA, plus a fallback requiring enhanced due diligence for anything unlisted. Consumed by minimumAgeFor() at :102 and by the age gate at :794 and :1456. The deployed endpoint served the US entry with accepted_ids, r2_prefix and IRS QI notes (logs/run_releases_and_kyc_probe.log). The audit's 'empty dict' claim and LAUNCH_PLAN's '72 countries' are both wrong; 46 is the number. eustress-identity, the client half, builds clean (exit 0)."
+    },
+    {
+      "capability": "usage_telemetry_pipeline",
+      "surface": "eustress/crates/engine -> Cloudflare Worker -> TELEMETRY KV",
+      "state": "partial",
+      "evidence_path": "eustress/crates/engine/src/usage_telemetry.rs",
+      "evidence_line": 576,
+      "verified_by": "run",
+      "log_path": "docs/PROMPTS/artifacts/B2/G1.40/logs/run_api_health_probe.log",
+      "chargeable_today": false,
+      "blocks": [],
+      "revenue_blocker": "not sellable in itself; it is the metering substrate any future usage-based price would need",
+      "note": "Sender present in the shipped binary (POSTs to https://api.eustress.dev/api/telemetry/usage), receiver deployed and serving (health 200), TELEMETRY KV bound at infrastructure/cloudflare/api/wrangler.toml:44, handler at index.js:2680. Recorded 'partial' rather than 'live' because closing the loop end to end would require either POSTing to production KV or reading it, and neither is admissible from here. A prior session reports an end-to-end KV verification; that is hearsay for the purposes of this ledger and is not counted."
+    },
+    {
+      "capability": "cad_tier1_mcp",
+      "surface": "eustress/crates/tools/src/cad_tools.rs + eustress/crates/cad",
+      "state": "partial",
+      "evidence_path": "eustress/crates/tools/src/cad_tools.rs",
+      "evidence_line": 615,
+      "verified_by": "build",
+      "log_path": "docs/PROMPTS/artifacts/B2/G1.40/logs/build_eustress_tools.log",
+      "chargeable_today": false,
+      "blocks": [],
+      "revenue_blocker": "the running MCP server binary does not expose the Tier-1 read tools; it must be rebuilt and restarted before a customer can reach them",
+      "note": "cad_describe_part (:615), cad_validate_part (:802) and cad_measure (:999) are registered unconditionally at tools/src/lib.rs:79-81, and both eustress-tools and eustress-cad build clean (exit 0). But the MCP server serving this session exposes only the three CAD WRITE tools — cad_create_part, cad_set_variable, cad_export_glb; resolving cad_describe_part, cad_validate_part or cad_measure against the live surface returns NOT FOUND. The Tier-1 trio compiles and is unreachable. Note the real tool name is cad_validate_part, not cad_validate as the item text has it."
+    },
+    {
+      "capability": "commercial_licence",
+      "surface": "LICENSE-COMMERCIAL.md (negotiated, contact licensing@eustress.dev)",
+      "state": "partial",
+      "evidence_path": "LICENSE-COMMERCIAL.md",
+      "evidence_line": 3,
+      "verified_by": "source_read",
+      "log_path": null,
+      "chargeable_today": true,
+      "blocks": [],
+      "revenue_blocker": "no published price, and the instrument names a grantor that does not yet exist",
+      "note": "A real instrument, not a plan: it states when a commercial licence is required, what it grants beyond the PolyForm Shield noncompete, and a contact channel. It is chargeable today in the sense that a customer signing it receives working software (desktop_studio and mcp_tool_surface are both verified live). Two caveats a pricing item must carry forward: no price is published anywhere, and line 3 attributes copyright to 'Eustress LLC', an entity whose formation is unconfirmed (see nevada_llc). Read as source, because a legal instrument is verified by reading it — there is nothing to build or run."
+    },
+    {
+      "capability": "stripe_connect",
+      "surface": "infrastructure/cloudflare (Worker, deployed)",
+      "state": "partial",
+      "evidence_path": "infrastructure/cloudflare/api/src/index.js",
+      "evidence_line": 3339,
+      "verified_by": "run",
+      "log_path": "docs/PROMPTS/artifacts/B2/G1.40/logs/run_api_health_probe.log",
+      "chargeable_today": false,
+      "blocks": ["payout_ledger"],
+      "revenue_blocker": "KYC completion, then business_banking, then ein, then nevada_llc",
+      "note": "Onboarding (:3339) and status (:3421) handlers exist and the Worker hosting them is deployed and serving. Checkout (:3132) and the webhook (:3226, with a real HMAC-SHA256 v1 signature check and a deposit idempotency guard) exist alongside them. Not verified: whether STRIPE_SECRET_KEY is actually set — the handlers return 503 'Stripe not configured' when it is not, and establishing which requires a POST that would create live Stripe objects, so it was deliberately not attempted. What IS measured is the outcome: deposit_count 0 and treasury_usd 0 on the live /api/payouts/rate, so no Connect payment has ever settled."
+    },
+    {
+      "capability": "payout_ledger",
+      "surface": "infrastructure/cloudflare (Worker + PAYOUTS KV + daily cron)",
+      "state": "partial",
+      "evidence_path": "infrastructure/cloudflare/api/src/index.js",
+      "evidence_line": 3498,
+      "verified_by": "run",
+      "log_path": "docs/PROMPTS/artifacts/B2/G1.40/logs/run_api_health_probe.log",
+      "chargeable_today": false,
+      "blocks": [],
+      "revenue_blocker": "business_banking; the USD leg cannot exist without an account to pay from",
+      "note": "The BLS side is live and computing: GET /api/payouts/rate returned daily_bls_emission 13715.52811612583, annual_emission_rate 0.05, current_supply 100123355.24771856, total_distributed 123355.24771854769, genesis_date 2026-07-01. The USD side is empty and has always been: treasury_usd 0, platform_usd 0, daily_drip_usd 0, deposit_count 0, bls_to_usd_rate 0, rate_display 'No treasury funds'. A daily cron is bound (wrangler.toml [triggers] crons '0 0 * * *') and PAYOUTS KV is bound. So the ledger runs; it has simply never had money in it."
+    },
+    {
+      "capability": "subscriptions_backend",
+      "surface": "infrastructure/cloudflare (Worker) + docs/monetization/SUBSCRIPTIONS.md",
+      "state": "partial",
+      "evidence_path": "infrastructure/cloudflare/api/src/index.js",
+      "evidence_line": 3153,
+      "verified_by": "source_read",
+      "log_path": null,
+      "chargeable_today": false,
+      "blocks": [],
+      "revenue_blocker": "no renewal handling and no entitlement grant; docs/monetization/SUBSCRIPTIONS.md:8 is still 'Pre-Release Design'",
+      "note": "More than paper: four recurring Stripe price IDs are hard-coded at index.js:3122-3125 and checkout switches to mode 'subscription' at :3153. But the webhook (:3226) handles only checkout.session.completed — no invoice.paid, no customer.subscription.updated, no customer.subscription.deleted — so a renewal grants nothing and a cancellation revokes nothing. There is no entitlement store. Recorded partial, and explicitly NOT chargeable: a subscription you cannot renew or revoke is not a product."
+    },
+    {
+      "capability": "forge_hosting",
+      "surface": "eustress/crates/forge (orchestration library over forge-orchestration 0.6.0 + Nomad)",
+      "state": "partial",
+      "evidence_path": "eustress/crates/forge/src/lib.rs",
+      "evidence_line": 1,
+      "verified_by": "source_read",
+      "log_path": null,
+      "chargeable_today": false,
+      "blocks": [],
+      "revenue_blocker": "no deployed control plane, no cluster, no billing hook, no customer workload has ever been scheduled",
+      "note": "Real library code — GameServerJob, ExperienceRouter, EustressForgeConfig over forge-orchestration's router, autoscaler and federation — and a workspace member. But nothing in infrastructure/ deploys it, no Nomad cluster is referenced anywhere in the repository, and there is no metering or billing path. Not built in this item; recorded source_read rather than claiming more than was measured. Per the item's own constraint, the '80-90% cost reduction' figure in docs/architecture/EUSTRESS_FORGE.md is unmeasured marketing copy and is not repeated here."
+    },
+    {
+      "capability": "marketplace_purchase_handler",
+      "surface": "eustress/crates/backend (Axum content API, binary eustress-api)",
+      "state": "absent",
+      "evidence_path": "eustress/crates/backend/src/marketplace.rs",
+      "evidence_line": 185,
+      "verified_by": "build",
+      "log_path": "docs/PROMPTS/artifacts/B2/G1.40/logs/build_eustress_backend.log",
+      "chargeable_today": false,
+      "blocks": ["refunds", "tax_vat"],
+      "revenue_blocker": "the crate is in no build graph and the handler references four methods that do not exist",
+      "note": "'absent' describes the capability, not the file. The source exists at :185 and is unreachable by every route: `cargo build -p eustress-backend` exits 101 with 'did not match any packages' because commit fd192891 removed crates/backend from [workspace] members, and `cargo build --manifest-path crates/backend/Cargo.toml` exits 101 with 'current package believes it's in a workspace when it's not'. Underneath that, the handler calls state.db.find_marketplace_item_by_id (:194), has_purchased (:199), get_user_balance (:207, :215) and purchase_item (:213); db.rs defines none of them — the nearest is get_marketplace_item_by_id, a different name — and get_user_balance has no balance store to read because db.rs:5 assigns user identity to Cloudflare KV rather than to this database. Re-listing the crate to obtain a build number would be fabricating evidence for the exact claim this row exists to test; it was not done, and no Rust source was edited. The working purchase path on the platform today is the Worker's TKT spend at index.js:3644, a different currency on a different surface."
+    },
+    {
+      "capability": "bliss_ledger_debit",
+      "surface": "infrastructure/cloudflare (Worker) + eustress/crates/bliss",
+      "state": "absent",
+      "evidence_path": "infrastructure/cloudflare/api/src/index.js",
+      "evidence_line": 4535,
+      "verified_by": "build",
+      "log_path": "docs/PROMPTS/artifacts/B2/G1.40/logs/build_eustress_bliss.log",
+      "chargeable_today": false,
+      "blocks": ["marketplace_purchase_handler", "refunds"],
+      "revenue_blocker": "business_banking — the only legitimate BLS debit is cash-out, and there is no account to pay from",
+      "note": "eustress-bliss compiles clean (exit 0) and its entire public surface was scanned in the same log: node mode control, cosign, heartbeat, submit_contribution, session_stats, and one set_balance that mirrors the witness's authoritative figure. Nothing debits. In the deployed Worker, all ten bliss_balance sites are init (:864), read (:2119, :2133, :2589, :3772, :3778, :3826, :4680), sum, or credit (:4535, `+ bls`); none subtract. This is consistent with docs/monetization/CURRENCY.md:43, which forbids a purchase path for BLS by design and keeps the earn rail and spend rail disjoint — the spend rail is TKT. So the missing piece is specifically the cash-out leg, blocked on banking per LAUNCH_PLAN.md:158. Per 00_MASTER_PROTOCOL §6.5, transferability and cash-out are human-only decisions; nothing is designed here, only measured."
+    },
+    {
+      "capability": "refunds",
+      "surface": "infrastructure/cloudflare (Worker) + eustress/crates/backend",
+      "state": "absent",
+      "evidence_path": "infrastructure/cloudflare/api/src/index.js",
+      "evidence_line": 3226,
+      "verified_by": "source_read",
+      "log_path": null,
+      "chargeable_today": false,
+      "blocks": [],
+      "revenue_blocker": "no refund path of any kind exists on any surface",
+      "note": "The Stripe webhook at :3226 handles checkout.session.completed only. There is no charge.refunded or charge.dispute.created branch, no refund endpoint, no reversal of a TKT credit, and no compensating entry in PAYOUTS or INVENTORY. Grepping refund across all .rs/.js/.toml finds it only in unrelated places: bliss_tracker.rs, tool_metadata.rs, a government mode manifest, common/src/services/marketplace.rs and the website terms page. Selling anything before this exists means the first refund request is handled by hand in the Stripe dashboard, with the ledger left inconsistent."
+    },
+    {
+      "capability": "tax_vat",
+      "surface": "infrastructure/cloudflare (Worker)",
+      "state": "absent",
+      "evidence_path": "infrastructure/cloudflare/api/src/index.js",
+      "evidence_line": 3132,
+      "verified_by": "source_read",
+      "log_path": null,
+      "chargeable_today": false,
+      "blocks": [],
+      "revenue_blocker": "no tax handling at all; a case-insensitive grep for tax, vat and automatic_tax across the entire Worker returns nothing",
+      "note": "The checkout session built at :3132-3183 sets mode, line items, metadata and a 2.5% platform fee, and never sets automatic_tax. Nothing collects a tax registration, computes a rate, stores a taxable location, or produces a report. Selling to EU or UK consumers in this state creates a VAT liability with no record to file against."
+    },
+    {
+      "capability": "steam_iap",
+      "surface": "eustress/crates/engine/src/auth.rs + docs/monetization/SUBSCRIPTIONS.md",
+      "state": "spec_only",
+      "evidence_path": "docs/monetization/SUBSCRIPTIONS.md",
+      "evidence_line": 8,
+      "verified_by": "source_read",
+      "log_path": null,
+      "chargeable_today": false,
+      "blocks": [],
+      "revenue_blocker": "no Steamworks integration, no app on Steam, no in-app-purchase code path",
+      "note": "SUBSCRIPTIONS.md:8 is marked 'Status: Pre-Release Design' and describes Player Plus / Creator Pro / Bundle via Steam. The only Steam code in the repository is OAuth sign-in at engine/src/auth.rs:218, which falls back to a mock at :420 when the backend is unavailable. No Steamworks SDK, no microtransaction callback, no entitlement sync. docs/monetization/CURRENCY.md:9 records the 'arcade tokens via Steam Wallet' framing as superseded."
+    },
+    {
+      "capability": "windows_code_signing",
+      "surface": ".github/workflows/release.yml",
+      "state": "absent",
+      "evidence_path": ".github/workflows/release.yml",
+      "evidence_line": 88,
+      "verified_by": "source_read",
+      "log_path": null,
+      "chargeable_today": false,
+      "blocks": ["paid_pilot"],
+      "revenue_blocker": "no code-signing certificate exists, which is a purchase and an identity verification only the founder can make",
+      "note": "A case-insensitive grep for signtool, codesign, notarize, notarise, certificate and SIGNING across all of .github/workflows/ returns nothing. The Windows Package step at :88 zips the binary produced at :63 and ships it unsigned, so every installer raises a SmartScreen warning. No workflow file was modified by this item."
+    },
+    {
+      "capability": "macos_notarisation",
+      "surface": ".github/workflows/release.yml",
+      "state": "absent",
+      "evidence_path": ".github/workflows/release.yml",
+      "evidence_line": 163,
+      "verified_by": "source_read",
+      "log_path": null,
+      "chargeable_today": false,
+      "blocks": ["paid_pilot"],
+      "revenue_blocker": "an Apple Developer Program membership and a Developer ID certificate, both founder-only purchases tied to a legal entity",
+      "note": "The build-macos-arm64 job packages a DMG at :163 with no codesign and no notarytool step — the same grep that found no Windows signing found no macOS signing. An unnotarised DMG is refused by Gatekeeper on a default macOS install, so the macOS artefact is not deliverable to a customer today."
+    },
+    {
+      "capability": "releases_r2_bucket",
+      "surface": "Cloudflare R2 (eustress-releases) + releases.eustress.dev",
+      "state": "absent",
+      "evidence_path": ".github/workflows/release.yml",
+      "evidence_line": 374,
+      "verified_by": "run",
+      "log_path": "docs/PROMPTS/artifacts/B2/G1.40/logs/run_releases_and_kyc_probe.log",
+      "chargeable_today": false,
+      "blocks": ["paid_pilot"],
+      "revenue_blocker": "provisioning an R2 bucket and a DNS record — founder-only, needs the Cloudflare account",
+      "note": "Measured, not inferred: GET https://releases.eustress.dev/latest.json fails with curl exit 6, 'Could not resolve host'. The host does not exist in DNS. release.yml:374 uploads latest.json to s3://eustress-releases via the S3 API and :308 builds download URLs under https://releases.eustress.dev, and engine/src/updater.rs fetches that manifest at startup, so every shipped copy checks for updates against a domain that does not resolve. docs/launch/PUBLIC_ALPHA_CHECKLIST.md:15 still carries this as an unchecked [BLOCKER], and that is correct."
+    },
+    {
+      "capability": "nevada_llc",
+      "surface": "corporate (LAUNCH_PLAN.md Stream 2)",
+      "state": "unknown",
+      "evidence_path": "LAUNCH_PLAN.md",
+      "evidence_line": 86,
+      "verified_by": "blocked",
+      "log_path": null,
+      "blocked_reason": "LAUNCH_PLAN.md:86 records 'Status: In progress (forming)'. No filing number, no articles of organization, no registered-agent confirmation and no state acknowledgement exists anywhere in the repository, and a corporate registration cannot be verified from this environment. Only the founder can resolve this row, by producing the Nevada Secretary of State filing.",
+      "chargeable_today": false,
+      "blocks": ["ein", "business_banking", "commercial_licence", "payout_ledger", "stripe_connect"],
+      "revenue_blocker": "the founder's filing; this is the root unlock for the entire money rail",
+      "note": "Recorded unknown rather than partial deliberately. A plan saying a thing is in progress is not evidence that the thing exists in any degree, and every downstream row — EIN, banking, payouts, and the grantor named in LICENSE-COMMERCIAL.md:3 — depends on the answer."
+    },
+    {
+      "capability": "ein",
+      "surface": "corporate (LAUNCH_PLAN.md Stream 2)",
+      "state": "absent",
+      "evidence_path": "LAUNCH_PLAN.md",
+      "evidence_line": 27,
+      "verified_by": "source_read",
+      "log_path": null,
+      "chargeable_today": false,
+      "blocks": ["business_banking"],
+      "revenue_blocker": "IRS application, which cannot be filed until the LLC is approved",
+      "note": "LAUNCH_PLAN.md:27 states the EIN 'auto-follows LLC approval (Stream 2); blocked on the state filing'. That is a definite negative — the plan asserts the EIN is not in hand — so this is recorded absent rather than unknown."
+    },
+    {
+      "capability": "business_banking",
+      "surface": "corporate (LAUNCH_PLAN.md Stream 3)",
+      "state": "absent",
+      "evidence_path": "LAUNCH_PLAN.md",
+      "evidence_line": 99,
+      "verified_by": "source_read",
+      "log_path": null,
+      "chargeable_today": false,
+      "blocks": ["payout_ledger", "bliss_ledger_debit"],
+      "revenue_blocker": "EIN, which is blocked on the LLC",
+      "note": "LAUNCH_PLAN.md:99 records 'Status: Blocked (needs EIN)' with Ramp pre-staged. Corroborated by measurement rather than trusted from the document: the live treasury reports deposit_count 0 and treasury_usd 0, which is what a rail with nowhere to settle looks like."
+    },
+    {
+      "capability": "paid_pilot",
+      "surface": "docs/marketing (University of Arizona Center for Innovation proposal)",
+      "state": "spec_only",
+      "evidence_path": "docs/marketing/UofA_Center_For_Innovation_Pilot.html",
+      "evidence_line": 1,
+      "verified_by": "source_read",
+      "log_path": null,
+      "chargeable_today": false,
+      "blocks": [],
+      "revenue_blocker": "no scope, no price, no executed agreement, no entity to contract through, and no download link to deliver against",
+      "note": "What exists is a pitch: an HTML and PDF proposal. There is no statement of work, no price, no signature, no invoice and no record of payment — and the live treasury has taken zero deposits. Recorded spec_only and not chargeable, which is the stricter reading; the offer becomes chargeable the moment a scope and a price exist and a counterparty signs, since the thing it would deliver (desktop_studio) is verified live. Separately, that proposal advertises 'Open source, MIT-friendly licensing', which contradicts LICENSE; fixing it belongs to the licence-phrasing verifier, not to this item."
+    }
+  ],
+
+  "what_only_the_founder_can_do": [
+    "File the Nevada LLC and produce the filing number — the root unlock; every corporate row and the grantor named in LICENSE-COMMERCIAL.md depends on it.",
+    "Apply for the EIN once the LLC is approved, then open the business bank account.",
+    "Provision the eustress-releases R2 bucket and the releases.eustress.dev DNS record. Until then every shipped copy updates against a host that does not resolve.",
+    "Buy a Windows code-signing certificate and an Apple Developer ID; both require a verified legal identity.",
+    "Decide whether STRIPE_SECRET_KEY is set on the deployed Worker. This item deliberately did not probe it, because establishing it requires a POST that creates live Stripe objects.",
+    "Decide the Bliss cash-out and transferability policy. 00_MASTER_PROTOCOL §6.5 makes that human-only; this ledger measures the absence of a debit path and designs nothing."
+  ]
+}

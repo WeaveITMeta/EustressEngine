@@ -2,26 +2,46 @@
 // Celestial Plugin - Day/Night Cycle and Atmosphere Integration
 // ============================================================================
 //
-// This plugin manages celestial bodies and the day/night cycle:
-// - Sun position and lighting based on time of day (6am sunrise, 6pm sunset)
-// - Moon phases and night lighting
-// - Star rendering at night
-// - Directional light synchronization with celestial bodies
-// - Atmosphere synchronization with time of day curves
-// - AAA lighting with smooth transitions
+// This plugin derives the *readable* state of the day/night cycle:
+// - CelestialState: sun/moon direction, elevation, colour, star visibility
+// - TimeOfDayCurve: smooth curves other systems interpolate against
+// - Atmosphere colour transitions across sunrise, noon and sunset
 //
-// NOTE: Sun/Moon visuals are rendered by Bevy's Atmosphere shader via SunDisk
-// component on DirectionalLight (see lighting_plugin.rs). No billboard meshes.
+// ## What this plugin deliberately does NOT do
+//
+// It does not write GlobalAmbientLight and it does not write any
+// DirectionalLight. It used to do both, and both were bugs:
+//
+// - `update_ambient_lighting` wrote GlobalAmbientLight with a brightness of
+//   `0.3 + 0.4 * elevation/90`, while SharedLightingPlugin wrote the same
+//   resource with `brightness * 500 * night_factor`. Neither system was ordered
+//   against the other, so the scene's ambient level depended on schedule order.
+// - `sync_directional_light_with_sun` queried `Without<Sun>`, which matches
+//   every directional light that is not the sun entity — including the Moon —
+//   and drove them all with *sun* data, overwriting the moon's own orbital
+//   mechanics every frame.
+//
+// GlobalAmbientLight is owned by `SharedLightingPlugin::update_ambient_light`,
+// the sun light by `update_sun_position`, the moon light by
+// `update_moon_position`. One writer each.
+//
+// It also no longer integrates its own clock. LightingService is the single
+// authority for time of day; a Sun authored with `cycle_speed` feeds that
+// service cycle instead of running a second integrator against it.
+//
+// NOTE: Sun/Moon visuals are rendered by Bevy's atmosphere via the SunDisk
+// component on DirectionalLight (see sky_atmosphere.rs). No billboard meshes.
 //
 // Table of Contents:
 // 1. Plugin Definition
 // 2. Resources (CelestialState, TimeOfDayCurve)
-// 3. Systems (update_celestial_cycle, sync_directional_light, sync_atmosphere_with_time)
+// 3. Systems (update_celestial_cycle, sync_sun_cycle_to_service, sync_atmosphere_with_time)
 // 4. Helper Functions
 // ============================================================================
 
 use bevy::prelude::*;
 use eustress_common::classes::{Sun, Moon, Sky, Atmosphere};
+use eustress_common::services::lighting::LightingService;
 
 // ============================================================================
 // 1. Plugin Definition
@@ -35,9 +55,8 @@ impl Plugin for CelestialPlugin {
         app.init_resource::<CelestialState>()
             .init_resource::<TimeOfDayCurve>()
             .add_systems(Update, (
+                sync_sun_cycle_to_service,
                 update_celestial_cycle,
-                sync_directional_light_with_sun,
-                update_ambient_lighting,
                 update_star_visibility,
                 sync_atmosphere_with_time_of_day,
             ).chain());
@@ -116,29 +135,58 @@ pub struct CelestialState {
 // 3. Systems
 // ============================================================================
 
-/// Update the celestial cycle based on Sun component settings
-/// Also updates the TimeOfDayCurve for AAA lighting transitions
+/// Translate an authored `Sun.cycle_speed` into the service-level day cycle.
+///
+/// `Sun` carries `cycle_speed` (hours of game time per real second) and
+/// `cycle_paused`, and `LightingService` carries `cycle_enabled` and
+/// `day_length_minutes`. Both used to integrate time independently: the sun
+/// advanced `Sun.time_of_day` here while `update_sun_position` advanced
+/// `LightingService.time_of_day`, and then `sync_clock_time_to_sun` wrote the
+/// service's (differently advanced) clock straight back over the sun's.
+///
+/// One integrator now, in `SharedLightingPlugin`. This system only converts the
+/// authored rate into the equivalent day length, so the `Sun` properties keep
+/// meaning exactly what they say.
+fn sync_sun_cycle_to_service(
+    mut lighting: ResMut<LightingService>,
+    sun_query: Query<&Sun, Changed<Sun>>,
+) {
+    let Some(sun) = sun_query.iter().find(|s| s.enabled) else {
+        return;
+    };
+
+    let running = !sun.cycle_paused && sun.cycle_speed > 0.0;
+    if lighting.cycle_enabled != running {
+        lighting.cycle_enabled = running;
+    }
+    if running {
+        // cycle_speed is game-hours per real second, so a full 24 h day takes
+        // 24 / cycle_speed real seconds.
+        let day_length_minutes = (24.0 / sun.cycle_speed) / 60.0;
+        if (lighting.day_length_minutes - day_length_minutes).abs() > 1e-3 {
+            lighting.day_length_minutes = day_length_minutes.max(1e-3);
+        }
+    }
+}
+
+/// Derive `CelestialState` and `TimeOfDayCurve` from the current sun and moon.
+///
+/// Read-only with respect to `Sun`. Mutating `Sun` every frame marked it
+/// `Changed`, which made `write_instance_changes_system` flush
+/// `Sun.instance.toml` to disk every frame and trip the file watcher, the same
+/// stutter loop documented on `update_sun_position`.
 fn update_celestial_cycle(
-    time: Res<Time>,
     mut celestial_state: ResMut<CelestialState>,
     mut time_curve: ResMut<TimeOfDayCurve>,
-    mut sun_query: Query<&mut Sun>,
+    sun_query: Query<&Sun>,
     moon_query: Query<&Moon>,
 ) {
     // Find the active sun
-    for mut sun in sun_query.iter_mut() {
+    for sun in sun_query.iter() {
         if !sun.enabled {
             continue;
         }
-        
-        // Advance time if not paused
-        if !sun.cycle_paused && sun.cycle_speed > 0.0 {
-            // cycle_speed: hours per real second
-            let hours_per_second = sun.cycle_speed / 3600.0;
-            sun.time_of_day += time.delta_secs() * hours_per_second;
-            sun.time_of_day = sun.time_of_day % 24.0;
-        }
-        
+
         // Update celestial state from sun
         celestial_state.sun_direction = sun.direction();
         celestial_state.sun_elevation = sun.elevation();
@@ -255,76 +303,24 @@ fn update_celestial_cycle(
     }
 }
 
-/// Synchronize the main directional light with the sun position
-fn sync_directional_light_with_sun(
-    celestial_state: Res<CelestialState>,
-    sun_query: Query<&Sun>,
-    moon_query: Query<&Moon>,
-    mut light_query: Query<(&mut DirectionalLight, &mut Transform), Without<Sun>>,
-) {
-    // Get sun and moon settings
-    let sun = sun_query.iter().find(|s| s.enabled);
-    let moon = moon_query.iter().find(|m| m.enabled);
-    
-    for (mut light, mut transform) in light_query.iter_mut() {
-        if celestial_state.is_day {
-            // Daytime - use sun
-            if let Some(sun) = sun {
-                // Point light toward sun (light direction is opposite of sun direction)
-                let light_dir = -celestial_state.sun_direction;
-                transform.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, light_dir);
-                
-                // Set light color and intensity
-                light.color = celestial_state.sun_color;
-                light.illuminance = celestial_state.sun_intensity;
-                
-                // Shadow settings
-                if sun.cast_shadows {
-                    // Shadows are handled by Bevy's shadow system
-                }
-            }
-        } else {
-            // Nighttime - use moon if bright enough
-            if let Some(moon) = moon {
-                if moon.cast_shadows && celestial_state.moon_illumination > 0.3 {
-                    // Moon provides some directional light
-                    let light_dir = -celestial_state.moon_direction;
-                    transform.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, light_dir);
-                    
-                    // Moonlight color (bluish)
-                    let moon_color = moon.color;
-                    light.color = Color::srgba(moon_color[0], moon_color[1], moon_color[2], moon_color[3]);
-                    light.illuminance = moon.current_intensity(celestial_state.sun_elevation) * 1000.0;
-                } else {
-                    // Very dark night - minimal light
-                    light.illuminance = 10.0;
-                    light.color = Color::srgba(0.1, 0.1, 0.2, 1.0);
-                }
-            } else {
-                // No moon - very dark
-                light.illuminance = 10.0;
-                light.color = Color::srgba(0.05, 0.05, 0.1, 1.0);
-            }
-        }
-    }
-}
-
-/// Update ambient lighting based on celestial state
-fn update_ambient_lighting(
-    celestial_state: Res<CelestialState>,
-    mut ambient_light: ResMut<GlobalAmbientLight>,
-) {
-    ambient_light.color = celestial_state.ambient_color;
-    
-    // Scale ambient brightness based on time of day
-    let brightness = if celestial_state.is_day {
-        0.3 + 0.4 * (celestial_state.sun_elevation / 90.0).max(0.0)
-    } else {
-        0.02 + 0.08 * celestial_state.moon_illumination
-    };
-    
-    ambient_light.brightness = brightness;
-}
+// `sync_directional_light_with_sun` and `update_ambient_lighting` used to live
+// here. Both were removed rather than repaired, because both were writing
+// resources that already had an owner:
+//
+// - The light sync's `Without<Sun>` filter matched every directional light in
+//   the scene that was not the sun entity. That includes the Moon, so moonlight
+//   colour, intensity and direction were overwritten with sun-derived values
+//   every frame, silently defeating `update_moon_position`'s orbital mechanics.
+//   The sun light is owned by `update_sun_position`; the moon light by
+//   `update_moon_position`.
+// - The ambient write competed with two systems in SharedLightingPlugin using
+//   an incompatible scale (a brightness of ~0.3 against their ~500), with no
+//   ordering between them. `GlobalAmbientLight` is now owned solely by
+//   `update_ambient_light`, which folds in time of day, exposure compensation
+//   and the diffuse environment scale in one place.
+//
+// `CelestialState` still publishes sun/moon direction, colour and illumination,
+// so anything that wants to read those (the clouds plugin does) still can.
 
 /// Update star visibility in Sky components
 fn update_star_visibility(

@@ -1,6 +1,26 @@
 # Bliss × Manufacturing Program Integration
 
-Complete specification for how Bliss cryptocurrency integrates with the Eustress Manufacturing Program to create a self-sustaining ecosystem.
+Complete specification for how Bliss integrates with the Eustress Manufacturing Program to create a self-sustaining ecosystem.
+
+> **⚠️ STATUS (2026-07-05): DESIGN ONLY — NOT IMPLEMENTED.**
+> None of the Bliss gatekeeping in this document exists in code. Specifically:
+> - `check_manufacturing_eligibility()` and the Workshop "Step 9a" gate are
+>   **not built**.
+> - The API calls below point at `http://localhost:9000/contributions/stats/:address`,
+>   which **does not exist**. The Bliss node's local API is on port **7777**
+>   and exposes co-signing / identity verification, not contribution stats.
+>   Live contribution data comes from the witness at
+>   `https://api.eustress.dev` (`/api/node/heartbeat` returns balance and
+>   today's pending score; `/api/payouts/rate` returns supply and emission).
+> - The equity/royalty splits are a **proposal**, not an implemented ledger.
+>
+> Treat every code block here as a sketch of intent. Before implementing,
+> reconcile against [docs/monetization/CURRENCY.md](../monetization/CURRENCY.md),
+> which is canonical for how Bliss actually works.
+>
+> **Note on the 20% contributor equity pool:** distributing real equity to a
+> pool by points formula is the most securities-sensitive element in the whole
+> Eustress economy. It needs counsel review before any of it is built.
 
 ---
 

@@ -147,23 +147,27 @@ impl CosignClient {
         user_id: Option<&str>,
     ) -> Result<HeartbeatReply, BlissError> {
         let url = format!("{}/api/node/heartbeat", self.witness_url);
-        let mut body = serde_json::json!({
+        // `user_id` is kept for anonymous node telemetry compatibility only —
+        // the witness now derives the ACCOUNT from the bearer token and
+        // ignores any body-supplied id, because presence / node-mode written
+        // here are the integrity anchors the cosign path trusts.
+        let _ = user_id;
+        let body = serde_json::json!({
             "node_id": node_id,
             "mode": mode,
             "players": players,
             "uptime_secs": uptime_secs,
             "fork_id": self.fork_id,
         });
-        if let Some(uid) = user_id {
-            body["user_id"] = serde_json::Value::String(uid.to_string());
-        }
 
-        let response = self.http
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(BlissError::Network)?;
+        let mut req = self.http.post(&url).json(&body);
+        // MUST send the token: without it the witness treats the beat as
+        // anonymous, so no presence accrues, no balance comes back, and the
+        // engine's 401 latch would be cleared by a meaningless 200.
+        if let Some(token) = self.auth_token.as_ref() {
+            req = req.bearer_auth(token);
+        }
+        let response = req.send().await.map_err(BlissError::Network)?;
 
         if response.status().is_success() {
             let reply: HeartbeatReply = response

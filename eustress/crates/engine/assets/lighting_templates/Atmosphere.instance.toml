@@ -1,20 +1,54 @@
 # Atmosphere — Atmospheric scattering and sky rendering
 # Auto-created with each Space in Lighting/ folder.
 # .instance.toml extension causes the file loader to spawn this as an ECS entity.
+#
+# These properties drive Bevy's physically-based atmosphere. Scattering
+# coefficients are in units of 1e-6 per metre, so Earth at sea level reads as
+# [5.802, 13.558, 33.1] for Rayleigh and 4.44 for Mie.
 
 [metadata]
 class_name = "Atmosphere"
 archivable = true
 
 [Appearance]
-Density = { type = "float", value = 0.5, min = 0.0, max = 1.0, description = "Atmospheric density" }
-Color = { type = "Color3", value = [0.776, 0.863, 1.0], description = "Atmosphere color" }
-Decay = { type = "Color3", value = [0.439, 0.506, 0.635], description = "Atmospheric decay color" }
+# 0.5 is Earth-normal. Scales the whole medium, so higher is hazier and the
+# horizon fades sooner.
+Density = { type = "float", value = 0.5, min = 0.0, max = 1.0, description = "Atmospheric density (0.5 = Earth)" }
+# Tints the sky by shifting Rayleigh scattering per channel. Normalised
+# internally, so this changes hue without thickening the atmosphere.
+Color = { type = "Color3", value = [0.776, 0.863, 1.0], description = "Sky tint" }
+# Becomes the planet's ground albedo, which feeds multiscattering and so sets
+# how bright and what colour the horizon reads.
+Decay = { type = "Color3", value = [0.439, 0.506, 0.635], description = "Ground albedo / horizon colour" }
+# Biases Mie scattering forward, which is what a halo around the sun is.
 Glare = { type = "float", value = 0.0, min = 0.0, max = 2.0, description = "Sun glare intensity" }
+# Multiplies the aerosol (Mie) term only — the term that actually reads as haze.
 Haze = { type = "float", value = 0.0, min = 0.0, max = 5.0, description = "Horizon haze" }
 
 [Scattering]
+# Stretches (+) or compresses (-) the vertical density profile.
 Offset = { type = "float", value = 0.0, min = -1.0, max = 1.0, description = "Scattering altitude offset" }
-RayleighCoefficient = { type = "Vector3", value = [5.8, 13.5, 33.1], description = "Rayleigh scattering RGB coefficients" }
-MieCoefficient = { type = "float", value = 21.0, min = 0.0, max = 100.0, description = "Mie scattering coefficient" }
+# Molecular scattering, units of 1e-6 per metre. Blue scatters most, which is
+# why the sky is blue and sunsets are red.
+RayleighCoefficient = { type = "Vector3", value = [5.802, 13.558, 33.1], description = "Rayleigh scattering RGB (1e-6 / m)" }
+# Aerosol extinction, units of 1e-6 per metre. 4.44 is Earth at sea level and
+# gives a clear day; Bruneton-lineage references quote 21.0 for a deliberately
+# hazy atmosphere, which is a legitimate look but not a clear one.
+MieCoefficient = { type = "float", value = 4.44, min = 0.0, max = 100.0, description = "Mie scattering coefficient (1e-6 / m)" }
+# Henyey-Greenstein asymmetry g. Higher throws more light forward around the sun.
 MieDirectionalFactor = { type = "float", value = 0.8, min = 0.0, max = 1.0, description = "Mie forward scattering" }
+
+[Rendering]
+# LookupTexture is the fast path and is right for anything at ground level.
+# Raymarched is slower but accurate at long range, and is what you want for
+# orbital views, flight sims and cinematic captures.
+RenderingMode = { type = "string", value = "LookupTexture", options = ["LookupTexture", "Raymarched"], description = "Sky rendering method" }
+SkyMaxSamples = { type = "int", value = 32, min = 8, max = 128, description = "Raymarching samples (Raymarched mode only)" }
+PlanetRadius = { type = "float", value = 6371000.0, min = 1000.0, description = "Planet radius in metres" }
+AtmosphereHeight = { type = "float", value = 100000.0, min = 1000.0, description = "Atmosphere thickness in metres" }
+
+[Reflections]
+# The atmosphere generates a filtered environment map every frame, so
+# reflections and image-based ambient track the time of day automatically.
+EnvironmentMapEnabled = { type = "bool", value = true, description = "Light the scene from the sky (image-based lighting)" }
+EnvironmentIntensity = { type = "float", value = 1.0, min = 0.0, max = 64.0, description = "Environment map intensity" }

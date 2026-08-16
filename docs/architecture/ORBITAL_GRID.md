@@ -1,520 +1,168 @@
-# Eustress Orbital Coordinate Grid
+# Grid-Cell Coordinates
 
-**The definitive breakthrough for Earth One**: a singular, persistent, photoreal digital twin that's geodesically accurate, orbitally realistic, and infinitely extensible with abstract spaces.
+**Status: design. Not implemented.** No code in the workspace implements this
+yet. Everything below specifies what to build; the "What exists today" section
+marks the seams it would attach to.
+
+The goal is a single Space that stays exact at planetary extents while
+rendering and simulating in `f32` — i.e. large worlds without a floating-point
+rewrite of Bevy or Avian.
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Core Types](#core-types)
-4. [WGS84/ECEF Coordinates](#wgs84ecef-coordinates)
-5. [Relative Euclidean Regions](#relative-euclidean-regions)
-6. [Orbital Gravity](#orbital-gravity)
-7. [P2P Integration](#p2p-integration)
-8. [Scene Format](#scene-format)
-9. [Usage Examples](#usage-examples)
-10. [Best Practices](#best-practices)
+1. [The problem](#the-problem)
+2. [Why not f64](#why-not-f64)
+3. [The design](#the-design)
+4. [Precision budget](#precision-budget)
+5. [Choosing the step](#choosing-the-step)
+6. [What exists today](#what-exists-today)
+7. [Integration points](#integration-points)
 
 ---
 
-## Overview
+## The problem
 
-The Eustress Orbital Coordinate Grid fuses WGS84/ECEF geospatial precision with procedural Euclidean regions, all chunked for P2P streaming and hybrid rendering. It's Cesium-level tiling meets Kerbal Space Program orbital physics, in a Rust-native engine.
+Engine-native coordinates are `f32` metres (`common/src/units.rs`). `f32`
+carries 24 bits of mantissa, so absolute precision degrades linearly with
+distance from the origin: the gap between representable values at distance
+`d` is `d × 2⁻²³`.
 
-### Key Features
+| Distance from origin | ULP | Practical effect |
+|---|---|---|
+| 1 km | 0.06 mm | fine |
+| 8 km | 1 mm | fine |
+| 65 km | 8 mm | visible vertex swim |
+| 262 km | 31 mm | obvious jitter |
+| 6,371 km (Earth radius) | 0.76 m | unusable |
 
-- **Global Layer**: WGS84/ECEF backbone with real ellipsoidal Earth (oblate spheroid)
-- **Floating Origin**: Each region has its own local Cartesian space (no f32 precision jitter)
-- **N-Body Gravity**: Optional Earth + Moon + Sun gravity simulation
-- **P2P Streaming**: Regions sync via CRDTs for persistent worlds
-- **Abstract Spaces**: Non-Earth dimensions linked to Earth locations
+Two distinct failures hide behind "precision":
 
-### Why This Matters
+- **Storage precision** — a position too large to represent exactly.
+- **Cancellation** — `vertex_world − camera_world` computed in `f32` when both
+  operands are large. This is the one that actually produces visible jitter,
+  and it appears well before storage precision runs out.
 
-| Problem | Solution |
-|---------|----------|
-| f32 precision breaks at planetary scale | Floating-origin regions with DVec3 global coords |
-| Flat-Earth physics assumptions | True spherical gravity from celestial bodies |
-| Disconnected Euclidean bubbles | Seamless region transitions with velocity preservation |
-| No geospatial compatibility | WGS84/ECEF standard for GIS integration |
+A grid-cell system fixes both, because the subtraction happens in the integer
+cell domain and the `f32` operands are always cell-local and small.
 
----
+## Why not f64
 
-## Architecture
+Converting the engine to `f64` is not a refactor:
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    Eustress Orbital Coordinate Grid                          │
-├─────────────────────────────────────────────────────────────────────────────┤
-│  Global Layer (WGS84/ECEF)                                                  │
-│     ├── DVec3 precision (f64) for planetary scale                           │
-│     ├── True ellipsoidal Earth (oblate spheroid)                            │
-│     └── Orbital mechanics (n-body gravity approximation)                    │
-├─────────────────────────────────────────────────────────────────────────────┤
-│  Relative Euclidean Regions                                                 │
-│     ├── RegionId → local Cartesian space (f32 for Bevy/Avian)              │
-│     ├── Floating origin per chunk (no precision jitter)                     │
-│     └── Seamless transitions (velocity preservation)                        │
-├─────────────────────────────────────────────────────────────────────────────┤
-│  Chunking & Streaming                                                       │
-│     ├── Cesium-inspired 3D Tiles hierarchy (quadtree/octree)               │
-│     ├── Adaptive LOD for GS/mesh hybrid rendering                          │
-│     └── P2P CRDT sync for persistent regions                               │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+- Bevy's `Transform` / `GlobalTransform` are `f32` `Affine3A`. There is no
+  `f64` feature; the type is `f32` all the way into the render world.
+- GPU vertex buffers and WGSL are `f32`. Consumer GPUs execute `fp64` at 1/32
+  to 1/64 rate, so an `f64` render path is not merely invasive but slow.
+- Avian *does* offer an `f64` feature, but the workspace pins
+  `"f32", "parry-f32"` (`eustress/Cargo.toml`). Enabling `f64` there yields
+  `f64` physics feeding `f32` transforms — double the solver bandwidth for a
+  value that is truncated on the way to the renderer.
 
----
+`f64` is also the weaker answer on its own merits. It moves the error rather
+than removing it: precision still varies with magnitude, and accumulated drift
+still exists, just further out. A grid cell plus a local offset is **exact** —
+the cell index carries no error at all, and the offset's precision is uniform
+everywhere in the world.
 
-## Core Types
+## The design
 
-### OrbitalCoords Component
-
-The main component for entities in the orbital grid:
+A position is a pair:
 
 ```rust
-use eustress_common::orbital::*;
-
-#[derive(Component)]
-pub struct OrbitalCoords {
-    /// High-precision global ECEF position (meters from Earth center)
-    pub global_ecef: GlobalPosition,
-    
-    /// Current region this entity belongs to
-    pub region_id: RegionId,
-    
-    /// Local Euclidean position within the region (f32 for Bevy/Avian)
-    pub local_position: Vec3,
-    
-    /// Local velocity in region space (m/s)
-    pub local_velocity: Vec3,
-    
-    /// Whether this entity should sync its Transform from orbital coords
-    pub sync_transform: bool,
-}
-```
-
-### GlobalPosition
-
-High-precision ECEF coordinates:
-
-```rust
-pub struct GlobalPosition {
-    pub x: f64,  // Through prime meridian at equator
-    pub y: f64,  // Through 90°E at equator
-    pub z: f64,  // Through north pole
+/// Which cell. Exact, no floating point.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GridCell {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
 }
 
-// Create from geodetic (lat/lon/alt)
-let sf = GlobalPosition::from_geodetic(37.7749, -122.4194, 10.0);
-
-// Convert back to geodetic
-let (lat, lon, alt) = sf.to_geodetic();
-
-// Distance between points
-let distance = sf.distance_to(&other);
+/// Where inside that cell, in metres. Always small.
+/// This is the existing Bevy `Transform.translation`.
 ```
 
-### RegionId
-
-Hierarchical region identifier for chunking:
-
-```rust
-pub struct RegionId {
-    pub level: u8,   // 0 = whole Earth, 24 = ~1m resolution
-    pub face: u8,    // Cube-sphere face (0-5)
-    pub x: u32,      // X index at this level
-    pub y: u32,      // Y index at this level
-    pub z: u32,      // Z index (altitude bands)
-}
-
-// Create from geodetic
-let region = RegionId::from_geodetic(37.7749, -122.4194);
-
-// Get tile size
-let size = region.tile_size_meters(); // ~600m at level 16
-
-// Abstract (non-Earth) region
-let abstract_region = RegionId::abstract_region(12345);
-```
-
----
-
-## WGS84/ECEF Coordinates
-
-### Constants
-
-```rust
-use eustress_common::orbital::wgs84::*;
-
-// Earth ellipsoid parameters
-WGS84_A          // Semi-major axis: 6,378,137 m
-WGS84_B          // Semi-minor axis: 6,356,752 m
-EARTH_MEAN_RADIUS // Mean radius: 6,371,000 m
-EARTH_GM         // Gravitational parameter: 3.986e14 m³/s²
-```
-
-### Coordinate Conversions
-
-```rust
-// Geodetic → ECEF
-let ecef = geodetic_to_ecef(lat_deg, lon_deg, alt_meters);
-
-// ECEF → Geodetic
-let (lat, lon, alt) = ecef_to_geodetic(x, y, z);
-
-// Great-circle distance (Haversine)
-let distance = haversine_distance(lat1, lon1, lat2, lon2);
-
-// Bearing between points
-let bearing = bearing(lat1, lon1, lat2, lon2);
-
-// Destination from start + bearing + distance
-let (lat2, lon2) = destination_point(lat, lon, bearing_deg, distance_m);
-```
-
----
-
-## Relative Euclidean Regions
-
-### Region Definition
-
-```rust
-pub struct Region {
-    pub id: RegionId,
-    pub origin: GlobalPosition,      // ECEF center
-    pub size: Vec3,                  // Local bounds (meters)
-    pub active: bool,                // Currently loaded
-    pub custom_gravity: Option<Vec3>, // Override orbital gravity
-    pub is_abstract: bool,           // Non-Earth space
-    pub parent_offset: Option<Vec3>, // Link to parent region
-}
-
-// Create Earth-surface region
-let sf_region = Region::from_geodetic(37.7749, -122.4194, 1000.0);
-
-// Create abstract space
-let dungeon = Region::abstract_space(hash("dungeon_1"), Vec3::splat(500.0));
-
-// Create linked abstract space (portal from Earth)
-let pocket_dim = Region::abstract_child(
-    sf_region.id,
-    Vec3::new(0.0, -100.0, 0.0), // 100m below surface
-    Vec3::splat(200.0),
-    hash("pocket_dimension"),
-);
-```
-
-### RegionRegistry Resource
-
-```rust
-// Access the registry
-fn my_system(mut registry: ResMut<RegionRegistry>) {
-    // Register a new region
-    registry.register(Region::from_geodetic(40.7128, -74.0060, 1000.0));
-    
-    // Activate/deactivate regions
-    registry.activate(region_id);
-    registry.deactivate(region_id);
-    
-    // Find region containing a position
-    if let Some(id) = registry.find_region(&global_pos) {
-        // ...
-    }
-    
-    // Update active regions based on focus
-    registry.update_active_regions(&focus_global);
-}
-```
-
-### Region Transitions
-
-```rust
-// Seamless transition between regions
-let (new_pos, new_vel) = transition_between_regions(
-    local_pos,
-    local_vel,
-    &from_region,
-    &to_region,
-);
-
-// Calculate offset between regions
-let offset = region_offset(&from_region, &to_region);
-```
-
----
-
-## Orbital Gravity
-
-### OrbitalGravity Resource
-
-```rust
-// Earth-only (default, fast)
-app.insert_resource(OrbitalGravity::earth_only());
-
-// Earth + Moon (for tidal effects)
-app.insert_resource(OrbitalGravity::earth_moon());
-
-// Full solar system
-app.insert_resource(OrbitalGravity::full_system());
-```
-
-### Gravity Calculation
-
-```rust
-fn my_system(gravity: Res<OrbitalGravity>) {
-    // Get gravity at a position
-    let g = gravity.gravity_at(&global_pos);
-    
-    // Get "up" direction (opposite of gravity)
-    let up = gravity.up_at(&global_pos);
-    
-    // Use cached gravity (updated each frame)
-    let cached_g = gravity.cached();
-}
-```
-
-### Celestial Bodies
-
-```rust
-let earth = CelestialBody::earth();
-let moon = CelestialBody::moon();
-let sun = CelestialBody::sun();
-
-// Surface gravity
-let g = earth.surface_gravity(); // ~9.81 m/s²
-
-// Escape velocity
-let v_escape = earth.escape_velocity(); // ~11.2 km/s
-
-// Orbital velocity at altitude
-let v_orbit = earth.orbital_velocity(400_000.0); // ISS: ~7.66 km/s
-```
-
-### Camera Gravity Alignment
-
-```rust
-// Add to camera entity
-commands.spawn((
-    Camera3d::default(),
-    OrbitalCoords::from_geodetic(37.7749, -122.4194, 100.0),
-    GravityAligned::default(),      // Smooth alignment
-    // or
-    GravityAligned::instant(),      // Instant alignment
-    // or
-    GravityAligned::with_speed(10.0), // Custom speed
-));
-```
-
----
-
-## P2P Integration
-
-### Region ↔ ChunkId Mapping
-
-```rust
-#[cfg(feature = "p2p")]
-use eustress_common::orbital::regions::{region_to_chunk_id, chunk_id_to_region};
-
-// Convert for networking
-let chunk_id = region_to_chunk_id(&region_id);
-
-// Convert back
-let region_id = chunk_id_to_region(&chunk_id);
-```
-
-### Distributed World Plugin
-
-```rust
-// Both plugins work together
-app.add_plugins(OrbitalPlugin::default())
-   .add_plugins(DistributedWorldPlugin);
-```
-
----
-
-## Scene Format
-
-### OrbitalSettings in Scene
-
-```rust
-pub struct OrbitalSettings {
-    pub enabled: bool,
-    pub origin_geodetic: [f64; 3],    // [lat, lon, alt]
-    pub region_size: f32,              // Chunk size in meters
-    pub nbody_gravity: bool,           // Use n-body simulation
-    pub custom_gravity: Option<[f32; 3]>,
-    pub is_abstract_space: bool,
-    pub parent_region: Option<String>,
-    pub parent_offset: Option<[f32; 3]>,
-    pub max_detail_level: u8,
-    pub camera_gravity_alignment: bool,
-}
-```
-
-### Preset Configurations
-
-```rust
-// Earth surface scene (San Francisco)
-let settings = OrbitalSettings::earth_surface(37.7749, -122.4194, 0.0);
-
-// Orbital scene (ISS altitude)
-let settings = OrbitalSettings::orbital(0.0, 0.0, 400.0);
-
-// Abstract space (standard gravity)
-let settings = OrbitalSettings::abstract_space([0.0, -9.81, 0.0]);
-
-// Abstract space linked to Earth
-let settings = OrbitalSettings::abstract_linked(
-    "L16F2(12345,67890,0)",
-    [0.0, -50.0, 0.0],
-    [0.0, -9.81, 0.0],
-);
-```
-
----
-
-## Usage Examples
-
-### Spawn Entity at Geodetic Location
-
-```rust
-fn spawn_at_location(mut commands: Commands) {
-    // San Francisco
-    commands.spawn((
-        OrbitalCoords::from_geodetic(37.7749, -122.4194, 10.0),
-        Transform::default(),
-        GlobalTransform::default(),
-        Mesh3d::default(),
-        // ...
-    ));
-}
-```
-
-### Track Player as Focus
-
-```rust
-fn setup_player(mut commands: Commands) {
-    commands.spawn((
-        OrbitalCoords::from_geodetic(37.7749, -122.4194, 2.0),
-        OrbitalFocusMarker, // This entity is the focus
-        GravityAligned::default(),
-        // Player components...
-    ));
-}
-```
-
-### Create Abstract Dimension
-
-```rust
-fn create_dungeon(mut registry: ResMut<RegionRegistry>) {
-    // Create abstract region
-    let dungeon = Region::abstract_space(
-        hash("dark_dungeon"),
-        Vec3::new(500.0, 100.0, 500.0),
-    );
-    
-    // Override gravity (lower gravity dungeon)
-    let mut dungeon = dungeon;
-    dungeon.custom_gravity = Some(Vec3::NEG_Y * 4.0);
-    
-    registry.register(dungeon);
-}
-```
-
-### Portal Between Regions
-
-```rust
-fn handle_portal(
-    mut commands: Commands,
-    portals: Query<(&Portal, &OrbitalCoords)>,
-    players: Query<(Entity, &OrbitalCoords), With<Player>>,
-) {
-    for (player_entity, player_coords) in players.iter() {
-        for (portal, portal_coords) in portals.iter() {
-            if player_coords.local_position.distance(portal_coords.local_position) < 2.0 {
-                // Schedule transition to target region
-                commands.entity(player_entity).insert(PendingRegionTransition {
-                    target_region: portal.target_region,
-                    preserve_velocity: true,
-                });
-            }
-        }
-    }
-}
-```
-
----
-
-## Best Practices
-
-### 1. Use Appropriate Detail Levels
-
-| Use Case | Detail Level | Tile Size |
-|----------|--------------|-----------|
-| Global view | 8 | ~150 km |
-| City view | 12 | ~10 km |
-| Neighborhood | 16 | ~600 m |
-| Street level | 20 | ~40 m |
-| Indoor | 24 | ~2.5 m |
-
-### 2. Manage Region Loading
-
-```rust
-// Configure registry for your use case
-let mut registry = RegionRegistry::new();
-registry.max_active_regions = 9;      // 3x3 grid
-registry.load_distance = 5000.0;      // 5km
-registry.unload_distance = 10000.0;   // 10km
-```
-
-### 3. Handle Precision Carefully
-
-```rust
-// ✅ Good: Use local coordinates for physics
-let local_pos = coords.local_position;
-physics_body.position = local_pos;
-
-// ❌ Bad: Convert global to f32 directly
-let bad_pos = Vec3::new(
-    coords.global_ecef.x as f32, // Precision loss!
-    coords.global_ecef.y as f32,
-    coords.global_ecef.z as f32,
-);
-```
-
-### 4. Optimize Gravity Calculations
-
-```rust
-// For most games, Earth-only is sufficient
-app.insert_resource(OrbitalGravity::earth_only());
-
-// Only use n-body for space simulations
-app.insert_resource(OrbitalGravity {
-    use_nbody: true,
-    max_influence_distance: 1e9, // Limit calculation range
-    ..OrbitalGravity::earth_moon()
-});
-```
-
-### 5. Abstract Spaces for Interiors
-
-```rust
-// Large buildings should be abstract spaces
-// This avoids precision issues and allows custom gravity
-
-let building_interior = Region::abstract_child(
-    street_region.id,
-    Vec3::new(100.0, 0.0, 50.0), // Building entrance
-    Vec3::new(200.0, 50.0, 200.0), // Interior size
-    hash("empire_state_interior"),
-);
-```
-
----
-
-## Related Documentation
-
-- [P2P Distributed Worlds](../networking/README.md)
-- [Scene Format](./SCENE_FORMAT.md)
-- [Physics Integration](./PHYSICS.md)
-- [USD Native Format](./USD_NATIVE_FORMAT.md)
+Invariant: `|offset| ≤ cell_size`, restored by a *rebase* whenever an entity
+crosses a boundary. Absolute position is `cell × cell_size + offset`, but that
+value is only ever materialised in `f64` for reporting — never for rendering.
+
+Rendering and physics are **camera-relative**: each frame, the renderer
+subtracts the camera's `GridCell` from every visible entity's `GridCell` in
+integer arithmetic, then adds the `f32` offsets. Both operands of the final
+`f32` subtraction are cell-local, so there is no cancellation regardless of how
+far the camera is from the world origin.
+
+Physics stays `f32` and unmodified: Avian only ever sees one cell neighbourhood
+at a time, which is by construction a small coordinate range.
+
+## Precision budget
+
+At `cell_size = 256 m`, an `f32` offset has a worst-case ULP of
+`256 × 2⁻²³ ≈ 0.03 mm`, **uniformly, at any world extent**.
+
+With `i32` cell indices the addressable world is `2³¹ × 256 m ≈ 5.5 × 10¹¹ m`
+— roughly 3.7 astronomical units. `i64` is available if that is ever the
+binding limit; it will not be.
+
+Compare against storing the same range in `f32`: at Earth radius the ULP is
+0.76 m, a factor of ~25,000 worse, and it keeps degrading.
+
+## Choosing the step
+
+If positions are also **quantised for storage** (see the entity-format work),
+the fixed-point step must be a binary fraction of the **authoring unit**, not
+of the metre.
+
+This project's convention is `1 stud ≡ 1 ft`. Under a metric step of `2⁻¹⁰ m`,
+foot-grid content lands on 312.1152 steps per grid unit — 256 distinct low
+bytes and ~7.92 bits of entropy, which destroys the all-zero low byte-plane
+that makes the column compress. Under `step = 1 ft / 2⁸ ≈ 1.1906 mm`, the same
+content produces exactly one distinct low byte.
+
+| Bits/axis over 256 m | Step | Max error | Bytes (3 axes) |
+|---|---|---|---|
+| 16 | 3.906 mm | 1.953 mm | 6.00 |
+| **18** | **0.977 mm** | **0.488 mm** | **6.75** |
+| 21 | 0.122 mm | 0.061 mm | 7.88 |
+| 24 | 0.0153 mm | 0.0076 mm | 9.00 |
+
+24-bit fixed-point matches `f32`'s own worst-case absolute error over a 256 m
+span (both 7.63 µm) in 25% fewer bits, and unlike `f32` the precision does not
+depend on where in the cell the point falls.
+
+## What exists today
+
+The grid already exists as a **storage key** — the work is promoting it to a
+**coordinate**.
+
+- `worlddb/src/keys.rs` — `MortonKeyEncoder`, 21 bits per axis with a `1 << 20`
+  bias, `chunk_size = 256.0`. `world_to_cell` / `cell_to_world_min` /
+  `cell_world_aabb` are the conversion surface.
+- `engine/src/space/residency.rs` — camera-locality spawn/evict already
+  operates in cell units with load/evict hysteresis.
+- `engine/src/space/hlod.rs` — merged-cell proxies, already per-cell.
+
+The seam to change: `world_to_cell` takes `coord: f32`, i.e. it derives a cell
+*from* a global `f32` position. Under this design the relationship inverts —
+the cell is authoritative and the `f32` offset is cell-local, so nothing ever
+needs a global `f32` coordinate to exist. Every call site that currently
+converts a world-space `f32` to a cell is a site this design removes.
+
+## Integration points
+
+Ordered by how much they constrain the rest:
+
+1. **`GridCell` component + rebase system.** Rebase on boundary crossing;
+   run before transform propagation.
+2. **Camera-relative view matrices.** The renderer subtracts cell indices in
+   integer space. This is what actually kills the jitter.
+3. **Raycasting, gizmos, selection.** Every API taking a "world position"
+   becomes cell-aware. This is the bulk of the work and the main source of
+   subtle bugs — a raycast that silently uses a stale cell is hard to see.
+4. **Physics sync.** Avian bodies live in cell-local space; the sync layer
+   translates on rebase. Rebasing a body mid-solve must preserve velocity.
+5. **Persistence.** `ArchTransform` stores `[f32; 3]` today; it gains the cell
+   index and the offset becomes quantised fixed-point.
+
+Prior art worth reading before implementing: the `big_space` crate takes this
+exact approach against Bevy and is the reference for how the rebase and
+propagation ordering interact.

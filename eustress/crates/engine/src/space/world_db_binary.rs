@@ -166,6 +166,7 @@ fn def_from_components(
                 locked: b.locked,
                 physics: None,
                 respect_gltf_materials: false,
+                deformation: b.deformation,
             }
         })
         .unwrap_or_default();

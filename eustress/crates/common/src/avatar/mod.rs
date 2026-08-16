@@ -51,14 +51,24 @@ pub mod control;
 /// Ledge detection and mantling.
 #[cfg(feature = "physics")]
 pub mod climb;
+/// Grip detection — the "what can I grab in direction d" primitive the whole
+/// traversal set is built on. Avian-dependent, so gated with its siblings.
+#[cfg(feature = "physics")]
+pub mod grip;
 /// Two-bone IK, foot planting, ground adaptation.
 #[cfg(feature = "physics")]
 pub mod ik;
+/// Landing response — soft, hard, and the roll.
+#[cfg(feature = "physics")]
+pub mod landing;
 /// Breathing, exertion, idle breaks, landing flex, look-at.
 #[cfg(feature = "physics")]
 pub mod procedural;
 #[cfg(feature = "physics")]
 pub mod locomotion;
+/// Behavioural tests that actually move the character through real geometry.
+#[cfg(feature = "physics")]
+pub mod behaviour;
 #[cfg(feature = "physics")]
 pub mod parity;
 /// Clip retargeting onto the canonical bone space. Requires the `gltf` parser
@@ -350,6 +360,7 @@ impl Plugin for AvatarRuntimePlugin {
             app.add_plugins((
                 procedural::AvatarLifePlugin,
                 climb::AvatarClimbPlugin,
+                landing::AvatarLandingPlugin,
                 ik::AvatarIkPlugin,
             ));
             #[cfg(feature = "model-import")]

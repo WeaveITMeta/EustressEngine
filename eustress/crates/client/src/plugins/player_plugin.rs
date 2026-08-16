@@ -20,7 +20,38 @@ use bevy::window::{CursorGrabMode, CursorOptions};
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::anti_alias::smaa::Smaa;
+use bevy::post_process::bloom::Bloom;
+use bevy::render::view::Msaa;
 use avian3d::prelude::*;
+
+/// The view/image-quality half of a player camera — the **single source of
+/// truth** for how the client renders, mirroring the Studio engine's
+/// `default_scene::studio_camera_bundle`.
+///
+/// There are two player-spawn paths (`spawn_local_player` and
+/// `spawn_skinned_local_player`) which each built their camera inline and had
+/// already drifted. Any divergence in view features between two `Camera3d`s
+/// produces different `mesh_view_bind_group` shapes against the shared layout,
+/// which is a wgpu abort ("N bindings != M bindings") rather than a visual bug
+/// — so both paths now build from here.
+///
+/// `Msaa::Off` is the perf half: nothing ever set `Msaa`, so the client
+/// silently ran Bevy's 4× default on every pass. SMAA replaces the anti-
+/// aliasing as one cheap post pass. SMAA rather than TAA deliberately — TAA
+/// needs motion vectors, and Gaussian-splat content writes none.
+fn player_camera_view_bundle() -> impl Bundle {
+    (
+        Camera3d::default(),
+        // Filmic tonemap, matching Studio. Safe now that `tonemapping_luts` is
+        // enabled in Cargo.toml — the previous `Reinhard` existed only to dodge
+        // the missing-LUT magenta bug.
+        Tonemapping::TonyMcMapface,
+        Msaa::Off,
+        Smaa::default(),
+        Bloom::NATURAL,
+    )
+}
 
 // Import shared types from common
 #[allow(unused_imports)]
@@ -821,13 +852,11 @@ fn spawn_local_player(
         right_foot,
     });
     
-    // Spawn camera with proper tonemapping (avoid magenta bug)
+    // Camera view features come from the shared bundle so this path and
+    // `spawn_skinned_local_player` cannot drift — see `player_camera_view_bundle`.
     let _camera_entity = commands.spawn((
-        Camera3d::default(),
+        player_camera_view_bundle(),
         Camera::default(),
-        // Use Reinhard tonemapping - works without LUT textures
-        // TonyMcMapface requires tonemapping_luts feature which may not be enabled
-        Tonemapping::Reinhard,
         Transform::from_translation(spawn_pos + Vec3::new(0.0, 5.0, 10.0))
             .looking_at(spawn_pos, Vec3::Y),
         Projection::Perspective(PerspectiveProjection {
@@ -894,13 +923,10 @@ fn spawn_skinned_local_player(
         Name::new("LocalPlayer"),
     )).id();
     
-    // Spawn camera with proper tonemapping (avoid magenta bug)
-    // Use Reinhard tonemapping - works without LUT textures
-    // TonyMcMapface requires tonemapping_luts feature which may not be enabled
+    // Shared view features — see `player_camera_view_bundle`.
     commands.spawn((
-        Camera3d::default(),
+        player_camera_view_bundle(),
         Camera::default(),
-        Tonemapping::Reinhard,
         Transform::from_translation(spawn_pos + Vec3::new(0.0, 5.0, 10.0))
             .looking_at(spawn_pos, Vec3::Y),
         Projection::Perspective(PerspectiveProjection {
@@ -1771,21 +1797,30 @@ fn camera_follow(
     // Character dimensions (should match skinned_character.rs)
     let character_height = 1.83;  // Y-Bot height
     
-    // Eye height from character root entity
-    // The mesh is offset, but we want camera at actual eye position
-    // Eye is at ~94% of character height = 1.72m from ground
-    // Character root spawns at (character_height / 2.0 + 0.1) above spawn point
-    // So eye offset from root = 1.72 - 0.915 - 0.1 = ~0.70m
-    // But simpler: just use a fixed offset that looks right
-    let eye_height_from_root = 0.75;  // Tuned for first-person eye level
+    // Eye height from the character ROOT, which is the capsule centre.
+    //
+    // Eyes sit at ~94% of height, so 1.72 m off the ground on a 1.83 m body,
+    // and the root is half a body up at 0.915 — leaving 0.805. The old 0.75
+    // was derived by also subtracting a 0.10 spawn offset that the root does
+    // not actually carry, which put the camera five centimetres low: at the
+    // NECK rather than behind the eyes, so the neck stayed on screen even
+    // though the head culled correctly.
+    let eye_height_from_root = character_height * 0.94 - character_height * 0.5;
+
+    // And forward, out past the throat.
+    //
+    // Sitting exactly at the eye point still leaves the neck and upper chest
+    // in front of the near plane whenever the view pitches down. Real
+    // first-person cameras sit slightly ahead of the eyes for this reason.
+    let eye_forward = 0.14;
     
     // Head center for third person (slightly lower than eyes)
     let head_height_from_root = 0.65;
     
     let target_pos = if camera.is_first_person {
-        // First person: Camera at eye level, centered on head
-        let eye_offset = Vec3::new(0.0, eye_height_from_root, 0.0);
-        char_transform.translation + eye_offset
+        // First person: at eye level and a little ahead of the throat.
+        let fwd = Vec3::new(-camera.yaw.sin(), 0.0, -camera.yaw.cos());
+        char_transform.translation + Vec3::Y * eye_height_from_root + fwd * eye_forward
     } else {
         // Third person: Camera orbits around character head
         let offset = Vec3::new(

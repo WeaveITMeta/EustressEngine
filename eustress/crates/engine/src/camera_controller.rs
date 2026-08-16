@@ -201,15 +201,67 @@ pub struct EustressCamera {
     pub focus_anchored: bool,
 }
 
+/// Startup orbit override for scripted / headless captures.
+///
+/// `EUSTRESS_CAMERA_ORBIT="yaw_deg,pitch_deg,distance[,pivot_x,pivot_y,pivot_z]"`.
+/// Pitch follows this controller's convention: **positive looks down**, so a
+/// negative pitch aims at the sky.
+///
+/// This has to seed the controller rather than the camera's `Transform`, because
+/// `EustressCamera` re-derives that Transform from `pivot`/`yaw`/`pitch`/
+/// `distance` every frame — a pose written at spawn is silently discarded on the
+/// first update.
+///
+/// Read once: it is a startup pose, and re-reading it would fight the user's
+/// mouse. Malformed values warn and fall back rather than panicking, so a typo
+/// in a capture script cannot stop the editor booting.
+fn orbit_override() -> Option<(f32, f32, f32, Vec3)> {
+    static V: std::sync::OnceLock<Option<(f32, f32, f32, Vec3)>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        let raw = std::env::var("EUSTRESS_CAMERA_ORBIT").ok()?;
+        let parts: Vec<f32> = raw
+            .split(',')
+            .filter_map(|s| s.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+            .collect();
+        let pivot = match parts.len() {
+            3 => Vec3::ZERO,
+            6 => Vec3::new(parts[3], parts[4], parts[5]),
+            _ => {
+                warn!(
+                    "EUSTRESS_CAMERA_ORBIT={raw:?} is not 3 or 6 finite comma-separated \
+                     numbers (yaw_deg,pitch_deg,distance[,pivot_x,pivot_y,pivot_z]) — ignoring"
+                );
+                return None;
+            }
+        };
+        // A non-positive distance collapses the orbit onto the pivot, which makes
+        // the derived look-at rotation undefined.
+        let distance = if parts[2] > 0.01 { parts[2] } else {
+            warn!("EUSTRESS_CAMERA_ORBIT distance {} is not positive — using 20", parts[2]);
+            20.0
+        };
+        info!(
+            "📷 Editor camera orbit override: yaw {}°, pitch {}°, distance {distance}, pivot {pivot:?}",
+            parts[0], parts[1]
+        );
+        Some((parts[0].to_radians(), parts[1].to_radians(), distance, pivot))
+    })
+}
+
 impl Default for EustressCamera {
     fn default() -> Self {
-        let yaw = 45.0_f32.to_radians();
-        let pitch = 30.0_f32.to_radians();
+        let (yaw, pitch, distance, pivot) = orbit_override().unwrap_or((
+            45.0_f32.to_radians(),
+            30.0_f32.to_radians(),
+            20.0,
+            Vec3::ZERO,
+        ));
         Self {
             enabled: true,
             initialized: false,
-            pivot: Vec3::ZERO,
-            distance: 20.0,
+            pivot,
+            distance,
             yaw,
             pitch,
             base_speed: 9.81,        // Direct WASD movement speed

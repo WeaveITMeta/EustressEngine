@@ -329,6 +329,7 @@ pub enum ClassName {
     Clouds,         // Volumetric cloud system
     Star,           // Star celestial body (sun) with day/night cycle
     Moon,           // Moon with phases and night lighting
+    ReflectionProbe,// Bounded volume that overrides the scene environment map
     // Seat Classes (extends BasePart)
     Seat,           // Basic seat - characters auto-sit on touch
     VehicleSeat,    // Vehicle seat with throttle/steer input
@@ -620,6 +621,7 @@ impl ClassName {
             ClassName::Clouds => "Clouds",
             ClassName::Star => "Star",
             ClassName::Moon => "Moon",
+            ClassName::ReflectionProbe => "ReflectionProbe",
             ClassName::Seat => "Seat",
             ClassName::VehicleSeat => "VehicleSeat",
             ClassName::Team => "Team",
@@ -901,6 +903,7 @@ impl ClassName {
             // Legacy: Sun maps to Star
             "Sun" => Ok(ClassName::Star),
             "Moon" => Ok(ClassName::Moon),
+            "ReflectionProbe" => Ok(ClassName::ReflectionProbe),
             "Seat" => Ok(ClassName::Seat),
             "VehicleSeat" => Ok(ClassName::VehicleSeat),
             "Team" => Ok(ClassName::Team),
@@ -8579,9 +8582,9 @@ impl Default for VideoAsset {
 // ============================================================================
 
 /// SolarSystem - Container for orbital hierarchies (like Model for space)
-/// 
-/// Integrates with `orbital::OrbitalGravity` for n-body simulation.
-/// Children are typically CelestialBody entities.
+///
+/// Children are typically CelestialBody entities; `time_scale` drives the
+/// orbital simulation rate.
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
 pub struct SolarSystem {
@@ -8633,9 +8636,11 @@ impl SolarSystem {
 }
 
 /// CelestialBodyClass - Orbital object with n-body gravity influence
-/// 
-/// Integrates with `orbital::CelestialBody` for physics and `orbital::GlobalPosition` for coordinates.
-/// This is the ECS component; orbital::CelestialBody is the physics data.
+///
+/// Carries its own gravitational parameter (`gm`) and radius, so
+/// [`Self::surface_gravity`], [`Self::escape_velocity`] and
+/// [`Self::orbital_velocity_at`] are computable from the component alone.
+/// Position is held as high-precision ECEF in `global_ecef`.
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
 pub struct CelestialBodyClass {
@@ -8776,22 +8781,6 @@ impl CelestialBodyClass {
         }
     }
     
-    /// Convert to orbital::CelestialBody for physics calculations
-    pub fn to_orbital_body(&self, name: &str) -> crate::orbital::CelestialBody {
-        crate::orbital::CelestialBody {
-            name: name.to_string(),
-            mass: self.mass,
-            gm: self.gm,
-            radius: self.radius,
-            position: crate::orbital::GlobalPosition::new(
-                self.global_ecef[0],
-                self.global_ecef[1],
-                self.global_ecef[2],
-            ),
-            active: self.gravitational,
-        }
-    }
-    
     /// Get surface gravity magnitude (m/s²)
     pub fn surface_gravity(&self) -> f64 {
         self.gm / (self.radius * self.radius)
@@ -8810,9 +8799,10 @@ impl CelestialBodyClass {
 }
 
 /// RegionChunk - Geospatial fragment with relative Euclidean space
-/// 
-/// Integrates with `orbital::Region` and `orbital::RegionId` for coordinate management.
-/// Children are standard Eustress entities (Part, Model, etc.) in local space.
+///
+/// Anchors a local Cartesian space to a high-precision ECEF centre, so
+/// children are standard Eustress entities (Part, Model, etc.) positioned in
+/// f32 local space rather than at planetary magnitudes.
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
 pub struct RegionChunk {
@@ -8889,19 +8879,36 @@ impl Default for RegionChunk {
 }
 
 impl RegionChunk {
-    /// Create from geodetic coordinates
+    /// Create from geodetic coordinates.
+    ///
+    /// `center_ecef` is the WGS84 geodetic → ECEF conversion; the `tile_*`
+    /// fields are the cube-sphere tile the point falls in at the default
+    /// detail level.
     pub fn from_geodetic(lat: f64, lon: f64, alt: f64, size: f32) -> Self {
-        let ecef = crate::orbital::geodetic_to_ecef(lat, lon, alt);
-        let region_id = crate::orbital::RegionId::from_geodetic(lat, lon);
-        
+        // WGS84 ellipsoid parameters.
+        const WGS84_A: f64 = 6_378_137.0; // semi-major axis (m)
+        const WGS84_B: f64 = 6_356_752.314_245; // semi-minor axis (m)
+
+        let lat_rad = lat.to_radians();
+        let lon_rad = lon.to_radians();
+        let e2 = 1.0 - (WGS84_B * WGS84_B) / (WGS84_A * WGS84_A);
+        let n = WGS84_A / (1.0 - e2 * lat_rad.sin().powi(2)).sqrt();
+
+        let ecef_x = (n + alt) * lat_rad.cos() * lon_rad.cos();
+        let ecef_y = (n + alt) * lat_rad.cos() * lon_rad.sin();
+        let ecef_z = (n * (1.0 - e2) + alt) * lat_rad.sin();
+
+        // Cube-sphere tile index at the default detail level.
+        const DEFAULT_TILE_LEVEL: u8 = 10;
+
         Self {
-            center_ecef: [ecef.x, ecef.y, ecef.z],
+            center_ecef: [ecef_x, ecef_y, ecef_z],
             center_geodetic: [lat, lon, alt],
             bounds_extents: Vec3::splat(size / 2.0),
-            tile_level: region_id.level,
-            tile_face: region_id.face,
-            tile_x: region_id.x,
-            tile_y: region_id.y,
+            tile_level: DEFAULT_TILE_LEVEL,
+            tile_face: ((lon + 180.0) / 60.0) as u8 % 6,
+            tile_x: ((lon + 180.0) * 1000.0) as u32,
+            tile_y: ((lat + 90.0) * 1000.0) as u32,
             ..Default::default()
         }
     }
@@ -8931,39 +8938,6 @@ impl RegionChunk {
             tile_level: 255,
             tile_face: 255,
             ..Default::default()
-        }
-    }
-    
-    /// Convert to orbital::Region for coordinate management
-    pub fn to_orbital_region(&self) -> crate::orbital::Region {
-        if self.is_abstract {
-            crate::orbital::Region::abstract_space(
-                0, // Will be assigned by registry
-                self.bounds_extents * 2.0,
-            )
-        } else {
-            crate::orbital::Region::from_geodetic(
-                self.center_geodetic[0],
-                self.center_geodetic[1],
-                (self.bounds_extents.x * 2.0) as f64,
-            )
-        }
-    }
-    
-    /// Get RegionId for P2P chunk mapping
-    pub fn to_region_id(&self) -> crate::orbital::RegionId {
-        if self.is_abstract {
-            crate::orbital::RegionId::abstract_region(
-                ((self.tile_x as u64) << 32) | (self.tile_y as u64)
-            )
-        } else {
-            crate::orbital::RegionId {
-                level: self.tile_level,
-                face: self.tile_face,
-                x: self.tile_x,
-                y: self.tile_y,
-                z: 0,
-            }
         }
     }
     

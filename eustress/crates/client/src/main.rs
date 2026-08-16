@@ -107,6 +107,9 @@ pub fn build_app(scene_path: Option<PathBuf>) -> App {
         .add_plugins(systems::agent_control::AgentControlPlugin)
         // Published-content fetch: download + unpack a .pak from R2.
         .add_plugins(systems::space_fetch::SpaceFetchPlugin)
+        // Open a real Eustress Space (Movement/Climbing by default) instead of
+        // the two hardcoded demo primitives.
+        .add_plugins(systems::space_world::SpaceWorldPlugin)
 
         // Enhancement pipeline
         .add_plugins(EnhancementPlugin)
@@ -132,7 +135,12 @@ pub fn build_app(scene_path: Option<PathBuf>) -> App {
         .insert_resource(ClientArgs { scene_path })
 
         // World setup - loads default scene (same as Studio)
-        .add_systems(Startup, setup_default_scene)
+        // Only when no Space is open: otherwise the demo baseplate and cube
+        // spawn inside the authored level.
+        .add_systems(
+            Startup,
+            setup_default_scene.run_if(|| !systems::space_world::space_is_available()),
+        )
         .add_systems(Startup, spawn_local_avatar.after(setup_default_scene))
         .add_systems(Update, handle_escape);
 

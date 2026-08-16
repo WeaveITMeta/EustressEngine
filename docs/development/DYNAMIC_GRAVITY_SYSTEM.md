@@ -223,14 +223,16 @@ LIGHT_UPDATE_HZ  = 1.0 Hz   // 1000 ms interval
 
 ### Basic Setup
 
+`DynamicGravityPlugin` accumulates forces into `DynamicGravityForce`.
+Integrating that force into motion is the caller's job — attach an Avian
+body and read the force, or run a bespoke integrator.
+
 ```rust
 use eustress_common::physics::*;
-use eustress_common::orbital::hybrid_coords::*;
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(HybridCoordsPlugin)
         .add_plugins(DynamicGravityPlugin)
         .add_systems(Startup, setup_solar_system)
         .run();
@@ -245,8 +247,7 @@ fn setup_solar_system(mut commands: Commands) {
     commands.spawn((
         DynamicMass::new(5.972e24),      // Editable at runtime
         DynamicRadius::new(6.371e6),
-        HybridPosition::default(),
-        HybridVelocity::default(),
+        Transform::default(),
         DynamicGravityForce::default(),
         Name::new("Earth"),
     ));
@@ -255,13 +256,18 @@ fn setup_solar_system(mut commands: Commands) {
     commands.spawn((
         DynamicMass::new(420_000.0),     // 420 tons
         DynamicRadius::new(50.0),
-        HybridPosition::from_vec3(Vec3::new(6_771_000.0, 0.0, 0.0)),
-        HybridVelocity::default(),
+        Transform::from_xyz(6_771_000.0, 0.0, 0.0),
         DynamicGravityForce::default(),
         Name::new("ISS"),
     ));
 }
 ```
+
+At these magnitudes an `f32` `Transform` is not adequate on its own — a
+position of 6.77e6 m has a ULP of ~0.5 m. Planetary-scale placement needs
+the grid-cell coordinate system described in
+[ORBITAL_GRID.md](../architecture/ORBITAL_GRID.md), which is not yet
+implemented.
 
 ### Runtime Mass Editing
 

@@ -24,7 +24,7 @@ pub enum ItemCategory {
     Audio,
     Textures,
     Templates,
-    Spaces,      // Open-sourced spaces that can be redistributed
+    Spaces,      // Spaces published with their source, so others can read and redistribute them
     // Avatar Items
     Clothing,
     Accessories,

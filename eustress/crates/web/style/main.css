@@ -20589,7 +20589,7 @@ a.experience-card {
 }
 
 /* =============================================================================
-   Open Source / GitHub section
+   Source-available / GitHub section
    ========================================================================== */
 .github-section {
     position: relative;
@@ -21376,4 +21376,369 @@ a.experience-card {
     .tel-mode > .tel-children { margin: 0 6px 8px 14px; }
     .tel-tool-comment { margin-left: 12px; }
     .tel-tool .tel-copy { opacity: 1; }
+}
+
+/* ==========================================================================
+   IDENTITY VERIFICATION (/verify) + desktop QR handoff
+   ==========================================================================
+   /verify is opened on a phone by scanning the QR shown during registration,
+   so it is written mobile-first and full-bleed rather than as a page inside
+   the normal site chrome. The desktop side only needs the QR panel styles at
+   the bottom of this block. */
+
+.page-verify {
+    min-height: 100vh;
+    min-height: 100dvh; /* dvh keeps the shutter clear of mobile browser chrome */
+    background: #0a0a12;
+    display: flex;
+    flex-direction: column;
+    overflow-x: hidden;
+}
+
+.verify-shell {
+    flex: 1;
+    width: 100%;
+    max-width: 560px;      /* keeps it sane if opened on a desktop */
+    margin: 0 auto;
+    padding: var(--space-md);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+    min-width: 0;
+}
+
+.verify-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    padding-bottom: var(--space-sm);
+    border-bottom: 1px solid rgba(128, 144, 160, 0.15);
+}
+
+.verify-brand {
+    font-size: var(--text-sm);
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    color: var(--color-text-primary);
+}
+
+.verify-step {
+    font-size: var(--text-xs);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+}
+
+/* Cards ------------------------------------------------------------------ */
+
+.verify-card {
+    background: rgba(25, 28, 35, 0.6);
+    border: 1px solid rgba(128, 144, 160, 0.15);
+    border-radius: var(--radius-lg);
+    padding: var(--space-lg);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+    min-width: 0;
+}
+
+.verify-center {
+    align-items: center;
+    text-align: center;
+}
+
+.verify-card h1 {
+    font-size: var(--text-2xl);
+    font-weight: 700;
+    color: var(--color-text-primary);
+    margin: 0;
+    line-height: 1.2;
+    overflow-wrap: break-word;
+}
+
+.verify-muted {
+    color: var(--color-text-secondary);
+    font-size: var(--text-md);
+    line-height: 1.6;
+    margin: 0;
+    overflow-wrap: break-word;
+}
+
+.verify-privacy {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    line-height: 1.5;
+    margin: 0;
+}
+
+.verify-tips {
+    margin: 0;
+    padding-left: 1.1em;
+    color: var(--color-text-secondary);
+    font-size: var(--text-sm);
+    line-height: 1.9;
+}
+
+.verify-error {
+    background: rgba(220, 38, 38, 0.12);
+    border: 1px solid rgba(220, 38, 38, 0.35);
+    color: #fca5a5;
+    border-radius: var(--radius-md);
+    padding: var(--space-sm) var(--space-md);
+    font-size: var(--text-sm);
+    margin: 0;
+    overflow-wrap: break-word;
+}
+
+/* Buttons ---------------------------------------------------------------- */
+
+.verify-btn {
+    /* 52px clears the 44px minimum touch target with room to spare */
+    min-height: 52px;
+    padding: 0 var(--space-lg);
+    border-radius: var(--radius-md);
+    font-size: var(--text-md);
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: filter 0.15s ease, background 0.15s ease;
+    width: 100%;
+}
+
+.verify-btn-primary {
+    background: var(--color-accent);
+    color: #fff;
+}
+
+.verify-btn-primary:hover { filter: brightness(1.08); }
+
+.verify-btn-ghost {
+    background: transparent;
+    border-color: rgba(128, 144, 160, 0.35);
+    color: var(--color-text-secondary);
+}
+
+.verify-btn-ghost:hover { background: rgba(128, 144, 160, 0.12); }
+
+.verify-actions {
+    display: flex;
+    gap: var(--space-sm);
+}
+
+.verify-actions .verify-btn { flex: 1; }
+
+/* Camera ----------------------------------------------------------------- */
+
+.verify-camera {
+    position: relative;
+    background: #000;
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    /* Tall enough to frame a card comfortably, capped so the shutter and
+       hint stay on screen without scrolling on a short phone. */
+    height: min(68dvh, 560px);
+    display: flex;
+}
+
+.verify-video {
+    width: 100%;
+    height: 100%;
+    /* contain, NOT cover: the crop maths in capture.rs assumes the whole
+       frame is visible, so cover would save something different from what
+       the applicant framed. */
+    object-fit: contain;
+    background: #000;
+}
+
+.verify-guide {
+    position: absolute;
+    pointer-events: none;
+    border: 2px solid rgba(255, 255, 255, 0.85);
+    border-radius: 10px;
+    box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.45); /* dims everything outside */
+}
+
+.guide-corner {
+    position: absolute;
+    width: 22px;
+    height: 22px;
+    border: 3px solid var(--color-accent);
+}
+
+.guide-corner.tl { top: -3px; left: -3px; border-right: 0; border-bottom: 0; border-radius: 8px 0 0 0; }
+.guide-corner.tr { top: -3px; right: -3px; border-left: 0; border-bottom: 0; border-radius: 0 8px 0 0; }
+.guide-corner.bl { bottom: -3px; left: -3px; border-right: 0; border-top: 0; border-radius: 0 0 0 8px; }
+.guide-corner.br { bottom: -3px; right: -3px; border-left: 0; border-top: 0; border-radius: 0 0 8px 0; }
+
+.verify-camera-bar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: var(--space-md);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-sm);
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.75), transparent);
+}
+
+.verify-camera-hint {
+    color: rgba(255, 255, 255, 0.9);
+    font-size: var(--text-sm);
+    text-align: center;
+    margin: 0;
+}
+
+.verify-shutter {
+    width: 68px;
+    height: 68px;
+    border-radius: 50%;
+    background: #fff;
+    border: 4px solid rgba(255, 255, 255, 0.45);
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.verify-shutter:active { transform: scale(0.94); }
+
+.verify-advice {
+    position: absolute;
+    top: var(--space-md);
+    left: var(--space-md);
+    right: var(--space-md);
+    background: rgba(180, 83, 9, 0.92);
+    color: #fff;
+    font-size: var(--text-sm);
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-md);
+    text-align: center;
+    margin: 0;
+}
+
+/* Review + result -------------------------------------------------------- */
+
+.verify-preview {
+    width: 100%;
+    height: auto;
+    border-radius: var(--radius-md);
+    border: 1px solid rgba(128, 144, 160, 0.2);
+    display: block;
+}
+
+/* Offscreen scratch surface for the crop/clean pass. Never shown. */
+.verify-canvas { display: none; }
+
+.verify-icon {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: var(--text-lg);
+}
+
+.verify-icon-ok { background: rgba(34, 197, 94, 0.18); color: #4ade80; }
+.verify-icon-warn { background: rgba(220, 38, 38, 0.18); color: #fca5a5; }
+
+.verify-spinner,
+.kyc-spinner {
+    width: 22px;
+    height: 22px;
+    border: 2px solid rgba(128, 144, 160, 0.25);
+    border-top-color: var(--color-accent);
+    border-radius: 50%;
+    animation: verify-spin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+
+@keyframes verify-spin { to { transform: rotate(360deg); } }
+
+/* Respect a reduced-motion preference; the spinner still reads as busy
+   without spinning fast enough to distract. */
+@media (prefers-reduced-motion: reduce) {
+    .verify-spinner,
+    .kyc-spinner { animation-duration: 3s; }
+}
+
+/* QR code + desktop handoff panel ---------------------------------------- */
+
+.qr-code {
+    display: block;
+    border-radius: var(--radius-md);
+    /* The white plate is part of the SVG; this just softens the edge. */
+    padding: 6px;
+    background: #fff;
+}
+
+.qr-error { color: #fca5a5; font-size: var(--text-sm); }
+
+.kyc-handoff {
+    margin: var(--space-md) 0;
+    padding-top: var(--space-md);
+    border-top: 1px dashed rgba(128, 144, 160, 0.2);
+}
+
+.kyc-phone-btn { width: 100%; }
+
+.kyc-qr-panel {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-sm);
+    text-align: center;
+    padding: var(--space-md);
+    background: rgba(15, 18, 25, 0.6);
+    border: 1px solid rgba(128, 144, 160, 0.18);
+    border-radius: var(--radius-lg);
+}
+
+.kyc-qr-title {
+    font-weight: 700;
+    color: var(--color-text-primary);
+    margin: 0;
+}
+
+.kyc-qr-hint {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    margin: 0;
+    line-height: 1.6;
+}
+
+.kyc-qr-waiting {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    margin: 0;
+}
+
+.kyc-qr-error {
+    color: #fca5a5;
+    font-size: var(--text-sm);
+    margin: var(--space-sm) 0 0;
+}
+
+.btn-link {
+    background: none;
+    border: 0;
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    text-decoration: underline;
+    cursor: pointer;
+    padding: var(--space-xs);
+}
+
+.btn-link:hover { color: var(--color-text-secondary); }
+
+/* Inline validation message (age gate on the registration form). */
+.form-error-inline {
+    color: #fca5a5;
+    font-size: var(--text-sm);
+    margin: var(--space-xs) 0 0;
 }

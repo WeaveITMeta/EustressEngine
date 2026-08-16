@@ -1,0 +1,2243 @@
+{
+  "schema": "eustress.gauntlet.G6.01.ux_baseline_census/1",
+  "item": "G6.01",
+  "measured_at": "2026-08-07",
+  "repo_root": "E:/Workspace/EustressEngine",
+  "git_head": "71ccf6fe330f1424d678c20699add189ec20ed7d",
+  "git_working_tree": "dirty — ~27 uncommitted engine files predating this item; this census measures the working tree as it stands on disk, not HEAD",
+  "slint_file_count": 60,
+  "slint_total_lines": 32577.0,
+  "ui_rs_total_lines": 37533.0,
+  "largest_ui_file": {
+    "path": "eustress/crates/engine/src/ui/slint_ui.rs",
+    "lines": 23103
+  },
+  "drain_required_params": [
+    {
+      "name": "file_events",
+      "type": "MessageWriter<'w, FileEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3450,
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:1412",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "SlintUiPlugin",
+      "superseded_dead_registration": "eustress/crates/engine/src/ui/slint_ui.rs:1262",
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "menu_events",
+      "type": "MessageWriter<'w, MenuActionEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3451,
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:1413",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "SlintUiPlugin",
+      "superseded_dead_registration": "eustress/crates/engine/src/ui/slint_ui.rs:1263",
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "undo_events",
+      "type": "MessageWriter<'w, crate::commands::UndoCommandEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3452,
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:1415",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "SlintUiPlugin",
+      "superseded_dead_registration": "eustress/crates/engine/src/ui/slint_ui.rs:1265",
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "redo_events",
+      "type": "MessageWriter<'w, crate::commands::RedoCommandEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3453,
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:1416",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "SlintUiPlugin",
+      "superseded_dead_registration": "eustress/crates/engine/src/ui/slint_ui.rs:1266",
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "resize_part_events",
+      "type": "MessageWriter<'w, crate::scale_tool::ResizePartEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3454,
+      "registered_at": "eustress/crates/engine/src/scale_tool.rs:133",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "ScaleToolPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "undo_action_events",
+      "type": "MessageWriter<'w, crate::undo::UndoEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3455,
+      "registered_at": "eustress/crates/engine/src/undo.rs:819",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "UndoPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "redo_action_events",
+      "type": "MessageWriter<'w, crate::undo::RedoEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3456,
+      "registered_at": "eustress/crates/engine/src/undo.rs:820",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "UndoPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "undo_single_events",
+      "type": "MessageWriter<'w, crate::undo::UndoSingleEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3457,
+      "registered_at": "eustress/crates/engine/src/undo.rs:821",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "UndoPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "revert_to_events",
+      "type": "MessageWriter<'w, crate::undo::RevertToEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3458,
+      "registered_at": "eustress/crates/engine/src/undo.rs:822",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "UndoPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "history_events",
+      "type": "MessageWriter<'w, crate::commands::HistoryActionEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3459,
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:1417",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "SlintUiPlugin",
+      "superseded_dead_registration": "eustress/crates/engine/src/ui/slint_ui.rs:1267",
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "exit_events",
+      "type": "MessageWriter<'w, bevy::app::AppExit>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3460,
+      "registered_at": null,
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "bevy_app::App (built-in)",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "spawn_events",
+      "type": "MessageWriter<'w, super::SpawnPartEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3461,
+      "registered_at": "eustress/crates/engine/src/ui/spawn_events.rs:923",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "SpawnEventsPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "terrain_spawn",
+      "type": "MessageWriter<'w, super::spawn_events::SpawnTerrainEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3462,
+      "registered_at": "eustress/crates/engine/src/ui/spawn_events.rs:927",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "SpawnEventsPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "terrain_toggle",
+      "type": "MessageWriter<'w, super::spawn_events::ToggleTerrainEditEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3463,
+      "registered_at": "eustress/crates/engine/src/ui/spawn_events.rs:928",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "SpawnEventsPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "terrain_brush",
+      "type": "MessageWriter<'w, super::spawn_events::SetTerrainBrushEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3464,
+      "registered_at": "eustress/crates/engine/src/ui/spawn_events.rs:929",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "SpawnEventsPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "terrain_import",
+      "type": "MessageWriter<'w, super::spawn_events::ImportTerrainEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3465,
+      "registered_at": "eustress/crates/engine/src/ui/spawn_events.rs:930",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "SpawnEventsPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "worldgen_request",
+      "type": "MessageWriter<'w, super::spawn_events::GenerateWorldEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3466,
+      "registered_at": "eustress/crates/engine/src/ui/spawn_events.rs:935",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "SpawnEventsPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "workshop_send",
+      "type": "MessageWriter<'w, crate::workshop::WorkshopSendMessageEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3468,
+      "registered_at": "eustress/crates/engine/src/workshop/mod.rs:1763",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "WorkshopPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "workshop_approve",
+      "type": "MessageWriter<'w, crate::workshop::WorkshopApproveMcpEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3469,
+      "registered_at": "eustress/crates/engine/src/workshop/mod.rs:1764",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "WorkshopPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "workshop_skip",
+      "type": "MessageWriter<'w, crate::workshop::WorkshopSkipMcpEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3470,
+      "registered_at": "eustress/crates/engine/src/workshop/mod.rs:1765",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "WorkshopPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "workshop_edit",
+      "type": "MessageWriter<'w, crate::workshop::WorkshopEditMcpEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3471,
+      "registered_at": "eustress/crates/engine/src/workshop/mod.rs:1766",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "WorkshopPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "workshop_open_artifact",
+      "type": "MessageWriter<'w, crate::workshop::WorkshopOpenArtifactEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3472,
+      "registered_at": "eustress/crates/engine/src/workshop/mod.rs:1767",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "WorkshopPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "workshop_optimize",
+      "type": "MessageWriter<'w, crate::workshop::OptimizeAndBuildEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3473,
+      "registered_at": "eustress/crates/engine/src/workshop/mod.rs:1769",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "WorkshopPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "workshop_set_mode",
+      "type": "MessageWriter<'w, crate::workshop::WorkshopSetModeEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3474,
+      "registered_at": "eustress/crates/engine/src/workshop/mod.rs:1772",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "WorkshopPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "workshop_set_gauntlet",
+      "type": "MessageWriter<'w, crate::workshop::gauntlet::WorkshopSetGauntletEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3475,
+      "registered_at": "eustress/crates/engine/src/workshop/mod.rs:1773",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "WorkshopPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "plugin_action",
+      "type": "MessageWriter<'w, crate::studio_plugins::PluginActionEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3476,
+      "registered_at": "eustress/crates/engine/src/studio_plugins/mod.rs:139",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "StudioPluginSystem",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "modal_tool_option",
+      "type": "MessageWriter<'w, crate::modal_tool::ToolOptionChangedEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3478,
+      "registered_at": "eustress/crates/engine/src/modal_tool.rs:625",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "ModalToolPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "modal_tool_cancel",
+      "type": "MessageWriter<'w, crate::modal_tool::CancelModalToolEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3479,
+      "registered_at": "eustress/crates/engine/src/modal_tool.rs:622",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "ModalToolPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "modal_tool_activate",
+      "type": "MessageWriter<'w, crate::modal_tool::ActivateModalToolEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3480,
+      "registered_at": "eustress/crates/engine/src/modal_tool.rs:621",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "ModalToolPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "align_events",
+      "type": "MessageWriter<'w, crate::align_distribute::AlignEntitiesEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3482,
+      "registered_at": "eustress/crates/engine/src/align_distribute.rs:74",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "AlignDistributePlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "distribute_events",
+      "type": "MessageWriter<'w, crate::align_distribute::DistributeEntitiesEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3483,
+      "registered_at": "eustress/crates/engine/src/align_distribute.rs:75",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "AlignDistributePlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "detach_panel_events",
+      "type": "MessageWriter<'w, crate::ui::floating_windows::DetachPanelEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3485,
+      "registered_at": "eustress/crates/engine/src/ui/floating_windows.rs:96",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "FloatingWindowsPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "notification",
+      "type": "MessageWriter<'w, super::notifications::NotificationEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3488,
+      "registered_at": "eustress/crates/engine/src/ui/notifications.rs:224",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "NotificationsPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "cad_insert",
+      "type": "MessageWriter<'w, crate::cad_plugin::CadInsertTemplateEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3490,
+      "registered_at": "eustress/crates/engine/src/cad_plugin.rs:185",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "CadPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "cad_set_variable",
+      "type": "MessageWriter<'w, crate::cad_plugin::CadSetVariableEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3491,
+      "registered_at": "eustress/crates/engine/src/cad_plugin.rs:186",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "CadPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "cad_export_glb",
+      "type": "MessageWriter<'w, crate::cad_plugin::CadExportGlbEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3492,
+      "registered_at": "eustress/crates/engine/src/cad_plugin.rs:187",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "CadPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "cad_tree_op",
+      "type": "MessageWriter<'w, crate::cad_plugin::CadTreeOpEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3493,
+      "registered_at": "eustress/crates/engine/src/cad_plugin.rs:188",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "CadPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "cad_solve_sketch",
+      "type": "MessageWriter<'w, crate::cad_plugin::CadSolveSketchEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3494,
+      "registered_at": "eustress/crates/engine/src/cad_plugin.rs:189",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "CadPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "cad_add_constraint",
+      "type": "MessageWriter<'w, crate::cad_plugin::CadAddConstraintEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3495,
+      "registered_at": "eustress/crates/engine/src/cad_plugin.rs:190",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "CadPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "cad_sketch_canvas_visible",
+      "type": "MessageWriter<'w, crate::cad_plugin::CadSketchCanvasSetVisibleEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3496,
+      "registered_at": "eustress/crates/engine/src/cad_plugin.rs:191",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "CadPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "cad_create_mate",
+      "type": "MessageWriter<'w, crate::cad_assembly::CadCreateMateEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3497,
+      "registered_at": "eustress/crates/engine/src/cad_assembly.rs:118",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "CadAssemblyPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "toast_undo_clicked",
+      "type": "MessageWriter<'w, crate::toast_undo::ToastUndoClickedEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3499,
+      "registered_at": "eustress/crates/engine/src/toast_undo.rs:71",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "ToastUndoPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "toast_undo_dismissed",
+      "type": "MessageWriter<'w, crate::toast_undo::ToastUndoDismissedEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3500,
+      "registered_at": "eustress/crates/engine/src/toast_undo.rs:72",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "ToastUndoPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "frame_selection",
+      "type": "MessageWriter<'w, crate::camera_controller::FrameSelectionEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3503,
+      "registered_at": "eustress/crates/engine/src/camera_controller.rs:253",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "CameraControllerPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "paste_events",
+      "type": "MessageWriter<'w, crate::clipboard::PasteEvent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3507,
+      "registered_at": "eustress/crates/engine/src/clipboard.rs:2031",
+      "bundle": "DrainEventWriters",
+      "param_kind": "message_writer",
+      "registering_plugin": "ClipboardPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "terrain_visibility",
+      "type": "ResMut<'w, TerrainVisibility>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3585,
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:1384",
+      "bundle": "DrainResources",
+      "param_kind": "resource",
+      "registering_plugin": "SlintUiPlugin",
+      "superseded_dead_registration": "eustress/crates/engine/src/ui/slint_ui.rs:1251",
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "materials",
+      "type": "ResMut<'w, Assets<StandardMaterial>>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3595,
+      "registered_at": "eustress/crates/engine/src/main.rs:130",
+      "bundle": "DrainResources",
+      "param_kind": "resource",
+      "registering_plugin": "DefaultPlugins (bevy AssetPlugin/PbrPlugin)",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "instances",
+      "type": "Query<'w, 's, (Entity, &'static mut eustress_common::classes::Instance)>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3942,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "transforms",
+      "type": "Query<'w, 's, &'static mut Transform>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3943,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "base_parts",
+      "type": "Query<'w, 's, &'static mut eustress_common::classes::BasePart>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3944,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "cad_parts",
+      "type": "Query<'w, 's, &'static crate::cad_plugin::CadPart>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3948,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "instance_files",
+      "type": "Query<'w, 's, &'static mut crate::space::instance_loader::InstanceFile>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3949,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "loaded_from_file",
+      "type": "Query<'w, 's, (Entity, &'static mut crate::space::LoadedFromFile)>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3950,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "service_components",
+      "type": "Query<'w, 's, &'static mut crate::space::service_loader::ServiceComponent>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3951,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "terrain_roots",
+      "type": "Query<'w, 's, Entity, With<eustress_common::terrain::TerrainRoot>>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3952,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "terrain_chunks",
+      "type": "Query<'w, 's, Entity, With<eustress_common::terrain::Chunk>>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3953,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "camera_query",
+      "type": "Query<'w, 's, (&'static Camera, &'static GlobalTransform)>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3954,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "projections",
+      "type": "Query<'w, 's, &'static mut Projection>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3959,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "gui_displays",
+      "type": "Query<'w, 's, &'static mut eustress_common::gui::billboard_renderer::GuiElementDisplay>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3960,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "selected_entities",
+      "type": "Query<'w, 's, Entity, With<crate::selection_box::Selected>>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3962,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "ui_text_labels",
+      "type": "Query<'w, 's, &'static mut eustress_common::classes::TextLabel>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3967,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "ui_text_buttons",
+      "type": "Query<'w, 's, &'static mut eustress_common::classes::TextButton>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3968,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "ui_text_boxes",
+      "type": "Query<'w, 's, &'static mut eustress_common::classes::TextBox>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3969,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "ui_frames",
+      "type": "Query<'w, 's, &'static mut eustress_common::classes::Frame>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3970,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "ui_image_labels",
+      "type": "Query<'w, 's, &'static mut eustress_common::classes::ImageLabel>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3971,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "ui_image_buttons",
+      "type": "Query<'w, 's, &'static mut eustress_common::classes::ImageButton>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3972,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "ui_scrolling_frames",
+      "type": "Query<'w, 's, &'static mut eustress_common::classes::ScrollingFrame>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3973,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "ui_billboard_guis",
+      "type": "Query<'w, 's, &'static mut eustress_common::classes::BillboardGui>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3979,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "entity_tags",
+      "type": "Query<'w, 's, (Entity, &'static eustress_common::attributes::Tags)>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3985,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "attributes",
+      "type": "Query<'w, 's, &'static mut eustress_common::attributes::Attributes>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3991,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "hierarchy_parents",
+      "type": "Query<'w, 's, &'static ChildOf>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 3997,
+      "registered_at": null,
+      "bundle": "DrainActionQueries",
+      "param_kind": "query",
+      "registering_plugin": null,
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "commands",
+      "type": "Commands",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 4971,
+      "registered_at": null,
+      "bundle": "direct",
+      "param_kind": "commands",
+      "registering_plugin": "bevy_ecs (deferred-command param; needs no registration)",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": false
+    },
+    {
+      "name": "asset_server",
+      "type": "Res<AssetServer>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 4972,
+      "registered_at": "eustress/crates/engine/src/main.rs:130",
+      "bundle": "direct",
+      "param_kind": "resource",
+      "registering_plugin": "DefaultPlugins (bevy AssetPlugin)",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "label_edit_state",
+      "type": "ResMut<LabelEditState>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 4973,
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:1379",
+      "bundle": "direct",
+      "param_kind": "resource",
+      "registering_plugin": "SlintUiPlugin",
+      "superseded_dead_registration": "eustress/crates/engine/src/ui/slint_ui.rs:1254",
+      "skips_drain_if_unregistered": true
+    },
+    {
+      "name": "pending_insert",
+      "type": "ResMut<PendingInsertSelection>",
+      "source_path": "eustress/crates/engine/src/ui/slint_ui.rs",
+      "source_line": 4978,
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:1451",
+      "bundle": "direct",
+      "param_kind": "resource",
+      "registering_plugin": "SlintUiPlugin",
+      "superseded_dead_registration": null,
+      "skips_drain_if_unregistered": true
+    }
+  ],
+  "ribbon_tools_total": 1999,
+  "ribbon_tools_wired": 30,
+  "slint_files_with_accessible_role": 1,
+  "top20_command_click_depth": [
+    {
+      "command": "Undo",
+      "keybinding_action_or_null": "Action::Undo (eustress/crates/engine/src/keybindings.rs:31)",
+      "clicks_from_cold_start": 1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:601 — `ribbon-tab` defaults to \"home\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2409 — `if root.ribbon-tab == \"home\":` renders the Home tab body",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2427 — ToolGroup label \"History\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2428 — CLICK 1: IconButton label \"Undo\" -> `root.on-undo()`"
+      ]
+    },
+    {
+      "command": "Redo",
+      "keybinding_action_or_null": "Action::Redo (eustress/crates/engine/src/keybindings.rs:32)",
+      "clicks_from_cold_start": 1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:601 — `ribbon-tab` defaults to \"home\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2409 — `if root.ribbon-tab == \"home\":` renders the Home tab body",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2429 — CLICK 1: IconButton label \"Redo\" -> `root.on-redo()`"
+      ]
+    },
+    {
+      "command": "Save",
+      "keybinding_action_or_null": "Action::SaveScene (eustress/crates/engine/src/keybindings.rs:22; bound Ctrl+S at keybindings.rs:359)",
+      "clicks_from_cold_start": 1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:601 — `ribbon-tab` defaults to \"home\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2409 — `if root.ribbon-tab == \"home\":` renders the Home tab body",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2417 — ToolGroup label \"File\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2420 — CLICK 1: IconButton label \"Save\" -> `root.on-save-scene()`"
+      ]
+    },
+    {
+      "command": "Copy",
+      "keybinding_action_or_null": "Action::Copy (eustress/crates/engine/src/keybindings.rs:33)",
+      "clicks_from_cold_start": 1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:601 — `ribbon-tab` defaults to \"home\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2409 — `if root.ribbon-tab == \"home\":` renders the Home tab body",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2435 — ToolGroup label \"Clipboard\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2437 — CLICK 1: IconButton label \"Copy\" -> `root.on-copy()`"
+      ]
+    },
+    {
+      "command": "Paste",
+      "keybinding_action_or_null": "Action::Paste (eustress/crates/engine/src/keybindings.rs:35)",
+      "clicks_from_cold_start": 1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:601 — `ribbon-tab` defaults to \"home\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2409 — `if root.ribbon-tab == \"home\":` renders the Home tab body",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2438 — CLICK 1: IconButton label \"Paste\" -> `root.on-paste()`"
+      ]
+    },
+    {
+      "command": "Duplicate",
+      "keybinding_action_or_null": "Action::Duplicate (eustress/crates/engine/src/keybindings.rs:36)",
+      "clicks_from_cold_start": 1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:601 — `ribbon-tab` defaults to \"home\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2409 — `if root.ribbon-tab == \"home\":` renders the Home tab body",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2439 — CLICK 1: IconButton label \"Duplicate\" -> `root.on-duplicate()`"
+      ]
+    },
+    {
+      "command": "Delete",
+      "keybinding_action_or_null": "Action::Delete (eustress/crates/engine/src/keybindings.rs:37)",
+      "clicks_from_cold_start": 1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:601 — `ribbon-tab` defaults to \"home\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2409 — `if root.ribbon-tab == \"home\":` renders the Home tab body",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2440 — CLICK 1: IconButton label \"Delete\" -> `root.on-delete()`"
+      ]
+    },
+    {
+      "command": "Group",
+      "keybinding_action_or_null": "Action::Group (eustress/crates/engine/src/keybindings.rs:49)",
+      "clicks_from_cold_start": 1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:601 — `ribbon-tab` defaults to \"home\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2409 — `if root.ribbon-tab == \"home\":` renders the Home tab body",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2483 — ToolGroup label \"Edit\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2484 — CLICK 1: IconButton label \"Group\" -> `root.on-group()`"
+      ]
+    },
+    {
+      "command": "Ungroup",
+      "keybinding_action_or_null": "Action::Ungroup (eustress/crates/engine/src/keybindings.rs:50)",
+      "clicks_from_cold_start": 1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:601 — `ribbon-tab` defaults to \"home\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2409 — `if root.ribbon-tab == \"home\":` renders the Home tab body",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2485 — CLICK 1: IconButton label \"Ungroup\" -> `root.on-ungroup()`"
+      ]
+    },
+    {
+      "command": "Select All",
+      "keybinding_action_or_null": "Action::SelectAll (eustress/crates/engine/src/keybindings.rs:38)",
+      "clicks_from_cold_start": 2,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:1038 — menu-bar row, rendered outside every `if root.ribbon-tab ==` guard, so always on screen",
+        "eustress/crates/engine/ui/slint/ribbon.slint:1092 — CLICK 1: `edit-touch := TouchArea { clicked => { edit-popup.show(); } }`",
+        "eustress/crates/engine/ui/slint/ribbon.slint:1122 — CLICK 2: DropdownItem label \"Select All\" -> `root.on-select-all()`"
+      ]
+    },
+    {
+      "command": "Select Tool",
+      "keybinding_action_or_null": "Action::SelectTool (eustress/crates/engine/src/keybindings.rs:9; bound Alt+Z at keybindings.rs:346)",
+      "clicks_from_cold_start": 1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:601 — `ribbon-tab` defaults to \"home\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2409 — `if root.ribbon-tab == \"home\":` renders the Home tab body",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2446 — ToolGroup label \"Tools\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2447 — CLICK 1: IconButton label \"Select\" -> `root.on-select-tool(\"select\")`"
+      ]
+    },
+    {
+      "command": "Move Tool",
+      "keybinding_action_or_null": "Action::MoveTool (eustress/crates/engine/src/keybindings.rs:10; bound Alt+X at keybindings.rs:347)",
+      "clicks_from_cold_start": 1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:601 — `ribbon-tab` defaults to \"home\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2409 — `if root.ribbon-tab == \"home\":` renders the Home tab body",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2448 — CLICK 1: IconButton label \"Move\" -> `root.on-select-tool(\"move\")`"
+      ]
+    },
+    {
+      "command": "Rotate Tool",
+      "keybinding_action_or_null": "Action::RotateTool (eustress/crates/engine/src/keybindings.rs:11; bound Alt+V at keybindings.rs:349)",
+      "clicks_from_cold_start": 1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:601 — `ribbon-tab` defaults to \"home\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2409 — `if root.ribbon-tab == \"home\":` renders the Home tab body",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2450 — CLICK 1: IconButton label \"Rotate\" -> `root.on-select-tool(\"rotate\")`"
+      ]
+    },
+    {
+      "command": "Scale Tool",
+      "keybinding_action_or_null": "Action::ScaleTool (eustress/crates/engine/src/keybindings.rs:12; bound Alt+C at keybindings.rs:348)",
+      "clicks_from_cold_start": 1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:601 — `ribbon-tab` defaults to \"home\"",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2409 — `if root.ribbon-tab == \"home\":` renders the Home tab body",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2449 — CLICK 1: IconButton label \"Scale\" -> `root.on-select-tool(\"scale\")`"
+      ]
+    },
+    {
+      "command": "Insert Part",
+      "keybinding_action_or_null": null,
+      "clicks_from_cold_start": 2,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:1038 — menu-bar row, rendered outside every `if root.ribbon-tab ==` guard, so always on screen",
+        "eustress/crates/engine/ui/slint/ribbon.slint:1181 — CLICK 1: `insert-touch := TouchArea { clicked => { insert-popup.show(); } }`",
+        "eustress/crates/engine/ui/slint/ribbon.slint:1215 — CLICK 2: DropdownItem label \"Part (Block)\" -> `root.on-menu-action(\"insert:part\")`"
+      ],
+      "alternate_routes": [
+        "2 clicks — viewport right-click (CLICK 1) then eustress/crates/engine/ui/slint/context_menu.slint:187 \"Insert Part Here\" (CLICK 2)",
+        "2 clicks — eustress/crates/engine/ui/slint/ribbon.slint:2688 Model tab then :2696 IconButton \"Part\"; requires leaving the default Home tab"
+      ]
+    },
+    {
+      "command": "Insert Script",
+      "keybinding_action_or_null": null,
+      "clicks_from_cold_start": -1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/ribbon.slint:1184-1220 — the Insert menu's static DropdownItem set is Part/Sphere/Cylinder/Wedge/Model/Folder; no script entry",
+        "eustress/crates/engine/ui/slint/ribbon.slint:1253 — the Insert menu's dynamic tail emits `insert:<ClassName>` from the `insert-classes` model",
+        "eustress/crates/engine/src/ui/slint_ui.rs:14949 — that model is `build_catalog(registry.registered_classes(), template_exists)`",
+        "eustress/crates/engine/src/ui/insert_classes.rs — `build_catalog` drops any class without a spawner in ClassRegistry; `ClassName::LuauScript` is referenced only by serialization/binary.rs:510 and :814, never registered as a spawner, so no script class can enter the list",
+        "eustress/crates/engine/ui/slint/context_menu.slint:187-263, :278-331 — neither the viewport nor the Explorer context menu offers a script insert",
+        "eustress/crates/engine/modes/engineering.toml:145 — `insert:script` exists ONLY as a mode-manifest ribbon tool; eustress/crates/engine/src/studio_modes.rs:570 leaves `ModeRegistry.active_id` empty by default, so no custom tab carries it at cold start",
+        "NO MOUSE ROUTE — recorded as -1 per the item's sentinel rule"
+      ]
+    },
+    {
+      "command": "Play Solo",
+      "keybinding_action_or_null": "Action::PlaySolo (eustress/crates/engine/src/keybindings.rs:104; F7)",
+      "clicks_from_cold_start": 1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2245-2251 — the ribbon tab-selector row and its left-hand simulation-control strip are unconditional siblings of the tab bodies, so they render on every tab",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2266 — CLICK 1: `play-solo-touch := TouchArea` -> `root.on-play-solo()` (guarded by `play-state == \"stopped\"`, which is the cold-start state)"
+      ]
+    },
+    {
+      "command": "Stop",
+      "keybinding_action_or_null": "Action::StopPlay (eustress/crates/engine/src/keybindings.rs:105; F8)",
+      "clicks_from_cold_start": 1,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2245-2251 — unconditional simulation-control strip on the tab-selector row",
+        "eustress/crates/engine/ui/slint/ribbon.slint:2318 — CLICK 1: `stop-touch := TouchArea` -> `root.on-stop()`"
+      ],
+      "note": "The control is on screen at depth 1 but its handler is gated `if root.play-state != \"stopped\"` (ribbon.slint:2320), so at cold start the click is inert by design. Depth measures the mouse route to the control, not whether the command applies."
+    },
+    {
+      "command": "Toggle Explorer",
+      "keybinding_action_or_null": "Action::ToggleExplorer (eustress/crates/engine/src/keybindings.rs:56; Ctrl+1 per ribbon.slint:1160)",
+      "clicks_from_cold_start": 2,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/main.slint:1225 — `show-explorer <=> root.show-explorer` binds the ribbon's toggle to the left dock's visibility gate at main.slint:1402",
+        "eustress/crates/engine/ui/slint/ribbon.slint:1138 — CLICK 1: `view-touch := TouchArea { clicked => { view-popup.show(); } }`",
+        "eustress/crates/engine/ui/slint/ribbon.slint:1160 — CLICK 2: DropdownItem \"Explorer [on/off]\" -> `root.show-explorer = !root.show-explorer`"
+      ]
+    },
+    {
+      "command": "Toggle Properties",
+      "keybinding_action_or_null": "Action::ToggleProperties (eustress/crates/engine/src/keybindings.rs:57; Ctrl+2 per ribbon.slint:1161)",
+      "clicks_from_cold_start": 2,
+      "path_chain": [
+        "eustress/crates/engine/ui/slint/main.slint:1194 — `Ribbon {` mounted unconditionally in StudioWindow",
+        "eustress/crates/engine/ui/slint/main.slint:1226 — `show-properties <=> root.show-properties` binds the ribbon's toggle to the right dock's visibility gate at main.slint:2914",
+        "eustress/crates/engine/ui/slint/ribbon.slint:1138 — CLICK 1: `view-touch := TouchArea { clicked => { view-popup.show(); } }`",
+        "eustress/crates/engine/ui/slint/ribbon.slint:1161 — CLICK 2: DropdownItem \"Properties [on/off]\" -> `root.show-properties = !root.show-properties`"
+      ]
+    }
+  ],
+  "theme_selection_tokens": {
+    "selection-background": {
+      "preset_classic": {
+        "value": "#14301c",
+        "line": 170
+      },
+      "preset_modern": {
+        "value": "#0a84ff26",
+        "line": 252
+      },
+      "struct_field_line": 69
+    },
+    "selection-border": {
+      "preset_classic": {
+        "value": "#3cba54",
+        "line": 171
+      },
+      "preset_modern": {
+        "value": "#0a84ff",
+        "line": 253
+      },
+      "struct_field_line": 70
+    },
+    "accent-cyan": {
+      "preset_classic": {
+        "value": "#00bcd4",
+        "line": 177
+      },
+      "preset_modern": {
+        "value": "#22d3ee",
+        "line": 259
+      },
+      "struct_field_line": 78
+    },
+    "accent-eustress": {
+      "preset_classic": {
+        "value": "#3cba54",
+        "line": 178
+      },
+      "preset_modern": {
+        "value": "#0a84ff",
+        "line": 260
+      },
+      "struct_field_line": 79
+    },
+    "border-focus": {
+      "preset_classic": {
+        "value": "#3cba54",
+        "line": 153
+      },
+      "preset_modern": {
+        "value": "#0a84ff",
+        "line": 235
+      },
+      "struct_field_line": 45
+    }
+  },
+  "panel_inventory": [
+    {
+      "file": "eustress/crates/engine/ui/slint/about_dialog.slint",
+      "lines": 189,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3904,
+      "exported_components": [
+        "AboutDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "AboutDialog",
+          "main_slint_line": 3904,
+          "mount": "modal-dialog",
+          "source": "if root.show-about-dialog: AboutDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/add_attribute_dialog.slint",
+      "lines": 269,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3980,
+      "exported_components": [
+        "AddAttributeDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "AddAttributeDialog",
+          "main_slint_line": 3980,
+          "mount": "modal-dialog",
+          "source": "if root.show-attribute-dialog: AddAttributeDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/ai_generation.slint",
+      "lines": 349,
+      "is_panel": false,
+      "mount": "not-instantiated-by-main",
+      "main_slint_line": null,
+      "exported_components": [
+        "AIGeneration"
+      ],
+      "mount_sites": []
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/api_reference_panel.slint",
+      "lines": 459,
+      "is_panel": true,
+      "mount": "docked-center",
+      "main_slint_line": 2854,
+      "exported_components": [
+        "ApiReferencePanel"
+      ],
+      "mount_sites": [
+        {
+          "component": "ApiReferencePanel",
+          "main_slint_line": 2854,
+          "mount": "docked-center",
+          "source": "if root.active-tab-type == \"api\": ApiReferencePanel {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/asset_manager.slint",
+      "lines": 348,
+      "is_panel": true,
+      "mount": "docked-left",
+      "main_slint_line": 1727,
+      "exported_components": [
+        "AssetManager"
+      ],
+      "mount_sites": [
+        {
+          "component": "AssetManager",
+          "main_slint_line": 1727,
+          "mount": "docked-left",
+          "source": "if root.left-tab-index == 1: AssetManager {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/collaboration.slint",
+      "lines": 277,
+      "is_panel": false,
+      "mount": "not-instantiated-by-main",
+      "main_slint_line": null,
+      "exported_components": [
+        "Collaboration"
+      ],
+      "mount_sites": []
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/command_bar.slint",
+      "lines": 184,
+      "is_panel": false,
+      "mount": "inline",
+      "main_slint_line": 3499,
+      "exported_components": [
+        "CommandBar"
+      ],
+      "mount_sites": [
+        {
+          "component": "CommandBar",
+          "main_slint_line": 3499,
+          "mount": "inline",
+          "source": "cmd-bar := CommandBar {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/context_menu.slint",
+      "lines": 335,
+      "is_panel": true,
+      "mount": "floating",
+      "main_slint_line": 3615,
+      "exported_components": [
+        "ContextMenu"
+      ],
+      "mount_sites": [
+        {
+          "component": "ContextMenu",
+          "main_slint_line": 3615,
+          "mount": "floating",
+          "source": "ContextMenu {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/cursor_badge.slint",
+      "lines": 37,
+      "is_panel": false,
+      "mount": "not-instantiated-by-main",
+      "main_slint_line": null,
+      "exported_components": [
+        "CursorBadge"
+      ],
+      "mount_sites": []
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/data_chart.slint",
+      "lines": 371,
+      "is_panel": true,
+      "mount": "docked-center",
+      "main_slint_line": 2876,
+      "exported_components": [
+        "DataChartView",
+        "DataChartPreview"
+      ],
+      "mount_sites": [
+        {
+          "component": "DataChartView",
+          "main_slint_line": 2876,
+          "mount": "docked-center",
+          "source": "if root.active-tab-type == \"chart\": DataChartView {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/data_grid.slint",
+      "lines": 170,
+      "is_panel": true,
+      "mount": "docked-bottom",
+      "main_slint_line": 3483,
+      "exported_components": [
+        "DataGrid",
+        "DataGridPreview"
+      ],
+      "mount_sites": [
+        {
+          "component": "DataGrid",
+          "main_slint_line": 3483,
+          "mount": "docked-bottom",
+          "source": "if root.bottom-panel-mode == \"datagrid\": DataGrid {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/data_sources.slint",
+      "lines": 480,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3881,
+      "exported_components": [
+        "DataSourcesDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "DataSourcesDialog",
+          "main_slint_line": 3881,
+          "mount": "modal-dialog",
+          "source": "if root.show-global-sources-window: DataSourcesDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/dock_layout.slint",
+      "lines": 864,
+      "is_panel": true,
+      "mount": "floating",
+      "main_slint_line": 2485,
+      "exported_components": [
+        "LayoutPresetSelector",
+        "LayoutDropdownMenu",
+        "AdvancedTabBar",
+        "PerformanceOverlay",
+        "DockZoneIndicator",
+        "ThemeEditor"
+      ],
+      "mount_sites": [
+        {
+          "component": "LayoutPresetSelector",
+          "main_slint_line": 2485,
+          "mount": "floating",
+          "source": "LayoutPresetSelector {"
+        },
+        {
+          "component": "LayoutDropdownMenu",
+          "main_slint_line": 3562,
+          "mount": "floating",
+          "source": "LayoutDropdownMenu {"
+        },
+        {
+          "component": "PerformanceOverlay",
+          "main_slint_line": 2656,
+          "mount": "floating",
+          "source": "if root.show-performance-overlay: PerformanceOverlay {"
+        },
+        {
+          "component": "ThemeEditor",
+          "main_slint_line": 3827,
+          "mount": "inline",
+          "source": "ThemeEditor {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/edit_label_dialog.slint",
+      "lines": 128,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3957,
+      "exported_components": [
+        "EditLabelDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "EditLabelDialog",
+          "main_slint_line": 3957,
+          "mount": "modal-dialog",
+          "source": "if root.show-edit-label-dialog: EditLabelDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/exit_confirmation.slint",
+      "lines": 144,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3705,
+      "exported_components": [
+        "ExitConfirmationDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "ExitConfirmationDialog",
+          "main_slint_line": 3705,
+          "mount": "modal-dialog",
+          "source": "if root.show-exit-confirmation: ExitConfirmationDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/explorer.slint",
+      "lines": 430,
+      "is_panel": true,
+      "mount": "docked-left",
+      "main_slint_line": 1618,
+      "exported_components": [
+        "ExplorerPanel"
+      ],
+      "mount_sites": [
+        {
+          "component": "ExplorerPanel",
+          "main_slint_line": 1618,
+          "mount": "docked-left",
+          "source": "if root.left-tab-index == 0: ExplorerPanel {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/feedback_dialog.slint",
+      "lines": 88,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3928,
+      "exported_components": [
+        "FeedbackDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "FeedbackDialog",
+          "main_slint_line": 3928,
+          "mount": "modal-dialog",
+          "source": "if root.show-feedback-dialog: FeedbackDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/find_dialog.slint",
+      "lines": 277,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3847,
+      "exported_components": [
+        "FindDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "FindDialog",
+          "main_slint_line": 3847,
+          "mount": "modal-dialog",
+          "source": "if root.show-find-dialog: FindDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/floating_numeric_input.slint",
+      "lines": 82,
+      "is_panel": false,
+      "mount": "inline",
+      "main_slint_line": 2569,
+      "exported_components": [
+        "FloatingNumericInput"
+      ],
+      "mount_sites": [
+        {
+          "component": "FloatingNumericInput",
+          "main_slint_line": 2569,
+          "mount": "inline",
+          "source": "if root.numeric-input-visible: FloatingNumericInput {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/forge_connect.slint",
+      "lines": 319,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3852,
+      "exported_components": [
+        "ForgeConnectDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "ForgeConnectDialog",
+          "main_slint_line": 3852,
+          "mount": "modal-dialog",
+          "source": "if root.show-forge-connect-dialog: ForgeConnectDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/history_panel.slint",
+      "lines": 303,
+      "is_panel": true,
+      "mount": "docked-right",
+      "main_slint_line": 3243,
+      "exported_components": [
+        "HistoryPanel"
+      ],
+      "mount_sites": [
+        {
+          "component": "HistoryPanel",
+          "main_slint_line": 3243,
+          "mount": "docked-right",
+          "source": "if root.right-tab-index == 1: HistoryPanel {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/keybindings.slint",
+      "lines": 366,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3892,
+      "exported_components": [
+        "KeybindingsDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "KeybindingsDialog",
+          "main_slint_line": 3892,
+          "mount": "modal-dialog",
+          "source": "if root.show-keybindings-dialog: KeybindingsDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/login.slint",
+      "lines": 211,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3689,
+      "exported_components": [
+        "LoginDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "LoginDialog",
+          "main_slint_line": 3689,
+          "mount": "modal-dialog",
+          "source": "if root.show-login-dialog: LoginDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/main.slint",
+      "lines": 4021,
+      "is_panel": false,
+      "mount": "not-instantiated-by-main",
+      "main_slint_line": null,
+      "exported_components": [
+        "StudioWindow"
+      ],
+      "mount_sites": []
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/mention_popup.slint",
+      "lines": 296,
+      "is_panel": false,
+      "mount": "not-instantiated-by-main",
+      "main_slint_line": null,
+      "exported_components": [
+        "MentionChip",
+        "MentionPopup"
+      ],
+      "mount_sites": []
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/network_panel.slint",
+      "lines": 439,
+      "is_panel": false,
+      "mount": "not-instantiated-by-main",
+      "main_slint_line": null,
+      "exported_components": [
+        "NetworkPanel"
+      ],
+      "mount_sites": []
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/new_space_dialog.slint",
+      "lines": 146,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3942,
+      "exported_components": [
+        "NewSpaceDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "NewSpaceDialog",
+          "main_slint_line": 3942,
+          "mount": "modal-dialog",
+          "source": "if root.show-new-space-dialog: NewSpaceDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/new_universe_dialog.slint",
+      "lines": 139,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3913,
+      "exported_components": [
+        "NewUniverseDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "NewUniverseDialog",
+          "main_slint_line": 3913,
+          "mount": "modal-dialog",
+          "source": "if root.show-new-universe-dialog: NewUniverseDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/notifications.slint",
+      "lines": 169,
+      "is_panel": true,
+      "mount": "floating",
+      "main_slint_line": 3538,
+      "exported_components": [
+        "Notifications"
+      ],
+      "mount_sites": [
+        {
+          "component": "Notifications",
+          "main_slint_line": 3538,
+          "mount": "floating",
+          "source": "if root.notifications.length > 0: Notifications {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/numeric_field.slint",
+      "lines": 243,
+      "is_panel": false,
+      "mount": "not-instantiated-by-main",
+      "main_slint_line": null,
+      "exported_components": [
+        "NumericField"
+      ],
+      "mount_sites": []
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/output.slint",
+      "lines": 680,
+      "is_panel": true,
+      "mount": "docked-bottom",
+      "main_slint_line": 3435,
+      "exported_components": [
+        "OutputConsole"
+      ],
+      "mount_sites": [
+        {
+          "component": "OutputConsole",
+          "main_slint_line": 3435,
+          "mount": "docked-bottom",
+          "source": "if root.bottom-panel-mode == \"output\": OutputConsole {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/problems_panel.slint",
+      "lines": 226,
+      "is_panel": true,
+      "mount": "docked-right",
+      "main_slint_line": 3388,
+      "exported_components": [
+        "ProblemsPanel"
+      ],
+      "mount_sites": [
+        {
+          "component": "ProblemsPanel",
+          "main_slint_line": 3388,
+          "mount": "docked-right",
+          "source": "if root.right-tab-index == 4: ProblemsPanel {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/properties.slint",
+      "lines": 2859,
+      "is_panel": true,
+      "mount": "docked-right",
+      "main_slint_line": 3176,
+      "exported_components": [
+        "HelpIcon",
+        "ColorSwatchCell",
+        "PropertiesPanel"
+      ],
+      "mount_sites": [
+        {
+          "component": "PropertiesPanel",
+          "main_slint_line": 3176,
+          "mount": "docked-right",
+          "source": "if root.right-tab-index == 0: props-panel := PropertiesPanel {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/publish.slint",
+      "lines": 491,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3667,
+      "exported_components": [
+        "PublishDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "PublishDialog",
+          "main_slint_line": 3667,
+          "mount": "modal-dialog",
+          "source": "if root.show-publish-dialog: PublishDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/radial_menu.slint",
+      "lines": 162,
+      "is_panel": false,
+      "mount": "inline",
+      "main_slint_line": 3648,
+      "exported_components": [
+        "RadialMenu"
+      ],
+      "mount_sites": [
+        {
+          "component": "RadialMenu",
+          "main_slint_line": 3648,
+          "mount": "inline",
+          "source": "if root.radial-menu-visible: RadialMenu {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/rename_tag_dialog.slint",
+      "lines": 132,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3967,
+      "exported_components": [
+        "RenameTagDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "RenameTagDialog",
+          "main_slint_line": 3967,
+          "mount": "modal-dialog",
+          "source": "if root.show-rename-tag-dialog: RenameTagDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/ribbon.slint",
+      "lines": 3389,
+      "is_panel": false,
+      "mount": "inline",
+      "main_slint_line": 1194,
+      "exported_components": [
+        "Ribbon"
+      ],
+      "mount_sites": [
+        {
+          "component": "Ribbon",
+          "main_slint_line": 1194,
+          "mount": "inline",
+          "source": "Ribbon {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/script_editor.slint",
+      "lines": 932,
+      "is_panel": true,
+      "mount": "docked-center",
+      "main_slint_line": 2712,
+      "exported_components": [
+        "ScriptEditor"
+      ],
+      "mount_sites": [
+        {
+          "component": "ScriptEditor",
+          "main_slint_line": 2712,
+          "mount": "docked-center",
+          "source": "if root.active-tab-type == \"script\" || root.active-tab-type == \"code\": ScriptEditor {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/service_properties.slint",
+      "lines": 560,
+      "is_panel": false,
+      "mount": "not-instantiated-by-main",
+      "main_slint_line": null,
+      "exported_components": [
+        "ServiceProperties"
+      ],
+      "mount_sites": []
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/services_browser.slint",
+      "lines": 633,
+      "is_panel": true,
+      "mount": "docked-center",
+      "main_slint_line": 2846,
+      "exported_components": [
+        "ServicesBrowserPanel"
+      ],
+      "mount_sites": [
+        {
+          "component": "ServicesBrowserPanel",
+          "main_slint_line": 2846,
+          "mount": "docked-center",
+          "source": "if root.active-tab-type == \"services\": ServicesBrowserPanel {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/settings.slint",
+      "lines": 990,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3720,
+      "exported_components": [
+        "SettingsDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "SettingsDialog",
+          "main_slint_line": 3720,
+          "mount": "modal-dialog",
+          "source": "if root.show-settings-dialog: SettingsDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/simulation_settings.slint",
+      "lines": 1131,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3996,
+      "exported_components": [
+        "SimulationSettingsDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "SimulationSettingsDialog",
+          "main_slint_line": 3996,
+          "mount": "modal-dialog",
+          "source": "if root.show-simulation-settings-dialog: SimulationSettingsDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/sketch_canvas.slint",
+      "lines": 191,
+      "is_panel": true,
+      "mount": "floating",
+      "main_slint_line": 2579,
+      "exported_components": [
+        "SketchCanvasPanel"
+      ],
+      "mount_sites": [
+        {
+          "component": "SketchCanvasPanel",
+          "main_slint_line": 2579,
+          "mount": "floating",
+          "source": "SketchCanvasPanel {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/soul_panel.slint",
+      "lines": 527,
+      "is_panel": true,
+      "mount": "docked-right",
+      "main_slint_line": 3288,
+      "exported_components": [
+        "SoulPanel"
+      ],
+      "mount_sites": [
+        {
+          "component": "SoulPanel",
+          "main_slint_line": 3288,
+          "mount": "docked-right",
+          "source": "if root.right-tab-index == 2: SoulPanel {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/soul_settings.slint",
+      "lines": 407,
+      "is_panel": false,
+      "mount": "not-instantiated-by-main",
+      "main_slint_line": null,
+      "exported_components": [
+        "SoulSettingsDialog"
+      ],
+      "mount_sites": []
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/stress_test.slint",
+      "lines": 391,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3860,
+      "exported_components": [
+        "StressTestDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "StressTestDialog",
+          "main_slint_line": 3860,
+          "mount": "modal-dialog",
+          "source": "if root.show-stress-test-dialog: StressTestDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/sync_domain.slint",
+      "lines": 398,
+      "is_panel": false,
+      "mount": "modal-dialog",
+      "main_slint_line": 3886,
+      "exported_components": [
+        "SyncDomainDialog"
+      ],
+      "mount_sites": [
+        {
+          "component": "SyncDomainDialog",
+          "main_slint_line": 3886,
+          "mount": "modal-dialog",
+          "source": "if root.show-sync-domain-dialog: SyncDomainDialog {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/tags_editor.slint",
+      "lines": 295,
+      "is_panel": false,
+      "mount": "not-instantiated-by-main",
+      "main_slint_line": null,
+      "exported_components": [
+        "TagsEditor"
+      ],
+      "mount_sites": []
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/terrain_editor.slint",
+      "lines": 595,
+      "is_panel": true,
+      "mount": "docked-left",
+      "main_slint_line": 1746,
+      "exported_components": [
+        "ChunkRow",
+        "TerrainEditor"
+      ],
+      "mount_sites": [
+        {
+          "component": "TerrainEditor",
+          "main_slint_line": 1746,
+          "mount": "docked-left",
+          "source": "if root.left-tab-index == 4: TerrainEditor {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/theme.slint",
+      "lines": 1010,
+      "is_panel": false,
+      "mount": "not-instantiated-by-main",
+      "main_slint_line": null,
+      "exported_components": [
+        "IconButton",
+        "ToolbarSeparator",
+        "SidePanelHeader",
+        "PanelHeader",
+        "PropertyRow",
+        "TreeItem",
+        "LogEntry"
+      ],
+      "mount_sites": []
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/timeline_filter_modal.slint",
+      "lines": 200,
+      "is_panel": false,
+      "mount": "inline",
+      "main_slint_line": 3522,
+      "exported_components": [
+        "TimelineFilterModal"
+      ],
+      "mount_sites": [
+        {
+          "component": "TimelineFilterModal",
+          "main_slint_line": 3522,
+          "mount": "inline",
+          "source": "if root.timeline-filter-modal-open: TimelineFilterModal {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/timeline_panel.slint",
+      "lines": 455,
+      "is_panel": true,
+      "mount": "docked-bottom",
+      "main_slint_line": 3464,
+      "exported_components": [
+        "TimelinePanel"
+      ],
+      "mount_sites": [
+        {
+          "component": "TimelinePanel",
+          "main_slint_line": 3464,
+          "mount": "docked-bottom",
+          "source": "if root.bottom-panel-mode == \"timeline\": TimelinePanel {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/toast_undo.slint",
+      "lines": 129,
+      "is_panel": true,
+      "mount": "floating",
+      "main_slint_line": 2602,
+      "exported_components": [
+        "ToastUndo"
+      ],
+      "mount_sites": [
+        {
+          "component": "ToastUndo",
+          "main_slint_line": 2602,
+          "mount": "floating",
+          "source": "if root.toast-undo-visible: ToastUndo {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/tool_options_bar.slint",
+      "lines": 442,
+      "is_panel": true,
+      "mount": "floating",
+      "main_slint_line": 2520,
+      "exported_components": [
+        "ToolOptionsBar"
+      ],
+      "mount_sites": [
+        {
+          "component": "ToolOptionsBar",
+          "main_slint_line": 2520,
+          "mount": "floating",
+          "source": "ToolOptionsBar {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/tool_panel.slint",
+      "lines": 324,
+      "is_panel": true,
+      "mount": "floating",
+      "main_slint_line": 2541,
+      "exported_components": [
+        "ToolPanel"
+      ],
+      "mount_sites": [
+        {
+          "component": "ToolPanel",
+          "main_slint_line": 2541,
+          "mount": "floating",
+          "source": "ToolPanel {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/toolbox.slint",
+      "lines": 281,
+      "is_panel": true,
+      "mount": "docked-left",
+      "main_slint_line": 1721,
+      "exported_components": [
+        "Toolbox"
+      ],
+      "mount_sites": [
+        {
+          "component": "Toolbox",
+          "main_slint_line": 1721,
+          "mount": "docked-left",
+          "source": "if root.left-tab-index == 3: Toolbox {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/universe_browser.slint",
+      "lines": 163,
+      "is_panel": true,
+      "mount": "docked-left",
+      "main_slint_line": 1740,
+      "exported_components": [
+        "UniverseBrowser"
+      ],
+      "mount_sites": [
+        {
+          "component": "UniverseBrowser",
+          "main_slint_line": 1740,
+          "mount": "docked-left",
+          "source": "if root.left-tab-index == 2: UniverseBrowser {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/view_selector.slint",
+      "lines": 105,
+      "is_panel": false,
+      "mount": "not-instantiated-by-main",
+      "main_slint_line": null,
+      "exported_components": [
+        "ViewSelector"
+      ],
+      "mount_sites": []
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/web_browser.slint",
+      "lines": 237,
+      "is_panel": true,
+      "mount": "docked-center",
+      "main_slint_line": 2755,
+      "exported_components": [
+        "WebBrowser"
+      ],
+      "mount_sites": [
+        {
+          "component": "WebBrowser",
+          "main_slint_line": 2755,
+          "mount": "docked-center",
+          "source": "if root.active-tab-type == \"web\": WebBrowser {"
+        }
+      ]
+    },
+    {
+      "file": "eustress/crates/engine/ui/slint/workshop_panel.slint",
+      "lines": 2109,
+      "is_panel": true,
+      "mount": "docked-right",
+      "main_slint_line": 3317,
+      "exported_components": [
+        "WorkshopPanel"
+      ],
+      "mount_sites": [
+        {
+          "component": "WorkshopPanel",
+          "main_slint_line": 3317,
+          "mount": "docked-right",
+          "source": "if root.right-tab-index == 3: WorkshopPanel {"
+        }
+      ]
+    }
+  ]
+}

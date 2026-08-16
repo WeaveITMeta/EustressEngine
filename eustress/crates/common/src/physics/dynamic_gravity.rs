@@ -511,20 +511,6 @@ fn calculate_dynamic_gravity(
     }
 }
 
-/// Apply forces to velocities
-fn apply_dynamic_gravity(
-    time: Res<Time>,
-    mut query: Query<(&DynamicMass, &DynamicGravityForce, &mut crate::orbital::hybrid_coords::HybridVelocity)>,
-) {
-    let dt = time.delta_secs_f64();
-    
-    for (mass, force, mut velocity) in query.iter_mut() {
-        let acceleration = force.acceleration(mass).as_dvec3();
-        velocity.absolute += acceleration * dt;
-        velocity.update_local();
-    }
-}
-
 /// Debug visualization
 fn debug_draw_dynamic_gravity(
     config: Res<DynamicGravityConfig>,
@@ -617,10 +603,12 @@ impl Plugin for DynamicGravityPlugin {
             .register_type::<DynamicMass>()
             .register_type::<DynamicRadius>()
             .register_type::<MassTier>()
+            // Accumulates into `DynamicGravityForce`. Integrating that into
+            // motion is the caller's job — attach an Avian body and read the
+            // force, or run a bespoke integrator.
             .add_systems(FixedUpdate, (
                 update_mass_tiers,
                 calculate_dynamic_gravity.after(update_mass_tiers),
-                apply_dynamic_gravity.after(calculate_dynamic_gravity),
                 update_dynamic_stats.after(calculate_dynamic_gravity),
             ))
             .add_systems(Update, debug_draw_dynamic_gravity);

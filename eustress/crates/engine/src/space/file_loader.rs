@@ -2025,7 +2025,7 @@ pub fn spawn_directory_entry(
             Atmosphere, Sky, SkyboxTextures, Clouds, EustressDirectionalLight,
         };
         use crate::plugins::lighting_plugin::LightingServiceOwner;
-        use eustress_common::services::lighting::EustressAtmosphere;
+        use eustress_common::services::lighting::{AtmosphereRenderingMode, EustressAtmosphere};
 
         let instance_toml = dir_meta.path.join("_instance.toml");
         let toml_value: Option<toml::Value> =
@@ -2059,6 +2059,15 @@ pub fn spawn_directory_entry(
         };
         let str_at = |sec: Option<&toml::Value>, key: &str| -> Option<String> {
             sec.and_then(|s| s.get(key)).and_then(|v| v.as_str()).map(|s| s.to_string())
+        };
+        let vec3_at = |sec: Option<&toml::Value>, key: &str| -> Option<[f32; 3]> {
+            let arr = sec.and_then(|s| s.get(key)).and_then(|v| v.as_array())?;
+            let ch = |i: usize| -> Option<f32> {
+                arr.get(i)
+                    .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|n| n as f64)))
+                    .map(|f| f as f32)
+            };
+            Some([ch(0)?, ch(1)?, ch(2)?])
         };
 
         // Position (lights/sky/atmosphere are positionless, but keep transform).
@@ -2115,9 +2124,56 @@ pub fn spawn_directory_entry(
                     glare: f32_at(sec, "glare").unwrap_or(d.glare),
                     haze: f32_at(sec, "haze").unwrap_or(d.haze),
                 };
+
+                // The scattering model. Previously this was always
+                // `EustressAtmosphere::default()`, so the authored Rayleigh/Mie
+                // coefficients, planet radius, atmosphere thickness and
+                // rendering mode never left the file. Nothing noticed, because
+                // nothing downstream read them either.
+                let ed = EustressAtmosphere::default();
+                let eustress_atmo = EustressAtmosphere {
+                    // Mirror the artistic properties so a direct
+                    // EustressAtmosphere read sees the same values as Atmosphere.
+                    density: atmo.density,
+                    offset: atmo.offset,
+                    color: atmo.color,
+                    decay: atmo.decay,
+                    glare: atmo.glare,
+                    haze: atmo.haze,
+                    rendering_mode: match str_at(sec, "rendering_mode")
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .as_str()
+                    {
+                        "raymarched" | "raymarch" => AtmosphereRenderingMode::Raymarched,
+                        _ => ed.rendering_mode,
+                    },
+                    sky_max_samples: sec
+                        .and_then(|s| s.get("sky_max_samples"))
+                        .and_then(|v| v.as_integer())
+                        .map(|n| n.clamp(8, 128) as u32)
+                        .unwrap_or(ed.sky_max_samples),
+                    planet_radius: f32_at(sec, "planet_radius").unwrap_or(ed.planet_radius),
+                    atmosphere_height: f32_at(sec, "atmosphere_height")
+                        .unwrap_or(ed.atmosphere_height),
+                    rayleigh_coefficient: vec3_at(sec, "rayleigh_coefficient")
+                        .unwrap_or(ed.rayleigh_coefficient),
+                    mie_coefficient: f32_at(sec, "mie_coefficient")
+                        .unwrap_or(ed.mie_coefficient),
+                    mie_direction: f32_at(sec, "mie_direction")
+                        .or_else(|| f32_at(sec, "mie_directional_factor"))
+                        .unwrap_or(ed.mie_direction),
+                    environment_map_enabled: bool_at(sec, "environment_map_enabled")
+                        .unwrap_or(ed.environment_map_enabled),
+                    environment_intensity: f32_at(sec, "environment_intensity")
+                        .unwrap_or(ed.environment_intensity),
+                    atmosphere_environment_light: bool_at(sec, "atmosphere_environment_light")
+                        .unwrap_or(ed.atmosphere_environment_light),
+                };
+
                 commands.entity(spawned).insert((
                     atmo,
-                    EustressAtmosphere::default(),
+                    eustress_atmo,
                     LightingServiceOwner,
                 ));
             }
@@ -2942,6 +2998,14 @@ pub fn load_space_files_system(
             // a small one (`Lighting`) still loads fully and instantly.
             // `prio_t0` elapsed should now be small even at 50k.
             let prio_t0 = std::time::Instant::now();
+            // Watchdog: this spawn is synchronous and unbounded below the
+            // budget threshold — a service subtree smaller than the budget
+            // never spills, so it all lands in one frame however long that
+            // takes. Guarded so the popup names the service that is stuck.
+            let _phase = super::load_phase::scope(
+                "priority-spawn",
+                format!("spawning service '{}'", entry.name),
+            );
             SPAWN_BUDGET.store(spawn_budget_per_frame(), std::sync::atomic::Ordering::Relaxed);
             match entry.file_type {
                 FileType::Directory => {
@@ -3021,6 +3085,15 @@ pub fn drain_paste_spawn_queue(
     space_root: Res<super::SpaceRoot>,
     class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
     mut queue: ResMut<PasteSpawnQueue>,
+    // Paste selects what it created. `handle_paste_event` can only do that
+    // for entities it spawns inline; folder-form instances (every Part, and
+    // anything with children) land HERE a frame later, so its `created_ids`
+    // is empty and the selection stays on the ORIGINAL. That is what made
+    // Duplicate feel broken: the copy lands exactly under the source, the
+    // source keeps the move gizmo, and the gizmo's hit-test claims the click
+    // before selection ever runs — so the copy could not be clicked at all
+    // until the user deselected first.
+    selection_manager: Option<Res<crate::rendering::BevySelectionManager>>,
 ) {
     if queue.folders.is_empty() {
         return;
@@ -3030,6 +3103,9 @@ pub fn drain_paste_spawn_queue(
     let cd_ref = class_defaults.as_deref();
     let workspace_dir = space_path.join("Workspace");
     let folders: Vec<std::path::PathBuf> = queue.folders.drain(..).collect();
+    // Roots spawned by THIS drain, in queue order, so the selection ends up
+    // matching what the user just pasted.
+    let mut spawned_roots: Vec<std::path::PathBuf> = Vec::new();
     for folder in folders {
         if registry.is_loaded(&folder) {
             continue; // already spawned (watcher beat us) — don't duplicate
@@ -3073,7 +3149,38 @@ pub fn drain_paste_spawn_queue(
             &disk,
         );
         info!("📋 paste: deterministically spawned pasted subtree {:?}", folder);
+        spawned_roots.push(folder);
     }
+
+    // Select the pasted roots. `spawn_directory_entry` registers rather than
+    // returning an entity, so resolve through the registry the same way the
+    // template-insert path does — folder-form instances are keyed under BOTH
+    // the folder and its `_instance.toml`, and the marker is what the spawner
+    // writes, so probe that first.
+    if spawned_roots.is_empty() {
+        return;
+    }
+    let Some(selection_manager) = selection_manager else { return };
+    let ids: Vec<String> = spawned_roots
+        .iter()
+        .filter_map(|folder| {
+            registry
+                .get_entity(&folder.join("_instance.toml"))
+                .or_else(|| registry.get_entity(folder))
+        })
+        .map(crate::entity_utils::entity_to_id_string)
+        .collect();
+    if ids.is_empty() {
+        // Spawned but not resolvable — leave the previous selection alone
+        // rather than clearing it, so a registry miss can't silently drop
+        // whatever the user had selected.
+        warn!("📋 paste: spawned {} subtree(s) but none resolved to an entity — selection unchanged",
+              spawned_roots.len());
+        return;
+    }
+    let count = ids.len();
+    selection_manager.0.write().set_selected(ids);
+    info!("📋 paste: selected {} pasted object(s)", count);
 }
 
 /// Update system: loads one deferred service per frame to keep the viewport responsive.

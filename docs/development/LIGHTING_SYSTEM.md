@@ -14,17 +14,44 @@ The Lighting system in Eustress Engine uses **TOML files** instead of binary ent
 Every new Space automatically receives 5 TOML files in the `Lighting/` folder:
 
 ### 1. Atmosphere.toml
-Atmospheric scattering and sky rendering.
+Atmospheric scattering, sky rendering, and the sky-sourced reflections that
+light everything under it.
 
-**Key Properties:**
-- `Density` - Atmospheric thickness (0.0-1.0)
-- `Color` - Atmosphere color toward sun
-- `Decay` - Light decay color through atmosphere
-- `Glare` - Sun glare intensity
-- `Haze` - Horizon haze intensity
-- `RayleighCoefficient` - Blue sky scattering (Vector3)
-- `MieCoefficient` - Haze/fog scattering
-- `MieDirectionalFactor` - Forward scattering bias
+These properties build a Bevy `ScatteringMedium` and the planet that carries it.
+Scattering coefficients are in **units of 1e-6 per metre**, so Earth at sea level
+reads as `[5.802, 13.558, 33.1]` for Rayleigh and `4.44` for Mie.
+
+**Appearance:**
+- `Density` - Scales the whole medium. `0.5` is Earth-normal; higher is hazier
+  and fades the horizon sooner.
+- `Color` - Tints the sky by shifting Rayleigh scattering per channel.
+  Normalised internally, so it changes hue without thickening the atmosphere.
+- `Decay` - Becomes the planet's ground albedo, which feeds multiscattering and
+  so sets how bright and what colour the horizon reads.
+- `Glare` - Biases Mie scattering forward, which is what a halo around the sun is.
+- `Haze` - Multiplies the aerosol (Mie) term only, the term that reads as haze.
+
+**Scattering:**
+- `Offset` - Stretches (+) or compresses (-) the vertical density profile.
+- `RayleighCoefficient` - Molecular scattering per channel (Vector3). Blue
+  scatters most, which is why the sky is blue and sunsets are red.
+- `MieCoefficient` - Aerosol extinction. `4.44` is a clear day; Bruneton-lineage
+  references quote `21.0` for a deliberately hazy atmosphere.
+- `MieDirectionalFactor` - Henyey-Greenstein asymmetry `g`.
+
+**Rendering:**
+- `RenderingMode` - `LookupTexture` (fast, right for ground level) or
+  `Raymarched` (accurate at long range: orbital views, flight sims, cinematics).
+- `SkyMaxSamples` - Raymarching sample budget, 8-128. `Raymarched` only.
+- `PlanetRadius` / `AtmosphereHeight` - Planet geometry in metres. Scale heights
+  are derived from the thickness, so Earth's 8 km Rayleigh scale height stays
+  physically correct at any authored value.
+
+**Reflections:**
+- `EnvironmentMapEnabled` - Light the scene from the sky. The atmosphere
+  regenerates a filtered environment map from the live sky, so reflections and
+  image-based ambient track the time of day without further authoring.
+- `EnvironmentIntensity` - Environment map intensity.
 
 **Example:**
 ```toml
@@ -33,7 +60,11 @@ Density = { type = "float", value = 0.5, min = 0.0, max = 1.0 }
 Color = { type = "Color3", value = [0.776, 0.863, 1.0] }
 
 [Scattering]
-RayleighCoefficient = { type = "Vector3", value = [5.8, 13.5, 33.1] }
+RayleighCoefficient = { type = "Vector3", value = [5.802, 13.558, 33.1] }
+MieCoefficient = { type = "float", value = 4.44, min = 0.0, max = 100.0 }
+
+[Rendering]
+RenderingMode = { type = "string", value = "LookupTexture" }
 ```
 
 ### 2. Moon.toml

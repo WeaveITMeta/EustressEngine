@@ -2,6 +2,32 @@ use bevy::prelude::*;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 
+/// Default hitch threshold in milliseconds.
+///
+/// This used to be 1000 ms (and was constructed at 2000 ms), which meant the
+/// log only ever showed CATASTROPHIC freezes. The hitches that actually make
+/// an editor feel broken — a 120 ms pause while dragging, a 300 ms hang on
+/// select — were completely invisible, so "it lags and freezes" had no
+/// corresponding evidence anywhere in the diagnostics. 100 ms is roughly the
+/// point a pause stops reading as "slow" and starts reading as "stuck".
+///
+/// Override with `EUSTRESS_STUTTER_MS` (e.g. `250` to see only bigger hangs).
+const DEFAULT_STUTTER_MS: u64 = 100;
+
+/// How many frames between rolling percentile reports.
+const REPORT_EVERY_FRAMES: u32 = 300;
+
+fn stutter_threshold_ms() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("EUSTRESS_STUTTER_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_STUTTER_MS)
+    })
+}
+
 /// Resource tracking frame times and per-system execution times
 #[derive(Resource)]
 pub struct FrameTimeTracker {
@@ -9,11 +35,20 @@ pub struct FrameTimeTracker {
     stutter_threshold: Duration,
     system_times: HashMap<String, Duration>,
     current_system_start: Option<(String, Instant)>,
+    /// Rolling window of recent frame times (microseconds) for percentiles.
+    /// A mean alone hides hitches completely — a 2 s freeze every 300 frames
+    /// adds only ~7 ms to the mean but is the whole user-visible problem.
+    /// Fixed capacity, so this allocates once and never grows.
+    recent_us: Vec<u32>,
+    /// Frames since the last percentile report.
+    since_report: u32,
+    /// Hitches (over threshold) counted since the last report.
+    hitches: u32,
 }
 
 impl Default for FrameTimeTracker {
     fn default() -> Self {
-        Self::new(1000) // Only log frames over 1 second
+        Self::new(stutter_threshold_ms())
     }
 }
 
@@ -24,6 +59,9 @@ impl FrameTimeTracker {
             stutter_threshold: Duration::from_millis(stutter_threshold_ms),
             system_times: HashMap::new(),
             current_system_start: None,
+            recent_us: Vec::with_capacity(REPORT_EVERY_FRAMES as usize),
+            since_report: 0,
+            hitches: 0,
         }
     }
     
@@ -68,8 +106,42 @@ pub fn track_frame_time(mut tracker: ResMut<FrameTimeTracker>) {
         
         // Clear system times for next frame
         tracker.system_times.clear();
+
+        // ── Rolling percentile report ───────────────────────────────────────
+        // Always on and effectively free (one push + a sort every 300 frames).
+        // This is the number to judge "is the editor usable": p99 and max are
+        // what a user feels, and a mean cannot show them.
+        let us = frame_time.as_micros().min(u32::MAX as u128) as u32;
+        tracker.recent_us.push(us);
+        if frame_time > tracker.stutter_threshold {
+            tracker.hitches += 1;
+        }
+        tracker.since_report += 1;
+        if tracker.since_report >= REPORT_EVERY_FRAMES {
+            let hitches = tracker.hitches;
+            let thresh_ms = tracker.stutter_threshold.as_secs_f64() * 1000.0;
+            let mut v = std::mem::take(&mut tracker.recent_us);
+            v.sort_unstable();
+            let pick = |q: f64| -> f64 {
+                if v.is_empty() {
+                    return 0.0;
+                }
+                let i = (((v.len() - 1) as f64) * q).round() as usize;
+                v[i] as f64 / 1000.0
+            };
+            let n = v.len();
+            info!(
+                target: "eustress_engine::frame_diagnostics",
+                "FRAME p50={:.1}ms p95={:.1}ms p99={:.1}ms max={:.1}ms | {} hitch(es) >{:.0}ms in {} frames",
+                pick(0.50), pick(0.95), pick(0.99), pick(1.0), hitches, thresh_ms, n,
+            );
+            v.clear();
+            tracker.recent_us = v; // reuse the allocation
+            tracker.since_report = 0;
+            tracker.hitches = 0;
+        }
     }
-    
+
     tracker.last_frame = Some(now);
 }
 
@@ -143,7 +215,10 @@ pub struct FrameDiagnosticsPlugin;
 
 impl Plugin for FrameDiagnosticsPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(FrameTimeTracker::new(2000)) // 2 second threshold — only log severe stutters
+        // Threshold comes from `EUSTRESS_STUTTER_MS`, default 100 ms. The old
+        // hardcoded 2000 ms meant an editor could hitch for a fifth of a second
+        // on every drag and the logs would show a clean bill of health.
+        app.insert_resource(FrameTimeTracker::default())
             .add_systems(Last, track_frame_time)
             // Perf diagnostic — dormant unless EUSTRESS_PROFILE is set.
             .add_systems(Update, trace_instance_change_storm);

@@ -614,7 +614,7 @@ pub fn BlissPage() -> impl IntoView {
                         <ul class="node-features">
                             <li>"Automatic — runs when you use Eustress Engine"</li>
                             <li>"Contributions co-signed by Cloudflare witness"</li>
-                            <li>"Monthly BLS distribution based on contribution score"</li>
+                            <li>"Daily BLS distribution (UTC midnight) based on contribution score"</li>
                             <li>"No port forwarding, no server setup"</li>
                             <li>"Opt-out at any time in settings"</li>
                             <li>"Minimal bandwidth — only sends contribution hashes"</li>

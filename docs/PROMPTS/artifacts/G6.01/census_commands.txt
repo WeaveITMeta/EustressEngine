@@ -1,0 +1,118 @@
+# G6.01 — ux_baseline_census.json field provenance.
+# Every command is pwsh 7, run from the repository root E:/Workspace/EustressEngine.
+# One block per census field, in the order the fields are defined in the item.
+# Physical line counts use (Get-Content).Count. Measure-Object -Line omits blank
+# lines and undercounts every file in this tree, so it is not used anywhere here.
+
+[1] slint_file_count
+(@(Get-ChildItem 'eustress/crates/engine/ui/slint/*.slint')).Count
+
+[2] slint_total_lines
+(Get-ChildItem 'eustress/crates/engine/ui/slint/*.slint' | ForEach-Object { (Get-Content -LiteralPath $_.FullName).Count } | Measure-Object -Sum).Sum
+
+[3] ui_rs_total_lines
+(Get-ChildItem 'eustress/crates/engine/src/ui/*.rs' | ForEach-Object { (Get-Content -LiteralPath $_.FullName).Count } | Measure-Object -Sum).Sum
+
+[4] largest_ui_file
+Get-ChildItem 'eustress/crates/engine/src/ui/*.rs' | ForEach-Object { [pscustomobject]@{ path = "eustress/crates/engine/src/ui/$($_.Name)"; lines = (Get-Content -LiteralPath $_.FullName).Count } } | Sort-Object lines -Descending | Select-Object -First 1
+
+[5a] drain_required_params — the three SystemParam bundles and the function signature
+Select-String -Path 'eustress/crates/engine/src/ui/slint_ui.rs' -Pattern 'struct DrainEventWriters|struct DrainResources|struct DrainActionQueries|fn drain_slint_actions|SlintSystems::Drain'
+
+[5b] drain_required_params — every field, classified Option vs required
+$src = Get-Content -LiteralPath 'eustress/crates/engine/src/ui/slint_ui.rs'
+foreach ($r in @(@(3450,3507),@(3550,3655),@(3942,3997))) { for ($i=$r[0]; $i -le $r[1]; $i++) { $t=$src[$i-1]; if ($t -match '^\s{4}([A-Za-z_][A-Za-z0-9_]*): (.+),\s*$') { $o = if ($Matches[2] -match '^Option<') {'OPT'} else {'REQ'}; "$i|$o|$($Matches[1])|$($Matches[2])" } } }
+
+[5c] drain_required_params — registered_at for a message type T
+Select-String -Path 'eustress/crates/engine/src/*.rs','eustress/crates/engine/src/**/*.rs' -Pattern 'add_message::<[^>]*\bT\b'
+
+[5d] drain_required_params — registered_at for a resource type T
+Select-String -Path 'eustress/crates/engine/src/*.rs','eustress/crates/engine/src/**/*.rs' -Pattern '(init_resource::<[^>]*\bT\b|insert_resource\([A-Za-z:]*T\b)'
+
+[5e] drain_required_params — the plugin enclosing a registration at FILE:LINE, and whether it is mounted
+$l = Get-Content -LiteralPath FILE; for ($i=LINE-1; $i -ge 0; $i--) { if ($l[$i] -match '^impl Plugin for ([A-Za-z0-9_]+)') { "$($Matches[1]) @ $($i+1)"; break } }
+Select-String -Path 'eustress/crates/engine/src/main.rs','eustress/crates/engine/src/app_core.rs','eustress/crates/engine/src/ui/slint_ui.rs' -Pattern 'add_plugins'
+# StudioUiPlugin (slint_ui.rs:1235) is NOT mounted; SlintUiPlugin (slint_ui.rs:1294) is, from main.rs:277.
+# Registrations inside StudioUiPlugin are recorded as superseded_dead_registration, never as registered_at.
+
+[6] ribbon_tools_total
+(Select-String -Path 'eustress/crates/engine/src/tool_metadata.rs' -Pattern ', (true|false)\),$' | Measure-Object).Count
+
+[7] ribbon_tools_wired
+(Select-String -Path 'eustress/crates/engine/src/tool_metadata.rs' -Pattern ', true\),$' | Measure-Object).Count
+
+[8] slint_files_with_accessible_role
+(Get-ChildItem 'eustress/crates/engine/ui/slint/*.slint' | Select-String -Pattern 'accessible-role' | Select-Object -ExpandProperty Path -Unique | Measure-Object).Count
+
+[9a] top20_command_click_depth — the default ribbon tab, which fixes what is on screen at depth 1
+Select-String -Path 'eustress/crates/engine/ui/slint/ribbon.slint' -Pattern 'in-out property <string> ribbon-tab'
+Select-String -Path 'eustress/crates/engine/ui/slint/main.slint' -Pattern 'Ribbon \{'
+
+[9b] top20_command_click_depth — every depth-1 control on the default Home tab
+$l = Get-Content -LiteralPath 'eustress/crates/engine/ui/slint/ribbon.slint'; for ($i=2408; $i -lt 2690; $i++) { if ($l[$i] -match 'label:|IconButton') { "$($i+1): $($l[$i].Trim())" } }
+
+[9c] top20_command_click_depth — the always-visible menu bar and simulation-control strip (depth-2 roots and the Play/Stop controls)
+Select-String -Path 'eustress/crates/engine/ui/slint/ribbon.slint' -Pattern 'popup\.show\(\)|play-solo-touch|stop-touch|Ribbon tab selector row'
+
+[9d] top20_command_click_depth — every menu entry reachable at depth 2
+$l = Get-Content -LiteralPath 'eustress/crates/engine/ui/slint/ribbon.slint'; for ($i=1036; $i -lt 1330; $i++) { if ($l[$i] -match 'DropdownItem|TouchArea') { "$($i+1): $($l[$i].Trim())" } }
+
+[9e] top20_command_click_depth — proof that Insert Script has no mouse route (recorded as -1)
+Select-String -Path 'eustress/crates/engine/ui/slint/*.slint' -Pattern 'insert:script|New Script|create-script'
+Select-String -Path 'eustress/crates/engine/ui/slint/ribbon.slint' -Pattern 'insert:'
+Select-String -Path 'eustress/crates/engine/ui/slint/context_menu.slint' -Pattern 'label:'
+Select-String -Path 'eustress/crates/engine/src/*.rs','eustress/crates/engine/src/**/*.rs' -Pattern 'ClassName::LuauScript'
+Get-ChildItem 'eustress/crates/engine/modes' -File | Select-String -Pattern 'insert:script'
+Select-String -Path 'eustress/crates/engine/src/studio_modes.rs' -Pattern 'pub active_id'
+# All four surfaces come back empty of a script-creation control: the Insert menu's
+# static entries stop at Folder, its dynamic tail is filtered to classes with a
+# registered spawner and LuauScript has none, neither context menu offers one, and
+# the only `insert:script` declarations live in mode manifests that no default
+# active_id selects.
+
+[9f] top20_command_click_depth — keybinding action per command
+Select-String -Path 'eustress/crates/engine/src/keybindings.rs' -Pattern '^\s{4}[A-Z][A-Za-z0-9]*,'
+
+[10] theme_selection_tokens
+Select-String -Path 'eustress/crates/engine/ui/slint/theme.slint' -Pattern 'struct ThemeData|preset-classic|preset-modern|out property <ThemeData> data'
+Select-String -Path 'eustress/crates/engine/ui/slint/theme.slint' -Pattern 'selection-background|selection-border|accent-cyan|accent-eustress|border-focus'
+# preset-classic spans theme.slint:135-216, preset-modern spans :217-303, and
+# Theme.data selects preset-classic at :304. A token's preset value is the
+# assignment inside the corresponding span.
+
+[11] panel_inventory
+# is_panel is decided by rule R, which uses only main.slint text.
+# A .slint file is a panel iff main.slint instantiates a component that file
+# exports, at a site that is either
+#   (D) DOCKED  — the instantiation line matches
+#                 root\.(left-tab-index|right-tab-index|bottom-panel-mode|active-tab-type)\s*==
+#   (F) FLOATED — the instantiation block assigns BOTH x: and y: at its top level,
+#                 i.e. main.slint positions it freely over the viewport instead of
+#                 handing it to a layout.
+# Modal dialogs satisfy neither: they are gated on root.show-* and set no x/y.
+# The twelve files main.slint never instantiates (ai_generation.slint,
+# collaboration.slint, cursor_badge.slint, main.slint itself, mention_popup.slint,
+# network_panel.slint, numeric_field.slint, service_properties.slint,
+# soul_settings.slint, tags_editor.slint, theme.slint, view_selector.slint) are
+# not panels.
+$ml = Get-Content -LiteralPath 'eustress/crates/engine/ui/slint/main.slint'
+foreach ($f in Get-ChildItem 'eustress/crates/engine/ui/slint/*.slint') {
+  $comps = @((Select-String -LiteralPath $f.FullName -Pattern '^export component ([A-Za-z0-9_]+)').Matches | ForEach-Object { $_.Groups[1].Value })
+  foreach ($c in $comps) {
+    for ($i=0; $i -lt $ml.Count; $i++) {
+      $t = $ml[$i]
+      if ($t -notmatch "(^|[^A-Za-z0-9_])$c\s*:?=?\s*\{" -and $t -notmatch ":\s*$c\s*\{") { continue }
+      $indent = ($t -replace '(\s*).*','$1').Length; $hasX=$false; $hasY=$false
+      for ($j=$i+1; $j -lt $ml.Count; $j++) {
+        $b = $ml[$j]
+        if ($b -match '^\s*\}\s*$' -and (($b -replace '(\s*).*','$1').Length -le $indent)) { break }
+        if ($b -match '^\s+x:\s') { $hasX=$true }; if ($b -match '^\s+y:\s') { $hasY=$true }
+      }
+      $docked = $t -match 'root\.(left-tab-index|right-tab-index|bottom-panel-mode|active-tab-type)\s*=='
+      "$($f.Name)|$c|$($i+1)|docked=$docked|floated=$($hasX -and $hasY)|$($t.Trim())"
+    }
+  }
+}
+
+[verify] the four independently checkable counts, as the item measures them
+pwsh -NoProfile -File docs/PROMPTS/harness/checkers/G6.01_check.ps1

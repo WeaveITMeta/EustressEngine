@@ -39,6 +39,30 @@ bevy = { workspace = true, features = [
     "x11",
     "wayland",
     "multi_threaded",
+    # ── Player-facing image quality (mirrors the Studio engine build) ────────
+    # The player binary rendered with Bevy's DEFAULT `Msaa::Sample4` because no
+    # camera ever set `Msaa` — 4× raster bandwidth on every pass. Turning MSAA
+    # off is only acceptable if something replaces the anti-aliasing, so these
+    # three features come as a set with the camera bundle in `player_plugin`:
+    #   bevy_anti_alias  → SMAA (post-process AA, no prepass, no motion vectors)
+    #   bevy_post_process→ filmic bloom
+    #   tonemapping_luts → TonyMcMapface, matching Studio's look. The old
+    #                      `Tonemapping::Reinhard` was chosen *because* this
+    #                      feature was off (the "magenta bug" is the missing LUT).
+    "bevy_anti_alias",
+    "bevy_post_process",
+    "tonemapping_luts",
+    # REQUIRED by `tonemapping_luts`, which brings in KTX2 + zstd decompression
+    # in `bevy_image`. That crate refuses to compile with zstd support and no
+    # backend selected — `compile_error!("Choosing a zstd backend is required")`
+    # — so this must travel with the feature above. The engine carries the same
+    # pairing for the same reason.
+    "zstd_rust",
+    # MANDATORY alongside `bevy_anti_alias` — without it SMAA binds a
+    # placeholder LUT whose view is D3 where the bind group declares D2, and
+    # bevy_render quits the app on the validation error the first time SMAA
+    # runs. See the matching note in crates/engine/Cargo.toml.
+    "smaa_luts",
 ] }
 
 # Physics (Avian3D from workspace - supports Bevy 0.18)

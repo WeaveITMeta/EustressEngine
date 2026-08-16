@@ -387,6 +387,13 @@ impl Default for KeyBindings {
         //     menu advertises always wins over a selection convenience.
         //   Ctrl+I       → Invert Selection
         bindings.insert(Action::SelectChildren, KeyBinding::new(KeyCode::KeyV).with_ctrl().with_shift());
+        // Ctrl+Alt+V reaches Select Children too. Ctrl+Shift+V is also the
+        // near-universal "paste special" chord, so reaching for Ctrl+Alt+V
+        // instead is a reasonable instinct — and an unbound chord gives no
+        // feedback at all, which reads as "Select Children is broken" rather
+        // than "wrong key".
+        alternates.entry(Action::SelectChildren).or_default()
+            .push(KeyBinding::new(KeyCode::KeyV).with_ctrl().with_alt());
         bindings.insert(Action::SelectDescendants, KeyBinding::new(KeyCode::KeyD).with_ctrl().with_shift());
         bindings.insert(Action::SelectParent, KeyBinding::new(KeyCode::KeyU).with_ctrl().with_shift());
         bindings.insert(Action::SelectSiblings, KeyBinding::new(KeyCode::KeyA).with_ctrl().with_shift());
@@ -1604,23 +1611,75 @@ fn handle_menu_action_events(
 
             // Select All (Ctrl+A) — select all unlocked BasePart entities
             // Also blocked when cursor is over UI panels (Properties text fields)
+            // Select every selectable object in the Space.
+            //
+            // Defined by EXCLUSION, deliberately. This used to require a
+            // `BasePart` component, which silently meant "primitives only" —
+            // every class without one (Beam, PointLight, ParticleEmitter,
+            // Attachment, Decal, GaussianSplats, CadPart, …) was invisible to
+            // Ctrl+A, and each new class quietly inherited the same gap. An
+            // allow-list has to be updated for every class ever added; a
+            // deny-list is correct by default and only needs touching when a
+            // genuinely non-selectable class appears.
             Action::SelectAll => {
                 if ui_focus.as_ref().map(|f| f.has_focus).unwrap_or(false) { continue; }
                 if let Some(ref sel_mgr) = selection_manager {
                     let sm = sel_mgr.0.write();
                     sm.clear();
+                    let mut count = 0usize;
                     for (entity, _, bp) in entity_query.iter() {
-                        // Only select entities that have BasePart (actual 3D parts)
-                        let Some(bp) = bp else { continue; };
-                        // Skip locked parts
-                        if bp.locked { continue; }
-                        // Skip adornments
-                        if instance_query.get(entity)
-                            .map(|i| i.class_name.is_adornment())
-                            .unwrap_or(false) { continue; }
-                        let id = format!("{}v{}", entity.index(), entity.generation());
-                        sm.add_to_selection(id);
+                        // Locked parts stay out. The Select tool's hit-test
+                        // already skips them, so letting Ctrl+A grab one would
+                        // make the keyboard the one way to move something the
+                        // user locked on purpose.
+                        if bp.map(|b| b.locked).unwrap_or(false) { continue; }
+
+                        // No `Instance` means no class identity — engine-internal
+                        // entities (gizmo handles, preview meshes, cameras spawned
+                        // by tools) live here and are never scene content.
+                        let Ok(inst) = instance_query.get(entity) else { continue };
+
+                        // The engine's own selection boxes / gizmo meshes.
+                        if inst.class_name.is_adornment() { continue; }
+
+                        // Containers and celestial backdrop — anchors, not
+                        // targets. Shared with `selection_sync` so Select All
+                        // and Select Children agree on what "selectable" means.
+                        if crate::selection_sync::ABSTRACT_CLASSES.contains(&inst.class_name) {
+                            continue;
+                        }
+
+                        // The viewport camera and the terrain voxel volume are
+                        // singletons, not objects you mass-transform. Sweeping
+                        // them into a Ctrl+A → drag would move the viewpoint and
+                        // the whole world with the selection.
+                        if matches!(
+                            inst.class_name,
+                            eustress_common::classes::ClassName::Camera
+                                | eustress_common::classes::ClassName::Terrain
+                        ) {
+                            continue;
+                        }
+
+                        // Service roots (Workspace, Lighting, SoulService, …) are
+                        // Space scaffolding — the Delete arm below refuses them
+                        // for the same reason, and Ctrl+A must not be the way a
+                        // user gets one into a selection to begin with.
+                        let backing = instance_file_query.get(entity).ok()
+                            .map(|f| f.toml_path.clone())
+                            .or_else(|| loaded_from_file_query.get(entity).ok()
+                                .map(|l| l.path.clone()));
+                        if backing.as_deref()
+                            .map(crate::space::is_protected_service_path)
+                            .unwrap_or(false)
+                        {
+                            continue;
+                        }
+
+                        sm.add_to_selection(format!("{}v{}", entity.index(), entity.generation()));
+                        count += 1;
                     }
+                    info!("⌨️ Select All: {} object(s) selected", count);
                 }
             }
 

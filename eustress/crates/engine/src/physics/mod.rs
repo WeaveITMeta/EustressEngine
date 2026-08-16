@@ -18,9 +18,13 @@
 //! plugins). It gates all its systems to `PlayModeState::Playing`.
 
 pub mod collider_streaming;
+pub mod deformation_bridge;
+pub mod fracture_bridge;
 pub mod joint_resolver;
 pub mod movers;
 
 pub use collider_streaming::ColliderStreamingPlugin;
+pub use deformation_bridge::DeformationBridgePlugin;
+pub use fracture_bridge::FractureBridgePlugin;
 pub use joint_resolver::JointResolverPlugin;
 pub use movers::MoversPlugin;

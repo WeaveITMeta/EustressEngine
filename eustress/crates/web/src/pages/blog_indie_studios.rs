@@ -289,7 +289,7 @@ pub fn BlogIndieStudiosPage() -> impl IntoView {
                                 </li>
                                 <li>
                                     <strong>"The Bliss contributor economy."</strong>
-                                    " Eustress isn't just open source — it has a built-in economy "
+                                    " Eustress isn't just source-available — it has a built-in economy "
                                     "for builders. Contributors earn Bliss tokens for meaningful work "
                                     "on the engine and ecosystem. If your studio contributes improvements "
                                     "back, you're not just being altruistic — you're building equity "
@@ -316,7 +316,7 @@ pub fn BlogIndieStudiosPage() -> impl IntoView {
                                     "time of their peers."
                                 </li>
                                 <li>
-                                    "Why \"open source\" only protects you if the engine is actually "
+                                    "Why a licence only protects you if the engine is actually "
                                     "forkable — and the one clause in most \"open\" licenses that "
                                     "means you're still locked in without knowing it."
                                 </li>
@@ -418,7 +418,8 @@ pub fn BlogIndieStudiosPage() -> impl IntoView {
 
                             <div class="docs-callout info">
                                 <strong>"Your investment:"</strong>
-                                " Free and open source. Optional paid support tiers for studios that "
+                                " Free to download and source-available under PolyForm Shield — read "
+                                "it, fork it, ship on it. Optional paid support tiers for studios that "
                                 "want direct engineering partnership."
                             </div>
                         </div>
@@ -517,7 +518,7 @@ pub fn BlogIndieStudiosPage() -> impl IntoView {
                         <h2 class="section-anchor">"P.S."</h2>
                         <div class="docs-block">
                             <p>
-                                "If you read nothing else: Eustress is an open-source, forkable "
+                                "If you read nothing else: Eustress is a source-available, forkable "
                                 "simulation engine that takes zero percent of your revenue, renders "
                                 "at AAA quality, and simulates millions of entities in real time. "
                                 "Early studios get direct contributor access and priority onboarding. "

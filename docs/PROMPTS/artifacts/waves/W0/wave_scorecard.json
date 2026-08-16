@@ -1,0 +1,99 @@
+{
+  "schema": "eustress.gauntlet.wave_scorecard/1",
+  "wave_id": "W0",
+  "started_utc": "2026-08-08T01:20:00Z",
+  "ended_utc": "2026-08-08T01:55:00Z",
+  "outcome": "HALTED",
+  "halted_on": "G1.30",
+  "halt_basis": "eustress-wave §6 — the moment any item reaches STALLED the wave stops. No serial-lane item was started. G1.30's stall is its own front-matter escalation trigger firing, not a criterion failure: the §5 mechanical criterion PASSED and the negative control behaved correctly.",
+
+  "ownership_check": {
+    "items_examined": 6,
+    "paths_examined": 20,
+    "shared_paths": 0,
+    "exclusive_deferrals": [],
+    "unresolved": [],
+    "finding": "All six in-scope sets disjoint. No row in 04_FILE_OWNERSHIP.md engaged. No W0 item appears on the PROGRAM-LICENCE-GATE list. Every W0 item carries critic_gate: [], so no Critic scorecard is required or admissible anywhere in this wave — the mechanical criterion is the whole gate."
+  },
+
+  "items": [
+    {
+      "id": "G1.02", "tier": "S", "lane": "concurrent", "status": "PASSED",
+      "exit_command": "pwsh -NoProfile -File docs/PROMPTS/harness/verify_reference_machine.ps1 -Id RM-1 ; echo RM_EXIT=$?",
+      "measured": "missing=(empty) / gpu_match=True / driver_match=True / RM_EXIT=0",
+      "threshold": "RM_EXIT == 0 — eleven required fields non-empty AND live GPU name and driver version match the RM-1 entry string for string",
+      "artifact_path": "docs/PROMPTS/harness/reference_machines.json",
+      "artifact_written": true,
+      "critic_scorecard": null, "critic_verdict": null,
+      "iterations": 1, "builds_consumed": 0, "envelope_builds": 0,
+      "files_touched": [
+        "docs/PROMPTS/harness/reference_machines.json",
+        "docs/PROMPTS/harness/RM-1.md",
+        "docs/PROMPTS/harness/verify_reference_machine.ps1"
+      ],
+      "note": "RM-1 pinned: i9-10980XE 18C/36T, GTX 1080 Ti, driver 32.0.15.8253 (NVIDIA 582.53), 256 GB, Windows 11 Pro build 10.0.26200, Vulkan, rustc 1.95.0. wgpu_backend was OBSERVED from the engine's own AdapterInfo log, not assumed — main.rs:148-150 requests Backends::all(), so the backend is whatever wgpu picks. Four drift controls run including a mutated-driver case; file restored byte-for-byte."
+    },
+    {
+      "id": "G6.01", "tier": "S", "lane": "concurrent", "status": "PASSED",
+      "exit_command": "pwsh -NoProfile -File docs/PROMPTS/harness/checkers/G6.01_check.ps1",
+      "measured": "CENSUS_OK, EXIT=0. Re-derived: slint_file_count 60/60, ribbon_tools_total 1999/1999, ribbon_tools_wired 30/30, accessible_role_files 1/1",
+      "threshold": "Final line exactly CENSUS_OK, exit 0, eleven required fields present, four re-derived counts must match",
+      "artifact_path": "docs/PROMPTS/artifacts/G6.01/ux_baseline_census.json",
+      "artifact_written": true,
+      "critic_scorecard": null, "critic_verdict": null,
+      "iterations": 1, "builds_consumed": 0, "envelope_builds": 0,
+      "files_touched": [
+        "docs/PROMPTS/artifacts/G6.01/ux_baseline_census.json",
+        "docs/PROMPTS/artifacts/G6.01/census_commands.txt"
+      ],
+      "note": "Read-only against eustress/. All four pre-verified counts reproduced independently rather than copied."
+    },
+    {
+      "id": "G1.30", "tier": "S", "lane": "concurrent", "status": "STALLED",
+      "exit_command": "python docs/PROMPTS/harness/checkers/claim_ledger_check.py --ledger docs/PROMPTS/artifacts/G1.30/claim_ledger.json --min-claims 60 --require-repro-for MEASURED --print-summary ; echo EXIT=$?",
+      "measured": "total_claims=104 | MEASURED=12 TARGET=19 CONFIG_DEFAULT=9 UNSUPPORTED=64 | unclassified=0 | measured_missing_repro=0 | records_missing_source_line=0 | EXIT=0. Negative control on fixtures/claim_ledger_bad.json: EXIT=2 with 2 violations.",
+      "threshold": "EXIT=0 AND total_claims >= 60 AND unclassified == 0 AND measured_missing_repro == 0. Item escalation floor: UNSUPPORTED must stay <= 40% of records.",
+      "artifact_path": "docs/PROMPTS/artifacts/G1.30/claim_ledger.json",
+      "artifact_written": true,
+      "critic_scorecard": null, "critic_verdict": null,
+      "iterations": 1, "builds_consumed": 0, "envelope_builds": 0,
+      "files_touched": [
+        "docs/PROMPTS/artifacts/G1.30/claim_ledger.json",
+        "docs/PROMPTS/artifacts/G1.30/claim_ledger.md",
+        "docs/PROMPTS/harness/checkers/claim_ledger_check.py",
+        "docs/PROMPTS/harness/checkers/fixtures/claim_ledger_bad.json"
+      ],
+      "stall": {
+        "trigger": "item-specific front matter — '>40% UNSUPPORTED: finish the ledger, then stall for a human decision on remediation sequencing'",
+        "measured_against_trigger": "64 of 104 records = 61.5% UNSUPPORTED, against a 40% floor",
+        "mechanical_criterion": "PASSED — this is not a criterion failure",
+        "remediation_attempted": "none; zero corpus files edited, which is correct",
+        "decision_requested": "DEFER remediation behind G1.31",
+        "recommendation": "DEFER"
+      }
+    },
+    { "id": "G0.06", "tier": "M", "lane": "serial", "status": "NOT_STARTED — wave halted at G1.30", "envelope_builds": 6 },
+    { "id": "G7.30", "tier": "M", "lane": "serial", "status": "NOT_STARTED — wave halted at G1.30", "envelope_builds": 6 },
+    { "id": "G1.40", "tier": "M", "lane": "serial", "status": "NOT_STARTED — wave halted at G1.30", "envelope_builds": 6 }
+  ],
+
+  "totals": {
+    "passed": 2,
+    "stalled": 1,
+    "not_started": 3,
+    "builds_consumed": 0,
+    "builds_declared_for_wave": 18
+  },
+
+  "findings_for_l0": [
+    "G1.30 — 64 of 104 customer-facing quantitative claims classify UNSUPPORTED (61.5%). Includes four licence_conflict records in docs/marketing/UofA_Center_For_Innovation_Pilot.html at :476, :592, :642, :665 against a PolyForm Shield LICENSE; the '72 countries' figure at LAUNCH_PLAN.md:59 against a measured 46 entries at infrastructure/cloudflare/api/src/index.js:39-97; and 'Bevy 0.18' at START.md:15 against the 0.19 pin at eustress/Cargo.toml:49.",
+    "G6.01 — Insert Script has click_depth -1: there is NO mouse route to creating a script from a cold start. build_catalog drops any class without a registered spawner, and ClassName::LuauScript never appears in a spawner registration. insert:script exists only as a mode-manifest ribbon tool, and ModeRegistry.active_id defaults to an empty String.",
+    "G6.01 — tool_metadata.rs:1479 marks insert:script wired:true. The wired flag asserts a handler exists, NOT that a user can reach the button. Downstream items must not treat wired:true as reachable.",
+    "G6.01 — StudioUiPlugin at slint_ui.rs:1235 is DEAD (nothing mounts it); SlintUiPlugin at :1294 is live, mounted at main.rs:277. Six registrations are duplicated across both. In-source comments at :1374-1378 and :1380-1383 confirm this duplication is the mechanism behind both historical whole-UI outages. Any future item that registers a required drain param in the dead plugin reproduces the bug.",
+    "G6.01 — MEASUREMENT TRAP: PowerShell Measure-Object -Line silently omits blank lines, producing a 5.8% undercount that reads as plausible tree drift. Physical line counts must use (Get-Content -LiteralPath $p).Count. Any G6 item counting lines the other way will manufacture a false delta.",
+    "G1.02 — RM-1 is a GTX 1080 Ti, a 2017 part. All seven T1 frame-cost triggers now resolve to it. Pinning is explicitly NOT a judgement that a 1.5 ms budget is achievable on that GPU; re-basing a threshold is a §5.3 LOWER decision for the human, not a repair.",
+    "G1.02 — T1's seven frame-cost trigger line anchors have drifted (values unchanged, correct set of seven). Current lines: 1287, 1366, 1607, 2195, 2294, 2520, 4358. G1.09 and G1.12 should anchor on values, not line numbers."
+  ],
+
+  "decision_owed": "STALL G1.30 — LOWER / FUND / DEFER / KILL. Agent recommends DEFER remediation behind G1.31. The ledger itself is complete and passing; what needs sequencing is the remediation of 64 unsupported claims."
+}

@@ -796,6 +796,80 @@ fn handle_plugin_action_events(
             "mindspace:connect" => {
                 notifications.info("Connect nodes not yet implemented");
             }
+            "mindspace:billboard-larger" | "mindspace:billboard-smaller" => {
+                // 5% per click, compounding. Shrink uses 1/1.05 rather than
+                // 0.95 so Larger→Smaller returns to the original size exactly
+                // instead of drifting down 0.25% per round trip.
+                let grow = event.action_id == "mindspace:billboard-larger";
+                let factor: f32 = if grow { 1.05 } else { 1.0 / 1.05 };
+
+                let selected_ids = selection_manager.0.read().get_selected();
+                if selected_ids.is_empty() {
+                    notifications.warning("Select a part with a label to resize");
+                    continue;
+                }
+
+                // EVERY selected entity, not just the first — resizing is a
+                // bulk operation and multi-select is the common case when
+                // tidying a mind map.
+                let roots: Vec<Entity> = instance_query
+                    .iter()
+                    .filter(|(entity, instance)| {
+                        let entity_id = format!("{}v{}", entity.index(), entity.generation());
+                        selected_ids
+                            .iter()
+                            .any(|s| *s == entity_id || *s == instance.name)
+                    })
+                    .map(|(entity, _)| entity)
+                    .collect();
+
+                if roots.is_empty() {
+                    notifications.warning("Selection resolved to no entities");
+                    continue;
+                }
+
+                // Mutate through the world rather than widening this system's
+                // queries: `billboard_query` / `text_label_query` are read-only
+                // here and several other arms rely on that.
+                let count = roots.len();
+                commands.queue(move |world: &mut World| {
+                    // The label usually hangs BELOW the selected part, so walk
+                    // the whole subtree — selecting the part is what the user
+                    // does, not selecting the BillboardGui itself.
+                    let mut stack = roots;
+                    while let Some(e) = stack.pop() {
+                        let kids: Vec<Entity> = world
+                            .get::<Children>(e)
+                            .map(|c| c.iter().collect())
+                            .unwrap_or_default();
+                        stack.extend(kids);
+
+                        if let Some(mut bb) = world.get_mut::<crate::classes::BillboardGui>(e) {
+                            // Scale BOTH halves of the UDim2 so a size given in
+                            // studs (Scale) and one given in pixels (Offset)
+                            // both respond.
+                            bb.size.x.scale *= factor;
+                            bb.size.x.offset *= factor;
+                            bb.size.y.scale *= factor;
+                            bb.size.y.offset *= factor;
+                        }
+
+                        // Text size follows the quad. When `text_scaled` is on
+                        // the renderer auto-fits and font_size is inert, but
+                        // scaling it anyway keeps the value meaningful if the
+                        // user later turns auto-fit off.
+                        if let Some(mut tl) = world.get_mut::<crate::classes::TextLabel>(e) {
+                            tl.font_size = (tl.font_size * factor).clamp(1.0, 512.0);
+                        }
+                    }
+                });
+
+                notifications.info(format!(
+                    "{} label(s) {} 5%",
+                    count,
+                    if grow { "grown" } else { "shrunk" }
+                ));
+            }
             "mindspace:link" => {
                 // Link two entities using Attachments and a Beam
                 // First click sets source, second click creates the beam connection

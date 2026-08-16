@@ -89,6 +89,8 @@ pub mod parameters;
 pub mod plugins;
 pub mod pointcloud;
 pub mod project_manifest;
+/// Reading a Space's geometry — the Part subset both shells share.
+pub mod space_read;
 pub mod properties;
 pub mod scene;
 pub mod scene_ops;
@@ -108,7 +110,6 @@ pub mod types;
 pub mod usd;
 pub mod utils;
 pub mod xr;
-pub mod orbital;
 pub mod physics;
 pub mod realism;
 pub mod simulation;
@@ -241,17 +242,6 @@ pub use scene::{
     OrbitalSettings,
     // Orbital class data types
     SolarSystemData, CelestialBodyData, RegionChunkData,
-};
-
-// Re-export orbital coordinate system for Earth One
-pub use orbital::{
-    OrbitalCoords, GlobalPosition, RegionId,
-    Region, RegionRegistry,
-    OrbitalGravity, GravityAligned, CelestialBody,
-    OrbitalPlugin, OrbitalFocus, OrbitalFocusMarker,
-    // WGS84 constants and conversions
-    geodetic_to_ecef, ecef_to_geodetic, haversine_distance,
-    WGS84_A, WGS84_B, EARTH_MEAN_RADIUS, EARTH_GM,
 };
 
 // Re-export orbital class components

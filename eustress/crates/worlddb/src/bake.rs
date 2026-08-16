@@ -23,6 +23,25 @@
 //! `eustress_common::streaming` types; this crate stays engine-free).
 //! v0 is the real, shippable bake; PackedInstance interop is the
 //! engine-side encoder, not a bake.rs change.
+//!
+//! ## Coverage — read this before treating a bake as a full backup
+//!
+//! [`bake_to_echk`] walks the `tree` partition and **only** the `tree`
+//! partition. Two classes of entity are therefore absent from its output:
+//!
+//! - **Binary-ECS cores.** A rkyv `ArchInstanceCore` in the `entities`
+//!   partition is Morton-keyed and has no `tree` entry at all. That is the
+//!   engine's scalable default for a new Part, and the whole streaming
+//!   path, so on a large Space this is most of the world.
+//! - **Correct chunk placement for `#bin` records.** Instances the engine
+//!   collapses to a flat binary record are stored under a `<path>#bin`
+//!   key. Those keys do not end in `_instance.toml`, so the bucketing test
+//!   below drops them all into chunk (0,0) instead of their spatial cell —
+//!   which means any edit to any such instance dirties one shared chunk and
+//!   defeats the delta-publish the blake3 hashes exist for.
+//!
+//! Closing both is what a bake needs before it can stand in as the
+//! versioned/publishable form of a Space.
 
 use std::collections::BTreeMap;
 use std::io::Write;

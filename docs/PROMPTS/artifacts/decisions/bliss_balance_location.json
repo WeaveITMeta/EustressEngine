@@ -1,0 +1,20 @@
+{
+  "question": "Where does a Bliss balance live?",
+  "raised_by": "G1.01 — crates/backend could not compile because marketplace.rs calls Database::get_user_balance and no balance store exists.",
+  "decision": "DECENTRALISED_NODE_NETWORK",
+  "decided_by": "founder",
+  "decided_utc": "2026-08-10T21:30:00Z",
+  "decision_text": "Bliss is decentralised. Balances are carried by the light and heavy nodes other people run on their own machines as part of Eustress. The balance is not a row in a central database.",
+  "consequence_for_crates_backend": {
+    "verdict": "crates/backend STAYS UNLISTED from workspace members, and the reason is now stronger than when the decision was deferred.",
+    "why": "Implementing get_user_balance against the crate's local SQLite pool would have been actively wrong, not merely premature. It would have created a central authority for a quantity the design says no single machine owns. crates/backend/src/db.rs:5 already records that user identity lives in Cloudflare KV and not in that database; the balance is a third location again, and it is a peer network.",
+    "what_would_re_list_it": "A node-network client the backend can query for a balance, or a decision that the marketplace purchase route is not a capability the project keeps. Neither exists today. Re-listing is a one-line revert of eustress/Cargo.toml once one of them does.",
+    "what_must_not_happen": "No item may implement get_user_balance against a local store to make a build number go green. That is fabricating a money rail, and it would bake a centralised assumption into the exact subsystem the architecture says must not have one."
+  },
+  "consequence_for_the_program": {
+    "bliss_ledger_state": "0% per docs/AUDIT/09_ECONOMY.md and 00_MASTER_PROTOCOL.md §3.1. This decision names the target architecture; it does not advance the implementation.",
+    "human_only_boundary_unchanged": "00_MASTER_PROTOCOL.md §6.5 still reserves any Bliss design touching transferability or cash-out to the founder. Locating balances on a peer network does not relax that — a decentralised ledger with cash-out is more regulatory exposure, not less, and no counsel is engaged.",
+    "affected_items": "G1.40 (revenue-rail truth ledger) must record the money rail as blocked on an unbuilt node network rather than on missing SQL. G1.51 (merit ladder) must not denominate a rung in cash-outable Bliss while the ledger is at 0%.",
+    "related_prior_work": "docs/architecture/DECENTRALIZATION_PLAN.md and the Phase-0 snapshot exporter are the existing groundwork for a node network."
+  }
+}

@@ -237,6 +237,13 @@ pub fn arch_to_instance(core: &ArchInstanceCore) -> InstanceDefinition {
             locked: core.locked,
             physics: None,
             respect_gltf_materials: false,
+            // `ArchInstanceCore` (the rkyv on-disk shape) carries no
+            // deformation flag, so a part round-tripped through the BINARY
+            // path loses its deformation opt-in — the same limitation
+            // `respect_gltf_materials` already has here. The TOML authoring
+            // path preserves it. Adding it to the core is a persisted-format
+            // change and needs its own migration.
+            deformation: false,
         },
         metadata,
         material,
@@ -292,6 +299,7 @@ mod tests {
                 locked: false,
                 physics: None,
                 respect_gltf_materials: false,
+                deformation: false,
             },
             metadata: InstanceMetadata {
                 class_name: "Part".into(),

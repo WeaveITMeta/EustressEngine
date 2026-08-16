@@ -36,7 +36,10 @@ pub struct ListedResource {
     pub mime_type: Option<String>,
 }
 
-const MAX_LIST: usize = 200;
+/// Ceiling on the full resource catalogue. `resources/list` pages over this
+/// with a cursor, so the cap is a runaway guard rather than a page size — it
+/// used to be 200, which quietly cut off any Universe bigger than that.
+const MAX_LIST: usize = 2000;
 
 pub fn list_resources(universe: &Path) -> Vec<ListedResource> {
     let mut out: Vec<ListedResource> = Vec::new();

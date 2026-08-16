@@ -484,6 +484,11 @@ impl ClassId {
             ClassName::Clouds => ClassId::Clouds,
             ClassName::Star => ClassId::Sun,
             ClassName::Moon => ClassId::Moon,
+            // No dedicated ClassId: a reflection probe round-trips through the
+            // generic Instance path, which carries its Transform (the probe
+            // volume) and its attributes. Adding a ClassId would change the
+            // binary format for every existing Space.
+            ClassName::ReflectionProbe => ClassId::Instance,
             ClassName::Lighting => ClassId::Lighting,
             ClassName::Workspace => ClassId::Workspace,
             // Operations

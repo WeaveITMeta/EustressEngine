@@ -120,6 +120,25 @@ pub fn register_scene_reflect_types(app: &mut App) {
         .register_type::<GltfSceneName>()
         .register_type::<GltfMeshName>()
         .register_type::<GltfMaterialName>();
+
+    // The list above was written for a STATIC glb scene graph and covers no
+    // rigged body: it has no skinning and no animation types. A Play-with-
+    // character spawn loads a rigged character glTF, so the world gains
+    // `SkinnedMesh`, `DynamicSkinnedMeshBounds`, `AnimationPlayer`,
+    // `AnimatedBy` and `AnimationTargetId` — and the world-serialization
+    // spawner panics on the first one it cannot reflect, killing the process
+    // the instant Play is pressed.
+    //
+    // Bevy itself is no help here: `AnimationPlugin::build` registers only the
+    // AnimationClip/AnimationGraph ASSETS and not one component type, even
+    // though all five derive `Reflect` + `#[reflect(Component)]`.
+    //
+    // Delegate to the shared registrar rather than restating the list. The
+    // Client already calls it; the engine registering `bundled://` (see
+    // `register_asset_sources` above) is exactly what makes character glTFs
+    // actually load here, which is what exposed the gap. Registering a type
+    // twice is a no-op, so the overlap with the set above is harmless.
+    eustress_common::avatar::boot::register_gltf_scene_types(app);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

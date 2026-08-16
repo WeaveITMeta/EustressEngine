@@ -1,0 +1,107 @@
+{
+  "item": "G0.06",
+  "title": "Every licensing misstatement found and fixed, enforced by a grep verifier",
+  "measured_at_head": "71ccf6fe330f1424d678c20699add189ec20ed7d",
+  "the_licence": {
+    "file": "LICENSE",
+    "terms": "PolyForm Shield 1.0.0, dual-licensed against LICENSE-COMMERCIAL.md",
+    "correct_public_phrase": "source-available",
+    "why_it_matters": "PolyForm Shield carries a Noncompete clause and a Competition clause that counts goods and services as competing even when provided free of charge. Telling a reader the project is open source or MIT-licensed tells them they hold rights the licence withholds, and the correction lands after they have committed."
+  },
+  "corrections": [
+    {"path": "docs/marketing/UofA_Center_For_Innovation_Pilot.html", "line": 476, "was": "Open-source \u00b7 Physics-as-Code \u00b7 Built for inventors", "now": "Source-available \u00b7 Physics-as-Code \u00b7 Built for inventors"},
+    {"path": "docs/marketing/UofA_Center_For_Innovation_Pilot.html", "line": 592, "was": "Free, open source. Windows, macOS, Linux. Vulkan / DX12 ready.", "now": "Free to download, source-available. Windows, macOS, Linux. Vulkan / DX12 ready."},
+    {"path": "docs/marketing/UofA_Center_For_Innovation_Pilot.html", "line": 641, "was": "Help shape the open-source platform of the future for inventors. Built in the open, owned by the community.", "now": "Help shape the source-available platform of the future for inventors. Built in the open, and every line of it is yours to read, fork and build on.", "note": "\"owned by the community\" carried no banned phrase but was the same false promise: PolyForm Shield does not transfer ownership. Corrected in the same sentence."},
+    {"path": "docs/marketing/UofA_Center_For_Innovation_Pilot.html", "line": 665, "was": "Open source \u00b7 MIT-friendly licensing \u00b7 Git-diffable projects \u00b7 No vendor lock-in", "now": "Source-available (PolyForm Shield 1.0.0) \u00b7 Read, fork and build on it \u00b7 Git-diffable projects \u00b7 No vendor lock-in"},
+    {"path": "docs/generative-world-layer.md", "line": 180, "was": "Differentiator: open source, agent-as-peer,", "now": "Differentiator: source-available, agent-as-peer,"},
+    {"path": "eustress/crates/web/src/pages/home.rs", "line": 426, "was": "// OPEN SOURCE - build it with us (GitHub + contributor ladder)", "now": "// SOURCE-AVAILABLE - build it with us (GitHub + contributor ladder)"},
+    {"path": "eustress/crates/web/src/pages/home.rs", "line": 434, "was": "<span class=\"section-tag\">\"OPEN SOURCE\"</span>", "now": "<span class=\"section-tag\">\"SOURCE-AVAILABLE\"</span>", "note": "Only the label changed. The section body already said PolyForm Shield correctly, and the whole \"Build It With Us\" story, the lead, and the contributor ladder are untouched."},
+    {"path": "eustress/crates/web/src/pages/blog_indie_studios.rs", "line": 292, "was": "Eustress isn't just open source \u2014 it has a built-in economy", "now": "Eustress isn't just source-available \u2014 it has a built-in economy"},
+    {"path": "eustress/crates/web/src/pages/blog_indie_studios.rs", "line": 319, "was": "Why \"open source\" only protects you if the engine is actually forkable", "now": "Why a licence only protects you if the engine is actually forkable", "note": "Judged in context: on an Eustress marketing page the original read as a claim about Eustress's own terms. Reworded to keep the argument while dropping the implied claim."},
+    {"path": "eustress/crates/web/src/pages/blog_indie_studios.rs", "line": 421, "was": "Free and open source. Optional paid support tiers for studios that want direct engineering partnership.", "now": "Free to download and source-available under PolyForm Shield \u2014 read it, fork it, ship on it. Optional paid support tiers for studios that want direct engineering partnership."},
+    {"path": "eustress/crates/web/src/pages/blog_indie_studios.rs", "line": 520, "was": "Eustress is an open-source, forkable simulation engine", "now": "Eustress is a source-available, forkable simulation engine"},
+    {"path": "eustress/crates/web/src/pages/docs_earning.rs", "line": 314, "was": "The ledger is public. The math is open source.", "now": "The ledger is public. The math is in the source, and the source is readable."},
+    {"path": "eustress/crates/web/src/pages/marketplace.rs", "line": 27, "was": "// Open-sourced spaces that can be redistributed", "now": "// Spaces published with their source, so others can read and redistribute them"},
+    {"path": "eustress/crates/web/style/main.css", "line": 20592, "was": "Open Source / GitHub section", "now": "Source-available / GitHub section", "note": "Corrected rather than allowlisted: the stylesheet comment is cheap to fix and an allowlist slot is not."},
+    {"path": "eustress/crates/engine/ui/slint/publish.slint", "line": 379, "was": "CheckBox { text: \"Open Source\"; checked <=> root.open-source; }", "now": "CheckBox { text: \"Share Source\"; checked <=> root.open_source; }"},
+    {"path": "eustress/crates/engine/ui/slint/publish.slint", "line": 113, "was": "in-out property <bool> open-source: false;", "now": "in-out property <bool> open_source: false;"},
+    {"path": "eustress/crates/engine/ui/slint/publish.slint", "line": 469, "was": "root.open-source,", "now": "root.open_source,"},
+    {"path": "eustress/crates/engine/ui/slint/main.slint", "line": 183, "was": "in-out property <bool> publish-open-source: false;", "now": "in-out property <bool> publish_open_source: false;"},
+    {"path": "eustress/crates/engine/ui/slint/main.slint", "line": 3672, "was": "open-source <=> root.publish-open-source;", "now": "open_source <=> root.publish_open_source;"},
+    {"path": "eustress/crates/web/index.html", "line": 179, "was": "\"license\": \"https://opensource.org/licenses/MIT\",", "now": "\"license\": \"https://polyformproject.org/licenses/shield/1.0.0/\",", "scope": "outside the item's declared in-scope list \u2014 see scope_extensions"},
+    {"path": "docs/development/UNIFIED_EXPLORER_PLAN.md", "line": 24, "was": "13. [Open Source References](#13-open-source-references)", "now": "13. [Third-Party References](#13-third-party-references)", "scope": "outside the item's declared in-scope list \u2014 see scope_extensions"},
+    {"path": "docs/development/UNIFIED_EXPLORER_PLAN.md", "line": 1231, "was": "## 13. Open Source References", "now": "## 13. Third-Party References", "scope": "outside the item's declared in-scope list \u2014 see scope_extensions"}
+  ],
+  "publish_slint_checkbox_decision": {
+    "surface": "eustress/crates/engine/ui/slint/publish.slint:379, bound through main.slint:183 and :3672",
+    "what_it_is": "A choice a creator makes about their own Space when publishing it, not a statement about Eustress.",
+    "decision": "FIXED, not allowlisted.",
+    "reasoning": "The checkbox attaches no licence to anything. A creator who ticks a box labelled \"Open Source\" on a platform that is not open source can reasonably believe they have applied an OSI licence they never chose. The helper text beside it already said the true thing \u2014 \"Allow source access and reuse\" \u2014 so the label was the only part that overclaimed. It now reads \"Share Source\", which is what the control does.",
+    "identifier_rename": "The bound property spellings were changed from open-source to open_source in the same pass. Slint normalises identifiers (i-slint-compiler parser.rs::normalize_identifier maps foo_bar to foo-bar), so the two spellings are the same identifier and the generated Rust accessors are unchanged. No Rust call site, no publish-manifest field, and no serialised name was touched.",
+    "rust_call_sites_left_alone": [
+      "eustress/crates/engine/src/ui/slint_ui.rs:1717, :3768, :3790",
+      "eustress/crates/engine/src/ui/slint_bridge.rs:93",
+      "eustress/crates/engine/src/ui/file_dialogs.rs:96",
+      "eustress/crates/engine/src/ui/file_event_handler.rs:1003"
+    ]
+  },
+  "scope_extensions": {
+    "note": "Two edits fall outside the item's declared in-scope file list. Both are recorded here rather than made quietly. Each is a one-line revert.",
+    "entries": [
+      {
+        "path": "eustress/crates/web/index.html",
+        "line": 179,
+        "why_out_of_scope": "The item's in-scope list names eustress/crates/web/src/pages/ and style/main.css, not the crate's index.html.",
+        "why_it_was_fixed_anyway": "The line is a machine-readable licence declaration in the live site's schema.org JSON-LD: \"license\": \"https://opensource.org/licenses/MIT\". Search engines and open-source programme-office scanners read that field directly. It is the single most consequential misstatement found, and it is a false MIT claim rather than a phrasing slip. The item's own measurement missed it because a grep for \"open source\" and \"open-source\" does not match \"opensource.org\". Leaving it would have meant either suppressing a real defect or reporting zero while a false MIT claim stayed live.",
+        "revert": "git checkout -- eustress/crates/web/index.html (note: this file also carries the founder's uncommitted edits)"
+      },
+      {
+        "path": "docs/development/UNIFIED_EXPLORER_PLAN.md",
+        "line": "24 and 1231",
+        "why_out_of_scope": "The file is on neither the in-scope nor the out-of-scope list.",
+        "why_it_was_fixed_anyway": "Section 13 lists third-party projects (VS Code, Monaco, Zed, Lapce, pulldown-cmark) as architecture references. \"Third-Party References\" is what the section actually contains, and the retitle is accurate on its own terms rather than a licence edit.",
+        "revert": "git checkout -- docs/development/UNIFIED_EXPLORER_PLAN.md"
+      }
+    ]
+  },
+  "not_touched": {
+    "LICENSE": "Changing the licence to match a description is a human-only decision. This item only changed descriptions to match the licence, which alters no terms.",
+    "third_party_licence_descriptions": "Statements about MinIO, fbxcel, the Autodesk FBX SDK and the rojo-rbx crates are true as written and were left alone. They are carried on the allowlist.",
+    "deployment": "The corrected tree is left in place. Publishing the site and deploying to production are human-only.",
+    "founder_uncommitted_work": "The working tree carried 91 uncommitted paths before this item and 91 after. The baseline measurement runs under `git stash`, which converts five staged deletions into unstaged ones; they were re-staged afterwards and `git status --porcelain` now matches the pre-item snapshot exactly."
+  },
+  "pdf_regeneration": {
+    "path": "docs/marketing/UofA_Center_For_Innovation_Pilot.pdf",
+    "why": "The PDF is generated from the HTML and is the file that actually gets emailed. Correcting only the HTML would leave a wrong PDF in the tree.",
+    "generator_of_record": "The committed PDF's /Creator field reads HeadlessChrome/147.0.0.0, so the same pipeline was used.",
+    "command": "\"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --headless --disable-gpu --no-pdf-header-footer --run-all-compositor-stages-before-draw --virtual-time-budget=10000 --print-to-pdf=<out.pdf> \"file:///E:/Workspace/EustressEngine/docs/marketing/UofA_Center_For_Innovation_Pilot.html\"",
+    "chrome_version": "150.0.7871.187",
+    "sha256_before": "8db745054cb3ee96a4c351685e37b96d326712d447b42a9dfd1a5d650b4bf104",
+    "sha256_after": "70854939169db3cce2d98eaf9abad06654e5fbfa4a64bcafdab6ef8bede20b46",
+    "bytes_before": 2389005,
+    "bytes_after": 2385426,
+    "verifier_cannot_read_pdfs": "The verifier skips PDFs exactly as `grep -I` does. An early draft inflated FlateDecode streams and it was removed: the only text it recovered from the marketing PDFs was embedded-font metadata (Monotype Arial ships a Biblical-Hebrew layout notice that says \"open source software under the MIT License\"), which is noise about a font vendor and not about Eustress. The sha256 pair above is the evidence that the PDF was regenerated, not a grep.",
+    "visual_confirmation": "The regenerated PDF was rendered and read page by page. The header tag reads \"SOURCE-AVAILABLE \u00b7 PHYSICS-AS-CODE \u00b7 BUILT FOR INVENTORS\", step 01 reads \"Free to download, source-available.\", the CTA reads \"Help shape the source-available platform of the future for inventors. Built in the open, and every line of it is yours to read, fork and build on.\", and the footer reads \"Source-available (PolyForm Shield 1.0.0) \u00b7 Read, fork and build on it \u00b7 Git-diffable projects \u00b7 No vendor lock-in\"."
+  },
+  "builds": {
+    "web": {
+      "command": "cd eustress/crates/web && trunk build --release",
+      "WEB_BUILD_EXIT": 0,
+      "wall_clock": "5m 40s release profile, then \"applying new distribution\" and \"success\"",
+      "note": "35 pre-existing warnings, no errors. This is what proves the Leptos edits are real Rust string literals that still compile."
+    },
+    "engine": {
+      "command": "cd eustress && cargo build -p eustress-engine",
+      "purpose": "Validates the two .slint edits, which the web build does not cover.",
+      "ENGINE_BUILD_EXIT": 0,
+      "wall_clock": "33m 33s dev profile, 140 pre-existing warnings, no errors"
+    }
+  },
+  "verifier_design_notes": {
+    "scan_universe": "The whole repository from --repo-root down. 6,315 text files scanned. Binary files are skipped the way `grep -I` skips them.",
+    "why_not_a_file_list": "A scanner pointed at the files the author already found cannot catch the next occurrence, which is the entire point of leaving it behind. The baseline run proves it: it independently found five further misstatements in eustress/crates/web/index.html (:10, :24, :35, :67, :103, all claiming \"open source\" and \"Apache-2.0\") that the item's own catalogue never listed.",
+    "rule_statement_classification": "Three lines outside docs/PROMPTS state the house rule itself \u2014 'say \"source-available\", never \"open source\"'. They are classified out, not allowlisted, on the same ground the prompt library itself is excluded: text that quotes the phrase in order to forbid it is not a claim. The test is same-line only \u2014 the correct term must appear on the very line that carries the banned phrase \u2014 and every line set aside is printed and stored verbatim in the report.",
+    "allowlist_durability": "Entries match on path + line + exact text. Edit the line and the entry stops matching, so the hit resurfaces for a fresh decision instead of staying suppressed forever.",
+    "ci_readiness": "The checker exits 0 clean, 5 on unallowlisted hits, 6 on an allowlist violation, 7 on a missing or too-small baseline. A later item can wire it into CI as-is; it needs nothing but python and a repo root."
+  }
+}

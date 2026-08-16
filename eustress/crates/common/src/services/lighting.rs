@@ -90,7 +90,10 @@ impl Default for LightingService {
             
             // Ambient
             ambient: [0.4, 0.45, 0.5, 1.0],
-            brightness: 1.0,
+            // 2.0 is the neutral value, matching the shipped Lighting
+            // `_service.toml` and Roblox's own `Lighting.Brightness` default.
+            // See `BRIGHTNESS_REFERENCE` in the lighting plugin.
+            brightness: 2.0,
             outdoor_ambient: [0.5, 0.55, 0.6, 1.0],
             
             // Fog
@@ -101,7 +104,13 @@ impl Default for LightingService {
             
             // Sun
             sun_color: [1.0, 0.98, 0.95, 1.0],
-            sun_intensity: 15000.0,
+            // Physical lux. This has to be real sunlight, because the camera
+            // exposure is now real too: `sky_atmosphere` runs at ev100 13, which
+            // is bevy's own calibration for `RAW_SUNLIGHT`. The previous 15,000
+            // is roughly overcast daylight, about 3.1 EV under, and it only
+            // looked correct because the camera was over-exposed by a matching
+            // amount. Fixing one without the other leaves the scene dark.
+            sun_intensity: bevy::light::light_consts::lux::RAW_SUNLIGHT,
             sun_angular_radius: 3.0, // Degrees — visible disc in 256px skybox
             
             // Shadows
@@ -243,18 +252,28 @@ pub struct EustressAtmosphere {
     #[serde(default = "default_atmosphere_height")]
     pub atmosphere_height: f32,
     
-    /// Rayleigh scattering coefficient (affects blue sky color)
-    /// Higher values = more blue scattering
+    /// Rayleigh (molecular) scattering coefficient per channel, in **units of
+    /// 1e-6 per metre**. Higher values scatter more, so a higher blue component
+    /// gives a bluer sky.
+    ///
+    /// Earth at sea level is `[5.802, 13.558, 33.1]`. These are the same units
+    /// the shipped `Atmosphere.instance.toml` writes, so what an author reads in
+    /// the Properties panel is what lands here.
     #[serde(default = "default_rayleigh_coefficient")]
     pub rayleigh_coefficient: [f32; 3],
-    
-    /// Mie scattering coefficient (affects sun glare/haze)
-    /// Higher values = more pronounced sun glare
+
+    /// Mie (aerosol) extinction coefficient, in **units of 1e-6 per metre**.
+    /// Drives haze and the halo around the sun.
+    ///
+    /// Earth at sea level is about `4.44`. Bruneton-lineage references quote
+    /// `21.0` for a deliberately hazy atmosphere, which is why the shipped
+    /// template used to carry that value; it is a legitimate look, just not a
+    /// clear-day one.
     #[serde(default = "default_mie_coefficient")]
     pub mie_coefficient: f32,
-    
-    /// Mie scattering direction (-1 to 1)
-    /// Negative = backscatter, Positive = forward scatter
+
+    /// Mie scattering asymmetry `g` (-1 to 1).
+    /// Negative = backscatter, positive = forward scatter (a sun halo).
     #[serde(default = "default_mie_direction")]
     pub mie_direction: f32,
     
@@ -279,8 +298,13 @@ pub struct EustressAtmosphere {
 fn default_sky_max_samples() -> u32 { 32 }
 fn default_planet_radius() -> f32 { 6_371_000.0 }
 fn default_atmosphere_height() -> f32 { 100_000.0 }
-fn default_rayleigh_coefficient() -> [f32; 3] { [5.5e-6, 13.0e-6, 22.4e-6] }
-fn default_mie_coefficient() -> f32 { 21e-6 }
+// Scattering coefficients are in units of 1e-6 per metre, matching the shipped
+// Atmosphere.instance.toml. They used to be written here in absolute units
+// (`5.5e-6`) while the template wrote `5.8`, a millionfold disagreement between
+// the two sources of the same value. Nothing caught it because nothing read
+// either one.
+fn default_rayleigh_coefficient() -> [f32; 3] { [5.802, 13.558, 33.1] }
+fn default_mie_coefficient() -> f32 { 4.44 }
 fn default_mie_direction() -> f32 { 0.758 }
 fn default_true() -> bool { true }
 fn default_environment_intensity() -> f32 { 1.0 }
@@ -288,23 +312,24 @@ fn default_environment_intensity() -> f32 { 1.0 }
 impl Default for EustressAtmosphere {
     fn default() -> Self {
         Self {
-            // Bevy Earth-like atmosphere defaults
-            density: 0.35,                        // Moderate density for clear sky
+            // Earth-like defaults. `density` is normalised so 0.5 is
+            // Earth-normal, matching the shipped Atmosphere.instance.toml.
+            density: 0.5,
             offset: 0.0,
             color: [0.4, 0.6, 1.0, 1.0],          // Blue sky (Rayleigh scattering)
             decay: [0.3, 0.3, 0.3, 1.0],          // Neutral ground albedo
             glare: 0.0,
             haze: 0.0,
-            
-            // Bevy 0.17 atmosphere defaults
+
             rendering_mode: AtmosphereRenderingMode::LookupTexture,
             sky_max_samples: 32,
-            planet_radius: 6_371_000.0,          // Earth radius in meters
-            atmosphere_height: 100_000.0,        // 100km atmosphere
-            rayleigh_coefficient: [5.5e-6, 13.0e-6, 22.4e-6], // Earth Rayleigh
-            mie_coefficient: 21e-6,              // Earth Mie
-            mie_direction: 0.758,                // Forward scattering
-            
+            planet_radius: 6_371_000.0,           // Earth radius, metres
+            atmosphere_height: 100_000.0,         // 100 km atmosphere
+            // Units of 1e-6 per metre — see the field docs.
+            rayleigh_coefficient: [5.802, 13.558, 33.1], // Earth, sea level
+            mie_coefficient: 4.44,                // Earth, sea level
+            mie_direction: 0.758,                 // Forward scattering
+
             // Environment map defaults
             environment_map_enabled: true,
             environment_intensity: 1.0,

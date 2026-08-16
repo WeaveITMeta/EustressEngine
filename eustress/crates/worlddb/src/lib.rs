@@ -64,7 +64,7 @@ pub use branch::{BranchHandle, WorldDbBranchExt};
 pub use changestream::{ChangeStream, CommitDelta, EntityChange, Filter, Subscription, TxId};
 pub use datastore::{DataStore, DataStorePages, DataStoreService, OrderedDataStore};
 pub use error::{Error, Result};
-pub use fjall_backend::FjallWorldDb;
+pub use fjall_backend::{normalise_rel, FjallWorldDb};
 pub use header::{EngineVersion, WorldHeader, WorldSchemaVersion};
 pub use keys::{ComponentTypeId, KeyEncoder, FlatKeyEncoder, MortonKeyEncoder};
 pub use rkyv_values::{

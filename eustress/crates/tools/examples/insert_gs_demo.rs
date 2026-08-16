@@ -40,6 +40,10 @@ fn main() {
         username: Some("mcp-verify".to_string()),
         luau_executor: None,
         display_unit: None,
+        cancelled: None,
+        // Local demo binary: insert_gaussian_splats is a Write, so the
+        // standard set covers it.
+        permissions: eustress_tools::Permissions::standard().for_principal("insert-gs-demo"),
     };
 
     let input = serde_json::json!({

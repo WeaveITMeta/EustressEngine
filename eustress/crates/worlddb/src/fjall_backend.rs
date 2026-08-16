@@ -24,7 +24,7 @@ use crate::keys::{ComponentTypeId, FlatKeyEncoder, KeyEncoder};
 
 /// Normalise a caller-supplied relative path to the tree key form:
 /// forward slashes, no leading/trailing slash, no `.`/`..` segments.
-fn normalise_rel(rel: &str) -> String {
+pub fn normalise_rel(rel: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for seg in rel.split(['/', '\\']) {
         match seg {
@@ -1108,6 +1108,23 @@ impl WorldDb for FjallWorldDb {
         // per-file presence check stays cheap even on a 161K-file tree.
         let key = normalise_rel(rel_path);
         Ok(self.tree.contains_key(key.as_bytes())?)
+    }
+
+    fn iter_tree_keys(&self) -> Result<Box<dyn Iterator<Item = Result<String>> + '_>> {
+        // Native key iteration — no value blocks are read, so this stays cheap
+        // on a tree whose values are the whole Space. Beats N `has_file`
+        // probes because it is ONE sequential scan instead of N round-trips
+        // through the backend's internal serialisation.
+        // Decoding mirrors `iter_tree` below — strict utf-8 with the same
+        // `KeyDecode` error, so a malformed key surfaces identically on both
+        // paths instead of silently lossy-converting into a key that matches
+        // nothing.
+        Ok(Box::new(self.tree.keys().map(|res| -> Result<String> {
+            let k = res?;
+            Ok(std::str::from_utf8(&k)
+                .map_err(|e| crate::error::Error::KeyDecode(format!("tree key not utf-8: {e}")))?
+                .to_string())
+        })))
     }
 
     fn delete_file(&self, rel_path: &str) -> Result<()> {

@@ -5,6 +5,10 @@ target-web/
 **/target-web/
 target-bench/
 **/target-bench/
+# Release build tree — the only `target-*` sibling that was never listed, so it
+# showed up as 182 files of untracked build output at commit time.
+target-rel/
+**/target-rel/
 
 # Cargo lock for libraries (keep for binaries)
 # Cargo.lock

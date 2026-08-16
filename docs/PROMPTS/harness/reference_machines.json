@@ -1,0 +1,140 @@
+{
+  "schema": "eustress.harness.reference_machines/1",
+  "description": "Registry of pinned reference machines for the Eustress capture harness. Every frame-cost threshold in the prompt library that says 'on the harness reference GPU' resolves to the machine whose id is named in the capture recipe. The default is RM-1. Additional machines are appended to the machines array; nothing about this schema is specific to a single entry.",
+  "required_fields": [
+    "id",
+    "cpu",
+    "gpu",
+    "gpu_driver",
+    "ram_gb",
+    "os",
+    "os_build",
+    "wgpu_backend",
+    "rustc_version",
+    "recorded_by",
+    "recorded_utc"
+  ],
+  "verified_by": "docs/PROMPTS/harness/verify_reference_machine.ps1",
+  "machines": [
+    {
+      "id": "RM-1",
+      "label": "Operator workstation, Tucson",
+      "role": "default reference machine for all capture-harness frame-cost thresholds",
+      "cpu": "Intel(R) Core(TM) i9-10980XE CPU @ 3.00GHz",
+      "cpu_cores": 18,
+      "cpu_logical_processors": 36,
+      "gpu": "NVIDIA GeForce GTX 1080 Ti",
+      "gpu_driver": "32.0.15.8253",
+      "gpu_driver_marketing": "582.53",
+      "gpu_driver_date": "2026-04-14",
+      "ram_gb": 256,
+      "ram_bytes": 274543210496,
+      "os": "Microsoft Windows 11 Pro",
+      "os_build": "10.0.26200",
+      "wgpu_backend": "Vulkan",
+      "rustc_version": "rustc 1.95.0 (59807616e 2026-04-14)",
+      "cargo_version": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+      "recorded_by": "Weave Solutions Admin <admin@weave.solutions>",
+      "recorded_utc": "2026-08-08T01:39:23Z",
+      "field_provenance": {
+        "id": {
+          "value_source": "assigned",
+          "command": null,
+          "note": "RM-1 is an identifier this registry assigns, not a reading. It is the only assigned field in the entry."
+        },
+        "cpu": {
+          "value_source": "measured",
+          "command": "Get-CimInstance Win32_Processor | Select-Object -ExpandProperty Name",
+          "measured_utc": "2026-08-08T01:37:09Z"
+        },
+        "cpu_cores": {
+          "value_source": "measured",
+          "command": "(Get-CimInstance Win32_Processor).NumberOfCores",
+          "measured_utc": "2026-08-08T01:39:00Z"
+        },
+        "cpu_logical_processors": {
+          "value_source": "measured",
+          "command": "(Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors",
+          "measured_utc": "2026-08-08T01:39:00Z"
+        },
+        "gpu": {
+          "value_source": "measured",
+          "command": "(Get-CimInstance Win32_VideoController | Select-Object -First 1).Name",
+          "measured_utc": "2026-08-08T01:36:00Z",
+          "note": "Win32_VideoController returns exactly one adapter on this machine, so -First 1 is unambiguous. This field is re-checked against the live machine on every verification run."
+        },
+        "gpu_driver": {
+          "value_source": "measured",
+          "command": "(Get-CimInstance Win32_VideoController | Select-Object -First 1).DriverVersion",
+          "measured_utc": "2026-08-08T01:36:00Z",
+          "note": "WDDM driver version. This is the field that actually moves between captures, which is why verification compares it string-for-string against the live machine."
+        },
+        "gpu_driver_marketing": {
+          "value_source": "measured",
+          "command": "grep -m1 -oE \"AdapterInfo \\{[^}]*\\}\" eustress/direct_run.log",
+          "measured_utc": "2026-08-08T01:38:00Z",
+          "note": "Read from the wgpu adapter report the engine itself logged on this machine (driver_info: \"582.53\"). Cross-checks the WDDM string: 32.0.15.8253 -> 582.53."
+        },
+        "gpu_driver_date": {
+          "value_source": "measured",
+          "command": "(Get-CimInstance Win32_VideoController | Select-Object -First 1).DriverDate",
+          "measured_utc": "2026-08-08T01:36:00Z"
+        },
+        "ram_gb": {
+          "value_source": "measured",
+          "command": "[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)",
+          "measured_utc": "2026-08-08T01:39:00Z"
+        },
+        "ram_bytes": {
+          "value_source": "measured",
+          "command": "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
+          "measured_utc": "2026-08-08T01:39:00Z"
+        },
+        "os": {
+          "value_source": "measured",
+          "command": "(Get-CimInstance Win32_OperatingSystem).Caption",
+          "measured_utc": "2026-08-08T01:37:09Z"
+        },
+        "os_build": {
+          "value_source": "measured",
+          "command": "(Get-CimInstance Win32_OperatingSystem).Version",
+          "measured_utc": "2026-08-08T01:37:09Z"
+        },
+        "wgpu_backend": {
+          "value_source": "measured",
+          "command": "grep -m1 -oE \"AdapterInfo \\{[^}]*\\}\" eustress/direct_run.log",
+          "measured_utc": "2026-08-08T01:38:00Z",
+          "note": "Observed, not chosen. The engine requests Backends::all() with PowerPreference::HighPerformance (eustress/crates/engine/src/main.rs:148-150); the adapter wgpu actually selected on this machine reports backend: Vulkan in the engine's own startup log. A capture that reports any other backend is not an RM-1 capture."
+        },
+        "rustc_version": {
+          "value_source": "measured",
+          "command": "rustc --version",
+          "measured_utc": "2026-08-08T01:37:09Z"
+        },
+        "cargo_version": {
+          "value_source": "measured",
+          "command": "cargo --version",
+          "measured_utc": "2026-08-08T01:39:00Z"
+        },
+        "recorded_by": {
+          "value_source": "measured",
+          "command": "git config user.name ; git config user.email",
+          "measured_utc": "2026-08-08T01:39:00Z"
+        },
+        "recorded_utc": {
+          "value_source": "measured",
+          "command": "Get-Date -AsUTC -Format \"yyyy-MM-ddTHH:mm:ssZ\"",
+          "measured_utc": "2026-08-08T01:39:23Z"
+        }
+      },
+      "manifest_hardware_block": {
+        "cpu": "Intel(R) Core(TM) i9-10980XE CPU @ 3.00GHz",
+        "gpu": "NVIDIA GeForce GTX 1080 Ti",
+        "gpu_driver": "32.0.15.8253",
+        "ram_gb": 256,
+        "os": "Microsoft Windows 11 Pro 10.0.26200"
+      },
+      "notes": "Pinning RM-1 records which machine the library's millisecond budgets refer to. It is not a judgement that those budgets are achievable on it. Re-basing any threshold is a floor change and a human decision."
+    }
+  ]
+}

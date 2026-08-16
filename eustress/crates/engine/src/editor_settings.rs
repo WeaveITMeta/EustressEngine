@@ -613,12 +613,25 @@ pub(crate) fn git_autosave_commit(
     }
 
     // Keep the binary Fjall DB, the `.eustress` sidecar/trash, and
-    // recovery backups OUT of the autosave repo. The autosave versions
-    // the editable TOML hierarchy; `world.fjalldb/` is a large, derived,
-    // constantly-rewritten mirror. Hashing its 32 MB journals every
-    // interval was expensive, caused "unstable object source data"
-    // errors (git reading journals mid-write), and churned `.git/`
-    // (storming the file watcher → the ~5s editor stutter). Idempotent.
+    // recovery backups OUT of the autosave repo. Hashing the 32 MB
+    // journals every interval was expensive, caused "unstable object
+    // source data" errors (git reading journals mid-write), and churned
+    // `.git/` (storming the file watcher → the ~5s editor stutter).
+    // Raw-committing a live LSM also risks capturing a torn state.
+    //
+    // COVERAGE LIMIT — the autosave versions the on-disk TOML hierarchy,
+    // which is NOT a complete record of the Space. `write_instance_definition`
+    // (space/instance_loader.rs) skips the disk write whenever
+    // `active_db::put_instance` succeeds, and that succeeds for LEAF
+    // instances that are neither file-natured nor mesh-backed and have no
+    // children — those persist only as a `<path>#bin` key in the DB's
+    // `tree` partition. Parents, mesh instances and file-natured classes
+    // still round-trip through disk TOML and ARE captured here.
+    //
+    // So an autosave commit restores the Space's structure but reverts
+    // binary-collapsed leaf entities to their seed state. Closing that gap
+    // needs a versioned export of the DB (`eustress_worlddb::bake` is the
+    // intended vehicle) rather than committing the LSM directly.
     ensure_autosave_gitignore(space_path);
     // Drop any DB files an earlier build already committed so this commit
     // removes them from the index (no-op once gone; --ignore-unmatch
@@ -677,27 +690,74 @@ pub(crate) fn git_autosave_commit(
 
 /// Ensure the Space's autosave `.gitignore` excludes the binary Fjall DB,
 /// the `.eustress` sidecar/trash, and recovery `.bak-*` backups so
-/// `git add -A` never hashes them. Idempotent — only writes when an entry
-/// is missing, so it doesn't itself churn the file watcher.
+/// `git add -A` never hashes them. Idempotent — writes only when an entry
+/// is missing or the stale header is present, so it doesn't itself churn
+/// the file watcher.
+///
+/// `world.fjalldb/` is excluded for cost and correctness (see
+/// `git_autosave_commit`), NOT because it is derived — it holds the only
+/// copy of every binary-collapsed leaf instance. The emitted header says so,
+/// because a reader who assumes the DB is reproducible from the TOML will
+/// delete it. Spaces written before that was understood carry a header
+/// asserting the opposite, so it is replaced in place on next open.
 fn ensure_autosave_gitignore(space_path: &std::path::Path) {
+    /// Header emitted above the ignore entries.
+    const HEADER: &str =
+        "# Eustress autosave: excluded from git, but NOT derived.\n\
+         # world.fjalldb/ is the authoritative store — it holds edits that\n\
+         # exist nowhere else on disk. It is ignored because committing a\n\
+         # live LSM every autosave interval is slow and can capture a torn\n\
+         # state, not because it can be regenerated. Back it up; do not\n\
+         # delete it, and do not treat a git checkout as a complete Space.\n";
+    /// The header earlier builds wrote. Claims the DB is derived, which is
+    /// the opposite of true and invites deleting it.
+    const STALE_HEADER: &str =
+        "# Eustress autosave: derived/binary + sidecar, not versioned";
+
     let path = space_path.join(".gitignore");
-    let needed = ["world.fjalldb/", ".eustress/trash/", "*.bak-*"];
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    // Replace the stale header in place, preserving every other line so a
+    // user's own ignore rules survive.
+    let had_stale = existing.lines().any(|l| l.trim() == STALE_HEADER);
+    let mut content: String = if had_stale {
+        let kept: Vec<&str> = existing
+            .lines()
+            .filter(|l| l.trim() != STALE_HEADER)
+            .collect();
+        let mut s = HEADER.to_string();
+        s.push_str(&kept.join("\n"));
+        if !s.ends_with('\n') {
+            s.push('\n');
+        }
+        s
+    } else {
+        existing
+    };
+
+    let needed = ["world.fjalldb/", ".eustress/trash/", "*.bak-*"];
     let mut additions = String::new();
     for entry in needed {
-        if !existing.lines().any(|l| l.trim() == entry) {
+        if !content.lines().any(|l| l.trim() == entry) {
             additions.push_str(entry);
             additions.push('\n');
         }
     }
+
     if additions.is_empty() {
+        // Nothing to add. Still persist if we rewrote the stale header.
+        if had_stale {
+            let _ = std::fs::write(&path, content);
+        }
         return;
     }
-    let mut content = existing;
+
     if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
-    content.push_str("# Eustress autosave: derived/binary + sidecar, not versioned\n");
+    if !had_stale {
+        content.push_str(HEADER);
+    }
     content.push_str(&additions);
     let _ = std::fs::write(&path, content);
 }

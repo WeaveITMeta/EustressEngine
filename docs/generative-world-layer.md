@@ -177,7 +177,7 @@ Eustress for story-driven simulation authoring.
 
 **Roblox AI Studio Tools.** Roblox Studio has generative tools for textures
 and meshes. Closed platform; generation tools are not agent-driven; no
-conversational surface; no MCP. Differentiator: open source, agent-as-peer,
+conversational surface; no MCP. Differentiator: source-available, agent-as-peer,
 MCP-addressable controls.
 
 **Bevy community AI plugins.** Several plugins for AI-driven generation

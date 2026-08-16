@@ -163,6 +163,8 @@ pub mod scenarios;
 pub mod circumstances;
 pub mod workshop;
 pub mod manufacturing;
+/// CMMC / NIST SP 800-171 control registers with CI-verifiable evidence.
+pub mod compliance;
 pub mod class_conversion;
 /// ClassRegistry plugin + LOOP-5 startup assertion.
 ///

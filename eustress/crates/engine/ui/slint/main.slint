@@ -180,7 +180,7 @@ export component StudioWindow inherits Window {
     in-out property <string> publish-description: "";
     in-out property <string> publish-genre: "All";
     in-out property <bool> publish-is-public: true;
-    in-out property <bool> publish-open-source: false;
+    in-out property <bool> publish_open_source: false;
     in-out property <bool> publish-studio-editable: false;
     in-out property <string> publish-mode: "universe"; // "universe" or "space"
     in-out property <bool> publish-is-update: false;
@@ -362,6 +362,11 @@ export component StudioWindow inherits Window {
     in-out property <string> workshop-active-tool: "";
     in-out property <string> workshop-active-mode-name: "General";
     in-out property <string> workshop-active-model-name: "Sonnet 5";
+    in-out property <bool>   workshop-gauntlet-enabled: false;
+    // Chat scroll offset, held at window root so it outlives the Workshop
+    // panel's `if right-tab-index == 3` teardown. The host swaps this value
+    // per Workshop session.
+    in-out property <length> workshop-chat-scroll-y: 0px;
     in-out property <image>  workshop-attached-image;
     in-out property <bool>   workshop-has-attached-image: false;
 
@@ -1146,6 +1151,7 @@ export component StudioWindow inherits Window {
     callback workshop-clear-image();        // × on preview strip
     callback workshop-mode-changed(string); // user picked a different mode
     callback workshop-model-changed(string); // user picked a different model
+    callback workshop-gauntlet-toggled(bool); // user flipped the AAA verify-loop mode
     /// Close a session tab in the Workshop panel. Host removes the
     /// session from the in-memory list and optionally deletes the
     /// folder under SoulService/Workshop/ (policy TBD — for now
@@ -2183,6 +2189,68 @@ export component StudioWindow inherits Window {
 
                     // Drag overlay removed — drag initiation is now handled by per-tab
                     // tab-hover TouchAreas for proper hover feedback on close buttons.
+
+                    // ── Drag ghost ───────────────────────────────────────────
+                    // Translucent copy of the tab being dragged, carried under
+                    // the cursor. Declared LAST inside tab-strip so it paints
+                    // over every tab and over the drop indicator. Purely
+                    // decorative: it takes no pointer input (no TouchArea), so
+                    // the full-width drag overlay above keeps receiving every
+                    // moved() event.
+                    //
+                    // `tab-drag-x` is measured from the drag overlay's origin,
+                    // which starts AFTER the pinned Space1 tab — so the strip-
+                    // relative position adds `tab-strip-space1-width` back.
+                    // Bounds-checked on `tab-drag-source` because the model can
+                    // shrink mid-drag (a tab closing elsewhere) and indexing
+                    // past the end would be a hard error.
+                    if root.tab-dragging
+                        && root.tab-drag-source >= 0
+                        && root.tab-drag-source < root.center-tabs.length: Rectangle {
+                        width: 180px;
+                        height: 35px;
+                        y: 0px;
+                        // Centre under the cursor, clamped inside the strip so
+                        // the ghost can't slide off either end.
+                        x: min(
+                            max(
+                                root.tab-strip-space1-width + root.tab-drag-x - self.width / 2,
+                                0px,
+                            ),
+                            max(0px, parent.width - self.width),
+                        );
+                        background: Theme.panel-background.with-alpha(0.92);
+                        border-width: 1px;
+                        border-color: Theme.accent-blue;
+                        border-radius: 4px;
+                        opacity: 0.9;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #00000066;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 6px;
+
+                            Text {
+                                text: root.center-tabs[root.tab-drag-source].name;
+                                color: Theme.text-primary;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+
+                            // Unsaved marker, mirroring the real tab.
+                            if root.center-tabs[root.tab-drag-source].dirty: Rectangle {
+                                width: 6px;
+                                height: 6px;
+                                border-radius: 3px;
+                                background: Theme.accent-blue;
+                                y: (parent.height - self.height) / 2;
+                            }
+                        }
+                    }
 
                     } // end tab-strip Rectangle
                     
@@ -3315,6 +3383,13 @@ export component StudioWindow inherits Window {
                             // Model selector
                             active-model-name <=> root.workshop-active-model-name;
                             on-model-changed(m) => { root.workshop-model-changed(m); }
+
+                            // Gauntlet (AAA verify-loop) toggle
+                            gauntlet-enabled <=> root.workshop-gauntlet-enabled;
+                            on-gauntlet-toggled(v) => { root.workshop-gauntlet-toggled(v); }
+
+                            // Per-session chat scroll position
+                            chat-scroll-y <=> root.workshop-chat-scroll-y;
                         }
 
                         if root.right-tab-index == 4: ProblemsPanel {
@@ -3601,7 +3676,7 @@ export component StudioWindow inherits Window {
         description <=> root.publish-description;
         genre <=> root.publish-genre;
         is-public <=> root.publish-is-public;
-        open-source <=> root.publish-open-source;
+        open_source <=> root.publish_open_source;
         studio-editable <=> root.publish-studio-editable;
         spaces: root.publish-spaces;
         tree-nodes: root.publish-tree-nodes;

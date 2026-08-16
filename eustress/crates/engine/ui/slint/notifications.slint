@@ -25,7 +25,17 @@ component NotificationToast inherits Rectangle {
     callback dismissed();
     
     width: 300px;
-    height: 72px;
+    // Grow to fit the wrapped message instead of pinning 72px. The body Text
+    // word-wraps, so a longer notice (the telemetry one runs to three lines)
+    // painted OUTSIDE the border, over whatever panel sat behind the toast.
+    // `Rectangle` does not size itself from its children, so the height is
+    // taken from the content layout's preferred height, floored at the
+    // original 72px so short toasts look exactly as before.
+    //
+    // This cannot hit the property recursion the `Notifications` parent warns
+    // about: `width` is fixed at 300px, so the wrap height is fully determined
+    // without anything consulting `height` on the way back.
+    height: max(72px, content.preferred-height);
     background: Theme.dialog-background;
     border-radius: 8px;
     border-width: 1px;
@@ -36,10 +46,10 @@ component NotificationToast inherits Rectangle {
     drop-shadow-blur: 12px;
     drop-shadow-color: Theme.shadow-color;
     
-    HorizontalBox {
+    content := HorizontalBox {
         padding: 12px;
         spacing: 12px;
-        
+
         // Icon
         Rectangle {
             width: 32px;
@@ -79,7 +89,10 @@ component NotificationToast inherits Rectangle {
                 text: root.message;
                 color: Theme.text-secondary;
                 font-size: 12px;
-                overflow: elide;
+                // `wrap` only, no `elide`: the two contradict each other —
+                // eliding truncates the very message the toast exists to
+                // deliver, and now that the toast grows to fit there is
+                // nothing to truncate.
                 wrap: word-wrap;
             }
         }

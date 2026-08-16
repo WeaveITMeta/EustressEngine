@@ -695,10 +695,14 @@ fn complete_steps(
         obs.climb_phase = match climb.phase {
             ClimbPhase::None => "none",
             ClimbPhase::Hanging => "hanging",
+            ClimbPhase::Shimmy => "shimmy",
+            ClimbPhase::Transfer => "transfer",
             ClimbPhase::Mantling => "mantling",
+            ClimbPhase::Vaulting => "vaulting",
+            ClimbPhase::Lowering => "lowering",
         }
         .into();
-        obs.grab_point = climb.grab_point.into();
+        obs.grab_point = climb.grab_point().into();
         obs.hand_ik_weight = ik.hand_weight;
         obs.hand_error_m = ik.hand_error_m;
         obs.climb_foot_error_m = ik.climb_foot_error_m;
@@ -713,7 +717,7 @@ fn complete_steps(
                 if let Some(e) = rig.bone(bone) {
                     if let Ok(g) = globals.get(e) {
                         obs.hand_to_ledge_m[slot] =
-                            (g.translation() - climb.grab_point).length();
+                            (g.translation() - climb.grab_point()).length();
                     }
                 }
             }

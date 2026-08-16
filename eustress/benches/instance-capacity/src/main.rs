@@ -712,11 +712,11 @@ fn run_bevy_bench(n: usize) -> EcsResult {
             })
             // Discrete GPU, all backends (Vulkan/DX12), no surface.
             .set(RenderPlugin {
-                render_creation: RenderCreation::Automatic(WgpuSettings {
+                render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
                     power_preference: bevy::render::settings::PowerPreference::HighPerformance,
                     backends: Some(bevy::render::settings::Backends::all()),
                     ..Default::default()
-                }),
+                })),
                 ..Default::default()
             })
             // Suppress repeated "logger already set" warnings across benchmark iterations.
@@ -1067,9 +1067,9 @@ fn bench_gpu_indirect(n: usize) -> IndirectResult {
     use wgpu::util::DeviceExt;
 
     // Request a wgpu device on the same adapter Bevy uses.
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN | wgpu::Backends::DX12,
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
 
     // Enumerate adapters and pick the first high-performance discrete GPU.
@@ -1204,7 +1204,7 @@ fn bench_gpu_indirect(n: usize) -> IndirectResult {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label:                Some("indirect-layout"),
         bind_group_layouts:   &[],
-        push_constant_ranges: &[],
+        immediate_size:       0,
     });
 
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1233,15 +1233,15 @@ fn bench_gpu_indirect(n: usize) -> IndirectResult {
         // Depth-only pass: write depth, no colour output.
         depth_stencil: Some(wgpu::DepthStencilState {
             format:              wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: true,
-            depth_compare:       wgpu::CompareFunction::Less,
+            depth_write_enabled: Some(true),
+            depth_compare:       Some(wgpu::CompareFunction::Less),
             stencil:             wgpu::StencilState::default(),
             bias:                wgpu::DepthBiasState::default(),
         }),
         multisample:  wgpu::MultisampleState::default(),
-        fragment:     None,
-        multiview:    None,
-        cache:        None,
+        fragment:       None,
+        multiview_mask: None,
+        cache:          None,
     });
 
     // Depth-only render target: 1×1 — submission cost is what we measure.
@@ -1274,6 +1274,7 @@ fn bench_gpu_indirect(n: usize) -> IndirectResult {
             }),
             timestamp_writes:    None,
             occlusion_query_set: None,
+            multiview_mask:      None,
         });
         pass.set_pipeline(&pipeline);
         pass.set_vertex_buffer(0, vertex_buf.slice(..));

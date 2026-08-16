@@ -16,12 +16,19 @@
 //!   tee, Watchman) can subscribe without depending on the worlddb
 //!   crate directly.
 //!
+//! ## Which store is authoritative
+//!
+//! Fjall. `world_db_binary::load_binary_ecs_instances` cold-loads entity
+//! cores from the `entities` partition at startup, and edits persist
+//! there. The disk TOML hierarchy is the import seed plus an ingest
+//! surface for files a human drops in between sessions (see the
+//! reconcile below) — it is NOT kept in sync with edits, because
+//! `write_instance_definition` skips the disk write for every instance
+//! `active_db::put_instance` accepts. The `toml` feature restores
+//! dual-write; it is deliberately not in the `core` tier.
+//!
 //! ## What this plugin does NOT do yet
 //!
-//! - Read from Fjall at startup. The cold-load path still scans TOML.
-//! - Authoritative TOML retirement. Fjall and TOML are dual-writers
-//!   for now — once Phase 6 wires the Fjall read path the TOML write
-//!   path retires and the Studio "Save" UX becomes "Flush".
 //! - Bridge to the `eustress-common::streaming` topic broker. The
 //!   bridge here is a Bevy `Events<>` queue; the topic-name mapping
 //!   (`world.entity.changed.<class>.<component>`) lives in the
@@ -129,6 +136,15 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
     // marker is stamped with the time captured BEFORE the walk, so a file
     // touched during the walk is caught on the next open, never missed. First
     // open (no marker) does the full pass once, then stamps.
+    if super::skip_disk_scans() {
+        info!(
+            target: "eustress_engine::world_db",
+            "disk→tree reconcile SKIPPED (EUSTRESS_SKIP_DISK_SCANS) — closed-engine \
+             disk edits will not be ingested for this open"
+        );
+        return 0;
+    }
+
     let marker = space_root.join(".eustress").join("last_reconcile");
     let last_reconcile: u64 = std::fs::read_to_string(&marker)
         .ok()
@@ -170,36 +186,92 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
     // byte-compare-before-write, same `#bin` delete, same final marker stamp.
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
-    // Phase 1 — enumerate candidate `.toml` paths (serial walk).
+    // Phase 1 — enumerate candidate paths, one directory LEVEL at a time with
+    // the level read in parallel.
+    //
+    // This was a serial stack walk. That is fine at ~161K files and is minutes
+    // of blocked main thread at ~1.3M (the Digital Twin shape), because the
+    // walk is per-entry syscalls on one core. Breadth-first by level lets rayon
+    // read every directory of a level concurrently; correctness is identical
+    // since the traversal order of a set-producing walk does not matter.
+    //
+    // `entry.file_type()` replaces `path.is_dir()`: `read_dir` already carries
+    // the type, so this drops one stat syscall PER ENTRY — the single biggest
+    // constant-factor win at this scale. It falls back to `is_dir()` only if
+    // the type is unavailable (symlink races).
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    let mut stack = vec![space_root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(read_dir) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in read_dir.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                // Skip the database directory + its backups and any hidden
-                // / `.eustress` container dirs — only the human TOML tree.
-                if name.starts_with('.') || name.starts_with("world.fjalldb") {
-                    continue;
-                }
-                stack.push(path);
-                continue;
-            }
-            // `.toml` = entity/instance definitions; `.rune`/`.luau`/`.soul`/`.md`
-            // = script sources a DB-primary (FjallSource) load reads from the
-            // tree. All small text files — the large GLB/image asset bytes the
-            // tree also holds are still skipped, keeping the walk cheap.
-            match path.extension().and_then(|e| e.to_str()) {
-                Some("toml" | "rune" | "luau" | "soul" | "md") => {}
-                _ => continue,
-            }
-            candidates.push(path);
-        }
+    let mut frontier: Vec<std::path::PathBuf> = vec![space_root.to_path_buf()];
+    while !frontier.is_empty() {
+        let (subdirs, files): (Vec<Vec<std::path::PathBuf>>, Vec<Vec<std::path::PathBuf>>) =
+            frontier
+                .par_iter()
+                .map(|dir| {
+                    let mut subdirs = Vec::new();
+                    let mut files = Vec::new();
+                    let Ok(read_dir) = std::fs::read_dir(dir) else {
+                        return (subdirs, files);
+                    };
+                    for entry in read_dir.flatten() {
+                        let path = entry.path();
+                        let is_dir = entry
+                            .file_type()
+                            .map(|t| t.is_dir())
+                            .unwrap_or_else(|_| path.is_dir());
+                        if is_dir {
+                            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            // Skip the database directory + its backups and any
+                            // hidden / `.eustress` container dirs — only the
+                            // human TOML tree.
+                            if name.starts_with('.') || name.starts_with("world.fjalldb") {
+                                continue;
+                            }
+                            subdirs.push(path);
+                            continue;
+                        }
+                        // `.toml` = entity/instance definitions;
+                        // `.rune`/`.luau`/`.soul`/`.md` = script sources a
+                        // DB-primary (FjallSource) load reads from the tree. All
+                        // small text files — the large GLB/image asset bytes the
+                        // tree also holds are still skipped.
+                        match path.extension().and_then(|e| e.to_str()) {
+                            Some("toml" | "rune" | "luau" | "soul" | "md") => files.push(path),
+                            _ => {}
+                        }
+                    }
+                    (subdirs, files)
+                })
+                .unzip();
+        candidates.extend(files.into_iter().flatten());
+        frontier = subdirs.into_iter().flatten().collect();
     }
+
+    // Phase 1b — pull the tree's key set ONCE.
+    //
+    // Phase 2 below used to ask `db.has_file(&rel)` per candidate. Each of
+    // those is a backend round-trip that serialises internally, so at ~1.3M
+    // candidates they were the bottleneck: the process burns ~1.3 cores with
+    // flat memory (workers blocked on the same lock) and the window goes
+    // "Not Responding". One sequential key scan answers every probe.
+    //
+    // Keys come back in stored form, so candidates are put through the SAME
+    // `normalise_rel` the backend uses when writing. Hand-rolling the
+    // separator fix here would risk a mismatch, and a mismatch means every
+    // file reads as absent and the whole tree gets re-ingested.
+    let tree_keys: std::collections::HashSet<String> = match db.iter_tree_keys() {
+        Ok(it) => it.filter_map(|r| r.ok()).collect(),
+        Err(e) => {
+            warn!(
+                target: "eustress_engine::world_db",
+                error = %e,
+                "tree key scan failed — falling back to per-file existence probes"
+            );
+            std::collections::HashSet::new()
+        }
+    };
+    // Distinguishes "scan failed / genuinely empty tree" from "scan worked":
+    // on an empty set we must fall back to probing, or a first-open Space
+    // (empty tree, every file missing) would look identical to a failed scan.
+    let have_key_set = !tree_keys.is_empty();
 
     // Phase 2 — parallel stat + mtime-gate + read + tree byte-compare. Returns
     // only files whose disk bytes differ from (or are missing in) the tree.
@@ -207,7 +279,10 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
         .par_iter()
         .filter_map(|path| {
             let stripped = path.strip_prefix(space_root).ok()?;
-            let rel = stripped.to_string_lossy().replace('\\', "/");
+            // Normalise through the backend's own function so this key is
+            // byte-identical to what `put_file` stored — see the key-set
+            // comment in Phase 1b.
+            let rel = eustress_worlddb::normalise_rel(&stripped.to_string_lossy());
             // A file MISSING from the tree was never ingested (dropped into a
             // migrated Space, or the reconcile was gated off for it) — always
             // ingest it, no matter how old its mtime. The mtime-gate skips ONLY
@@ -217,7 +292,14 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
             // read), so the presence check stays cheap at scale. Without it, an
             // un-ingested file whose mtime predates the marker is skipped
             // forever — the "I dropped SoulScripts in and nothing registers" bug.
-            let in_tree = db.has_file(&rel).unwrap_or(false);
+            // In-memory set hit when the bulk scan succeeded; the per-file
+            // probe only when it did not (or the tree really is empty), which
+            // preserves the original behaviour exactly on that path.
+            let in_tree = if have_key_set {
+                tree_keys.contains(&rel)
+            } else {
+                db.has_file(&rel).unwrap_or(false)
+            };
             if in_tree && last_reconcile != 0 {
                 let unchanged = std::fs::metadata(path)
                     .ok()
@@ -292,6 +374,14 @@ fn open_world_db_on_space_change(
     // above) so every later milestone — in file_loader / residency — reads
     // elapsed-since-open from the same anchor. Silent unless EUSTRESS_PROFILE.
     super::load_phase::stamp_open_start();
+    // Watchdog: guard the synchronous space-open. Unlike the milestone above
+    // this is ALWAYS armed — it is what reports the load as unfinished if the
+    // main thread never comes back out (the ~1.3M-file reconcile case). RAII,
+    // so all four early returns and the normal exit close it; only an actual
+    // failure to return leaves it open, which is exactly the condition worth
+    // a popup.
+    let _open_phase =
+        super::load_phase::scope("space-open", space_root.0.display().to_string());
     // M0 (diagnostics): reset the per-load SPAWN-COST accumulators so this
     // Space's decode/arch/spawn breakdown measures from zero. Paired with
     // the `eager-spawn-complete` settle-point emit in file_loader. No-op
@@ -376,12 +466,13 @@ fn open_world_db_on_space_change(
             // V-Cell-staleness class of bug). Reconcile the changed `.toml`
             // back into the tree here, BEFORE FjallSource goes live, so the
             // human-editable disk hierarchy and the database always agree
-            // on open. Runs for a migrated Space TOO: the loose disk tree is the
-            // git-versioned source of truth (world.fjalldb is a derived,
-            // .gitignore'd cache), so Parts and SoulScripts dropped onto disk
-            // while the engine was closed get ingested into the tree on open —
-            // else a DB-primary (FjallSource) load never sees them and they
-            // silently vanish ("I put files in the Space and nothing registers").
+            // on open. Runs for a migrated Space TOO — NOT because disk is
+            // authoritative (it is not; the DB is, and it is .gitignore'd but
+            // never derived), but because disk is the INGEST surface: Parts
+            // and SoulScripts dropped into the Space while the engine was
+            // closed have no other way in, and a DB-primary (FjallSource)
+            // load would never see them ("I put files in the Space and
+            // nothing registers"). Ingest is one-way, disk → DB, on open.
             // Mtime-gated, so an empty/unchanged disk tree on a migrated Space
             // pays ~nothing.
             let migrated = WorldHeader::read(&space_root.0)
@@ -389,8 +480,17 @@ fn open_world_db_on_space_change(
                 .flatten()
                 .map(|h| h.is_migrated())
                 .unwrap_or(false);
-            let _ = migrated; // reconcile now runs for migrated Spaces too — disk is the SoT
+            let _ = migrated; // reconcile runs for migrated Spaces too — disk is the ingest surface
             {
+                // The dominant cost on a large imported Space, and the phase
+                // that wedges the main thread when the disk tree is huge — it
+                // walks every `.toml` under the Space root. Guarded separately
+                // from `space-open` so the popup names the reconcile rather
+                // than just "the load".
+                let _phase = super::load_phase::scope(
+                    "db-reconcile",
+                    format!("scanning disk tree under {}", space_root.0.display()),
+                );
                 let n = reconcile_disk_toml_into_tree(&space_root.0, db.as_ref());
                 if n > 0 {
                     let _ = db.flush();

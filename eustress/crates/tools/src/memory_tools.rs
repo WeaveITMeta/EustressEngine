@@ -50,6 +50,11 @@ impl ToolHandler for RememberTool {
 pub struct RecallTool;
 
 impl ToolHandler for RecallTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "recall",
@@ -86,6 +91,11 @@ impl ToolHandler for RecallTool {
 pub struct ListRulesTool;
 
 impl ToolHandler for ListRulesTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "list_rules",
@@ -166,6 +176,11 @@ fn scan_rules_dir(dir: &std::path::Path, scope: &str, rules: &mut Vec<serde_json
 pub struct ListWorkflowsTool;
 
 impl ToolHandler for ListWorkflowsTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "list_workflows",
@@ -231,6 +246,11 @@ impl ToolHandler for ListWorkflowsTool {
 pub struct QueryStreamEventsTool;
 
 impl ToolHandler for QueryStreamEventsTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "query_stream_events",

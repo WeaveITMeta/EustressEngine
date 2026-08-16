@@ -151,8 +151,13 @@ pub struct IdleSettings {
     pub pause_animations_minimized: bool,
     /// Background update rate in milliseconds
     pub background_update_ms: u64,
-    /// Idle update rate in milliseconds
+    /// Idle update rate in milliseconds (UNFOCUSED idle only).
     pub idle_update_ms: u64,
+    /// Idle update rate while the window is still FOCUSED. Kept separate from
+    /// [`Self::idle_update_ms`] because a focused window must stay responsive:
+    /// this is a frame-rate floor for an idle-but-visible editor, not a power
+    /// setting. See the `PowerMode::Idle` arm of `apply_power_settings`.
+    pub idle_focused_update_ms: u64,
     /// Minimized update rate in milliseconds
     pub minimized_update_ms: u64,
 }
@@ -167,7 +172,11 @@ impl Default for IdleSettings {
             pause_physics_minimized: true,
             pause_animations_minimized: true,
             background_update_ms: 250,         // 4 FPS when unfocused
-            idle_update_ms: 500,               // 2 FPS when idle
+            idle_update_ms: 500,               // 2 FPS when idle AND unfocused
+            // 30 FPS floor while focused-but-idle. Was sharing the 500 ms
+            // (2 FPS) figure above, which made a focused editor feel frozen
+            // after a one-minute pause.
+            idle_focused_update_ms: 33,
             minimized_update_ms: 1000,         // 1 FPS when minimized
         }
     }
@@ -385,9 +394,21 @@ fn apply_power_settings(
             );
         }
         PowerMode::Idle => {
-            // Even when focused but idle, reduce update rate
-            winit_settings.focused_mode = UpdateMode::reactive_low_power(
-                Duration::from_millis(settings.idle_update_ms)
+            // A FOCUSED window is one the user is looking at. Dropping it to
+            // `idle_update_ms` (500 ms = 2 FPS) meant that pausing for a minute
+            // to read the Explorer or think left the editor at 2 FPS, and the
+            // next mouse move waited up to half a second for the reactive tick
+            // before anything responded — which reads as "it froze", every
+            // time, and is a large part of why the editor felt unusable.
+            //
+            // Two changes: keep a 30 FPS floor while focused, and use
+            // `reactive` rather than `reactive_low_power` so DEVICE events
+            // (raw mouse motion) wake it immediately instead of only window
+            // events. Power saving on a window the user is actively looking at
+            // is not worth the latency; the real saving is the unfocused and
+            // minimized paths below, which are untouched.
+            winit_settings.focused_mode = UpdateMode::reactive(
+                Duration::from_millis(settings.idle_focused_update_ms)
             );
             winit_settings.unfocused_mode = UpdateMode::reactive_low_power(
                 Duration::from_millis(settings.idle_update_ms)

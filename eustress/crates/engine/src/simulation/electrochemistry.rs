@@ -277,8 +277,8 @@ fn electrochemical_tick(
         // ── 7. Thermal coupling ──
         if let Some(ref mut thermo_state) = thermo {
             // Simple thermal model: dT = Q·dt / (m·Cp)
-            // V-Cell mass ≈ 0.45 kg, effective Cp ≈ 900 J/(kg·K)
-            let thermal_mass = 0.45 * 900.0; // J/K
+            // Engineering-path cell mass 0.695 kg (closes 650 Wh/kg). Cp ≈ 900 J/(kg·K).
+            let thermal_mass = 0.695 * 900.0; // J/K
             let dt_temp = echem_state.heat_generation * dt / thermal_mass;
             thermo_state.temperature += dt_temp;
 

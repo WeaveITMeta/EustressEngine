@@ -423,7 +423,7 @@ pub fn HomePage() -> impl IntoView {
             </section>
 
             // ═══════════════════════════════════════════════════════════════
-            // OPEN SOURCE - build it with us (GitHub + contributor ladder)
+            // SOURCE-AVAILABLE - build it with us (GitHub + contributor ladder)
             // ═══════════════════════════════════════════════════════════════
             <section class="github-section">
                 <div class="github-bg">
@@ -431,7 +431,7 @@ pub fn HomePage() -> impl IntoView {
                 </div>
                 <div class="github-inner">
                     <div class="github-copy">
-                        <span class="section-tag">"OPEN SOURCE"</span>
+                        <span class="section-tag">"SOURCE-AVAILABLE"</span>
                         <h2 class="section-title-epic">"Build It With Us"</h2>
                         <p class="github-lead">"The best simulation engine should not be a walled garden. It should be free."</p>
                         <p class="github-sub">"Eustress ships under PolyForm Shield: free to clone, fork, and build on. The work you put in is the equity you keep."</p>

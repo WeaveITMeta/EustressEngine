@@ -25,25 +25,57 @@ AI-native over MCP.
 | Parameter system | Reuse `Quantity` + feature-tree variables + the GetAttribute/SetAttribute ECS attribute seam | No parallel `Params` struct zoo |
 | Feature-tree storage | TOML document in the WorldDb **tree partition** (per the binary pivot / hybrid-store decision) | Rich docs live as TOML in `tree`; rkyv cores in `entities` |
 
-## Ground truth at plan time (verified 2026-06-10)
+## Current state (verified 2026-08-02)
 
-- `eustress-cad`: Extrude, Revolve, Mirror, Pattern (linear/circular), Boolean, Split,
-  Hole **working**. Fillet/Chamfer blocked on truck-shapeops upstream; Shell needs an
-  offset-surface op; Sweep/Loft need the path/profile resolver.
-- `tessellate()` in `cad/src/eval.rs` is a **stub returning an empty mesh** — blocks
-  everything downstream (viewport, STL, STEP, GLB).
-- The engine crate does **not depend on `eustress-cad`** at all. No plugin, no UI.
-- Sketch constraints are **types only** — nothing solves them.
-- GLB **export** does not exist anywhere in the workspace
-  (`pointcloud/formats.rs::export_gltf` returns `Err`).
-- No CAD tools on the MCP surface.
+Read this before the phase sections — they are written as a running log, so a
+`✅ DONE` note inside a phase is the authority on what shipped, and this is the
+consolidated view.
+
+- `eustress-cad` is a **4,003-line working kernel**. Extrude, Revolve, Mirror,
+  Pattern (linear/circular), Boolean, Split, Hole **work**. Fillet/Chamfer remain
+  blocked on truck-shapeops upstream; Shell needs an offset-surface op; Sweep/Loft
+  need the path/profile resolver. Tools that author a blocked feature must fail
+  loudly — writing TOML the evaluator silently skips yields a wrong-looking body
+  with no error anywhere.
+- **Tessellation is real.** `tessellate_solid()` (`cad/src/eval.rs`): triangulation +
+  robust-retry + attribute weld + normal fill + per-corner index expansion, with
+  `catch_unwind` around truck's internal panics. Per-tree `metadata.mesh_tolerance`
+  override; `DEFAULT_MESH_TOLERANCE` is 1 mm.
+- **The engine depends on the kernel.** `engine/Cargo.toml` → `eustress-cad`, with
+  `cad_plugin.rs`, `cad_assembly.rs` and `cad_mate_tool.rs` wired. `CadPlugin`
+  attaches `CadPart` when it sees `features.toml` beside an instance and regenerates
+  the mesh — CAD tools write files, they never mutate the ECS directly.
+- **Sketch constraints solve.** `solver.rs` runs Gauss-Newton/LM over 12 typed
+  `ConstraintKind`s and returns a `SolveReport`: `status` (under / fully / over
+  constrained / failed), `free_dof`, `converged`, `residual_norm`,
+  `constraint_residuals`, `iterations`.
+- **GLB export exists** — `export_glb.rs::{encode_glb, write_glb}`, with feature-tree
+  variables carried through as glTF extras.
+- **MCP surface: six CAD tools.** Write — `cad_create_part`, `cad_set_variable`,
+  `cad_export_glb`. Read — `cad_describe_part`, `cad_validate_part`, `cad_measure`.
+  Every path argument goes through `resolve_space_path()`, which rejects `..` before
+  joining and absolute paths after.
+- Truck pins are **a coherent family**, not a mismatch: base/geometry 0.5,
+  topology/modeling/polymesh 0.6, meshalgo/shapeops 0.4, stepio 0.3 resolve to one
+  set in `Cargo.lock`. The Phase A alignment audit closed with no action needed.
 - `eustress-mesh-edit`: extrude_face + inset_face working; bevel_edge + loop_cut
   blocked on the edge-loop walker; no engine ModalTool wired.
-- Truck workspace pins are **mixed versions** (base/geometry 0.5, topology/modeling 0.6,
-  meshalgo 0.4, shapeops 0.4, stepio 0.3) — alignment audit is a Phase A item.
-- Realism: `StressTensor` + principal-stress → Hooke's-law strain → uniform-field vertex
-  deformation exists; comment in `deformation/systems.rs` marks field interpolation as
-  the intended upgrade.
+- Realism: `StressTensor` + principal-stress → Hooke's-law strain → uniform-field
+  vertex deformation exists; the comment in `deformation/systems.rs` marks field
+  interpolation as the intended upgrade.
+
+### Two properties that shape every CAD interface
+
+Both are why the read tools above exist rather than being a nice-to-have:
+
+1. **Geometry fails silently and partially.** A boolean can succeed and return a
+   solid with holes; tessellation can drop faces within tolerance. Nothing raises.
+   The corrupt body is only noticed many steps later, misattributed. Anything
+   authoring geometry — human or agent — needs a validity probe, not a return code.
+2. **Units are semantic.** `Quantity::parse` accepts a bare number and classifies it
+   `Scalar`, so `0.02` and `"0.02 m"` are not the same input. A bare number is a
+   silent 1000× error that looks plausible at any scale, which is why every
+   length-valued tool parameter demands a unit string and rejects unitless input.
 
 ---
 

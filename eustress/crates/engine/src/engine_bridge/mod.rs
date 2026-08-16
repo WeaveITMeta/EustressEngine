@@ -88,8 +88,284 @@ impl Plugin for EngineBridgePlugin {
     fn build(&self, app: &mut App) {
         let pending = PendingRequests::default();
         app.insert_resource(BridgePendingQueue(pending.clone()))
+            .init_resource::<SimStepJob>()
             .add_systems(Startup, setup_engine_bridge)
-            .add_systems(Update, (drain_bridge_requests, resync_port_file_to_space));
+            // `pump_sim_step` runs after the drain so a step requested this
+            // frame starts advancing this frame rather than next.
+            .add_systems(
+                Update,
+                (
+                    (drain_bridge_requests, pump_sim_step).chain(),
+                    resync_port_file_to_space,
+                ),
+            );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// sim.step — advanced across frames instead of in one blocking burst
+// ---------------------------------------------------------------------------
+
+/// Wall-clock a `sim.step` job may spend inside a single frame.
+///
+/// `sim.step` runs fixed-timestep schedules synchronously, so the whole
+/// request used to be serviced in one drain call: 10 000 ticks meant the
+/// engine stopped rendering, stopped answering other RPCs, and looked hung
+/// for as long as it took. Budgeting per frame keeps the window alive and the
+/// bridge responsive — you can `capture_viewport` mid-rollout — while still
+/// running far faster than real time. The engine visibly slows during a long
+/// step; that is the trade, and it beats appearing frozen.
+///
+/// Determinism is unaffected: the same total tick count runs in the same
+/// order, just spread over more frames.
+const SIM_STEP_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// A `sim.step` request being advanced across frames.
+struct InflightSimStep {
+    id: serde_json::Value,
+    /// Ticks still to run.
+    remaining: u64,
+    /// Ticks originally requested, for the response.
+    requested: u64,
+    /// Frames this job has spanned, for the response.
+    frames: u64,
+    responder: tokio::sync::oneshot::Sender<BridgeResponse>,
+}
+
+/// The single in-flight `sim.step`, if any.
+///
+/// Deliberately one at a time: concurrent stepped rollouts would interleave
+/// ticks and destroy the reproducibility that stepped mode exists to provide.
+#[derive(Resource, Default)]
+pub struct SimStepJob(Option<InflightSimStep>);
+
+/// Install a `sim.step` request as a background job, or reject it when one is
+/// already running.
+fn begin_sim_step(world: &mut World, pending: server::Pending) {
+    let ticks = protocol::handlers::sim_step_ticks(&pending.request);
+    let mut job = world.resource_mut::<SimStepJob>();
+    if job.0.is_some() {
+        let _ = pending.responder.send(BridgeResponse::error(
+            pending.request.id.clone(),
+            BridgeError::invalid_params(
+                "a sim.step is already in progress — wait for it to finish before starting another",
+            ),
+        ));
+        return;
+    }
+    job.0 = Some(InflightSimStep {
+        id: pending.request.id.clone(),
+        remaining: ticks,
+        requested: ticks,
+        frames: 0,
+        responder: pending.responder,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// db.export_toml — DB scan on the main thread, decode + write off it
+// ---------------------------------------------------------------------------
+
+/// Default cap on instances per export. Generous enough for a real world,
+/// small enough that a fat-fingered call doesn't produce a million folders.
+const EXPORT_DEFAULT_LIMIT: usize = 5_000;
+/// Hard ceiling regardless of what the caller asks for.
+const EXPORT_MAX_LIMIT: usize = 200_000;
+
+/// Start a `db.export_toml` request.
+///
+/// Split deliberately: reading cores out of Fjall needs the main thread (the
+/// active-DB handle is owned there), but decoding rkyv and writing thousands
+/// of small files does not. Doing the whole thing inline would freeze the
+/// engine for the length of the export — the same failure `sim.step` used to
+/// have. So the scan happens here and everything after it on a worker, which
+/// answers the client when the files are actually on disk.
+fn begin_db_export(world: &mut World, pending: server::Pending) {
+    #[cfg(not(feature = "world-db"))]
+    {
+        let _ = world;
+        let _ = pending.responder.send(BridgeResponse::error(
+            pending.request.id.clone(),
+            BridgeError::internal(
+                "db.export_toml: this build has the world-db feature disabled, so there is no \
+                 database to export",
+            ),
+        ));
+    }
+    #[cfg(feature = "world-db")]
+    {
+        use crate::space::db_export::{
+            dir_has_content, resolve_output_dir, ExportLayout, ExportPlan,
+        };
+
+        let req = &pending.request;
+        let id = req.id.clone();
+
+        let prepared = (|| -> Result<(Vec<(u64, Vec<u8>)>, ExportPlan, usize, bool), String> {
+            if !crate::space::active_db::is_active() {
+                return Err("no active world DB — export needs a converted (.eustress) Space".into());
+            }
+            let space_root = world
+                .get_resource::<crate::space::SpaceRoot>()
+                .ok_or("no SpaceRoot resource — no Space is open")?
+                .0
+                .clone();
+
+            let layout = match req.params.get("layout").and_then(|v| v.as_str()) {
+                Some(s) => ExportLayout::parse(s)?,
+                None => ExportLayout::Folders,
+            };
+            let output_dir = resolve_output_dir(
+                &space_root,
+                req.params.get("output_dir").and_then(|v| v.as_str()),
+            )?;
+            let overwrite = req
+                .params
+                .get("overwrite")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !overwrite && dir_has_content(&output_dir) {
+                return Err(format!(
+                    "{} already has content — pass overwrite:true to export on top of it",
+                    output_dir.display()
+                ));
+            }
+            let class_filter = req
+                .params
+                .get("class")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            let limit = req
+                .params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize)
+                .unwrap_or(EXPORT_DEFAULT_LIMIT)
+                .clamp(1, EXPORT_MAX_LIMIT);
+
+            // Region-scoped scans read only the relevant Morton cells; an
+            // unscoped one walks the whole partition, which is the part of an
+            // export the main thread genuinely has to pay for.
+            let mut cores = match parse_region_cells(&req.params) {
+                Some((cx, cy, cz)) => {
+                    crate::space::active_db::iter_instance_cores_in_region(cx, cy, cz)
+                }
+                None => crate::space::active_db::iter_instance_cores(),
+            };
+            let scanned = cores.len();
+            let truncated = scanned > limit;
+            cores.truncate(limit);
+
+            Ok((
+                cores,
+                ExportPlan { output_dir, layout, class_filter },
+                scanned,
+                truncated,
+            ))
+        })();
+
+        let (cores, plan, scanned, truncated) = match prepared {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = pending
+                    .responder
+                    .send(BridgeResponse::error(id, BridgeError::invalid_params(e)));
+                return;
+            }
+        };
+
+        let layout_name = plan.layout.as_str();
+        let responder = pending.responder;
+        std::thread::spawn(move || {
+            let response = match crate::space::db_export::write_export(&cores, &plan) {
+                Ok(report) => BridgeResponse::ok(
+                    id,
+                    serde_json::json!({
+                        "exported":     report.written,
+                        "scanned":      scanned,
+                        "filtered_out": report.filtered_out,
+                        "undecodable":  report.undecodable,
+                        // True when the limit cut the scan short: some
+                        // instances are NOT in the output. Narrow with
+                        // `region`/`class` or raise `limit` for full coverage.
+                        "truncated":    truncated,
+                        "output_dir":   report.output_dir.to_string_lossy(),
+                        "layout":       layout_name,
+                    }),
+                ),
+                Err(e) => BridgeResponse::error(id, BridgeError::internal(e)),
+            };
+            if responder.send(response).is_err() {
+                debug!("EngineBridge: db.export_toml caller disconnected before it finished");
+            }
+        });
+    }
+}
+
+/// Convert an optional `region: {min:[x,y,z], max:[x,y,z]}` world-space AABB
+/// into the inclusive 21-bit Morton cell box the DB region scan expects.
+/// Returns `None` when no usable region was supplied, meaning "scan it all".
+#[cfg(feature = "world-db")]
+fn parse_region_cells(
+    params: &serde_json::Value,
+) -> Option<((u32, u32), (u32, u32), (u32, u32))> {
+    use eustress_worlddb::keys::world_to_cell;
+    const CHUNK: f32 = 256.0;
+
+    let region = params.get("region")?;
+    let axis = |key: &str| -> Option<[f32; 3]> {
+        let a = region.get(key)?.as_array()?;
+        if a.len() < 3 {
+            return None;
+        }
+        Some([
+            a[0].as_f64()? as f32,
+            a[1].as_f64()? as f32,
+            a[2].as_f64()? as f32,
+        ])
+    };
+    let min = axis("min")?;
+    let max = axis("max")?;
+    // Tolerate a caller that passes the corners the other way round.
+    let span = |i: usize| {
+        let (lo, hi) = if min[i] <= max[i] { (min[i], max[i]) } else { (max[i], min[i]) };
+        (world_to_cell(lo, CHUNK), world_to_cell(hi, CHUNK))
+    };
+    Some((span(0), span(1), span(2)))
+}
+
+/// Advance the in-flight `sim.step` by one frame's budget, answering the
+/// client once every requested tick has run.
+fn pump_sim_step(world: &mut World) {
+    // Taken out of the resource so `world` is free for `run_schedule`, then
+    // put back if there's more to do.
+    let Some(mut job) = world.resource_mut::<SimStepJob>().0.take() else {
+        return;
+    };
+
+    let ran = protocol::handlers::pump_fixed_ticks(world, job.remaining, SIM_STEP_FRAME_BUDGET);
+    job.remaining = job.remaining.saturating_sub(ran);
+    job.frames += 1;
+
+    if job.remaining > 0 {
+        world.resource_mut::<SimStepJob>().0 = Some(job);
+        return;
+    }
+
+    let response = BridgeResponse::ok(
+        job.id.clone(),
+        serde_json::json!({
+            "stepped": job.requested,
+            "sim_seconds": job.requested as f64 / 60.0,
+            // How many frames the step spanned — 1 means it fit in a single
+            // budget, higher means the engine stayed live while it worked.
+            "frames": job.frames,
+        }),
+    );
+    if job.responder.send(response).is_err() {
+        debug!("EngineBridge: sim.step caller disconnected before it finished");
     }
 }
 
@@ -281,6 +557,20 @@ fn drain_bridge_requests(world: &mut World) {
     }
 
     for pending in drained.drain(..) {
+        // `sim.step` is the one method that does unbounded work, so it is
+        // deferred to `pump_sim_step` and answered from there once complete.
+        // Running it inline would block the frame for its whole duration.
+        if matches!(pending.request.method, MethodName::SimStep) {
+            begin_sim_step(world, pending);
+            continue;
+        }
+        // Likewise deferred: the export writes thousands of files, which has
+        // no business happening inside a frame.
+        if matches!(pending.request.method, MethodName::DbExportToml) {
+            begin_db_export(world, pending);
+            continue;
+        }
+
         let response = match pending.request.method {
             MethodName::Ping => protocol::handlers::ping(&pending.request),
             MethodName::SimRead => protocol::handlers::sim_read(world, &pending.request),
@@ -307,10 +597,25 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::EntityPromote => protocol::handlers::entity_promote(world, &pending.request),
             MethodName::EntityDemote => protocol::handlers::entity_demote(world, &pending.request),
             MethodName::OplogTail => protocol::handlers::oplog_tail(&pending.request),
-            MethodName::SimStep => protocol::handlers::sim_step(world, &pending.request),
+            // Deferred above to `pump_sim_step`, so this arm is dead today.
+            // It reports an error rather than `unreachable!` because a panic
+            // here would take the whole engine down with it — and the only
+            // way to reach it is someone narrowing the guard above, which is
+            // exactly when you want a message instead of a crash.
+            MethodName::SimStep => BridgeResponse::error(
+                pending.request.id.clone(),
+                BridgeError::internal("sim.step reached the synchronous dispatch path"),
+            ),
+            MethodName::DbExportToml => BridgeResponse::error(
+                pending.request.id.clone(),
+                BridgeError::internal("db.export_toml reached the synchronous dispatch path"),
+            ),
             MethodName::Raycast => protocol::handlers::raycast(world, &pending.request),
             MethodName::SceneOverview => protocol::handlers::scene_overview(world, &pending.request),
             MethodName::SimBindings => protocol::handlers::sim_bindings(world, &pending.request),
+            MethodName::DataBind => protocol::handlers::data_bind(world, &pending.request),
+            MethodName::DataBindings => protocol::handlers::data_bindings(world, &pending.request),
+            MethodName::DataUnbind => protocol::handlers::data_unbind(world, &pending.request),
             MethodName::Unknown(ref name) => {
                 // Unknown method — return a JSON-RPC "method not found"
                 // error rather than crashing the handler.

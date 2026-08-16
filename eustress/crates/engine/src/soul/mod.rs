@@ -87,6 +87,11 @@ pub struct GlobalSoulSettings {
     /// no per-space override in v1.
     #[serde(default)]
     pub global_xai_api_key: String,
+    /// Whether Workshop's Gauntlet (AAA verify-loop) mode is on. Defaults to
+    /// OFF — it deliberately spends extra tokens per artifact, so it must be
+    /// an explicit opt-in, never a silent default.
+    #[serde(default)]
+    pub workshop_gauntlet: bool,
 }
 
 fn default_workshop_model() -> String {
@@ -101,6 +106,8 @@ impl Default for GlobalSoulSettings {
             use_global_for_new_spaces: true,
             workshop_model: default_workshop_model(),
             global_xai_api_key: String::new(),
+            // Opt-in only, per the field's contract.
+            workshop_gauntlet: false,
         }
     }
 }

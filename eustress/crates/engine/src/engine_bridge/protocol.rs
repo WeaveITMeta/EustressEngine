@@ -196,6 +196,18 @@ pub enum MethodName {
     /// whole-gang committed flag. Only meaningful in a build with the
     /// `sim-orchestration` feature; errors gracefully otherwise. Read-only.
     SimBindings,
+    /// Bind a Dataset column to a simulation parameter — measured data drives
+    /// the running sim (the input half of data/simulation fusion).
+    DataBind,
+    /// List active Dataset→parameter bindings + their last written value.
+    DataBindings,
+    /// Remove the binding driving a given sim parameter.
+    DataUnbind,
+    /// Dump the world DB's binary instance cores to TOML on disk — the
+    /// readable/greppable/diffable view of a world that otherwise exists only
+    /// as rkyv blobs in Fjall. Reads the DB and writes a copy; changes no
+    /// entity's representation (that's `entity.promote`).
+    DbExportToml,
     Unknown(String),
 }
 
@@ -234,6 +246,10 @@ where
         "scene.raycast" => MethodName::Raycast,
         "scene.overview" => MethodName::SceneOverview,
         "sim.bindings" => MethodName::SimBindings,
+        "data.bind" => MethodName::DataBind,
+        "data.bindings" => MethodName::DataBindings,
+        "data.unbind" => MethodName::DataUnbind,
+        "db.export_toml" => MethodName::DbExportToml,
         _ => MethodName::Unknown(s),
     })
 }
@@ -295,42 +311,61 @@ pub mod handlers {
     /// wall-clock-independent and reproducible. Avian physics is unpaused for the
     /// pumps and then LEFT PAUSED: `sim.step` is "stepped mode" — the world only
     /// advances on an explicit step. Resume free-running via play / run_simulation.
-    pub fn sim_step(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
-        // `pause`/`unpause`/`is_paused` on `Time<Physics>` come from an Avian
-        // trait (same import `play_mode.rs` relies on).
-        use avian3d::prelude::*;
-        let ticks = req
-            .params
+    /// Number of fixed ticks a `sim.step` request may ask for.
+    pub const SIM_STEP_MAX_TICKS: u64 = 10_000;
+
+    /// Parse and clamp the `ticks` parameter of a `sim.step` request.
+    pub fn sim_step_ticks(req: &BridgeRequest) -> u64 {
+        req.params
             .get("ticks")
             .and_then(|v| v.as_u64())
-            .map(|n| n.min(10_000))
-            .unwrap_or(1);
-        let dt = std::time::Duration::from_secs_f64(1.0 / 60.0);
+            .map(|n| n.min(SIM_STEP_MAX_TICKS))
+            .unwrap_or(1)
+    }
 
-        // Unpause Avian physics so the manual FixedMain pumps advance dynamics
-        // (Edit mode keeps it paused). Best-effort — resource present once
-        // avian3d is loaded.
+    /// Advance the fixed-timestep schedule by up to `max_ticks`, stopping
+    /// early once `budget` of wall-clock time is spent. Returns how many
+    /// ticks actually ran (always at least one, so a caller can never
+    /// livelock on a zero budget).
+    ///
+    /// Physics is unpaused for the duration and re-paused afterwards, so the
+    /// world stays frozen between steps — that freeze is what makes stepped
+    /// mode reproducible.
+    pub fn pump_fixed_ticks(
+        world: &mut World,
+        max_ticks: u64,
+        budget: std::time::Duration,
+    ) -> u64 {
+        // `pause`/`unpause` on `Time<Physics>` come from an Avian trait (the
+        // same import `play_mode.rs` relies on).
+        use avian3d::prelude::*;
+
+        let dt = std::time::Duration::from_secs_f64(1.0 / 60.0);
+        // Unpause Avian physics so the manual FixedMain pumps advance
+        // dynamics (Edit mode keeps it paused). Best-effort — the resource is
+        // present once avian3d is loaded.
         if let Some(mut pt) = world.get_resource_mut::<Time<avian3d::prelude::Physics>>() {
             pt.unpause();
         }
-        for _ in 0..ticks {
+
+        let started = std::time::Instant::now();
+        let mut ran = 0;
+        while ran < max_ticks {
             if let Some(mut fixed) = world.get_resource_mut::<Time<bevy::time::Fixed>>() {
                 fixed.advance_by(dt);
             }
             world.run_schedule(bevy::app::FixedMain);
+            ran += 1;
+            if started.elapsed() >= budget {
+                break;
+            }
         }
-        // Leave physics PAUSED so the world is frozen between steps (stepped mode).
+
+        // Leave physics PAUSED so the world is frozen between steps.
         if let Some(mut pt) = world.get_resource_mut::<Time<avian3d::prelude::Physics>>() {
             pt.pause();
         }
-
-        BridgeResponse::ok(
-            req.id.clone(),
-            serde_json::json!({
-                "stepped": ticks,
-                "sim_seconds": ticks as f64 / 60.0,
-            }),
-        )
+        ran
     }
 
     /// Cast a world-space ray (origin + direction, default straight down)
@@ -535,6 +570,7 @@ pub mod handlers {
                     locked: false,
                     physics: None,
                     respect_gltf_materials: false,
+                    deformation: false,
                 },
                 metadata: InstanceMetadata {
                     class_name: "Part".to_string(),
@@ -1996,6 +2032,172 @@ pub mod handlers {
         }
     }
 
+    /// `data.bind` — bind a Dataset column to a simulation parameter, so real
+    /// measured numbers drive the running sim. Params: `dataset` (instance
+    /// name), `column`, `target` (sim value key), optional `mode`
+    /// ("by_row" | "by_time"), `time_column` (required for by_time), `loop`.
+    #[cfg(feature = "data")]
+    pub fn data_bind(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        use crate::simulation::data_binding::{BindMode, DataBinding, DataBindingRegistry};
+        use eustress_common::classes::{ClassName, Instance};
+
+        let p = &req.params;
+        let s = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let (dataset, column, target) = (s("dataset"), s("column"), s("target"));
+        if dataset.is_empty() || column.is_empty() || target.is_empty() {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::invalid_params("data.bind requires `dataset`, `column`, and `target`"),
+            );
+        }
+        let mode = BindMode::parse(p.get("mode").and_then(|v| v.as_str()).unwrap_or("by_row"));
+        let time_column = p.get("time_column").and_then(|v| v.as_str()).map(str::to_string);
+        let looping = p.get("loop").and_then(|v| v.as_bool()).unwrap_or(false);
+        if mode == BindMode::ByTime && time_column.is_none() {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::invalid_params("mode \"by_time\" requires `time_column`"),
+            );
+        }
+
+        // Resolve the Dataset instance → its backing folder (same resolution
+        // the Data Grid / chart / Properties inspector use).
+        let mut dir: Option<std::path::PathBuf> = None;
+        let mut q = world.query::<(&Instance, &crate::space::LoadedFromFile)>();
+        for (inst, lff) in q.iter(world) {
+            if inst.class_name == ClassName::Dataset && inst.name.eq_ignore_ascii_case(&dataset) {
+                let path = lff.path.clone();
+                dir = Some(if path.is_dir() {
+                    path
+                } else {
+                    path.parent().map(|x| x.to_path_buf()).unwrap_or(path)
+                });
+                break;
+            }
+        }
+        let Some(dir) = dir else {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::invalid_params(format!("no Dataset named '{dataset}' in this Space")),
+            );
+        };
+
+        let (values, times) =
+            match crate::simulation::data_binding::load_column(&dir, &column, time_column.as_deref()) {
+                Ok(v) => v,
+                Err(e) => {
+                    return BridgeResponse::error(req.id.clone(), BridgeError::invalid_params(e))
+                }
+            };
+        if mode == BindMode::ByTime && times.is_none() {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::invalid_params("`time_column` not found in the dataset"),
+            );
+        }
+        let n = values.len();
+
+        let Some(mut reg) = world.get_resource_mut::<DataBindingRegistry>() else {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("DataBindingRegistry missing"),
+            );
+        };
+        reg.upsert(DataBinding {
+            dataset: dataset.clone(),
+            column: column.clone(),
+            target: target.clone(),
+            mode,
+            values,
+            times,
+            cursor: 0,
+            last_value: None,
+            enabled: true,
+            looping,
+        });
+
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({
+                "bound": true,
+                "dataset": dataset,
+                "column": column,
+                "target": target,
+                "mode": mode.as_str(),
+                "rows": n,
+            }),
+        )
+    }
+
+    #[cfg(not(feature = "data"))]
+    pub fn data_bind(_world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        BridgeResponse::error(
+            req.id.clone(),
+            BridgeError::internal("data.bind: build the engine with the `data` feature"),
+        )
+    }
+
+    /// `data.bindings` — list active Dataset→sim parameter bindings and the
+    /// value each one most recently wrote.
+    pub fn data_bindings(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        use crate::simulation::data_binding::DataBindingRegistry;
+        let Some(reg) = world.get_resource::<DataBindingRegistry>() else {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("DataBindingRegistry missing"),
+            );
+        };
+        let rows: Vec<serde_json::Value> = reg
+            .0
+            .iter()
+            .map(|b| {
+                serde_json::json!({
+                    "dataset":    b.dataset,
+                    "column":     b.column,
+                    "target":     b.target,
+                    "mode":       b.mode.as_str(),
+                    "rows":       b.values.len(),
+                    "cursor":     b.cursor,
+                    "last_value": b.last_value,
+                    "enabled":    b.enabled,
+                    "loop":       b.looping,
+                })
+            })
+            .collect();
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({ "count": rows.len(), "bindings": rows }),
+        )
+    }
+
+    /// `data.unbind` — remove the binding driving `target`.
+    pub fn data_unbind(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        use crate::simulation::data_binding::DataBindingRegistry;
+        let target = req
+            .params
+            .get("target")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if target.is_empty() {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::invalid_params("data.unbind requires `target`"),
+            );
+        }
+        let Some(mut reg) = world.get_resource_mut::<DataBindingRegistry>() else {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("DataBindingRegistry missing"),
+            );
+        };
+        let removed = reg.remove_target(&target);
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({ "removed": removed, "target": target }),
+        )
+    }
+
     /// `tool.equip` — set the active editor tool. Param `tool`:
     /// "select" | "move" | "scale" | "rotate". Mutates the same
     /// `StudioState.current_tool` the Alt+Z/X/C/V shortcuts drive, so the
@@ -2491,6 +2693,17 @@ pub mod handlers {
             username,
             luau_executor: None,
             display_unit: display_unit_sym,
+            // Bridge `tools.call` is a single synchronous round-trip on the
+            // main thread — there's no window in which a cancel could arrive.
+            cancelled: None,
+            // CMMC AC.L1-3.1.2. The bridge listens on TCP and is reachable by
+            // anything that can read the `engine.port` file — it performs no
+            // peer authentication (IA.L1-3.5.2, still open). Until it does,
+            // it gets the standard set: Read and Write, never Execute,
+            // Destructive, or Network. That is what stops an unauthenticated
+            // local peer from calling `run_bash` or `delete_entity`.
+            permissions: eustress_tools::Permissions::standard()
+                .for_principal("engine-bridge"),
         };
 
         let Some(registry) =

@@ -379,6 +379,11 @@ impl ToolHandler for InsertGaussianSplatsTool {
 pub struct QueryEntitiesTool;
 
 impl ToolHandler for QueryEntitiesTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "query_entities",

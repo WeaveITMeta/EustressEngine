@@ -140,6 +140,7 @@ pub fn dispatch_chat_request(
     mention_index: Option<Res<super::mention::MentionIndex>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
     display_unit: Option<Res<eustress_common::units::DisplayUnit>>,
+    gauntlet: Option<Res<super::gauntlet::GauntletMode>>,
 ) {
     // Only dispatch in the conversing state, only when we're not already
     // waiting, and only when the user has not gated us behind a tool
@@ -174,22 +175,7 @@ pub fn dispatch_chat_request(
     // caused runaway dispatch: every frame after Claude replied, the guard
     // would re-find the original user message and fire another request.
     // At ~1 dispatch/frame this racked up $50+ in a minute.
-    let ready_to_dispatch = pipeline
-        .messages
-        .iter()
-        .rev()
-        .find_map(|m| match m.role {
-            MessageRole::User => Some(true),
-            // A resolved tool_use round-trip is ready; an unresolved one (no
-            // tool_result yet) means we're still waiting on approval/exec.
-            MessageRole::Mcp => Some(m.tool_result.is_some()),
-            // Assistant turn already happened for this user message.
-            MessageRole::System => Some(false),
-            // UI-only rows — transparent to the dispatch guard.
-            MessageRole::Artifact | MessageRole::Error | MessageRole::Approval => None,
-        })
-        .unwrap_or(false);
-    if !ready_to_dispatch { return; }
+    if !ready_to_dispatch(&pipeline.messages) { return; }
 
     // Resolve which model executes this turn, then fetch the matching
     // provider's key. Model choice is a global UI preference (see
@@ -247,7 +233,9 @@ pub fn dispatch_chat_request(
 
     // Build system prompt: base + active mode fragments + current
     // DisplayUnit hint so the model speaks the user's unit naturally.
-    let system_prompt = build_system_prompt(&pipeline.active_modes, display_unit.as_deref());
+    let gauntlet_state = gauntlet.as_deref().copied().unwrap_or_default();
+    let system_prompt =
+        build_system_prompt(&pipeline.active_modes, display_unit.as_deref(), &gauntlet_state);
 
     // Advertise every registered tool to Claude regardless of which
     // modes are currently active. The mode system still drives system-
@@ -263,7 +251,7 @@ pub fn dispatch_chat_request(
         .map(|r| super::tools::claude_tools_for(r, eustress_tools::modes::WorkshopMode::ALL))
         .unwrap_or_default();
 
-    // Bridge-local advisor tool — Sonnet 5 or Grok 4.5 (as executor) can
+    // Bridge-local advisor tool — Sonnet 5 or Grok 4.6 (as executor) can
     // consult Fable 5 on hard architecture/design calls, mirroring the
     // user's own Sonnet<->Fable pairing. Deliberately NOT in the shared
     // `eustress-tools` registry: keeps the out-of-process MCP server's tool
@@ -278,6 +266,18 @@ pub fn dispatch_chat_request(
             .unwrap_or(false);
     if advisor_available {
         tools.push(consult_advisor_tool());
+    }
+
+    // The Critic is only offered while Gauntlet is on — it's the scoring half
+    // of that protocol and meaningless without the loop that feeds it. Gated
+    // on an Anthropic key for the same reason as the advisor: the judge call
+    // always targets Anthropic regardless of which provider is executing.
+    let critic_available = gauntlet_state.enabled
+        && global_settings.as_ref().zip(space_settings.as_ref())
+            .map(|(g, s)| !s.effective_api_key(g).is_empty())
+            .unwrap_or(false);
+    if critic_available {
+        tools.push(gauntlet_critic_tool());
     }
 
     let tool_count = tools.len();
@@ -326,6 +326,94 @@ pub fn dispatch_chat_request(
         tool_count,
         pipeline.active_modes.badges_text()
     );
+}
+
+/// Decide whether the pipeline is waiting on a Claude turn.
+///
+/// Walks backwards and stops at the FIRST message the model would see. A
+/// user text message means "send this"; a resolved tool_result means
+/// "continue the loop"; anything that represents a finished or failed turn
+/// means "stop".
+///
+/// ## Why `Error` is terminal
+///
+/// It used to be transparent, grouped with the UI-only Artifact and Approval
+/// rows. That was a runaway: a failed turn appended an `Error` row, the
+/// walk-back skipped straight past it to the original `User` message, and
+/// dispatch fired again. With a persistent failure (a bad API key, a wrong
+/// endpoint) nothing ever changed, so it re-fired every frame the poller
+/// cleared `chat_pending`, hammering the provider and the user's balance
+/// until the panel was closed. A failed turn is a completed turn: it stops,
+/// and the user decides whether to retry.
+///
+/// Artifact and Approval stay transparent because they are genuinely
+/// decorative rows that can sit between a user message and its dispatch.
+pub(super) fn ready_to_dispatch(messages: &[super::ChatMessage]) -> bool {
+    messages
+        .iter()
+        .rev()
+        .find_map(|m| match m.role {
+            MessageRole::User => Some(true),
+            // A resolved tool_use round-trip is ready; an unresolved one (no
+            // tool_result yet) means we're still waiting on approval/exec.
+            MessageRole::Mcp => Some(m.tool_result.is_some()),
+            // Assistant turn already happened for this user message.
+            MessageRole::System => Some(false),
+            // A failed turn is a finished turn. Never auto-retry.
+            MessageRole::Error => Some(false),
+            // UI-only rows — transparent to the dispatch guard.
+            MessageRole::Artifact | MessageRole::Approval => None,
+        })
+        .unwrap_or(false)
+}
+
+/// Bridge-local `gauntlet_critic` tool — the independent judge required by
+/// `docs/PROMPTS/00_MASTER_PROTOCOL.md` §5.1 step 6.
+///
+/// The input schema is the enforcement mechanism, not the description. There
+/// is deliberately **no** field for a summary, rationale, changelog, or
+/// argument-for-passing: the protocol forbids the Critic from receiving the
+/// candidate's self-report (§2.4), and the rubric makes such input an
+/// `INPUT_CONTAMINATED` return. A schema that only accepts measurements and
+/// paths makes the contaminating input awkward to supply in the first place.
+fn gauntlet_critic_tool() -> ClaudeTool {
+    ClaudeTool {
+        name: "gauntlet_critic".to_string(),
+        description: "Submit a finished artifact to the independent Gauntlet Critic for scoring \
+            against docs/PROMPTS/01_CRITIC_RUBRIC.md. Returns a scorecard JSON: a 0-10 score per \
+            rubric dimension with a mandatory evidence citation, floor 8.0 on EVERY dimension \
+            (not the mean). You cannot score your own work and you cannot argue with the result. \
+            Call this only AFTER you have run the exit-criterion measurement and it cleared its \
+            floor — submitting an artifact you already know misses its number wastes the call. \
+            Pass evidence only: measured values, literal tool transcripts, file paths, entity \
+            data. Do NOT pass a summary of what you did, why it was hard, or why it should pass — \
+            the Critic returns INPUT_CONTAMINATED and refuses to score."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "artifact_type": {
+                    "type": "string",
+                    "enum": ["3d_asset", "script", "simulation", "ui", "document", "data"],
+                    "description": "Which artifact this is, so the Critic knows which rubric dimensions apply and which score null."
+                },
+                "exit_criterion": {
+                    "type": "string",
+                    "description": "The falsifiable criterion declared in SPEC, with its threshold. e.g. 'torso_width / waist_width >= 1.8'."
+                },
+                "measured_value": {
+                    "type": "string",
+                    "description": "The LITERAL tool call or command run to measure it, and its LITERAL output. Not a paraphrase, not a claim."
+                },
+                "evidence": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Measured values, tool transcripts, file:line references, entity dimensions, file paths. Facts only — no prose about your own work."
+                }
+            },
+            "required": ["artifact_type", "exit_criterion", "measured_value", "evidence"]
+        }),
+    }
 }
 
 /// Bridge-local `consult_advisor` tool definition — see the doc comment at
@@ -458,10 +546,18 @@ Gradio-Hosted Mesh Generation (via run_bash):
   - Set timeout_seconds generously — complex generation can take 5+ minutes.
 "#;
 
-fn build_system_prompt(active_modes: &ActiveModes, display_unit: Option<&eustress_common::units::DisplayUnit>) -> String {
+fn build_system_prompt(
+    active_modes: &ActiveModes,
+    display_unit: Option<&eustress_common::units::DisplayUnit>,
+    gauntlet: &super::gauntlet::GauntletMode,
+) -> String {
     let mut out = String::with_capacity(2048);
     out.push_str(BASE_SYSTEM_PROMPT);
     out.push_str(&active_modes.system_prompt_fragments());
+    // Gauntlet's doctrine goes AFTER the mode fragments so its verification
+    // procedure is the last word on how to finish work — and contributes
+    // nothing when off (`prompt_fragment` returns "").
+    out.push_str(gauntlet.prompt_fragment());
     // Tell the model which unit the user is currently working in so
     // its conversational answers ("a 5 ft wall is …") use the same
     // unit, AND so that `create_entity`/`update_entity` calls without
@@ -531,7 +627,19 @@ pub(crate) fn build_anthropic_messages(pipeline: &IdeationPipeline) -> Vec<Value
         match msg.role {
             MessageRole::User => {
                 switch(&mut current_role, &mut buffer, &mut out, "user");
-                buffer.push(json!({ "type": "text", "text": msg.content.clone() }));
+                // The attachment rides ahead of the text, matching the
+                // ordering Anthropic recommends for image + question turns.
+                // Without this the picture reached the transcript on disk but
+                // never reached the model, so the user got an answer about
+                // nothing.
+                if let Some(path) = &msg.image_path {
+                    if let Some(block) = inline_attachment_block(path) {
+                        buffer.push(block);
+                    }
+                }
+                if !msg.content.is_empty() {
+                    buffer.push(json!({ "type": "text", "text": msg.content.clone() }));
+                }
             }
             MessageRole::System => {
                 // Skip mode-activation badges — they're UI-only. Heuristic:
@@ -574,6 +682,44 @@ pub(crate) fn build_anthropic_messages(pipeline: &IdeationPipeline) -> Vec<Value
     flush(&mut out, current_role, &mut buffer);
 
     out
+}
+
+/// Anthropic's cap on an inlined image, matching `mention_resolver`'s limit.
+const MAX_ATTACHMENT_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Read a saved attachment back as an Anthropic image content block.
+///
+/// Returns a text block instead when the file is missing or too large, so a
+/// broken attachment degrades into something the model can reason about
+/// rather than vanishing without trace.
+fn inline_attachment_block(path: &std::path::Path) -> Option<Value> {
+    use base64::Engine as _;
+    let meta = std::fs::metadata(path).ok();
+    match meta {
+        Some(m) if m.len() > MAX_ATTACHMENT_BYTES => {
+            return Some(json!({
+                "type": "text",
+                "text": format!(
+                    "[attached image at {} is {} bytes, too large to inline]",
+                    path.display(),
+                    m.len()
+                ),
+            }));
+        }
+        Some(_) => {}
+        None => {
+            return Some(json!({
+                "type": "text",
+                "text": format!("[attached image missing at {}]", path.display()),
+            }));
+        }
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Some(json!({
+        "type": "image",
+        "source": { "type": "base64", "media_type": "image/png", "data": data },
+    }))
 }
 
 /// Heuristic: does this content look like a "🏭 Manufacturing — mode activated"
@@ -744,7 +890,7 @@ pub fn poll_agentic_responses(
         match result {
             Ok(agentic) => {
                 // Estimate cost from token usage at the model that actually
-                // answered — Sonnet 5, Fable 5, and Grok 4.5 have distinct
+                // answered — Sonnet 5, Fable 5, and Grok 4.6 have distinct
                 // per-token pricing (see `WorkshopModel::estimate_cost`).
                 let cost = model.estimate_cost(agentic.input_tokens, agentic.output_tokens);
                 pipeline.total_cost += cost;
@@ -772,6 +918,56 @@ pub fn poll_agentic_responses(
                     // `poll_advisor_responses` fill in the result — the
                     // `advisor_in_flight` guard in `dispatch_chat_request`
                     // blocks redispatch until it does.
+                    // The Gauntlet Critic — same async shape as the advisor
+                    // (a slow LLM call must not block the frame), but a
+                    // different contract: it receives the rubric and the
+                    // evidence, never the executor's prose, and its verdict
+                    // is final. Intercepted here for the same reason as the
+                    // advisor — it's bridge-local, so the registry lookup
+                    // below would treat it as an unknown tool.
+                    if tool_use.name == "gauntlet_critic" {
+                        let card_content = format!(
+                            "gauntlet_critic({})",
+                            compact_input_preview(&tool_use.input)
+                        );
+                        let msg_id = pipeline.add_mcp_command(
+                            card_content,
+                            "gauntlet_critic".to_string(),
+                            "tool_use".to_string(),
+                            0.0,
+                        );
+                        if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == msg_id) {
+                            msg.tool_use_id = Some(tool_use.id.clone());
+                            msg.tool_input = Some(tool_use.input.clone());
+                            msg.is_assistant_turn = true;
+                        }
+                        pipeline.update_mcp_status(msg_id, McpCommandStatus::Running);
+
+                        let critic_key = global_settings.as_ref().zip(space_settings.as_ref())
+                            .map(|(g, s)| s.effective_api_key(g))
+                            .filter(|k| !k.is_empty());
+                        match critic_key {
+                            Some(api_key) => spawn_critic_call(
+                                advisor_in_flight,
+                                msg_id,
+                                api_key,
+                                &tool_use.input,
+                            ),
+                            None => {
+                                if let Some(msg) =
+                                    pipeline.messages.iter_mut().find(|m| m.id == msg_id)
+                                {
+                                    msg.tool_result = Some(
+                                        "Critic unavailable: no Anthropic API key configured."
+                                            .to_string(),
+                                    );
+                                }
+                                pipeline.update_mcp_status(msg_id, McpCommandStatus::Error);
+                            }
+                        }
+                        continue;
+                    }
+
                     if tool_use.name == "consult_advisor" {
                         let question = tool_use.input.get("question")
                             .and_then(|v| v.as_str()).unwrap_or_default().to_string();
@@ -883,7 +1079,16 @@ pub fn poll_agentic_responses(
                 pipeline.awaiting_tool_approval = any_awaiting_approval;
             }
             Err(err) => {
-                pipeline.add_error_message(format!("Workshop: Claude error — {}", err));
+                // Name the model that actually failed. This said "Claude"
+                // unconditionally, which was actively misleading once the
+                // picker could select Grok: a 400 from api.x.ai was reported
+                // as a Claude error, pointing debugging at the wrong provider.
+                let msg_id = pipeline.add_error_message(format!(
+                    "Workshop: {} error: {}",
+                    model.display_name(),
+                    err
+                ));
+                pipeline.set_message_model(msg_id, model.api_id());
                 pipeline.awaiting_tool_approval = false;
             }
         }
@@ -946,6 +1151,76 @@ fn spawn_advisor_call(
             Err(poisoned) => {
                 tracing::error!("Workshop: Mutex poisoned in advisor thread, recovering");
                 *poisoned.into_inner() = Some(Err("Internal error: thread lock poisoned".to_string()));
+            }
+        }
+    });
+
+    advisor_in_flight.push(AdvisorInFlight { message_id, result: result_container });
+}
+
+/// Spawn the independent Critic call for one `gauntlet_critic` invocation.
+///
+/// Shares [`AdvisorInFlight`] and the poll loop with the advisor — both are
+/// "a slow LLM call that resolves into a `tool_result`" — but differs in the
+/// two ways the protocol cares about: the system prompt is the full rubric
+/// (including the held-out §4, which reaches only this call), and the user
+/// message is assembled *here in Rust* from the tool's structured fields, so
+/// the executor cannot smuggle a self-report into the Critic's context even
+/// by putting prose in the evidence array's items.
+fn spawn_critic_call(
+    advisor_in_flight: &mut Vec<AdvisorInFlight>,
+    message_id: u32,
+    api_key: String,
+    input: &Value,
+) {
+    let artifact_type = input.get("artifact_type").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let exit_criterion = input.get("exit_criterion").and_then(|v| v.as_str()).unwrap_or("(none declared)");
+    let measured_value = input.get("measured_value").and_then(|v| v.as_str()).unwrap_or("(none supplied)");
+    let evidence: Vec<String> = input
+        .get("evidence")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| e.as_str())
+                .map(|e| format!("- {}", e))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Fixed layout, built from named fields only. There is no free-text slot
+    // for the builder to describe its own work.
+    let prompt = format!(
+        "ARTIFACT TYPE: {}\n\nEXIT CRITERION (declared before building):\n{}\n\n\
+         MEASUREMENT (literal call and literal output):\n{}\n\nEVIDENCE:\n{}\n\n\
+         Score this artifact against the rubric. Return exactly one scorecard JSON block.",
+        artifact_type,
+        exit_criterion,
+        measured_value,
+        if evidence.is_empty() { "(none supplied)".to_string() } else { evidence.join("\n") },
+    );
+
+    let result_container: Arc<Mutex<Option<Result<String, String>>>> = Arc::new(Mutex::new(None));
+    let result_clone = result_container.clone();
+
+    std::thread::spawn(move || {
+        let config = ClaudeConfig { api_key: Some(api_key), ..ClaudeConfig::default() };
+        let messages = vec![json!({
+            "role": "user",
+            "content": [{ "type": "text", "text": prompt }]
+        })];
+        let system = super::gauntlet::critic_system_prompt();
+        // No tools: the Critic scores what it is given and nothing else.
+        let result = ClaudeClient::new(config)
+            .call_with_tools(&messages, &[], Some(&system), &WorkshopModel::Fable5)
+            .map(|resp| resp.text)
+            .map_err(|e| e.to_string());
+
+        match result_clone.lock() {
+            Ok(mut lock) => *lock = Some(result),
+            Err(poisoned) => {
+                tracing::error!("Workshop: Mutex poisoned in critic thread, recovering");
+                *poisoned.into_inner() =
+                    Some(Err("Internal error: thread lock poisoned".to_string()));
             }
         }
     });
@@ -1070,6 +1345,15 @@ fn build_tool_context(
         username,
         luau_executor,
         display_unit: display_unit_sym,
+        // Workshop tool calls aren't cancellable out of band today; wiring
+        // the stop button through to here is the natural next step.
+        cancelled: None,
+        // The local Workshop session: the user is present, and every tool
+        // whose definition sets `requires_approval` still stops at a card
+        // they must click. Full capability here, with that human gate, is
+        // the intended posture — the CMMC AC.L1-3.1.2 concern is unattended
+        // transports, not the operator's own session.
+        permissions: eustress_tools::Permissions::full().for_principal("workshop-session"),
     })
 }
 
@@ -1132,5 +1416,106 @@ pub fn poll_claude_responses(
         if was_chat {
             tasks.chat_pending = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workshop::{ChatMessage, MessageRole};
+
+    fn msg(role: MessageRole) -> ChatMessage {
+        ChatMessage { role, ..Default::default() }
+    }
+
+    fn resolved_tool() -> ChatMessage {
+        ChatMessage {
+            role: MessageRole::Mcp,
+            tool_result: Some("ok".to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_user_message_dispatches() {
+        assert!(ready_to_dispatch(&[msg(MessageRole::User)]));
+    }
+
+    #[test]
+    fn an_answered_turn_does_not_redispatch() {
+        assert!(!ready_to_dispatch(&[
+            msg(MessageRole::User),
+            msg(MessageRole::System),
+        ]));
+    }
+
+    #[test]
+    fn a_failed_turn_never_auto_retries() {
+        // The runaway: an Error row used to be transparent, so the walk-back
+        // reached the original User message and fired again. With a bad API
+        // key that repeated every frame until the panel was closed.
+        assert!(!ready_to_dispatch(&[
+            msg(MessageRole::User),
+            msg(MessageRole::Error),
+        ]));
+    }
+
+    #[test]
+    fn repeated_failures_still_never_retry() {
+        // Exactly the screenshot: one user message, a pile of errors.
+        let mut messages = vec![msg(MessageRole::User)];
+        for _ in 0..5 {
+            messages.push(msg(MessageRole::Error));
+        }
+        assert!(!ready_to_dispatch(&messages));
+    }
+
+    #[test]
+    fn the_user_can_always_retry_by_sending_again() {
+        // An error stops the loop, but it must not wedge the session: a new
+        // user message is more recent than the error and dispatches.
+        assert!(ready_to_dispatch(&[
+            msg(MessageRole::User),
+            msg(MessageRole::Error),
+            msg(MessageRole::User),
+        ]));
+    }
+
+    #[test]
+    fn a_resolved_tool_result_continues_the_loop() {
+        assert!(ready_to_dispatch(&[msg(MessageRole::User), resolved_tool()]));
+    }
+
+    #[test]
+    fn an_unresolved_tool_call_waits() {
+        assert!(!ready_to_dispatch(&[
+            msg(MessageRole::User),
+            msg(MessageRole::Mcp),
+        ]));
+    }
+
+    #[test]
+    fn decorative_rows_stay_transparent() {
+        // Artifact and Approval can legitimately sit between a user message
+        // and its dispatch, so they must not block it.
+        assert!(ready_to_dispatch(&[
+            msg(MessageRole::User),
+            msg(MessageRole::Artifact),
+            msg(MessageRole::Approval),
+        ]));
+    }
+
+    #[test]
+    fn an_error_after_a_tool_result_still_stops() {
+        assert!(!ready_to_dispatch(&[
+            msg(MessageRole::User),
+            resolved_tool(),
+            msg(MessageRole::Error),
+        ]));
+    }
+
+    #[test]
+    fn an_empty_transcript_does_not_dispatch() {
+        assert!(!ready_to_dispatch(&[]));
     }
 }

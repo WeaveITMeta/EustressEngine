@@ -241,6 +241,13 @@ pub fn specific_power(v_terminal: f32, current: f32, mass_kg: f32) -> f32 {
     power_output(v_terminal, current) / mass_kg
 }
 
+/// Gravimetric energy density (Wh/kg): `E = Q × V / m`.
+#[inline]
+pub fn gravimetric_energy_density(capacity_ah: f32, voltage: f32, mass_kg: f32) -> f32 {
+    if mass_kg <= 0.0 { return 0.0; }
+    (capacity_ah * voltage) / mass_kg
+}
+
 /// C-rate: `C = I / Q_nom` (h⁻¹)
 #[inline]
 pub fn c_rate(current_a: f32, capacity_ah: f32) -> f32 {
@@ -432,5 +439,73 @@ mod tests {
     fn terminal_voltage_charge() {
         let v = terminal_voltage(3.7, 0.1, 0.05, 0.02, false);
         assert!((v - 3.87).abs() < 0.01);
+    }
+
+    #[test]
+    fn vcell_nernst_at_full_soc_is_standard_potential() {
+        let e = nernst_potential(
+            constants::na_s::STANDARD_POTENTIAL,
+            constants::na_s::ELECTRONS,
+            298.15,
+            1.0,
+        );
+        assert!(
+            (e - constants::na_s::STANDARD_POTENTIAL).abs() < EPSILON,
+            "Q=1 must return E° = 2.23 V, got {e}"
+        );
+        assert!((1.8..=2.5).contains(&e), "Na-S OCV {e} outside [1.8, 2.5]");
+    }
+
+    #[test]
+    fn vcell_engineering_path_closes_mass_budget() {
+        let e = gravimetric_energy_density(202.5, constants::na_s::STANDARD_POTENTIAL, 0.695);
+        assert!(
+            (e - 650.0).abs() < 15.0,
+            "202.5 Ah × 2.23 V / 0.695 kg must sit on the 650 Wh/kg path, got {e}"
+        );
+        assert!(
+            e < constants::na_s::THEORETICAL_ENERGY_DENSITY,
+            "cell energy density {e} cannot exceed theoretical 5517 Wh/kg"
+        );
+    }
+
+    #[test]
+    fn vcell_target_is_below_theoretical_and_above_path() {
+        let path = gravimetric_energy_density(202.5, constants::na_s::STANDARD_POTENTIAL, 0.695);
+        let target = gravimetric_energy_density(202.5, constants::na_s::STANDARD_POTENTIAL, 0.502);
+        assert!(path < target);
+        assert!(target < constants::na_s::THEORETICAL_ENERGY_DENSITY);
+        assert!(
+            (target - 900.0).abs() < 20.0,
+            "0.502 kg at 202.5 Ah / 2.23 V should be the 900 Wh/kg target, got {target}"
+        );
+    }
+
+    #[test]
+    fn vcell_58g_mass_is_nonphysical() {
+        let bogus = gravimetric_energy_density(202.5, constants::na_s::STANDARD_POTENTIAL, 0.058);
+        assert!(
+            bogus > constants::na_s::THEORETICAL_ENERGY_DENSITY,
+            "58 g + 202.5 Ah must be detected as above theoretical; got {bogus}"
+        );
+    }
+
+    #[test]
+    fn vcell_electrolyte_asr_demonstrated_vs_target() {
+        let thickness_m = 30e-6;
+        let area_m2 = 0.0284;
+        let r_demo = cell_resistance_from_asr(
+            electrolyte_asr(thickness_m, constants::sc_nasicon::IONIC_CONDUCTIVITY_DEMONSTRATED * 100.0),
+            area_m2,
+        );
+        let r_target = cell_resistance_from_asr(
+            electrolyte_asr(thickness_m, constants::sc_nasicon::IONIC_CONDUCTIVITY_TARGET * 100.0),
+            area_m2,
+        );
+        assert!(r_demo.is_finite() && r_target.is_finite());
+        assert!(
+            r_demo > r_target,
+            "demonstrated 1e-3 S/cm must produce higher R than 1e-2 target ({r_demo} vs {r_target})"
+        );
     }
 }

@@ -35,6 +35,8 @@ pub mod mention_searcher_vortex;
 pub mod claude_bridge;
 pub mod artifact_gen;
 pub mod modes;
+/// Opt-in AAA quality loop — build → observe → critique → fix before "done".
+pub mod gauntlet;
 pub mod tools;
 pub mod context;
 pub mod streams;
@@ -95,6 +97,11 @@ pub struct ChatMessage {
     /// non-assistant rows (user/artifact/error/etc).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_used: Option<String>,
+    /// Image attached to this message, stored beside the session on disk.
+    /// A path rather than inline base64 so session transcripts stay readable
+    /// and reloading a conversation can render the picture again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_path: Option<PathBuf>,
 
     // ── Agentic tool-use fields (new) ──────────────────────────────────
     // Populated when the message represents a Claude `tool_use` block or
@@ -1002,6 +1009,12 @@ impl IdeationPipeline {
 #[derive(Message, Debug, Clone)]
 pub struct WorkshopSendMessageEvent {
     pub content: String,
+    /// PNG bytes of an image attached to this message, if the user pasted
+    /// one into the attach strip before sending. Carried on the event
+    /// because the staging lives in the Slint action layer while the
+    /// pipeline that records the message lives here.
+    #[allow(dead_code)]
+    pub image_png: Option<Vec<u8>>,
 }
 
 /// Fired when user approves an MCP command
@@ -1087,13 +1100,16 @@ fn handle_send_message(
     mut pipeline: ResMut<IdeationPipeline>,
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
     space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
 ) {
     for event in events.read() {
         let content = event.content.trim().to_string();
-        if content.is_empty() {
+        // An image on its own is a legitimate message ("what is wrong with
+        // this?"). Bailing on empty text alone silently swallowed those.
+        if content.is_empty() && event.image_png.is_none() {
             continue;
         }
-        
+
         // Mode detection runs FIRST (keyword scan against the incoming
         // text). Any newly-activated mode gets a system badge appended
         // *before* the user message so that after we push the user msg,
@@ -1109,7 +1125,52 @@ fn handle_send_message(
         }
 
         // Add user message to conversation (must be last so dispatch guard passes)
-        pipeline.add_user_message(content.clone());
+        let user_msg_id = pipeline.add_user_message(content.clone());
+
+        // Persist any attachment beside the session and record it on the
+        // message, so it renders in the transcript and can be inlined for
+        // the model on dispatch.
+        if let Some(png) = &event.image_png {
+            match space_root.as_ref() {
+                Some(sr) => {
+                    let dir = sr
+                        .0
+                        .join("SoulService")
+                        .join("Workshop")
+                        .join(&pipeline.session_id)
+                        .join("attachments");
+                    let path = dir.join(format!("msg_{}.png", user_msg_id));
+                    let written = std::fs::create_dir_all(&dir)
+                        .and_then(|_| std::fs::write(&path, png));
+                    match written {
+                        Ok(()) => {
+                            if let Some(msg) =
+                                pipeline.messages.iter_mut().find(|m| m.id == user_msg_id)
+                            {
+                                msg.image_path = Some(path.clone());
+                            }
+                            info!(
+                                "Workshop: attached image saved to {} ({} bytes)",
+                                path.display(),
+                                png.len()
+                            );
+                        }
+                        Err(e) => {
+                            pipeline.add_error_message(format!(
+                                "Workshop: could not save the attached image: {e}"
+                            ));
+                        }
+                    }
+                }
+                None => {
+                    pipeline.add_error_message(
+                        "Workshop: an image was attached but no Space is loaded, so it \
+                         could not be saved."
+                            .to_string(),
+                    );
+                }
+            }
+        }
 
         // Check if API key is available
         let has_key = match (&global_settings, &space_settings) {
@@ -1202,6 +1263,13 @@ fn handle_approve_mcp(
                     username,
                     luau_executor: None,
                     display_unit: display_unit.as_deref().map(|d| d.0.symbol().to_string()),
+                    cancelled: None,
+                    // This path runs only after the user clicked Approve on
+                    // the tool card, so the human has authorized this
+                    // specific call. Full capability with a per-call human
+                    // gate is the intended posture for the local session.
+                    permissions: eustress_tools::Permissions::full()
+                        .for_principal("workshop-user-approved"),
                 }
             }
             _ => {
@@ -1767,6 +1835,8 @@ impl Plugin for WorkshopPlugin {
             .add_message::<ClaudeResponseEvent>()
             .add_message::<ClaudeErrorEvent>()
             .add_message::<WorkshopSetModeEvent>()
+            .add_message::<gauntlet::WorkshopSetGauntletEvent>()
+            .init_resource::<gauntlet::GauntletMode>()
             // Core systems: handle user actions → update pipeline state
             // Must run AFTER SlintSystems::Drain so WorkshopSendMessageEvent etc. are available
             .add_systems(Update, (
@@ -1778,9 +1848,12 @@ impl Plugin for WorkshopPlugin {
                 handle_claude_response,
                 handle_claude_error,
                 handle_set_mode,
+                gauntlet::handle_set_gauntlet,
             ).chain().after(crate::ui::SlintSystems::Drain).in_set(WorkshopCoreSystems))
             // Poll background tool dispatch threads (non-blocking approve)
             .add_systems(Update, poll_tool_dispatches.after(WorkshopCoreSystems))
+            // One-shot: restore the persisted Gauntlet toggle on launch.
+            .add_systems(Update, gauntlet::seed_gauntlet_from_settings)
             // Claude bridge: dispatch async requests + poll responses
             // Must run AFTER WorkshopCoreSystems so pipeline.state is updated before dispatch checks it
             .add_systems(Update, (

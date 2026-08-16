@@ -654,7 +654,19 @@ fn handle_start_play(
     // into its `RenderTarget::Image`, blanking the AI "eyes" after a Play→Edit
     // cycle (recovered only on restart) and wiping its `order: -1`. Filtering it
     // out keeps it active + at order -1 across the whole Play cycle.
-    cameras: Query<(Entity, &Transform), (With<Camera3d>, Without<crate::ai_camera::AiCamera>)>,
+    // `Without<SlintOverlayCamera>` is load-bearing: the Slint editor chrome is
+    // composited by an ORTHO `Camera3d` at order 300, so it matches
+    // `With<Camera3d>` just like the editor camera does. Deactivating it on Play
+    // switched off the entire editor UI — including the Stop button — which left
+    // no way back out of play mode short of killing the process.
+    cameras: Query<
+        (Entity, &Transform),
+        (
+            With<Camera3d>,
+            Without<crate::ai_camera::AiCamera>,
+            Without<crate::ui::slint_ui::SlintOverlayCamera>,
+        ),
+    >,
     spawn_locations: Query<(&Transform, &SpawnLocation)>,
     snapshot_query: Query<(
         Entity,

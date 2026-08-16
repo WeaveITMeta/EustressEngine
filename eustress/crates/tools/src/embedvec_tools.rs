@@ -50,6 +50,11 @@ use crate::modes::WorkshopMode;
 pub struct FindSimilarEntitiesTool;
 
 impl ToolHandler for FindSimilarEntitiesTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "find_similar_entities",
@@ -107,6 +112,11 @@ impl ToolHandler for FindSimilarEntitiesTool {
 pub struct SuggestSwapTemplateTool;
 
 impl ToolHandler for SuggestSwapTemplateTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "suggest_swap_template",
@@ -232,6 +242,11 @@ impl ToolHandler for SuggestContextualEditsTool {
 pub struct SuggestToolDefaultsTool;
 
 impl ToolHandler for SuggestToolDefaultsTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "suggest_tool_defaults",

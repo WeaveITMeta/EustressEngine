@@ -40,6 +40,12 @@ export struct ChatMessage {
     entity-class: string,   // class_name, e.g. "Part" | "SoulScript" | "BillboardGui"
     entity-name: string,    // human-readable entity name
     entity-icon: image,     // pre-loaded class icon (same source the Explorer uses)
+    // Image the user attached to this message. Loaded from the message's
+    // saved PNG by `sync_workshop_to_slint`, same as `entity-icon`, because
+    // Slint can only resolve `@image-url` at compile time and this path is
+    // only known at runtime.
+    attachment: image,
+    has-attachment: bool,
 }
 
 // Past conversation summary for history browser
@@ -84,6 +90,10 @@ component ChatBubble inherits Rectangle {
     in property <string> entity-class: "";
     in property <string> entity-name: "";
     in property <image>  entity-icon;
+
+    // Attached image (see ChatMessage struct comments)
+    in property <image>  attachment;
+    in property <bool>   has-attachment: false;
 
     callback approve-mcp(int);
     callback skip-mcp(int);
@@ -265,6 +275,19 @@ component ChatBubble inherits Rectangle {
                         font-size: 10px;
                         vertical-alignment: center;
                     }
+                }
+
+                // Attached image, above the text: the picture is usually the
+                // subject and the words are the question about it. Capped in
+                // height so a tall screenshot cannot push the rest of the
+                // conversation off screen, and `image-fit: contain` keeps the
+                // aspect ratio rather than stretching it.
+                if root.has-attachment: Image {
+                    source: root.attachment;
+                    width: 100%;
+                    height: min(self.preferred-height, 220px);
+                    image-fit: contain;
+                    horizontal-alignment: left;
                 }
 
                 // Message content — hidden for pure MCP tool-call cards
@@ -614,7 +637,20 @@ export component WorkshopPanel inherits Rectangle {
     // Fires when the user picks a different model from the dropdown.
     callback on-model-changed(string);
     // Available model names — one global list, not mode-specific.
-    in property <[string]> available-models: ["Sonnet 5", "Fable 5", "Grok 4.5"];
+    in property <[string]> available-models: ["Sonnet 5", "Opus 5", "Fable 5", "Grok 4.6"];
+
+    // ── Gauntlet toggle ──────────────────────────────────────────────────
+    // AAA verify-loop mode. Off by default: it deliberately spends extra
+    // tokens per artifact, so it's an explicit opt-in. Rust keeps this in
+    // sync with GlobalSoulSettings::workshop_gauntlet.
+    in-out property <bool> gauntlet-enabled: false;
+    callback on-gauntlet-toggled(bool);
+
+    // ── Chat scroll position ─────────────────────────────────────────────
+    // Two-way bound to the chat ScrollView's viewport-y and out to the
+    // window root, so it survives this panel being torn down on tab switch.
+    // The host restores the value belonging to the active session.
+    in-out property <length> chat-scroll-y: 0px;
 
     /// Scan `input-text` for a trailing `@prefix` token; if found, open
     /// the popup and emit a query. Called from the input field's `edited`
@@ -1226,6 +1262,15 @@ export component WorkshopPanel inherits Rectangle {
         if root.messages.length > 0: chat-scroll := ScrollView {
             vertical-stretch: 1;
 
+            // Chat scroll offset is hoisted to the panel root, and from there
+            // to the window root, because the right-hand dock instantiates
+            // this panel with `if right-tab-index == 3`. Switching tabs away
+            // destroys the whole component, so anything held in here (and in
+            // the ScrollView's own viewport-y) is gone on return. The host
+            // keys the saved value by session id, so each conversation tab
+            // comes back where you left it rather than sharing one offset.
+            viewport-y <=> root.chat-scroll-y;
+
             // Edge auto-scroll: when the pointer hovers within 40px of the
             // top or bottom edge the timer nudges viewport-y each frame.
             // `scroll-touch.has-hover` drives the running state — no
@@ -1285,6 +1330,8 @@ export component WorkshopPanel inherits Rectangle {
                     entity-class: msg.entity-class;
                     entity-name: msg.entity-name;
                     entity-icon: msg.entity-icon;
+                    attachment: msg.attachment;
+                    has-attachment: msg.has-attachment;
                     message-id: msg.id;
 
                     approve-mcp(id) => { root.on-approve-mcp(id); }
@@ -1400,9 +1447,17 @@ export component WorkshopPanel inherits Rectangle {
 
                         mode-popup := PopupWindow {
                             x: 0px;
-                            y: -min(root.available-modes.length * 24px, 200px) - 4px;
+                            // Exact content height, and y derived from it so
+                            // the two can never disagree. The previous
+                            // independent `min()` caps did: with 10 modes the
+                            // content needed 248px while height capped at
+                            // 208px, clipping the last ~2 entries, and the
+                            // separately-capped y put the popup's bottom edge
+                            // *below* the pill so those entries overlapped the
+                            // toolbar.
+                            y: -(root.available-modes.length * 24px + 8px) - 4px;
                             width: 160px;
-                            height: min(root.available-modes.length * 24px + 8px, 208px);
+                            height: root.available-modes.length * 24px + 8px;
 
                             Rectangle {
                                 background: Theme.background-secondary;
@@ -1480,9 +1535,12 @@ export component WorkshopPanel inherits Rectangle {
 
                         model-popup := PopupWindow {
                             x: 0px;
-                            y: -min(root.available-models.length * 24px, 200px) - 4px;
+                            // Same derivation as the mode popup above — the
+                            // model list is shorter so it never hit the clip,
+                            // but the latent bug was identical.
+                            y: -(root.available-models.length * 24px + 8px) - 4px;
                             width: 160px;
-                            height: min(root.available-models.length * 24px + 8px, 208px);
+                            height: root.available-models.length * 24px + 8px;
 
                             Rectangle {
                                 background: Theme.background-secondary;
@@ -1523,8 +1581,52 @@ export component WorkshopPanel inherits Rectangle {
                         }
                     }
 
+                    // Gauntlet toggle pill — filled when ON so the extra
+                    // token spend is never invisible.
+                    Rectangle {
+                        width: gauntlet-label.preferred-width + 26px;
+                        height: 24px;
+                        background: root.gauntlet-enabled
+                            ? #f0a02233
+                            : (gauntlet-touch.has-hover ? Theme.background-tertiary : transparent);
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: root.gauntlet-enabled ? #f0a022 : Theme.border-color;
+
+                        gauntlet-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.gauntlet-enabled = !root.gauntlet-enabled;
+                                root.on-gauntlet-toggled(root.gauntlet-enabled);
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            spacing: 4px;
+                            alignment: center;
+
+                            gauntlet-label := Text {
+                                text: "⚔ Gauntlet";
+                                color: root.gauntlet-enabled ? #f0a022 : Theme.text-secondary;
+                                font-size: 10px;
+                                font-weight: root.gauntlet-enabled ? 700 : 400;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
                     // Spacer
                     Rectangle { horizontal-stretch: 1; }
+
+                    // Cost warning — only while the expensive mode is live.
+                    if root.gauntlet-enabled: Text {
+                        text: "verify loop ×4, higher token use";
+                        color: #f0a022;
+                        font-size: 9px;
+                        vertical-alignment: center;
+                    }
 
                     if root.active-tool != "": Text {
                         text: "⟳ " + root.active-tool;

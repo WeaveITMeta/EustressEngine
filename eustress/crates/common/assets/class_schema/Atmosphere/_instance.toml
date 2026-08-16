@@ -1,13 +1,54 @@
-# Atmosphere — Atmospheric effects (fog, haze, sky tinting)
-# Bevy: Custom atmosphere shader / fog
+# Atmosphere — atmospheric scattering, sky rendering and sky-sourced reflections
+# Bevy: bevy_light::Atmosphere (the planet) + bevy_pbr::AtmosphereSettings (per camera)
+#
+# Scattering coefficients are in units of 1e-6 per metre, so Earth at sea level
+# reads as [5.802, 13.558, 33.1] for Rayleigh and 4.44 for Mie.
 
 [atmosphere]
+# --- Artistic controls ---
+# Scales the whole medium. 0.5 is Earth-normal: higher is hazier and fades the
+# horizon sooner.
 density = 0.395
+# Stretches (+) or compresses (-) the vertical density profile.
 offset = 0.0
+# Tints the sky by shifting Rayleigh scattering per channel. Normalised
+# internally, so this changes hue without thickening the atmosphere.
 color = [173, 215, 255]
+# Becomes the planet's ground albedo, which feeds multiscattering and so sets
+# how bright and what colour the horizon reads.
 decay_color = [105, 123, 142]
+# Biases Mie scattering forward, which is what a halo around the sun is.
 glare = 0.0
+# Multiplies the aerosol (Mie) term only — the term that reads as haze.
 haze = 0.0
+
+# --- Scattering model ---
+# Molecular scattering. Blue scatters most, which is why the sky is blue and
+# sunsets are red.
+rayleigh_coefficient = [5.802, 13.558, 33.1]
+# Aerosol extinction. 4.44 is Earth at sea level and gives a clear day.
+# Bruneton-lineage references quote 21.0 for a deliberately hazy atmosphere.
+mie_coefficient = 4.44
+# Henyey-Greenstein asymmetry g: higher throws more light forward around the sun.
+mie_direction = 0.758
+
+# --- Planet geometry ---
+planet_radius = 6371000.0
+atmosphere_height = 100000.0
+
+# --- Rendering ---
+# "LookupTexture" is the fast path and is right for anything at ground level.
+# "Raymarched" is slower but accurate at long range: orbital views, flight sims,
+# cinematic captures.
+rendering_mode = "LookupTexture"
+sky_max_samples = 32
+
+# --- Reflections ---
+# The atmosphere regenerates a filtered environment map from the live sky, so
+# reflections and image-based ambient track the time of day on their own.
+environment_map_enabled = true
+environment_intensity = 1.0
+atmosphere_environment_light = true
 
 [metadata]
 class_name = "Atmosphere"

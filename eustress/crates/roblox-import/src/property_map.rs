@@ -1713,9 +1713,14 @@ fn try_part_property(bag: &mut PropertyBag, target_class: ClassName, key: &str, 
     // can arrive in either order from the property HashMap.
     if key == "Shape" {
         if let Variant::Enum(e) = variant {
+            // `Enum.PartType`: Ball=0, Block=1, Cylinder=2, Wedge=3,
+            // CornerWedge=4 — every variant Roblox can author is mapped,
+            // so none of them silently import as a cube.
             let mesh = match e.to_u32() {
                 0 => Some("parts/ball.glb"),
                 2 => Some("parts/cylinder.glb"),
+                3 => Some("parts/wedge.glb"),
+                4 => Some("parts/corner_wedge.glb"),
                 // 1 (Block) — the class-schema default already applies;
                 // no override needed. Any future PartType value falls
                 // through to the extras catch-all below (unchanged
@@ -1875,15 +1880,22 @@ fn try_light_property(
 /// crate doesn't need `glam` directly.
 fn cframe_to_translation_quat(cf: &CFrame) -> ([f32; 3], [f32; 4]) {
     let translation = [cf.position.x, cf.position.y, cf.position.z];
-    // Roblox: rows are basis vectors (right, up, back).
-    let r = cf.orientation.x;
-    let u = cf.orientation.y;
-    let b = cf.orientation.z;
-    // Build the rotation matrix in column-basis form. The "back" basis
-    // vector points into +Z in Roblox; glam's convention follows the
-    // right-up-back convention as columns, so this is a transpose of
-    // the row-stored layout.
-    let m = [[r.x, r.y, r.z], [u.x, u.y, u.z], [b.x, b.y, b.z]];
+    // `Matrix3`'s x/y/z fields are the ROWS of the rotation matrix, in the
+    // order Roblox serialises them (R00 R01 R02 / R10 R11 R12 / R20 R21 R22).
+    // The basis vectors — right, up, back — are its COLUMNS, which is why
+    // `Matrix3::to_basic_rotation_id` transposes before reading them.
+    let row0 = cf.orientation.x;
+    let row1 = cf.orientation.y;
+    let row2 = cf.orientation.z;
+    // `mat3_to_quat` wants column-major `[col0, col1, col2]`, so gather the
+    // columns: col0 = right, col1 = up, col2 = back. Feeding the rows in
+    // directly would transpose the matrix, and the transpose of a rotation is
+    // its inverse — every rotated part would come in turned the wrong way.
+    let m = [
+        [row0.x, row1.x, row2.x],
+        [row0.y, row1.y, row2.y],
+        [row0.z, row1.z, row2.z],
+    ];
     let q = mat3_to_quat(m);
     (translation, q)
 }
@@ -2396,6 +2408,89 @@ mod tests {
         assert_eq!(t, [1.5, -2.0, 7.25]);
     }
 
+    /// Rotate `v` by quaternion `q` (`[x, y, z, w]`).
+    fn quat_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+        let (qx, qy, qz, qw) = (q[0], q[1], q[2], q[3]);
+        let cross = |a: [f32; 3], b: [f32; 3]| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let u = [qx, qy, qz];
+        let t = cross(u, v);
+        let t = [t[0] * 2.0, t[1] * 2.0, t[2] * 2.0];
+        let ut = cross(u, t);
+        [
+            v[0] + qw * t[0] + ut[0],
+            v[1] + qw * t[1] + ut[1],
+            v[2] + qw * t[2] + ut[2],
+        ]
+    }
+
+    /// A +90° yaw must import as +90°, not −90°. `Matrix3`'s fields are the
+    /// matrix ROWS; feeding them to `mat3_to_quat` (which wants columns)
+    /// transposes, and a transposed rotation is its inverse — which reads as
+    /// parts having their X/Z rotation "switched".
+    ///
+    /// Identity cannot catch this (it is its own transpose), so the regression
+    /// needs a rotation that is not self-inverse.
+    #[test]
+    fn cframe_yaw_90_is_not_inverted() {
+        // +90° about Y: rows (0,0,1) / (0,1,0) / (-1,0,0).
+        let cf = CFrame::new(
+            Vector3::new(0.0, 0.0, 0.0),
+            Matrix3::new(
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(0.0, 1.0, 0.0),
+                Vector3::new(-1.0, 0.0, 0.0),
+            ),
+        );
+        let (_, q) = cframe_to_translation_quat(&cf);
+        let h = std::f32::consts::FRAC_1_SQRT_2; // sin/cos of 45°
+        assert!(q[0].abs() < 1e-5, "q = {q:?}");
+        assert!(
+            (q[1] - h).abs() < 1e-5,
+            "expected +90° yaw (y = +{h}), got {q:?} — a negative y means the \
+             rotation matrix was transposed (inverted)"
+        );
+        assert!(q[2].abs() < 1e-5, "q = {q:?}");
+        assert!((q[3] - h).abs() < 1e-5, "q = {q:?}");
+    }
+
+    /// General invariant: the quaternion must act on a vector exactly as the
+    /// source matrix does. Roblox's basis vectors are the matrix COLUMNS, so
+    /// rotating the +X axis must yield column 0 (the part's right vector).
+    /// Uses an asymmetric rotation, so a transpose cannot pass by symmetry.
+    #[test]
+    fn cframe_quat_matches_matrix_basis_vectors() {
+        // Basic rotation id 0x09 — rows (0,0,1) / (1,0,0) / (0,1,0).
+        // Columns (right, up, back) are therefore (0,1,0), (0,0,1), (1,0,0).
+        let cf = CFrame::new(
+            Vector3::new(0.0, 0.0, 0.0),
+            Matrix3::new(
+                Vector3::new(0.0, 0.0, 1.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+            ),
+        );
+        let (_, q) = cframe_to_translation_quat(&cf);
+        for (axis, expected, name) in [
+            ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], "right"),
+            ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0], "up"),
+            ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], "back"),
+        ] {
+            let got = quat_rotate(q, axis);
+            for i in 0..3 {
+                assert!(
+                    (got[i] - expected[i]).abs() < 1e-5,
+                    "{name} basis: expected {expected:?}, got {got:?} (q = {q:?})"
+                );
+            }
+        }
+    }
+
     #[test]
     fn vector3_position_lands_on_overrides() {
         let bag = map_properties(
@@ -2735,6 +2830,51 @@ mod tests {
             ClassName::Part,
         );
         assert_eq!(bag.overrides.asset_mesh, None);
+    }
+
+    #[test]
+    fn shape_wedge_maps_to_wedge_mesh() {
+        let bag = map_properties(
+            &props_with(vec![("Shape", Variant::Enum(Enum::from_u32(3)))]),
+            ClassName::Part,
+        );
+        assert_eq!(bag.overrides.asset_mesh.as_deref(), Some("parts/wedge.glb"));
+        assert!(
+            !bag.properties_extras.contains_key("Shape"),
+            "Shape must be consumed, not also duplicated into extras"
+        );
+    }
+
+    #[test]
+    fn shape_corner_wedge_maps_to_corner_wedge_mesh() {
+        let bag = map_properties(
+            &props_with(vec![("Shape", Variant::Enum(Enum::from_u32(4)))]),
+            ClassName::Part,
+        );
+        assert_eq!(
+            bag.overrides.asset_mesh.as_deref(),
+            Some("parts/corner_wedge.glb")
+        );
+        assert!(
+            !bag.properties_extras.contains_key("Shape"),
+            "Shape must be consumed, not also duplicated into extras"
+        );
+    }
+
+    /// Wedge/CornerWedge must NOT pick up the Cylinder axis correction —
+    /// that fix is specific to Roblox orienting cylinders along local X.
+    #[test]
+    fn shape_wedges_are_not_axis_corrected() {
+        for ordinal in [3u32, 4] {
+            let bag = map_properties(
+                &props_with(vec![("Shape", Variant::Enum(Enum::from_u32(ordinal)))]),
+                ClassName::Part,
+            );
+            assert_eq!(
+                bag.overrides.rotation, None,
+                "PartType ordinal {ordinal} must keep its authored CFrame verbatim"
+            );
+        }
     }
 
     #[test]

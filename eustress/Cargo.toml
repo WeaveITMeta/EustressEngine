@@ -128,6 +128,23 @@ truck-stepio    = "0.3"    # latest: 0.3.0 — STEP import/export
 
 [profile.dev]
 opt-level = 2
+# Line-tables only, NOT full debuginfo.
+#
+# `eustress-engine` is a monolith, and with full debuginfo its rlib reached
+# 4077 MB in target/debug — past what the Windows COFF archive format can
+# address. link.exe then reports `LNK4003: invalid library format; library
+# ignored`, discards the ENTIRE library, and every symbol in it comes back
+# unresolved: ~200 LNK2001/LNK2019 across modules nobody touched (including
+# `main`), ending in LNK1120. That reads exactly like a code or incremental
+# corruption bug and is neither — `cargo clean` does not fix it, because the
+# rlib is simply too big.
+#
+# Line tables keep file/line info for panics and backtraces (which is what the
+# engine's diagnostics actually rely on) while dropping the type/variable DWARF
+# that dominates the size. Raise back to `debug = 2` only for a session that
+# genuinely needs a full-fidelity debugger, and expect the linker to fail again
+# if the crate has grown.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3

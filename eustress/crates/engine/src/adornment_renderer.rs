@@ -37,10 +37,61 @@
 
 use bevy::prelude::*;
 use bevy::light::NotShadowCaster;
+use bevy::pbr::{
+    ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
+};
+use bevy::mesh::MeshVertexBufferLayoutRef;
+use bevy::render::render_resource::{
+    AsBindGroup, CompareFunction, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+};
 use eustress_common::adornments::{
     BoxHandleAdornment, ConeHandleAdornment, CylinderHandleAdornment,
     SphereHandleAdornment,
 };
+
+// ============================================================================
+// Always-on-top material — transform handles stay grabbable through geometry
+// ============================================================================
+
+/// Zero-data material extension whose only job is to disable the depth
+/// test for tool handles, so Move/Scale/Rotate gizmos stay visible (and
+/// therefore grabbable) even when they sit inside the part they control.
+///
+/// `StandardMaterial::depth_bias` cannot do this on its own. Bevy feeds
+/// that value to the rasterizer as `depth_stencil.bias.constant`, where
+/// it is scaled to a few ULPs of the fragment's own depth — enough to
+/// break a z-fight, nowhere near enough to cross an arbitrary occluder.
+/// With a depth prepass writing the part's depth, a handle inside the
+/// part loses the compare no matter how large the bias. Overriding
+/// `depth_compare` is what actually works — the same mechanism
+/// `billboard_pipeline`'s always-on-top mode uses.
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
+pub struct AlwaysOnTopExtension {}
+
+impl MaterialExtension for AlwaysOnTopExtension {
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        if let Some(depth_stencil) = descriptor.depth_stencil.as_mut() {
+            // `Always` = this fragment wins the depth test unconditionally.
+            // No depth WRITE, so handles never occlude scene geometry or
+            // punch holes in the buffer later passes read. Handles then
+            // resolve against each other by phase order, which
+            // `depth_bias` on the base material still steers.
+            depth_stencil.depth_compare = Some(CompareFunction::Always);
+            depth_stencil.depth_write_enabled = Some(false);
+        }
+        Ok(())
+    }
+}
+
+/// Material used by every tool handle: a `StandardMaterial` (unlit +
+/// emissive, so handles read as UI rather than lit geometry) wrapped in
+/// the always-on-top depth override.
+pub type AdornmentMaterial = ExtendedMaterial<StandardMaterial, AlwaysOnTopExtension>;
 
 // ============================================================================
 // Color tag — tools write this alongside a HandleAdornment to pick color
@@ -91,31 +142,31 @@ pub struct AdornmentMeshes {
 
 #[derive(Resource)]
 pub struct AdornmentMaterials {
-    pub x: Handle<StandardMaterial>,
-    pub y: Handle<StandardMaterial>,
-    pub z: Handle<StandardMaterial>,
-    pub xy: Handle<StandardMaterial>,
-    pub xz: Handle<StandardMaterial>,
-    pub yz: Handle<StandardMaterial>,
-    pub center: Handle<StandardMaterial>,
-    pub hover: Handle<StandardMaterial>,
-    pub drag: Handle<StandardMaterial>,
+    pub x: Handle<AdornmentMaterial>,
+    pub y: Handle<AdornmentMaterial>,
+    pub z: Handle<AdornmentMaterial>,
+    pub xy: Handle<AdornmentMaterial>,
+    pub xz: Handle<AdornmentMaterial>,
+    pub yz: Handle<AdornmentMaterial>,
+    pub center: Handle<AdornmentMaterial>,
+    pub hover: Handle<AdornmentMaterial>,
+    pub drag: Handle<AdornmentMaterial>,
     /// Shared ghost-preview material used by every Smart Build Tool
     /// (Gap Fill, Resize Align, Edge Align, Part Swap, Model Reflect,
     /// Part to Terrain). Translucent green-emissive, always-on-top,
     /// alpha pulses via `pulse_ghost_preview_alpha`. See
     /// [TOOLSET_UX.md §3.6](../../../docs/development/TOOLSET_UX.md).
-    pub ghost_preview: Handle<StandardMaterial>,
+    pub ghost_preview: Handle<AdornmentMaterial>,
     /// Silhouette outline pass for ghost preview — thin cyan halo so
     /// 0.05m geometry is still legible against any background.
-    pub ghost_preview_outline: Handle<StandardMaterial>,
+    pub ghost_preview_outline: Handle<AdornmentMaterial>,
     /// Brief success flash after a commit succeeds — bright green,
     /// fades out in 150ms.
-    pub commit_flash: Handle<StandardMaterial>,
+    pub commit_flash: Handle<AdornmentMaterial>,
 }
 
 impl AdornmentMaterials {
-    pub fn pick(&self, color: AdornmentAxisColor) -> Handle<StandardMaterial> {
+    pub fn pick(&self, color: AdornmentAxisColor) -> Handle<AdornmentMaterial> {
         match color {
             AdornmentAxisColor::X => self.x.clone(),
             AdornmentAxisColor::Y => self.y.clone(),
@@ -138,7 +189,10 @@ pub struct AdornmentRendererPlugin;
 
 impl Plugin for AdornmentRendererPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, create_adornment_assets)
+        // Handles render through the always-on-top material, so its
+        // pipeline has to be registered before anything spawns one.
+        app.add_plugins(MaterialPlugin::<AdornmentMaterial>::default())
+            .add_systems(Startup, create_adornment_assets)
             .add_systems(
                 PostUpdate,
                 (
@@ -164,7 +218,7 @@ impl Plugin for AdornmentRendererPlugin {
 fn create_adornment_assets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<AdornmentMaterial>>,
 ) {
     // Primitive meshes — all UNIT-sized so per-adornment Transform::scale
     // can stretch them to whatever `height`/`radius`/`size` is requested.
@@ -196,40 +250,47 @@ fn create_adornment_assets(
 
     // Ghost preview: translucent green, pulses alpha, always-on-top.
     // accent-green #3cba54 at 40% base alpha (pulsed by pulse_ghost_preview_alpha).
-    // `depth_bias` values flipped to positive 2026-04-23 — Bevy 0.18
-    // uses reverse-Z so "always on top" requires a LARGE POSITIVE
-    // bias (near = 1.0, far = 0.0, compare = Greater). The prior
-    // negative values were shoving these fragments toward far.
-    let ghost_preview = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.235, 0.729, 0.329, 0.40),
-        emissive: LinearRgba::from(Color::srgb(0.235, 0.729, 0.329)) * 2.5,
-        unlit: true,
-        depth_bias: 1.0e6,
-        alpha_mode: AlphaMode::Blend,
-        cull_mode: None,
-        ..default()
+    // `depth_bias` here only breaks ties among the adornment set — the
+    // see-through behaviour comes from `AlwaysOnTopExtension`.
+    let ghost_preview = materials.add(AdornmentMaterial {
+        base: StandardMaterial {
+            base_color: Color::srgba(0.235, 0.729, 0.329, 0.40),
+            emissive: LinearRgba::from(Color::srgb(0.235, 0.729, 0.329)) * 2.5,
+            unlit: true,
+            depth_bias: 1.0e6,
+            alpha_mode: AlphaMode::Blend,
+            cull_mode: None,
+            ..default()
+        },
+        extension: AlwaysOnTopExtension {},
     });
     // Outline pass: thin cyan silhouette for legibility on any
     // background. accent-cyan #00bcd4. Bias higher than ghost_preview
     // so the outline always stacks above the translucent fill.
-    let ghost_preview_outline = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.0, 0.737, 0.831, 0.85),
-        emissive: LinearRgba::from(Color::srgb(0.0, 0.737, 0.831)) * 3.0,
-        unlit: true,
-        depth_bias: 2.0e6,
-        alpha_mode: AlphaMode::Blend,
-        cull_mode: None,
-        ..default()
+    let ghost_preview_outline = materials.add(AdornmentMaterial {
+        base: StandardMaterial {
+            base_color: Color::srgba(0.0, 0.737, 0.831, 0.85),
+            emissive: LinearRgba::from(Color::srgb(0.0, 0.737, 0.831)) * 3.0,
+            unlit: true,
+            depth_bias: 2.0e6,
+            alpha_mode: AlphaMode::Blend,
+            cull_mode: None,
+            ..default()
+        },
+        extension: AlwaysOnTopExtension {},
     });
     // Commit flash: 150ms bright-green burst. accent-green-bright #00e676.
-    let commit_flash = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.0, 0.902, 0.463, 0.70),
-        emissive: LinearRgba::from(Color::srgb(0.0, 0.902, 0.463)) * 4.0,
-        unlit: true,
-        depth_bias: 1.0e6,
-        alpha_mode: AlphaMode::Blend,
-        cull_mode: None,
-        ..default()
+    let commit_flash = materials.add(AdornmentMaterial {
+        base: StandardMaterial {
+            base_color: Color::srgba(0.0, 0.902, 0.463, 0.70),
+            emissive: LinearRgba::from(Color::srgb(0.0, 0.902, 0.463)) * 4.0,
+            unlit: true,
+            depth_bias: 1.0e6,
+            alpha_mode: AlphaMode::Blend,
+            cull_mode: None,
+            ..default()
+        },
+        extension: AlwaysOnTopExtension {},
     });
 
     commands.insert_resource(AdornmentMaterials {
@@ -243,50 +304,51 @@ fn create_adornment_assets(
 fn pulse_ghost_preview_alpha(
     time: Res<Time>,
     mats_res: Option<Res<AdornmentMaterials>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<AdornmentMaterial>>,
 ) {
     let Some(mats_res) = mats_res else { return };
     let t = time.elapsed_secs();
     let alpha = 0.40 + 0.10 * (t * std::f32::consts::TAU * 1.5).sin();
     if let Some(mut m) = materials.get_mut(&mats_res.ghost_preview) {
-        m.base_color.set_alpha(alpha);
+        m.base.base_color.set_alpha(alpha);
     }
 }
 
 fn axis_material(
-    materials: &mut Assets<StandardMaterial>,
+    materials: &mut Assets<AdornmentMaterial>,
     color: Color,
-) -> Handle<StandardMaterial> {
-    materials.add(StandardMaterial {
-        base_color: color,
-        emissive: LinearRgba::from(color) * 2.5,
-        unlit: true,
-        // Always-on-top so tool handles stay visible when the camera
-        // is on the far side of or inside the adornee. **Bevy 0.18
-        // uses reverse-Z** (near = 1.0, far = 0.0, depth compare =
-        // Greater) so a fragment "wins" the depth test by carrying a
-        // HIGHER depth value. A large POSITIVE `depth_bias` pushes
-        // the gizmo fragment toward near, so opaque geometry in
-        // front of it loses the test.
-        //
-        // 2026-05-08: `AlphaMode::Blend` materials run in the
-        // transparent pass, which in Bevy 0.18 doesn't apply the
-        // material's `depth_bias` reliably (the bias is consumed by
-        // the prepass + opaque pipelines, not the transparent
-        // pipeline). The gizmo arrow shaft was being occluded by
-        // the part it was inside even though its tip — drawn from a
-        // less-occluded angle — was visible. Switching to Opaque
-        // puts the handle on the opaque pipeline where depth_bias
-        // works as advertised. The cost is that overlapping handle
-        // siblings can occlude each other from oblique angles,
-        // which is far less noticeable than the part-occlusion bug.
-        depth_bias: 1.0e6,
-        alpha_mode: AlphaMode::Opaque,
-        // Don't drop back-faces — with the heavy bias the viewing
-        // angle can put us "inside" the cone, and we want the user
-        // to still see the handle.
-        cull_mode: None,
-        ..default()
+) -> Handle<AdornmentMaterial> {
+    materials.add(AdornmentMaterial {
+        base: StandardMaterial {
+            base_color: color,
+            emissive: LinearRgba::from(color) * 2.5,
+            unlit: true,
+            // Always-on-top needs BOTH halves working together:
+            //
+            //   1. `Blend` puts handles in `Transparent3d`, which is a
+            //      SORTED phase that runs after opaque. `Opaque3d` is a
+            //      BINNED phase with no per-item ordering, so a handle
+            //      there can be overpainted by scene geometry drawn
+            //      later in the same pass — even with the depth test off.
+            //   2. `AlwaysOnTopExtension` forces `depth_compare = Always`
+            //      so the handle wins regardless of what's in front.
+            //
+            // `depth_bias` is added to the sorted phase's distance, and
+            // that sort is ascending with values increasing toward the
+            // camera — so a large POSITIVE bias sorts handles last, i.e.
+            // painted over everything else in the pass. It cannot do the
+            // job alone: it also lands on the rasterizer as
+            // `depth_stencil.bias.constant`, but that is scaled to a few
+            // ULPs of the fragment's own depth — a z-fighting nudge, not
+            // an occlusion override.
+            depth_bias: 1.0e6,
+            alpha_mode: AlphaMode::Blend,
+            // Don't drop back-faces — the camera can end up "inside" a
+            // cone, and the handle should still be visible there.
+            cull_mode: None,
+            ..default()
+        },
+        extension: AlwaysOnTopExtension {},
     })
 }
 

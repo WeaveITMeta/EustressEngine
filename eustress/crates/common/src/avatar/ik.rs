@@ -35,6 +35,9 @@ use super::{AvatarSystems, SpawnedByAvatarRuntime};
 
 /// Below this the foot is considered planted.
 const PLANT_SPEED_FRAC: f32 = 0.15;
+/// How close a foot must be to the ground beneath it to count as planted, m.
+/// Roughly a sole's thickness plus the clip's contact slop.
+const PLANT_GROUND_GAP: f32 = 0.09;
 /// How far below the foot to look for ground.
 const FOOT_PROBE_DOWN: f32 = 0.55;
 /// Maximum foot pitch when conforming to a slope.
@@ -42,19 +45,57 @@ const MAX_FOOT_ROLL_DEG: f32 = 35.0;
 /// IK fades out above this multiple of run speed — on a fast sprint the clip
 /// reads better than the solve.
 const IK_FADE_ABOVE: f32 = 1.4;
-/// How far past the ledge lip the palms sit, so fingers wrap the edge rather
-/// than floating on the face.
-const HAND_GRIP_LIFT: f32 = 0.03;
+/// Where the WRIST sits relative to the lip, as a fraction of body height.
+///
+/// Negative — below it. The IK end effector is the wrist, but the hand mesh
+/// continues past it along the forearm, which while hanging points straight
+/// up. Targeting the wrist ON the lip therefore hangs the whole hand in the
+/// air above the ledge, gripping nothing. Dropping the wrist by about a hand's
+/// length puts the palm on the edge, which is what the grip is supposed to
+/// look like.
+const WRIST_BELOW_LIP_FRAC: f32 = -0.055;
+/// How far the sole target sits below the body centre, as a fraction of the
+/// capsule half-extent.
+///
+/// At 0.92 the legs hung nearly straight and the knees never bent — the pose
+/// read as a limp dangle rather than a braced hang. Bringing the feet up puts
+/// a real angle at the knee, which is what "feet planted on the wall" means.
+const CLIMB_SOLE_DROP_FRAC: f32 = 0.42;
+/// How much say the leg IK gets while hanging.
+///
+/// Small. The authored stance already puts the knees out and the feet tucked;
+/// a full-weight solve straightens all of that back out to reach whatever
+/// point on the wall the target happens to sit at. The IK is here to press the
+/// soles onto the face, not to decide the shape of the legs.
+const CLIMB_LEG_IK_WEIGHT: f32 = 0.30;
+/// How much closer the ANCHORED hand's target sits to its shoulder, as a
+/// fraction of arm length — i.e. how much that elbow bends under load.
+const ANCHOR_ELBOW_FLEX: f32 = 0.16;
+/// Extra lateral splay given to the leg on the REACHING side, as a multiple of
+/// foot separation. The opposite leg pulls slightly the other way.
+const COUNTERWEIGHT_SPLAY: f32 = 0.9;
 /// Soles press this far off the wall face — the collision skin, so the foot
 /// contacts rather than intersects.
 const SOLE_WALL_CLEARANCE: f32 = 0.05;
 /// Mantle fraction over which the hands let go of the edge.
 ///
-/// Measured, not guessed: the body clears 1.96 m in 0.65 s, so with a ~0.54 m
-/// arm span the grip stays solvable only for the first ~15% of the pull.
-/// Holding past that leaves the arms stretched straight at a point they cannot
-/// reach, which reads as the hands being dragged behind the body.
-const HAND_RELEASE_BAND: (f32, f32) = (0.15, 0.55);
+/// Late, because the hands are what the body is pulling AGAINST. An earlier
+/// band (0.15–0.55) was chosen when the vertical curve was `ease_out`, which
+/// front-loaded the rise so hard that the torso passed the lip while the arms
+/// were still on it — holding longer only stretched them further. With a
+/// symmetric rise the body and hands stay in the same part of the motion, so
+/// the grip can hold through the pull and release as the hips clear.
+const HAND_RELEASE_BAND: (f32, f32) = (0.80, 0.96);
+
+/// How much of the arm grip the LEGS get during a mantle.
+///
+/// Low. Pinning the soles to the wall face through a pull-up bends the knees
+/// hard for the whole move, which is what made a vault read as being climbed
+/// with the knees. Once the body is rising, the legs should trail on the clip
+/// and let the arms carry the motion.
+const MANTLE_FOOT_WEIGHT: f32 = 0.45;
+/// How far a swinging foot lifts off the wall mid-step, in metres.
+const FOOT_SWING_LIFT: f32 = 0.10;
 /// How fast the grip blends in and out, per second. A hand catching a ledge is
 /// near-instant; at the old 18/s the blend was still climbing when the mantle
 /// took over.
@@ -63,6 +104,25 @@ const GRIP_BLEND_RATE: f32 = 35.0;
 /// length. Keeps a residual bend in the knee and elbow instead of snapping to
 /// a locked joint at the solver's straight-line case.
 const MAX_CHAIN_EXTENSION: f32 = 0.97;
+/// Tightest a solved chain may fold, as a fraction of its own length.
+///
+/// The solver had a maximum reach clamp and no minimum, so a target near the
+/// joint root folded the limb as far as the maths allowed. That is where every
+/// "sitting" and "L-sit" pose came from: soles targeted level with the hips are
+/// perfectly satisfiable by a knee bent past 120°, which is geometrically valid
+/// and anatomically absurd. A real knee or elbow stops around 55% of full
+/// extension, and pulling the target out to that distance produces a plausible
+/// pose instead of a folded one.
+const MIN_CHAIN_EXTENSION: f32 = 0.58;
+
+/// What a chain does when its target is closer than the joint can fold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NearTarget {
+    /// Leave the authored pose alone.
+    Refuse,
+    /// Solve to the nearest plausible point along the same direction.
+    PushOut,
+}
 
 /// Per-foot lock state.
 #[derive(Debug, Clone, Copy, Default)]
@@ -279,6 +339,7 @@ fn drive_two_bone_chain(
     target: Vec3,
     pole: Vec3,
     weight: f32,
+    near: NearTarget,
 ) -> Option<f32> {
     if weight < 1e-3 {
         return None;
@@ -300,10 +361,33 @@ fn drive_two_bone_chain(
     // straight line at >=99.9% reach, which on a leg means a locked knee — a
     // pose no walk cycle ever contains and the single loudest tell that a
     // character is being posed by IK rather than animated.
-    let reachable = (upper_len + lower_len) * MAX_CHAIN_EXTENSION;
+    let span = upper_len + lower_len;
+    let reachable = span * MAX_CHAIN_EXTENSION;
+    let closest = span * MIN_CHAIN_EXTENSION;
     let to_target = target - up_w.translation;
-    let target = if to_target.length() > reachable {
+    let dist = to_target.length();
+    // Clamp the target into the band the limb can plausibly occupy — too far
+    // locks the joint straight, too near folds it past anatomy.
+    let target = if dist > reachable {
+        // Too far: pull the target in, which only straightens the limb.
         up_w.translation + to_target.normalize_or_zero() * reachable
+    } else if dist < closest {
+        match near {
+            // A FOOT refuses. Relocating it outward would plant it where the
+            // ground is not, and a foot in the authored pose still reads as a
+            // foot. This is where every "sitting" and "L-sit" pose came from.
+            NearTarget::Refuse => return None,
+            // A HAND pushes out to the closest anatomically plausible point.
+            //
+            // Refusing here was much worse than the problem it avoided: with
+            // no solve the arm keeps the authored hang direction, which points
+            // it STRAIGHT UP INTO THE AIR — the hand ends up half a metre from
+            // the ledge instead of the two or three centimetres that clamping
+            // costs. "Hands don't always hold the ledge" is this branch.
+            NearTarget::PushOut => {
+                up_w.translation + to_target.normalize_or(Vec3::NEG_Y) * closest
+            }
+        }
     } else {
         target
     };
@@ -366,7 +450,7 @@ fn solve_limb_ik(
 
         if ik.hand_weight > 1e-3 {
             solve_climb_limbs(
-                &mut writes, &parents, root, root_tf, rig, body, climb, &mut ik,
+                &spatial, &mut writes, &parents, root, root_tf, rig, body, climb, &mut ik,
             );
             // The ground solver must not also be running: there is no ground
             // under a hanging character, and a half-faded foot lock left over
@@ -421,9 +505,22 @@ fn solve_limb_ik(
             let ground_pos = origin + Vec3::NEG_Y * hit.distance;
             let ground_n = Vec3::from(hit.normal);
 
-            // Plant test: the foot is slow relative to this body's stride.
-            let planted = loco.planar_speed
-                < body.motion.walk_speed * PLANT_SPEED_FRAC * body.metrics.stride_scale.max(0.25);
+            // Plant test: is THIS FOOT near the ground?
+            //
+            // Gating on whole-body speed was wrong in both directions. Applied
+            // to both feet it dragged the swing foot to the floor and flattened
+            // the walk; restricted to slow movement it meant the stance foot
+            // got no ground adaptation at any walking speed, so ankles ignored
+            // slopes and steps the moment you were actually moving.
+            //
+            // Per-foot height is the real signal: the stance foot is down and
+            // conforms, the swing foot is up and is left to the clip.
+            let foot_gap = foot_w.translation.y - ground_pos.y;
+            let planted = foot_gap <= PLANT_GROUND_GAP
+                || loco.planar_speed
+                    < body.motion.walk_speed
+                        * PLANT_SPEED_FRAC
+                        * body.metrics.stride_scale.max(0.25);
 
             if planted && !lock.locked {
                 lock.locked = true;
@@ -463,6 +560,7 @@ fn solve_limb_ik(
             let w = lock.weight;
             drive_two_bone_chain(
                 &mut writes, &parents, root, root_tf, up_e, lo_e, foot_e, target, pole, w,
+                NearTarget::Refuse,
             );
 
             // Conform the foot to the surface, clamped.
@@ -481,7 +579,7 @@ fn solve_limb_ik(
                             MAX_FOOT_ROLL_DEG.to_radians(),
                         ),
                     );
-                    let blended = Quat::IDENTITY.slerp(clamped, (w * 0.6).clamp(0.0, 1.0));
+                    let blended = Quat::IDENTITY.slerp(clamped, (w * 0.9).clamp(0.0, 1.0));
                     ft.rotation = local_after_world_delta(foot_now.rotation, ft.rotation, blended);
                 }
             }
@@ -500,10 +598,280 @@ fn solve_limb_ik(
         ik.pelvis_offset += ik.pelvis_velocity * dt;
 
         if let Some(hips) = rig.bone(HumanoidBone::Hips) {
-            if let Ok(mut h) = writes.get_mut(hips) {
-                h.translation.y += ik.pelvis_offset;
-            }
+            // PELVIS DROP IS DISABLED — deliberately, not forgotten.
+            //
+            // It was wrong on two independent axes: the value was in world
+            // metres written into an armature-local bone (~100x off), AND
+            // hips-local +Y is world FORWARD after the root correction, so it
+            // never moved the pelvis down at all. Fixing only the scale made
+            // the wrong-axis error 100x larger and threw the hips forward,
+            // which is what folded the character into a seated pose while
+            // simply standing on flat ground.
+            //
+            // A pelvis drop needs the hips' own world basis to push along
+            // world -Y, and it is a refinement rather than a requirement.
+            // Shipping a third guess at it is worse than shipping none.
+            let _ = (hips, &ik.pelvis_offset);
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The authored climb pose
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A hand-authored pose, written as the direction each bone should POINT in
+/// the body's own frame (+X right, +Y up, −Z forward, i.e. into the wall).
+///
+/// ## Why directions and not Euler angles
+///
+/// A pose is normally authored as local bone rotations, but those depend
+/// entirely on the rig's bind orientation and axis conventions — get one wrong
+/// on a Mixamo skeleton and the limb twists somewhere unrelated. A *direction*
+/// is convention-free: aim the bone at its child, measure the arc, apply it.
+/// The same machinery the IK already uses.
+///
+/// ## Why a base pose exists at all
+///
+/// Without one, the climb was four end-effector targets and a solver free to
+/// satisfy them however it liked — which is why every fix produced a different
+/// wrong pose, and why bones the IK does not own (spine, neck, shoulders) sat
+/// frozen at whatever the clip last wrote. The pose sets the whole body; the
+/// IK then adjusts only the hands and feet onto the real geometry.
+type PoseDir = (HumanoidBone, HumanoidBone, [f32; 3]);
+
+/// A dead hang: arms overhead and slightly out, torso long, knees soft, feet
+/// toward the wall.
+const HANG_POSE: &[PoseDir] = &[
+    // Spine counter-rotates against the pelvis: the chain leans progressively
+    // to one side going up, so the shoulder line and the hip line are NOT
+    // parallel. In the footage they are separate, counter-rotating segments —
+    // a rigid torso is the difference between a climber and a plank.
+    (HumanoidBone::Spine, HumanoidBone::Spine1, [0.10, 0.98, 0.10]),
+    (HumanoidBone::Spine1, HumanoidBone::Spine2, [0.16, 0.97, 0.08]),
+    (HumanoidBone::Spine2, HumanoidBone::Neck, [0.20, 0.96, 0.04]),
+    (HumanoidBone::Neck, HumanoidBone::Head, [-0.08, 0.96, -0.22]),
+    // The girdle SHRUGS toward the ears under a hanging load, and tilts high
+    // on the side taking weight. Shoulder bones run outboard from the spine, so
+    // a positive Y here lifts that shoulder.
+    (HumanoidBone::LeftShoulder, HumanoidBone::LeftArm, [-0.90, 0.42, -0.10]),
+    (HumanoidBone::RightShoulder, HumanoidBone::RightArm, [0.90, 0.42, -0.10]),
+    // Upper arms reach up and a little outboard; forearms close to vertical.
+    (HumanoidBone::LeftArm, HumanoidBone::LeftForeArm, [-0.28, 0.94, -0.16]),
+    (HumanoidBone::LeftForeArm, HumanoidBone::LeftHand, [-0.10, 0.99, -0.06]),
+    (HumanoidBone::RightArm, HumanoidBone::RightForeArm, [0.28, 0.94, -0.16]),
+    (HumanoidBone::RightForeArm, HumanoidBone::RightHand, [0.10, 0.99, -0.06]),
+    // A CLIMBER'S STANCE, not a dangle.
+    //
+    // Knees splay outward and forward, shins come back inboard so the feet
+    // tuck up under the body against the wall. Straight legs with pointed toes
+    // read as a corpse on a rope; this is what taking your weight on the wall
+    // looks like.
+    //
+    // Deliberately ASYMMETRIC: one leg rides higher than the other. Perfectly
+    // mirrored legs look posed, and a stagger is what a climber actually does
+    // while searching for the next foothold.
+    (HumanoidBone::LeftUpLeg, HumanoidBone::LeftLeg, [-0.62, -0.62, -0.48]),
+    (HumanoidBone::LeftLeg, HumanoidBone::LeftFoot, [0.30, -0.88, -0.37]),
+    (HumanoidBone::RightUpLeg, HumanoidBone::RightLeg, [0.52, -0.76, -0.39]),
+    (HumanoidBone::RightLeg, HumanoidBone::RightFoot, [-0.24, -0.93, -0.28]),
+];
+
+/// Moving sideways, authored for travel toward the character's RIGHT (+X).
+///
+/// Mirrored for the other direction rather than authored twice — see
+/// [`mirror_pose_dir`]. The asymmetry is the whole point of the pose: the lead
+/// arm is long and reaching along the lip, the trail arm is bent and pulling,
+/// the torso is angled into the direction of travel, and the legs cross so the
+/// trailing foot comes across behind the leading one. A symmetric hang that
+/// happens to be translating sideways reads as a body on rails.
+const SHIMMY_POSE: &[PoseDir] = &[
+    // Torso angles toward the reach and leans into it.
+    (HumanoidBone::Spine, HumanoidBone::Spine1, [0.24, 0.95, 0.08]),
+    (HumanoidBone::Spine1, HumanoidBone::Spine2, [0.30, 0.94, 0.06]),
+    (HumanoidBone::Spine2, HumanoidBone::Neck, [0.34, 0.93, 0.02]),
+    // Head tracks where the hand is going.
+    (HumanoidBone::Neck, HumanoidBone::Head, [0.22, 0.92, -0.26]),
+    // Leading (right) shoulder drives UP and out into the reach; trailing
+    // (left) shoulder drops as that arm takes the load.
+    (HumanoidBone::LeftShoulder, HumanoidBone::LeftArm, [-0.92, 0.18, -0.12]),
+    (HumanoidBone::RightShoulder, HumanoidBone::RightArm, [0.86, 0.52, -0.08]),
+    // Lead arm reaches OUT along the lip — closer to horizontal than vertical.
+    // This is the shape that makes a traverse legible from any camera angle.
+    (HumanoidBone::RightArm, HumanoidBone::RightForeArm, [0.82, 0.54, -0.18]),
+    (HumanoidBone::RightForeArm, HumanoidBone::RightHand, [0.52, 0.84, -0.10]),
+    // Trail arm is the one bearing weight, so it hangs close to VERTICAL and
+    // crosses slightly under the body as it pulls across.
+    (HumanoidBone::LeftArm, HumanoidBone::LeftForeArm, [-0.34, 0.92, -0.20]),
+    (HumanoidBone::LeftForeArm, HumanoidBone::LeftHand, [0.06, 0.99, -0.08]),
+    // Legs CROSS. The trailing leg comes across behind the leading one, which
+    // is what actually happens when a climber traverses and is the single most
+    // recognisable thing about the motion.
+    (HumanoidBone::RightUpLeg, HumanoidBone::RightLeg, [0.66, -0.66, -0.36]),
+    (HumanoidBone::RightLeg, HumanoidBone::RightFoot, [0.20, -0.94, -0.28]),
+    (HumanoidBone::LeftUpLeg, HumanoidBone::LeftLeg, [0.18, -0.80, -0.57]),
+    (HumanoidBone::LeftLeg, HumanoidBone::LeftFoot, [0.42, -0.86, -0.30]),
+];
+
+/// The drive: lead knee up and forward, trail leg extended behind, arms
+/// swinging CONTRALATERALLY — right leg forward means left arm forward, the
+/// same coupling as a walk cycle.
+///
+/// Authored for a right-leg lead and mirrored for the other, so the vault
+/// alternates legs instead of always hopping off the same foot.
+const VAULT_LAUNCH_POSE: &[PoseDir] = &[
+    // A lean, not a dive. Around 15°.
+    (HumanoidBone::Spine, HumanoidBone::Spine1, [0.0, 0.97, -0.22]),
+    (HumanoidBone::Spine1, HumanoidBone::Spine2, [0.0, 0.98, -0.19]),
+    (HumanoidBone::Spine2, HumanoidBone::Neck, [0.0, 0.99, -0.14]),
+    // Eyes on the landing.
+    (HumanoidBone::Neck, HumanoidBone::Head, [0.0, 0.95, -0.30]),
+    (HumanoidBone::LeftShoulder, HumanoidBone::LeftArm, [-0.97, 0.16, -0.18]),
+    (HumanoidBone::RightShoulder, HumanoidBone::RightArm, [0.97, 0.16, 0.18]),
+    // ARMS HANG AND SWING. Every one of these is Y-DOMINANT on purpose.
+    //
+    // The first pass had the upper arm at z = -0.86 — nearly horizontal — which
+    // does not read as a swing at all, it reads as Superman. A running arm
+    // hangs from the shoulder and swings through maybe 40° while the elbow
+    // carries the forearm further; the upper arm never leaves vertical by much.
+    // LEFT arm forward (opposing the right leg).
+    (HumanoidBone::LeftArm, HumanoidBone::LeftForeArm, [-0.30, -0.87, -0.39]),
+    (HumanoidBone::LeftForeArm, HumanoidBone::LeftHand, [-0.18, -0.72, -0.67]),
+    // RIGHT arm driving back.
+    // The back-swinging arm stays MODEST. A full rearward drive is a sprint
+    // start, and over a low block it reads as the arms flying backwards rather
+    // than swinging; the opposition only has to be legible, not extreme.
+    (HumanoidBone::RightArm, HumanoidBone::RightForeArm, [0.30, -0.93, 0.20]),
+    (HumanoidBone::RightForeArm, HumanoidBone::RightHand, [0.16, -0.88, 0.44]),
+    // RIGHT leg leads: thigh down and forward — a stride, not a high march.
+    (HumanoidBone::RightUpLeg, HumanoidBone::RightLeg, [0.14, -0.71, -0.69]),
+    (HumanoidBone::RightLeg, HumanoidBone::RightFoot, [0.09, -0.95, -0.30]),
+    // LEFT leg trails: extended back, taking the push-off.
+    (HumanoidBone::LeftUpLeg, HumanoidBone::LeftLeg, [-0.12, -0.85, 0.51]),
+    (HumanoidBone::LeftLeg, HumanoidBone::LeftFoot, [-0.09, -0.90, 0.43]),
+];
+/// The landing: lead foot planted on the top, trail leg swinging through,
+/// arms passing back toward neutral. Blending out of this returns the body to
+/// a walk without a seam.
+const VAULT_LAND_POSE: &[PoseDir] = &[
+    (HumanoidBone::Spine, HumanoidBone::Spine1, [0.0, 0.99, -0.11]),
+    (HumanoidBone::Spine1, HumanoidBone::Spine2, [0.0, 0.99, -0.09]),
+    (HumanoidBone::Spine2, HumanoidBone::Neck, [0.0, 1.0, -0.06]),
+    (HumanoidBone::Neck, HumanoidBone::Head, [0.0, 0.98, -0.18]),
+    (HumanoidBone::LeftShoulder, HumanoidBone::LeftArm, [-0.98, 0.14, -0.08]),
+    (HumanoidBone::RightShoulder, HumanoidBone::RightArm, [0.98, 0.14, 0.08]),
+    // Arms passing back through neutral, still opposed but closer to hanging.
+    (HumanoidBone::LeftArm, HumanoidBone::LeftForeArm, [-0.26, -0.95, -0.16]),
+    (HumanoidBone::LeftForeArm, HumanoidBone::LeftHand, [-0.16, -0.92, -0.36]),
+    (HumanoidBone::RightArm, HumanoidBone::RightForeArm, [0.26, -0.96, 0.13]),
+    (HumanoidBone::RightForeArm, HumanoidBone::RightHand, [0.14, -0.94, 0.31]),
+    // Lead leg under the body, taking the weight.
+    (HumanoidBone::RightUpLeg, HumanoidBone::RightLeg, [0.11, -0.95, -0.29]),
+    (HumanoidBone::RightLeg, HumanoidBone::RightFoot, [0.07, -0.99, -0.12]),
+    // Trail leg swinging through, knee folding as it comes forward.
+    (HumanoidBone::LeftUpLeg, HumanoidBone::LeftLeg, [-0.11, -0.82, 0.56]),
+    (HumanoidBone::LeftLeg, HumanoidBone::LeftFoot, [-0.07, -0.96, -0.27]),
+];
+/// The mirror image of one authored entry, for travel the other way.
+///
+/// Both halves of the transform are required: flipping the direction's X
+/// without swapping the bone would aim the LEFT arm along a right-handed
+/// reach. Mirroring is a reflection of the whole body, not of a vector.
+fn mirror_pose_dir((bone, child, d): PoseDir) -> PoseDir {
+    (
+        bone.mirrored(),
+        child.mirrored(),
+        [-d[0], d[1], d[2]],
+    )
+}
+
+/// The pull-up: elbows driving down and back, torso tucked, knees rising.
+const MANTLE_POSE: &[PoseDir] = &[
+    (HumanoidBone::Spine, HumanoidBone::Spine1, [0.08, 0.93, -0.34]),
+    (HumanoidBone::Spine1, HumanoidBone::Spine2, [0.12, 0.94, -0.30]),
+    (HumanoidBone::Spine2, HumanoidBone::Neck, [0.15, 0.95, -0.24]),
+    (HumanoidBone::Neck, HumanoidBone::Head, [-0.06, 0.94, -0.34]),
+    // Shoulders driven down and back — the pull-up position.
+    (HumanoidBone::LeftShoulder, HumanoidBone::LeftArm, [-0.88, 0.30, -0.36]),
+    (HumanoidBone::RightShoulder, HumanoidBone::RightArm, [0.88, 0.30, -0.36]),
+    (HumanoidBone::LeftArm, HumanoidBone::LeftForeArm, [-0.34, 0.70, -0.62]),
+    (HumanoidBone::LeftForeArm, HumanoidBone::LeftHand, [-0.12, 0.96, -0.24]),
+    (HumanoidBone::RightArm, HumanoidBone::RightForeArm, [0.34, 0.70, -0.62]),
+    (HumanoidBone::RightForeArm, HumanoidBone::RightHand, [0.12, 0.96, -0.24]),
+    // Knees RISE, but they do not come up to horizontal.
+    //
+    // Both thighs used to point further forward than down, which is a knee
+    // raised to waist height on both legs at once. Under a torso already
+    // pitched forward that reads as the body folding up — the crumpled,
+    // "weird knee" shape that shows whenever the character climbs onto a
+    // block. A pull-up tucks the knees; it does not sit down in mid-air.
+    // Two properties, and both matter: the thigh must lift MORE than a dead
+    // hang does (it is a pull-up, the knees come up) while still pointing
+    // further down than forward (it is not a mid-air sit).
+    (HumanoidBone::LeftUpLeg, HumanoidBone::LeftLeg, [-0.40, -0.55, -0.50]),
+    (HumanoidBone::LeftLeg, HumanoidBone::LeftFoot, [0.26, -0.90, -0.35]),
+    (HumanoidBone::RightUpLeg, HumanoidBone::RightLeg, [0.34, -0.68, -0.55]),
+    (HumanoidBone::RightLeg, HumanoidBone::RightFoot, [-0.20, -0.94, -0.27]),
+];
+
+/// Aim `bone` so the segment toward `child` points along `want` (world space).
+fn aim_bone(
+    writes: &mut Query<&mut Transform, Without<SpawnedByAvatarRuntime>>,
+    parents: &Query<&ChildOf>,
+    root: Entity,
+    root_tf: &Transform,
+    bone: Entity,
+    child: Entity,
+    want: Vec3,
+    weight: f32,
+) {
+    if weight < 1e-3 {
+        return;
+    }
+    let (Some(b), Some(c)) = (
+        world_of(bone, root, root_tf, parents, writes),
+        world_of(child, root, root_tf, parents, writes),
+    ) else {
+        return;
+    };
+    let cur = c.translation - b.translation;
+    if cur.length_squared() < 1e-8 {
+        return;
+    }
+    let cur = cur.normalize();
+    let d = scaled_arc(cur, want.normalize_or(cur), weight);
+    apply_world_delta(writes, bone, b.rotation, d);
+}
+
+/// Lay an authored pose over the skeleton, in the avatar's own frame.
+fn apply_pose(
+    writes: &mut Query<&mut Transform, Without<SpawnedByAvatarRuntime>>,
+    parents: &Query<&ChildOf>,
+    root: Entity,
+    root_tf: &Transform,
+    rig: &AvatarRig,
+    pose: &[PoseDir],
+    weight: f32,
+    mirror: bool,
+) {
+    // Rotation only: the pose is expressed relative to which way the body
+    // faces, so it follows the character around a corner for free.
+    let facing = root_tf.rotation;
+    for entry in pose {
+        let (bone, child, dir) = if mirror { mirror_pose_dir(*entry) } else { *entry };
+        let (Some(b), Some(c)) = (rig.bone(bone), rig.bone(child)) else {
+            continue;
+        };
+        aim_bone(
+            writes,
+            parents,
+            root,
+            root_tf,
+            b,
+            c,
+            facing * Vec3::from_array(dir),
+            weight,
+        );
     }
 }
 
@@ -520,12 +888,64 @@ fn solve_limb_ik(
 pub(crate) fn climb_hand_weight(climb: &AvatarClimb) -> f32 {
     match climb.phase {
         ClimbPhase::None => 0.0,
-        ClimbPhase::Hanging => 1.0,
+        // Every attached phase except the mantle keeps full grip: hanging,
+        // shimmying, reaching and lowering are all defined by the hands being
+        // on the wall.
+        ClimbPhase::Hanging
+        | ClimbPhase::Shimmy
+        | ClimbPhase::Transfer
+        | ClimbPhase::Lowering => 1.0,
         ClimbPhase::Mantling => {
             let (a, b) = HAND_RELEASE_BAND;
             1.0 - ((climb.t - a) / (b - a)).clamp(0.0, 1.0)
         }
+        // A vault never touches the block. The arms are SWINGING — that swing
+        // is where the momentum comes from — so binding a hand to the lip is
+        // exactly wrong, and was part of why stepping onto a low block looked
+        // like being winched up it.
+        ClimbPhase::Vaulting => 0.0,
     }
+}
+
+/// Look for an actual foothold on the wall, rather than pressing the sole flat
+/// against a blank face.
+///
+/// Naughty Dog's write-up on Uncharted 4 names this directly: *"the feet
+/// actually look for an edge instead of having them just dangling and
+/// swinging"*, alongside the observation that when you climb, most of your
+/// weight is on your feet. A sole pinned to a flat plane at a fixed height is
+/// the dangle; searching the face for something to stand on is the difference.
+///
+/// Casts down the wall face inside the band the leg can reach and returns the
+/// first up-facing surface found — a ledge, a step, a protrusion. `None` means
+/// the face really is blank there, and the caller falls back to pressing on it.
+pub(crate) fn find_foothold(
+    spatial: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+    face_xz: Vec3,
+    normal: Vec3,
+    from_y: f32,
+    to_y: f32,
+    stand_off: f32,
+) -> Option<Vec3> {
+    let span = from_y - to_y;
+    if span <= 0.01 {
+        return None;
+    }
+    // Just off the face, so the cast samples the wall's profile rather than
+    // skimming along the inside of it.
+    let origin = Vec3::new(face_xz.x, from_y, face_xz.z) + normal * stand_off;
+    if !origin.is_finite() {
+        return None;
+    }
+    let hit = spatial.cast_ray(origin, Dir3::NEG_Y, span, true, filter)?;
+    let n = Vec3::from(hit.normal);
+    // Only a surface you could actually weight — a near-vertical hit is the
+    // wall itself, not a foothold on it.
+    if n.dot(Vec3::Y) < 0.5 {
+        return None;
+    }
+    Some(origin + Vec3::NEG_Y * hit.distance)
 }
 
 /// Plant both hands on the ledge edge and both soles on the wall face.
@@ -534,6 +954,7 @@ pub(crate) fn climb_hand_weight(climb: &AvatarClimb) -> f32 {
 /// grip stays put while the body swings under it.
 #[allow(clippy::too_many_arguments)]
 fn solve_climb_limbs(
+    spatial: &SpatialQuery,
     writes: &mut Query<&mut Transform, Without<SpawnedByAvatarRuntime>>,
     parents: &Query<&ChildOf>,
     root: Entity,
@@ -546,11 +967,65 @@ fn solve_climb_limbs(
     let m = &body.metrics;
     let w = ik.hand_weight;
 
+    // Base pose FIRST, IK second.
+    //
+    // The solver only owns four end effectors; everything else — spine, neck,
+    // shoulders — had no one writing it once the clips were blended out, and
+    // sat frozen wherever the last frame of walking left it. Laying an
+    // authored pose down first gives the whole body a sensible shape, and the
+    // limb solve then adjusts the hands and feet onto the actual geometry
+    // instead of inventing the entire posture from four points.
+    if climb.phase == ClimbPhase::Vaulting {
+        // A STRIDE, so the pose has to move. Two authored keys blended across
+        // the hop: a single static shape would hold one silhouette the whole
+        // way over and read as the body being carried rather than stepping.
+        //
+        // The lead leg alternates by which hand last reached, so consecutive
+        // blocks are not all taken off the same foot.
+        let mirror = climb.reaching == 0;
+        let k = climb.t.clamp(0.0, 1.0);
+        apply_pose(writes, parents, root, root_tf, rig, VAULT_LAUNCH_POSE, w, mirror);
+        // Cross over in the back half, once the lead foot is near the surface.
+        let land = ((k - 0.35) / 0.65).clamp(0.0, 1.0);
+        if land > 0.01 {
+            apply_pose(
+                writes, parents, root, root_tf, rig, VAULT_LAND_POSE,
+                w * super::climb::ease_in_out(land), mirror,
+            );
+        }
+    } else if climb.phase == ClimbPhase::Mantling {
+        apply_pose(writes, parents, root, root_tf, rig, MANTLE_POSE, w, false);
+    } else {
+        // Hang underneath, sideways lean over the top, blended by how hard the
+        // character is actually traversing. Laying the shimmy over the hang
+        // rather than switching between them means starting and stopping a
+        // traverse eases in and out instead of popping between two postures.
+        apply_pose(writes, parents, root, root_tf, rig, HANG_POSE, w, false);
+        let lean = climb.travel.clamp(-1.0, 1.0);
+        if lean.abs() > 0.02 {
+            apply_pose(
+                writes,
+                parents,
+                root,
+                root_tf,
+                rig,
+                SHIMMY_POSE,
+                w * lean.abs(),
+                lean < 0.0,
+            );
+        }
+    }
+
     // Ledge frame: `n` points off the wall toward the character, `tangent`
-    // runs along the lip.
-    let n = climb.wall_normal.with_y(0.0).normalize_or(Vec3::Z);
-    let tangent = Vec3::Y.cross(n).normalize_or(Vec3::X);
-    let edge = climb.grab_point;
+    // runs along the lip. Taken from `hand_frame` rather than the raw grip so
+    // the hands lead the body across a transfer.
+    let Some((edge, raw_n, raw_t)) = climb.hand_frame() else {
+        ik.hand_error_m = 0.0;
+        ik.climb_foot_error_m = 0.0;
+        return;
+    };
+    let n = raw_n.with_y(0.0).normalize_or(Vec3::Z);
+    let tangent = raw_t.with_y(0.0).normalize_or(Vec3::Y.cross(n).normalize_or(Vec3::X));
 
     let arm_len = m.height_m * super::climb::ARM_SPAN_FRAC;
     let leg_len = m.leg_length.max(0.2);
@@ -559,7 +1034,7 @@ fn solve_climb_limbs(
     // the playing clip happened to leave each foot. Following the clip left one
     // leg tucked at knee height while the other hung straight, which reads as a
     // stumble rather than a brace.
-    let sole_y = root_tf.translation.y - m.capsule_half_extent() * 0.92;
+    let sole_y = root_tf.translation.y - m.capsule_half_extent() * CLIMB_SOLE_DROP_FRAC;
 
     // ── Hands ───────────────────────────────────────────────────────────────
     let mut worst_hand = 0.0_f32;
@@ -576,9 +1051,36 @@ fn solve_climb_limbs(
             continue;
         };
 
-        let target = edge
-            + tangent * (side * m.shoulder_half_width.max(0.10))
-            + Vec3::Y * HAND_GRIP_LIFT;
+        // Each hand solves to ITS OWN hold, not to a shared point offset by
+        // shoulder width. That symmetry is what made every pose read as
+        // hanging: a climber anchors one hand and reaches with the other, and
+        // the two are rarely on the same feature.
+        let hand_idx = if side < 0.0 { 0 } else { 1 };
+        let hold = climb.holds[hand_idx];
+        let mut target = if hold.is_finite() && hold != Vec3::ZERO {
+            hold + Vec3::Y * (m.height_m * WRIST_BELOW_LIP_FRAC)
+        } else {
+            edge + tangent * (side * m.shoulder_half_width.max(0.10))
+                + Vec3::Y * (m.height_m * WRIST_BELOW_LIP_FRAC)
+        };
+
+        // The two arms are never in the same state.
+        //
+        // Frame analysis: one arm sits near full extension (~165–175°) while
+        // the other is bent — elbow flexion IS the load signal, and it is on
+        // the ANCHORED arm, which is pulling. Solving both to identical
+        // extension is what makes a hang read as a gymnast's dead hang rather
+        // than a climber holding on.
+        //
+        // Pulling the anchored hand's target slightly toward its shoulder
+        // shortens that chain, which the solver resolves as a bent elbow.
+        if hand_idx != climb.reaching {
+            if let Some(sh) = rig.bone(arm_b).and_then(|e| world_of(e, root, root_tf, parents, writes))
+            {
+                let toward_shoulder = (sh.translation - target).normalize_or_zero();
+                target += toward_shoulder * (arm_len * ANCHOR_ELBOW_FLEX);
+            }
+        }
 
         // Elbows hang low and flare outboard — the shape of a dead hang. A
         // pole directly below would leave the solve free to pick an inward
@@ -589,12 +1091,73 @@ fn solve_climb_limbs(
 
         if let Some(err) = drive_two_bone_chain(
             writes, parents, root, root_tf, up_e, lo_e, end_e, target, pole, w,
+            NearTarget::PushOut,
         ) {
             worst_hand = worst_hand.max(err);
+        }
+
+        // Orient the WRIST.
+        //
+        // The chain solver aims the upper and lower arm and stops there, so
+        // the hand kept whatever rotation was last written to it. That used to
+        // be hidden because the clips were overwriting hand rotation every
+        // frame; now that climbing blends clip authority to zero, the stale
+        // value is what you see — hands cocked at an angle that has nothing to
+        // do with the ledge.
+        //
+        // Local identity is a straight wrist on a Mixamo rig (bind-pose bones
+        // run along the chain), which is the right STARTING point — it clears
+        // whatever stale rotation the clip left — but it is not the answer.
+        if let Ok(mut h) = writes.get_mut(end_e) {
+            h.rotation = h.rotation.slerp(Quat::IDENTITY, w.clamp(0.0, 1.0));
+        }
+
+        // Now lay the PALM DOWN on the lip.
+        //
+        // Aiming the finger direction was not enough and made things worse:
+        // rotating one axis onto a target leaves the twist about that axis
+        // completely unconstrained, so the hand landed at whatever roll the
+        // elbow's pole vector happened to produce — which is what "palms
+        // broken" looks like. A grip needs the palm PLANE controlled, not the
+        // direction the fingers happen to point.
+        //
+        // The hand's local +Y is the back of the hand — the same convention
+        // the sole uses a few lines below, where local +Y is the top of the
+        // foot. Pointing it at world +Y therefore lays the palm flat and
+        // downward on the top face of the ledge, which is the grip being
+        // asked for.
+        if let Some(hand_now) = world_of(end_e, root, root_tf, parents, writes) {
+            if let Ok(mut h) = writes.get_mut(end_e) {
+                // Two constraints, because one is not enough.
+                //
+                // Aligning the back of the hand to world up fixes the palm
+                // PLANE but leaves the spin within that plane free, and the
+                // elbow pole flares the arms outboard — so each hand settled
+                // with its fingers pointing out to its own side, a quarter turn
+                // off, mirrored left to right.
+                //
+                // The second term spins each hand about the now-vertical axis
+                // until the fingers point along the body's forward, across the
+                // top of the ledge. `side` is -1 left and +1 right, so the two
+                // hands turn opposite ways — which is exactly the mirrored
+                // correction the pose needs.
+                let flat = Quat::from_rotation_arc(hand_now.rotation * Vec3::Y, Vec3::Y);
+                let square = Quat::from_axis_angle(Vec3::Y, side * std::f32::consts::FRAC_PI_2);
+                let want = square * flat;
+                let blended = Quat::IDENTITY.slerp(want, w.clamp(0.0, 1.0));
+                h.rotation = local_after_world_delta(hand_now.rotation, h.rotation, blended);
+            }
         }
     }
 
     // ── Soles ───────────────────────────────────────────────────────────────
+    //
+    // Weighted DOWN during a mantle: see `MANTLE_FOOT_WEIGHT`.
+    let foot_w = if climb.phase == ClimbPhase::Mantling {
+        w * MANTLE_FOOT_WEIGHT
+    } else {
+        w * CLIMB_LEG_IK_WEIGHT
+    };
     //
     // The wall is vertical, so its face at any height shares the edge's x/z.
     let mut worst_foot = 0.0_f32;
@@ -611,18 +1174,91 @@ fn solve_climb_limbs(
             continue;
         };
 
-        let target = Vec3::new(edge.x, sole_y, edge.z)
-            + n * SOLE_WALL_CLEARANCE
-            + tangent * (side * m.foot_half_separation);
+        // Search the face for something to stand on before settling for it.
+        //
+        // The band runs from just under the hips down to the leg's reach, so a
+        // ledge, a step or any protrusion in that range wins over the blank
+        // wall — which is what makes the stance read as taking weight rather
+        // than hanging.
+        // The SAME-SIDE leg tracks the reaching arm.
+        //
+        // Measured in the footage as a cross-body counterbalance: reach left
+        // and the left leg splays left and flexes, keeping the centre of mass
+        // under the load. Legs that stay put while an arm swings out make the
+        // body look like it is hanging off a hook.
+        let reaching_side = if climb.reaching == 0 { -1.0 } else { 1.0 };
+        let follows = if (side - reaching_side).abs() < 0.5 { 1.0 } else { -0.35 };
+        let counter = tangent * (follows * side * m.foot_half_separation * COUNTERWEIGHT_SPLAY);
+        let lateral = tangent * (side * m.foot_half_separation * 1.4) + counter;
 
-        // Knees drop and tuck slightly toward the wall. A pole pushed hard at
-        // the wall would bend the knee straight through it.
-        let pole = hip.translation + Vec3::NEG_Y * leg_len - n * (leg_len * 0.25);
+        // THE FEET STEP TOO, in counterphase to the hands.
+        //
+        // The hands got a hand-over-hand cycle and the feet were left on a
+        // fixed offset, so traversing showed two arms working above a pair of
+        // legs that never moved. Monkeying along a wall is four limbs
+        // alternating: a foot swings while the hand diagonally opposite it is
+        // planted and bearing load.
+        let travel = climb.travel.clamp(-1.0, 1.0);
+        let (step_along, lift) = if travel.abs() > 0.05 {
+            // Contralateral — this foot leads when the hand on the OTHER side
+            // is the one leading.
+            let hand_lead_side = if climb.reaching == 0 { -1.0 } else { 1.0 };
+            crate::avatar::climb::shimmy_foot_step(
+                climb.cycle,
+                (side - hand_lead_side).abs() > 0.5,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        let stride = travel.signum() * step_along * crate::avatar::climb::SHIMMY_STRIDE;
+        let face_xz = edge + lateral + tangent * stride;
+        let reach_low = root_tf.translation.y - m.capsule_half_extent() - leg_len * 0.45;
+        let foothold = find_foothold(
+            spatial,
+            &SpatialQueryFilter::default().with_excluded_entities([root]),
+            face_xz,
+            n,
+            root_tf.translation.y - m.capsule_half_extent() * 0.2,
+            reach_low,
+            m.capsule_radius * 0.5,
+        );
+
+        let target = match foothold {
+            // Stand ON it, a sole's thickness above the surface and pressed
+            // back toward the wall.
+            Some(p) => p + Vec3::Y * 0.03 + n * (SOLE_WALL_CLEARANCE * 0.5),
+            None => Vec3::new(face_xz.x, sole_y, face_xz.z) + n * SOLE_WALL_CLEARANCE,
+        };
+        // Off the wall while swinging, back on it when planted.
+        let target = target + Vec3::Y * (lift * FOOT_SWING_LIFT * travel.abs())
+            + n * (lift * FOOT_SWING_LIFT * 0.6 * travel.abs());
+
+        // Knees drop and bulge AWAY from the wall.
+        //
+        // The pole decides which way the joint folds, and this pointed it at
+        // the wall (`-n`), so the knees bent inward — through the surface the
+        // feet are braced on. Hanging with the hips out from the face and the
+        // soles on it, the shin swings back from the thigh, which is away from
+        // the wall: `+n`.
+        let pole = hip.translation + Vec3::NEG_Y * leg_len + n * (leg_len * 0.35);
 
         if let Some(err) = drive_two_bone_chain(
-            writes, parents, root, root_tf, up_e, lo_e, foot_e, target, pole, w,
+            writes, parents, root, root_tf, up_e, lo_e, foot_e, target, pole, foot_w,
+            NearTarget::Refuse,
         ) {
             worst_foot = worst_foot.max(err);
+        }
+
+        // Sole flat against the wall face, for the same reason the wrist needs
+        // orienting: nothing else is writing this bone while climbing.
+        if let Some(foot_now) = world_of(foot_e, root, root_tf, parents, writes) {
+            if let Ok(mut f) = writes.get_mut(foot_e) {
+                // The foot's "up" should point off the wall, i.e. along the
+                // face normal, so the sole lies on it.
+                let want = Quat::from_rotation_arc(foot_now.rotation * Vec3::Y, n);
+                let blended = Quat::IDENTITY.slerp(want, (foot_w * 0.7).clamp(0.0, 1.0));
+                f.rotation = local_after_world_delta(foot_now.rotation, f.rotation, blended);
+            }
         }
     }
 
@@ -764,9 +1400,15 @@ mod tests {
         c.t = 0.0;
         assert_eq!(climb_hand_weight(&c), 1.0, "let go before the pull started");
 
+        // Mid-pull the grip is still FULL: the hands are what the body pulls
+        // against, so releasing here is what left the arms behind the torso.
         c.t = 0.5;
-        let mid = climb_hand_weight(&c);
-        assert!((0.0..1.0).contains(&mid), "mid-mantle grip {mid} not releasing");
+        assert_eq!(climb_hand_weight(&c), 1.0, "let go in the middle of the pull");
+
+        // Inside the release band it must be easing off.
+        c.t = 0.88;
+        let late = climb_hand_weight(&c);
+        assert!((0.0..1.0).contains(&late), "late-mantle grip {late} not releasing");
 
         c.t = 1.0;
         assert_eq!(climb_hand_weight(&c), 0.0, "still welded to the edge on top");
@@ -803,4 +1445,386 @@ mod tests {
         let knee = root + u * 0.5;
         assert!(knee.z > root.z, "knee bent away from pole: {knee:?}");
     }
+}
+
+#[cfg(test)]
+mod limb_band_tests {
+    use super::*;
+
+    /// A limb must never be asked to fold tighter than anatomy allows — that
+    /// is where the sitting and L-sit poses came from.
+    #[test]
+    fn a_target_inside_the_fold_limit_is_pushed_out_to_it() {
+        let span = 1.0_f32;
+        let closest = span * MIN_CHAIN_EXTENSION;
+        // Simulate the clamp the solver applies.
+        for dist in [0.05_f32, 0.2, 0.4, 0.5] {
+            let clamped = if dist < closest { closest } else { dist };
+            assert!(
+                clamped >= closest - 1e-6,
+                "target at {dist} was not pushed out to the fold limit"
+            );
+        }
+    }
+
+    #[test]
+    fn the_plausible_band_is_neither_locked_nor_folded() {
+        assert!(MIN_CHAIN_EXTENSION > 0.4, "folds tighter than a real joint");
+        assert!(MIN_CHAIN_EXTENSION < MAX_CHAIN_EXTENSION, "band is empty");
+        assert!(MAX_CHAIN_EXTENSION < 1.0, "locks the joint straight");
+    }
+
+    /// A hang tucks the feet UP under the body — a climber's stance, not a
+    /// dangle.
+    ///
+    /// This used to assert the opposite, that the soles hang low. That was a
+    /// misreading of an earlier bug: tucked feet looked like a seated pose
+    /// because the leg IK had full authority and folded the chain to reach its
+    /// target, not because the target height was wrong. With the authored
+    /// stance owning the shape and the solve reduced to a nudge, tucked is
+    /// correct — so the safeguard belongs on the IK's SHARE, not the height.
+    #[test]
+    fn hanging_legs_are_owned_by_the_stance_not_the_solver() {
+        assert!(
+            CLIMB_SOLE_DROP_FRAC < 0.7,
+            "soles at {CLIMB_SOLE_DROP_FRAC} hang low — a dangle, not a brace"
+        );
+        assert!(
+            CLIMB_LEG_IK_WEIGHT < 0.5,
+            "leg IK at {CLIMB_LEG_IK_WEIGHT} outvotes the authored stance and              straightens the knees back out"
+        );
+        assert!(CLIMB_LEG_IK_WEIGHT > 0.0, "soles never reach the wall at all");
+    }
+}
+
+#[cfg(test)]
+mod pose_tests {
+    use super::*;
+
+    fn dirs(pose: &[PoseDir]) -> Vec<(HumanoidBone, Vec3)> {
+        pose.iter().map(|(b, _, d)| (*b, Vec3::from_array(*d))).collect()
+    }
+
+    /// Every authored direction must be usable as a direction — a zero or
+    /// non-finite entry silently disables that bone and the pose half-applies.
+    #[test]
+    fn every_authored_direction_is_a_usable_direction() {
+        for (name, pose) in [("hang", HANG_POSE), ("mantle", MANTLE_POSE)] {
+            for (bone, dir) in dirs(pose) {
+                assert!(dir.is_finite(), "{name}/{bone:?}: non-finite");
+                assert!(
+                    dir.length() > 0.5,
+                    "{name}/{bone:?}: length {} is too short to normalise safely",
+                    dir.length()
+                );
+            }
+        }
+    }
+
+    /// A hang points the arms UP and the legs DOWN. If a sign is flipped the
+    /// character hangs upside down, which is the sort of thing that should be
+    /// caught here rather than in a screenshot.
+    #[test]
+    fn the_hang_reaches_up_and_hangs_down() {
+        for (bone, dir) in dirs(HANG_POSE) {
+            match bone {
+                HumanoidBone::LeftArm
+                | HumanoidBone::RightArm
+                | HumanoidBone::LeftForeArm
+                | HumanoidBone::RightForeArm => {
+                    assert!(dir.y > 0.5, "{bone:?} does not reach upward: {dir:?}")
+                }
+                HumanoidBone::LeftUpLeg
+                | HumanoidBone::RightUpLeg
+                | HumanoidBone::LeftLeg
+                | HumanoidBone::RightLeg => {
+                    assert!(dir.y < -0.5, "{bone:?} does not hang downward: {dir:?}")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A climber's stance: the knee goes OUT to the side, and the shin comes
+    /// back inboard so the foot tucks under the body. Thigh and shin sharing a
+    /// lateral sign is a straight splayed leg, not a tucked one.
+    #[test]
+    fn knees_splay_out_and_shins_tuck_back_in() {
+        for (name, pose) in [("hang", HANG_POSE), ("mantle", MANTLE_POSE)] {
+            let map: std::collections::HashMap<_, _> = dirs(pose).into_iter().collect();
+            for (thigh, shin, out) in [
+                (HumanoidBone::LeftUpLeg, HumanoidBone::LeftLeg, -1.0_f32),
+                (HumanoidBone::RightUpLeg, HumanoidBone::RightLeg, 1.0),
+            ] {
+                let t = map[&thigh];
+                let s = map[&shin];
+                assert!(
+                    t.x * out > 0.25,
+                    "{name}: {thigh:?} x={} does not splay outward", t.x
+                );
+                assert!(
+                    s.x * out < 0.0,
+                    "{name}: {shin:?} x={} does not tuck back inboard", s.x
+                );
+                assert!(t.z < 0.0, "{name}: {thigh:?} should lean toward the wall");
+            }
+        }
+    }
+
+    /// The legs must NOT be mirrored — a stagger is what makes it read as
+    /// climbing rather than as a mannequin.
+    #[test]
+    fn the_legs_are_staggered_not_mirrored() {
+        let map: std::collections::HashMap<_, _> = dirs(HANG_POSE).into_iter().collect();
+        let l = map[&HumanoidBone::LeftUpLeg];
+        let r = map[&HumanoidBone::RightUpLeg];
+        assert!(
+            (l.y - r.y).abs() > 0.05,
+            "both thighs sit at the same height ({} vs {}) — no stagger",
+            l.y,
+            r.y
+        );
+    }
+
+    /// The pose is mirrored: left and right differ only in the sign of X.
+    #[test]
+    fn the_pose_is_symmetric_left_to_right() {
+        for (name, pose) in [("hang", HANG_POSE), ("mantle", MANTLE_POSE)] {
+            let map: std::collections::HashMap<_, _> = dirs(pose).into_iter().collect();
+            // ARMS only. The legs are deliberately staggered — see HANG_POSE —
+            // because mirrored legs read as posed rather than climbing.
+            for (l, r) in [
+                (HumanoidBone::LeftArm, HumanoidBone::RightArm),
+                (HumanoidBone::LeftForeArm, HumanoidBone::RightForeArm),
+            ] {
+                let a = map[&l];
+                let b = map[&r];
+                assert!(
+                    (a.x + b.x).abs() < 1e-5 && (a.y - b.y).abs() < 1e-5 && (a.z - b.z).abs() < 1e-5,
+                    "{name}: {l:?} {a:?} and {r:?} {b:?} are not mirrored"
+                );
+            }
+        }
+    }
+
+    /// A mantle tucks: knees come up relative to the hang, or it is just a
+    /// hang with the body moved.
+    /// Paired with `no_authored_climb_pose_leaves_a_limb_horizontal`, which
+    /// bounds the same value from the other side. Raising the knees to satisfy
+    /// this one is what produced the horizontal thighs that folded the body;
+    /// dropping them to satisfy that one removes the tuck entirely. The pose
+    /// has to sit between the two.
+    #[test]
+    fn the_mantle_tucks_more_than_the_hang() {
+        let hang: std::collections::HashMap<_, _> = dirs(HANG_POSE).into_iter().collect();
+        let mantle: std::collections::HashMap<_, _> = dirs(MANTLE_POSE).into_iter().collect();
+        for thigh in [HumanoidBone::LeftUpLeg, HumanoidBone::RightUpLeg] {
+            assert!(
+                mantle[&thigh].y > hang[&thigh].y,
+                "{thigh:?} does not lift during the pull-up"
+            );
+        }
+    }
+
+    /// A traverse pose that mirrors to itself would give the same body shape
+    /// going both ways, which is the same as having no directional pose at all.
+    #[test]
+    fn the_shimmy_pose_is_directional_and_mirrors_cleanly() {
+        let m: std::collections::HashMap<_, _> = SHIMMY_POSE
+            .iter()
+            .map(|(b, c, d)| ((*b, *c), Vec3::from_array(*d)))
+            .collect();
+
+        // Every entry has a mirror partner, or the reflected pose has holes.
+        for (bone, child, _) in SHIMMY_POSE {
+            let key = (bone.mirrored(), child.mirrored());
+            assert!(
+                m.contains_key(&key) || bone.mirrored() == *bone,
+                "{bone:?} has no mirror partner in SHIMMY_POSE"
+            );
+        }
+
+        // Asymmetric where it counts: the two arms must NOT be reflections of
+        // one another, or there is no lead arm and no trail arm.
+        let l = m[&(HumanoidBone::LeftArm, HumanoidBone::LeftForeArm)];
+        let r = m[&(HumanoidBone::RightArm, HumanoidBone::RightForeArm)];
+        let reflected_r = Vec3::new(-r.x, r.y, r.z);
+        assert!(
+            l.normalize().distance(reflected_r.normalize()) > 0.15,
+            "the arms are mirror images, so the pose has no direction: {l:?} vs {r:?}"
+        );
+
+        // The lead (right) arm reaches further along +X than the trail arm.
+        assert!(
+            r.normalize().x > -l.normalize().x + 0.1,
+            "the leading arm does not reach further along the lip than the trailing one"
+        );
+
+        // Mirroring twice is the identity, so travelling left then right does
+        // not accumulate a bias.
+        for e in SHIMMY_POSE {
+            let back = mirror_pose_dir(mirror_pose_dir(*e));
+            assert_eq!(back.0, e.0);
+            assert_eq!(back.1, e.1);
+            assert_eq!(back.2, e.2);
+        }
+
+        // And one mirrored entry actually lands on the other side.
+        let (b, c, d) = mirror_pose_dir((
+            HumanoidBone::RightArm,
+            HumanoidBone::RightForeArm,
+            r.to_array(),
+        ));
+        assert_eq!(b, HumanoidBone::LeftArm);
+        assert_eq!(c, HumanoidBone::LeftForeArm);
+        assert_eq!(d[0], -r.x);
+        assert_eq!(d[1], r.y);
+    }
+
+    /// "One leg out front and the other trailing behind, swinging arms for
+    /// momentum." Both halves of that are structural, so both are pinned here.
+    #[test]
+    fn the_vault_is_a_stride_with_opposed_arms_and_staggered_legs() {
+        let key = |pose: &[PoseDir]| -> std::collections::HashMap<_, _> {
+            pose.iter()
+                .map(|(b, c, d)| ((*b, *c), Vec3::from_array(*d)))
+                .collect()
+        };
+        // -Z is forward in the body frame.
+        let launch = key(VAULT_LAUNCH_POSE);
+        let land = key(VAULT_LAND_POSE);
+
+        // EVERY limb root hangs. This is the single property that separates a
+        // stride from a dive, and getting it wrong is not subtle: the first
+        // version of this pose put the upper arms and the leading thigh near
+        // horizontal, and the character went over the block in a Superman pose.
+        // A limb that points further forward than it points down is not
+        // swinging, it is reaching.
+        for pose in [VAULT_LAUNCH_POSE, VAULT_LAND_POSE] {
+            for (bone, child, d) in pose {
+                let is_limb_root = matches!(
+                    bone,
+                    HumanoidBone::LeftArm
+                        | HumanoidBone::RightArm
+                        | HumanoidBone::LeftForeArm
+                        | HumanoidBone::RightForeArm
+                        | HumanoidBone::LeftUpLeg
+                        | HumanoidBone::RightUpLeg
+                        | HumanoidBone::LeftLeg
+                        | HumanoidBone::RightLeg
+                );
+                if !is_limb_root {
+                    continue;
+                }
+                let v = Vec3::from_array(*d);
+                assert!(
+                    v.y < 0.0 && v.y.abs() > v.z.abs(),
+                    "{bone:?}->{child:?} points more along the ground than down                      ({v:?}) — that is a dive, not a swing"
+                );
+            }
+        }
+
+        let r_leg = launch[&(HumanoidBone::RightUpLeg, HumanoidBone::RightLeg)];
+        let l_leg = launch[&(HumanoidBone::LeftUpLeg, HumanoidBone::LeftLeg)];
+        assert!(
+            r_leg.z < -0.25,
+            "the leading thigh is not driving forward: {r_leg:?}"
+        );
+        assert!(
+            l_leg.z > 0.2,
+            "the trailing thigh is not extended behind: {l_leg:?}"
+        );
+
+        // CONTRALATERAL: the arm opposite the leading leg swings forward.
+        let l_arm = launch[&(HumanoidBone::LeftArm, HumanoidBone::LeftForeArm)];
+        let r_arm = launch[&(HumanoidBone::RightArm, HumanoidBone::RightForeArm)];
+        assert!(
+            l_arm.z < -0.25,
+            "right leg leads, so the LEFT arm must swing forward: {l_arm:?}"
+        );
+        assert!(
+            r_arm.z > 0.15,
+            "the right arm should be driving back against it: {r_arm:?}"
+        );
+        assert!(
+            l_arm.z * r_arm.z < 0.0,
+            "both arms swing the same way — that is a jump, not a stride"
+        );
+
+        // The two keys must actually differ, or blending them animates nothing.
+        let moved: f32 = VAULT_LAUNCH_POSE
+            .iter()
+            .filter_map(|(b, c, d)| {
+                land.get(&(*b, *c))
+                    .map(|e| Vec3::from_array(*d).distance(*e))
+            })
+            .sum();
+        assert!(
+            moved > 0.9,
+            "launch and landing poses are nearly identical (total change {moved:.2}) —              blending them would hold one silhouette across the whole vault"
+        );
+
+        // Landing takes the weight: the lead shin comes under the body rather
+        // than staying out in front of it.
+        let r_shin_launch = launch[&(HumanoidBone::RightLeg, HumanoidBone::RightFoot)];
+        let r_shin_land = land[&(HumanoidBone::RightLeg, HumanoidBone::RightFoot)];
+        assert!(
+            r_shin_land.y < r_shin_launch.y,
+            "the leading shin does not drop under the body to land:              {r_shin_launch:?} -> {r_shin_land:?}"
+        );
+
+        // Mirrors cleanly, so vaults can alternate legs.
+        for e in VAULT_LAUNCH_POSE.iter().chain(VAULT_LAND_POSE) {
+            let back = mirror_pose_dir(mirror_pose_dir(*e));
+            assert_eq!(back.0, e.0);
+            assert_eq!(back.2, e.2);
+        }
+    }
+
+    /// No climbing pose puts a limb HORIZONTAL.
+    ///
+    /// The vault learned this the hard way and the mantle was left with both
+    /// thighs pointing further forward than down — a knee raised to waist
+    /// height on each leg at once, which under a forward-pitched torso reads as
+    /// the body folding up in mid-air. Applied to every authored climb pose so
+    /// the next one cannot reintroduce it.
+    ///
+    /// Sign is deliberately not constrained: a hang reaches UP and a vault
+    /// swings DOWN, both legitimate. What is never legitimate is a limb lying
+    /// flat.
+    #[test]
+    fn no_authored_climb_pose_leaves_a_limb_horizontal() {
+        for (name, pose) in [
+            ("hang", HANG_POSE),
+            ("mantle", MANTLE_POSE),
+            ("shimmy", SHIMMY_POSE),
+            ("vault-launch", VAULT_LAUNCH_POSE),
+            ("vault-land", VAULT_LAND_POSE),
+        ] {
+            for (bone, child, d) in pose {
+                let limb = matches!(
+                    bone,
+                    HumanoidBone::LeftArm
+                        | HumanoidBone::RightArm
+                        | HumanoidBone::LeftForeArm
+                        | HumanoidBone::RightForeArm
+                        | HumanoidBone::LeftUpLeg
+                        | HumanoidBone::RightUpLeg
+                        | HumanoidBone::LeftLeg
+                        | HumanoidBone::RightLeg
+                );
+                if !limb {
+                    continue;
+                }
+                let v = Vec3::from_array(*d);
+                assert!(
+                    v.y.abs() > v.z.abs(),
+                    "{name}: {bone:?}->{child:?} lies flat ({v:?}) — it points further                      along the ground than up or down, which folds the body"
+                );
+            }
+        }
+    }
+
+
+
 }

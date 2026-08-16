@@ -70,6 +70,7 @@ use crate::pages::{
     tickets::TicketsPage,
     trust_registry::TrustRegistryPage,
     kyc::KycPage,
+    verify::VerifyPage,
     license::LicensePage,
     support::SupportPage,
 };
@@ -124,6 +125,44 @@ pub fn App() -> impl IntoView {
     
     // Restore session from localStorage on startup
     app_state.restore_session();
+
+    // Keep the signed-in user fresh. `restore_session` rehydrates from
+    // localStorage, which snapshots the balance at login time — so BLS earned
+    // since then (credited at the UTC-midnight distribution) never appeared
+    // until the user manually logged out and back in. Re-fetch once now and
+    // then on an interval so the wallet, nav badge, and dashboard all track
+    // the ledger.
+    {
+        let app_state = app_state.clone();
+        let refresh = move || {
+            let app_state = app_state.clone();
+            spawn_local(async move {
+                let Some(token) = app_state.get_token() else { return };
+                let client = crate::api::ApiClient::new(&app_state.api_url);
+                match crate::api::get_me(&client, &token).await {
+                    Ok(user) => {
+                        // The user may have signed out while this request was
+                        // in flight. Applying the response then would restore
+                        // a session they just ended (and re-persist it to
+                        // localStorage), so re-check before committing.
+                        if app_state.auth.get_untracked().is_authenticated() {
+                            // login() re-persists to localStorage, so the
+                            // refreshed balance survives the next reload.
+                            app_state.login(user);
+                        }
+                    }
+                    // The session is genuinely dead — stop showing a signed-in
+                    // UI backed by a token the witness rejects.
+                    Err(crate::api::ApiError::Unauthorized) => app_state.logout(),
+                    // Network/5xx: transient. Keep the session and retry.
+                    Err(_) => {}
+                }
+            });
+        };
+        refresh();
+        let handle = gloo_timers::callback::Interval::new(60_000, refresh);
+        handle.forget(); // refresh for the life of the app
+    }
 
     // Cookieless pageview beacon (feeds the /admin funnel). Fire-and-forget:
     // a failure here must never affect the app. The Worker no-ops if the
@@ -251,6 +290,7 @@ pub fn App() -> impl IntoView {
                 // Info pages
                 <Route path=path!("/license") view=LicensePage />
                 <Route path=path!("/kyc") view=KycPage />
+                <Route path=path!("/verify") view=VerifyPage />
                 <Route path=path!("/support") view=SupportPage />
             </Routes>
                         </Router>

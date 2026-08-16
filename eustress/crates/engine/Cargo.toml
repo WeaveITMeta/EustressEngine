@@ -61,6 +61,10 @@ name = "eustress-headless"
 path = "src/bin/headless.rs"
 required-features = ["world-db"]
 
+[[bin]]
+name = "session-baseline"
+path = "src/bin/session-baseline.rs"
+
 [dependencies]
 # Cross-platform clipboard (arboard). Backs the Slint platform clipboard
 # (Ctrl+V paste in LineEdit/TextInput), Explorer "Copy Path", and the
@@ -124,14 +128,24 @@ bevy = { workspace = true, default-features = false, features = [
     "tonemapping_luts",
     "zstd_rust",
     "debug",
-    # Kept enabled only so the previous build's bevy artifacts are reused (a
-    # ~100-min bevy recompile otherwise). The photoreal camera components
-    # (Bloom/TAA/SSAO) were reverted out of studio_camera_bundle — they washed
-    # the editor viewport to flat grey — so DefaultPlugins registers these
-    # plugins but NO camera carries the components, i.e. they are inert. Drop
-    # both features (and accept the bevy rebuild) when doing a clean pass.
+    # ── Photoreal post stack (LIVE — see src/photoreal.rs) ──────────────────
+    # These are no longer inert: `studio_camera_bundle` carries `Msaa::Off` +
+    # SMAA + bloom. MSAA had never been set at all, so every Studio camera ran
+    # Bevy's 4× default on the main pass AND the depth prepass; SMAA replaces
+    # that anti-aliasing for a fraction of the cost.
     "bevy_anti_alias",
     "bevy_post_process",
+    # REQUIRED by SMAA, and easy to miss: without it `bevy_anti_alias` compiles
+    # its `#[cfg(not(feature = "smaa_luts"))]` branch, which substitutes a
+    # `lut_placeholder()` image for the real area/search lookup textures. That
+    # placeholder produces a D3 texture view where the SMAA blend-weight bind
+    # group declares D2, so the FIRST frame that runs SMAA dies with
+    #   "Texture binding 2 expects dimension = D2, but given a view with
+    #    dimension = D3"
+    # and bevy_render quits the app on the validation error. Costs no extra
+    # rebuild beyond `bevy_anti_alias` itself: this feature's other two deps
+    # (`ktx2`, `bevy_image/zstd`) are already pulled in by `tonemapping_luts`.
+    "smaa_luts",
 ] }
 # bevy_ecs as a direct, NON-OPTIONAL dep. Two reasons it must NOT be optional:
 #   1. Merely naming `bevy_ecs` in this manifest makes Bevy's derive macros
@@ -218,11 +232,12 @@ eustress-forge-sdk = { path = "../forge-sdk" }
 # (= raft-persist), so we MUST forward that feature or `eustress_forge::sim`
 # would not be compiled into the dependency.
 eustress-forge = { path = "../forge", optional = true, features = ["sim-orchestration"] }
-# WorldDb — Fjall-backed authoritative ECS persistence. Optional today;
-# wired by the `world-db` feature. When on, the Bevy plugin in
-# `space::world_db_plugin` opens `<universe>/<space>/world.fjalldb/`
-# on Space switch and mirrors Transform/BasePart writes alongside the
-# legacy TOML write path.
+# WorldDb — Fjall-backed authoritative ECS persistence. Wired by the
+# `world-db` feature, which is IN `core`, so this is on in every normal
+# build. The Bevy plugin in `space::world_db_plugin` opens
+# `<universe>/<space>/world.fjalldb/` on Space switch; from then on the DB
+# is the authoritative store and the disk TOML hierarchy is the import
+# seed, not a live mirror (see the `world-db` feature comment below).
 eustress-worlddb = { path = "../worlddb", optional = true }
 # Data Platform columnar leaf (P0). Optional + OFF by default and NOT in
 # `core` — arrow-rs/parquet must never enter the default `cargo run` graph
@@ -280,6 +295,11 @@ syntect = { version = "5.2", default-features = false, features = ["default-synt
 sentry = { version = "0.34", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
 # Window icon (must match bevy's versions)
 image = "0.25"
+# PNG encoding for staged chat attachments (`ui::slint_ui::stage_attachment_png`).
+# NOTE: `png` is ALSO listed under [build-dependencies] for the icon build
+# script — that entry is not visible to crate source, so this separate
+# [dependencies] entry is required and is not a duplicate.
+png = "0.17"
 winit = "0.30"
 # WGPU version synced with Bevy 0.19 (wgpu 28)
 # wgpu = "27"
@@ -358,9 +378,13 @@ core = [
     # native meters at every load boundary. ON by default 2026-05-13.
     "units_v1",
     # WorldDb — Fjall-backed authoritative ECS store. ON by default
-    # 2026-05-15 (binary pivot). The mirror path is ADDITIVE: TOML
-    # stays authoritative, Fjall is written alongside, so a Fjall
-    # fault degrades to a logged warning rather than data loss.
+    # 2026-05-15 (binary pivot). Fjall is AUTHORITATIVE: TOML seeds the
+    # DB on first open and is not kept in sync afterwards. The `toml`
+    # write-back feature is deliberately NOT in this tier, so on a normal
+    # build `write_instance_definition` skips the disk write for every
+    # instance `active_db::put_instance` accepts (leaf, non-mesh,
+    # non-file-natured, childless) — those live only in `world.fjalldb/`.
+    # Losing that directory loses those edits.
     # Override with `--no-default-features` (+ re-add needed tiers) to
     # diagnose a WorldDb issue in isolation.
     "world-db",

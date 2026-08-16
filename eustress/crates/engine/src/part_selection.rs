@@ -448,16 +448,36 @@ pub fn part_selection_system(
     {
         use avian3d::prelude::SpatialQueryFilter;
         if let Ok(dir) = Dir3::new(*ray.direction) {
-            let hits = spatial_query.ray_hits(ray.origin, dir, 10000.0, 20, true, &SpatialQueryFilter::default());
-            for hit in hits {
-                if let Some((part_id, parent_model)) = entity_part_ids.get(&hit.entity) {
-                    let distance = hit.distance;
-                    if closest_hit.as_ref().map_or(true, |(_, d, _, _)| distance < *d) {
-                        closest_hit = Some((part_id.clone(), distance, hit.entity, *parent_model));
+            // `ray_hits_callback` visits EVERY collider along the ray; we keep
+            // the nearest one that maps to a selectable part.
+            //
+            // Do NOT use `ray_hits(.., max_hits, ..)` here. It is implemented
+            // as this same callback pushing hits in BVH TRAVERSAL order and
+            // stopping once `max_hits` is reached — the results are never
+            // distance-sorted. With the old cap of 20, a dense scene
+            // (Mountain Ascension is ~131K instances) filled those 20 slots
+            // with arbitrary colliders and the part actually under the cursor
+            // was usually never collected, so clicking selected the wrong
+            // part or nothing at all. Streaming every hit and comparing
+            // distance is both correct and allocation-free.
+            spatial_query.ray_hits_callback(
+                ray.origin,
+                dir,
+                10000.0,
+                true,
+                &SpatialQueryFilter::default(),
+                |hit| {
+                    if let Some((part_id, parent_model)) = entity_part_ids.get(&hit.entity) {
+                        if closest_hit.as_ref().map_or(true, |(_, d, _, _)| hit.distance < *d) {
+                            closest_hit =
+                                Some((part_id.clone(), hit.distance, hit.entity, *parent_model));
+                        }
                     }
-                    break;
-                }
-            }
+                    // Keep traversing — a nearer part can still appear later
+                    // because hits arrive in tree order, not distance order.
+                    true
+                },
+            );
         }
     }
 

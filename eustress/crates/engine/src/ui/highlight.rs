@@ -90,6 +90,13 @@ pub fn language_for_ext(ext: &str) -> &'static str {
         // Rune is syntactically nearly identical to Rust
         "rn" | "rune" | "soul" => "Rust",
         "rs" => "Rust",
+        // Luau is Lua plus type annotations; the Lua grammar covers the
+        // shared syntax (keywords, strings, comments, numbers). Without
+        // this both engine scripting stacks were NOT equal citizens —
+        // Rune highlighted, Luau fell through to "Plain Text", produced
+        // zero token spans, and the editor's overlay stayed switched off
+        // (`has-token-spans` is bound to `token-spans.length > 0`).
+        "lua" | "luau" => "Lua",
         "toml" => "TOML",
         "json" => "JSON",
         "yaml" | "yml" => "YAML",

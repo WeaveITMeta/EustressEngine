@@ -14,10 +14,23 @@ use serde::{Deserialize, Serialize};
 #[derive(Component, Reflect, Clone, Debug)]
 #[reflect(Component)]
 pub struct DeformableMesh {
-    /// Original mesh handle (undeformed reference)
+    /// Handle of the shared, undeformed SOURCE mesh this part was built from.
+    ///
+    /// Read-only provenance: it is what `Mesh3d` is restored to when
+    /// deformation is torn down (play-stop / `deformation = false`). The
+    /// per-frame reference pose is [`original_positions`](Self::original_positions),
+    /// NOT this asset — several parts share one cached source mesh.
     pub original_mesh: Handle<Mesh>,
-    /// Deformed mesh handle (runtime modified)
+    /// Per-entity writable mesh asset. `Mesh3d` points here while deformable.
     pub deformed_mesh: Handle<Mesh>,
+    /// Undeformed vertex positions, captured once at init.
+    ///
+    /// Holding the reference pose in the component (rather than reading it
+    /// back out of a mesh asset) is what makes every vertex write ABSOLUTE —
+    /// `original[i] + displacement[i]` — so displacement can never compound
+    /// frame over frame into unbounded drift, no matter what the dirty flag
+    /// does. It also removes a full position-buffer clone from every write.
+    pub original_positions: Vec<Vec3>,
     /// Number of vertices
     pub vertex_count: usize,
     /// Whether mesh needs GPU sync
@@ -31,12 +44,30 @@ impl Default for DeformableMesh {
         Self {
             original_mesh: Handle::default(),
             deformed_mesh: Handle::default(),
+            original_positions: Vec::new(),
             vertex_count: 0,
             dirty: false,
             quality: DeformationQuality::Medium,
         }
     }
 }
+
+/// Marks a part that wants deformation (`BasePart.deformation = true`) but
+/// whose mesh asset had not finished loading when
+/// [`init_deformable_meshes`](super::systems::init_deformable_meshes) first
+/// saw it.
+///
+/// The init system is driven by `Changed<BasePart>` (a deliberate perf choice
+/// — see that system's docs), which fires ONCE. A GLB-backed part whose mesh
+/// is still streaming in at that moment would therefore never become
+/// deformable: the change tick is spent and nothing re-triggers it. This
+/// marker adds the entity to the init query's second `Or` arm so it is
+/// retried each frame until its mesh resolves, then removed. Cold streamed
+/// scenery never receives it (those early-out on `deformation == false`), so
+/// the O(N) cold-part scan the `Changed` filter avoids stays avoided.
+#[derive(Component, Reflect, Clone, Copy, Debug, Default)]
+#[reflect(Component)]
+pub struct DeformInitPending;
 
 /// Deformation quality settings
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect, Serialize, Deserialize)]
@@ -53,13 +84,23 @@ pub enum DeformationQuality {
 }
 
 // ============================================================================
-// DeformationState Component
+// VertexDisplacements Component
 // ============================================================================
 
-/// Per-entity deformation state tracking
+/// Per-vertex displacement accumulators for a [`DeformableMesh`].
+///
+/// NOTE ON THE NAME: this was called `DeformationState`, which collided with
+/// the *other* `DeformationState` component in
+/// [`crate::realism::materials::deformation`] — a `StrainTensor`-based
+/// physical state. Both were glob-re-exported from `realism::prelude`, so a
+/// `use realism::prelude::*` silently resolved `DeformationState` to the
+/// materials type and any code trying to reach this one got a component the
+/// vertex pipeline never writes. The two are pipeline STAGES, not duplicates:
+/// the materials type is the physical stress/strain state, this is the
+/// render-side displacement cache a full pipeline would derive from it.
 #[derive(Component, Reflect, Clone, Debug)]
 #[reflect(Component)]
-pub struct DeformationState {
+pub struct VertexDisplacements {
     /// Elastic displacement (recoverable)
     pub elastic_displacement: Vec<Vec3>,
     /// Plastic displacement (permanent)
@@ -72,6 +113,13 @@ pub struct DeformationState {
     pub yield_strain: f32,
     /// Current maximum displacement magnitude
     pub max_displacement: f32,
+    /// Largest SQUARED elastic displacement magnitude, refreshed by
+    /// [`update_total`](Self::update_total).
+    ///
+    /// Lets the elastic-relaxation system reject a settled part in O(1)
+    /// instead of scanning every vertex every frame just to discover there is
+    /// nothing to relax. Squared to keep the hot loop free of `sqrt`.
+    pub max_elastic_sq: f32,
     /// Reference temperature for thermal expansion (K)
     pub reference_temperature: f32,
     /// Thermal expansion coefficient (1/K)
@@ -82,7 +130,7 @@ pub struct DeformationState {
     pub allow_thermal: bool,
 }
 
-impl Default for DeformationState {
+impl Default for VertexDisplacements {
     fn default() -> Self {
         Self {
             elastic_displacement: Vec::new(),
@@ -91,6 +139,7 @@ impl Default for DeformationState {
             total_displacement: Vec::new(),
             yield_strain: 0.002, // 0.2% typical for steel
             max_displacement: 0.0,
+            max_elastic_sq: 0.0,
             reference_temperature: 293.15, // 20°C
             thermal_expansion_coeff: 12e-6, // Steel
             allow_plastic: true,
@@ -99,7 +148,7 @@ impl Default for DeformationState {
     }
 }
 
-impl DeformationState {
+impl VertexDisplacements {
     /// Initialize for given vertex count
     pub fn init(&mut self, vertex_count: usize) {
         self.elastic_displacement = vec![Vec3::ZERO; vertex_count];
@@ -111,15 +160,23 @@ impl DeformationState {
     /// Update total displacement from components
     pub fn update_total(&mut self) {
         self.max_displacement = 0.0;
-        
+        self.max_elastic_sq = 0.0;
+
         for i in 0..self.total_displacement.len() {
             self.total_displacement[i] = self.elastic_displacement[i]
                 + self.plastic_displacement[i]
                 + self.thermal_displacement[i];
-            
+
             let mag = self.total_displacement[i].length();
             if mag > self.max_displacement {
                 self.max_displacement = mag;
+            }
+
+            // Tracked in the loop that already runs, so the relaxation system
+            // can skip settled parts without a second full scan.
+            let elastic_sq = self.elastic_displacement[i].length_squared();
+            if elastic_sq > self.max_elastic_sq {
+                self.max_elastic_sq = elastic_sq;
             }
         }
     }
@@ -233,13 +290,29 @@ pub struct VertexInfluence {
 #[derive(Resource, Reflect, Clone, Debug)]
 #[reflect(Resource)]
 pub struct DeformationConfig {
+    /// Master switch for the whole vertex-deformation pipeline.
+    ///
+    /// The engine drives this from play state: deformation is a RUNTIME
+    /// effect, so it stays off while editing (physics is paused there anyway)
+    /// and is switched on when Play starts. Keeping the gate as plain resource
+    /// state rather than a `PlayModeState` run-condition is deliberate —
+    /// `eustress-common` must not depend on the engine's state enum, and
+    /// headless/other hosts can drive the same switch.
+    pub enabled: bool,
     /// Global deformation scale
     pub scale: f32,
     /// Maximum displacement as fraction of mesh size
     pub max_displacement_ratio: f32,
     /// Elastic spring constant (stiffness)
     pub stiffness: f32,
-    /// Damping factor for elastic recovery
+    /// Elastic recovery RATE, in units of 1/second.
+    ///
+    /// Elastic displacement decays as `exp(-damping · dt)`, so this is
+    /// frame-rate independent: ~5.0 relaxes a dent by 95% in about 0.6 s.
+    /// (The field previously went unread — nothing ever relaxed elastic
+    /// deformation — and its old `0.1` default was written for a per-FRAME
+    /// `disp *= 1 - damping` interpretation, which as a per-second rate would
+    /// take minutes to visibly recover.)
     pub damping: f32,
     /// Enable GPU compute for large meshes
     pub use_gpu: bool,
@@ -247,18 +320,36 @@ pub struct DeformationConfig {
     pub gpu_threshold: usize,
     /// Update frequency (frames between updates)
     pub update_interval: u32,
+    /// Target edge length (metres) for the deformable copy of a mesh.
+    ///
+    /// Deformation moves existing vertices and cannot create new ones, so an
+    /// authored 24-vertex cube — every vertex at a corner — has nothing to
+    /// displace under a localized impact and looks totally unreactive. The
+    /// mesh is subdivided at init until its edges are roughly this long, which
+    /// puts several vertices inside a typical impact radius.
+    pub target_edge_m: f32,
+    /// Hard cap on subdivision levels. Each level QUADRUPLES triangle count,
+    /// so this bounds a large part from exploding into millions of triangles
+    /// chasing a small target edge.
+    pub max_subdivision_levels: u32,
 }
 
 impl Default for DeformationConfig {
     fn default() -> Self {
         Self {
+            // On by default so a common-only / headless host gets working
+            // deformation without extra wiring; the engine explicitly clears
+            // it for Edit mode at startup.
+            enabled: true,
             scale: 1.0,
             max_displacement_ratio: 0.1, // 10% of mesh size
             stiffness: 1000.0,
-            damping: 0.1,
+            damping: 5.0,
             use_gpu: true,
             gpu_threshold: 10000,
             update_interval: 1,
+            target_edge_m: 0.2,
+            max_subdivision_levels: 5,
         }
     }
 }

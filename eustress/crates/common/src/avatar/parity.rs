@@ -232,6 +232,21 @@ mod tests {
         // reads `AssetEvent<Mesh>`. `AssetPlugin` alone does not register
         // `Assets<Mesh>`, which leaves that message uninitialized and panics
         // the whole schedule at param validation.
+        // Avian takes these as `ResMut` unconditionally, but its
+        // `register_physics_diagnostics` guards the `init_resource` behind
+        // `is_resource_added`, which does not hold at plugin-build time in a
+        // minimal app. `DefaultPlugins` supplies them in both shells, so the
+        // gap only ever shows up in tests — and only once enough frames run for
+        // a collider to move or a query to fire, which is why this harness
+        // survived until the behavioural suite started exercising it.
+        app.init_resource::<avian3d::spatial_query::SpatialQueryDiagnostics>();
+        app.init_resource::<avian3d::collider_tree::ColliderTreeDiagnostics>();
+        app.init_resource::<avian3d::collision::CollisionDiagnostics>();
+        app.init_resource::<avian3d::dynamics::solver::SolverDiagnostics>();
+        // All three pools: `TaskPoolPlugin` is not present when Bevy's plugins
+        // are added individually.
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(Default::default);
+        bevy::tasks::ComputeTaskPool::get_or_init(Default::default);
         app.init_asset::<Mesh>();
         // The spawner loads the body glTF as a `WorldAsset` (Bevy 0.19's
         // replacement for `Scene`). Registering the asset type lets the handle

@@ -600,6 +600,16 @@ pub struct InstanceProperties {
     /// `BasePart.respect_gltf_materials`; default false → unchanged behaviour.
     #[serde(default)]
     pub respect_gltf_materials: bool,
+    /// Opt in to runtime mesh deformation for this part.
+    ///
+    /// Surfaced to `BasePart.deformation`, which
+    /// `realism::deformation::init_deformable_meshes` watches. Without this
+    /// field the flag had no authoring route at all: it existed on `BasePart`
+    /// but nothing read it from TOML, so every loaded part was hard-`false`
+    /// and the whole deformation pipeline was unreachable outside of code.
+    /// Default false → parts stay rigid unless they ask not to be.
+    #[serde(default)]
+    pub deformation: bool,
     /// Roblox `PhysicalProperties` decomposition written by the importer
     /// under `[properties.physics]`. Optional — absent for hand-authored
     /// parts. When present, the collider-insert path attaches the
@@ -738,6 +748,7 @@ impl Default for InstanceProperties {
             locked: false,
             physics: None,
             respect_gltf_materials: false,
+            deformation: false,
         }
     }
 }
@@ -1663,12 +1674,17 @@ fn attributes_from_toml_table(
 }
 
 /// Known primitive mesh filenames that map to engine asset parts
+// ORDER MATTERS: the lookup takes the FIRST hint that appears anywhere in the
+// mesh filename, so any hint that is a substring of another must come first.
+// `corner_wedge` contains `wedge`, so listing `wedge` first would classify
+// every `corner_wedge.glb` as `PartType::Wedge` — wrong mesh semantics, wrong
+// Avian collider, and wrong replacement mesh when the scale tool rebuilds it.
 const PRIMITIVE_MESHES: &[(&str, &str, eustress_common::classes::PartType)] = &[
+    ("corner_wedge", "parts/corner_wedge.glb", eustress_common::classes::PartType::CornerWedge),
     ("block", "parts/block.glb", eustress_common::classes::PartType::Block),
     ("ball", "parts/ball.glb", eustress_common::classes::PartType::Ball),
     ("cylinder", "parts/cylinder.glb", eustress_common::classes::PartType::Cylinder),
     ("wedge", "parts/wedge.glb", eustress_common::classes::PartType::Wedge),
-    ("corner_wedge", "parts/corner_wedge.glb", eustress_common::classes::PartType::CornerWedge),
     ("cone", "parts/cone.glb", eustress_common::classes::PartType::Cone),
 ];
 
@@ -2196,6 +2212,7 @@ pub fn spawn_instance(
         material_name: instance.properties.material.clone(),
         cframe: Transform::from(safe_instance_transform.clone()),
         respect_gltf_materials: instance.properties.respect_gltf_materials,
+        deformation: instance.properties.deformation,
         ..default()
     };
 
@@ -3105,6 +3122,15 @@ pub fn load_disk_gaussian_splats_on_open(
     if !workspace.is_dir() {
         return;
     }
+    if super::skip_disk_scans() {
+        // Stamp the Space so this does not re-attempt every frame.
+        *last_space = Some(space_root.0.clone());
+        info!(
+            "🌫️ GS persistence scan SKIPPED (EUSTRESS_SKIP_DISK_SCANS) — disk-authored \
+             splat clouds will not be re-spawned for this open"
+        );
+        return;
+    }
     *last_space = Some(space_root.0.clone());
 
     // Best-effort parent: the Workspace service entity if the file loader has
@@ -3117,33 +3143,91 @@ pub fn load_disk_gaussian_splats_on_open(
 
     // Walk the DISK Workspace (GaussianSplats are disk-authoritative). A cheap
     // substring pre-filter avoids full-parsing every non-splat instance.
-    let mut stack = vec![workspace];
+    //
+    // Watchdog: this is a SERIAL walk that `read_to_string`s every
+    // `_instance.toml` under Workspace. On a Space with a large disk tree it
+    // is minutes of main-thread work, so it gets its own guard — the popup
+    // then names the splat scan rather than the enclosing load.
+    let _phase = super::load_phase::scope(
+        "gaussian-splat-scan",
+        format!("scanning {} for splat clouds", workspace.display()),
+    );
+    // Discovery is split from spawning so the expensive half can run off the
+    // serial path. Spawning needs `commands` / `registry` / asset resources,
+    // none of which are usable from a worker thread — but reading and filtering
+    // is pure I/O, and on a large Space that is effectively all of the cost
+    // (a Space with 1.3M `_instance.toml` files pays 1.3M sequential reads to
+    // usually find zero splats).
+    //
+    // Phase A — parallel walk + read + filter. Level-order so rayon can read a
+    // whole directory level at once; `file_type()` avoids the extra stat that
+    // `is_dir()` costs per entry.
+    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
     let mut found_toml = 0usize;
-    let mut found_gs = 0usize;
     let mut replaced = 0usize;
     let mut spawned = 0usize;
-    while let Some(dir) = stack.pop() {
-        let Ok(read_dir) = std::fs::read_dir(&dir) else { continue; };
-        for entry in read_dir.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                // Skip `.eustress` (trash + world.fjalldb) — only the human tree.
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !name.starts_with('.') {
-                    stack.push(path);
+    let mut gs_hits: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut frontier: Vec<std::path::PathBuf> = vec![workspace];
+    while !frontier.is_empty() {
+        struct LevelScan {
+            subdirs: Vec<std::path::PathBuf>,
+            toml_seen: usize,
+            hits: Vec<(std::path::PathBuf, String)>,
+        }
+        let scans: Vec<LevelScan> = frontier
+            .par_iter()
+            .map(|dir| {
+                let mut out = LevelScan {
+                    subdirs: Vec::new(),
+                    toml_seen: 0,
+                    hits: Vec::new(),
+                };
+                let Ok(read_dir) = std::fs::read_dir(dir) else {
+                    return out;
+                };
+                for entry in read_dir.flatten() {
+                    let path = entry.path();
+                    let is_dir = entry
+                        .file_type()
+                        .map(|t| t.is_dir())
+                        .unwrap_or_else(|_| path.is_dir());
+                    if is_dir {
+                        // Skip `.eustress` (trash + world.fjalldb) — only the
+                        // human tree.
+                        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        if !name.starts_with('.') {
+                            out.subdirs.push(path);
+                        }
+                        continue;
+                    }
+                    if path.file_name().and_then(|n| n.to_str()) != Some("_instance.toml") {
+                        continue;
+                    }
+                    out.toml_seen += 1;
+                    let Ok(content) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    // Only GaussianSplats carry a `[gaussian_splats]` section.
+                    if content.contains("gaussian_splats") {
+                        out.hits.push((path, content));
+                    }
                 }
-                continue;
-            }
-            if path.file_name().and_then(|n| n.to_str()) != Some("_instance.toml") {
-                continue;
-            }
-            found_toml += 1;
-            let Ok(content) = std::fs::read_to_string(&path) else { continue; };
-            // Only GaussianSplats carry a `[gaussian_splats]` section.
-            if !content.contains("gaussian_splats") {
-                continue;
-            }
-            found_gs += 1;
+                out
+            })
+            .collect();
+        frontier = Vec::new();
+        for scan in scans {
+            found_toml += scan.toml_seen;
+            gs_hits.extend(scan.hits);
+            frontier.extend(scan.subdirs);
+        }
+    }
+    let found_gs = gs_hits.len();
+
+    // Phase B — serial spawn over the hit list, which is empty on almost every
+    // Space. Body is unchanged; only what feeds it moved.
+    {
+        for (path, content) in gs_hits {
             // In DB-primary mode the file loader DOES spawn this GS folder — but
             // WITHOUT a cloud: the `[gaussian_splats]` section is lost through the
             // Fjall core/tree, and the folder-spawn never re-reads it from disk

@@ -110,7 +110,7 @@ export component PublishDialog inherits Rectangle {
     in-out property <string> description: "";
     in-out property <string> genre: "All";
     in-out property <bool> is-public: true;
-    in-out property <bool> open-source: false;
+    in-out property <bool> open_source: false;
     in-out property <bool> studio-editable: false;
     in property <[string]> spaces: [];
     in property <[PublishTreeNode]> tree-nodes: [];
@@ -376,7 +376,7 @@ export component PublishDialog inherits Rectangle {
                             height: 28px;
                             HorizontalLayout {
                                 spacing: 8px;
-                                CheckBox { text: "Open Source"; checked <=> root.open-source; }
+                                CheckBox { text: "Share Source"; checked <=> root.open_source; }
                                 Text {
                                     text: "Allow source access and reuse";
                                     color: Theme.text-secondary;
@@ -466,7 +466,7 @@ export component PublishDialog inherits Rectangle {
                                     root.description,
                                     root.genre,
                                     root.is-public,
-                                    root.open-source,
+                                    root.open_source,
                                     false,
                                     root.publish-mode == "space",
                                 );

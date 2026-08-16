@@ -372,6 +372,7 @@ fn build_binary_part_def(
             locked: base.locked,
             physics: None,
             respect_gltf_materials: false,
+            deformation: base.deformation,
         },
         metadata: InstanceMetadata {
             class_name: "Part".to_string(),

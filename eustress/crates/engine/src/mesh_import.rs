@@ -178,6 +178,14 @@ fn scan_for_new_sources(
     // cost is bounded regardless of how large the Space tree is.
     mut frontier: Local<Vec<PathBuf>>,
     mut since_last_scan: Local<f32>,
+    // PERF: consecutive full passes that found nothing new. The walk is
+    // throttled + budgeted, but it still re-walked the ENTIRE Space tree every
+    // 2 s forever — a measured ~1.6 ms/frame (its whole 2 ms budget) on an
+    // idle, unchanging scene, indefinitely. Backing off after quiet passes
+    // takes that to ~0 while keeping a cold-start scan prompt.
+    mut quiet_passes: Local<u32>,
+    // Set when the current pass emitted at least one import request.
+    mut pass_found_any: Local<bool>,
 ) {
     if load.map_or(false, |l| l.active) {
         return;
@@ -189,7 +197,13 @@ fn scan_for_new_sources(
     // drained AND the throttle has elapsed. While the frontier still has work,
     // keep draining it (budgeted) every frame.
     if frontier.is_empty() {
-        if *since_last_scan < 2.0 {
+        // Exponential backoff on a quiet tree: 2 s → 4 → 8 … capped at 64 s.
+        // Any pass that finds a new source resets to the responsive 2 s cadence,
+        // so an active import session still feels immediate. A brand-new file
+        // dropped into a long-quiet Space is picked up within a minute — and the
+        // file watcher (`space::file_watcher`) is the prompt path for edits.
+        let interval = 2.0_f32 * (1u32 << (*quiet_passes).min(5)) as f32;
+        if *since_last_scan < interval {
             return;
         }
         *since_last_scan = 0.0;
@@ -198,6 +212,13 @@ fn scan_for_new_sources(
         if !root.is_dir() {
             return;
         }
+        // Score the pass that just ended, then start a fresh one.
+        if *pass_found_any {
+            *quiet_passes = 0;
+        } else {
+            *quiet_passes = quiet_passes.saturating_add(1);
+        }
+        *pass_found_any = false;
         frontier.push(root);
     }
 
@@ -246,6 +267,8 @@ fn scan_for_new_sources(
                     format,
                     target_path: target,
                 });
+                // Keep the scan on its responsive cadence while work is arriving.
+                *pass_found_any = true;
                 scanned.insert(path);
             }
         }

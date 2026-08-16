@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::modes::WorkshopMode;
@@ -80,6 +81,24 @@ pub trait ToolHandler: Send + Sync + 'static {
 
     /// Execute the tool with the given JSON input.
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult;
+
+    /// True when this tool only observes: it mutates neither the live
+    /// World, the world database, nor the filesystem, and running it twice
+    /// leaves the same state as running it once.
+    ///
+    /// Surfaced to MCP clients as `readOnlyHint`, which is what lets an IDE
+    /// auto-approve a scene query while still prompting on a delete. It lives
+    /// here, next to the handler, so a new tool declares its own nature —
+    /// the alternative (a list of names kept elsewhere) silently goes stale
+    /// the first time someone adds a tool without updating it.
+    ///
+    /// Defaults to `false`. An unmarked tool is treated as potentially
+    /// mutating, which is the safe direction: the cost of a missing hint is
+    /// one extra approval prompt, while the cost of a wrong one is a
+    /// destructive call waved through.
+    fn read_only(&self) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +198,37 @@ pub struct ToolContext {
     /// explicitly. Canonical symbol form (`"m"`, `"cm"`, …, `"studs"`)
     /// or `None` to indicate engine-native meters.
     pub display_unit: Option<String>,
+    /// Set by the caller when the invocation can be cancelled out of band —
+    /// MCP's `notifications/cancelled`, a Workshop stop button, a dropped
+    /// client. Long-polling tools (`await_simulation`, `run_experiment`)
+    /// check it between polls and return early instead of burning their
+    /// full `timeout_s` on work nobody is waiting for.
+    ///
+    /// `None` means "not cancellable" — [`ToolContext::is_cancelled`] then
+    /// always reports `false`, so a tool can check unconditionally.
+    pub cancelled: Option<Arc<AtomicBool>>,
+    /// What this caller is permitted to execute (CMMC AC.L1-3.1.2), checked
+    /// by [`ToolRegistry::dispatch`] before any handler runs.
+    ///
+    /// Defaults via [`crate::capability::Permissions::default`] to the
+    /// standard set — Read and Write, but not Execute, Destructive, or
+    /// Network. A caller that needs more grants it explicitly, so a context
+    /// built without a security decision is the safe one rather than the
+    /// permissive one.
+    pub permissions: crate::capability::Permissions,
+}
+
+impl ToolContext {
+    /// True once the caller has asked for this invocation to stop.
+    ///
+    /// Cheap enough (a relaxed atomic load) to call inside a poll loop.
+    /// Relaxed ordering is right here: the flag is a one-way latch and we
+    /// only need eventual visibility, not ordering against other writes.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +279,19 @@ impl ToolRegistry {
         self.handlers.values().map(|h| h.definition()).collect()
     }
 
+    /// Every registered tool's definition paired with its
+    /// [`ToolHandler::read_only`] declaration.
+    ///
+    /// `ToolDefinition` is built from `&'static` data and can't carry a
+    /// per-handler override, so the flag rides alongside it. MCP's
+    /// `tools/list` uses this to emit accurate `readOnlyHint` annotations.
+    pub fn all_tools_annotated(&self) -> Vec<(ToolDefinition, bool)> {
+        self.handlers
+            .values()
+            .map(|h| (h.definition(), h.read_only()))
+            .collect()
+    }
+
     /// Dispatch a tool call by name. On unknown tools returns a
     /// failed `ToolResult` rather than panicking — the caller can
     /// surface the error to the AI, which will try a different tool.
@@ -239,6 +302,27 @@ impl ToolRegistry {
         input: serde_json::Value,
         ctx: &ToolContext,
     ) -> ToolResult {
+        // CMMC AC.L1-3.1.2 — authorize before executing. This runs ahead of
+        // the handler lookup so an unclassified-but-registered tool is
+        // refused rather than executed: the policy table in
+        // `capability::capability_of` is the allowlist, and absence from it
+        // means deny.
+        if let Err(denial) = crate::capability::authorize(tool_name, &ctx.permissions) {
+            return ToolResult {
+                tool_name: tool_name.to_string(),
+                tool_use_id: tool_use_id.to_string(),
+                success: false,
+                content: denial.message(),
+                structured_data: Some(serde_json::json!({
+                    "error": "permission_denied",
+                    "tool": denial.tool_name,
+                    "required_capability": denial.required.map(|c| c.label()),
+                    "principal": denial.principal,
+                })),
+                stream_topic: None,
+            };
+        }
+
         match self.handlers.get(tool_name) {
             Some(handler) => {
                 let mut result = handler.execute(input, ctx);

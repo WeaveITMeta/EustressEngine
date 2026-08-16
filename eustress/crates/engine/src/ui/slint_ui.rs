@@ -602,6 +602,8 @@ pub enum SlintAction {
     /// User picked a different model from the dropdown — the display name
     /// (e.g. "Fable 5"), resolved to a `WorkshopModel` in the handler.
     WorkshopModelChanged(String),
+    /// User flipped the Gauntlet (AAA verify-loop) toggle.
+    WorkshopGauntletToggled(bool),
 
     // Problems panel — VS Code-style diagnostic list
     /// Click a row → jump the editor to that file/line/column.
@@ -1353,6 +1355,17 @@ impl Plugin for SlintUiPlugin {
             // `DeferredCollider` parts near physics activity (see
             // `crate::physics::collider_streaming` module docs).
             crate::physics::ColliderStreamingPlugin,
+            // Turns solved Avian contact impulses into ImpactDeformEvents —
+            // the producer the vertex-deformation pipeline in
+            // `eustress_common::realism::deformation` never had, so impact
+            // dents could not fire at all. Also gates that pipeline to play
+            // sessions and restores every deformed mesh on Stop.
+            crate::physics::DeformationBridgePlugin,
+            // Runtime fracture: splits a struck part into two independent
+            // dynamic bodies along the crack plane. Depends on the
+            // DeformationBridgePlugin above, which raises the FractureMeshEvent
+            // when an impact clears the material's Griffith energy threshold.
+            crate::physics::FractureBridgePlugin,
             crate::interaction::InteractionPlugin,
         ));
 
@@ -1530,6 +1543,10 @@ impl Plugin for SlintUiPlugin {
             // the API. See function docs for backoff rules.
             .init_resource::<WorkshopTitleGenState>()
             .init_resource::<WorkshopTabOrder>()
+            // Per-session chat scroll memory: the Workshop panel is torn
+            // down on tab switch, so the offset has to live outside it.
+            .init_resource::<WorkshopScrollMemory>()
+            .add_systems(Update, persist_workshop_scroll.after(SlintSystems::Drain))
             .add_systems(Update, generate_workshop_titles.after(sync_workshop_sessions_to_slint))
             // Script analyzer → squiggle spans on the script editor
             .add_systems(Update, sync_analyzer_to_slint.after(SlintSystems::Drain))
@@ -2316,6 +2333,8 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_workshop_model_changed(move |m| q.push(SlintAction::WorkshopModelChanged(m.to_string())));
     let q = queue.clone();
+    ui.on_workshop_gauntlet_toggled(move |v| q.push(SlintAction::WorkshopGauntletToggled(v)));
+    let q = queue.clone();
     ui.on_workshop_mention_query_changed(move |text| q.push(SlintAction::WorkshopMentionQueryChanged(text.to_string())));
     let q = queue.clone();
     ui.on_workshop_mention_commit(move |idx| q.push(SlintAction::WorkshopMentionCommit(idx)));
@@ -2380,8 +2399,8 @@ fn setup_slint_overlay(world: &mut World) {
     // Spawn overlay camera: orthographic Camera3d (NOT Camera2d — Camera2d uses a separate
     // 2D pipeline that doesn't render Mesh3d/MeshMaterial3d entities).
     // Camera3d with orthographic projection renders on top of the main scene.
-    // SkyboxAttached prevents SharedLightingPlugin from attaching a skybox to this camera,
-    // which would paint over the entire 3D scene since this camera renders at order=100.
+    // `NoAtmosphere` (below) keeps SkyAtmospherePlugin from attaching a sky to this
+    // camera, which would paint over the entire 3D scene since it renders on top.
     // ── Camera stack ──────────────────────────────────────────────────────
     // Order 0:   Main Camera3d — 3D scene + sky + gizmos (selection outlines)
     // Order 300: Slint Camera3d — Slint editor chrome + ScreenGui overlay
@@ -2426,12 +2445,22 @@ fn setup_slint_overlay(world: &mut World) {
         },
         Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
         overlay_layer.clone(),
+        // This camera composites ONE pre-rendered Slint texture over the scene.
+        // Nothing here has geometric edges to anti-alias, but without an explicit
+        // `Msaa` it inherited Bevy's `Sample4` default and paid 4× the raster
+        // bandwidth for a full-screen blit — plus, as a non-first camera on the
+        // target, an `MsaaWriteback` resolve every frame. Both vanish at `Off`
+        // (the main camera is `Msaa::Off` too, so there is nothing to write back).
+        bevy::render::view::Msaa::Off,
         SlintOverlayCamera,
         // Hdr marker — required for gizmo pipeline to work correctly when main
         // camera uses Atmosphere (HDR). Without this, gizmo render passes are
         // suppressed or corrupted on the secondary camera.
         bevy::camera::Hdr,
-        eustress_common::plugins::lighting_plugin::SkyboxAttached,
+        // One opt-out marker now instead of two. `SkyAtmospherePlugin` skips
+        // every camera carrying `NoAtmosphere`, so the overlay gets no sky, no
+        // atmosphere settings and no environment map — which also keeps it out
+        // of the SSR camera set, since that keys off the same marker.
         eustress_common::plugins::lighting_plugin::NoAtmosphere,
         Name::new("Slint Overlay Camera"),
     ));
@@ -2646,37 +2675,81 @@ fn sync_gui_elements_to_slint(
 
     let ui = &slint_context.window;
 
-    // Build parent offset map: walk up ChildOf chain to accumulate x/y offsets
-    // This handles nested Frames where child positions are relative to parent
-    let mut offset_cache: std::collections::HashMap<Entity, (f32, f32)> = std::collections::HashMap::new();
-
-    fn compute_offset(
+    /// Resolve an element's screen rect as `(x, y, w, h)` in viewport-local
+    /// logical pixels.
+    ///
+    /// `Position` / `Size` are `UDim2`: `Scale` is a FRACTION OF THE PARENT's
+    /// resolved extent, `Offset` is pixels added on top. The parent of a
+    /// top-level ScreenGui child is the viewport itself, so Scale has to
+    /// resolve against the viewport rect — resolving it against nothing is
+    /// what collapsed `Position = {0.5,0},{0.5,0}` (screen centre) to the
+    /// top-left corner and `Size = {1,0},{1,0}` (full screen) to 1×1 px.
+    /// Mirrors the billboard subtree resolver in `billboard_gui.rs`.
+    ///
+    /// `AnchorPoint` shifts by the element's OWN resolved size, so
+    /// `{0.5,0.5}` centres the element on its position instead of hanging it
+    /// from the top-left.
+    fn resolve_rect(
         entity: Entity,
         gui_query: &Query<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay, Option<&ChildOf>)>,
-        cache: &mut std::collections::HashMap<Entity, (f32, f32)>,
-    ) -> (f32, f32) {
+        viewport: (f32, f32),
+        cache: &mut std::collections::HashMap<Entity, (f32, f32, f32, f32)>,
+    ) -> (f32, f32, f32, f32) {
         if let Some(&cached) = cache.get(&entity) {
             return cached;
         }
-        let Ok((_, display, parent)) = gui_query.get(entity) else {
-            return (0.0, 0.0);
+        let Ok((_, d, parent)) = gui_query.get(entity) else {
+            return (0.0, 0.0, viewport.0, viewport.1);
         };
-        let parent_offset = if let Some(child_of) = parent {
-            compute_offset(child_of.parent(), gui_query, cache)
+        // A ScreenGui is a zero-size container that spans the whole screen —
+        // its children resolve Scale against the viewport, not against the
+        // container's (unset, would-be-1px) extent.
+        if d.class_type == "screengui" {
+            let r = (0.0, 0.0, viewport.0, viewport.1);
+            cache.insert(entity, r);
+            return r;
+        }
+        let (px, py, pw, ph) = match parent {
+            Some(c) if gui_query.get(c.parent()).is_ok() => {
+                resolve_rect(c.parent(), gui_query, viewport, cache)
+            }
+            _ => (0.0, 0.0, viewport.0, viewport.1),
+        };
+
+        // Fall back to the pre-resolved pixel fields when a UDim2 is entirely
+        // absent (both halves zero) — some loader paths populate only the
+        // legacy `x/y/width/height` and leave the UDim2 arrays zeroed.
+        let udim_unset = |s: f32, o: f32| s == 0.0 && o == 0.0;
+
+        let w = if udim_unset(d.size_udim2[0], d.size_udim2[1]) {
+            d.width.max(1.0)
         } else {
-            (0.0, 0.0)
+            (d.size_udim2[0] * pw + d.size_udim2[1]).max(1.0)
         };
-        // Check if parent itself has a GuiElementDisplay (is a Frame/ScreenGui)
-        let parent_pos = if let Some(child_of) = parent {
-            gui_query.get(child_of.parent())
-                .map(|(_, pd, _)| (pd.x, pd.y))
-                .unwrap_or((0.0, 0.0))
+        let h = if udim_unset(d.size_udim2[2], d.size_udim2[3]) {
+            d.height.max(1.0)
         } else {
-            (0.0, 0.0)
+            (d.size_udim2[2] * ph + d.size_udim2[3]).max(1.0)
         };
-        let offset = (parent_offset.0 + parent_pos.0, parent_offset.1 + parent_pos.1);
-        cache.insert(entity, offset);
-        offset
+        let local_x = if udim_unset(d.position_udim2[0], d.position_udim2[1]) {
+            d.x
+        } else {
+            d.position_udim2[0] * pw + d.position_udim2[1]
+        };
+        let local_y = if udim_unset(d.position_udim2[2], d.position_udim2[3]) {
+            d.y
+        } else {
+            d.position_udim2[2] * ph + d.position_udim2[3]
+        };
+
+        let r = (
+            px + local_x - d.anchor_point[0] * w,
+            py + local_y - d.anchor_point[1] * h,
+            w,
+            h,
+        );
+        cache.insert(entity, r);
+        r
     }
 
     // Check if an entity or any ancestor has visible=false (hidden ScreenGui)
@@ -2810,8 +2883,19 @@ fn sync_gui_elements_to_slint(
     }
     elements.sort_by_key(|(_, e)| e.z_order);
 
+    // Viewport extent in LOGICAL px — the same space the Slint overlay lays
+    // out in. ScreenGui Scale resolves against THIS, not the window.
+    let viewport_extent = {
+        let vw = ui.get_viewport_width();
+        let vh = ui.get_viewport_height();
+        if vw > 0.0 && vh > 0.0 { (vw, vh) } else { (1920.0, 1080.0) }
+    };
+    let mut rect_cache: std::collections::HashMap<Entity, (f32, f32, f32, f32)> =
+        std::collections::HashMap::new();
+
     let slint_elements: Vec<GuiElementData> = elements.iter().map(|(entity, e)| {
-        let (ox, oy) = compute_offset(*entity, &gui_query, &mut offset_cache);
+        let (rx, ry, rw, rh) =
+            resolve_rect(*entity, &gui_query, viewport_extent, &mut rect_cache);
 
         // Load image for ImageLabel/ImageButton if path is set
         let (has_image, image_source) = if !e.image_path.is_empty() {
@@ -2830,10 +2914,10 @@ fn sync_gui_elements_to_slint(
         };
 
         GuiElementData {
-            x: e.x + ox,
-            y: e.y + oy,
-            width: e.width,
-            height: e.height,
+            x: rx,
+            y: ry,
+            width: rw,
+            height: rh,
             z_order: e.z_order,
             visible: e.visible,
             clip_children: e.clip_children,
@@ -3194,12 +3278,32 @@ pub fn update_slint_ui_focus(
     let vb_w = vb.width / scale;
     let vb_h = vb.height / scale;
 
+    // The centre area is TABBED: the 3D viewport only exists while the
+    // active tab is "scene" (see main.slint — `if root.active-tab-type ==
+    // "scene": viewport-area`). A script, code, web, image, video, document
+    // or chart tab REPLACES it in exactly the same rect, so the geometric
+    // test alone reports "inside the viewport" while the user is actually
+    // over a script editor. That let wheel events scroll the script AND zoom
+    // the 3D camera at once (and mouse drags orbit the camera behind the
+    // editor). Require the scene tab to be the active one before any point
+    // counts as viewport.
+    let scene_tab_active = slint_context
+        .as_ref()
+        .map(|ctx| {
+            let t: String = ctx.window.get_active_tab_type().into();
+            t == "scene"
+        })
+        // No Slint context yet (pre-UI-init frames) — fall back to the
+        // geometric test so camera input still works during startup.
+        .unwrap_or(true);
+
     // Check if cursor is inside the 3D viewport bounds (logical pixels)
-    let in_viewport = cursor_pos.x >= vb_x
+    let in_viewport = scene_tab_active
+        && cursor_pos.x >= vb_x
         && cursor_pos.x <= vb_x + vb_w
         && cursor_pos.y >= vb_y
         && cursor_pos.y <= vb_y + vb_h;
-    
+
     // has_focus = true means "UI has focus" (cursor is over a panel, NOT the viewport)
     ui_focus.has_focus = !in_viewport;
     ui_focus.last_ui_position = if !in_viewport { Some(cursor_pos) } else { None };
@@ -3315,22 +3419,14 @@ fn try_restore_auth_session(
                         };
 
                         // Read private key for challenge-response auth
-                        let mut private_key = String::new();
-                        for line in content.lines() {
-                            let trimmed = line.trim();
-                            if trimmed.starts_with("private_key") {
-                                if let Some(val) = trimmed.splitn(2, '=').nth(1) {
-                                    private_key = val.trim().trim_matches('"').trim_matches('\'').to_string();
-                                }
-                            }
-                        }
+                        let (_, private_key, _) = parse_identity_toml(&content);
 
                         // Try challenge-response auth with the API
-                        let token = if !private_key.is_empty() {
+                        let authed = if !private_key.is_empty() {
                             match do_challenge_auth(&public_key, &private_key) {
-                                Ok(jwt) => {
+                                Ok(pair) => {
                                     tracing::info!("Challenge auth succeeded for {}", display_name);
-                                    Some(jwt)
+                                    Some(pair)
                                 }
                                 Err(e) => {
                                     tracing::warn!("Challenge auth failed: {} — using local identity", e);
@@ -3341,14 +3437,22 @@ fn try_restore_auth_session(
                             None
                         };
 
+                        // Use the witness's account id when authenticated —
+                        // the ledger keys everything by it, not by the pubkey.
+                        let (token, account_id) = match authed {
+                            Some((jwt, uid)) => (Some(jwt), uid),
+                            None => (None, public_key.clone()),
+                        };
+                        auth_state.jwt_valid = token.is_some();
+
                         auth_state.user = Some(crate::auth::AuthUser {
-                            id: public_key.clone(),
+                            id: account_id,
                             username: display_name.clone(),
                             email: None,
                             avatar_url: None,
                             steam_id: None,
                             discord_id: None,
-                            bliss_balance: 0,
+                            bliss_balance: 0.0,
                             total_hours: 0.0,
                         });
                         auth_state.token = token.or(Some(public_key));
@@ -3393,6 +3497,7 @@ struct DrainEventWriters<'w> {
     workshop_open_artifact: MessageWriter<'w, crate::workshop::WorkshopOpenArtifactEvent>,
     workshop_optimize: MessageWriter<'w, crate::workshop::OptimizeAndBuildEvent>,
     workshop_set_mode: MessageWriter<'w, crate::workshop::WorkshopSetModeEvent>,
+    workshop_set_gauntlet: MessageWriter<'w, crate::workshop::gauntlet::WorkshopSetGauntletEvent>,
     plugin_action: MessageWriter<'w, crate::studio_plugins::PluginActionEvent>,
     // Modal tool activations — ToolOptionsBar control edits + explicit cancel.
     modal_tool_option: MessageWriter<'w, crate::modal_tool::ToolOptionChangedEvent>,
@@ -3577,14 +3682,28 @@ struct DrainResources<'w> {
 
 /// Perform Ed25519 challenge-response auth against the API.
 /// Returns a JWT token on success.
-fn do_challenge_auth(public_key_hex: &str, private_key_hex: &str) -> Result<String, String> {
+/// Challenge-response login against the witness. Returns `(jwt, user_id)`.
+///
+/// `user_id` is the witness's CANONICAL account id (the JWT `sub`), which is
+/// NOT the Ed25519 public key. Callers must store this as `AuthUser.id` —
+/// every ledger key (balance, presence, node-mode, daily score) is written
+/// under it, so using the public key instead silently breaks Bliss earning.
+fn do_challenge_auth(public_key_hex: &str, private_key_hex: &str) -> Result<(String, String), String> {
     use ed25519_dalek::{SigningKey, Signer};
 
     let api_url = "https://api.eustress.dev";
 
+    // Bounded timeouts: this runs on the Bevy main thread, so an unreachable
+    // or blackholed witness (captive portal, offline) would otherwise stall
+    // startup for ureq's default (effectively forever on a hung read).
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(4))
+        .timeout(std::time::Duration::from_secs(8))
+        .build();
+
     // Step 1: Request challenge
     let challenge_body = serde_json::json!({ "public_key": public_key_hex });
-    let challenge_resp = ureq::post(&format!("{}/api/auth/challenge", api_url))
+    let challenge_resp = agent.post(&format!("{}/api/auth/challenge", api_url))
         .set("Content-Type", "application/json")
         .send_string(&challenge_body.to_string())
         .map_err(|e| format!("Challenge request failed: {}", e))?;
@@ -3613,7 +3732,7 @@ fn do_challenge_auth(public_key_hex: &str, private_key_hex: &str) -> Result<Stri
         "challenge": challenge,
         "signature": sig_hex,
     });
-    let verify_resp = ureq::post(&format!("{}/api/auth/verify-challenge", api_url))
+    let verify_resp = agent.post(&format!("{}/api/auth/verify-challenge", api_url))
         .set("Content-Type", "application/json")
         .send_string(&verify_body.to_string())
         .map_err(|e| format!("Verify failed: {}", e))?;
@@ -3623,8 +3742,39 @@ fn do_challenge_auth(public_key_hex: &str, private_key_hex: &str) -> Result<Stri
     let token = verify_json["token"].as_str()
         .ok_or("No token in verify response")?
         .to_string();
+    // The witness echoes the account record; its `id` is the JWT subject.
+    // Fall back to the public key only so a schema change can't hard-fail
+    // login — the worker also maps pubkey→uuid defensively.
+    let user_id = verify_json["user"]["id"].as_str()
+        .unwrap_or(public_key_hex)
+        .to_string();
 
-    Ok(token)
+    Ok((token, user_id))
+}
+
+/// Parse `public_key` / `private_key` / `username` out of an identity.toml.
+/// Shared by every identity login path so they authenticate identically —
+/// previously only auto-login read `private_key`, so the manual paths could
+/// never obtain a JWT.
+fn parse_identity_toml(content: &str) -> (String, String, String) {
+    let (mut public_key, mut private_key, mut username) =
+        (String::new(), String::new(), String::new());
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let mut take = |target: &mut String| {
+            if let Some(val) = trimmed.splitn(2, '=').nth(1) {
+                *target = val.trim().trim_matches('"').trim_matches('\'').to_string();
+            }
+        };
+        if trimmed.starts_with("public_key") {
+            take(&mut public_key);
+        } else if trimmed.starts_with("private_key") {
+            take(&mut private_key);
+        } else if trimmed.starts_with("username") {
+            take(&mut username);
+        }
+    }
+    (public_key, private_key, username)
 }
 
 fn default_publish_name(space_root: Option<&Path>) -> String {
@@ -5560,30 +5710,46 @@ fn drain_slint_actions(
                     if let Some(identity) = settings.saved_identities.iter().find(|i| i.username == username) {
                         let path = identity.path.clone();
                         if let Ok(content) = std::fs::read_to_string(&path) {
-                            let mut public_key = String::new();
-                            let mut uname = String::new();
-                            for line in content.lines() {
-                                let trimmed = line.trim();
-                                if trimmed.starts_with("public_key") {
-                                    if let Some(val) = trimmed.splitn(2, '=').nth(1) {
-                                        public_key = val.trim().trim_matches('"').trim_matches('\'').to_string();
-                                    }
-                                }
-                                if trimmed.starts_with("username") {
-                                    if let Some(val) = trimmed.splitn(2, '=').nth(1) {
-                                        uname = val.trim().trim_matches('"').trim_matches('\'').to_string();
-                                    }
-                                }
-                            }
+                            let (public_key, private_key, uname) = parse_identity_toml(&content);
                             if !public_key.is_empty() {
                                 let display = if uname.is_empty() { public_key[..std::cmp::min(8, public_key.len())].to_string() } else { uname };
+                                // Re-authenticate on switch — the JWT is
+                                // per-account, so carrying the previous
+                                // identity's token (or the bare public key)
+                                // would earn Bliss for the wrong user, or
+                                // nothing at all.
+                                let authed = if private_key.is_empty() {
+                                    // NOTE: bound to a differently-named local on purpose.
+                                    // Inside tracing macros the identifier `display` resolves
+                                    // to `tracing::field::display` (in scope via the bevy
+                                    // prelude) rather than this local — for inline `{display}`,
+                                    // for a positional arg, and even for `display.as_str()`,
+                                    // since the path resolves before the method call. Renaming
+                                    // is the only reliable fix.
+                                    let ident_label: &str = &display;
+                                    warn!("Identity '{}' has no private_key — Bliss earning disabled", ident_label);
+                                    None
+                                } else {
+                                    match do_challenge_auth(&public_key, &private_key) {
+                                        Ok(pair) => Some(pair),
+                                        Err(e) => {
+                                            warn!("Challenge auth failed on switch: {e} — Bliss earning disabled");
+                                            None
+                                        }
+                                    }
+                                };
+                                let (token, account_id) = match authed {
+                                    Some((jwt, uid)) => (Some(jwt), uid),
+                                    None => (None, public_key.clone()),
+                                };
                                 if let Some(ref mut auth) = res.auth_state {
+                                    auth.jwt_valid = token.is_some();
                                     auth.user = Some(crate::auth::AuthUser {
-                                        id: public_key.clone(), username: display.clone(),
+                                        id: account_id, username: display.clone(),
                                         email: None, avatar_url: None, steam_id: None, discord_id: None,
-                                        bliss_balance: 0, total_hours: 0.0,
+                                        bliss_balance: 0.0, total_hours: 0.0,
                                     });
-                                    auth.token = Some(public_key);
+                                    auth.token = token.or(Some(public_key));
                                     auth.status = crate::auth::AuthStatus::LoggedIn;
                                 }
                                 // Move this identity to front (active)
@@ -5638,21 +5804,7 @@ fn drain_slint_actions(
                 } else {
                     match std::fs::read_to_string(&identity_path) {
                         Ok(content) => {
-                            let mut public_key = String::new();
-                            let mut username = String::new();
-                            for line in content.lines() {
-                                let trimmed = line.trim();
-                                if trimmed.starts_with("public_key") {
-                                    if let Some(val) = trimmed.splitn(2, '=').nth(1) {
-                                        public_key = val.trim().trim_matches('"').trim_matches('\'').to_string();
-                                    }
-                                }
-                                if trimmed.starts_with("username") {
-                                    if let Some(val) = trimmed.splitn(2, '=').nth(1) {
-                                        username = val.trim().trim_matches('"').trim_matches('\'').to_string();
-                                    }
-                                }
-                            }
+                            let (public_key, private_key, username) = parse_identity_toml(&content);
                             info!("🔐 Parsed: username='{}', public_key='{}'",
                                 username, if public_key.is_empty() { "EMPTY" } else { &public_key[..8.min(public_key.len())] });
 
@@ -5666,19 +5818,41 @@ fn drain_slint_actions(
                                 } else {
                                     username.clone()
                                 };
+                                // Authenticate to the witness. Without this the
+                                // token was just the public key, so every Bliss
+                                // co-sign 401'd and the user earned nothing —
+                                // silently.
+                                let authed = if private_key.is_empty() {
+                                    warn!("Identity has no private_key — Bliss earning disabled for this session");
+                                    None
+                                } else {
+                                    match do_challenge_auth(&public_key, &private_key) {
+                                        Ok(pair) => Some(pair),
+                                        Err(e) => {
+                                            warn!("Challenge auth failed: {e} — local identity only, Bliss earning disabled");
+                                            None
+                                        }
+                                    }
+                                };
+                                let (token, account_id) = match authed {
+                                    Some((jwt, uid)) => (Some(jwt), uid),
+                                    None => (None, public_key.clone()),
+                                };
+
                                 // Update AuthState resource so the sync system reflects the login
                                 if let Some(ref mut auth) = res.auth_state {
+                                    auth.jwt_valid = token.is_some();
                                     auth.user = Some(crate::auth::AuthUser {
-                                        id: public_key.clone(),
+                                        id: account_id,
                                         username: display_name.clone(),
                                         email: None,
                                         avatar_url: None,
                                         steam_id: None,
                                         discord_id: None,
-                                        bliss_balance: 0,
+                                        bliss_balance: 0.0,
                                         total_hours: 0.0,
                                     });
-                                    auth.token = Some(public_key.clone());
+                                    auth.token = token.or(Some(public_key.clone()));
                                     auth.status = crate::auth::AuthStatus::LoggedIn;
                                     auth.offline_mode = false;
                                 }
@@ -6028,6 +6202,32 @@ fn drain_slint_actions(
                         out.info(format!("Workshop model set to {}", model.display_name()));
                     }
                 }
+            }
+            SlintAction::WorkshopGauntletToggled(enabled) => {
+                // Mirror into the UI immediately, persist globally, and fire
+                // the ECS event that flips the live GauntletMode resource
+                // (which also drops a note in the transcript so the token-use
+                // change is visible in the conversation, not just the toolbar).
+                if let Some(ui) = ui {
+                    ui.set_workshop_gauntlet_enabled(enabled);
+                }
+                if let Some(ref mut gs) = res.global_soul_settings {
+                    gs.workshop_gauntlet = enabled;
+                    if let Err(e) = gs.save() {
+                        if let Some(ref mut out) = res.output {
+                            out.warn(format!("Workshop: failed to persist Gauntlet mode: {}", e));
+                        }
+                    }
+                }
+                if let Some(ref mut out) = res.output {
+                    out.info(format!(
+                        "Workshop Gauntlet mode {}",
+                        if enabled { "ON — AAA verify loop active" } else { "off" }
+                    ));
+                }
+                events.workshop_set_gauntlet.write(
+                    crate::workshop::gauntlet::WorkshopSetGauntletEvent { enabled },
+                );
             }
             SlintAction::SoulApiKeySaved => {
                 // Pull both typed keys out of Slint and commit them. The
@@ -6797,13 +6997,16 @@ fn drain_slint_actions(
                 if let Some(ref mut es) = res.explorer_state {
                     if node_type == "entity" {
                         if id < 0 {
-                            // Negative ID — service header node. Recover name from known list.
-                            let known = ["Workspace","Lighting","Players","StarterGui","StarterPack",
-                                "StarterPlayer","ReplicatedStorage","ServerStorage",
-                                "ServerScriptService","SoulService","SoundService","Teams","Chat",
-                                "MaterialService","AdornmentService"];
-                            if let Some(name) = known.iter().find(|n| service_name_to_id(n) == id) {
-                                es.expanded_services.insert(name.to_string());
+                            // Negative ID — service header node. Resolve the name
+                            // by reversing `service_name_to_id` over every service
+                            // the tree can actually render: the static set PLUS the
+                            // dynamic ones discovered on disk (any directory with a
+                            // `_service.toml`). Matching only the static list left
+                            // every dynamic service — DataService among them — with
+                            // an expand arrow that resolved to no name and silently
+                            // did nothing.
+                            if let Some(name) = resolve_service_name_by_id(id, &es.cached_dynamic_services) {
+                                es.expanded_services.insert(name.clone());
                                 info!("🌲 [diag] ExpandNode: service '{}' inserted, expanded_services now {:?}", name, es.expanded_services);
                             } else {
                                 warn!("🌲 [diag] ExpandNode: id={} looked negative but matched no known service name", id);
@@ -6835,13 +7038,12 @@ fn drain_slint_actions(
                 if let Some(ref mut es) = res.explorer_state {
                     if node_type == "entity" {
                         if id < 0 {
-                            // Negative ID — service header node.
-                            let known = ["Workspace","Lighting","Players","StarterGui","StarterPack",
-                                "StarterPlayer","ReplicatedStorage","ServerStorage",
-                                "ServerScriptService","SoulService","SoundService","Teams","Chat",
-                                "MaterialService","AdornmentService"];
-                            if let Some(name) = known.iter().find(|n| service_name_to_id(n) == id) {
-                                es.expanded_services.remove(*name);
+                            // Negative ID — service header node. Same resolution as
+                            // ExpandNode: a dynamic service must be collapsible by
+                            // the same name it was expanded under, or it would latch
+                            // open once expanded.
+                            if let Some(name) = resolve_service_name_by_id(id, &es.cached_dynamic_services) {
+                                es.expanded_services.remove(&name);
                             }
                         } else {
                             if let Some(entity) = es.entity_id_cache.get(&id).copied() {
@@ -9134,8 +9336,20 @@ fn drain_slint_actions(
                                 }
                             }
                             _ => {
-                                // Dynamic property - parse value based on existing type or infer
-                                if let Some(existing) = service.properties.get(&key) {
+                                // Dynamic property — parse the value against the existing type.
+                                //
+                                // The panel sends the DISPLAY name ("Brightness",
+                                // "EnvironmentDiffuseScale") while `properties` is keyed from the
+                                // service TOML in snake_case ("brightness",
+                                // "environment_diffuse_scale"). Looking the display name up
+                                // directly missed every time, so `changed` stayed false and the
+                                // edit was dropped with no error: the property appeared editable,
+                                // accepted a value, and did nothing. Only the handful of
+                                // explicitly-matched keys below worked, because they bypass this
+                                // map. Resolve the key to whatever spelling the map actually uses.
+                                let resolved = resolve_service_property_key(&service.properties, &key);
+                                if let Some(existing) = service.properties.get(&resolved).cloned() {
+                                    let existing = &existing;
                                     // Update based on existing type
                                     let new_value = match existing {
                                         crate::space::service_loader::PropertyValue::Bool(_) => {
@@ -9163,7 +9377,11 @@ fn drain_slint_actions(
                                     };
                                     
                                     if let Some(new_val) = new_value {
-                                        service.properties.insert(key.clone(), new_val);
+                                        // Insert under the resolved key, not the display name —
+                                        // inserting "Brightness" alongside "brightness" would
+                                        // leave the reader looking at the stale one and write a
+                                        // duplicate into the TOML.
+                                        service.properties.insert(resolved, new_val);
                                         changed = true;
                                     }
                                 }
@@ -10201,7 +10419,18 @@ fn drain_slint_actions(
             
             // Workshop Panel (System 0: Ideation) — dispatch to Bevy messages
             SlintAction::WorkshopSendMessage(text) => {
-                events.workshop_send.write(crate::workshop::WorkshopSendMessageEvent { content: text });
+                // Hand any staged attachment to this message and clear the
+                // strip, so one paste attaches to exactly one message.
+                let image_png = take_staged_attachment();
+                if image_png.is_some() {
+                    if let Some(ui) = ui {
+                        ui.set_workshop_has_attached_image(false);
+                    }
+                }
+                events.workshop_send.write(crate::workshop::WorkshopSendMessageEvent {
+                    content: text,
+                    image_png,
+                });
             }
             SlintAction::WorkshopApproveMcp(id) => {
                 events.workshop_approve.write(crate::workshop::WorkshopApproveMcpEvent { message_id: id as u32 });
@@ -10473,6 +10702,12 @@ fn drain_slint_actions(
                             let w = img.width as u32;
                             let h = img.height as u32;
                             let rgba: Vec<u8> = img.bytes.into_owned();
+                            // Keep the PNG-encoded bytes, not just the Slint
+                            // image. Previously this set the display property
+                            // and nothing else, so the preview strip worked
+                            // while Send had nothing to attach and silently
+                            // dropped the picture.
+                            stage_attachment_png(&rgba, w, h);
                             let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
                                 &rgba, w, h,
                             );
@@ -10488,6 +10723,7 @@ fn drain_slint_actions(
             }
 
             SlintAction::WorkshopClearImage => {
+                clear_staged_attachment();
                 if let Some(ui) = ui {
                     ui.set_workshop_has_attached_image(false);
                 }
@@ -14039,6 +14275,9 @@ fn sync_workshop_to_slint(
         .map(|g| g.effective_workshop_model().display_name())
         .unwrap_or_else(|| crate::soul::WorkshopModel::default().display_name());
     ui.set_workshop_active_model_name(model_name.into());
+    ui.set_workshop_gauntlet_enabled(
+        global_settings.as_ref().map(|g| g.workshop_gauntlet).unwrap_or(false),
+    );
     ui.set_workshop_pipeline_state(pipeline.state_string().into());
     ui.set_workshop_product_name(pipeline.product_name.as_str().into());
     ui.set_workshop_total_artifacts(pipeline.artifacts.len() as i32);
@@ -14073,6 +14312,20 @@ fn sync_workshop_to_slint(
             entity_class: entity_class.into(),
             entity_name: entity_name.into(),
             entity_icon,
+            // Slint resolves `@image-url` at compile time only, so a runtime
+            // attachment path has to be loaded here, the same way the entity
+            // icon above is. A file that has gone missing degrades to no
+            // thumbnail rather than failing the whole message row.
+            attachment: msg
+                .image_path
+                .as_ref()
+                .and_then(|p| slint::Image::load_from_path(p).ok())
+                .unwrap_or_default(),
+            has_attachment: msg
+                .image_path
+                .as_ref()
+                .map(|p| p.exists())
+                .unwrap_or(false),
         }
     }).collect();
     let msg_model = std::rc::Rc::new(slint::VecModel::from(messages));
@@ -14088,6 +14341,109 @@ fn sync_workshop_to_slint(
     }).collect();
     let step_model = std::rc::Rc::new(slint::VecModel::from(steps));
     ui.set_workshop_pipeline_steps(slint::ModelRc::from(step_model));
+}
+
+/// PNG bytes for the image currently sitting in the Workshop attach strip,
+/// held between the attach action and the next Send.
+///
+/// The attach handler used to push pixels into Slint for display and keep
+/// nothing, so the send path had no image to forward and the attachment was
+/// silently discarded. A `static` rather than a Bevy resource because both
+/// ends of this handoff live inside the Slint action match, which does not
+/// take the resource in its params.
+static STAGED_ATTACHMENT: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+
+/// Encode raw RGBA to PNG and stage it for the next Send.
+#[cfg_attr(not(feature = "clipboard"), allow(dead_code))]
+fn stage_attachment_png(rgba: &[u8], width: u32, height: u32) {
+    let mut png: Vec<u8> = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(std::io::Cursor::new(&mut png), width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        match encoder.write_header().and_then(|mut w| w.write_image_data(rgba)) {
+            Ok(()) => {}
+            Err(e) => {
+                warn!("Workshop: failed to encode pasted image as PNG: {e}");
+                return;
+            }
+        }
+    }
+    if let Ok(mut slot) = STAGED_ATTACHMENT.lock() {
+        *slot = Some(png);
+    }
+}
+
+/// Drop the staged attachment (the × on the preview strip, or after Send).
+fn clear_staged_attachment() {
+    if let Ok(mut slot) = STAGED_ATTACHMENT.lock() {
+        *slot = None;
+    }
+}
+
+/// Hand the staged attachment to the outgoing message, clearing it.
+fn take_staged_attachment() -> Option<Vec<u8>> {
+    STAGED_ATTACHMENT.lock().ok().and_then(|mut slot| slot.take())
+}
+
+/// Saved chat scroll offset per Workshop session id.
+///
+/// The Workshop panel is instantiated as `if right-tab-index == 3`, so
+/// switching the right dock to another tab destroys it and returns a fresh
+/// one with `viewport-y` at zero. Holding the offset out here, keyed by
+/// session, means each conversation tab returns to where it was rather than
+/// every session sharing a single position.
+#[derive(Resource, Default)]
+pub struct WorkshopScrollMemory {
+    positions: std::collections::HashMap<String, f32>,
+}
+
+/// Records the chat scroll offset while the Workshop panel is open, and
+/// restores the right one when the panel reappears or the session changes.
+///
+/// Restoration is re-applied for a few frames rather than written once.
+/// `ScrollView` clamps `viewport-y` against `viewport-height`, and on the
+/// frame a panel is rebuilt that height is still zero, so a single write
+/// would be clamped straight back to zero before layout caught up.
+fn persist_workshop_scroll(
+    slint_context: Option<NonSend<SlintUiState>>,
+    pipeline: Option<Res<crate::workshop::IdeationPipeline>>,
+    mut memory: ResMut<WorkshopScrollMemory>,
+    mut last_session: Local<String>,
+    mut was_open: Local<bool>,
+    mut restore_frames: Local<u8>,
+) {
+    const WORKSHOP_TAB: i32 = 3;
+
+    let Some(slint_context) = slint_context else { return };
+    let Some(pipeline) = pipeline else { return };
+    let ui = &slint_context.window;
+
+    let is_open = ui.get_right_tab_index() == WORKSHOP_TAB;
+    let session = pipeline.session_id.clone();
+
+    // Panel just opened, or the user switched sessions: schedule a restore.
+    if (is_open && !*was_open) || session != *last_session {
+        *restore_frames = 5;
+    }
+    *was_open = is_open;
+    *last_session = session.clone();
+
+    if !is_open {
+        return;
+    }
+
+    if *restore_frames > 0 {
+        let saved = memory.positions.get(&session).copied().unwrap_or(0.0);
+        ui.set_workshop_chat_scroll_y(saved);
+        *restore_frames -= 1;
+        return;
+    }
+
+    // Steady state: whatever the user scrolled to belongs to this session.
+    memory
+        .positions
+        .insert(session, ui.get_workshop_chat_scroll_y());
 }
 
 /// Rescan `SoulService/Workshop/` every ~500 ms and push the session
@@ -14324,6 +14680,14 @@ fn generate_workshop_titles(
     if now - state.last_dispatch < 1.0 {
         return;
     }
+    // PERF: stamp the throttle on every ATTEMPT, not only on a successful
+    // dispatch. The stamp used to live after the `let Some(target) = …` bail,
+    // so in the (overwhelmingly common) steady state where no session needs a
+    // title, it was never written — the 1 s throttle never engaged and the
+    // `list_sessions_in_space` disk enumeration plus a per-session manifest
+    // read + JSON parse ran EVERY FRAME. Measured 2.55 ms/frame on an idle
+    // scene, the largest single Eustress-side cost in the profile.
+    state.last_dispatch = now;
 
     // Find the first session that has a first-user message but no
     // stored title yet. We re-read the manifest to distinguish
@@ -14347,7 +14711,6 @@ fn generate_workshop_titles(
     let Some(target) = target else { return };
 
     state.in_flight.insert(target.session_id.clone());
-    state.last_dispatch = now;
 
     // Dispatch in a background thread so we never stall the render
     // loop on network IO. The result is flushed to disk; the next
@@ -16152,12 +16515,19 @@ fn forward_keyboard_to_slint(
     let alt_held = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     
     for event in key_events.read() {
-        // Skip Alt and Super — engine uses these for shortcuts.
-        // Forward Ctrl and Shift — Slint needs them for Ctrl+V paste,
-        // Ctrl+A select-all, Ctrl+C copy, Shift+arrow selection, etc.
+        // Forward Ctrl and Shift: Slint needs them for Ctrl+V paste,
+        // Ctrl+A select-all, Ctrl+C copy, Shift+arrow selection.
+        //
+        // Super is platform-dependent and must NOT be treated uniformly.
+        // On macOS it is the Command key, which is the modifier Slint keys
+        // every standard text shortcut off, so it has to reach Slint or
+        // Cmd+V arrives as a bare "v" and gets typed into the field. On
+        // Windows and Linux it is the Meta/Windows key, which the engine
+        // reserves for its own shortcuts, so it is still skipped there.
         match &event.logical_key {
-            bevy::input::keyboard::Key::Alt
-            | bevy::input::keyboard::Key::Super => continue,
+            bevy::input::keyboard::Key::Alt => continue,
+            #[cfg(not(target_os = "macos"))]
+            bevy::input::keyboard::Key::Super => continue,
             _ => {}
         }
         
@@ -16206,6 +16576,12 @@ fn convert_key_to_slint_text(key: &bevy::input::keyboard::Key) -> slint::SharedS
         BevyKey::Shift => SlintKey::Shift.into(),
         BevyKey::Control => SlintKey::Control.into(),
         BevyKey::Alt => SlintKey::Alt.into(),
+        // Super is Command on macOS, and Slint's text input keys its
+        // paste/copy/cut/select-all shortcuts off Meta on that platform.
+        // Without this arm the key converted to empty text and
+        // `forward_keyboard_to_slint` dropped it, so Slint never saw the
+        // modifier and Cmd+V landed in the field as a literal "v".
+        BevyKey::Super => SlintKey::Meta.into(),
         // Function keys — needed so F2-rename, F12-go-to-definition,
         // Shift+F12-find-references, etc. reach Slint FocusScopes. Without
         // these mappings the keys fall through to SharedString::default()
@@ -17685,6 +18061,44 @@ fn service_name_to_id(name: &str) -> i32 {
     }
     // Ensure negative and non-zero; mask to 30 bits to stay safely in i32 range
     -((h & 0x3FFF_FFFF) as i32 + 1)
+}
+
+/// Every service the Explorer renders with a STATIC row, in the order it
+/// renders them. Kept beside `service_name_to_id` because the two are a pair:
+/// the tree hashes a name into a negative node id, and expand/collapse has to
+/// hash back. Dynamic services are NOT here — they are discovered at runtime
+/// (see `ExplorerState::cached_dynamic_services`) and supplied separately.
+const STATIC_SERVICE_NAMES: &[&str] = &[
+    "Workspace",
+    "Lighting",
+    "Players",
+    "StarterGui",
+    "StarterPack",
+    "StarterPlayer",
+    "ReplicatedStorage",
+    "ServerStorage",
+    "ServerScriptService",
+    "SoulService",
+    "SoundService",
+    "Teams",
+    "Chat",
+    "MaterialService",
+    "AdornmentService",
+];
+
+/// Reverse `service_name_to_id` across EVERY service the tree can render.
+///
+/// `service_name_to_id` is a one-way hash, so the only way back is to hash the
+/// candidates and compare. The candidate set must therefore include the
+/// dynamic services (any Space subdirectory carrying a `_service.toml` —
+/// DataService is one), or their rows render an expand arrow that resolves to
+/// no name and silently does nothing when clicked.
+fn resolve_service_name_by_id(id: i32, dynamic: &[(String, String)]) -> Option<String> {
+    STATIC_SERVICE_NAMES
+        .iter()
+        .map(|s| (*s).to_string())
+        .chain(dynamic.iter().map(|(name, _icon)| name.clone()))
+        .find(|name| service_name_to_id(name) == id)
 }
 
 fn make_service_node(
@@ -20406,6 +20820,55 @@ fn is_undo_wired_property(name: &str) -> bool {
 // removal note above. They were only reachable via
 // `update_toml_property`, which `route_property` replaces.)
 
+/// Find the key a service's property map actually uses for a panel property.
+///
+/// The Properties panel labels things in PascalCase (`EnvironmentDiffuseScale`)
+/// while service TOMLs are written in snake_case (`environment_diffuse_scale`),
+/// so a direct lookup misses and the edit is silently discarded. Tries the key
+/// as given, then its snake_case form, then a case- and underscore-insensitive
+/// scan, and finally falls back to the snake_case form so a genuinely new
+/// property is still stored in the file's own convention.
+fn resolve_service_property_key(
+    properties: &std::collections::HashMap<String, crate::space::service_loader::PropertyValue>,
+    key: &str,
+) -> String {
+    if properties.contains_key(key) {
+        return key.to_string();
+    }
+    let snake = to_snake_case(key);
+    if properties.contains_key(&snake) {
+        return snake;
+    }
+    // Last resort: match ignoring case and underscores, so `ColorShift_Top`
+    // still finds `color_shift_top` however either side was spelled.
+    let squash = |s: &str| -> String {
+        s.chars().filter(|c| *c != '_').flat_map(|c| c.to_lowercase()).collect()
+    };
+    let target = squash(key);
+    properties
+        .keys()
+        .find(|k| squash(k) == target)
+        .cloned()
+        .unwrap_or(snake)
+}
+
+/// `ColorShift_Bottom` → `color_shift_bottom`, `Brightness` → `brightness`.
+/// Already-snake_case input passes through unchanged.
+fn to_snake_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 && !out.ends_with('_') {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Parses a Vec3 string "x, y, z" into f32 tuple for TOML write-back.
 /// Accepts any comma-separated string with ≥ 3 numeric parts; extras are
 /// ignored. That lets a pasted triple into a single X/Y/Z LineEdit win
@@ -21375,6 +21838,9 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
         ClassName::Star => "sun",
         ClassName::Moon => "moon",
         ClassName::Clouds => "sky",
+        // Shares the atmosphere icon: both are environment-lighting volumes,
+        // and Clouds already shares with Sky on the same reasoning.
+        ClassName::ReflectionProbe => "atmosphere",
         ClassName::SoulScript => "soulservice",
         ClassName::Decal => "decal",
         ClassName::Attachment => "attachment",
@@ -22328,6 +22794,13 @@ fn sync_soul_api_key_to_slint(
     // so we check the root flag.
     if !ui.get_show_settings_dialog() {
         ui.set_soul_api_key(effective_key.clone().into());
+        // The xAI key must be loaded on the same terms as the Anthropic one.
+        // Without this the field read empty every time Settings opened, and
+        // because the save handler commits both fields together, the next
+        // Save wrote "" over a perfectly good stored key. The symptom was a
+        // 400 "Incorrect API key provided" from api.x.ai on a key the user
+        // had definitely entered: it had been blanked by a later Save.
+        ui.set_soul_xai_api_key(global.global_xai_api_key.clone().into());
     }
     ui.set_soul_api_key_valid(!effective_key.is_empty());
     ui.set_soul_api_key_status(status.into());
@@ -22991,4 +23464,56 @@ fn sync_notifications_to_slint(
     }).collect();
     let model = std::rc::Rc::new(slint::VecModel::from(items));
     ui.set_notifications(slint::ModelRc::from(model));
+}
+
+#[cfg(test)]
+mod property_key_tests {
+    use super::*;
+    use crate::space::service_loader::PropertyValue;
+    use std::collections::HashMap;
+
+    #[test]
+    fn pascal_case_display_names_become_snake_case() {
+        assert_eq!(to_snake_case("Brightness"), "brightness");
+        assert_eq!(to_snake_case("ClockTime"), "clock_time");
+        assert_eq!(to_snake_case("EnvironmentDiffuseScale"), "environment_diffuse_scale");
+        // An embedded underscore must not double up.
+        assert_eq!(to_snake_case("ColorShift_Bottom"), "color_shift_bottom");
+        // Already snake_case passes through untouched.
+        assert_eq!(to_snake_case("outdoor_ambient"), "outdoor_ambient");
+    }
+
+    #[test]
+    fn panel_edits_resolve_to_the_key_the_toml_actually_uses() {
+        // The bug this guards: the panel sends "Brightness", the map is keyed
+        // "brightness" from the service TOML, the lookup missed, and the edit was
+        // dropped with no error — the property looked editable and did nothing.
+        let mut props: HashMap<String, PropertyValue> = HashMap::new();
+        props.insert("brightness".into(), PropertyValue::Float(2.0));
+        props.insert("environment_diffuse_scale".into(), PropertyValue::Float(1.0));
+        props.insert("color_shift_top".into(), PropertyValue::Vec4([0.0; 4]));
+
+        assert_eq!(resolve_service_property_key(&props, "Brightness"), "brightness");
+        assert_eq!(
+            resolve_service_property_key(&props, "EnvironmentDiffuseScale"),
+            "environment_diffuse_scale"
+        );
+        assert_eq!(resolve_service_property_key(&props, "ColorShift_Top"), "color_shift_top");
+    }
+
+    #[test]
+    fn an_exact_key_is_preferred_over_conversion() {
+        // A service whose TOML genuinely uses PascalCase must keep working.
+        let mut props: HashMap<String, PropertyValue> = HashMap::new();
+        props.insert("Brightness".into(), PropertyValue::Float(1.0));
+        assert_eq!(resolve_service_property_key(&props, "Brightness"), "Brightness");
+    }
+
+    #[test]
+    fn an_unknown_property_falls_back_to_the_file_convention() {
+        // A brand-new property should be stored snake_case like its neighbours,
+        // not in the panel's display casing.
+        let props: HashMap<String, PropertyValue> = HashMap::new();
+        assert_eq!(resolve_service_property_key(&props, "SomeNewThing"), "some_new_thing");
+    }
 }

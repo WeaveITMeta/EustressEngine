@@ -21,6 +21,11 @@ use crate::modes::WorkshopMode;
 pub struct ListUniversesTool;
 
 impl ToolHandler for ListUniversesTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "list_universes",
@@ -86,6 +91,11 @@ impl ToolHandler for ListUniversesTool {
 pub struct ListSpacesTool;
 
 impl ToolHandler for ListSpacesTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "list_spaces",
@@ -148,6 +158,11 @@ impl ToolHandler for ListSpacesTool {
 pub struct ListScriptsTool;
 
 impl ToolHandler for ListScriptsTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "list_scripts",
@@ -186,6 +201,11 @@ impl ToolHandler for ListScriptsTool {
 pub struct ReadScriptTool;
 
 impl ToolHandler for ReadScriptTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "read_script",
@@ -251,6 +271,11 @@ impl ToolHandler for ReadScriptTool {
 pub struct ListAssetsTool;
 
 impl ToolHandler for ListAssetsTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "list_assets",
@@ -297,6 +322,11 @@ impl ToolHandler for ListAssetsTool {
 pub struct FindEntityTool;
 
 impl ToolHandler for FindEntityTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "find_entity",
@@ -345,6 +375,11 @@ impl ToolHandler for FindEntityTool {
 pub struct SearchUniverseTool;
 
 impl ToolHandler for SearchUniverseTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "search_universe",
@@ -632,6 +667,11 @@ impl ToolHandler for SetDefaultUniverseTool {
 pub struct GetConversationTool;
 
 impl ToolHandler for GetConversationTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "get_conversation",

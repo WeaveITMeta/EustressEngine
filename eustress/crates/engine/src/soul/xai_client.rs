@@ -116,11 +116,9 @@ fn claude_tools_to_openai(tools: &[ClaudeTool]) -> Vec<Value> {
 ///   OpenAI wants one `{role:"tool", tool_call_id, content}` message *per*
 ///   call, in order, with any leftover plain user text following.
 ///
-/// Known v1 gap: image/document content blocks (from `@file:` mention
-/// resolution) aren't translated — only `text` and `tool_result`/`tool_use`
-/// blocks are. Grok 4.5 supports vision, but wiring that through is out of
-/// scope for the model picker; a mention that resolves to an image is
-/// silently dropped from the Grok-bound history rather than erroring.
+/// Image blocks (Workshop attachments, and `@file:` mentions that resolve to
+/// pictures) are translated to OpenAI's `image_url` data-URI form, so Grok's
+/// vision works the same as Claude's. Document blocks are still text-only.
 pub fn anthropic_history_to_openai(messages: &[Value], system_prompt: Option<&str>) -> Vec<Value> {
     let mut out = Vec::with_capacity(messages.len() + 1);
     if let Some(sys) = system_prompt {
@@ -196,9 +194,26 @@ fn assistant_message_to_openai(content: &[Value]) -> Value {
 /// OpenAI wants each as its own `role:"tool"` message. Emits the tool
 /// messages first (matching the preceding assistant `tool_calls`), then one
 /// trailing user message for any leftover plain text — never merges the two.
+/// Anthropic image block to OpenAI `image_url` with a data URI.
+///
+/// Grok 4.6 supports vision, but the two wire formats disagree: Anthropic
+/// nests base64 under `source`, OpenAI takes a `data:` URL. Without this,
+/// an attached image was dropped on the Grok path while working on Claude,
+/// which reads as "the attachment feature is broken on Grok only".
+fn anthropic_image_to_openai(block: &Value) -> Option<Value> {
+    let source = block.get("source")?;
+    let media_type = source.get("media_type").and_then(|v| v.as_str())?;
+    let data = source.get("data").and_then(|v| v.as_str())?;
+    Some(json!({
+        "type": "image_url",
+        "image_url": { "url": format!("data:{};base64,{}", media_type, data) },
+    }))
+}
+
 fn user_message_to_openai(content: &[Value]) -> Vec<Value> {
     let mut out = Vec::new();
     let mut leftover_text = String::new();
+    let mut images: Vec<Value> = Vec::new();
 
     for block in content {
         match block.get("type").and_then(|t| t.as_str()) {
@@ -225,11 +240,25 @@ fn user_message_to_openai(content: &[Value]) -> Vec<Value> {
                     leftover_text.push_str(t);
                 }
             }
+            Some("image") => {
+                if let Some(img) = anthropic_image_to_openai(block) {
+                    images.push(img);
+                }
+            }
             _ => {}
         }
     }
 
-    if !leftover_text.is_empty() {
+    // OpenAI carries a mixed image+text turn as a content *array*. Only use
+    // that shape when there is an image; a plain string keeps ordinary text
+    // turns in the simpler form every endpoint accepts.
+    if !images.is_empty() {
+        let mut parts = images;
+        if !leftover_text.is_empty() {
+            parts.push(json!({ "type": "text", "text": leftover_text }));
+        }
+        out.push(json!({ "role": "user", "content": parts }));
+    } else if !leftover_text.is_empty() {
         out.push(json!({ "role": "user", "content": leftover_text }));
     }
     out
@@ -287,6 +316,11 @@ pub fn parse_openai_response(body: &Value) -> Result<AgenticResponse, ClaudeErro
     // Light normalization to Anthropic's vocabulary for consistent logs —
     // nothing in poll_agentic_responses branches on the exact string today.
     let stop_reason = match choice.get("finish_reason").and_then(|s| s.as_str()) {
+        // OpenAI's normal-completion signal is "stop"; Anthropic's is
+        // "end_turn". Without this arm it fell through the catch-all below
+        // and leaked the OpenAI vocabulary into a field the rest of the
+        // Workshop reads as Anthropic-shaped.
+        Some("stop") => "end_turn",
         Some("tool_calls") => "tool_use",
         Some("length") => "max_tokens",
         Some(other) => other,
@@ -384,6 +418,60 @@ mod tests {
         assert_eq!(parsed.tool_uses[0].name, "a");
         assert_eq!(parsed.tool_uses[1].name, "b");
         assert_eq!(parsed.tool_uses[1].input, json!({"x": 1}));
+    }
+
+    #[test]
+    fn an_attached_image_reaches_grok_as_a_data_uri() {
+        // Workshop attachments arrive as Anthropic image blocks. Before the
+        // translation existed these were dropped, so Grok answered about a
+        // picture it had never been shown.
+        let history = vec![json!({
+            "role": "user",
+            "content": [
+                { "type": "image", "source": {
+                    "type": "base64", "media_type": "image/png", "data": "QUJD" } },
+                { "type": "text", "text": "what is wrong with this?" },
+            ]
+        })];
+        let openai = anthropic_history_to_openai(&history, None);
+        assert_eq!(openai.len(), 1);
+        assert_eq!(openai[0]["role"], "user");
+
+        // Mixed turns must use the content-array form, not a bare string.
+        let parts = openai[0]["content"].as_array().expect("content array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "image_url");
+        assert_eq!(parts[0]["image_url"]["url"], "data:image/png;base64,QUJD");
+        // Image first, then the question, matching the Anthropic ordering.
+        assert_eq!(parts[1]["type"], "text");
+        assert_eq!(parts[1]["text"], "what is wrong with this?");
+    }
+
+    #[test]
+    fn an_image_with_no_text_still_sends() {
+        let history = vec![json!({
+            "role": "user",
+            "content": [
+                { "type": "image", "source": {
+                    "type": "base64", "media_type": "image/png", "data": "QUJD" } },
+            ]
+        })];
+        let openai = anthropic_history_to_openai(&history, None);
+        let parts = openai[0]["content"].as_array().expect("content array");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "image_url");
+    }
+
+    #[test]
+    fn text_only_turns_keep_the_plain_string_form() {
+        // Only reach for the array shape when an image forces it.
+        let history = vec![json!({
+            "role": "user",
+            "content": [{ "type": "text", "text": "hello" }]
+        })];
+        let openai = anthropic_history_to_openai(&history, None);
+        assert!(openai[0]["content"].is_string());
+        assert_eq!(openai[0]["content"], "hello");
     }
 
     #[test]

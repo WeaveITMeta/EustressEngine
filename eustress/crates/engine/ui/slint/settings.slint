@@ -43,13 +43,16 @@ component SettingsSection inherits Rectangle {
 
 component SettingsHint inherits Rectangle {
     in property <string> text: "";
-    height: 16px;
     background: transparent;
-    Text {
+    // Height follows the wrapped text instead of being pinned at one line.
+    // With a fixed 16px height, any hint long enough to wrap painted outside
+    // its own box and over the control next to it, which is what made the
+    // API key hints collide with their input fields.
+    height: hint-text.preferred-height;
+    hint-text := Text {
         text: root.text;
         color: Theme.text-disabled;
         font-size: 10px;
-        vertical-alignment: center;
         wrap: word-wrap;
         width: parent.width;
     }
@@ -761,7 +764,7 @@ export component SettingsDialog inherits Rectangle {
                             }
                         }
 
-                        SettingsHint { text: "Your BYOK xAI (Grok) API key — used when Workshop's model picker is set to Grok 4.5. Stored locally, never transmitted to Eustress servers."; }
+                        SettingsHint { text: "Your BYOK xAI (Grok) API key, used when Workshop's model picker is set to Grok 4.6. Stored locally, never transmitted to Eustress servers."; }
 
                         // Model selection: Workshop panel toolbar, next to
                         // the Mode pill — not here, to keep a single writer

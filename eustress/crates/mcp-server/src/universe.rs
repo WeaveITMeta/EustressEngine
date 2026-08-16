@@ -1,16 +1,15 @@
 // Universe helpers — tiny fs layer that maps Eustress's file-system-first
 // conventions onto ergonomic tool inputs. Functions take pre-validated
-// absolute paths; `resolve_in_universe` is the gatekeeper for path safety.
+// absolute paths.
 
 use serde::Serialize;
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 // Cap result sizes so we never hand back megabytes to the client. MCP clients
 // that blow past their natural bounds get truncated silently on their side;
 // bounding up front gives us a clean "truncated" signal we can surface.
 pub const MAX_LIST_ITEMS: usize = 500;
-pub const MAX_SEARCH_MATCHES: usize = 200;
 pub const MAX_FILE_BYTES: usize = 256 * 1024;
 
 #[derive(Serialize, Debug, Clone)]
@@ -27,21 +26,6 @@ pub struct ScriptInfo {
     pub class: String,
     pub source_path: String,
     pub summary_path: Option<String>,
-}
-
-#[derive(Serialize, Debug, Clone)]
-pub struct EntityMatch {
-    pub name: String,
-    pub class: String,
-    pub space: String,
-    pub path: String,
-}
-
-#[derive(Serialize, Debug, Clone)]
-pub struct SearchMatch {
-    pub path: String,
-    pub line: usize,
-    pub preview: String,
 }
 
 pub fn list_spaces(universe: &Path) -> Vec<SpaceInfo> {
@@ -177,162 +161,6 @@ fn find_script_summary(folder: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-pub fn find_entity(universe: &Path, query: &str, space_filter: Option<&str>) -> Vec<EntityMatch> {
-    let needle = query.to_lowercase();
-    let spaces: Vec<SpaceInfo> = list_spaces(universe)
-        .into_iter()
-        .filter(|s| space_filter.map_or(true, |f| f == s.name))
-        .collect();
-
-    let mut out = Vec::new();
-    for space in &spaces {
-        walk_for_entities(Path::new(&space.path), &space.name, &needle, &mut out);
-        if out.len() >= MAX_LIST_ITEMS {
-            break;
-        }
-    }
-    out.truncate(MAX_LIST_ITEMS);
-    out
-}
-
-fn walk_for_entities(dir: &Path, space_name: &str, needle: &str, out: &mut Vec<EntityMatch>) {
-    if out.len() >= MAX_LIST_ITEMS {
-        return;
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-
-    for e in entries.flatten() {
-        let ft = match e.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
-        };
-        let name = e.file_name().to_string_lossy().to_string();
-        if ft.is_dir() {
-            if name == ".eustress" || name.starts_with('.') {
-                continue;
-            }
-            walk_for_entities(&e.path(), space_name, needle, out);
-            if out.len() >= MAX_LIST_ITEMS {
-                return;
-            }
-            continue;
-        }
-        if !ft.is_file() {
-            continue;
-        }
-        let is_instance = name == "_instance.toml";
-        let is_flat = name.ends_with(".part.toml")
-            || name.ends_with(".glb.toml")
-            || name.ends_with(".model.toml")
-            || name.ends_with(".textlabel.toml");
-        if !is_instance && !is_flat {
-            continue;
-        }
-        let full = e.path();
-        let toml_text = match std::fs::read_to_string(&full) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        let name_field = extract_toml(&toml_text, "name");
-        let klass = extract_toml(&toml_text, "class_name").unwrap_or_else(|| "Instance".to_string());
-        let identity = match name_field {
-            Some(n) => n,
-            None if is_instance => dir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
-            None => name.split('.').next().unwrap_or(&name).to_string(),
-        };
-        if !identity.to_lowercase().contains(needle) {
-            continue;
-        }
-        out.push(EntityMatch {
-            name: identity,
-            class: klass,
-            space: space_name.to_string(),
-            path: full.to_string_lossy().to_string(),
-        });
-        if out.len() >= MAX_LIST_ITEMS {
-            return;
-        }
-    }
-}
-
-pub fn search_universe(universe: &Path, query: &str, space_filter: Option<&str>) -> Vec<SearchMatch> {
-    let needle = query.to_lowercase();
-    let roots: Vec<PathBuf> = if let Some(space) = space_filter {
-        list_spaces(universe)
-            .into_iter()
-            .filter(|s| s.name == space)
-            .map(|s| PathBuf::from(s.path))
-            .collect()
-    } else {
-        vec![universe.join("Spaces")]
-    };
-
-    let mut out = Vec::new();
-    for root in &roots {
-        walk_for_search(root, &needle, &mut out);
-        if out.len() >= MAX_SEARCH_MATCHES {
-            break;
-        }
-    }
-    out.truncate(MAX_SEARCH_MATCHES);
-    out
-}
-
-fn walk_for_search(dir: &Path, needle: &str, out: &mut Vec<SearchMatch>) {
-    if out.len() >= MAX_SEARCH_MATCHES {
-        return;
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-    for e in entries.flatten() {
-        let ft = match e.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
-        };
-        let name = e.file_name().to_string_lossy().to_string();
-        let abs = e.path();
-        if ft.is_dir() {
-            if name == ".eustress" || name.starts_with('.') {
-                continue;
-            }
-            walk_for_search(&abs, needle, out);
-            if out.len() >= MAX_SEARCH_MATCHES {
-                return;
-            }
-            continue;
-        }
-        if !ft.is_file() {
-            continue;
-        }
-        if !(name.ends_with(".rune") || name.ends_with(".toml") || name.ends_with(".md")) {
-            continue;
-        }
-        let text = match std::fs::read_to_string(&abs) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        for (i, line) in text.lines().enumerate() {
-            if line.to_lowercase().contains(needle) {
-                let preview = line.trim();
-                let capped: String = preview.chars().take(200).collect();
-                out.push(SearchMatch {
-                    path: abs.to_string_lossy().to_string(),
-                    line: i + 1,
-                    preview: capped,
-                });
-                if out.len() >= MAX_SEARCH_MATCHES {
-                    return;
-                }
-            }
-        }
-    }
-}
-
 /// Extract a scalar string field from a TOML file. Uses the real `toml`
 /// parser so nested tables and mixed content parse correctly (improvement
 /// over the TS version's per-line substring hack).
@@ -369,45 +197,6 @@ pub fn read_capped(abs: &Path) -> std::io::Result<CappedRead> {
     let slice = if truncated { &bytes[..MAX_FILE_BYTES] } else { &bytes[..] };
     let text = String::from_utf8_lossy(slice).into_owned();
     Ok(CappedRead { text, truncated })
-}
-
-/// Path-safety gatekeeper. Resolves `input` against `universe`, rejects
-/// anything that escapes the root. Returns the resolved absolute path on
-/// success, `Err(msg)` on violation.
-pub fn resolve_in_universe(universe: &Path, input: &str) -> Result<PathBuf, String> {
-    let universe_abs = universe
-        .canonicalize()
-        .unwrap_or_else(|_| universe.to_path_buf());
-    let input_path = Path::new(input);
-    let resolved = if input_path.is_absolute() {
-        input_path.to_path_buf()
-    } else {
-        universe_abs.join(input_path)
-    };
-    // Canonicalize if it exists; otherwise normalize components manually so we
-    // can still reject `..` escapes for paths we're about to create.
-    let normalized = match resolved.canonicalize() {
-        Ok(p) => p,
-        Err(_) => normalize_components(&resolved),
-    };
-    if !normalized.starts_with(&universe_abs) {
-        return Err(format!("path '{input}' escapes the Universe root"));
-    }
-    Ok(normalized)
-}
-
-fn normalize_components(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for c in p.components() {
-        match c {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
 }
 
 /// Walk up from `start` looking for the enclosing Universe — any directory
@@ -470,20 +259,88 @@ pub fn discover_universes(roots: &[PathBuf]) -> Vec<PathBuf> {
     v
 }
 
+/// How long a `find_live_engine_universe` answer stays good. Long enough that
+/// a burst of bridge calls costs one scan, short enough that closing one
+/// engine and opening another is picked up without restarting the server.
+const LIVE_ENGINE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How long we give a port file's listener to accept before calling it dead.
+/// The engine answers on its frame loop, so a live one connects instantly;
+/// this only bounds the wait on an abandoned port.
+const LIVENESS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+type LiveEngineCache = std::sync::Mutex<Option<(std::time::Instant, Option<PathBuf>)>>;
+static LIVE_ENGINE_CACHE: std::sync::OnceLock<LiveEngineCache> = std::sync::OnceLock::new();
+
+/// True if something is actually accepting connections on the port this file
+/// advertises.
+///
+/// The port file is written on engine start but is NOT reliably removed when
+/// the engine crashes or is killed, so "file exists" is not "engine is
+/// running". Trusting it meant a leftover file could shadow a genuinely live
+/// engine in another Universe and route every bridge tool into a dead socket.
+fn port_file_is_live(port_file: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(port_file) else {
+        return false;
+    };
+    let Ok(port) = raw.trim().parse::<u16>() else {
+        return false;
+    };
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    std::net::TcpStream::connect_timeout(&addr, LIVENESS_PROBE_TIMEOUT).is_ok()
+}
+
 /// Find the Universe whose engine bridge is live — the one holding an
-/// `.eustress/engine.port` file (written by a running engine). Scans the
-/// search roots' Universes and returns the first live one.
+/// `.eustress/engine.port` file that something is *actually listening on*.
 ///
 /// This is how the live-engine ("bridge") tools locate the running engine
 /// *deterministically*, even when several Universes exist on disk and the
 /// "default" is ambiguous: there is exactly one running engine, and it
 /// advertises itself with exactly one port file. Naming/sorting/`.default_
 /// universe` don't enter into it — we follow the port file to the engine.
+///
+/// Cached for [`LIVE_ENGINE_TTL`]: the underlying scan `read_dir`s every
+/// search root, and the default roots include the user's home directory, so
+/// running it per bridge call put a full home-directory walk in front of
+/// every `inspect_scene`.
 pub fn find_live_engine_universe(roots: &[PathBuf]) -> Option<PathBuf> {
-    for u in discover_universes(roots) {
-        if u.join(".eustress").join("engine.port").is_file() {
-            return Some(u);
+    let cache = LIVE_ENGINE_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some((at, ref hit)) = *guard {
+            if at.elapsed() < LIVE_ENGINE_TTL {
+                return hit.clone();
+            }
         }
+    }
+
+    let found = scan_for_live_engine(roots);
+
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((std::time::Instant::now(), found.clone()));
+    }
+    found
+}
+
+fn scan_for_live_engine(roots: &[PathBuf]) -> Option<PathBuf> {
+    // Two passes so one unreachable port file can't hide a live engine:
+    // collect every candidate, then probe. A Universe whose file is stale is
+    // skipped rather than returned.
+    let candidates: Vec<PathBuf> = discover_universes(roots)
+        .into_iter()
+        .filter(|u| u.join(".eustress").join("engine.port").is_file())
+        .collect();
+
+    for u in &candidates {
+        if port_file_is_live(&u.join(".eustress").join("engine.port")) {
+            return Some(u.clone());
+        }
+    }
+
+    if !candidates.is_empty() {
+        tracing::debug!(
+            "found {} engine.port file(s) but none answered — treating the engine as down",
+            candidates.len()
+        );
     }
     None
 }
@@ -518,12 +375,4 @@ mod tests {
         assert!(extract_toml(src, "class_name").is_none());
     }
 
-    #[test]
-    fn resolve_in_universe_rejects_escape() {
-        let tmp = std::env::temp_dir();
-        let u = tmp.join("eustress-test-universe");
-        std::fs::create_dir_all(u.join("Spaces")).ok();
-        let err = resolve_in_universe(&u, "../../etc/passwd");
-        assert!(err.is_err());
-    }
 }

@@ -9,8 +9,44 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_navigate;
 use crate::api::{self, ApiClient};
-use crate::components::CentralNav;
+use crate::components::{CentralNav, QrCodeSvg};
 use crate::state::AppState;
+
+/// Global minimum age. Bliss pays out real USD, so accounts are gated on age
+/// before an identity is ever created. The server enforces this again against
+/// the date of birth read off the document; this copy only spares the applicant
+/// a pointless round trip.
+const MIN_AGE: u32 = 18;
+
+/// Whole years from a `YYYY-MM-DD` date to today.
+///
+/// Returns `None` for an absent, malformed, or impossible date so callers can
+/// distinguish "not filled in yet" from "too young".
+fn age_from_dob(dob: &str) -> Option<u32> {
+    let d = dob.trim();
+    let parts: Vec<&str> = d.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let year: i32 = parts[0].parse().ok()?;
+    let month: u32 = parts[1].parse().ok()?;
+    let day: u32 = parts[2].parse().ok()?;
+
+    use chrono::Datelike;
+
+    let birth = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+    let today = chrono::Local::now().date_naive();
+    if birth > today {
+        return None; // born in the future
+    }
+
+    let mut age = today.year() - year;
+    // Subtract a year when this year's birthday has not happened yet.
+    if (today.month(), today.day()) < (month, day) {
+        age -= 1;
+    }
+    u32::try_from(age.max(0)).ok()
+}
 
 /// Login/Register page with tabs.
 #[component]
@@ -49,6 +85,148 @@ pub fn LoginPage() -> impl IntoView {
     let kyc_rejected = RwSignal::new(false);
     let kyc_verified_name = RwSignal::new(String::new()); // name extracted by Grok
     let kyc_reject_reason = RwSignal::new(String::new());
+
+    // Desktop -> mobile handoff. Desktops rarely have a camera good enough to
+    // resolve the small print on an ID, so the applicant can scan a QR code and
+    // finish capture on their phone while this tab polls for the result.
+    let qr_open = RwSignal::new(false);
+    let qr_url = RwSignal::new(String::new());
+    let qr_error = RwSignal::new(String::new());
+    // Drives the polling Effect; bumped once the handoff is live.
+    let qr_polling = RwSignal::new(false);
+
+    // Register the handoff, then show the QR. The applicant's name and birthday
+    // are stored server-side against the session id so they never travel
+    // through the QR payload or the phone's URL bar.
+    let start_handoff = move || {
+        qr_error.set(String::new());
+        let session = kyc_session_id.get_untracked();
+        let payload = serde_json::json!({
+            "session_id": session,
+            "id_type": reg_id_type.get_untracked(),
+            "needs_back": reg_id_needs_back.get_untracked(),
+            "full_name": reg_username.get_untracked(),
+            "birthday": reg_birthday.get_untracked(),
+            "username": reg_username.get_untracked(),
+        });
+
+        spawn_local(async move {
+            let result = gloo_net::http::Request::post("https://api.eustress.dev/api/kyc/handoff")
+                .header("Content-Type", "application/json")
+                .body(payload.to_string())
+                .map_err(|_| ())
+                .ok();
+
+            let Some(req) = result else {
+                qr_error.set("Could not prepare the phone link.".into());
+                return;
+            };
+
+            match req.send().await {
+                Ok(resp) if resp.status() == 200 => {
+                    let text = resp.text().await.unwrap_or_default();
+                    let url = serde_json::from_str::<serde_json::Value>(&text)
+                        .ok()
+                        .and_then(|v| v.get("verify_url").and_then(|s| s.as_str()).map(String::from));
+                    match url {
+                        Some(u) => {
+                            qr_url.set(u);
+                            qr_open.set(true);
+                            qr_polling.set(true);
+                        }
+                        None => qr_error.set("The server did not return a phone link.".into()),
+                    }
+                }
+                _ => qr_error.set("Could not create a phone link. Check your connection.".into()),
+            }
+        });
+    };
+
+    // Watch the handoff session until the phone finishes. Polling (rather than
+    // a socket) keeps this working through the same CDN as every other request.
+    Effect::new(move |_| {
+        if !qr_polling.get() {
+            return;
+        }
+        let session = kyc_session_id.get_untracked();
+
+        spawn_local(async move {
+            // 30 minutes at 3s intervals matches the handoff TTL, so the loop
+            // cannot outlive the session it is watching.
+            for _ in 0..600 {
+                gloo_timers::future::TimeoutFuture::new(3000).await;
+
+                // Stop if the applicant closed the panel or moved on.
+                if !qr_polling.get_untracked() {
+                    return;
+                }
+
+                let url = format!("https://api.eustress.dev/api/kyc/session/{}", session);
+                let Ok(resp) = gloo_net::http::Request::get(&url).send().await else {
+                    continue;
+                };
+                if resp.status() != 200 {
+                    continue;
+                }
+                let Ok(text) = resp.text().await else { continue };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    continue;
+                };
+
+                let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                let front = v.get("front_uploaded").and_then(|b| b.as_bool()).unwrap_or(false);
+                let back = v.get("back_uploaded").and_then(|b| b.as_bool()).unwrap_or(false);
+
+                // Mirror the phone's progress into the desktop form so the
+                // step-2 gating sees the same state as a desktop upload would.
+                if front {
+                    reg_id_front_uploaded.set(true);
+                    if reg_id_front_name.get_untracked().is_empty() {
+                        reg_id_front_name.set("Captured on phone".into());
+                    }
+                }
+                if back {
+                    reg_id_back_uploaded.set(true);
+                    if reg_id_back_name.get_untracked().is_empty() {
+                        reg_id_back_name.set("Captured on phone".into());
+                    }
+                }
+
+                match status {
+                    "verified" => {
+                        kyc_verified.set(true);
+                        kyc_rejected.set(false);
+                        kyc_verified_name.set(
+                            v.get("ocr_name").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                        );
+                        kyc_status_text.set(String::new());
+                        qr_polling.set(false);
+                        qr_open.set(false);
+                        return;
+                    }
+                    "rejected" => {
+                        kyc_verified.set(false);
+                        kyc_rejected.set(true);
+                        kyc_reject_reason.set(
+                            v.get("reason").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                        );
+                        kyc_status_text.set(String::new());
+                        qr_polling.set(false);
+                        return;
+                    }
+                    _ if front => {
+                        kyc_status_text.set(if back {
+                            "Both sides received. Verifying...".into()
+                        } else {
+                            "Front received on your phone...".into()
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            qr_polling.set(false);
+        });
+    });
 
     // Jurisdiction detection (from Cloudflare cdn-cgi/trace)
     let detected_country = RwSignal::new("US".to_string());
@@ -423,12 +601,41 @@ pub fn LoginPage() -> impl IntoView {
                                             prop:value=move || reg_birthday.get()
                                             on:input=move |e| reg_birthday.set(event_target_value(&e))
                                         />
+                                        // Age is a hard gate, not a warning: Bliss pays
+                                        // out real money, so say so at the point of entry
+                                        // rather than after documents are uploaded.
+                                        <Show
+                                            when=move || {
+                                                let b = reg_birthday.get();
+                                                !b.is_empty() && age_from_dob(&b).map_or(true, |a| a < MIN_AGE)
+                                            }
+                                            fallback=|| view! {
+                                                <p class="form-hint">
+                                                    "You must be "{MIN_AGE}" or older. This is checked against your ID."
+                                                </p>
+                                            }
+                                        >
+                                            <p class="form-error-inline">
+                                                {move || match age_from_dob(&reg_birthday.get()) {
+                                                    Some(_) => format!(
+                                                        "You must be at least {} years old to create an account.",
+                                                        MIN_AGE
+                                                    ),
+                                                    None => "Enter a valid date of birth.".to_string(),
+                                                }}
+                                            </p>
+                                        </Show>
                                     </div>
 
                                     <button
                                         type="button"
                                         class="btn btn-primary"
-                                        disabled=move || reg_username.get().trim().is_empty() || reg_email.get().trim().is_empty() || !reg_email.get().contains('@') || reg_birthday.get().is_empty()
+                                        disabled=move || {
+                                            reg_username.get().trim().is_empty()
+                                            || reg_email.get().trim().is_empty()
+                                            || !reg_email.get().contains('@')
+                                            || age_from_dob(&reg_birthday.get()).map_or(true, |a| a < MIN_AGE)
+                                        }
                                         on:click=move |_| reg_step.set(2)
                                     >"Continue"</button>
                                 </div>
@@ -611,6 +818,49 @@ pub fn LoginPage() -> impl IntoView {
                                                 }}
                                             </div>
                                         </div>
+                                    </div>
+
+                                    // ── Continue on phone (QR handoff) ──
+                                    // A webcam rarely resolves the small print on
+                                    // an ID. Scanning a code hands capture to the
+                                    // phone camera while this tab keeps polling.
+                                    <div class="kyc-handoff">
+                                        <Show
+                                            when=move || !qr_open.get()
+                                            fallback=move || view! {
+                                                <div class="kyc-qr-panel">
+                                                    <p class="kyc-qr-title">"Scan with your phone"</p>
+                                                    <QrCodeSvg data=qr_url.get() size_px=200 />
+                                                    <p class="kyc-qr-hint">
+                                                        "Point your phone camera at the code, then photograph your ID. "
+                                                        "This page updates on its own when you finish."
+                                                    </p>
+                                                    <Show when=move || qr_polling.get()>
+                                                        <p class="kyc-qr-waiting">
+                                                            <span class="kyc-spinner"></span>
+                                                            "Waiting for your phone..."
+                                                        </p>
+                                                    </Show>
+                                                    <button
+                                                        type="button"
+                                                        class="btn-link"
+                                                        on:click=move |_| { qr_open.set(false); qr_polling.set(false); }
+                                                    >"Cancel and upload here instead"</button>
+                                                </div>
+                                            }
+                                        >
+                                            <button
+                                                type="button"
+                                                class="btn btn-secondary kyc-phone-btn"
+                                                on:click=move |_| start_handoff()
+                                            >"Use my phone camera instead"</button>
+                                            <p class="form-hint">
+                                                "Recommended. Phone cameras read ID text far more reliably than a webcam."
+                                            </p>
+                                        </Show>
+                                        <Show when=move || !qr_error.get().is_empty()>
+                                            <p class="kyc-qr-error">{move || qr_error.get()}</p>
+                                        </Show>
                                     </div>
 
                                     <p class="form-hint">

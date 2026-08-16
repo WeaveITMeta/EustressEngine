@@ -57,6 +57,8 @@ pub mod world_db_binary;
 #[cfg(feature = "world-db")]
 pub mod promote;
 #[cfg(feature = "world-db")]
+pub mod db_export;
+#[cfg(feature = "world-db")]
 pub mod residency;
 /// Merged-cell HLOD: far Morton cells render as ONE merged proxy mesh
 /// instead of thousands of individual entities, so the whole map draws
@@ -81,6 +83,30 @@ pub mod data_recorder;
 /// `world_db_binary::ResidencyChainSet` safely.
 #[cfg(feature = "sim-orchestration")]
 pub mod sim_orchestration;
+
+/// True when `EUSTRESS_SKIP_DISK_SCANS` is set to a non-empty, non-`0` value.
+///
+/// Two open-time passes walk the Space's ENTIRE disk tree: the disk→tree
+/// reconcile (`world_db_plugin`) and the Gaussian-splat persistence scan
+/// (`instance_loader`). Both exist to catch edits made while the engine was
+/// closed, and both cost one directory entry per file — fine at a few thousand,
+/// minutes of blocked main thread on a Space with ~1.3M `_instance.toml` files.
+///
+/// Setting this skips both. The trade is explicit: files added or edited on
+/// disk while the engine was closed will NOT be picked up until the variable is
+/// cleared and the Space reopened. For a Space only ever edited inside the
+/// engine — the normal case once it is DB-primary — nothing is lost.
+///
+/// Read fresh rather than cached so it can be flipped between Space opens in
+/// one session; the cost is one env read per Space open, not per file.
+pub fn skip_disk_scans() -> bool {
+    std::env::var("EUSTRESS_SKIP_DISK_SCANS")
+        .map(|v| {
+            let v = v.trim();
+            !v.is_empty() && v != "0"
+        })
+        .unwrap_or(false)
+}
 
 /// Resource holding the current Space root path
 #[derive(Resource, Debug, Clone)]

@@ -31,6 +31,11 @@ fn num_arg(input: &serde_json::Value, key: &str) -> Option<f64> {
 pub struct GetSimValueTool;
 
 impl ToolHandler for GetSimValueTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "get_sim_value",
@@ -185,6 +190,11 @@ impl ToolHandler for SetSimValueTool {
 pub struct ListSimValuesTool;
 
 impl ToolHandler for ListSimValuesTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "list_sim_values",
@@ -249,6 +259,11 @@ impl ToolHandler for ListSimValuesTool {
 pub struct GetTaggedEntitiesTool;
 
 impl ToolHandler for GetTaggedEntitiesTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "get_tagged_entities",
@@ -354,6 +369,11 @@ fn toml_has_tag(path: &std::path::Path, tag: &str) -> bool {
 pub struct RaycastTool;
 
 impl ToolHandler for RaycastTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "raycast",
@@ -525,6 +545,11 @@ impl ToolHandler for HttpRequestTool {
 pub struct DataStoreGetTool;
 
 impl ToolHandler for DataStoreGetTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "datastore_get",
@@ -816,6 +841,11 @@ fn toggle_tag(
 pub struct TailTelemetryTool;
 
 impl ToolHandler for TailTelemetryTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "tail_telemetry",
@@ -961,6 +991,11 @@ impl ToolHandler for TailTelemetryTool {
 pub struct QueryAuditLogTool;
 
 impl ToolHandler for QueryAuditLogTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "query_audit_log",
@@ -1213,6 +1248,11 @@ impl ToolHandler for StopSimulationTool {
 pub struct GetSimulationStateTool;
 
 impl ToolHandler for GetSimulationStateTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "get_simulation_state",
@@ -1453,8 +1493,24 @@ impl ToolHandler for AwaitSimulationTool {
         let start_ts = chrono::Utc::now();
         let poll = std::time::Duration::from_millis(500);
 
-        // Poll until not Playing or timeout
+        // Poll until not Playing, cancelled, or timed out.
         let final_snap = loop {
+            // Checked first so a cancel that lands during a sleep is honoured
+            // on the very next tick instead of after the full timeout. The
+            // simulation itself keeps running — this call stops *waiting*, it
+            // does not stop the world.
+            if ctx.is_cancelled() {
+                return ToolResult {
+                    tool_name: "await_simulation".to_string(), tool_use_id: String::new(),
+                    success: false,
+                    content: format!(
+                        "Cancelled after {:.1}s of waiting. The simulation was NOT stopped — \
+                         call stop_simulation if you want it to end.",
+                        start_wall.elapsed().as_secs_f64()
+                    ),
+                    structured_data: None, stream_topic: None,
+                };
+            }
             if start_wall.elapsed().as_secs_f64() >= timeout_s {
                 return ToolResult {
                     tool_name: "await_simulation".to_string(), tool_use_id: String::new(),
@@ -1606,6 +1662,22 @@ impl ToolHandler for RunExperimentTool {
         std::thread::sleep(std::time::Duration::from_secs(1));
 
         let final_snap = loop {
+            // A cancelled experiment stops being waited on immediately rather
+            // than holding the caller for the full timeout. The run itself is
+            // already in flight engine-side; stop_simulation ends it.
+            if ctx.is_cancelled() {
+                return ToolResult {
+                    tool_name: "run_experiment".to_string(), tool_use_id: String::new(),
+                    success: false,
+                    content: format!(
+                        "Experiment '{}' cancelled after {:.0}s of waiting. The run was NOT \
+                         stopped — call stop_simulation if you want it to end.",
+                        name,
+                        start_wall.elapsed().as_secs_f64()
+                    ),
+                    structured_data: None, stream_topic: None,
+                };
+            }
             if start_wall.elapsed().as_secs_f64() >= timeout_s {
                 return ToolResult {
                     tool_name: "run_experiment".to_string(), tool_use_id: String::new(),
@@ -1678,6 +1750,11 @@ impl ToolHandler for RunExperimentTool {
 pub struct CompareRunsTool;
 
 impl ToolHandler for CompareRunsTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "compare_runs",
@@ -1802,6 +1879,11 @@ impl ToolHandler for CompareRunsTool {
 pub struct ListExperimentsTool;
 
 impl ToolHandler for ListExperimentsTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "list_experiments",

@@ -1008,13 +1008,25 @@ fn recycle_offscreen_billboard_slots(
         }
     }
 
-    // (2) Nearest-first under pressure. When MORE billboards sit inside the
-    // render radius than the atlas has slots, keep only the N NEAREST: find the
-    // N-th nearest squared distance across every in-range candidate (slotted +
-    // un-slotted) and evict any slotted billboard beyond it. The distance-sorted
-    // allocator then refills the freed slots with the nearest un-slotted labels,
-    // so a dense cluster shows its CLOSEST labels rather than an arbitrary
-    // first-come subset — and the labelled set follows the camera.
+    // (2) Nearest-first under pressure. When MORE billboards want a slot than
+    // the atlas has, keep only the N NEAREST: rank every contender by distance,
+    // take the N-th nearest as the keep/evict cutoff, and evict any slotted
+    // billboard beyond it. The distance-sorted allocator then refills the freed
+    // slots with the nearest un-slotted labels, so a dense cluster shows its
+    // CLOSEST labels rather than an arbitrary first-come subset — and the
+    // labelled set follows the camera.
+    //
+    // EVERY slot-holder competes, at whatever distance it sits — a slot it
+    // holds is a slot a nearer label cannot have, so range is irrelevant to
+    // whether it should be ranked. Gating this pool on the render radius (as
+    // an earlier revision did) made slot-holders in the 300..360 hysteresis
+    // band structurally immune to eviction: too near for pass (1)'s >360 test,
+    // too far to enter the pool, so they were never compared against anything.
+    // Once enough slots were captured by that band the atlas locked solid and
+    // billboards the camera stood right next to could never obtain a slot —
+    // labels "stopped loading past a certain point" and never recovered.
+    // Pass (1) has already evicted everything beyond 360, so the survivors
+    // ranked here are all ≤360 and lose cleanly to any nearer contender.
     let n = atlas.total_slots() as usize;
     if n > 0 {
         let evict_set: std::collections::HashSet<Entity> = to_evict.iter().copied().collect();
@@ -1023,10 +1035,7 @@ fn recycle_offscreen_billboard_slots(
             if evict_set.contains(&entity) {
                 continue;
             }
-            let d = gt.translation().distance_squared(cam_pos);
-            if d <= RENDER_RADIUS_SQ {
-                dists.push(d);
-            }
+            dists.push(gt.translation().distance_squared(cam_pos));
         }
         grid.for_each_in_radius(cam_pos, 300.0, |e| {
             let Ok((gt, marker)) = unslotted.get(e) else { return };

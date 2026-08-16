@@ -341,6 +341,7 @@ pub fn get_extension(class_name: ClassName) -> &'static str {
         ClassName::Atmosphere => ".atmosphere.toml",
         ClassName::Clouds => ".clouds.toml",
         ClassName::Sky => ".sky.toml",
+        ClassName::ReflectionProbe => ".reflectionprobe.toml",
         ClassName::Terrain => ".terrain.toml",
         ClassName::ChunkedWorld => "_instance.toml",
         // Containers use _instance.toml

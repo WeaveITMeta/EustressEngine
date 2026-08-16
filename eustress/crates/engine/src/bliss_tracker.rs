@@ -69,6 +69,8 @@ const MAX_JOBS_PER_FLUSH: usize = 6;
 const PERSIST_INTERVAL_SECS: f64 = 30.0;
 /// Heartbeat cadence — each beat returns the authoritative balance.
 const HEARTBEAT_INTERVAL_SECS: f64 = 90.0;
+/// Consecutive non-auth cosign failures before the badge says "not syncing".
+const SYNC_FAILURE_VISIBLE_AFTER: u32 = 3;
 
 /// Contribution buckets tracked by the engine. Indexes into
 /// [`BlissTracker::buckets`]. Weights shown are applied witness-side.
@@ -97,6 +99,13 @@ struct TrackerFile {
     /// Unsent bucket seconds, keyed by contribution type name.
     #[serde(default)]
     pending_buckets: HashMap<String, f64>,
+    /// Next contribution chunk id. MUST persist: the id is mixed into the
+    /// contribution hash, and the witness dedupes on that hash. Restarting
+    /// at 1 regenerated already-used hashes, so re-submitted work after a
+    /// crash was rejected as a duplicate and silently lost (or, for a
+    /// different day, sailed through as a fresh claim).
+    #[serde(default)]
+    next_chunk_id: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +129,10 @@ enum NetJob {
         mode: String,
         user_id: Option<String>,
         uptime_secs: u64,
+        /// Bearer JWT. Without it the witness treats the beat as anonymous:
+        /// no presence accrues (so ActiveTime can never be credited) and no
+        /// balance is returned.
+        token: Option<String>,
     },
 }
 
@@ -213,7 +226,9 @@ impl BlissNet {
                             mode,
                             user_id,
                             uptime_secs,
+                            token,
                         } => {
+                            client.set_auth_token(token);
                             let result = rt.block_on(client.heartbeat(
                                 &node_id,
                                 &mode,
@@ -243,6 +258,38 @@ impl BlissNet {
 // ---------------------------------------------------------------------------
 // Tracker resource
 // ---------------------------------------------------------------------------
+
+/// Why the badge shows what it shows. Earning silently doing nothing was
+/// indistinguishable from earning normally, which hid a real auth bug for
+/// an entire release — the state is now explicit and rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EarnState {
+    /// Co-signing normally.
+    Earning,
+    /// No user session at all.
+    SignedOut,
+    /// Signed in locally, but the witness never issued a JWT (no private
+    /// key in identity.toml, offline, unregistered identity, or a 401).
+    NotAuthenticated,
+    /// Authenticated, but submissions keep failing for a non-auth reason
+    /// (network, 404, 5xx). Work is banked locally and will retry.
+    NotSyncing,
+    /// User turned Bliss off in the badge dropdown.
+    Disabled,
+}
+
+impl EarnState {
+    /// Text for the badge dropdown's pending line.
+    fn hint(&self) -> Option<&'static str> {
+        match self {
+            EarnState::Earning => None,
+            EarnState::SignedOut => Some("Sign in to earn BLS"),
+            EarnState::NotAuthenticated => Some("Identity not verified — cannot earn"),
+            EarnState::NotSyncing => Some("Not syncing — saved locally, retrying"),
+            EarnState::Disabled => Some("Bliss disabled"),
+        }
+    }
+}
 
 /// Engine-side contribution state. The drain in `slint_ui.rs` marks
 /// script activity on this resource; everything else is fed by
@@ -282,6 +329,14 @@ pub struct BlissTracker {
     /// Signals negative (idle-out) edges so the display refresh knows
     /// a repaint is needed even without new input.
     display_dirty: bool,
+    /// Why earning is (or isn't) happening — rendered on the badge.
+    earn_state: EarnState,
+    /// Set when the witness returns 401. Stops the flush/refund/retry loop
+    /// until the user re-authenticates (cleared on a successful AUTHENTICATED
+    /// heartbeat balance read, which proves credentials work again).
+    auth_rejected: bool,
+    /// Consecutive non-auth cosign failures; drives the NotSyncing hint.
+    consecutive_failures: u32,
 }
 
 impl Default for BlissTracker {
@@ -315,7 +370,7 @@ impl Default for BlissTracker {
             last_undo_sequence: 0,
             buckets,
             inflight: HashMap::new(),
-            next_chunk_id: 1,
+            next_chunk_id: file.next_chunk_id.max(1),
             server_balance: file.cached_balance,
             server_pending: file.cached_pending,
             node_id,
@@ -325,11 +380,22 @@ impl Default for BlissTracker {
             since_heartbeat: HEARTBEAT_INTERVAL_SECS - 5.0,
             persist_path,
             display_dirty: true,
+            earn_state: EarnState::SignedOut,
+            auth_rejected: false,
+            consecutive_failures: 0,
         }
     }
 }
 
 impl BlissTracker {
+    /// Update the earn state, repainting the badge only on a real change.
+    fn set_earn_state(&mut self, state: EarnState) {
+        if self.earn_state != state {
+            self.earn_state = state;
+            self.display_dirty = true;
+        }
+    }
+
     /// Local pending-score estimate (weighted minutes) for unsent +
     /// in-flight seconds. Display only — the witness is authoritative.
     fn local_pending_estimate(&self) -> f64 {
@@ -370,6 +436,7 @@ impl BlissTracker {
             cached_balance: self.server_balance,
             cached_pending: self.server_pending,
             pending_buckets,
+            next_chunk_id: self.next_chunk_id,
         };
         match toml::to_string_pretty(&file) {
             Ok(body) => {
@@ -452,8 +519,21 @@ fn flush_contributions(
     }
     tracker.since_flush = 0.0;
 
+    // Earn state is derived in `drain_net_events`; these are pure guards.
     let Some(auth) = auth else { return };
     if auth.status != AuthStatus::LoggedIn {
+        return;
+    }
+    // A local-only identity (no private key / offline / unregistered) leaves
+    // `token` set to the public key, which the witness rejects. Attempting
+    // anyway burned the rate limit and looked identical to "earning" from
+    // the UI, so refuse to send and let the badge explain why.
+    if !auth.jwt_valid {
+        return;
+    }
+    // A 401 already told us this session's credentials are dead; retrying
+    // every 5 min just refunds and re-submits forever.
+    if tracker.auth_rejected {
         return;
     }
     let (Some(token), Some(user)) = (auth.token.clone(), auth.user.as_ref()) else {
@@ -533,11 +613,11 @@ fn send_heartbeat(
     }
     tracker.since_heartbeat = 0.0;
 
-    let user_id = auth
+    let authed = auth
         .as_ref()
-        .filter(|a| a.status == AuthStatus::LoggedIn)
-        .and_then(|a| a.user.as_ref())
-        .map(|u| u.id.clone());
+        .filter(|a| a.status == AuthStatus::LoggedIn && a.jwt_valid);
+    let user_id = authed.and_then(|a| a.user.as_ref()).map(|u| u.id.clone());
+    let token = authed.and_then(|a| a.token.clone());
     let mode = bliss_state
         .map(|b| b.mode.clone())
         .unwrap_or_else(|| "Light".to_string());
@@ -547,6 +627,7 @@ fn send_heartbeat(
         mode,
         user_id,
         uptime_secs: time.elapsed_secs_f64() as u64,
+        token,
     });
 }
 
@@ -573,21 +654,67 @@ fn drain_net_events(
                 contribution_type,
                 score_added,
             } => {
-                tracker.inflight.remove(&chunk_id);
-                tracker.server_pending += score_added;
-                tracker.display_dirty = true;
-                if let Some(ref mut out) = output {
-                    out.info(format!(
-                        "Bliss: +{score_added:.1} pts co-signed ({contribution_type})"
-                    ));
+                let chunk = tracker.inflight.remove(&chunk_id);
+                tracker.consecutive_failures = 0;
+                if score_added > 0.0 {
+                    tracker.server_pending += score_added;
+                    if let Some(ref mut out) = output {
+                        out.info(format!(
+                            "Bliss: +{score_added:.1} pts co-signed ({contribution_type})"
+                        ));
+                    }
+                } else if let Some((idx, secs)) = chunk {
+                    // A 200 that credited nothing means the claim was clamped
+                    // (daily cap reached, or ActiveTime beyond observed
+                    // presence). Dropping the chunk here destroyed real work —
+                    // an offline backlog could never be paid because every
+                    // flush silently consumed it. Put it back and let it
+                    // settle once headroom exists.
+                    tracker.buckets[idx] += secs;
                 }
+                tracker.display_dirty = true;
             }
             NetEvent::CosignFail { chunk_id, error } => {
                 // Refund the chunk — it re-flushes next cycle.
                 if let Some((idx, secs)) = tracker.inflight.remove(&chunk_id) {
                     tracker.buckets[idx] += secs;
                 }
-                debug!("Bliss cosign failed (kept locally, will retry): {error}");
+                // A 401/403 is not transient: the credentials are wrong and
+                // every retry burns rate limit while looking like progress.
+                // Latch it, surface it, and stop until re-auth.
+                let unauthorized = error.contains("401")
+                    || error.contains("403")
+                    || error.to_ascii_lowercase().contains("unauthorized");
+                if unauthorized {
+                    if !tracker.auth_rejected {
+                        tracker.auth_rejected = true;
+                        tracker.set_earn_state(EarnState::NotAuthenticated);
+                        if let Some(ref mut out) = output {
+                            out.warn(
+                                "Bliss: witness rejected this identity — work is being saved \
+                                 locally but not credited. Re-open your identity to fix."
+                                    .to_string(),
+                            );
+                        }
+                    }
+                } else {
+                    // Non-auth failures were invisible: the badge kept saying
+                    // "Earning" while every submission failed forever (e.g. a
+                    // 404 from a missing user record). Surface it after a few
+                    // consecutive failures rather than only on 401/403.
+                    tracker.consecutive_failures += 1;
+                    if tracker.consecutive_failures == SYNC_FAILURE_VISIBLE_AFTER {
+                        tracker.set_earn_state(EarnState::NotSyncing);
+                        if let Some(ref mut out) = output {
+                            out.warn(format!(
+                                "Bliss: {} consecutive sync failures — work is saved locally \
+                                 but not being credited. Last error: {error}",
+                                tracker.consecutive_failures
+                            ));
+                        }
+                    }
+                    debug!("Bliss cosign failed (kept locally, will retry): {error}");
+                }
             }
             NetEvent::Balance {
                 bliss_balance,
@@ -596,24 +723,61 @@ fn drain_net_events(
                 tracker.server_balance = bliss_balance;
                 tracker.server_pending = pending_score;
                 tracker.display_dirty = true;
+                // The witness answered for this account, so whatever caused
+                // an earlier 401 is resolved — allow flushing again.
+                if tracker.auth_rejected {
+                    tracker.auth_rejected = false;
+                }
                 if let Some(ref mut auth) = auth {
                     if let Some(ref mut user) = auth.user {
-                        user.bliss_balance = bliss_balance as i64;
+                        user.bliss_balance = bliss_balance;
                     }
                 }
             }
         }
     }
 
+    // -- Earn state ---------------------------------------------------------
+    // Derived here (every frame) rather than in `flush_contributions` (every
+    // 5 min) so toggling Bliss or signing in updates the badge immediately.
+    // Single authority — do not also set this from the flush path.
+    let rejected = tracker.auth_rejected;
+    let failing = tracker.consecutive_failures >= SYNC_FAILURE_VISIBLE_AFTER;
+    let derived = if !display.enabled {
+        EarnState::Disabled
+    } else {
+        match auth.as_ref() {
+            Some(a) if a.status == AuthStatus::LoggedIn => {
+                if !a.jwt_valid || rejected {
+                    EarnState::NotAuthenticated
+                } else if failing {
+                    EarnState::NotSyncing
+                } else {
+                    EarnState::Earning
+                }
+            }
+            _ => EarnState::SignedOut,
+        }
+    };
+    tracker.set_earn_state(derived);
+
     // -- Badge display strings ---------------------------------------------
     // Balance is the ledger truth; pending = server score + local unsent
-    // estimate so the badge visibly responds to work within seconds.
+    // estimate so the badge visibly responds to work within seconds. When
+    // earning is blocked, the pending line says WHY instead of showing a
+    // climbing number that will never be credited.
     if tracker.display_dirty {
         tracker.display_dirty = false;
-        let pending_total = tracker.server_pending + tracker.local_pending_estimate();
         display.balance = format!("{:.18}", tracker.server_balance);
         display.balance_short = format!("{:.2}", tracker.server_balance);
-        display.pending = format!("+{pending_total:.1} pts today");
+        display.pending = match tracker.earn_state.hint() {
+            Some(hint) => hint.to_string(),
+            None => {
+                let pending_total =
+                    tracker.server_pending + tracker.local_pending_estimate();
+                format!("+{pending_total:.1} pts today")
+            }
+        };
     }
 }
 

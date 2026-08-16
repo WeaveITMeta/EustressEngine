@@ -3,15 +3,33 @@ fn main() {
     use std::fs::File;
     use std::io::BufWriter;
     
-    // Compile Slint UI files
-    let slint_config = slint_build::CompilerConfiguration::new()
-        .with_style("fluent-dark".into());
-    
-    slint_build::compile_with_config(
-        "ui/slint/main.slint",
-        slint_config,
-    ).expect("Failed to compile Slint UI");
-    
+    // Compile Slint UI files.
+    //
+    // The Slint compiler descends `main.slint` and everything it imports
+    // recursively, and this UI tree is now deep enough that the descent
+    // exhausts the 1 MiB stack Windows gives a build script's main thread:
+    // `cargo build --release -p eustress-engine` died with
+    // STATUS_STACK_OVERFLOW (0xc00000fd) inside build-script-build, before a
+    // single line of engine code was compiled. The debug profile only appeared
+    // healthy because its build-script output was still cached from before the
+    // UI grew. Stack reserve is fixed at link time and is not something a
+    // profile can raise, but a build script is free to choose the stack of a
+    // thread it spawns — so do the compile there.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let slint_config = slint_build::CompilerConfiguration::new()
+                .with_style("fluent-dark".into());
+
+            slint_build::compile_with_config(
+                "ui/slint/main.slint",
+                slint_config,
+            ).expect("Failed to compile Slint UI");
+        })
+        .expect("Failed to spawn Slint compile thread")
+        .join()
+        .expect("Slint compile thread panicked");
+
     println!("cargo:rerun-if-changed=ui/slint/");
     
     let svg_path = Path::new("assets/icon.svg");

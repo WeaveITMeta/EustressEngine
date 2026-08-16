@@ -54,9 +54,30 @@ web-sys = { version = "0.3", features = [
     "FileReader",
     "Blob",
     "Url",
+    "UrlSearchParams",
     "HtmlAnchorElement",
     "FormData",
+    # Live document capture (/verify) — rear camera, frame grab, crop + clean
+    "MediaDevices",
+    "MediaStream",
+    "MediaStreamTrack",
+    "MediaStreamConstraints",
+    "MediaTrackConstraints",
+    "MediaTrackSettings",
+    "HtmlVideoElement",
+    "HtmlMediaElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
+    "BlobPropertyBag",
+    "DomException",
+    "DomRect",
 ] }
+
+# QR code generation for the desktop → mobile verification handoff.
+# default-features off keeps the `image` and `svg` render backends (and their
+# dependency trees) out of the WASM bundle — we render the module matrix to
+# SVG rects ourselves in `components::qr`.
+qrcode = { version = "0.14", default-features = false }
 
 # HTTP Client (WASM-compatible)
 gloo-net = "0.6"

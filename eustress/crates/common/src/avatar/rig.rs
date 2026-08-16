@@ -105,6 +105,33 @@ pub enum HumanoidBone {
 }
 
 impl HumanoidBone {
+    /// The bone on the other side of the body, or self for a centre bone.
+    ///
+    /// Lets a one-sided pose be authored once and reflected, instead of
+    /// maintaining two copies that drift apart the moment either is tuned.
+    pub const fn mirrored(self) -> Self {
+        use HumanoidBone as B;
+        match self {
+            B::LeftShoulder => B::RightShoulder,
+            B::LeftArm => B::RightArm,
+            B::LeftForeArm => B::RightForeArm,
+            B::LeftHand => B::RightHand,
+            B::LeftUpLeg => B::RightUpLeg,
+            B::LeftLeg => B::RightLeg,
+            B::LeftFoot => B::RightFoot,
+            B::LeftToeBase => B::RightToeBase,
+            B::RightShoulder => B::LeftShoulder,
+            B::RightArm => B::LeftArm,
+            B::RightForeArm => B::LeftForeArm,
+            B::RightHand => B::LeftHand,
+            B::RightUpLeg => B::LeftUpLeg,
+            B::RightLeg => B::LeftLeg,
+            B::RightFoot => B::LeftFoot,
+            B::RightToeBase => B::LeftToeBase,
+            centre => centre,
+        }
+    }
+
     pub const ALL: [HumanoidBone; 23] = [
         HumanoidBone::Hips,
         HumanoidBone::Spine,

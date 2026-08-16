@@ -22,6 +22,11 @@ fn err_result(tool: &str, msg: String) -> ToolResult {
 pub struct ReadFileTool;
 
 impl ToolHandler for ReadFileTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "read_file",
@@ -108,6 +113,11 @@ impl ToolHandler for ReadFileTool {
 pub struct ListDirectoryTool;
 
 impl ToolHandler for ListDirectoryTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "list_directory",

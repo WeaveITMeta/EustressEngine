@@ -53,12 +53,124 @@ fn ok(tool_name: &str, content: String, data: Value) -> ToolResult {
 }
 
 // ---------------------------------------------------------------------------
+// Screenshot delivery
+// ---------------------------------------------------------------------------
+
+/// How long to wait for a capture PNG to finish landing on disk.
+const CAPTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Largest PNG we inline as base64. Bigger frames stay path-only: a 4K
+/// screenshot base64s to well past what a client will accept in one message,
+/// and silently blowing the reader's context is worse than one extra read.
+const MAX_INLINE_PNG_BYTES: u64 = 2_800_000;
+
+/// Block until `path` holds a complete PNG, then return its bytes.
+///
+/// The engine answers `viewport.capture` before the render graph has written
+/// the file, so the path it returns points at a file that does not exist yet
+/// (or is half-written). The old contract pushed that race onto the caller —
+/// "allow ~1 frame for the PNG to land" — which fails whenever the engine is
+/// mid-hitch. Waiting for the IEND terminator is a definitive done signal.
+fn wait_for_png(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    const IEND: &[u8] = b"\x00\x00\x00\x00IEND\xaeB\x60\x82";
+    let start = std::time::Instant::now();
+    let mut last_err = String::from("capture file never appeared");
+    while start.elapsed() < CAPTURE_WAIT {
+        match std::fs::read(path) {
+            Ok(bytes) if bytes.len() > IEND.len() && bytes.ends_with(IEND) => return Ok(bytes),
+            Ok(_) => last_err = "capture file is still being written".into(),
+            Err(e) => last_err = e.to_string(),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    Err(format!(
+        "timed out after {}s waiting for {} ({last_err})",
+        CAPTURE_WAIT.as_secs(),
+        path.display()
+    ))
+}
+
+/// Turn a capture bridge response into a `ToolResult` carrying the actual
+/// pixels.
+///
+/// Returning only a path assumes the reader can open local files. MCP clients
+/// generally cannot, so the AI's "eyes" were blind everywhere except a
+/// filesystem-capable host. Embedding the PNG (via the `_mcp_image_*` keys
+/// that `shared_registry::to_mcp_json` lifts into an MCP image block) makes
+/// the same tool work in every client, and the path is still reported for
+/// hosts that would rather open the file themselves.
+fn capture_result(tool_name: &str, mut result: Value) -> ToolResult {
+    use base64::Engine as _;
+
+    let path = match result.get("path").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+        // No path at all — engine answered but wrote nothing useful.
+        _ => {
+            return ok(
+                tool_name,
+                "Capture succeeded but the engine returned no file path.".to_string(),
+                result,
+            )
+        }
+    };
+
+    let bytes = match wait_for_png(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            return fail(
+                tool_name,
+                format!("Capture was requested but the PNG never completed: {e}"),
+            )
+        }
+    };
+
+    let size = bytes.len() as u64;
+    if size > MAX_INLINE_PNG_BYTES {
+        return ok(
+            tool_name,
+            format!(
+                "Screenshot saved to {} ({size} bytes — too large to inline; \
+                 read the file path to view it).",
+                path.display()
+            ),
+            result,
+        );
+    }
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    if let Some(map) = result.as_object_mut() {
+        map.insert(
+            crate::shared_registry::IMAGE_B64_KEY.to_string(),
+            Value::String(b64),
+        );
+        map.insert(
+            crate::shared_registry::IMAGE_MIME_KEY.to_string(),
+            Value::String("image/png".to_string()),
+        );
+        map.insert("bytes".to_string(), Value::from(size));
+    }
+    ok(
+        tool_name,
+        format!(
+            "Screenshot captured ({size} bytes) and attached below. Saved to {}.",
+            path.display()
+        ),
+        result,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // inspect_scene  ->  ecs.inspect
 // ---------------------------------------------------------------------------
 
 pub struct InspectSceneTool;
 
 impl ToolHandler for InspectSceneTool {
+    /// Read-only: a pure bridge query, mutates nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "inspect_scene",
@@ -141,6 +253,11 @@ impl ToolHandler for InspectSceneTool {
 pub struct SceneOverviewTool;
 
 impl ToolHandler for SceneOverviewTool {
+    /// Read-only: a pure bridge query, mutates nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "scene_overview",
@@ -211,6 +328,11 @@ impl ToolHandler for SceneOverviewTool {
 pub struct PartitionSceneTool;
 
 impl ToolHandler for PartitionSceneTool {
+    /// Read-only: a pure bridge query, mutates nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "partition_scene",
@@ -389,6 +511,11 @@ impl ToolHandler for PartitionSceneTool {
 pub struct SimBindingsTool;
 
 impl ToolHandler for SimBindingsTool {
+    /// Read-only: a pure bridge query, mutates nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "sim_bindings",
@@ -428,10 +555,165 @@ impl ToolHandler for SimBindingsTool {
 }
 
 // ---------------------------------------------------------------------------
+// data_bind / data_bindings / data_unbind  ->  data.*
+// The input half of data/simulation fusion: a measured column drives a live
+// simulation parameter, so a sim runs against real numbers instead of guesses.
+// ---------------------------------------------------------------------------
+
+pub struct DataBindTool;
+
+impl ToolHandler for DataBindTool {
+    fn read_only(&self) -> bool {
+        false
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "data_bind",
+            description: "Bind a Dataset column to a simulation parameter so real measured data DRIVES the running simulation. Example: bind the `current` column of a battery-test Dataset to `battery.current` and the electrochemical model runs the real duty cycle instead of its default. mode=\"by_row\" advances one sample per frame (replay); mode=\"by_time\" interpolates the column against simulation time and needs `time_column`. Re-binding the same target replaces the previous binding. Read back with data_bindings; remove with data_unbind.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "dataset":     { "type": "string", "description": "Dataset instance name, e.g. \"GlobalTemperature\"" },
+                    "column":      { "type": "string", "description": "Column in that Dataset's CSV to read" },
+                    "target":      { "type": "string", "description": "Sim parameter key to drive, e.g. \"battery.current\"" },
+                    "mode":        { "type": "string", "enum": ["by_row", "by_time"], "description": "by_row = one sample/frame; by_time = interpolate against sim time" },
+                    "time_column": { "type": "string", "description": "Time column (required when mode = by_time)" },
+                    "loop":        { "type": "boolean", "description": "Restart at row 0 when the column runs out (by_row only)" }
+                },
+                "required": ["dataset", "column", "target"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        match call_engine(&ctx.universe_root, "data.bind", input) {
+            Ok(result) => {
+                let ds = result.get("dataset").and_then(|v| v.as_str()).unwrap_or("?");
+                let col = result.get("column").and_then(|v| v.as_str()).unwrap_or("?");
+                let tgt = result.get("target").and_then(|v| v.as_str()).unwrap_or("?");
+                let mode = result.get("mode").and_then(|v| v.as_str()).unwrap_or("?");
+                let rows = result.get("rows").and_then(|v| v.as_u64()).unwrap_or(0);
+                ok(
+                    "data_bind",
+                    format!("bound {ds}.{col} -> {tgt} ({mode}, {rows} rows)"),
+                    result,
+                )
+            }
+            Err(e) => fail("data_bind", e),
+        }
+    }
+}
+
+pub struct DataBindingsTool;
+
+impl ToolHandler for DataBindingsTool {
+    /// Read-only: a pure bridge query, mutates nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "data_bindings",
+            description: "List active Dataset->simulation parameter bindings and the value each one most recently wrote into the sim. Use to verify a data_bind took effect and to watch measured data flowing into the running model. Read-only.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
+        match call_engine(&ctx.universe_root, "data.bindings", serde_json::json!({})) {
+            Ok(result) => {
+                let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mut lines: Vec<String> = Vec::new();
+                if let Some(arr) = result.get("bindings").and_then(|v| v.as_array()) {
+                    for b in arr.iter().take(20) {
+                        let ds = b.get("dataset").and_then(|v| v.as_str()).unwrap_or("?");
+                        let col = b.get("column").and_then(|v| v.as_str()).unwrap_or("?");
+                        let tgt = b.get("target").and_then(|v| v.as_str()).unwrap_or("?");
+                        let mode = b.get("mode").and_then(|v| v.as_str()).unwrap_or("?");
+                        let last = b
+                            .get("last_value")
+                            .and_then(|v| v.as_f64())
+                            .map(|v| format!("{v:.4}"))
+                            .unwrap_or_else(|| "-".to_string());
+                        lines.push(format!("  - {ds}.{col} -> {tgt} [{mode}] last={last}"));
+                    }
+                }
+                ok(
+                    "data_bindings",
+                    format!("{count} binding(s)\n{}", lines.join("\n")),
+                    result,
+                )
+            }
+            Err(e) => fail("data_bindings", e),
+        }
+    }
+}
+
+pub struct DataUnbindTool;
+
+impl ToolHandler for DataUnbindTool {
+    fn read_only(&self) -> bool {
+        false
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "data_unbind",
+            description: "Remove the Dataset->simulation binding driving a given sim parameter, returning that parameter to normal engine/model control.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "description": "Sim parameter key to release, e.g. \"battery.current\"" }
+                },
+                "required": ["target"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        match call_engine(&ctx.universe_root, "data.unbind", input) {
+            Ok(result) => {
+                let tgt = result.get("target").and_then(|v| v.as_str()).unwrap_or("?");
+                let removed = result
+                    .get("removed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                ok(
+                    "data_unbind",
+                    if removed {
+                        format!("released {tgt}")
+                    } else {
+                        format!("no binding was driving {tgt}")
+                    },
+                    result,
+                )
+            }
+            Err(e) => fail("data_unbind", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 pub struct OplogTailTool;
 
 impl ToolHandler for OplogTailTool {
+    /// Read-only: a pure bridge query, mutates nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "oplog_tail",
@@ -490,7 +772,7 @@ impl ToolHandler for SimStepTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "sim_step",
-            description: "Deterministically advance the LIVE engine's physics simulation by N fixed-timestep ticks (1 tick = 1/60s), then return — the POMDP control primitive (observe -> act -> STEP -> observe). Pause the sim first (pause_simulation) so ONLY these steps advance the world; then sim_step(ticks) advances physics by exactly that many ticks, wall-clock-independent and reproducible. After stepping, read the new state with inspect_scene. Requires the engine running.",
+            description: "Deterministically advance the LIVE engine's physics simulation by N fixed-timestep ticks (1 tick = 1/60s), then return — the POMDP control primitive (observe -> act -> STEP -> observe). Pause the sim first (pause_simulation) so ONLY these steps advance the world; then sim_step(ticks) advances physics by exactly that many ticks, wall-clock-independent and reproducible. Long steps are spread across frames so the engine keeps rendering and answering other tools while it works — the reply arrives when every tick has run, and `frames` in the result says how many frames it spanned. Only one sim_step may be in flight at a time. After stepping, read the new state with inspect_scene. Requires the engine running.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -505,12 +787,27 @@ impl ToolHandler for SimStepTool {
 
     fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         let mut params = serde_json::Map::new();
+        let ticks = input
+            .get("ticks")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1)
+            .min(10_000);
         if let Some(v) = input.get("ticks") {
             if !v.is_null() {
                 params.insert("ticks".to_string(), v.clone());
             }
         }
-        match call_engine(&ctx.universe_root, "sim.step", Value::Object(params)) {
+        // The engine runs every requested `FixedMain` schedule synchronously
+        // before it replies, so the reply deadline has to scale with the work.
+        // At the default 2 s, anything past a few hundred ticks timed out and
+        // reported "engine is not running" while the engine was mid-step.
+        let deadline = std::time::Duration::from_millis(5_000 + ticks * 10);
+        match eustress_bridge_client::call_engine_with_timeout(
+            &ctx.universe_root,
+            "sim.step",
+            Value::Object(params),
+            deadline,
+        ) {
             Ok(result) => {
                 let stepped = result.get("stepped").and_then(|v| v.as_u64()).unwrap_or(0);
                 let secs = result.get("sim_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -529,6 +826,11 @@ impl ToolHandler for SimStepTool {
 pub struct SceneRaycastTool;
 
 impl ToolHandler for SceneRaycastTool {
+    /// Read-only: a pure bridge query, mutates nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "scene_raycast",
@@ -573,6 +875,100 @@ impl ToolHandler for SceneRaycastTool {
                 ok("scene_raycast", summary, result)
             }
             Err(e) => fail("scene_raycast", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// export_instances_toml  ->  db.export_toml
+// ---------------------------------------------------------------------------
+
+pub struct ExportInstancesTomlTool;
+
+impl ToolHandler for ExportInstancesTomlTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "export_instances_toml",
+            description: "Export the LIVE engine's world-database instances to readable TOML on disk. Binary-ECS entities are stored in Fjall as rkyv blobs — fast to stream, impossible to read or diff; this dumps them back out as ordinary `_instance.toml` documents so you can grep, review, or version-control a world that exists only in the database. Covers entities that were never streamed into the scene, unlike inspect_scene (resident only). Two layouts: `folders` (default) writes one `<Name>_<id>/_instance.toml` per instance, in the canonical shape, so the output can be copied into a Space's Workspace/ and loaded; `single_file` writes one `instances.toml` holding every instance as an `[[instance]]` entry, which is better for reading and diffing. Scope big worlds with `region` and/or `class` — an unscoped export scans the whole partition. Defaults to `<Space>/.eustress/exports/instances`, which the loader and file watcher both skip, so an export is never re-ingested as a duplicate scene. This does NOT change any entity's storage: the database still owns them (that's promote_entity). Writes many files; requires the engine to be running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "output_dir": { "type": "string", "description": "Destination, absolute or relative to the Space root. Must resolve INSIDE the Space. Default: \".eustress/exports/instances\"." },
+                    "layout": {
+                        "type": "string",
+                        "enum": ["folders", "single_file"],
+                        "description": "\"folders\" (default) = one loadable _instance.toml folder per instance; \"single_file\" = one instances.toml with an [[instance]] array."
+                    },
+                    "class":  { "type": "string", "description": "Export only this exact class name (e.g. \"Part\")." },
+                    "region": { "type": "object", "description": "Restrict to a world-space AABB: {min:[x,y,z], max:[x,y,z]}. Scans only the matching Morton cells, so this is the cheap way to export part of a large world.",
+                                "properties": { "min": { "type": "array", "items": { "type": "number" } },
+                                                "max": { "type": "array", "items": { "type": "number" } } } },
+                    "limit":  { "type": "integer", "description": "Max instances to write (default 5000, cap 200000). The result's `truncated` flag tells you whether the limit cut the export short." },
+                    "overwrite": { "type": "boolean", "description": "Export into a directory that already has content. Default false — the call is refused rather than mixing a new export into an old one." }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            // Writes a directory tree, potentially thousands of files.
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = serde_json::Map::new();
+        for key in ["output_dir", "layout", "class", "region", "limit", "overwrite"] {
+            if let Some(v) = input.get(key) {
+                if !v.is_null() {
+                    params.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+        let limit = input
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5_000)
+            .min(200_000);
+        // The engine scans the DB on its main thread and writes the files on a
+        // worker, replying only once they have all landed. Both scale with the
+        // instance count, so the deadline has to as well.
+        let deadline = std::time::Duration::from_millis(30_000 + limit * 2);
+
+        match eustress_bridge_client::call_engine_with_timeout(
+            &ctx.universe_root,
+            "db.export_toml",
+            Value::Object(params),
+            deadline,
+        ) {
+            Ok(result) => {
+                let exported = result.get("exported").and_then(|v| v.as_u64()).unwrap_or(0);
+                let scanned = result.get("scanned").and_then(|v| v.as_u64()).unwrap_or(0);
+                let dir = result
+                    .get("output_dir")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(unknown)");
+                let layout = result.get("layout").and_then(|v| v.as_str()).unwrap_or("?");
+                let truncated = result
+                    .get("truncated")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let undecodable = result.get("undecodable").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                let mut summary =
+                    format!("Exported {exported} instance(s) of {scanned} scanned to {dir} ({layout} layout).");
+                if truncated {
+                    summary.push_str(
+                        "\n  NOTE: the limit cut the scan short — some instances are NOT in the \
+                         output. Raise `limit`, or narrow with `region`/`class`, for full coverage.",
+                    );
+                }
+                if undecodable > 0 {
+                    summary.push_str(&format!(
+                        "\n  WARNING: {undecodable} core(s) failed to decode and were skipped."
+                    ));
+                }
+                ok("export_instances_toml", summary, result)
+            }
+            Err(e) => fail("export_instances_toml", e),
         }
     }
 }
@@ -851,6 +1247,11 @@ impl ToolHandler for SelectEntityTool {
 pub struct GetEditorStateTool;
 
 impl ToolHandler for GetEditorStateTool {
+    /// Read-only: a pure bridge query, mutates nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "get_editor_state",
@@ -957,7 +1358,7 @@ impl ToolHandler for CaptureViewportTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "capture_viewport",
-            description: "Screenshot the LIVE engine's viewport (3D scene + UI overlay = exactly what a human sees) to a PNG on disk, and return its path. This is the AI's EYES: after calling it, READ the returned file path to view the frame. Use it to see the result of your actions and to debug VISUAL issues (gizmo hidden behind a part, wrong placement, render glitches) that state queries can't catch. Requires the engine to be running; allow a brief moment after the call before reading (the PNG lands 1-2 frames later).",
+            description: "Screenshot the LIVE engine's viewport (3D scene + UI overlay = exactly what a human sees) and return the image inline. This is the AI's EYES: the PNG comes back in the response, so you see the frame directly — no follow-up file read needed. Use it to see the result of your actions and to debug VISUAL issues (gizmo hidden behind a part, wrong placement, render glitches) that state queries can't catch. The call waits for the PNG to finish writing before returning. Requires the engine to be running.",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
             modes: &[WorkshopMode::General],
             requires_approval: false,
@@ -967,20 +1368,7 @@ impl ToolHandler for CaptureViewportTool {
 
     fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
         match call_engine(&ctx.universe_root, "viewport.capture", serde_json::json!({})) {
-            Ok(result) => {
-                let path = result
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("(unknown)");
-                ok(
-                    "capture_viewport",
-                    format!(
-                        "Screenshot saved to {path} — read that file path to view it \
-                         (allow ~1 frame for the PNG to land)."
-                    ),
-                    result,
-                )
-            }
+            Ok(result) => capture_result("capture_viewport", result),
             Err(e) => fail("capture_viewport", e),
         }
     }
@@ -1085,7 +1473,7 @@ impl ToolHandler for AiCameraCaptureTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "ai_camera_capture",
-            description: "Render the AI's OWN independent camera to a PNG and return its path — your own eyes, separate from capture_viewport (which is the human's window). After calling, READ the returned file path to view your frame. Use ai_camera_set_pose/orbit/frame first to aim it. On-demand: the off-screen camera powers up only for this shot, so it doesn't tax the user's framerate. Allow ~3 frames before reading. Requires the engine running.",
+            description: "Render the AI's OWN independent camera and return the image inline — your own eyes, separate from capture_viewport (which is the human's window). The PNG comes back in the response, so you see your frame directly. Use ai_camera_set_pose/orbit/frame first to aim it. On-demand: the off-screen camera powers up only for this shot, so it doesn't tax the user's framerate. The call waits for the PNG to finish writing before returning. Requires the engine running.",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
             modes: &[WorkshopMode::General],
             requires_approval: false,
@@ -1095,17 +1483,7 @@ impl ToolHandler for AiCameraCaptureTool {
 
     fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
         match call_engine(&ctx.universe_root, "ai_camera.capture", serde_json::json!({})) {
-            Ok(r) => {
-                let path = r.get("path").and_then(|v| v.as_str()).unwrap_or("(unknown)");
-                ok(
-                    "ai_camera_capture",
-                    format!(
-                        "AI camera frame saved to {path} — read that file path to view it \
-                         (allow ~3 frames for the PNG to land)."
-                    ),
-                    r,
-                )
-            }
+            Ok(r) => capture_result("ai_camera_capture", r),
             Err(e) => fail("ai_camera_capture", e),
         }
     }
@@ -1144,6 +1522,13 @@ impl BridgeEntityTool {
 impl ToolHandler for BridgeEntityTool {
     fn definition(&self) -> ToolDefinition {
         self.disk.definition()
+    }
+
+    /// Delegated: routing an op over the bridge instead of to disk doesn't
+    /// change whether it mutates. `ecs.inspect` (wrapping `QueryEntitiesTool`)
+    /// stays read-only; the create/update/delete wrappers stay not.
+    fn read_only(&self) -> bool {
+        self.disk.read_only()
     }
 
     fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
@@ -1189,6 +1574,10 @@ impl Default for FindEntityBridgeTool {
 impl ToolHandler for FindEntityBridgeTool {
     fn definition(&self) -> ToolDefinition {
         self.disk.definition()
+    }
+
+    fn read_only(&self) -> bool {
+        self.disk.read_only()
     }
 
     fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {

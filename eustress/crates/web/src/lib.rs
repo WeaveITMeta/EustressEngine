@@ -13,6 +13,7 @@
 
 pub mod api;
 pub mod app;
+pub mod capture;
 pub mod components;
 pub mod pages;
 pub mod services;

@@ -20,12 +20,15 @@ use eustress_common::classes::{
     Sun as SunClass, Moon as MoonClass, Sky,
 };
 use eustress_common::services::lighting::{Sun as SunMarker, Moon as MoonMarker, EustressAtmosphere, LightingService};
+// Aliased because `ClassName::ReflectionProbe` (the authored class) and the
+// component that implements it share a name.
+use eustress_common::plugins::reflections::ReflectionProbe as ReflectionProbeComponent;
 
-// Re-export shared plugin
-pub use eustress_common::plugins::lighting_plugin::{
-    SharedLightingPlugin, SkyboxHandle,
-    create_procedural_skybox, regenerate_skybox,
-};
+// Re-export shared plugin. Sky rendering moved to `sky_atmosphere`, so
+// `SkyboxHandle` / `create_procedural_skybox` / `regenerate_skybox` are gone:
+// the star field is built once into `StarField` and the analytic gradient is
+// only reachable as the `EUSTRESS_SKY=gradient` fallback.
+pub use eustress_common::plugins::lighting_plugin::{SharedLightingPlugin, StarField};
 
 /// Component to track which service an entity belongs to (for Explorer)
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Reflect)]
@@ -87,8 +90,12 @@ impl Plugin for LightingPlugin {
             .add_systems(Update, hydrate_lighting_entities)
             // Sync Sun class properties with LightingService
             .add_systems(Update, sync_sun_with_lighting_service)
-            // Update directional light from Sun class (latitude-based positioning)
-            .add_systems(Update, update_directional_light_from_sun_class.after(sync_sun_with_lighting_service))
+            // NOTE: no second sun driver here. `update_directional_light_from_sun_class`
+            // used to run over the same `With<SunMarker>` entity as
+            // SharedLightingPlugin's `update_sun_position`, with a different
+            // intensity curve, and the two were unordered. `update_sun_position`
+            // absorbed the `SunClass::current_intensity()` model and is now the
+            // single owner of the sun light.
             // Sync Atmosphere entity with SceneAtmosphere resource for rendering
             .add_systems(Update, sync_atmosphere_to_rendering)
             // Sync Lighting ServiceComponent property edits → LightingService resource
@@ -164,6 +171,8 @@ fn hydrate_lighting_entities(
     unhydrated_sky: Query<(Entity, &Instance), (Added<Instance>, Without<Sky>, NotBinaryStreamed)>,
     // Atmosphere entities that lack EustressAtmosphere component
     unhydrated_atmo: Query<(Entity, &Instance), (Added<Instance>, Without<EustressAtmosphere>, NotBinaryStreamed)>,
+    // ReflectionProbe entities that lack the probe component
+    unhydrated_probe: Query<(Entity, &Instance), (Added<Instance>, Without<ReflectionProbeComponent>, NotBinaryStreamed)>,
 ) {
     // ── Star → Sun (DirectionalLight + SunMarker + SunClass) ──────────
     for (entity, instance) in unhydrated_sun.iter() {
@@ -283,6 +292,21 @@ fn hydrate_lighting_entities(
             LightingServiceOwner,
         ));
     }
+
+    // ── ReflectionProbe → ReflectionProbe component ───────────────────
+    //
+    // Unlike the classes above, a probe is a spatial object: its Transform is
+    // the volume it covers (bevy treats a light probe as a 1x1x1 cube in local
+    // space, so the scale is the extent). It lives in Workspace, not under
+    // Lighting, and is deliberately selectable so it can be placed and sized.
+    // `hydrate_reflection_probes` in the reflections plugin turns the component
+    // into bevy's `LightProbe` plus a filtered environment map.
+    for (entity, instance) in unhydrated_probe.iter() {
+        if instance.class_name != ClassName::ReflectionProbe { continue; }
+
+        info!("🪞 Hydrating ReflectionProbe entity {:?}", entity);
+        commands.entity(entity).insert(ReflectionProbeComponent::default());
+    }
 }
 
 /// Sync Sun class properties with LightingService for real-time updates
@@ -321,60 +345,38 @@ fn parse_clock_time(clock_time: &str) -> Option<(u32, u32)> {
     }
 }
 
-/// Update directional light position and properties from Sun class
-/// Uses latitude-based sun position calculation for realistic sun arcs
-fn update_directional_light_from_sun_class(
-    sun_class_query: Query<&SunClass, Changed<SunClass>>,
-    mut light_query: Query<(&mut DirectionalLight, &mut Transform), With<SunMarker>>,
-) {
-    for sun in sun_class_query.iter() {
-        if !sun.enabled {
-            continue;
-        }
-        
-        // Get direction from Sun class (uses latitude, day_of_year, time_of_day)
-        let sun_dir = sun.direction();
-        let sun_distance = 100.0;
-        
-        // Get current color and intensity based on elevation
-        let color = sun.current_color();
-        let intensity = sun.current_intensity();
-        
-        // Update directional light
-        if let Ok((mut light, mut transform)) = light_query.single_mut() {
-            light.color = Color::srgba(color[0], color[1], color[2], color[3]);
-            light.illuminance = intensity;
-            light.shadow_maps_enabled = sun.cast_shadows;
-            
-            // Position light in direction of sun
-            transform.translation = sun_dir * sun_distance;
-            transform.look_at(Vec3::ZERO, Vec3::Y);
-        }
-    }
-}
-
-/// Sync Atmosphere entity properties with SceneAtmosphere resource for rendering
-/// When the Atmosphere entity in Explorer is modified, update the rendering resource
+/// Sync the authored Atmosphere entity into the `SceneAtmosphere` resource that
+/// drives rendering.
+///
+/// This system always worked; what changed is that something now reads the
+/// result. `SceneAtmosphere` used to be applied to a camera exactly once and
+/// then filtered out forever behind an `AtmosphereApplied` marker, so every edit
+/// after the first frame updated a resource nothing consumed.
+///
+/// `Atmosphere` (the Explorer class) carries the six artistic properties;
+/// `EustressAtmosphere` carries those plus the scattering model. Writing the six
+/// individually rather than replacing the whole struct is deliberate: it keeps
+/// the authored planet radius, scale heights and Rayleigh/Mie coefficients
+/// intact when someone drags the Density slider.
 fn sync_atmosphere_to_rendering(
     atmosphere_query: Query<&Atmosphere, Changed<Atmosphere>>,
     eustress_atmo_query: Query<&EustressAtmosphere, Changed<EustressAtmosphere>>,
     mut scene_atmosphere: ResMut<eustress_common::plugins::lighting_plugin::SceneAtmosphere>,
 ) {
-    // Sync from Atmosphere class component (Explorer entity)
     for atmosphere in atmosphere_query.iter() {
-        // Convert Atmosphere class to EustressAtmosphere for rendering
         scene_atmosphere.atmosphere.density = atmosphere.density;
         scene_atmosphere.atmosphere.offset = atmosphere.offset;
         scene_atmosphere.atmosphere.color = atmosphere.color;
         scene_atmosphere.atmosphere.decay = atmosphere.decay;
         scene_atmosphere.atmosphere.glare = atmosphere.glare;
         scene_atmosphere.atmosphere.haze = atmosphere.haze;
-        
-        info!("🌫️ Synced Atmosphere to rendering (density: {}, haze: {})", 
+
+        info!("🌫️ Synced Atmosphere to rendering (density: {}, haze: {})",
               atmosphere.density, atmosphere.haze);
     }
-    
-    // Also sync from EustressAtmosphere if it was modified directly
+
+    // A direct EustressAtmosphere edit carries the scattering model too, so it
+    // replaces the whole thing.
     for eustress_atmo in eustress_atmo_query.iter() {
         scene_atmosphere.atmosphere = eustress_atmo.clone();
         info!("🌫️ Synced EustressAtmosphere to rendering");

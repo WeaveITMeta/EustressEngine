@@ -10,6 +10,7 @@
 
 - **P3 (2026-05-14):** New doc; 9 features.
 - **P4 (2026-05-14):** State correction from secondary critique: `HybridPosition` Component **DOES exist** with `PRECISION_THRESHOLD = 100km`, but **no auto-rebase system runs**. Feature 2 state 🟡 → math layer ✅ / ECS plumbing 🟡 / rebase system 🔴. Time-of-day → sun / moon driver not wired from clock.
+- **P5 (2026-08-01):** `common/src/orbital/` removed. Reference audit found the whole subsystem unreachable — `OrbitalPlugin` and `HybridCoordsPlugin` were never added to any `App`, and the two physics systems reading `HybridVelocity` sat inside `GravityPlugin` / `DynamicGravityPlugin`, neither of which is registered either. Feature 2 state → 🔴 across the board. Replacement design (`i32` grid cell + cell-local `f32` offset, reusing `MortonKeyEncoder`) is specified in [ORBITAL_GRID.md](../architecture/ORBITAL_GRID.md) and is **not implemented**.
 
 ---
 
@@ -25,9 +26,7 @@ This is **load-bearing** for any project that uses real-world coordinates: terra
 
 **Crates / files:**
 - [eustress-geo](../../eustress/crates/geo/) — GeoTIFF, GeoJSON, R-tree, `proj` / `flatgeobuf` deps
-- [common/src/orbital/wgs84.rs](../../eustress/crates/common/src/orbital/) — geodetic ↔ ECEF transforms (Bowring's method)
-- [common/src/orbital/hybrid_coords.rs](../../eustress/crates/common/src/orbital/) — hybrid local-tangent + ECEF
-- [docs/development/ORBITAL_GRID.md](../development/ORBITAL_GRID.md), [HYBRID_COORDINATES.md](../development/HYBRID_COORDINATES.md), [LOCAL_GEOSPATIAL.md](../development/LOCAL_GEOSPATIAL.md)
+- [docs/architecture/ORBITAL_GRID.md](../architecture/ORBITAL_GRID.md) — grid-cell coordinate design (not implemented), [LOCAL_GEOSPATIAL.md](../development/LOCAL_GEOSPATIAL.md)
 
 **Working:**
 - WGS84 ↔ ECEF

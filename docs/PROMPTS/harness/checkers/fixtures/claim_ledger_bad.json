@@ -1,0 +1,35 @@
+{
+  "generated_at": "2026-08-08T00:00:00Z",
+  "corpus": ["README.md"],
+  "records": [
+    {
+      "id": "B001",
+      "claim_text": "A MEASURED record whose reproduction command was never filled in.",
+      "source_path": "README.md",
+      "source_line": 1,
+      "class": "MEASURED",
+      "number": 42,
+      "unit": "FPS",
+      "reproduction_command": null,
+      "reproduction_artifact_path": null,
+      "config_field_path": null,
+      "audit_reference": null,
+      "licence_conflict": false
+    },
+    {
+      "id": "B002",
+      "claim_text": "A record with no source line, so its provenance cannot be checked.",
+      "source_path": "README.md",
+      "source_line": null,
+      "class": "UNSUPPORTED",
+      "number": null,
+      "unit": null,
+      "reproduction_command": null,
+      "reproduction_artifact_path": null,
+      "config_field_path": null,
+      "audit_reference": null,
+      "licence_conflict": false
+    }
+  ],
+  "unreadable_sources": []
+}

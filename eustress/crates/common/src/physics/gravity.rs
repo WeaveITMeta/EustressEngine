@@ -395,23 +395,6 @@ fn calculate_gravity_forces(
     }
 }
 
-/// Apply gravitational forces to velocities
-fn apply_gravity_to_velocity(
-    time: Res<Time>,
-    mut query: Query<(&Mass, &GravitationalForce, &mut crate::orbital::hybrid_coords::HybridVelocity)>,
-) {
-    let dt = time.delta_secs_f64();
-    
-    for (mass, grav_force, mut velocity) in query.iter_mut() {
-        // F = ma, so a = F/m
-        let acceleration = grav_force.force.as_dvec3() / mass.kg;
-        
-        // v = v0 + a*dt
-        velocity.absolute += acceleration * dt;
-        velocity.update_local();
-    }
-}
-
 /// Debug visualization of gravity forces
 fn debug_draw_gravity(
     config: Res<GravityConfig>,
@@ -542,10 +525,12 @@ impl Plugin for GravityPlugin {
             .init_resource::<GravityStats>()
             .register_type::<Mass>()
             .register_type::<PhysicalRadius>()
+            // Accumulates into `GravitationalForce`. Integrating that into
+            // motion is the caller's job — attach an Avian body and read the
+            // force, or run a bespoke integrator.
             .add_systems(FixedUpdate, (
                 build_spatial_partition,
                 calculate_gravity_forces.after(build_spatial_partition),
-                apply_gravity_to_velocity.after(calculate_gravity_forces),
                 update_gravity_stats.after(calculate_gravity_forces),
             ))
             .add_systems(Update, debug_draw_gravity);

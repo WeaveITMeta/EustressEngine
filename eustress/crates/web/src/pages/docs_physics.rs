@@ -806,8 +806,9 @@ base_part.deformation = true;
 // Or via property system
 base_part.set_property("Deformation", PropertyValue::Bool(true));
 
-// The system automatically adds DeformableMesh and DeformationState
-// components when deformation is enabled"#}</code></pre>
+// The system automatically adds DeformableMesh and VertexDisplacements
+// components when deformation is enabled, gives the part its own mesh
+// copy to deform into, and restores the original mesh on Stop."#}</code></pre>
                             </div>
                             
                             <div class="comparison-table">
@@ -885,21 +886,31 @@ deformation_state.allow_thermal = true;
                         <div id="deformation-impact" class="subsection">
                             <h3>"Impact Deformation"</h3>
                             <p>
-                                "Trigger localized deformation from impacts:"
+                                "Avian collisions drive this automatically during Play: the engine
+                                converts each solved contact impulse into an impact event, so a part
+                                with deformation enabled dents where it is struck. Emit events
+                                directly to deform a part from your own code:"
                             </p>
-                            
+
                             <div class="code-block">
                                 <div class="code-header">
                                     <span class="code-lang">"Rust"</span>
                                 </div>
-                                <pre><code class="language-rust">{r#"// Send impact event
-commands.trigger(ImpactDeformEvent {
-    entity,
-    point: Vec3::new(0.0, 0.5, 0.0),   // Impact location
-    force: Vec3::new(0.0, -1000.0, 0.0), // Impact force
-    radius: 0.5,                        // Effect radius
-    permanent: true,                    // Plastic deformation
-});"#}</code></pre>
+                                <pre><code class="language-rust">{r#"// ImpactDeformEvent is a Message, so it is emitted with a
+// MessageWriter — `commands.trigger` targets observers and will
+// never reach the deformation systems, which use MessageReader.
+fn dent_it(mut impacts: MessageWriter<ImpactDeformEvent>, entity: Entity) {
+    impacts.write(ImpactDeformEvent {
+        entity,
+        // Local MESH space, not world space.
+        point: Vec3::new(0.0, 0.5, 0.0),
+        // Direction of the dent; its LENGTH is the peak depth in
+        // local units (scaled by DeformationConfig::scale).
+        force: Vec3::new(0.0, -0.05, 0.0),
+        radius: 0.5,     // Falloff radius, local units
+        permanent: true, // Plastic (permanent) vs elastic (springs back)
+    });
+}"#}</code></pre>
                             </div>
                         </div>
                         
@@ -913,8 +924,10 @@ commands.trigger(ImpactDeformEvent {
                                 <div class="code-header">
                                     <span class="code-lang">"Rust"</span>
                                 </div>
-                                <pre><code class="language-rust">{r#"// Trigger mesh fracture
-commands.trigger(FractureMeshEvent {
+                                <pre><code class="language-rust">{r#"// FractureMeshEvent is a Message — emit it with a MessageWriter.
+// NOTE: mesh SPLITTING is not implemented yet; the handler currently
+// logs the event. Deformation (denting) is live; fracture is not.
+fractures.write(FractureMeshEvent {
     entity,
     origin: crack_position,
     normal: crack_plane_normal,

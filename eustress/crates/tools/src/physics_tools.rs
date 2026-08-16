@@ -14,6 +14,11 @@ use crate::modes::WorkshopMode;
 pub struct QueryMaterialTool;
 
 impl ToolHandler for QueryMaterialTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "query_material",
@@ -115,6 +120,11 @@ fn pbr_entry(name: &str) -> (f32, f32, f32, &'static str) {
 pub struct CalculatePhysicsTool;
 
 impl ToolHandler for CalculatePhysicsTool {
+    /// Read-only: queries only, writes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "calculate_physics",

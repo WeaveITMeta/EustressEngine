@@ -19,8 +19,16 @@ export default {
     }
 
     try {
-      // Public: latest.json manifest (no auth needed — engine updater reads this)
-      if (path === '/api/releases/latest' || path === '/api/latest') {
+      // Public: latest.json manifest (no auth needed — engine updater reads this).
+      //
+      // `/latest.json` is the path the shipped engine asks for: updater.rs
+      // compiles `https://releases.eustress.dev/latest.json` in as a constant,
+      // so it is fixed in every copy already in the field and cannot be changed
+      // by shipping a new build — the only mechanism that would deliver that
+      // build is the updater itself. The server therefore answers to the name
+      // the client already calls. The other two spellings are kept because
+      // downloads.eustress.dev has served them since 2025-12.
+      if (path === '/latest.json' || path === '/api/releases/latest' || path === '/api/latest') {
         return handleLatest(env, cors);
       }
 

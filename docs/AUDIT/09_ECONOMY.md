@@ -1,8 +1,23 @@
 # 09 — Economy & Monetization
 
-> Bliss tokens (dual-nature: in-game arcade currency **and** Proof-of-Contribution
-> cryptocurrency), Premium subscriptions, Marketplace, creator payouts, Steam IAP,
-> Stripe Connect, refund / chargeback, tax / VAT / GST, fraud detection.
+> Bliss (earned-only Proof-of-Contribution currency), Tickets (purchased),
+> Premium subscriptions, Marketplace, creator payouts, Stripe Connect,
+> refund / chargeback, tax / VAT / GST, fraud detection.
+
+> **⚠️ 2026-07-05 — THIS DOCUMENT IS PARTLY SUPERSEDED.** Two corrections:
+>
+> 1. **The "dual-nature" premise below is wrong.** Bliss is **not** an
+>    arcade currency purchased with Steam Wallet; it is **earned only** and
+>    cannot be bought. **Tickets** are the purchased currency. The
+>    "regulatory arbitrage risk" flagged in the P4 pass stemmed from that
+>    mistaken dual-nature reading and does not apply as written.
+> 2. **The state table is stale.** Bliss earning, the witness ledger,
+>    UTC-midnight BLS distribution, treasury drip, and cosign anti-abuse
+>    shipped to production 2026-07-04/05. Features 1, 7, 10 are LIVE, not
+>    🔴/🟡. Marketplace (Feature 6) is a **stub** returning empty — it was
+>    over-reported at 🟢 75%.
+>
+> Canonical: [docs/monetization/CURRENCY.md](../monetization/CURRENCY.md).
 
 ## Pass changelog
 

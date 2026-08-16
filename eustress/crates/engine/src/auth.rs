@@ -34,6 +34,16 @@ pub struct AuthState {
     pub login_form: LoginForm,
     /// Offline mode enabled
     pub offline_mode: bool,
+    /// Whether `token` is a real witness-issued JWT (challenge-response
+    /// succeeded) rather than a local-identity fallback.
+    ///
+    /// Identity login can succeed LOCALLY (we read the public key off
+    /// identity.toml) while the witness never issued a JWT — offline, no
+    /// private key in the file, or the identity isn't registered. In that
+    /// state the user is legitimately "logged in" for UI purposes but
+    /// CANNOT authenticate to api.eustress.dev, so Bliss must not attempt
+    /// to co-sign (every call would 401 and silently retry forever).
+    pub jwt_valid: bool,
 }
 
 impl Default for AuthState {
@@ -47,6 +57,7 @@ impl Default for AuthState {
             show_login_dialog: false,
             login_form: LoginForm::default(),
             offline_mode: false,
+            jwt_valid: false,
         }
     }
 }
@@ -112,7 +123,10 @@ pub struct AuthUser {
     pub avatar_url: Option<String>,
     pub steam_id: Option<String>,
     pub discord_id: Option<String>,
-    pub bliss_balance: i64,
+    /// Whole BLS, fractional — the ledger credits fractional amounts at each
+    /// daily distribution, so this is f64 (an i64 truncated every balance
+    /// below 1 BLS to zero).
+    pub bliss_balance: f64,
     pub total_hours: f64,
 }
 
@@ -221,7 +235,10 @@ impl AuthState {
         self.status = AuthStatus::Offline;
         self.show_login_dialog = false;
         self.error = None;
-        
+        // No witness session offline — never leave this true or Bliss would
+        // try to co-sign with a dead token.
+        self.jwt_valid = false;
+
         // Create offline user
         self.user = Some(AuthUser {
             id: "offline".to_string(),
@@ -230,7 +247,7 @@ impl AuthState {
             avatar_url: None,
             steam_id: None,
             discord_id: None,
-            bliss_balance: 0,
+            bliss_balance: 0.0,
             total_hours: 0.0,
         });
     }
@@ -242,6 +259,7 @@ impl AuthState {
         self.status = AuthStatus::LoggedOut;
         self.error = None;
         self.offline_mode = false;
+        self.jwt_valid = false;
         self.login_form = LoginForm::default();
         
         // Clear saved token
@@ -336,7 +354,7 @@ fn try_real_login(email: &str, password: &str, remember: bool) -> AuthResult {
                 avatar_url: user_json["avatar_url"].as_str().map(|s| s.to_string()),
                 steam_id: user_json["steam_id"].as_str().map(|s| s.to_string()),
                 discord_id: user_json["discord_id"].as_str().map(|s| s.to_string()),
-                bliss_balance: user_json["bliss_balance"].as_i64().unwrap_or(0),
+                bliss_balance: user_json["bliss_balance"].as_f64().unwrap_or(0.0),
                 total_hours: user_json["total_hours"].as_f64().unwrap_or(0.0),
             };
             
@@ -386,7 +404,7 @@ fn mock_login(email: &str, remember: bool) -> AuthResult {
         avatar_url: None,
         steam_id: None,
         discord_id: None,
-        bliss_balance: 0,
+        bliss_balance: 0.0,
         total_hours: 0.0,
     };
 
@@ -414,7 +432,7 @@ fn mock_steam_login() -> AuthResult {
         avatar_url: None,
         steam_id: Some("76561198000000000".to_string()), // Mock Steam ID
         discord_id: None,
-        bliss_balance: 0,
+        bliss_balance: 0.0,
         total_hours: 0.0,
     };
 
@@ -540,7 +558,7 @@ fn validate_and_fetch_user(token: &str) -> AuthResult {
                 avatar_url: json["avatar_url"].as_str().map(|s| s.to_string()),
                 steam_id: json["steam_id"].as_str().map(|s| s.to_string()),
                 discord_id: json["discord_id"].as_str().map(|s| s.to_string()),
-                bliss_balance: json["bliss_balance"].as_i64().unwrap_or(0),
+                bliss_balance: json["bliss_balance"].as_f64().unwrap_or(0.0),
                 total_hours: json["total_hours"].as_f64().unwrap_or(0.0),
             };
             

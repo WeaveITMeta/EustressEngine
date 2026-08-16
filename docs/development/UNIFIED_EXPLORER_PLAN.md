@@ -21,7 +21,7 @@
 10. [Monaco Editor Integration](#10-monaco-editor-integration)
 11. [VS Code Keybindings](#11-vs-code-keybindings)
 12. [Phased Implementation Plan](#12-phased-implementation-plan)
-13. [Open Source References](#13-open-source-references)
+13. [Third-Party References](#13-third-party-references)
 14. [Risk Assessment](#14-risk-assessment)
 15. [Testing Strategy](#15-testing-strategy)
 
@@ -1228,7 +1228,7 @@ Bundle Monaco Editor locally in `assets/monaco/` for offline use:
 
 ---
 
-## 13. Open Source References
+## 13. Third-Party References
 
 ### Primary Sources
 

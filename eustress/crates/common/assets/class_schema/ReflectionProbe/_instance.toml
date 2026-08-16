@@ -1,0 +1,39 @@
+# ReflectionProbe — a bounded volume that overrides the scene environment map
+# Bevy: bevy_light::LightProbe + a GPU-filtered GeneratedEnvironmentMapLight
+#
+# The atmosphere gives every surface a reflection of the *sky*, which is right
+# outdoors and wrong the moment the camera walks inside, where a room should
+# reflect the room. A probe covers that: everything inside its volume reflects
+# the cubemap named here instead of the sky.
+#
+# The probe's Transform scale IS its extent. Bevy treats a light probe as a
+# 1x1x1 cube in local space, so a scale of (20, 5, 12) covers a room of those
+# dimensions centred on the probe.
+#
+# Properties live in [attributes] because that is the table the generic instance
+# loader round-trips. `seed_probes_from_attributes` reads them once when the
+# probe spawns; after that the component is authoritative, so Properties-panel
+# edits take effect immediately and are not overwritten.
+
+[attributes]
+# Cubemap asset path. Leave empty to inherit the scene environment, which is
+# only useful for carving out a region at a different intensity.
+Texture = ""
+# Reflected light scale, in cd/m^2.
+Intensity = 1000.0
+# Proportion of the volume over which influence fades out, so overlapping probes
+# do not seam. 0.25 keeps the inner 0.75 cubed at full strength. Domain is
+# [0, 0.5]; at 0.5 the full-strength interior vanishes.
+Falloff = 0.25
+# Rotation of the cubemap about Y, in degrees. Lets a captured interior line up
+# with the room it belongs to.
+RotationDegrees = 0.0
+
+[transform]
+position = [0.0, 0.0, 0.0]
+# Default extent: a 10x10x10 room.
+scale = [10.0, 10.0, 10.0]
+
+[metadata]
+class_name = "ReflectionProbe"
+archivable = true

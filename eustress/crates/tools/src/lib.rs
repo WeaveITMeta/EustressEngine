@@ -31,8 +31,12 @@
 //! engine can insert it directly. Off by default so the MCP server
 //! can depend on this crate without pulling in the Bevy tree.
 
+/// Tool capability classification and caller permissions (CMMC AC.L1-3.1.2).
+pub mod capability;
 pub mod modes;
 pub mod registry;
+
+pub use capability::{authorize, capability_of, Capability, Denial, Permissions};
 
 pub use modes::WorkshopMode;
 pub use registry::{
@@ -69,10 +73,24 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(entity_tools::UpdateEntityTool);
     registry.register(entity_tools::DeleteEntityTool);
 
-    // Parametric CAD (feature-tree CadPart).
+    // Parametric CAD (feature-tree CadPart) — write path…
     registry.register(cad_tools::CadCreatePartTool);
     registry.register(cad_tools::CadSetVariableTool);
     registry.register(cad_tools::CadExportGlbTool);
+    // …and the read path that closes the loop. CAD fails silently and
+    // partially, so an agent has to be able to observe what it authored
+    // rather than infer success from a write returning Ok.
+    registry.register(cad_tools::CadDescribePartTool);
+    registry.register(cad_tools::CadValidatePartTool);
+    registry.register(cad_tools::CadMeasureTool);
+    // …and the authoring path, so a feature tree can be built without
+    // hand-writing TOML. Each of these folds the read back into its own
+    // response — a write that leaves the body defective says so rather
+    // than returning a bare Ok.
+    registry.register(cad_tools::CadListTemplatesTool);
+    registry.register(cad_tools::CadAddFeatureTool);
+    registry.register(cad_tools::CadEditFeatureTool);
+    registry.register(cad_tools::CadDeleteFeatureTool);
 
     // File I/O.
     registry.register(file_tools::ReadFileTool);

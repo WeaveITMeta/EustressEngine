@@ -3151,7 +3151,14 @@ export component Ribbon inherits Rectangle {
                     IconButton { icon: @image-url("../../assets/icons/ui/link.svg"); label: "Connect"; tooltip: "Connect Nodes (Ctrl+K)"; tint: Theme.accent-green; clicked => { root.on-plugin-action("mindspace:connect"); } }
                 }
                 GroupDivider {}
-                
+
+                ToolGroup {
+                    label: "Size";
+                    IconButton { icon: @image-url("../../assets/icons/ui/expand-all.svg"); label: "Larger"; tooltip: "Grow the selected label 5% (billboard + text)"; tint: Theme.accent-blue; clicked => { root.on-plugin-action("mindspace:billboard-larger"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/collapse-all.svg"); label: "Smaller"; tooltip: "Shrink the selected label 5% (billboard + text)"; tint: Theme.accent-blue; clicked => { root.on-plugin-action("mindspace:billboard-smaller"); } }
+                }
+                GroupDivider {}
+
                 ToolGroup {
                     label: "File";
                     IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import Mind Map"; tint: Theme.cat-data; clicked => { root.on-plugin-action("mindspace:import"); } }
