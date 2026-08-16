@@ -103,23 +103,51 @@ pub fn resolve_output_dir(space_root: &Path, requested: Option<&str>) -> Result<
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_EXPORT_SUBDIR);
 
-    let joined = if Path::new(raw).is_absolute() {
-        PathBuf::from(raw)
+    // Canonicalise the root ONCE, then resolve everything against that form so
+    // both sides of the containment check are written the same way. Comparing
+    // a canonicalised root against a raw candidate is the classic version of
+    // this bug: on Windows `canonicalize` yields a verbatim `\\?\C:\…` path,
+    // `starts_with` compares components literally, and every path — including
+    // the default — reads as an escape.
+    let root = normalise(&de_verbatim(
+        &space_root
+            .canonicalize()
+            .unwrap_or_else(|_| space_root.to_path_buf()),
+    ));
+
+    let candidate = Path::new(raw);
+    let joined = if candidate.is_absolute() {
+        de_verbatim(candidate)
     } else {
-        space_root.join(raw)
+        root.join(candidate)
     };
 
-    // Normalise `..` textually — the path usually doesn't exist yet, so
+    // Normalise `..` textually — the destination usually doesn't exist yet, so
     // `canonicalize` isn't available to do it for us.
     let normalised = normalise(&joined);
-    let root = normalise(&space_root.canonicalize().unwrap_or_else(|_| space_root.to_path_buf()));
     if !normalised.starts_with(&root) {
         return Err(format!(
-            "output_dir '{raw}' resolves outside the Space root ({}) — exports must stay inside the Space",
+            "output_dir '{raw}' resolves to {} which is outside the Space root ({}) — exports must stay inside the Space",
+            normalised.display(),
             root.display()
         ));
     }
     Ok(normalised)
+}
+
+/// Strip Windows' `\\?\` verbatim prefix.
+///
+/// `Path::canonicalize` returns verbatim paths on Windows; a path the caller
+/// typed is not verbatim. The two forms name the same location but compare
+/// unequal, so both sides of a containment check have to agree on one. UNC
+/// verbatim paths (`\\?\UNC\…`) are left alone — stripping their prefix would
+/// change what they point at.
+fn de_verbatim(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => p.to_path_buf(),
+    }
 }
 
 fn normalise(p: &Path) -> PathBuf {
@@ -241,12 +269,43 @@ mod tests {
         dir
     }
 
+    /// A minimal but complete core. Spelled out rather than derived from
+    /// `Default` so the test doesn't require a derive on the wire-contract
+    /// struct in `eustress-worlddb`.
+    fn core(class: &str, pos: [f32; 3]) -> eustress_worlddb::ArchInstanceCore {
+        eustress_worlddb::ArchInstanceCore {
+            class_name: class.to_string(),
+            mesh: String::new(),
+            scene: String::new(),
+            t: pos,
+            r: [0.0, 0.0, 0.0, 1.0],
+            s: [1.0, 1.0, 1.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+            transparency: 0.0,
+            reflectance: 0.0,
+            anchored: true,
+            can_collide: true,
+            cast_shadow: true,
+            locked: false,
+            material: String::new(),
+            tags: Vec::new(),
+            extra: Vec::new(),
+        }
+    }
+
+    fn encoded(class: &str, pos: [f32; 3]) -> Vec<u8> {
+        eustress_worlddb::encode_instance_core(&core(class, pos)).unwrap()
+    }
+
     #[test]
-    fn default_dir_lands_under_the_space() {
+    fn default_dir_lands_under_the_space_and_is_writable() {
         let space = temp_space("default");
-        let out = resolve_output_dir(&space, None).unwrap();
-        assert!(out.ends_with("instances"));
-        assert!(out.starts_with(normalise(&space.canonicalize().unwrap())));
+        let out = resolve_output_dir(&space, None).expect("the default must always resolve");
+        assert!(out.ends_with(Path::new("exports").join("instances")));
+        // The returned path has to be usable, not merely well-shaped — an
+        // unwritable "valid" path is the failure this guards.
+        std::fs::create_dir_all(&out).expect("resolved default dir must be creatable");
+        std::fs::write(out.join("probe.txt"), b"ok").expect("resolved dir must be writable");
     }
 
     #[test]
@@ -257,6 +316,10 @@ mod tests {
         // An absolute path outside the Space is rejected too.
         let outside = std::env::temp_dir().join("definitely-not-the-space");
         assert!(resolve_output_dir(&space, outside.to_str()).is_err());
+        // A sibling whose name merely starts with the root's must not pass:
+        // containment is per-component, not a string prefix.
+        let sibling = format!("{}-evil", space.display());
+        assert!(resolve_output_dir(&space, Some(&sibling)).is_err());
     }
 
     #[test]
@@ -264,6 +327,88 @@ mod tests {
         let space = temp_space("nested");
         let out = resolve_output_dir(&space, Some("Exports/run1")).unwrap();
         assert!(out.ends_with(Path::new("Exports").join("run1")));
+        std::fs::create_dir_all(&out).expect("nested dir must be creatable");
+    }
+
+    #[test]
+    fn absolute_path_inside_the_space_is_accepted() {
+        // The engine hands out absolute paths (SpaceRoot-derived), so an
+        // absolute destination inside the Space must round-trip rather than
+        // being rejected for being written in a different form than the
+        // canonicalised root.
+        let space = temp_space("absolute");
+        let inside = space.join("Exports").join("abs");
+        let out = resolve_output_dir(&space, inside.to_str()).expect("inside-the-Space absolute");
+        assert!(out.ends_with(Path::new("Exports").join("abs")));
+    }
+
+    #[test]
+    fn folders_layout_writes_loadable_documents() {
+        // Round-trip a real core: encode → export → parse the TOML back.
+        let space = temp_space("roundtrip");
+        let plan = ExportPlan {
+            output_dir: space.join("out"),
+            layout: ExportLayout::Folders,
+            class_filter: None,
+        };
+        let report = write_export(&[(0x2a, encoded("Part", [1.0, 2.0, 3.0]))], &plan).unwrap();
+        assert_eq!(report.written, 1);
+        assert_eq!(report.undecodable, 0);
+
+        let folder = plan.output_dir.join("Part_000000000000002a");
+        let text = std::fs::read_to_string(folder.join("_instance.toml"))
+            .expect("exported _instance.toml must exist at the id-suffixed folder");
+        let parsed: toml::Value = toml::from_str(&text).expect("export must be valid TOML");
+        assert_eq!(parsed["metadata"]["class_name"].as_str(), Some("Part"));
+        // The export must carry real data, not just an identity stub — a
+        // transform that came back as the default would mean the decode path
+        // silently produced an empty instance.
+        let pos = parsed["transform"]["position"].as_array().expect("position");
+        let pos: Vec<f64> = pos.iter().map(|v| v.as_float().unwrap()).collect();
+        assert_eq!(pos, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn class_filter_excludes_and_counts() {
+        let space = temp_space("filter");
+        let plan = ExportPlan {
+            output_dir: space.join("out"),
+            layout: ExportLayout::Folders,
+            class_filter: Some("Part".to_string()),
+        };
+        let z = [0.0; 3];
+        let cores = vec![
+            (1u64, encoded("Part", z)),
+            (2u64, encoded("Model", z)),
+            (3u64, encoded("Part", z)),
+        ];
+        let report = write_export(&cores, &plan).unwrap();
+        assert_eq!(report.written, 2);
+        assert_eq!(report.filtered_out, 1);
+        // Every input is accounted for — a silently dropped instance would
+        // make a partial export look complete.
+        assert_eq!(
+            report.written + report.filtered_out + report.undecodable,
+            cores.len()
+        );
+    }
+
+    #[test]
+    fn single_file_layout_holds_every_instance() {
+        let space = temp_space("single");
+        let plan = ExportPlan {
+            output_dir: space.join("out"),
+            layout: ExportLayout::SingleFile,
+            class_filter: None,
+        };
+        let z = [0.0; 3];
+        let report =
+            write_export(&[(1, encoded("Part", z)), (2, encoded("Model", z))], &plan).unwrap();
+        assert_eq!(report.written, 2);
+
+        let text = std::fs::read_to_string(plan.output_dir.join(SINGLE_FILE_NAME)).unwrap();
+        let parsed: toml::Value = toml::from_str(&text).expect("aggregate export must be valid TOML");
+        assert_eq!(parsed["instance"].as_array().map(|a| a.len()), Some(2));
     }
 
     #[test]
