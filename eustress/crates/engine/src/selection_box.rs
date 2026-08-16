@@ -22,8 +22,16 @@ use crate::classes::{BasePart, Part, PartType};
 // Constants
 // ============================================================================
 
-/// Scale factor for wireframe mesh (slightly larger than part to avoid z-fight)
-const WIREFRAME_SCALE: f32 = 1.01;
+/// How far the selection wireframe sits OUTSIDE the part's surface, in
+/// world metres, per side. A FIXED offset — not a percentage.
+///
+/// This was previously a multiplicative `WIREFRAME_SCALE = 1.01`, i.e. 0.5%
+/// of the part's own size per side. That reads correctly on a 1 m part (5 mm)
+/// and falls apart as parts grow: a 100 m part got a half-metre gap, so the
+/// outline looked detached and offset rather than hugging the surface. The
+/// gap exists only to beat z-fighting with the part's own faces, which is an
+/// absolute depth concern — it has nothing to do with how big the part is.
+const WIREFRAME_MARGIN_M: f32 = 0.01;
 
 /// Selection outline color (Eustress blue)
 const SELECTION_COLOR: Color = Color::srgb(0.0, 0.6, 1.0);
@@ -282,7 +290,7 @@ fn spawn_selection_adornments(
         // by the parent's world scale. Works for BOTH primitive parts
         // (transform.scale = size) and GLB parts (transform.scale = 1,1,1).
         let parent_world_scale = global_transform.compute_transform().scale;
-        let counter_scale = counter_scale_from(parent_world_scale, WIREFRAME_SCALE);
+        let counter_scale = margin_scale_from(parent_world_scale, size, WIREFRAME_MARGIN_M);
 
         commands.spawn((
             Mesh3d(wireframe_handle),
@@ -318,6 +326,37 @@ fn counter_scale_from(parent_world_scale: Vec3, world_scale_target: f32) -> Vec3
         world_scale_target / parent_world_scale.x.abs().max(0.0001),
         world_scale_target / parent_world_scale.y.abs().max(0.0001),
         world_scale_target / parent_world_scale.z.abs().max(0.0001),
+    )
+}
+
+/// Local scale for a wireframe that should sit exactly `margin` metres
+/// outside the part on every side, at any part size.
+///
+/// The wireframe mesh is baked at the part's real `size`, and the child
+/// inherits the parent's world scale, so its final world extent is
+/// `size * parent_scale * local_scale`. Solving that for
+/// `size + 2 * margin` gives the per-axis factor below.
+///
+/// Per-AXIS is the point: a single scalar (what a percentage gives you)
+/// cannot produce an even border on a non-cubic part — a 20 x 0.5 x 20 slab
+/// would get a 40x thicker gap on its long axes than its thin one. Degenerate
+/// axes fall back to the parent counter-scale alone, so a zero-thickness part
+/// can't divide by zero or explode the outline.
+fn margin_scale_from(parent_world_scale: Vec3, size: Vec3, margin: f32) -> Vec3 {
+    let axis = |size_axis: f32, parent_axis: f32| -> f32 {
+        let parent = parent_axis.abs().max(0.0001);
+        let s = size_axis.abs();
+        if s <= 1.0e-4 {
+            // No meaningful extent to pad — just undo the parent scale.
+            1.0 / parent
+        } else {
+            ((s + 2.0 * margin) / s) / parent
+        }
+    };
+    Vec3::new(
+        axis(size.x, parent_world_scale.x),
+        axis(size.y, parent_world_scale.y),
+        axis(size.z, parent_world_scale.z),
     )
 }
 
@@ -385,7 +424,7 @@ fn spawn_hover_adornments(
         );
 
         let parent_world_scale = global_transform.compute_transform().scale;
-        let counter_scale = counter_scale_from(parent_world_scale, WIREFRAME_SCALE);
+        let counter_scale = margin_scale_from(parent_world_scale, size, WIREFRAME_MARGIN_M);
 
         commands.spawn((
             Mesh3d(wireframe_handle),
@@ -467,7 +506,7 @@ fn update_changed_adornments(
         );
 
         let parent_world_scale = global_transform.compute_transform().scale;
-        let counter_scale = counter_scale_from(parent_world_scale, WIREFRAME_SCALE);
+        let counter_scale = margin_scale_from(parent_world_scale, size, WIREFRAME_MARGIN_M);
 
         commands.spawn((
             Mesh3d(wireframe_handle),
