@@ -176,12 +176,17 @@ fn rebuild_collider_on_size_change(
             if base_part.size.y.is_finite() { (base_part.size.y * 0.5).abs().max(0.05) } else { 0.05 },
             if base_part.size.z.is_finite() { (base_part.size.z * 0.5).abs().max(0.05) } else { 0.05 },
         );
+        // Avian takes FULL extents for cuboid and FULL height for cylinder —
+        // it halves them internally. Feeding it half-extents (as this did)
+        // produced a collider half the part's visual size, so a resized part
+        // would let things sink into it. Must match `safe_collider_from`, or
+        // resizing a part would silently change its collision size.
         let collider = match part_opt.map(|p| p.shape) {
             Some(PartType::Ball) => Collider::sphere(half.x),
             Some(PartType::Cylinder) | Some(PartType::Cone) => {
-                Collider::cylinder(half.x, half.y)
+                Collider::cylinder(half.x, half.y * 2.0)
             }
-            _ => Collider::cuboid(half.x, half.y, half.z),
+            _ => Collider::cuboid(half.x * 2.0, half.y * 2.0, half.z * 2.0),
         };
         commands.entity(entity).insert(collider);
     }

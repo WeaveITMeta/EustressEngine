@@ -188,16 +188,33 @@ pub(crate) fn safe_collider_from(
     {
         return None;
     }
-    // Every half-extent component must be finite AND strictly positive.
-    let hx = if scale.x.is_finite() { (scale.x * 0.5).abs().max(MIN_HALF) } else { return None; };
-    let hy = if scale.y.is_finite() { (scale.y * 0.5).abs().max(MIN_HALF) } else { return None; };
-    let hz = if scale.z.is_finite() { (scale.z * 0.5).abs().max(MIN_HALF) } else { return None; };
+    // AVIAN TAKES FULL EXTENTS, NOT HALF-EXTENTS.
+    //
+    //     pub fn cuboid(x_length, y_length, z_length) -> Self {
+    //         SharedShape::cuboid(x_length * 0.5, ...)   // halves internally
+    //     }
+    //
+    // This previously passed `scale * 0.5`, so every cuboid collider in the
+    // engine was HALF its visual size and parts sank halfway into whatever
+    // they landed on before contact resolved. (Older Avian did take
+    // half-extents — the call sites were not updated when the API changed,
+    // and the stale "colliders take HALF-extents" comments date from then.
+    // `instance_loader.rs:3059` had already been individually corrected with
+    // an explicit `* 2.0`, which is the same bug seen from the other side.)
+    //
+    // `sphere` genuinely takes a RADIUS, so half of the diameter is correct
+    // there; `cylinder` takes (radius, FULL height).
+    const MIN_FULL: f32 = MIN_HALF * 2.0;
+    let sx = if scale.x.is_finite() { scale.x.abs().max(MIN_FULL) } else { return None; };
+    let sy = if scale.y.is_finite() { scale.y.abs().max(MIN_FULL) } else { return None; };
+    let sz = if scale.z.is_finite() { scale.z.abs().max(MIN_FULL) } else { return None; };
     Some(match part_shape {
-        eustress_common::classes::PartType::Ball => Collider::sphere(hx),
+        // Radius = half the diameter.
+        eustress_common::classes::PartType::Ball => Collider::sphere(sx * 0.5),
         eustress_common::classes::PartType::Cylinder | eustress_common::classes::PartType::Cone => {
-            Collider::cylinder(hx, hy)
+            Collider::cylinder(sx * 0.5, sy)
         }
-        _ => Collider::cuboid(hx, hy, hz),
+        _ => Collider::cuboid(sx, sy, sz),
     })
 }
 

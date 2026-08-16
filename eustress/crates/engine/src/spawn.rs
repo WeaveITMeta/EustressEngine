@@ -112,15 +112,15 @@ pub fn spawn_part_glb(
         format!("{}#Mesh0/Primitive0", glb_path)
     );
 
-    // Create collider — Avian3D takes half-extents for cuboid and half-height
-    // for cylinder. (Collider sizing under investigation — kept at size/2, the
-    // long-standing value; the drag no longer depends on it once OBB-primary
-    // surface-follow lands.)
+    // Avian takes FULL extents (it halves them internally), NOT half-extents.
+    // Passing `size * 0.5` made every collider HALF its visual size, so parts
+    // sank visibly into whatever they landed on. `sphere` genuinely takes a
+    // radius; `cylinder` takes (radius, FULL height).
     let half = size * 0.5;
     let collider = match part.shape {
         PartType::Ball => Collider::sphere(half.x),
-        PartType::Cylinder | PartType::Cone => Collider::cylinder(half.x, half.y),
-        _ => Collider::cuboid(half.x, half.y, half.z),
+        PartType::Cylinder | PartType::Cone => Collider::cylinder(half.x, size.y),
+        _ => Collider::cuboid(size.x, size.y, size.z),
     };
 
     // Create material with special handling for Glass
@@ -218,12 +218,13 @@ pub fn spawn_part(
         PartType::Cone => meshes.add(Cylinder::new(size.x / 2.0, size.y)), // TODO: proper cone
     };
     
-    // Create collider — Avian3D takes half-extents for cuboid and half-height for cylinder
+    // Avian takes FULL extents (halved internally); see the note on the other
+    // spawn path above. `sphere` takes a radius, `cylinder` (radius, height).
     let half = size * 0.5;
     let collider = match part.shape {
         PartType::Ball => Collider::sphere(half.x),
-        PartType::Cylinder | PartType::Cone => Collider::cylinder(half.x, half.y),
-        _ => Collider::cuboid(half.x, half.y, half.z),
+        PartType::Cylinder | PartType::Cone => Collider::cylinder(half.x, size.y),
+        _ => Collider::cuboid(size.x, size.y, size.z),
     };
     
     // Create material with special handling for Glass
