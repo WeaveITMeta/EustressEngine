@@ -268,7 +268,7 @@ pub fn export_to_space(world: &WorldOutput, space_root: &Path) -> Result<ExportS
     let mut summary = ExportSummary::default();
 
     // ── Master config + palette (fixed templates, stable field order) ──
-    let toml_text = render_terrain_toml(&grid, spec);
+    let toml_text = render_terrain_toml(&grid, spec.seed as u32, spec.sea_level as f32);
     let toml_path = terrain_dir.join("_terrain.toml");
     fs::write(&toml_path, toml_text.as_bytes())
         .map_err(|e| format!("export: failed to write {:?}: {}", toml_path, e))?;
@@ -323,6 +323,233 @@ pub fn export_to_space(world: &WorldOutput, space_root: &Path) -> Result<ExportS
     Ok(summary)
 }
 
+// ============================================================================
+// Flat plate ("baseplate") export
+// ============================================================================
+
+/// A dead-flat terrain plate — the ground a builder starts on.
+///
+/// Written in EXACTLY the format [`export_to_space`] writes and the engine's
+/// `hydrate_terrain_from_disk` reads, so the plate persists across a Space
+/// reload and every brush / LOD / streaming path treats it like any other
+/// terrain. Unlike the worldgen pipeline (hydrology + erosion + climate +
+/// materials), nothing is simulated here: the heights are a constant, so the
+/// write returns in well under a second at the sizes the ribbon offers.
+///
+/// ## Height floor
+/// The R16 format stores heights NORMALIZED to `[0, 1]` against
+/// `height_scale`, so a terrain surface can never sit below world Y = 0.
+/// A plate authored at `height_m = 0.0` is sculptable UPWARD only — Lower
+/// and Flatten clamp at the floor. Author it at `height_m > 0` to leave
+/// room to carve down into.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlatSpec {
+    /// Chunk coordinates span `[-half_extent, +half_extent]` on both axes,
+    /// so the plate is `(2N + 1)` chunks per side. Must be `>= 1`.
+    pub half_extent: u32,
+    /// Metres per chunk side. Must be a whole power of two — the loader
+    /// re-derives `N` as `ceil(view_distance / chunk_size)` and a
+    /// non-power-of-two divisor can shift every chunk by one
+    /// (see [`ExportGrid::chunk_size`]).
+    pub chunk_size: f32,
+    /// Samples per chunk side (R16 file = `chunk_resolution^2` u16).
+    pub chunk_resolution: u32,
+    /// World Y the flat surface sits at. Must be in `[0, height_scale]`.
+    pub height_m: f32,
+    /// Vertical ceiling the R16 values normalize against — also the
+    /// headroom later sculpting can raise the surface to.
+    pub height_scale: f32,
+    /// Palette slot painted across the whole plate: 0 = Grass, 1 = Rock,
+    /// 2 = Dirt, 3 = Snow. Written as a one-hot splatmap; WITHOUT it the
+    /// mesher sees an all-zero splat cache and renders the plate black.
+    pub material_slot: u8,
+    /// Recorded in `[terrain] seed`. A flat plate's geometry does not use
+    /// it; it seeds the mesher's macro colour variation.
+    pub seed: u32,
+}
+
+impl Default for FlatSpec {
+    fn default() -> Self {
+        Self {
+            half_extent: 4,
+            chunk_size: 64.0,
+            chunk_resolution: EXPORT_CHUNK_RESOLUTION,
+            height_m: 0.0,
+            height_scale: 100.0,
+            material_slot: 0,
+            seed: 0,
+        }
+    }
+}
+
+impl FlatSpec {
+    /// Total covered extent (metres) — `(2N + 1) * chunk_size`.
+    #[inline]
+    pub fn total_extent_m(&self) -> f32 {
+        (self.half_extent * 2 + 1) as f32 * self.chunk_size
+    }
+
+    /// Validate and lower to the shared [`ExportGrid`].
+    pub fn grid(&self) -> Result<ExportGrid, String> {
+        if self.half_extent < 1 {
+            return Err(
+                "flat export: half_extent must be >= 1 (0 would set view_distance = 0, which \
+                 the streamer reads as load-nothing)"
+                    .to_string(),
+            );
+        }
+        if self.half_extent > MAX_HALF_EXTENT {
+            return Err(format!(
+                "flat export: half_extent {} exceeds the {} ceiling ({} chunk files)",
+                self.half_extent,
+                MAX_HALF_EXTENT,
+                (MAX_HALF_EXTENT * 2 + 1).pow(2)
+            ));
+        }
+        if !(self.chunk_size > 0.0)
+            || self.chunk_size.fract() != 0.0
+            || !(self.chunk_size as u32).is_power_of_two()
+        {
+            return Err(format!(
+                "flat export: chunk_size {} must be a whole power of two",
+                self.chunk_size
+            ));
+        }
+        if self.chunk_resolution < 2 {
+            return Err(format!(
+                "flat export: chunk_resolution {} < 2 (need a fence-post grid)",
+                self.chunk_resolution
+            ));
+        }
+        if !(self.height_scale > 0.0) {
+            return Err(format!(
+                "flat export: height_scale {} must be positive (R16 values normalize against it)",
+                self.height_scale
+            ));
+        }
+        if !(self.height_m >= 0.0) || self.height_m > self.height_scale {
+            return Err(format!(
+                "flat export: height_m {} outside [0, height_scale = {}] — the R16 format cannot \
+                 represent a surface below 0 or above the ceiling",
+                self.height_m, self.height_scale
+            ));
+        }
+        if self.material_slot > 3 {
+            return Err(format!(
+                "flat export: material_slot {} outside 0..=3 (the splatmap has four channels)",
+                self.material_slot
+            ));
+        }
+        Ok(ExportGrid {
+            chunk_size: self.chunk_size,
+            chunk_resolution: self.chunk_resolution,
+            half_extent: self.half_extent,
+            height_scale: self.height_scale,
+        })
+    }
+}
+
+/// Write a flat plate into `<space_root>/Workspace/Terrain/`.
+///
+/// Deterministic: same spec in, byte-identical files out. Clears stale
+/// `.r16`/`.png` a previous, larger export left behind first, so the
+/// directory afterwards contains EXACTLY this plate.
+pub fn export_flat_to_space(spec: &FlatSpec, space_root: &Path) -> Result<ExportSummary, String> {
+    let grid = spec.grid()?;
+
+    let terrain_dir = space_root.join("Workspace").join("Terrain");
+    let chunks_dir = terrain_dir.join("chunks");
+    let materials_dir = terrain_dir.join("materials");
+    fs::create_dir_all(&chunks_dir)
+        .map_err(|e| format!("flat export: failed to create {:?}: {}", chunks_dir, e))?;
+    fs::create_dir_all(&materials_dir)
+        .map_err(|e| format!("flat export: failed to create {:?}: {}", materials_dir, e))?;
+    #[cfg(feature = "image")]
+    let splat_dir = {
+        let dir = terrain_dir.join("splatmap");
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("flat export: failed to create {:?}: {}", dir, e))?;
+        dir
+    };
+
+    clear_stale_files(&chunks_dir, "r16");
+    #[cfg(feature = "image")]
+    clear_stale_files(&splat_dir, "png");
+
+    let mut summary = ExportSummary::default();
+
+    // Sea level 0: the template writes `[water] enabled = false`, so a flat
+    // plate never comes up with a water plane sitting over it.
+    let toml_text = render_terrain_toml(&grid, spec.seed, 0.0);
+    let toml_path = terrain_dir.join("_terrain.toml");
+    fs::write(&toml_path, toml_text.as_bytes())
+        .map_err(|e| format!("flat export: failed to write {:?}: {}", toml_path, e))?;
+    summary.bytes_written += toml_text.len() as u64;
+
+    for (name, file_stem, roughness) in MATERIAL_PALETTE {
+        let text = render_material_toml(name, roughness);
+        let path = materials_dir.join(format!("{file_stem}.mat.toml"));
+        fs::write(&path, text.as_bytes())
+            .map_err(|e| format!("flat export: failed to write {:?}: {}", path, e))?;
+        summary.bytes_written += text.len() as u64;
+    }
+
+    // Every sample is the same normalized height — `save_chunk_r16` quantises
+    // it exactly the way the loader's `raw / 65535.0` inverse expects.
+    let res = grid.chunk_resolution as usize;
+    let half = grid.half_extent as i64;
+    let normalized = spec.height_m / grid.height_scale;
+    let heights = vec![normalized; res * res];
+
+    #[cfg(feature = "image")]
+    let png = encode_uniform_splat_png(spec.material_slot, res)?;
+
+    for cz in -half..=half {
+        for cx in -half..=half {
+            let r16_path = chunk_r16_path(&terrain_dir, cx as i32, cz as i32);
+            save_chunk_r16(&r16_path, &heights, grid.chunk_resolution)?;
+            summary.chunks_written += 1;
+            summary.bytes_written += (res * res * 2) as u64;
+
+            #[cfg(feature = "image")]
+            {
+                let png_path = chunk_splatmap_path(&terrain_dir, cx as i32, cz as i32);
+                fs::write(&png_path, &png)
+                    .map_err(|e| format!("flat export: failed to write {:?}: {}", png_path, e))?;
+                summary.splatmaps_written += 1;
+                summary.bytes_written += png.len() as u64;
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Encode a `res x res` RGBA8 splatmap that is one-hot on `slot` — the whole
+/// plate is a single material. Channel bytes sum to 255 per pixel, matching
+/// [`encode_chunk_splat_png`]'s contract.
+///
+/// Load-bearing, not cosmetic: `load_chunks_from_disk` sizes `splat_cache`
+/// whether or not PNGs exist, so the mesher's `has_splat` branch is taken
+/// either way — with no splatmap every weight is zero and the plate renders
+/// black.
+#[cfg(feature = "image")]
+fn encode_uniform_splat_png(slot: u8, res: usize) -> Result<Vec<u8>, String> {
+    let mut raw = vec![0u8; res * res * 4];
+    for px in raw.chunks_exact_mut(4) {
+        px[slot as usize] = 255;
+    }
+    let mut png = Vec::new();
+    {
+        use image::ImageEncoder;
+        let encoder = image::codecs::png::PngEncoder::new(&mut png);
+        encoder
+            .write_image(&raw, res as u32, res as u32, image::ExtendedColorType::Rgba8)
+            .map_err(|e| format!("flat export: failed to encode splat PNG: {e}"))?;
+    }
+    Ok(png)
+}
+
 /// Generated-world coordinate (metres) sampled by each global cache pixel:
 /// pixel `p` of `W = (2N+1)*R` sits `p * T/(W-1)` metres from the generated
 /// min corner (which the export maps onto the engine grid's `(-N*S, -N*S)`
@@ -350,7 +577,12 @@ fn clear_stale_files(dir: &Path, ext: &str) {
 /// Render `_terrain.toml` — exact schema `TerrainTomlFile` parses. Fixed
 /// template: stable field order, no timestamps, `{:?}` float formatting
 /// (shortest round-trip, e.g. `256.0`).
-fn render_terrain_toml(grid: &ExportGrid, spec: &WorldSpec) -> String {
+///
+/// Takes the two scalars it actually writes rather than a whole
+/// [`WorldSpec`], so the flat-plate exporter ([`export_flat_to_space`])
+/// shares this one template instead of keeping a second copy that could
+/// drift out of sync with what the loader parses.
+fn render_terrain_toml(grid: &ExportGrid, seed: u32, sea_level: f32) -> String {
     format!(
         r#"# Eustress Engine — Terrain Configuration
 # Generated by the worldgen exporter (deterministic: same world => identical bytes).
@@ -409,10 +641,10 @@ color = [0.1, 0.3, 0.6, 0.8]
         chunk_size = grid.chunk_size,
         chunk_resolution = grid.chunk_resolution,
         height_scale = grid.height_scale,
-        seed = spec.seed as u32,
-        water_level = spec.sea_level as f32,
+        seed = seed,
+        water_level = sea_level,
         view_distance = grid.view_distance(),
-        sea_level = spec.sea_level as f32,
+        sea_level = sea_level,
     )
 }
 
@@ -1013,5 +1245,182 @@ mod tests {
             ..WorldSpec::default()
         })
         .is_err());
+    }
+    // ── Flat plate ("baseplate") export ──────────────────────────────────
+
+    #[test]
+    fn flat_export_round_trips_to_a_dead_flat_surface() {
+        let root = temp_dir("flat_round_trip");
+        let spec = FlatSpec {
+            half_extent: 2,
+            chunk_size: 64.0,
+            chunk_resolution: 32,
+            height_m: 25.0,
+            height_scale: 100.0,
+            material_slot: 0,
+            seed: 7,
+        };
+        let summary = export_flat_to_space(&spec, &root).expect("flat export");
+        assert_eq!(summary.chunks_written, 25); // (2*2+1)^2
+
+        // Load back through the SAME path the engine hydrates with.
+        let terrain = root.join("Workspace").join("Terrain");
+        let toml = toml_loader::load_terrain_toml(&terrain.join("_terrain.toml")).unwrap();
+        let config = toml.to_terrain_config();
+
+        // view_distance is load-bearing: the loader must re-derive N = 2, or
+        // every chunk lands at the wrong cache offset.
+        assert_eq!(config.chunks_x, 2);
+        assert_eq!(config.chunks_z, 2);
+        assert_eq!(config.chunk_resolution, 32);
+        assert_eq!(config.height_scale, 100.0);
+
+        let mut data = crate::terrain::TerrainData::procedural();
+        data.resize_cache(&config);
+        let loaded = toml_loader::load_chunks_from_disk(&terrain, &config, &mut data);
+        assert_eq!(loaded.len(), 25);
+
+        // Every cache sample is the SAME height, and it is the authored one.
+        // (u16 quantisation: 25/100 * 65535 = 16383.75 -> 16384 -> 0.2500038.)
+        let expected = spec.height_m / spec.height_scale;
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for &h in &data.height_cache {
+            lo = lo.min(h);
+            hi = hi.max(h);
+        }
+        assert!(
+            (hi - lo).abs() < 1e-6,
+            "plate is not flat: spread {} (lo {lo}, hi {hi})",
+            hi - lo
+        );
+        assert!(
+            (lo - expected).abs() < 1.0 / 65535.0,
+            "plate height {lo} != authored {expected}"
+        );
+    }
+
+    #[test]
+    fn flat_export_writes_a_non_black_splatmap() {
+        // Regression: load_chunks_from_disk sizes splat_cache whether or not
+        // PNGs exist, so the mesher's has_splat branch is taken either way.
+        // Without splatmaps every weight is zero and the plate renders black.
+        let root = temp_dir("flat_splat");
+        let spec = FlatSpec {
+            half_extent: 1,
+            chunk_resolution: 16,
+            material_slot: 1, // Rock
+            ..Default::default()
+        };
+        let summary = export_flat_to_space(&spec, &root).expect("flat export");
+        assert_eq!(summary.splatmaps_written, 9);
+
+        let terrain = root.join("Workspace").join("Terrain");
+        let img = image::open(toml_loader::chunk_splatmap_path(&terrain, 0, 0))
+            .expect("splat png")
+            .to_rgba8();
+        for px in img.pixels() {
+            let [r, g, b, a] = px.0;
+            assert_eq!(
+                u32::from(r) + u32::from(g) + u32::from(b) + u32::from(a),
+                255
+            );
+            assert_eq!(g, 255, "slot 1 (rock) should own the whole pixel");
+        }
+    }
+
+    #[test]
+    fn flat_export_is_byte_deterministic() {
+        let spec = FlatSpec::default();
+        let a = temp_dir("flat_det_a");
+        let b = temp_dir("flat_det_b");
+        export_flat_to_space(&spec, &a).unwrap();
+        export_flat_to_space(&spec, &b).unwrap();
+        for rel in [
+            "_terrain.toml",
+            "chunks/x0_z0.r16",
+            "chunks/x-4_z3.r16",
+            "materials/grass.mat.toml",
+        ] {
+            let pa = a.join("Workspace").join("Terrain").join(rel);
+            let pb = b.join("Workspace").join("Terrain").join(rel);
+            assert_eq!(
+                std::fs::read(&pa).unwrap(),
+                std::fs::read(&pb).unwrap(),
+                "{rel} differs between two exports of the same spec"
+            );
+        }
+    }
+
+    #[test]
+    fn flat_export_clears_a_larger_previous_export() {
+        let root = temp_dir("flat_shrink");
+        export_flat_to_space(
+            &FlatSpec {
+                half_extent: 3,
+                chunk_resolution: 16,
+                ..Default::default()
+            },
+            &root,
+        )
+        .unwrap();
+        let terrain = root.join("Workspace").join("Terrain");
+        assert!(toml_loader::chunk_r16_path(&terrain, 3, 3).is_file());
+
+        export_flat_to_space(
+            &FlatSpec {
+                half_extent: 1,
+                chunk_resolution: 16,
+                ..Default::default()
+            },
+            &root,
+        )
+        .unwrap();
+        assert!(
+            !toml_loader::chunk_r16_path(&terrain, 3, 3).exists(),
+            "stale out-of-range chunk survived a smaller re-export"
+        );
+        assert!(toml_loader::chunk_r16_path(&terrain, 1, 1).is_file());
+    }
+
+    #[test]
+    fn flat_spec_rejects_specs_the_loader_cannot_round_trip() {
+        // chunk_size must be a whole power of two, or ceil(view_distance /
+        // chunk_size) can land off by one and shift every chunk.
+        assert!(FlatSpec {
+            chunk_size: 100.0,
+            ..Default::default()
+        }
+        .grid()
+        .is_err());
+        // R16 cannot represent a surface above the ceiling it normalizes to.
+        assert!(FlatSpec {
+            height_m: 150.0,
+            height_scale: 100.0,
+            ..Default::default()
+        }
+        .grid()
+        .is_err());
+        // ...nor below world Y = 0.
+        assert!(FlatSpec {
+            height_m: -1.0,
+            ..Default::default()
+        }
+        .grid()
+        .is_err());
+        // half_extent 0 => view_distance 0 => the streamer loads nothing.
+        assert!(FlatSpec {
+            half_extent: 0,
+            ..Default::default()
+        }
+        .grid()
+        .is_err());
+        // Only four splat channels exist.
+        assert!(FlatSpec {
+            material_slot: 4,
+            ..Default::default()
+        }
+        .grid()
+        .is_err());
+        assert!(FlatSpec::default().grid().is_ok());
     }
 }

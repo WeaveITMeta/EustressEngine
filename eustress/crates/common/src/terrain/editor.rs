@@ -176,8 +176,30 @@ pub enum BrushMode {
     Fill,
 }
 
-/// System for terrain painting with mouse
-/// Note: In engine, this should be gated by egui pointer check
+/// Host-app veto on terrain painting, checked by [`terrain_paint_system`].
+///
+/// The paint system reads the raw cursor, so on its own it happily sculpts
+/// while the pointer is over ribbon buttons or a docked panel. Hosts with
+/// editor chrome (the Studio engine) insert this resource and set `allowed`
+/// each frame from their viewport bounds + UI focus, exactly the way the
+/// other engine tools gate themselves. Hosts without chrome (the Client)
+/// never insert it — absent resource means "no veto".
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct TerrainPaintGate {
+    /// `false` = the pointer is over UI chrome this frame; do not paint.
+    pub allowed: bool,
+}
+
+impl Default for TerrainPaintGate {
+    fn default() -> Self {
+        Self { allowed: true }
+    }
+}
+
+/// System for terrain painting with mouse.
+///
+/// Gated by [`TerrainPaintGate`] when the host inserts one, so a drag that
+/// starts on a ribbon button does not carve the ground underneath it.
 pub fn terrain_paint_system(
     buttons: Res<ButtonInput<MouseButton>>,
     _keys: Res<ButtonInput<KeyCode>>,
@@ -186,6 +208,7 @@ pub fn terrain_paint_system(
     mut terrain_query: Query<(&TerrainConfig, &mut TerrainData), With<TerrainRoot>>,
     mut chunk_query: Query<(Entity, &mut Chunk, &GlobalTransform)>,
     brush: Res<TerrainBrush>,
+    gate: Option<Res<TerrainPaintGate>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut commands: Commands,
 ) {
@@ -193,12 +216,22 @@ pub fn terrain_paint_system(
     if !buttons.pressed(MouseButton::Left) {
         return;
     }
-    
-    // Adjust brush with scroll or keys
-    // (handled separately in UI)
-    
+
+    // Host veto (pointer over editor chrome). Absent resource = no veto.
+    if !gate.map(|g| g.allowed).unwrap_or(true) {
+        return;
+    }
+
     let Ok(window) = windows.single() else { return };
-    let Ok((camera, camera_transform)) = camera_query.single() else { return };
+    // The render camera, NOT `single()`: the Studio engine runs several
+    // Camera3d entities at once (scene camera at order 0, the Slint chrome
+    // overlay at order 300, the AI camera). `single()` errors out with more
+    // than one, which silently disabled every brush in the engine. `order ==
+    // 0` is the engine-wide convention for "the camera the user is looking
+    // through"; a single-camera host also matches it.
+    let Some((camera, camera_transform)) = camera_query.iter().find(|(c, _)| c.order == 0) else {
+        return;
+    };
     let Ok((config, mut data)) = terrain_query.single_mut() else { return };
     
     // Get cursor position
@@ -253,7 +286,18 @@ pub fn terrain_paint_system(
     }
 }
 
-/// Apply brush effect to terrain data with voxel-based precision
+/// Apply brush effect to terrain data with voxel-based precision.
+///
+/// Everything here is world-space, routed through [`super::height_query`].
+/// It used to index `height_cache` as a single `(chunk_resolution + 1)^2`
+/// grid, but a loaded terrain's cache is ONE global raster of
+/// `(chunks_x * 2 + 1) * chunk_resolution` samples per axis (see that
+/// module's docs, which already name this function as a hand-rolled copy of
+/// the math). With any terrain bigger than one chunk the strides disagreed,
+/// so a stroke wrote scrambled cells in the raster's first corner instead of
+/// the ground under the cursor — and the splat branch reallocated the global
+/// splat cache down to chunk size, discarding every material weight the
+/// loader had decoded.
 fn apply_brush_to_chunk(
     hit_point: &Vec3,
     brush: &TerrainBrush,
@@ -261,17 +305,18 @@ fn apply_brush_to_chunk(
     config: &TerrainConfig,
     data: &mut TerrainData,
 ) {
-    // Initialize height cache if empty
-    if data.height_cache.is_empty() {
-        let total_size = (config.chunk_resolution + 1) * (config.chunk_resolution + 1);
-        data.height_cache = vec![0.0; total_size as usize];
-        data.cache_width = config.chunk_resolution + 1;
-        data.cache_height = config.chunk_resolution + 1;
+    use super::height_query::{height_at_world, set_height_at_world, set_splat_at_world};
+
+    // No raster to write into. Sizing one here would have to guess the
+    // terrain's extent; `TerrainData::resize_cache` is the one place that
+    // knows it, and every spawn path calls it.
+    if data.height_cache.is_empty() || data.cache_width == 0 || data.cache_height == 0 {
+        return;
     }
-    
+
     let chunk_world_x = chunk.position.x as f32 * config.chunk_size;
     let chunk_world_z = chunk.position.y as f32 * config.chunk_size;
-    
+
     // Calculate sampling density based on precision and voxel mode
     let sample_mult = brush.sample_multiplier();
     let effective_resolution = if brush.voxel_mode {
@@ -280,20 +325,23 @@ fn apply_brush_to_chunk(
     } else {
         config.chunk_resolution
     };
-    
+
     // Voxel size determines the minimum edit granularity
     let voxel_size = brush.effective_voxel_size();
     let height_step = if brush.voxel_mode { brush.height_step } else { 0.0 };
-    
+    let height_scale = config.height_scale.max(1e-3);
+    // One sample step in metres — the neighbour offset the Smooth kernel uses.
+    let step_m = (config.chunk_size / effective_resolution.max(1) as f32).max(1e-3);
+
     // Iterate over vertices with higher precision in voxel mode
     for z in 0..=effective_resolution {
         for x in 0..=effective_resolution {
             let u = x as f32 / effective_resolution as f32;
             let v = z as f32 / effective_resolution as f32;
-            
+
             let world_x = chunk_world_x + u * config.chunk_size;
             let world_z = chunk_world_z + v * config.chunk_size;
-            
+
             // Check brush shape
             let in_brush = match brush.shape {
                 BrushShape::Circle => {
@@ -312,16 +360,16 @@ fn apply_brush_to_chunk(
                     dx + dz <= brush.radius
                 }
             };
-            
+
             if !in_brush {
                 continue;
             }
-            
+
             // Calculate distance for falloff
             let dx = world_x - hit_point.x;
             let dz = world_z - hit_point.z;
             let dist = (dx * dx + dz * dz).sqrt();
-            
+
             // Calculate falloff
             let falloff = if brush.falloff > 0.0 && dist > 0.0 {
                 let t = dist / brush.radius;
@@ -329,8 +377,9 @@ fn apply_brush_to_chunk(
             } else {
                 1.0
             };
-            
-            // Scale effect based on voxel mode
+
+            // Scale effect based on voxel mode. Normalized-height units, the
+            // same as before — multiplied up to metres at the write.
             let base_effect = if brush.voxel_mode {
                 // Voxel mode: stronger, more discrete changes
                 brush.strength * falloff * voxel_size
@@ -338,98 +387,76 @@ fn apply_brush_to_chunk(
                 // Smooth mode: gentler changes
                 brush.strength * falloff * 0.1
             };
-            
-            // Map to actual height cache index (may need interpolation for higher res)
-            let cache_x = ((u * config.chunk_resolution as f32).round() as u32).min(config.chunk_resolution);
-            let cache_z = ((v * config.chunk_resolution as f32).round() as u32).min(config.chunk_resolution);
-            let idx = (cache_z * (config.chunk_resolution + 1) + cache_x) as usize;
-            
-            if idx >= data.height_cache.len() {
-                continue;
-            }
-            
-            let current_height = data.height_cache[idx];
-            
-            match brush.mode {
-                BrushMode::Raise | BrushMode::VoxelAdd => {
-                    let new_height = current_height + base_effect;
-                    // Quantize to voxel grid if in voxel mode
-                    data.height_cache[idx] = if brush.voxel_mode && height_step > 0.0 {
-                        quantize_height(new_height, height_step)
-                    } else {
-                        new_height
-                    };
-                }
-                BrushMode::Lower | BrushMode::VoxelRemove => {
-                    let new_height = current_height - base_effect;
-                    data.height_cache[idx] = if brush.voxel_mode && height_step > 0.0 {
-                        quantize_height(new_height, height_step)
-                    } else {
-                        new_height
-                    };
-                }
+
+            let current = height_at_world(config, data, world_x, world_z);
+            let delta = base_effect * height_scale;
+            // Blend factor for the averaging brushes, unchanged tuning.
+            let blend = (base_effect * 10.0).clamp(0.0, 1.0);
+
+            let target = match brush.mode {
+                BrushMode::Raise | BrushMode::VoxelAdd => Some(current + delta),
+                BrushMode::Lower | BrushMode::VoxelRemove => Some(current - delta),
                 BrushMode::Smooth | BrushMode::VoxelSmooth => {
-                    // Average with neighbors (more neighbors in voxel mode)
-                    let neighbors = get_neighbor_heights_extended(data, cache_x, cache_z, config.chunk_resolution, brush.voxel_mode);
-                    if !neighbors.is_empty() {
-                        let avg = neighbors.iter().sum::<f32>() / neighbors.len() as f32;
-                        let smoothed = current_height * (1.0 - base_effect * 10.0) + avg * (base_effect * 10.0);
-                        data.height_cache[idx] = if brush.voxel_mode && height_step > 0.0 {
-                            quantize_height(smoothed, height_step)
-                        } else {
-                            smoothed
-                        };
+                    // Average the four (voxel mode: eight) world-space
+                    // neighbours. Sampling by world offset rather than cache
+                    // index means the kernel keeps working across a chunk
+                    // border instead of wrapping to the far edge of the row.
+                    let mut sum = 0.0;
+                    let mut count = 0.0;
+                    let offsets: &[(f32, f32)] = if brush.voxel_mode {
+                        &[
+                            (-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0),
+                            (-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0),
+                        ]
+                    } else {
+                        &[(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)]
+                    };
+                    for (ox, oz) in offsets {
+                        sum += height_at_world(
+                            config,
+                            data,
+                            world_x + ox * step_m,
+                            world_z + oz * step_m,
+                        );
+                        count += 1.0;
                     }
+                    Some(current * (1.0 - blend) + (sum / count) * blend)
                 }
                 BrushMode::Flatten => {
-                    // Flatten to hit point height
-                    let target = hit_point.y / config.height_scale;
-                    let flattened = current_height * (1.0 - base_effect * 10.0) + target * (base_effect * 10.0);
-                    data.height_cache[idx] = if brush.voxel_mode && height_step > 0.0 {
-                        quantize_height(flattened, height_step)
-                    } else {
-                        flattened
-                    };
+                    // Flatten toward the height the cursor hit.
+                    Some(current * (1.0 - blend) + hit_point.y * blend)
                 }
                 BrushMode::PaintTexture => {
-                    // Paint material onto splatmap cache
-                    let total_pixels = (config.chunk_resolution + 1) * (config.chunk_resolution + 1);
-                    // Initialize splat cache if empty (default to all grass = channel 0)
-                    if data.splat_cache.len() != (total_pixels * 4) as usize {
-                        data.splat_cache = vec![0.0; (total_pixels * 4) as usize];
-                        // Default: 100% grass (channel 0)
-                        for i in 0..total_pixels as usize {
-                            data.splat_cache[i * 4] = 1.0;
-                        }
-                    }
-                    let splat_idx = idx * 4;
-                    if splat_idx + 3 < data.splat_cache.len() {
-                        let layer = brush.texture_layer.min(3);
-                        let paint_strength = base_effect * 5.0; // Scale up for visible paint strokes
-                        // Add weight to target channel, reduce others proportionally
-                        let current = data.splat_cache[splat_idx + layer];
-                        let new_weight = (current + paint_strength).min(1.0);
-                        let added = new_weight - current;
-                        data.splat_cache[splat_idx + layer] = new_weight;
-                        // Reduce other channels proportionally to keep sum ≈ 1.0
-                        let other_sum: f32 = (0..4)
-                            .filter(|&c| c != layer)
-                            .map(|c| data.splat_cache[splat_idx + c])
-                            .sum();
-                        if other_sum > 0.0 {
-                            for c in 0..4 {
-                                if c != layer {
-                                    data.splat_cache[splat_idx + c] *= (1.0 - added / other_sum).max(0.0);
-                                }
-                            }
-                        }
-                        data.splat_dirty = true;
-                    }
+                    // Paint material weight into the GLOBAL splat raster, at
+                    // the same cell `mesh.rs::sample_splat_weights` reads.
+                    set_splat_at_world(
+                        config,
+                        data,
+                        world_x,
+                        world_z,
+                        brush.texture_layer.min(3),
+                        blend,
+                    );
+                    data.splat_dirty = true;
+                    None
                 }
                 BrushMode::Region | BrushMode::Fill => {
-                    // Region selection and fill are handled separately
-                    // These modes don't modify terrain directly during brush stroke
+                    // Region select and Fill are marked-out modes with no
+                    // stroke behaviour — see `SetTerrainBrushEvent`'s handler,
+                    // which refuses them rather than arming a dead brush.
+                    None
                 }
+            };
+
+            if let Some(world_h) = target {
+                let world_h = if brush.voxel_mode && height_step > 0.0 {
+                    // Quantise in the same normalized space the previous
+                    // implementation used, so voxel steps keep their size.
+                    quantize_height(world_h / height_scale, height_step) * height_scale
+                } else {
+                    world_h
+                };
+                set_height_at_world(config, data, world_x, world_z, world_h, 1.0);
             }
         }
     }
@@ -445,32 +472,5 @@ fn quantize_height(height: f32, step: f32) -> f32 {
     }
 }
 
-/// Get heights of neighboring vertices for smoothing (extended for voxel mode)
-fn get_neighbor_heights_extended(data: &TerrainData, x: u32, z: u32, resolution: u32, extended: bool) -> Vec<f32> {
-    let range = if extended { 2i32 } else { 1i32 };
-    let capacity = if extended { 24 } else { 8 };
-    let mut heights = Vec::with_capacity(capacity);
-    let stride = resolution + 1;
-    
-    for dz in -range..=range {
-        for dx in -range..=range {
-            if dx == 0 && dz == 0 {
-                continue;
-            }
-            
-            let nx = x as i32 + dx;
-            let nz = z as i32 + dz;
-            
-            if nx >= 0 && nx <= resolution as i32 && nz >= 0 && nz <= resolution as i32 {
-                let idx = (nz as u32 * stride + nx as u32) as usize;
-                if idx < data.height_cache.len() {
-                    heights.push(data.height_cache[idx]);
-                }
-            }
-        }
-    }
-    
-    heights
-}
 
 // Keyboard shortcuts moved to engine UI

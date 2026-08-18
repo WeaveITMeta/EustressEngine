@@ -12,7 +12,9 @@ use eustress_common::terrain::{
     spawn_terrain, TerrainRoot, Chunk,
     TerrainHistory,
     AdvancedBrushState,
+    TerrainPaintGate,
 };
+use bevy::window::PrimaryWindow;
 use eustress_common::classes::Terrain;
 use std::path::PathBuf;
 
@@ -45,14 +47,38 @@ impl Plugin for EngineTerrainPlugin {
             .init_resource::<TerrainHistory>()
             .init_resource::<AdvancedBrushState>()
             .init_resource::<BrushPreviewState>()
+            // The brush veto + the brush itself. These used to be left to
+            // `common::terrain::TerrainPlugin`, which the Studio engine has
+            // never added (only the Client does) — so every Terrain-ribbon
+            // brush set a mode that nothing consumed and the ground never
+            // moved. Registered here, next to the systems that drive them.
+            .init_resource::<TerrainPaintGate>()
             .add_systems(Update, (
                 sync_terrain_class_to_system,
                 handle_editor_shortcuts,
                 update_selection_gizmos,
                 handle_undo_redo_shortcuts,
-                update_brush_preview,
-                // terrain_paint_system is registered in common::terrain::TerrainPlugin
-            ).run_if(resource_equals(TerrainMode::Editor)));
+                // Chained so the veto is fresh for BOTH consumers this frame:
+                // an unordered tuple would leave the preview circle drawing
+                // (and the brush deciding) off last frame's cursor position.
+                (
+                    sync_terrain_paint_gate,
+                    (
+                        update_brush_preview,
+                        eustress_common::terrain::terrain_paint_system,
+                    ),
+                )
+                    .chain(),
+            ).run_if(resource_equals(TerrainMode::Editor)))
+            // Water plane (Terrain ribbon > Water). Same story as the brush:
+            // the resource and both systems live in the shared terrain
+            // plugin the engine does not add, so `WaterConfig` had no
+            // consumer here at all.
+            .init_resource::<eustress_common::terrain::WaterConfig>()
+            .add_systems(Update, (
+                eustress_common::terrain::water::water_sync_system,
+                eustress_common::terrain::water::water_update_system,
+            ));
 
         // Disk-terrain auto-loader — on Space open, when
         // `Workspace/Terrain/_terrain.toml` exists (worldgen export or
@@ -266,19 +292,70 @@ fn update_selection_gizmos(
     }
 }
 
+/// Feed the shared [`TerrainPaintGate`] from the Studio's editor chrome.
+///
+/// The brush reads the raw cursor, so without this a drag that starts on a
+/// ribbon button or a docked panel carves the ground underneath it. Same
+/// two conditions every other engine tool checks (see `decal_place_tool`):
+/// the pointer must be inside the viewport rectangle, and no Slint panel or
+/// text field may own it.
+fn sync_terrain_paint_gate(
+    mut gate: ResMut<TerrainPaintGate>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
+    ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
+) {
+    let over_chrome = ui_focus
+        .as_deref()
+        .map(|f| f.has_focus || f.text_input_focused)
+        .unwrap_or(false);
+
+    let in_viewport = windows
+        .single()
+        .ok()
+        .and_then(|window| {
+            let cursor = window.cursor_position()?;
+            Some(match viewport_bounds.as_deref() {
+                Some(bounds) => bounds.contains_logical(cursor, window.scale_factor() as f32),
+                None => true,
+            })
+        })
+        .unwrap_or(false);
+
+    let allowed = !over_chrome && in_viewport;
+    if gate.allowed != allowed {
+        gate.allowed = allowed;
+    }
+}
+
 /// Update brush preview gizmo — renders a circle on the terrain surface at cursor position
 fn update_brush_preview(
-    windows: Query<&Window>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    terrain_query: Query<&TerrainConfig, With<TerrainRoot>>,
+    terrain_query: Query<(&TerrainConfig, &TerrainData), With<TerrainRoot>>,
     brush: Res<TerrainBrush>,
     buttons: Res<ButtonInput<MouseButton>>,
+    gate: Res<TerrainPaintGate>,
     mut preview: ResMut<BrushPreviewState>,
     mut gizmos: Gizmos,
 ) {
     let Ok(window) = windows.single() else { return };
-    let Ok((camera, camera_transform)) = camera_query.single() else { return };
-    let Ok(_config) = terrain_query.single() else { return };
+    // `order == 0` (the engine-wide "camera the user looks through"
+    // convention), NOT `single()`: the Studio runs the scene camera, the
+    // Slint chrome overlay and the AI camera at once, so `single()` always
+    // errored here and the preview circle never drew.
+    let Some((camera, camera_transform)) = camera_query.iter().find(|(c, _)| c.order == 0) else {
+        return;
+    };
+    let Ok((config, data)) = terrain_query.single() else { return };
+
+    // Nothing to preview while the pointer is over editor chrome — and the
+    // brush would not paint there either.
+    if !gate.allowed {
+        preview.position = None;
+        preview.is_painting = false;
+        return;
+    }
 
     let Some(cursor_pos) = window.cursor_position() else {
         preview.position = None;
@@ -291,19 +368,16 @@ fn update_brush_preview(
         return;
     };
 
-    // Raycast to terrain ground plane (Y = 0)
-    // TODO: Replace with proper terrain heightmap raycast for accuracy on sculpted terrain
-    if ray.direction.y.abs() < 0.001 {
+    // Raymarch the REAL heightfield, the same call `terrain_paint_system`
+    // uses to pick its hit point. The old flat Y=0 plane test put the circle
+    // somewhere the brush was not going to act on any sculpted ground.
+    let Some(hit) =
+        eustress_common::terrain::height_query::raycast_terrain(config, data, ray, 2000.0, 2.0)
+    else {
         preview.position = None;
         return;
-    }
-    let t = -ray.origin.y / ray.direction.y;
-    if t < 0.0 {
-        preview.position = None;
-        return;
-    }
+    };
 
-    let hit = ray.origin + ray.direction * t;
     preview.position = Some(hit);
     preview.is_painting = buttons.pressed(MouseButton::Left);
 

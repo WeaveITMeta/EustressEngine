@@ -190,7 +190,18 @@ export component TerrainEditor inherits Rectangle {
                 
                 Rectangle { height: 8px; }
                 
-                // Generate buttons
+                // ── Flat baseplate ──
+                // These three used to run the FULL worldgen pipeline at a
+                // fixed seed — which is exactly what the Generate World
+                // control below already does, so they were a slow duplicate
+                // wearing a quick-looking label. They now write a dead-level
+                // plate straight to disk and load it in the same frame.
+                Text {
+                    text: "Flat baseplate — instant, ready to sculpt";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                }
                 HorizontalBox {
                     spacing: 8px;
                     alignment: center;
@@ -202,11 +213,12 @@ export component TerrainEditor inherits Rectangle {
                         border-radius: 4px;
                         
                         TouchArea {
-                            clicked => { root.on-generate-terrain("small"); }
+                            enabled: !root.worldgen-busy;
+                            clicked => { root.on-generate-terrain("flat-small"); }
                         }
                         
                         Text {
-                            text: "Small";
+                            text: "320 m";
                             color: Theme.text-primary;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -220,11 +232,12 @@ export component TerrainEditor inherits Rectangle {
                         border-radius: 4px;
                         
                         TouchArea {
-                            clicked => { root.on-generate-terrain("medium"); }
+                            enabled: !root.worldgen-busy;
+                            clicked => { root.on-generate-terrain("flat"); }
                         }
                         
                         Text {
-                            text: "Medium";
+                            text: "576 m";
                             color: white;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -238,11 +251,12 @@ export component TerrainEditor inherits Rectangle {
                         border-radius: 4px;
                         
                         TouchArea {
-                            clicked => { root.on-generate-terrain("large"); }
+                            enabled: !root.worldgen-busy;
+                            clicked => { root.on-generate-terrain("flat-large"); }
                         }
                         
                         Text {
-                            text: "Large";
+                            text: "1.1 km";
                             color: Theme.text-primary;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -254,7 +268,7 @@ export component TerrainEditor inherits Rectangle {
 
                 // ── Generate World (worldgen pipeline) ──
                 Text {
-                    text: "Or generate a full world (rivers, climate, materials)";
+                    text: "Or generate a full world (rivers, climate, materials) — takes a while";
                     color: Theme.text-secondary;
                     font-size: 11px;
                     horizontal-alignment: center;
