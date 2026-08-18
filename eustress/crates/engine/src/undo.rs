@@ -2202,6 +2202,11 @@ fn apply_property_value_to_entity(id: u32, property: &str, value: &PropertyValue
                 bp.locked = *l;
             }
         }
+        ("Destructible", PropertyValueSnapshot::Bool(d)) => {
+            if let Some(mut bp) = world.get_mut::<BasePart>(entity) {
+                bp.destructible = *d;
+            }
+        }
         ("FieldOfView", PropertyValueSnapshot::Float(deg)) => {
             if let Some(mut proj) = world.get_mut::<Projection>(entity) {
                 if let Projection::Perspective(p) = proj.as_mut() {

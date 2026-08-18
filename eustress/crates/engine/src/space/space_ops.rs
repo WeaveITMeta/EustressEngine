@@ -540,9 +540,9 @@ pub fn save_space(world: &mut World) {
                         locked: base_part.locked,
                         physics: None,
                         respect_gltf_materials: false,
-                        // Persist the deformation opt-in so a part authored as
-                        // deformable stays deformable across a save/load.
-                        deformation: base_part.deformation,
+                        // Persist the destructible opt-in so a part authored as
+                        // destructible stays destructible across a save/load.
+                        destructible: base_part.destructible,
                     },
                     metadata: InstanceMetadata {
                         class_name,

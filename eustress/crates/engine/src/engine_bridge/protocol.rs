@@ -570,7 +570,7 @@ pub mod handlers {
                     locked: false,
                     physics: None,
                     respect_gltf_materials: false,
-                    deformation: false,
+                    destructible: false,
                 },
                 metadata: InstanceMetadata {
                     class_name: "Part".to_string(),

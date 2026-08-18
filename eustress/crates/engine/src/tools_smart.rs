@@ -109,7 +109,7 @@ impl NewPartDescriptor {
                 locked: false,
                 physics: None,
                 respect_gltf_materials: false,
-                deformation: false,
+                destructible: false,
             },
             metadata: InstanceMetadata {
                 class_name: self.class_name.clone(),
@@ -492,7 +492,7 @@ fn build_fallback_def(position: Vec3, rotation: Quat, size: Vec3) -> InstanceDef
             locked: false,
             physics: None,
             respect_gltf_materials: false,
-            deformation: false,
+            destructible: false,
         },
         metadata: InstanceMetadata {
             class_name: "Part".to_string(),

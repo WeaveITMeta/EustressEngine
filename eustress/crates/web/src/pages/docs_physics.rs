@@ -801,7 +801,7 @@ let v_terminal = terminal_velocity(
                                     <span class="code-lang">"Rust"</span>
                                 </div>
                                 <pre><code class="language-rust">{r#"// Enable deformation on a part
-base_part.deformation = true;
+base_part.destructible = true;
 
 // Or via property system
 base_part.set_property("Deformation", PropertyValue::Bool(true));
