@@ -357,6 +357,9 @@ fn handle_select_drag(
     mut state: ResMut<SelectToolState>,
     studio_state: Option<Res<StudioState>>,
     ui_focus: Option<Res<SlintUIFocus>>,
+    // Terrain sculpt mode owns the left button in the viewport — see the
+    // stand-down guard below.
+    terrain_mode: Option<Res<eustress_common::terrain::TerrainMode>>,
     input: (Res<ButtonInput<MouseButton>>, Res<ButtonInput<KeyCode>>),
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
@@ -389,6 +392,23 @@ fn handle_select_drag(
     );
     
     if !drag_enabled {
+        if state.dragging {
+            state.dragging = false;
+            state.dragged_entity = None;
+        }
+        return;
+    }
+
+    // Terrain sculpt mode owns the left button. Without this, an LMB drag on
+    // the ground both paints the heightfield AND picks/moves whatever part is
+    // under the cursor — the two tools fight over the same gesture. Same
+    // shape as the `drag_enabled` stand-down above: cancel any drag already
+    // in flight so releasing the button does not commit a half-move.
+    if terrain_mode
+        .as_deref()
+        .copied()
+        .is_some_and(|m| m == eustress_common::terrain::TerrainMode::Editor)
+    {
         if state.dragging {
             state.dragging = false;
             state.dragged_entity = None;

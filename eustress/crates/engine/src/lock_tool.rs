@@ -94,14 +94,21 @@ fn lock_tool_hover_highlight(
     mut gizmos: Gizmos,
 ) {
     let Some(state) = studio_state else { return };
-    if state.current_tool != Tool::Lock { return; }
+    if !matches!(state.current_tool, Tool::Lock | Tool::Anchor) { return; }
 
     let Some(entity) = cursor_part(&ui_focus, &viewport_bounds, &windows, &cameras, &spatial_query)
     else { return };
     let Ok((gt, bp)) = parts.get(entity) else { return };
 
     let t = gt.compute_transform();
-    let color = if bp.locked { HOVER_LOCKED } else { HOVER_UNLOCKED };
+    // Colour reflects the flag THIS mode flips, so the hover preview always
+    // answers "what will my click do here" rather than always reporting lock
+    // state even while the Anchor mode is armed.
+    let already_set = match state.current_tool {
+        Tool::Anchor => bp.anchored,
+        _ => bp.locked,
+    };
+    let color = if already_set { HOVER_LOCKED } else { HOVER_UNLOCKED };
     draw_wire_box(&mut gizmos, t.translation, t.rotation, bp.size, color);
 }
 
@@ -150,22 +157,70 @@ fn lock_tool_toggle_click(
     auth: Option<Res<crate::auth::AuthState>>,
 ) {
     let Some(state) = studio_state else { return };
-    if state.current_tool != Tool::Lock { return; }
+    // Lock and Anchor are the same gesture over different flags, so one
+    // handler serves both rather than a near-duplicate system per flag.
+    let flag = match state.current_tool {
+        Tool::Lock => PaintFlag::Locked,
+        Tool::Anchor => PaintFlag::Anchored,
+        _ => return,
+    };
     if !mouse.just_pressed(MouseButton::Left) { return; }
 
     let Some(entity) = cursor_part(&ui_focus, &viewport_bounds, &windows, &cameras, &spatial_query)
     else { return };
     let Ok((mut bp, name)) = parts.get_mut(entity) else { return };
 
-    let now_locked = !bp.locked;
-    bp.locked = now_locked;
+    let now_set = !flag.read(&bp);
+    flag.write(&mut bp, now_set);
     info!(
         "{} '{}' is now {}",
-        if now_locked { "🔒" } else { "🔓" },
+        flag.log_icon(now_set),
         name.as_str(),
-        if now_locked { "locked" } else { "unlocked" },
+        flag.describe(now_set),
     );
-    persist_locked(entity, now_locked, &instance_files, &auth);
+    persist_flag(entity, flag, now_set, &instance_files, &auth);
+}
+
+/// Which `BasePart` boolean a paint-mode click flips.
+///
+/// Lock and Anchor differ only in the field they touch and the TOML key they
+/// persist to, so they share one enum rather than two parallel systems that
+/// would drift.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PaintFlag {
+    Locked,
+    Anchored,
+}
+
+impl PaintFlag {
+    fn read(self, bp: &BasePart) -> bool {
+        match self {
+            PaintFlag::Locked => bp.locked,
+            PaintFlag::Anchored => bp.anchored,
+        }
+    }
+    fn write(self, bp: &mut BasePart, value: bool) {
+        match self {
+            PaintFlag::Locked => bp.locked = value,
+            PaintFlag::Anchored => bp.anchored = value,
+        }
+    }
+    fn log_icon(self, value: bool) -> &'static str {
+        match (self, value) {
+            (PaintFlag::Locked, true) => "🔒",
+            (PaintFlag::Locked, false) => "🔓",
+            (PaintFlag::Anchored, true) => "⚓",
+            (PaintFlag::Anchored, false) => "🎈",
+        }
+    }
+    fn describe(self, value: bool) -> &'static str {
+        match (self, value) {
+            (PaintFlag::Locked, true) => "locked",
+            (PaintFlag::Locked, false) => "unlocked",
+            (PaintFlag::Anchored, true) => "anchored",
+            (PaintFlag::Anchored, false) => "unanchored",
+        }
+    }
 }
 
 /// Pressing the Unlock tool is a one-shot "Unlock All": every part in the
@@ -195,7 +250,7 @@ fn unlock_all_on_entry(
         // Keep the per-part log at debug — on a huge Space an INFO per part is
         // a log-I/O stall; the aggregate below is the signal.
         debug!("🔓 '{}' unlocked (Unlock All)", name.as_str());
-        persist_locked(entity, false, &instance_files, &auth);
+        persist_flag(entity, PaintFlag::Locked, false, &instance_files, &auth);
     }
     info!("🔓 Unlock All: unlocked {} part(s) in the Space", count);
 
@@ -207,16 +262,20 @@ fn unlock_all_on_entry(
 /// has a disk file. Binary-ECS parts (no `InstanceFile`) keep the change in the
 /// live ECS for the session; their persisted store is written through the
 /// normal save path, not here.
-fn persist_locked(
+fn persist_flag(
     entity: Entity,
-    locked: bool,
+    flag: PaintFlag,
+    value: bool,
     instance_files: &Query<&crate::space::instance_loader::InstanceFile>,
     auth: &Option<Res<crate::auth::AuthState>>,
 ) {
     let Ok(inst_file) = instance_files.get(entity) else { return };
     let stamp = auth.as_deref().and_then(crate::space::instance_loader::current_stamp);
     if let Ok(mut def) = crate::space::instance_loader::load_instance_definition(&inst_file.toml_path) {
-        def.properties.locked = locked;
+        match flag {
+            PaintFlag::Locked => def.properties.locked = value,
+            PaintFlag::Anchored => def.properties.anchored = value,
+        }
         let _ = crate::space::instance_loader::write_instance_definition_signed(
             &inst_file.toml_path, &mut def, stamp.as_ref(),
         );
@@ -234,7 +293,7 @@ fn cancel_on_escape(
     if ui_focus.as_ref().map(|f| f.text_input_focused).unwrap_or(false) { return; }
     if !keys.just_pressed(KeyCode::Escape) { return; }
     let Some(mut studio_state) = studio_state else { return };
-    if matches!(studio_state.current_tool, Tool::Lock | Tool::Unlock) {
+    if matches!(studio_state.current_tool, Tool::Lock | Tool::Unlock | Tool::Anchor) {
         studio_state.current_tool = Tool::Select;
     }
 }

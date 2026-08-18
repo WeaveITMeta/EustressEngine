@@ -57,6 +57,11 @@ fn sync_cursor_badge_state(
     move_state: Option<Res<crate::move_tool::MoveToolState>>,
     scale_state: Option<Res<crate::scale_tool::ScaleToolState>>,
     rotate_state: Option<Res<crate::rotate_tool::RotateToolState>>,
+    // Paint modes live on `StudioState.current_tool`, NOT in `ActiveModalTool`
+    // — they are not ModalTools. Without this the badge could never show for
+    // Lock / Unlock / Anchor, so entering one of those modes changed nothing
+    // on screen and read as "the button does nothing".
+    studio_state: Option<Res<crate::ui::StudioState>>,
 ) {
     // Modal tools take precedence; otherwise fall through to gizmo-hover
     // badges for the transform tools.
@@ -93,7 +98,16 @@ fn sync_cursor_badge_state(
     {
         "assets/icons/ui/cursor-badge-rotate.svg"
     } else {
-        ""
+        // Paint modes. These persist until Escape, so unlike the gizmo badges
+        // above the cursor carries the mode for as long as it is armed — that
+        // is the only on-screen signal that a click is about to flip a flag
+        // rather than select.
+        match studio_state.as_deref().map(|s| s.current_tool) {
+            Some(crate::ui::Tool::Lock)   => "assets/icons/ui/lock.svg",
+            Some(crate::ui::Tool::Unlock) => "assets/icons/ui/unlock.svg",
+            Some(crate::ui::Tool::Anchor) => "assets/icons/ui/anchor.svg",
+            _ => "",
+        }
     };
 
     if icon_path.is_empty() {
