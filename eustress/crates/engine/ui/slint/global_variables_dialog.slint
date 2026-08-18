@@ -1,0 +1,1092 @@
+// ============================================================================
+// Eustress Engine Studio - Global Variables Dialog
+//
+// The surface behind the "Global Variables..." menu item. Lists every globally
+// scoped key/value pair the running universe exposes to scripts, bindings and
+// simulation values, and lets the user filter, add, retype, edit inline and
+// delete them.
+//
+// Design notes worth knowing before editing this file:
+//
+//   * FILTERING IS DONE IN RUST. Slint has no substring test (there is no
+//     `contains` on `string`), so `variables` is expected to arrive ALREADY
+//     filtered. The dialog owns the query text and reports every keystroke
+//     through `on-filter-changed`. It tells "nothing exists yet" apart from
+//     "nothing matched" purely from `filter-text` being non-empty, so it stays
+//     correct without the host supplying an unfiltered total.
+//
+//   * DUPLICATE-KEY VALIDATION IS DONE IN RUST for the same reason: the model
+//     cannot be searched from Slint. The dialog enforces the one rule it can
+//     see on its own (an empty key) and renders whatever `add-error` /
+//     `edit-error` the host pushes back in answer to `on-new-key-edited` /
+//     `on-edit-key-edited`. Both feed ONE message line per form, so a host that
+//     never wires those callbacks still gets working empty-key feedback instead
+//     of a dead validation slot.
+//
+//   * THE INLINE EDITOR AND THE DELETE CONFIRMATION ARE VISIBILITY-GATED, NOT
+//     `if`-GATED. Their buttons clear the very state that spawned them, which
+//     under an `if` would delete the element from inside its own click handler
+//     - the Slint "Recursion detected" crash class documented in
+//     add_attribute_dialog.slint. Because a `visible: false` child still
+//     occupies space in a layout, every gated group sits inside a fixed-size
+//     Rectangle (not a layout slot) and the row height carries the swap.
+//
+//   * The type selector is a segmented control rather than a dropdown. With
+//     three options a popup buys nothing and would clip against the fixed row
+//     height inside the ScrollView.
+//
+// Colors, radii, spacing and font sizes come from Theme tokens only.
+// ============================================================================
+
+import { LineEdit, ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// One global variable as the host sees it.
+//
+// `var-type` is the lowercase type tag and must be one of `type-options`
+// (default: "string", "number", "bool"). `value` is always the DISPLAY string:
+// numbers arrive pre-formatted and bools arrive as "true" / "false", so this
+// dialog never has to parse or round-trip a typed value.
+export struct GlobalVariableEntry {
+    id: int,
+    key: string,
+    value: string,
+    var-type: string,
+}
+
+// Section rule + label, matching the DSSection treatment in data_sources.slint.
+component GVSection inherits Rectangle {
+    in property <string> title: "";
+
+    height: 28px;
+    background: transparent;
+
+    Rectangle {
+        x: 0px;
+        // Derive the bar's y from the row so the accent and the label share one
+        // centre line even if the row height changes.
+        y: (parent.height - self.height) / 2;
+        width: 3px;
+        height: 16px;
+        border-radius: 1.5px;
+        background: Theme.accent-blue;
+    }
+
+    Text {
+        x: 10px;
+        // `vertical-alignment` centres text inside THIS element's box, so the
+        // element must span the row. Without an explicit height the box
+        // collapses to the glyph height and the label sits at the top while the
+        // accent bar stays centred — the label then reads as misaligned.
+        y: 0;
+        height: parent.height;
+        text: root.title;
+        color: Theme.text-primary;
+        font-size: Theme.font-sm;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        vertical-alignment: center;
+    }
+}
+
+// Themed button with hover, pressed and disabled states.
+//
+// `kind` picks the surface: "default" (neutral), "primary" (success surface,
+// for the affirmative action) or "danger" (error surface, for destructive
+// actions). All three read from the success-/error-surface tokens rather than
+// the hard-coded tints older dialogs had to use before those tokens existed.
+component GVButton inherits Rectangle {
+    in property <string> label: "";
+    in property <string> kind: "default";
+    in property <bool> enabled: true;
+
+    callback clicked();
+
+    height: 30px;
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+
+    background: !root.enabled ? Theme.button-background
+        : root.kind == "primary"
+            ? (btn-ta.pressed ? Theme.success-surface
+               : btn-ta.has-hover ? Theme.success-surface-hover : Theme.success-surface)
+        : root.kind == "danger"
+            ? (btn-ta.pressed ? Theme.error-surface
+               : btn-ta.has-hover ? Theme.error-surface-hover : Theme.error-surface)
+        : (btn-ta.pressed ? Theme.button-pressed
+           : btn-ta.has-hover ? Theme.button-hover : Theme.button-background);
+
+    border-color: !root.enabled ? Theme.border-color
+        : root.kind == "primary"
+            ? (btn-ta.has-hover ? Theme.accent-green : Theme.success-surface-border)
+        : root.kind == "danger"
+            ? (btn-ta.has-hover ? Theme.accent-red : Theme.error-surface-border)
+        : Theme.border-color;
+
+    btn-ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        color: !root.enabled ? Theme.text-disabled
+            : root.kind == "primary"
+                ? (btn-ta.has-hover ? Theme.success-surface-text-hover : Theme.accent-green)
+            : root.kind == "danger"
+                ? (btn-ta.has-hover ? Theme.text-error : Theme.accent-red)
+            : Theme.text-primary;
+        font-size: Theme.font-sm;
+        font-weight: root.kind == "default" ? 400 : 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// Segmented single-choice control. Used for the variable type, and again as the
+// true/false editor a boolean variable gets instead of a text field.
+component GVSegmented inherits Rectangle {
+    in property <[string]> options: [];
+    in property <string> current: "";
+    in property <bool> enabled: true;
+
+    callback changed(string);
+
+    height: 30px;
+    background: Theme.input-background;
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+    border-color: Theme.input-border;
+
+    HorizontalLayout {
+        padding: 3px;
+        spacing: 3px;
+
+        for opt in root.options: Rectangle {
+            border-radius: Theme.radius-sm;
+            border-width: opt == root.current ? 1px : 0px;
+            border-color: Theme.accent-blue;
+            background: opt == root.current ? Theme.accent-blue.with-alpha(0.22)
+                : !root.enabled ? transparent
+                : seg-ta.pressed ? Theme.button-pressed
+                : seg-ta.has-hover ? Theme.button-hover : transparent;
+
+            seg-ta := TouchArea {
+                enabled: root.enabled;
+                mouse-cursor: root.enabled ? pointer : default;
+                clicked => {
+                    root.changed(opt);
+                }
+            }
+
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: opt;
+                color: !root.enabled ? Theme.text-disabled
+                    : opt == root.current ? Theme.accent-blue : Theme.text-secondary;
+                font-size: Theme.font-sm;
+                font-weight: opt == root.current ? 600 : 400;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// Text field wrapped so the focus ring uses the theme's focus border rather
+// than the std-widgets default, matching add_attribute_dialog.slint. `invalid`
+// swaps that ring to the error border so a bad key is visible without reading.
+component GVField inherits Rectangle {
+    in property <string> placeholder: "";
+    in property <bool> numeric: false;
+    in property <bool> invalid: false;
+    in-out property <string> text: "";
+
+    callback edited(string);
+    callback accepted(string);
+
+    height: 30px;
+    background: Theme.input-background;
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+    border-color: root.invalid ? Theme.border-error
+        : field.has-focus ? Theme.border-focus : Theme.input-border;
+
+    field := LineEdit {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        placeholder-text: root.placeholder;
+        input-type: root.numeric ? InputType.decimal : InputType.text;
+        text <=> root.text;
+        edited(t) => {
+            root.edited(t);
+        }
+        accepted(t) => {
+            root.accepted(t);
+        }
+    }
+}
+
+export component GlobalVariablesDialog inherits Rectangle {
+    // ── Data ─────────────────────────────────────────────────────────────
+    /// The rows to render. Expected to be ALREADY filtered by `filter-text`
+    /// (see the header note). Safe to leave empty.
+    in property <[GlobalVariableEntry]> variables: [];
+    /// Allowed type tags, in the order the segmented selector shows them.
+    in property <[string]> type-options: ["string", "number", "bool"];
+
+    // ── Filter ───────────────────────────────────────────────────────────
+    in-out property <string> filter-text: "";
+
+    // ── Add form ─────────────────────────────────────────────────────────
+    in-out property <bool> adding: false;
+    in-out property <string> new-key: "";
+    in-out property <string> new-value: "";
+    in-out property <string> new-type: "string";
+    /// Host-supplied validation message for the add form, e.g. a duplicate key
+    /// or a reserved name. Empty means valid. The empty-key rule is checked
+    /// locally and does not need to be reported here.
+    in property <string> add-error: "";
+
+    // ── Inline edit ──────────────────────────────────────────────────────
+    /// Id of the row being edited, or -1 when no row is in edit mode.
+    in-out property <int> editing-id: -1;
+    in-out property <string> edit-key: "";
+    in-out property <string> edit-value: "";
+    in-out property <string> edit-type: "string";
+    /// Host-supplied validation message for the inline editor. Empty = valid.
+    in property <string> edit-error: "";
+
+    // ── Selection ────────────────────────────────────────────────────────
+    in-out property <int> selected-id: -1;
+
+    // ── Callbacks ────────────────────────────────────────────────────────
+    callback on-filter-changed(/* query */ string);
+    callback on-clear-filter();
+
+    callback on-begin-add();
+    callback on-cancel-add();
+    /// Fired on every keystroke in the add form's key field so the host can
+    /// answer with `add-error` (duplicate key, reserved name, bad identifier).
+    callback on-new-key-edited(/* key */ string);
+    callback on-add-variable(/* key */ string, /* value */ string, /* type */ string);
+
+    callback on-begin-edit(/* id */ int);
+    callback on-cancel-edit();
+    /// Same live-validation contract as `on-new-key-edited`, for the row editor.
+    callback on-edit-key-edited(/* id */ int, /* key */ string);
+    callback on-commit-edit(/* id */ int, /* key */ string, /* value */ string, /* type */ string);
+
+    callback on-select-variable(/* id */ int);
+    callback on-delete-variable(/* id */ int);
+
+    callback on-close();
+
+    // ── Local state ──────────────────────────────────────────────────────
+    // Delete arming is deliberately local: it is a confirmation affordance, not
+    // application state, and keeping it here means the host cannot strand a row
+    // in "confirm" by forgetting to reset a property.
+    property <int> arm-delete-id: -1;
+    // Hold back the empty-key complaint until the user has actually typed, so a
+    // freshly opened form is not red before it has been used.
+    property <bool> new-key-touched: false;
+    property <bool> edit-key-touched: false;
+
+    property <bool> add-key-empty: root.new-key == "";
+    property <bool> add-blocked: root.add-key-empty || root.add-error != "";
+    property <string> add-message: (root.new-key-touched && root.add-key-empty)
+        ? "Key cannot be empty." : root.add-error;
+
+    property <bool> edit-key-empty: root.edit-key == "";
+    property <bool> edit-blocked: root.edit-key-empty || root.edit-error != "";
+    property <string> edit-message: (root.edit-key-touched && root.edit-key-empty)
+        ? "Key cannot be empty." : root.edit-error;
+
+    property <bool> filtering: root.filter-text != "";
+
+    // Row geometry. The edit face is taller than the display face and the row
+    // height switches between them; see the header note on visibility gating.
+    property <length> row-display-height: 46px;
+    property <length> row-edit-height: 110px;
+
+    // Clears every transient piece of dialog state, so a later reopen never
+    // inherits a stale complaint or a half-armed delete.
+    function clear-transient() {
+        root.arm-delete-id = -1;
+        root.new-key-touched = false;
+        root.edit-key-touched = false;
+    }
+
+    function close-dialog() {
+        root.clear-transient();
+        root.on-close();
+    }
+
+    function clear-filter() {
+        root.filter-text = "";
+        root.on-clear-filter();
+        root.on-filter-changed("");
+    }
+
+    function begin-add() {
+        root.arm-delete-id = -1;
+        root.new-key-touched = false;
+        root.adding = true;
+        root.on-begin-add();
+    }
+
+    width: 100%;
+    height: 100%;
+    background: Theme.modal-backdrop;
+
+    // Backdrop: click dismisses, scroll is absorbed so it never reaches the 3D
+    // viewport behind the modal.
+    TouchArea {
+        clicked => {
+            root.close-dialog();
+        }
+        scroll-event(event) => {
+            return accept;
+        }
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 660px;
+        height: min(parent.height - 80px, 560px);
+        background: Theme.background-secondary;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: Theme.shadow-color;
+        clip: true;
+
+        // Absorb clicks and scroll anywhere over the card so neither falls
+        // through to the dismissing backdrop underneath.
+        TouchArea {
+            scroll-event(event) => {
+                return accept;
+            }
+        }
+
+        // One FocusScope for the whole card. Escape unwinds the innermost open
+        // thing first (armed delete, then row editor, then add form, then the
+        // dialog), which is what a user expects from a stacked modal. Keys are
+        // swallowed either way so nothing leaks to the Explorer or the viewport.
+        keys := FocusScope {
+            width: 100%;
+            height: 100%;
+
+            init => {
+                self.focus();
+            }
+
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    if (root.arm-delete-id != -1) {
+                        root.arm-delete-id = -1;
+                    } else if (root.editing-id != -1) {
+                        root.editing-id = -1;
+                        root.edit-key-touched = false;
+                        root.on-cancel-edit();
+                    } else if (root.adding) {
+                        root.adding = false;
+                        root.new-key-touched = false;
+                        root.on-cancel-add();
+                    } else {
+                        root.close-dialog();
+                    }
+                    return accept;
+                }
+                return accept;
+            }
+
+            key-released(event) => {
+                return accept;
+            }
+
+            VerticalLayout {
+                padding: 0px;
+                spacing: 0px;
+
+                // ── Title bar ────────────────────────────────────────────
+                Rectangle {
+                    height: 46px;
+                    background: Theme.dialog-titlebar-background;
+
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: "Global Variables";
+                        color: Theme.text-primary;
+                        font-size: Theme.font-md;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        x: parent.width - 36px;
+                        y: (parent.height - self.height) / 2;
+                        width: 28px;
+                        height: 28px;
+                        border-radius: Theme.radius-sm;
+                        background: close-ta.pressed ? Theme.error-surface
+                            : close-ta.has-hover ? Theme.error-surface-hover : transparent;
+
+                        close-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.close-dialog();
+                            }
+                        }
+
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "×";
+                            color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
+                            font-size: 17px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Rectangle {
+                        y: parent.height - 1px;
+                        width: 100%;
+                        height: 1px;
+                        background: Theme.border-color;
+                    }
+                }
+
+                // ── Filter bar ───────────────────────────────────────────
+                Rectangle {
+                    height: 52px;
+                    background: Theme.background-tertiary;
+
+                    Rectangle {
+                        y: parent.height - 1px;
+                        width: 100%;
+                        height: 1px;
+                        background: Theme.border-color;
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        padding-top: 11px;
+                        padding-bottom: 11px;
+                        spacing: 8px;
+
+                        GVField {
+                            horizontal-stretch: 1;
+                            placeholder: "Filter by key or value";
+                            text <=> root.filter-text;
+                            edited(t) => {
+                                root.on-filter-changed(t);
+                            }
+                        }
+
+                        // Clear-filter affordance. Kept at a fixed width in the
+                        // layout so the field does not resize as the user types.
+                        Rectangle {
+                            width: 30px;
+                            height: 30px;
+                            border-radius: Theme.radius-md;
+                            border-width: root.filtering ? 1px : 0px;
+                            border-color: Theme.border-color;
+                            background: !root.filtering ? transparent
+                                : clear-ta.pressed ? Theme.button-pressed
+                                : clear-ta.has-hover ? Theme.button-hover : Theme.button-background;
+
+                            clear-ta := TouchArea {
+                                enabled: root.filtering;
+                                mouse-cursor: root.filtering ? pointer : default;
+                                clicked => {
+                                    root.clear-filter();
+                                }
+                            }
+
+                            Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: "×";
+                                visible: root.filtering;
+                                color: clear-ta.has-hover ? Theme.text-primary : Theme.text-secondary;
+                                font-size: 15px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // ── Content ──────────────────────────────────────────────
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        padding-top: 14px;
+                        padding-bottom: 16px;
+                        spacing: 4px;
+                        alignment: start;
+
+                        // ── Add form ─────────────────────────────────────
+                        if root.adding: VerticalLayout {
+                            spacing: 8px;
+
+                            GVSection {
+                                title: "NEW VARIABLE";
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+
+                                Text {
+                                    width: 56px;
+                                    text: "Key";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-sm;
+                                    vertical-alignment: center;
+                                }
+
+                                GVField {
+                                    horizontal-stretch: 1;
+                                    placeholder: "e.g. RoundDuration";
+                                    invalid: root.new-key-touched && root.add-blocked;
+                                    text <=> root.new-key;
+                                    edited(t) => {
+                                        root.new-key-touched = true;
+                                        root.on-new-key-edited(t);
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+
+                                Text {
+                                    width: 56px;
+                                    text: "Type";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-sm;
+                                    vertical-alignment: center;
+                                }
+
+                                GVSegmented {
+                                    horizontal-stretch: 1;
+                                    options: root.type-options;
+                                    current: root.new-type;
+                                    changed(t) => {
+                                        root.new-type = t;
+                                        // Keep the value coherent with the new
+                                        // type instead of carrying "hello" over
+                                        // into a boolean.
+                                        if (t == "bool" && root.new-value != "true" && root.new-value != "false") {
+                                            root.new-value = "false";
+                                        }
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+
+                                Text {
+                                    width: 56px;
+                                    text: "Value";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-sm;
+                                    vertical-alignment: center;
+                                }
+
+                                // Booleans get a two-state control; every other
+                                // type gets a text field, numeric-gated when the
+                                // type is "number". Safe to swap with `if`: the
+                                // control that triggers the swap lives in the
+                                // Type row above, not in here.
+                                if root.new-type == "bool": GVSegmented {
+                                    horizontal-stretch: 1;
+                                    options: ["false", "true"];
+                                    current: root.new-value;
+                                    changed(v) => {
+                                        root.new-value = v;
+                                    }
+                                }
+
+                                if root.new-type != "bool": GVField {
+                                    horizontal-stretch: 1;
+                                    placeholder: root.new-type == "number" ? "0" : "Value";
+                                    numeric: root.new-type == "number";
+                                    text <=> root.new-value;
+                                    accepted(v) => {
+                                        if (!root.add-blocked) {
+                                            root.on-add-variable(root.new-key, v, root.new-type);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Validation line. Always present so the form does
+                            // not jump by a row when a message appears.
+                            Text {
+                                height: 16px;
+                                text: root.add-message;
+                                color: Theme.text-error;
+                                font-size: Theme.font-xs;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: end;
+
+                                GVButton {
+                                    width: 84px;
+                                    label: "Cancel";
+                                    clicked => {
+                                        root.adding = false;
+                                        root.new-key-touched = false;
+                                        root.on-cancel-add();
+                                    }
+                                }
+
+                                GVButton {
+                                    width: 84px;
+                                    label: "Add";
+                                    kind: "primary";
+                                    enabled: !root.add-blocked;
+                                    clicked => {
+                                        root.on-add-variable(root.new-key, root.new-value, root.new-type);
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 8px;
+                            }
+                        }
+
+                        GVSection {
+                            title: root.filtering ? "MATCHING VARIABLES" : "DEFINED VARIABLES";
+                        }
+
+                        // ── Empty states ─────────────────────────────────
+                        // Two distinct cases: nothing defined at all, versus a
+                        // filter that excluded everything. Different wording,
+                        // different recovery action.
+                        if root.variables.length == 0 && !root.filtering: Rectangle {
+                            height: 136px;
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 8px;
+
+                                Text {
+                                    text: "No global variables defined";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-md;
+                                    horizontal-alignment: center;
+                                }
+
+                                Text {
+                                    text: "Global variables are readable from every script and binding in this universe.";
+                                    color: Theme.text-disabled;
+                                    font-size: Theme.font-xs;
+                                    horizontal-alignment: center;
+                                    wrap: word-wrap;
+                                }
+
+                                HorizontalLayout {
+                                    alignment: center;
+
+                                    GVButton {
+                                        width: 130px;
+                                        label: "+ Add Variable";
+                                        kind: "primary";
+                                        clicked => {
+                                            root.begin-add();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.variables.length == 0 && root.filtering: Rectangle {
+                            height: 112px;
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 8px;
+
+                                Text {
+                                    text: "No variables match \"\{root.filter-text}\"";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-md;
+                                    horizontal-alignment: center;
+                                    overflow: elide;
+                                }
+
+                                HorizontalLayout {
+                                    alignment: center;
+
+                                    GVButton {
+                                        width: 110px;
+                                        label: "Clear filter";
+                                        clicked => {
+                                            root.clear-filter();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── Variable rows ────────────────────────────────
+                        for entry[idx] in root.variables: row := Rectangle {
+                            property <bool> editing: root.editing-id == entry.id;
+                            property <bool> armed: root.arm-delete-id == entry.id;
+
+                            height: row.editing ? root.row-edit-height : root.row-display-height;
+                            border-radius: Theme.radius-md;
+                            border-width: row.editing ? 1px : 0px;
+                            border-color: Theme.border-focus;
+                            background: row.editing ? Theme.background-tertiary
+                                : entry.id == root.selected-id ? Theme.selection-background
+                                : row-ta.has-hover ? Theme.explorer-item-hover
+                                : mod(idx, 2) == 1 ? Theme.background-tertiary.with-alpha(0.35)
+                                : transparent;
+
+                            // ── Display face ─────────────────────────────
+                            Rectangle {
+                                x: 0px;
+                                y: 0px;
+                                width: 100%;
+                                height: root.row-display-height;
+                                visible: !row.editing;
+
+                                row-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.selected-id = entry.id;
+                                        root.arm-delete-id = -1;
+                                        root.on-select-variable(entry.id);
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    padding-top: 8px;
+                                    padding-bottom: 8px;
+                                    spacing: 10px;
+
+                                    // Type pill
+                                    Rectangle {
+                                        width: 62px;
+                                        border-radius: Theme.radius-sm;
+                                        border-width: 1px;
+                                        border-color: entry.var-type == "number" ? Theme.accent-orange.with-alpha(0.45)
+                                            : entry.var-type == "bool" ? Theme.accent-purple.with-alpha(0.45)
+                                            : Theme.accent-cyan.with-alpha(0.45);
+                                        background: entry.var-type == "number" ? Theme.accent-orange.with-alpha(0.12)
+                                            : entry.var-type == "bool" ? Theme.accent-purple.with-alpha(0.12)
+                                            : Theme.accent-cyan.with-alpha(0.12);
+
+                                        Text {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            text: entry.var-type;
+                                            color: entry.var-type == "number" ? Theme.accent-orange
+                                                : entry.var-type == "bool" ? Theme.accent-purple
+                                                : Theme.accent-cyan;
+                                            font-size: Theme.font-xs;
+                                            font-weight: 600;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                    }
+
+                                    Text {
+                                        width: 150px;
+                                        text: entry.key;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.font-sm;
+                                        font-weight: 500;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: entry.value;
+                                        color: Theme.text-secondary;
+                                        font-size: Theme.font-sm;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+
+                                    // Action well. A plain Rectangle, NOT a
+                                    // layout slot, so the hidden group of the
+                                    // idle/armed pair costs no width.
+                                    Rectangle {
+                                        width: 190px;
+
+                                        // Idle actions
+                                        Rectangle {
+                                            x: parent.width - self.width;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 88px;
+                                            height: 26px;
+                                            visible: !row.armed;
+
+                                            HorizontalLayout {
+                                                spacing: 6px;
+
+                                                GVButton {
+                                                    width: 54px;
+                                                    height: 26px;
+                                                    label: "Edit";
+                                                    clicked => {
+                                                        // Seed the editor locally
+                                                        // as well as notifying the
+                                                        // host, so the dialog works
+                                                        // even before the host
+                                                        // populates the buffers.
+                                                        root.edit-key = entry.key;
+                                                        root.edit-value = entry.value;
+                                                        root.edit-type = entry.var-type;
+                                                        root.edit-key-touched = false;
+                                                        root.arm-delete-id = -1;
+                                                        root.editing-id = entry.id;
+                                                        root.on-begin-edit(entry.id);
+                                                    }
+                                                }
+
+                                                GVButton {
+                                                    width: 28px;
+                                                    height: 26px;
+                                                    label: "×";
+                                                    kind: "danger";
+                                                    clicked => {
+                                                        root.arm-delete-id = entry.id;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Armed-delete confirmation. Removing a
+                                        // global variable silently breaks every
+                                        // script that reads it, so it takes two
+                                        // clicks and says which way is which.
+                                        Rectangle {
+                                            x: 0px;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 100%;
+                                            height: 26px;
+                                            visible: row.armed;
+
+                                            HorizontalLayout {
+                                                spacing: 6px;
+                                                alignment: end;
+
+                                                Text {
+                                                    text: "Delete?";
+                                                    color: Theme.text-warning;
+                                                    font-size: Theme.font-sm;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                }
+
+                                                GVButton {
+                                                    width: 54px;
+                                                    height: 26px;
+                                                    label: "Cancel";
+                                                    clicked => {
+                                                        root.arm-delete-id = -1;
+                                                    }
+                                                }
+
+                                                GVButton {
+                                                    width: 62px;
+                                                    height: 26px;
+                                                    label: "Delete";
+                                                    kind: "danger";
+                                                    clicked => {
+                                                        root.arm-delete-id = -1;
+                                                        root.on-delete-variable(entry.id);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ── Edit face ────────────────────────────────
+                            Rectangle {
+                                x: 0px;
+                                y: 0px;
+                                width: 100%;
+                                height: root.row-edit-height;
+                                visible: row.editing;
+
+                                VerticalLayout {
+                                    padding: 10px;
+                                    spacing: 8px;
+
+                                    HorizontalLayout {
+                                        spacing: 8px;
+
+                                        GVField {
+                                            horizontal-stretch: 3;
+                                            placeholder: "Key";
+                                            invalid: root.edit-key-touched && root.edit-blocked;
+                                            text <=> root.edit-key;
+                                            edited(t) => {
+                                                root.edit-key-touched = true;
+                                                root.on-edit-key-edited(entry.id, t);
+                                            }
+                                        }
+
+                                        GVSegmented {
+                                            horizontal-stretch: 4;
+                                            options: root.type-options;
+                                            current: root.edit-type;
+                                            changed(t) => {
+                                                root.edit-type = t;
+                                                if (t == "bool" && root.edit-value != "true" && root.edit-value != "false") {
+                                                    root.edit-value = "false";
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 8px;
+
+                                        if root.edit-type == "bool": GVSegmented {
+                                            horizontal-stretch: 1;
+                                            options: ["false", "true"];
+                                            current: root.edit-value;
+                                            changed(v) => {
+                                                root.edit-value = v;
+                                            }
+                                        }
+
+                                        if root.edit-type != "bool": GVField {
+                                            horizontal-stretch: 1;
+                                            placeholder: root.edit-type == "number" ? "0" : "Value";
+                                            numeric: root.edit-type == "number";
+                                            text <=> root.edit-value;
+                                            accepted(v) => {
+                                                if (!root.edit-blocked) {
+                                                    root.on-commit-edit(entry.id, root.edit-key, v, root.edit-type);
+                                                }
+                                            }
+                                        }
+
+                                        GVButton {
+                                            width: 78px;
+                                            label: "Cancel";
+                                            clicked => {
+                                                root.editing-id = -1;
+                                                root.edit-key-touched = false;
+                                                root.on-cancel-edit();
+                                            }
+                                        }
+
+                                        GVButton {
+                                            width: 78px;
+                                            label: "Save";
+                                            kind: "primary";
+                                            enabled: !root.edit-blocked;
+                                            clicked => {
+                                                root.on-commit-edit(entry.id, root.edit-key, root.edit-value, root.edit-type);
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        height: 16px;
+                                        text: root.edit-message;
+                                        color: Theme.text-error;
+                                        font-size: Theme.font-xs;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Footer ───────────────────────────────────────────────
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border-color;
+                }
+
+                Rectangle {
+                    height: 56px;
+                    background: Theme.dialog-titlebar-background;
+
+                    HorizontalLayout {
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        padding-top: 13px;
+                        padding-bottom: 13px;
+                        spacing: 8px;
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.filtering
+                                ? "\{root.variables.length} shown"
+                                : (root.variables.length == 1
+                                    ? "1 variable"
+                                    : "\{root.variables.length} variables");
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        GVButton {
+                            width: 130px;
+                            label: "+ Add Variable";
+                            kind: "primary";
+                            enabled: !root.adding;
+                            clicked => {
+                                root.begin-add();
+                            }
+                        }
+
+                        GVButton {
+                            width: 88px;
+                            label: "Close";
+                            clicked => {
+                                root.close-dialog();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

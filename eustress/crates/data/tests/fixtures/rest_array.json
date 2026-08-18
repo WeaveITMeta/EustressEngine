@@ -1,0 +1,37 @@
+[
+  {
+    "station": "TUS-001",
+    "temperature_c": 38.4,
+    "humidity_pct": 11,
+    "wind_ms": 3.2,
+    "clear": true
+  },
+  {
+    "station": "TUS-002",
+    "temperature_c": 39.1,
+    "humidity_pct": 9,
+    "wind_ms": 4.8,
+    "clear": true
+  },
+  {
+    "station": "TUS-003",
+    "temperature_c": 36.9,
+    "humidity_pct": 14,
+    "wind_ms": null,
+    "clear": false
+  },
+  {
+    "station": "TUS-004",
+    "temperature_c": 41.0,
+    "humidity_pct": 7,
+    "wind_ms": 6.1,
+    "clear": true
+  },
+  {
+    "station": "TUS-005",
+    "temperature_c": 37.5,
+    "humidity_pct": 12,
+    "wind_ms": 2.0,
+    "clear": false
+  }
+]

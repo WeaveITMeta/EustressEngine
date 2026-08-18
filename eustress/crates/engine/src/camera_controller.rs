@@ -728,10 +728,12 @@ fn eustress_camera_controls(
             || s.show_publish_dialog
             || s.show_forge_connect_window
             || s.show_stress_test_window
-            || s.show_global_sources_window
-            || s.show_domains_window
-            || s.show_global_variables_window
-            || s.show_sync_domain_modal
+            // NOTE: the Data dialogs (global sources / domains / global
+            // variables / sync domain) are gated by Slint properties, not by
+            // these StudioState bools. Nothing ever cleared the bools, so
+            // including them here meant one click on a Data menu item killed
+            // camera input for the rest of the session. Visibility and input
+            // blocking must read the same source of truth.
             || s.show_exit_confirmation
             || s.show_find_dialog
     });

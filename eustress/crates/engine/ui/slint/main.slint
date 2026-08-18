@@ -1350,11 +1350,14 @@ export component StudioWindow inherits Window {
             on-show-network-panel => { root.show-network-panel = true; }
             on-show-stress-test => { root.show-stress-test-dialog = true; }
             
-            // Data
-            on-show-global-sources => { root.open-global-sources(); }
-            on-show-domains => { root.open-domains(); }
-            on-show-global-variables => { root.open-global-variables(); }
-            on-show-sync-domain => { root.open-sync-domain(); }
+            // Data — set the dialog property directly, exactly like every other
+            // menu section above. Routing these through Rust set a StudioState
+            // bool that nothing bridged back to these properties, so the dialog
+            // never appeared while the bool latched the camera off for good.
+            on-show-global-sources => { root.show-global-sources-window = true; }
+            on-show-domains => { root.show-domains-window = true; }
+            on-show-global-variables => { root.show-global-variables-window = true; }
+            on-show-sync-domain => { root.show-sync-domain-dialog = true; }
             on-add-data-source(source-type) => { root.add-data-source(source-type); }
             
             // Terrain

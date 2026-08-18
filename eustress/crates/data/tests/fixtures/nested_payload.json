@@ -1,0 +1,40 @@
+{
+  "status": "ok",
+  "meta": {
+    "request_id": "0f8c1d2e-6a41-4f2b-9c33-0f2f9a1c5b77",
+    "generated_at": "2026-08-14T17:05:00Z",
+    "page": { "number": 1, "size": 4, "total": 4 }
+  },
+  "data": {
+    "results": {
+      "count": 4,
+      "items": [
+        {
+          "channel": "vibration.x",
+          "value_mm_s": 0.42,
+          "sample_index": 1,
+          "alarm": false
+        },
+        {
+          "channel": "vibration.y",
+          "value_mm_s": 0.51,
+          "sample_index": 2,
+          "alarm": false
+        },
+        {
+          "channel": "vibration.z",
+          "value_mm_s": 2.98,
+          "sample_index": 3,
+          "alarm": true
+        },
+        {
+          "channel": "vibration.x",
+          "value_mm_s": null,
+          "sample_index": 4,
+          "alarm": false
+        }
+      ]
+    },
+    "warnings": []
+  }
+}

@@ -1,0 +1,5 @@
+time (s),pressure (psi),valve_open,operator
+0.0,14.70,true,alvarez
+0.5,15.02,true,alvarez
+1.0,,false,alvarez
+1.5,15.21,true,

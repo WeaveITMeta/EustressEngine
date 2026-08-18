@@ -2,93 +2,284 @@
 // Eustress Engine Studio - Sync Domain Modal
 // Sync domain data to object types
 // ============================================================================
+//
+// CONTRACT (read this before binding the dialog in main.slint)
+//
+//   Seeds (`in`)      the caller pushes the starting state in:
+//                     `available-domains`, `available-fields`,
+//                     `initial-spacing-x/y/z`, `preview-status`, `busy`.
+//   Live state (`out` / `in-out`)
+//                     the caller reads the user's answers back out when a
+//                     callback fires: `selected-domain`, `target-class`,
+//                     `layout`, `spacing-x/y/z`, `name-field`, `color-field`,
+//                     `show-billboard`, `billboard-field`.
+//   Callbacks         `on-preview()`, `on-sync()`, `on-close()`. All three
+//                     are argument-free on purpose: the handler reads the
+//                     live properties off `self`, exactly the way the
+//                     StressTestDialog block already does.
+//
+// Spacing deserves a note, because getting it wrong is what broke this dialog
+// before. `spacing-x/y/z` are DERIVED out-properties: each one parses the text
+// currently sitting in its LineEdit. That means
+//   * a typed value is live the instant it is typed — there is no commit step,
+//     so clicking Sync straight after typing cannot lose the keystrokes, and
+//   * nothing ever writes back into the LineEdit while the user types, so the
+//     caret never jumps mid-entry.
+// To seed a different starting spacing, set `initial-spacing-x/y/z`; those are
+// plain `in` properties and re-seeding them replaces whatever is in the field.
+// ============================================================================
 
-import { VerticalBox, HorizontalBox, LineEdit, ComboBox, CheckBox, ScrollView, Slider } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, LineEdit, ComboBox, CheckBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
+// Small caps section heading, matching the Data Sources dialog.
+component SDSection inherits Rectangle {
+    in property <string> title: "";
+    height: 20px;
+    background: transparent;
+
+    Text {
+        text: root.title;
+        color: Theme.text-secondary;
+        font-size: Theme.font-sm;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        vertical-alignment: center;
+    }
+}
+
+// One spacing axis. The LineEdit's text is the single source of truth — the
+// parent reads `value` (a live parse of that text) rather than pushing a
+// number back in, which is what keeps the caret still while typing.
+component SpacingField inherits Rectangle {
+    in property <string> axis: "X";
+    in property <color> axis-color: Theme.text-secondary;
+    in property <float> seed: 0.0;
+
+    // Live parse of whatever the user has typed. `to-float()` yields 0 for a
+    // blank field, which is why `blank` below is surfaced separately instead
+    // of letting an empty box masquerade as a deliberate zero.
+    out property <float> value: edit.text.to-float();
+    out property <bool> blank: edit.text == "";
+    out property <bool> editing: edit.has-focus;
+
+    // No `changed()` callback on purpose: `value` re-derives from the
+    // LineEdit on every keystroke, so there is nothing for a listener to do
+    // that reading `value` does not already do.
+
+    height: 26px;
+
+    HorizontalBox {
+        padding: 0px;
+        spacing: 4px;
+
+        Text {
+            width: 12px;
+            text: root.axis;
+            color: root.axis-color;
+            font-size: Theme.font-sm;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            width: 64px;
+            height: 24px;
+            background: Theme.input-background;
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: root.blank ? Theme.border-error
+                        : edit.has-focus ? Theme.input-focus
+                        : Theme.input-border;
+            animate border-color { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
+
+            edit := LineEdit {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 100%;
+                // `decimal` keeps letters out of a field the parent parses as
+                // a number, so the only invalid state left is "empty".
+                input-type: decimal;
+                text: root.seed;
+            }
+        }
+    }
+}
+
+// Footer button. `primary` paints the accent fill, `enabled: false` drops it to
+// the disabled surface and swallows the click.
+component SDButton inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+
+    callback clicked();
+
+    width: 84px;
+    height: 32px;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: root.primary ? transparent : Theme.border-color;
+    background: !root.enabled ? Theme.button-background
+              : root.primary
+                  ? (ta.pressed ? Theme.button-pressed
+                     : ta.has-hover ? Theme.button-primary-hover
+                     : Theme.button-primary)
+                  : (ta.pressed ? Theme.button-pressed
+                     : ta.has-hover ? Theme.button-hover
+                     : Theme.button-background);
+    opacity: root.enabled ? 1.0 : 0.45;
+    animate background { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        text: root.label;
+        color: root.enabled ? Theme.text-primary : Theme.text-disabled;
+        font-size: Theme.font-md;
+        font-weight: root.primary ? 600 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
 export component SyncDomainDialog inherits Rectangle {
-    // Properties
+    // ── Seeds ────────────────────────────────────────────────────────────
     in property <[string]> available-domains: [];
     in property <[string]> available-fields: [];
+    in property <float> initial-spacing-x: 2.0;
+    in property <float> initial-spacing-y: 0.0;
+    in property <float> initial-spacing-z: 2.0;
+    // Result of the last `on-preview()`, shown in the footer. Empty hides the
+    // line, so a caller that never previews sees no dead UI.
+    in property <string> preview-status: "";
+    // True while the caller is mid-sync or mid-preview; greys the action row
+    // so the same job cannot be fired twice.
+    in property <bool> busy: false;
+
+    // ── Live state the caller reads back ─────────────────────────────────
     in-out property <string> selected-domain: "";
     in-out property <string> target-class: "Part";
     in-out property <string> layout: "Grid";
-    in-out property <float> spacing-x: 2.0;
-    in-out property <float> spacing-y: 0.0;
-    in-out property <float> spacing-z: 2.0;
     in-out property <string> name-field: "";
     in-out property <string> color-field: "";
     in-out property <bool> show-billboard: false;
     in-out property <string> billboard-field: "";
-    
-    // Callbacks
-    callback on-sync();
-    callback on-close();
+
+    // Derived from the spacing fields — see the header note.
+    out property <float> spacing-x: sx.value;
+    out property <float> spacing-y: sy.value;
+    out property <float> spacing-z: sz.value;
+
+    // A domain is the one genuinely required answer; everything else has a
+    // usable default. Exposed so the caller can mirror the gate if it wants.
+    out property <bool> can-sync: root.selected-domain != ""
+        && !sx.blank && !sy.blank && !sz.blank
+        && !root.busy;
+    out property <bool> has-domains: root.available-domains.length > 0;
+
+    // True while the caret sits in one of the spacing fields. The caller must
+    // suppress the viewport Delete/Backspace shortcut while this is set, or
+    // erasing a digit deletes the selected part instead of a character.
+    out property <bool> text-input-focused: sx.editing || sy.editing || sz.editing;
+
+    // ── Callbacks ────────────────────────────────────────────────────────
+    // Fired when the user asks for a dry run. The handler should read the
+    // live properties off `self`, place a throwaway preview in the scene, and
+    // push a one-line summary back through `preview-status`.
     callback on-preview();
-    
+    // Fired on Sync. Same read-off-`self` contract as `on-preview`.
+    callback on-sync();
+    // Fired by the × button, the Cancel button, a click on the backdrop, and
+    // Escape. The handler is expected to hide the dialog and clear any
+    // preview it put in the scene.
+    callback on-close();
+
     width: 100%;
     height: 100%;
     background: Theme.modal-backdrop;
-    
-    TouchArea {
-        clicked => { root.on-close(); }
-        scroll-event(event) => {
+
+    // Swallows keys so they cannot reach the Explorer or the viewport behind
+    // the modal, and turns Escape into a close. Child inputs take focus when
+    // clicked and keep receiving keys normally.
+    keys := FocusScope {
+        width: 0px;
+        height: 0px;
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if event.text == Key.Escape { root.on-close(); return accept; }
             return accept;
         }
+        key-released(event) => { return accept; }
+    }
+
+    TouchArea {
+        clicked => { root.on-close(); }
+        scroll-event(event) => { return accept; }
     }
 
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 550px;
-        height: 550px;
+        height: min(parent.height - 80px, 560px);
         background: Theme.background-secondary;
-        border-radius: 8px;
+        border-radius: Theme.radius-md;
         border-width: 1px;
         border-color: Theme.border-color;
         drop-shadow-blur: 28px;
         drop-shadow-color: Theme.shadow-color;
 
+        // Absorbs clicks on the card so they never reach the backdrop's
+        // close-on-click TouchArea.
         TouchArea {
-            scroll-event(event) => {
-                return accept;
-            }
+            scroll-event(event) => { return accept; }
         }
-        
+
         VerticalBox {
             padding: 0px;
             spacing: 0px;
-            
-            // Header
+
+            // ── Header ──
             Rectangle {
                 height: 48px;
                 background: Theme.header-background;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                
+                border-top-left-radius: Theme.radius-md;
+                border-top-right-radius: Theme.radius-md;
+
                 HorizontalBox {
                     padding: 16px;
-                    
+
                     Text {
                         text: "Sync Domain to Object Type";
                         color: Theme.text-primary;
-                        font-size: 18px;
+                        font-size: Theme.font-xl;
                         font-weight: 600;
                         vertical-alignment: center;
                     }
-                    
+
                     Rectangle { horizontal-stretch: 1; }
-                    
+
                     Rectangle {
                         width: 28px;
                         height: 28px;
-                        background: close-touch.has-hover ? Theme.button-hover : transparent;
-                        border-radius: 4px;
-                        
+                        background: close-touch.pressed ? Theme.error-surface
+                                  : close-touch.has-hover ? Theme.error-surface-hover
+                                  : transparent;
+                        border-radius: Theme.radius-sm;
+                        animate background { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
+
                         close-touch := TouchArea {
+                            mouse-cursor: pointer;
                             clicked => { root.on-close(); }
                         }
-                        
+
                         Image {
                             width: 12px;
                             height: 12px;
@@ -96,225 +287,212 @@ export component SyncDomainDialog inherits Rectangle {
                             image-fit: contain;
                             horizontal-alignment: center;
                             vertical-alignment: center;
+                            colorize: close-touch.has-hover ? Theme.text-error : Theme.text-secondary;
                         }
                     }
                 }
             }
-            
-            // Content
+
+            // ── Content ──
             ScrollView {
                 vertical-stretch: 1;
-                
+
                 VerticalBox {
                     padding: 16px;
-                    spacing: 16px;
-                    
+                    spacing: 14px;
+
                     // Domain selection
-                    Text {
-                        text: "Source";
-                        color: Theme.text-secondary;
-                        font-size: 11px;
-                        font-weight: 600;
+                    SDSection { title: "SOURCE"; }
+
+                    // Empty state: with no domains loaded there is nothing to
+                    // choose, so show why rather than an empty dropdown.
+                    if !root.has-domains: Rectangle {
+                        height: 56px;
+                        background: Theme.background-tertiary;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+
+                        VerticalBox {
+                            padding: 8px;
+                            spacing: 2px;
+                            alignment: center;
+
+                            Text {
+                                text: "No domains available";
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-md;
+                                horizontal-alignment: center;
+                            }
+
+                            Text {
+                                text: "Import a dataset or connect a data source first";
+                                color: Theme.text-disabled;
+                                font-size: Theme.font-xs;
+                                horizontal-alignment: center;
+                            }
+                        }
                     }
-                    
-                    HorizontalBox {
+
+                    if root.has-domains: HorizontalBox {
+                        padding: 0px;
                         spacing: 8px;
-                        
+
                         Text {
                             width: 100px;
                             text: "Domain";
                             color: Theme.text-primary;
+                            font-size: Theme.font-md;
                             vertical-alignment: center;
                         }
-                        
+
                         ComboBox {
                             horizontal-stretch: 1;
                             model: root.available-domains;
                             current-value <=> root.selected-domain;
                         }
                     }
-                    
+
                     // Target configuration
-                    Text {
-                        text: "Target";
-                        color: Theme.text-secondary;
-                        font-size: 11px;
-                        font-weight: 600;
-                    }
-                    
+                    SDSection { title: "TARGET"; }
+
                     HorizontalBox {
+                        padding: 0px;
                         spacing: 8px;
-                        
+
                         Text {
                             width: 100px;
                             text: "Class";
                             color: Theme.text-primary;
+                            font-size: Theme.font-md;
                             vertical-alignment: center;
                         }
-                        
+
                         ComboBox {
                             horizontal-stretch: 1;
                             model: ["Part", "SpherePart", "CylinderPart", "Model"];
                             current-value <=> root.target-class;
                         }
                     }
-                    
+
                     HorizontalBox {
+                        padding: 0px;
                         spacing: 8px;
-                        
+
                         Text {
                             width: 100px;
                             text: "Layout";
                             color: Theme.text-primary;
+                            font-size: Theme.font-md;
                             vertical-alignment: center;
                         }
-                        
+
                         ComboBox {
                             horizontal-stretch: 1;
                             model: ["Grid", "Line", "Circle", "Random"];
                             current-value <=> root.layout;
                         }
                     }
-                    
+
                     // Spacing
-                    Text {
-                        text: "Spacing";
-                        color: Theme.text-secondary;
-                        font-size: 11px;
-                        font-weight: 600;
-                    }
-                    
+                    SDSection { title: "SPACING"; }
+
                     HorizontalBox {
+                        padding: 0px;
                         spacing: 16px;
-                        
-                        HorizontalBox {
-                            spacing: 4px;
-                            
-                            Text {
-                                text: "X";
-                                color: Theme.text-secondary;
-                                vertical-alignment: center;
-                            }
-                            
-                            Rectangle {
-                                width: 60px;
-                                height: 28px;
-                                background: Theme.input-background;
-                                border-radius: 4px;
-                                border-width: 1px;
-                                border-color: Theme.input-border;
-                                
-                                LineEdit {
-                                    text: root.spacing-x;
-                                }
-                            }
+                        alignment: start;
+
+                        sx := SpacingField {
+                            axis: "X";
+                            axis-color: Theme.gizmo-x;
+                            seed: root.initial-spacing-x;
                         }
-                        
-                        HorizontalBox {
-                            spacing: 4px;
-                            
-                            Text {
-                                text: "Y";
-                                color: Theme.text-secondary;
-                                vertical-alignment: center;
-                            }
-                            
-                            Rectangle {
-                                width: 60px;
-                                height: 28px;
-                                background: Theme.input-background;
-                                border-radius: 4px;
-                                border-width: 1px;
-                                border-color: Theme.input-border;
-                                
-                                LineEdit {
-                                    text: root.spacing-y;
-                                }
-                            }
+
+                        sy := SpacingField {
+                            axis: "Y";
+                            axis-color: Theme.gizmo-y;
+                            seed: root.initial-spacing-y;
                         }
-                        
-                        HorizontalBox {
-                            spacing: 4px;
-                            
-                            Text {
-                                text: "Z";
-                                color: Theme.text-secondary;
-                                vertical-alignment: center;
-                            }
-                            
-                            Rectangle {
-                                width: 60px;
-                                height: 28px;
-                                background: Theme.input-background;
-                                border-radius: 4px;
-                                border-width: 1px;
-                                border-color: Theme.input-border;
-                                
-                                LineEdit {
-                                    text: root.spacing-z;
-                                }
-                            }
+
+                        sz := SpacingField {
+                            axis: "Z";
+                            axis-color: Theme.gizmo-z;
+                            seed: root.initial-spacing-z;
                         }
                     }
-                    
+
+                    if sx.blank || sy.blank || sz.blank: Text {
+                        text: "Spacing needs a number on every axis.";
+                        color: Theme.text-error;
+                        font-size: Theme.font-xs;
+                    }
+
                     // Field mappings
-                    Text {
-                        text: "Field Mappings";
-                        color: Theme.text-secondary;
-                        font-size: 11px;
-                        font-weight: 600;
+                    SDSection { title: "FIELD MAPPINGS"; }
+
+                    if root.available-fields.length == 0: Text {
+                        text: "The selected domain exposes no fields to map.";
+                        color: Theme.text-disabled;
+                        font-size: Theme.font-xs;
                     }
-                    
-                    HorizontalBox {
+
+                    if root.available-fields.length > 0: HorizontalBox {
+                        padding: 0px;
                         spacing: 8px;
-                        
+
                         Text {
                             width: 100px;
                             text: "Name Field";
                             color: Theme.text-primary;
+                            font-size: Theme.font-md;
                             vertical-alignment: center;
                         }
-                        
+
                         ComboBox {
                             horizontal-stretch: 1;
                             model: root.available-fields;
                             current-value <=> root.name-field;
                         }
                     }
-                    
-                    HorizontalBox {
+
+                    if root.available-fields.length > 0: HorizontalBox {
+                        padding: 0px;
                         spacing: 8px;
-                        
+
                         Text {
                             width: 100px;
                             text: "Color Field";
                             color: Theme.text-primary;
+                            font-size: Theme.font-md;
                             vertical-alignment: center;
                         }
-                        
+
                         ComboBox {
                             horizontal-stretch: 1;
                             model: root.available-fields;
                             current-value <=> root.color-field;
                         }
                     }
-                    
+
                     // Billboard
                     CheckBox {
                         text: "Show billboard labels";
                         checked <=> root.show-billboard;
+                        enabled: root.available-fields.length > 0;
                     }
-                    
-                    if root.show-billboard: HorizontalBox {
+
+                    if root.show-billboard && root.available-fields.length > 0: HorizontalBox {
+                        padding: 0px;
                         spacing: 8px;
-                        
+
                         Text {
                             width: 100px;
                             text: "Label Field";
                             color: Theme.text-primary;
+                            font-size: Theme.font-md;
                             vertical-alignment: center;
                         }
-                        
+
                         ComboBox {
                             horizontal-stretch: 1;
                             model: root.available-fields;
@@ -323,73 +501,50 @@ export component SyncDomainDialog inherits Rectangle {
                     }
                 }
             }
-            
-            // Footer
+
+            // ── Footer ──
+            Rectangle {
+                height: 1px;
+                background: Theme.border-color;
+            }
+
             Rectangle {
                 height: 56px;
                 background: Theme.header-background;
-                border-bottom-left-radius: 8px;
-                border-bottom-right-radius: 8px;
-                
+                border-bottom-left-radius: Theme.radius-md;
+                border-bottom-right-radius: Theme.radius-md;
+
                 HorizontalBox {
                     padding: 12px;
                     spacing: 8px;
-                    
-                    Rectangle {
-                        width: 80px;
-                        height: 32px;
-                        background: Theme.button-background;
-                        border-radius: 4px;
-                        
-                        TouchArea {
-                            clicked => { root.on-preview(); }
-                        }
-                        
-                        Text {
-                            text: "Preview";
-                            color: Theme.text-primary;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+
+                    SDButton {
+                        label: "Preview";
+                        enabled: root.can-sync;
+                        clicked => { root.on-preview(); }
                     }
-                    
-                    Rectangle { horizontal-stretch: 1; }
-                    
-                    Rectangle {
-                        width: 80px;
-                        height: 32px;
-                        background: Theme.button-background;
-                        border-radius: 4px;
-                        
-                        TouchArea {
-                            clicked => { root.on-close(); }
-                        }
-                        
-                        Text {
-                            text: "Cancel";
-                            color: Theme.text-primary;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+
+                    // Where the answer from `on-preview()` lands. Without it
+                    // the Preview button would have nowhere to report to.
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.preview-status;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        overflow: elide;
+                        vertical-alignment: center;
                     }
-                    
-                    Rectangle {
-                        width: 80px;
-                        height: 32px;
-                        background: Theme.button-primary;
-                        border-radius: 4px;
-                        
-                        TouchArea {
-                            clicked => { root.on-sync(); }
-                        }
-                        
-                        Text {
-                            text: "Sync";
-                            color: white;
-                            font-weight: 500;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+
+                    SDButton {
+                        label: "Cancel";
+                        clicked => { root.on-close(); }
+                    }
+
+                    SDButton {
+                        label: root.busy ? "Syncing…" : "Sync";
+                        primary: true;
+                        enabled: root.can-sync;
+                        clicked => { root.on-sync(); }
                     }
                 }
             }

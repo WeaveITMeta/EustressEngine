@@ -1,0 +1,24 @@
+{
+  "data": {
+    "readings": [
+      {
+        "sensor": "bay-a-inlet",
+        "pressurePsi": 14.7,
+        "valveOpen": true,
+        "sampleIndex": 1
+      },
+      {
+        "sensor": "bay-a-inlet",
+        "pressurePsi": 15.02,
+        "valveOpen": true,
+        "sampleIndex": 2
+      },
+      {
+        "sensor": "bay-b-outlet",
+        "pressurePsi": null,
+        "valveOpen": false,
+        "sampleIndex": 3
+      }
+    ]
+  }
+}

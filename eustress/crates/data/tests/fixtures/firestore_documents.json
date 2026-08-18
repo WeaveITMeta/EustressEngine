@@ -1,0 +1,56 @@
+{
+  "documents": [
+    {
+      "name": "projects/eustress-demo/databases/(default)/documents/readings/r-0001",
+      "fields": {
+        "sensor": { "stringValue": "bay-a-inlet" },
+        "pressure_psi": { "doubleValue": 14.7 },
+        "sample_index": { "integerValue": "1" },
+        "valve_open": { "booleanValue": true },
+        "recorded_at": { "timestampValue": "2026-08-14T17:04:11.882Z" },
+        "operator": { "stringValue": "alvarez" }
+      },
+      "createTime": "2026-08-14T17:04:12.001Z",
+      "updateTime": "2026-08-14T17:04:12.001Z"
+    },
+    {
+      "name": "projects/eustress-demo/databases/(default)/documents/readings/r-0002",
+      "fields": {
+        "sensor": { "stringValue": "bay-a-inlet" },
+        "pressure_psi": { "doubleValue": 15.02 },
+        "sample_index": { "integerValue": "2" },
+        "valve_open": { "booleanValue": true },
+        "recorded_at": { "timestampValue": "2026-08-14T17:04:12.382Z" },
+        "operator": { "stringValue": "alvarez" }
+      },
+      "createTime": "2026-08-14T17:04:12.501Z",
+      "updateTime": "2026-08-14T17:04:12.501Z"
+    },
+    {
+      "name": "projects/eustress-demo/databases/(default)/documents/readings/r-0003",
+      "fields": {
+        "sensor": { "stringValue": "bay-a-inlet" },
+        "pressure_psi": { "nullValue": null },
+        "sample_index": { "integerValue": "3" },
+        "valve_open": { "booleanValue": false },
+        "recorded_at": { "timestampValue": "2026-08-14T17:04:12.884Z" },
+        "operator": { "stringValue": "alvarez" }
+      },
+      "createTime": "2026-08-14T17:04:13.002Z",
+      "updateTime": "2026-08-14T17:04:13.002Z"
+    },
+    {
+      "name": "projects/eustress-demo/databases/(default)/documents/readings/r-0004",
+      "fields": {
+        "sensor": { "stringValue": "bay-b-outlet" },
+        "pressure_psi": { "doubleValue": 15.21 },
+        "sample_index": { "integerValue": "4" },
+        "valve_open": { "booleanValue": true },
+        "recorded_at": { "timestampValue": "2026-08-14T17:04:13.377Z" }
+      },
+      "createTime": "2026-08-14T17:04:13.500Z",
+      "updateTime": "2026-08-14T17:04:13.500Z"
+    }
+  ],
+  "nextPageToken": "Ch4KEHJlYWRpbmdzL3ItMDAwNBIKCggIARABGAEgAA"
+}

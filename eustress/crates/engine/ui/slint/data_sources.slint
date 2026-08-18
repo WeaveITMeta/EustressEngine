@@ -2,6 +2,30 @@
 // Eustress Engine - Data Sources Dialog
 // Manage global data sources (REST, GraphQL, PostgreSQL, etc.)
 // ============================================================================
+//
+// CONTRACT (read this before binding the dialog in main.slint)
+//
+//   `sources`     the caller owns the list. Every row carries both its
+//                 standing connection `status` AND the result of the last
+//                 explicit Test in `test-state` / `test-detail` /
+//                 `tested-at`. Those three are what gives the Test button
+//                 somewhere to put its answer: the handler for
+//                 `on-test-source(id)` sets the row to "testing", runs the
+//                 probe off the UI thread, then writes back "ok" or "failed"
+//                 with a one-line detail.
+//   `on-add-source()`
+//                 reads `new-source-name` / `new-source-type` /
+//                 `new-source-url` off `self`. The Add button is disabled
+//                 until name and URL are both non-empty, so the handler can
+//                 assume they are populated. Clearing the fields and
+//                 lowering `adding-source` is the caller's job — the dialog
+//                 does not guess whether the add succeeded.
+//   `on-close()`  fired by the ×, the Close button, a backdrop click, and
+//                 Escape.
+//
+// Secrets never live here. A source's credential is named by an env var on
+// the Rust side; this dialog only ever shows an endpoint.
+// ============================================================================
 
 import { VerticalBox, HorizontalBox, LineEdit, ScrollView, ComboBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -13,6 +37,18 @@ export struct DataSourceEntry {
     source-type: string, // "REST", "GraphQL", "PostgreSQL", "CSV", etc.
     url: string,
     status: string, // "connected", "disconnected", "error"
+
+    // ── Last explicit Test ──
+    // "idle"    never tested this session — the row shows nothing
+    // "testing" a probe is in flight — the Test button is greyed and spins
+    // "ok"      the probe reached the endpoint
+    // "failed"  the probe did not
+    test-state: string,
+    // One line of human-readable evidence: "200 OK · 41 ms", "auth failed",
+    // "connection refused". Shown under the endpoint, elided if long.
+    test-detail: string,
+    // When the probe ran, e.g. "12:04". Empty hides the timestamp.
+    tested-at: string,
 }
 
 component DSSection inherits Rectangle {
@@ -31,15 +67,134 @@ component DSSection inherits Rectangle {
         x: 10px;
         text: root.title;
         color: Theme.text-primary;
-        font-size: 11px;
+        font-size: Theme.font-sm;
         font-weight: 700;
         letter-spacing: 0.5px;
         vertical-alignment: center;
     }
 }
 
+// Neutral row/footer button with hover, pressed and disabled states.
+component DSButton inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> enabled: true;
+    in property <length> font-size: Theme.font-xs;
+
+    callback clicked();
+
+    height: 24px;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    background: !root.enabled ? Theme.button-background
+              : ta.pressed ? Theme.button-pressed
+              : ta.has-hover ? Theme.button-hover
+              : Theme.button-background;
+    opacity: root.enabled ? 1.0 : 0.45;
+    animate background { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        text: root.label;
+        color: root.enabled ? Theme.text-primary : Theme.text-disabled;
+        font-size: root.font-size;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Affirmative (green) button — Add / + Add Source.
+component DSAddButton inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> enabled: true;
+
+    callback clicked();
+
+    height: 24px;
+    border-radius: 4px;
+    border-width: 1px;
+    background: !root.enabled ? Theme.button-background
+              : ta.pressed ? Theme.success-surface
+              : ta.has-hover ? Theme.success-surface-hover
+              : Theme.success-surface;
+    border-color: !root.enabled ? Theme.border-color
+                : ta.has-hover ? Theme.accent-green
+                : Theme.success-surface-border;
+    opacity: root.enabled ? 1.0 : 0.45;
+    animate background { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        text: root.label;
+        color: !root.enabled ? Theme.text-disabled
+             : ta.has-hover ? Theme.success-surface-text-hover
+             : Theme.accent-green;
+        font-size: Theme.font-sm;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Labelled text field used by the new-source form. `invalid` paints the
+// error border once the user has been told the field is required.
+component DSField inherits Rectangle {
+    in property <string> label: "";
+    in-out property <string> value: "";
+    in property <bool> invalid: false;
+    out property <bool> editing: edit.has-focus;
+
+    // Fired the instant the caret enters or leaves, not on the first
+    // keystroke — the parent needs to know before a key is pressed, or the
+    // Delete shortcut fires once against the scene.
+    callback focus-changed(bool);
+    changed editing => { root.focus-changed(self.editing); }
+
+    height: 28px;
+
+    HorizontalLayout {
+        spacing: 8px;
+
+        Text {
+            width: 110px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            height: 22px;
+            background: Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: root.invalid ? Theme.border-error
+                        : edit.has-focus ? Theme.input-focus
+                        : Theme.input-border;
+            animate border-color { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
+
+            edit := LineEdit {
+                x: 0px; y: 0px;
+                width: 100%; height: 100%;
+                text <=> root.value;
+            }
+        }
+    }
+}
+
 export component DataSourcesDialog inherits Rectangle {
-    // Properties
+    // ── Properties ───────────────────────────────────────────────────────
     in property <[DataSourceEntry]> sources: [];
     in-out property <int> selected-source: -1;
     in-out property <string> new-source-name: "";
@@ -47,16 +202,69 @@ export component DataSourcesDialog inherits Rectangle {
     in-out property <string> new-source-url: "";
     in-out property <bool> adding-source: false;
 
-    // Callbacks
+    // Both required fields must carry something before Add is live. Exposed
+    // so a caller can mirror the gate rather than re-deriving it.
+    out property <bool> can-add: root.new-source-name != "" && root.new-source-url != "";
+
+    // Caret state of the new-source form. The caller must suppress the
+    // viewport Delete/Backspace shortcut while this is set, or erasing a
+    // character deletes the selected part instead. The `adding-source` guard
+    // matters: the fields are inside an `if`, so tearing the form down
+    // destroys them without a final focus-lost, and the raw flags would
+    // otherwise stay stuck true.
+    out property <bool> text-input-focused:
+        root.adding-source && (root.name-focused || root.url-focused);
+    private property <bool> name-focused: false;
+    private property <bool> url-focused: false;
+
+    // ── Callbacks ────────────────────────────────────────────────────────
     callback on-add-source();
     callback on-remove-source(int);
     callback on-edit-source(int);
+    // Probe one source. The handler is expected to flip that row's
+    // `test-state` to "testing" immediately, then to "ok"/"failed" with a
+    // `test-detail` line when the probe returns.
     callback on-test-source(int);
     callback on-close();
+
+    // Human label for a row's last test. Kept as a function so the row markup
+    // stays readable and the four states are stated in one place.
+    pure function test-label(entry: DataSourceEntry) -> string {
+        entry.test-state == "testing" ? "Testing…"
+        : entry.test-state == "ok"
+            ? "Reachable" + (entry.test-detail == "" ? "" : " · " + entry.test-detail)
+        : entry.test-state == "failed"
+            ? "Unreachable" + (entry.test-detail == "" ? "" : " · " + entry.test-detail)
+        : "";
+    }
+
+    pure function test-color(entry: DataSourceEntry) -> color {
+        entry.test-state == "ok" ? Theme.text-success
+        : entry.test-state == "failed" ? Theme.text-error
+        : Theme.text-secondary
+    }
 
     width: 100%;
     height: 100%;
     background: Theme.modal-backdrop;
+
+    // Swallows keys so they cannot reach the Explorer or the viewport behind
+    // the modal, and turns Escape into a close. Escape backs out of the
+    // add-source form first, so one keypress does not discard a half-typed
+    // source and shut the dialog in the same motion.
+    keys := FocusScope {
+        width: 0px; height: 0px;
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                if root.adding-source { root.adding-source = false; return accept; }
+                root.on-close();
+                return accept;
+            }
+            return accept;
+        }
+        key-released(event) => { return accept; }
+    }
 
     TouchArea {
         clicked => { root.on-close(); }
@@ -69,12 +277,14 @@ export component DataSourcesDialog inherits Rectangle {
         width: 580px;
         height: min(parent.height - 80px, 520px);
         background: Theme.background-secondary;
-        border-radius: 8px;
+        border-radius: Theme.radius-md;
         border-width: 1px;
         border-color: Theme.border-color;
         drop-shadow-blur: 28px;
         drop-shadow-color: Theme.shadow-color;
 
+        // Absorbs clicks on the card so they never reach the backdrop's
+        // close-on-click TouchArea.
         TouchArea {
             scroll-event(event) => { return accept; }
         }
@@ -87,14 +297,14 @@ export component DataSourcesDialog inherits Rectangle {
             Rectangle {
                 height: 46px;
                 background: Theme.dialog-titlebar-background;
-                border-radius: 8px;
+                border-radius: Theme.radius-md;
 
                 Text {
                     width: parent.width;
                     height: parent.height;
                     text: "Data Sources";
                     color: Theme.text-primary;
-                    font-size: 13px;
+                    font-size: Theme.font-md;
                     font-weight: 600;
                     horizontal-alignment: center;
                     vertical-alignment: center;
@@ -105,7 +315,10 @@ export component DataSourcesDialog inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     width: 28px; height: 28px;
                     border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: dark-red destructive-hover tint, no red-surface token
+                    background: close-ta.pressed ? Theme.error-surface
+                              : close-ta.has-hover ? Theme.error-surface-hover
+                              : transparent;
+                    animate background { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
 
                     close-ta := TouchArea {
                         mouse-cursor: pointer;
@@ -143,31 +356,11 @@ export component DataSourcesDialog inherits Rectangle {
 
                         DSSection { title: "NEW SOURCE"; }
 
-                        Rectangle {
-                            height: 28px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 110px;
-                                    text: "Name";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    height: 22px;
-                                    background: Theme.input-background;
-                                    border-radius: 3px;
-                                    border-width: 1px;
-                                    border-color: Theme.input-border;
-
-                                    LineEdit {
-                                        width: 100%; height: 100%;
-                                        text <=> root.new-source-name;
-                                    }
-                                }
-                            }
+                        DSField {
+                            label: "Name";
+                            value <=> root.new-source-name;
+                            invalid: root.new-source-name == "";
+                            focus-changed(f) => { root.name-focused = f; }
                         }
 
                         Rectangle {
@@ -178,7 +371,7 @@ export component DataSourcesDialog inherits Rectangle {
                                     width: 110px;
                                     text: "Type";
                                     color: Theme.text-secondary;
-                                    font-size: 11px;
+                                    font-size: Theme.font-sm;
                                     vertical-alignment: center;
                                 }
                                 ComboBox {
@@ -189,31 +382,20 @@ export component DataSourcesDialog inherits Rectangle {
                             }
                         }
 
-                        Rectangle {
-                            height: 28px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    width: 110px;
-                                    text: "URL";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                }
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    height: 22px;
-                                    background: Theme.input-background;
-                                    border-radius: 3px;
-                                    border-width: 1px;
-                                    border-color: Theme.input-border;
+                        DSField {
+                            // CSV points at a file, everything else at a
+                            // service, so the label follows the type rather
+                            // than calling a path a URL.
+                            label: root.new-source-type == "CSV" ? "File path" : "Endpoint";
+                            value <=> root.new-source-url;
+                            invalid: root.new-source-url == "";
+                            focus-changed(f) => { root.url-focused = f; }
+                        }
 
-                                    LineEdit {
-                                        width: 100%; height: 100%;
-                                        text <=> root.new-source-url;
-                                    }
-                                }
-                            }
+                        if !root.can-add: Text {
+                            text: "Name and endpoint are both required.";
+                            color: Theme.text-disabled;
+                            font-size: Theme.font-xs;
                         }
 
                         Rectangle { height: 4px; }
@@ -222,47 +404,20 @@ export component DataSourcesDialog inherits Rectangle {
                             spacing: 8px;
                             alignment: end;
 
-                            Rectangle {
-                                width: 70px; height: 28px;
-                                border-radius: 4px;
-                                background: cancel-add-ta.has-hover ? Theme.button-hover : Theme.button-background;
-                                border-width: 1px;
-                                border-color: Theme.border-color;
-
-                                cancel-add-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.adding-source = false; }
-                                }
-
-                                Text {
-                                    text: "Cancel";
-                                    color: Theme.text-primary;
-                                    font-size: 11px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
+                            DSButton {
+                                width: 70px;
+                                height: 28px;
+                                label: "Cancel";
+                                font-size: Theme.font-sm;
+                                clicked => { root.adding-source = false; }
                             }
 
-                            Rectangle {
-                                width: 70px; height: 28px;
-                                border-radius: 4px;
-                                background: add-ta.has-hover ? #1a4a2a : #152a1e;  // theme-exempt: dark-green add-button fill, no green-surface token
-                                border-width: 1px;
-                                border-color: add-ta.has-hover ? Theme.accent-green : #2a5a32;  // theme-exempt: dark-green default border, no green-surface token
-
-                                add-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.on-add-source(); }
-                                }
-
-                                Text {
-                                    text: "Add";
-                                    color: add-ta.has-hover ? #a5d6a7 : Theme.accent-green;  // theme-exempt: light success-green hover text, no light-green token
-                                    font-size: 11px;
-                                    font-weight: 600;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
+                            DSAddButton {
+                                width: 70px;
+                                height: 28px;
+                                label: "Add";
+                                enabled: root.can-add;
+                                clicked => { root.on-add-source(); }
                             }
                         }
 
@@ -277,26 +432,10 @@ export component DataSourcesDialog inherits Rectangle {
                         HorizontalLayout {
                             alignment: start;
 
-                            Rectangle {
-                                width: 100px; height: 24px;
-                                border-radius: 4px;
-                                background: add-src-ta.has-hover ? #1a4a2a : #152a1e;  // theme-exempt: dark-green add-button fill, no green-surface token
-                                border-width: 1px;
-                                border-color: add-src-ta.has-hover ? Theme.accent-green : #2a5a32;  // theme-exempt: dark-green default border, no green-surface token
-
-                                add-src-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.adding-source = true; }
-                                }
-
-                                Text {
-                                    text: "+ Add Source";
-                                    color: add-src-ta.has-hover ? #a5d6a7 : Theme.accent-green;  // theme-exempt: light success-green hover text, no light-green token
-                                    font-size: 11px;
-                                    font-weight: 600;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
+                            DSAddButton {
+                                width: 100px;
+                                label: "+ Add Source";
+                                clicked => { root.adding-source = true; }
                             }
                         }
                     }
@@ -314,14 +453,14 @@ export component DataSourcesDialog inherits Rectangle {
                             Text {
                                 text: "No data sources configured";
                                 color: Theme.text-secondary;
-                                font-size: 12px;
+                                font-size: Theme.font-md;
                                 horizontal-alignment: center;
                             }
 
                             Text {
                                 text: "Add a source to connect to external APIs and databases";
                                 color: Theme.text-disabled;
-                                font-size: 10px;
+                                font-size: Theme.font-xs;
                                 horizontal-alignment: center;
                             }
                         }
@@ -329,12 +468,17 @@ export component DataSourcesDialog inherits Rectangle {
 
                     // Sources list
                     for source in root.sources: Rectangle {
-                        height: 52px;
-                        background: source.id == root.selected-source ? Theme.selection-background :
-                                    source-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                        border-radius: 4px;
+                        // Taller than the old 52px because each row now has a
+                        // third line for the last test result.
+                        height: 62px;
+                        background: source.id == root.selected-source ? Theme.selection-background
+                                  : source-touch.has-hover ? Theme.explorer-item-hover
+                                  : transparent;
+                        border-radius: Theme.radius-sm;
+                        animate background { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
 
                         source-touch := TouchArea {
+                            mouse-cursor: pointer;
                             clicked => { root.selected-source = source.id; }
                         }
 
@@ -342,13 +486,13 @@ export component DataSourcesDialog inherits Rectangle {
                             padding: 10px;
                             spacing: 10px;
 
-                            // Status indicator
+                            // Standing connection status
                             Rectangle {
                                 width: 8px; height: 8px;
                                 y: (parent.height - self.height) / 2;
-                                background: source.status == "connected" ? Theme.accent-green :
-                                           source.status == "error" ? Theme.text-error :
-                                           Theme.text-secondary;
+                                background: source.status == "connected" ? Theme.accent-green
+                                          : source.status == "error" ? Theme.text-error
+                                          : Theme.text-secondary;
                                 border-radius: 4px;
                             }
 
@@ -361,67 +505,54 @@ export component DataSourcesDialog inherits Rectangle {
                                 Text {
                                     text: source.name;
                                     color: Theme.text-primary;
-                                    font-size: 11px;
+                                    font-size: Theme.font-sm;
                                     font-weight: 500;
+                                    overflow: elide;
                                 }
 
                                 Text {
                                     text: source.source-type + " · " + source.url;
                                     color: Theme.text-secondary;
-                                    font-size: 10px;
+                                    font-size: Theme.font-xs;
+                                    overflow: elide;
+                                }
+
+                                // Where the Test button's answer lands.
+                                // Hidden until the source has been probed, so
+                                // an untested row stays quiet rather than
+                                // claiming an outcome it does not have.
+                                if source.test-state != "" && source.test-state != "idle": Text {
+                                    text: root.test-label(source)
+                                        + (source.tested-at == "" ? "" : "  (" + source.tested-at + ")");
+                                    color: root.test-color(source);
+                                    font-size: Theme.font-xs;
                                     overflow: elide;
                                 }
                             }
 
                             // Actions
-                            Rectangle {
-                                width: 40px; height: 24px;
-                                border-radius: 3px;
-                                background: test-ta.has-hover ? Theme.button-hover : Theme.button-background;
-                                border-width: 1px;
-                                border-color: Theme.border-color;
-
-                                test-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.on-test-source(source.id); }
-                                }
-
-                                Text {
-                                    text: "Test";
-                                    color: Theme.text-primary;
-                                    font-size: 10px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
+                            DSButton {
+                                width: 40px;
+                                label: source.test-state == "testing" ? "…" : "Test";
+                                enabled: source.test-state != "testing";
+                                clicked => { root.on-test-source(source.id); }
                             }
 
-                            Rectangle {
-                                width: 40px; height: 24px;
-                                border-radius: 3px;
-                                background: edit-ta.has-hover ? Theme.button-hover : Theme.button-background;
-                                border-width: 1px;
-                                border-color: Theme.border-color;
-
-                                edit-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.on-edit-source(source.id); }
-                                }
-
-                                Text {
-                                    text: "Edit";
-                                    color: Theme.text-primary;
-                                    font-size: 10px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
+                            DSButton {
+                                width: 40px;
+                                label: "Edit";
+                                clicked => { root.on-edit-source(source.id); }
                             }
 
                             Rectangle {
                                 width: 24px; height: 24px;
                                 border-radius: 3px;
-                                background: del-ta.has-hover ? #3d1515 : Theme.button-background;  // theme-exempt: dark-red destructive-hover tint, no red-surface token
+                                background: del-ta.pressed ? Theme.error-surface
+                                          : del-ta.has-hover ? Theme.error-surface-hover
+                                          : Theme.button-background;
                                 border-width: 1px;
-                                border-color: del-ta.has-hover ? #5a2020 : Theme.border-color;  // theme-exempt: dark-red destructive-hover border, no red-surface token
+                                border-color: del-ta.has-hover ? Theme.error-surface-border : Theme.border-color;
+                                animate background { duration: Theme.panel-anim-duration-fast * Theme.motion-scale; }
 
                                 del-ta := TouchArea {
                                     mouse-cursor: pointer;
@@ -448,30 +579,17 @@ export component DataSourcesDialog inherits Rectangle {
             Rectangle {
                 height: 52px;
                 background: Theme.dialog-titlebar-background;
-                border-radius: 8px;
+                border-radius: Theme.radius-md;
 
                 HorizontalLayout {
                     alignment: center;
 
-                    Rectangle {
-                        width: 80px; height: 32px;
-                        border-radius: 5px;
-                        background: close-btn.has-hover ? Theme.button-hover : Theme.button-background;
-                        border-width: 1px;
-                        border-color: Theme.border-color;
-
-                        close-btn := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.on-close(); }
-                        }
-
-                        Text {
-                            text: "Close";
-                            color: Theme.text-primary;
-                            font-size: 12px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+                    DSButton {
+                        width: 80px;
+                        height: 32px;
+                        label: "Close";
+                        font-size: Theme.font-md;
+                        clicked => { root.on-close(); }
                     }
                 }
             }

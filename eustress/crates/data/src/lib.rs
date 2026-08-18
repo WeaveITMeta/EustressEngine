@@ -39,6 +39,9 @@ pub mod spectral;
 #[cfg(feature = "import")]
 pub mod import;
 
+/// Data sources — the provider seam behind the Studio's Data menu.
+pub mod source;
+
 // ── Core types — always compiled, no arrow/parquet dependency ────────────────
 
 /// Logical column element type. P0 covers the four Logger-Pro-grade scalars;

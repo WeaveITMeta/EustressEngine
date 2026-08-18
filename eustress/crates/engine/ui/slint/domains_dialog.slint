@@ -1,0 +1,592 @@
+// ============================================================================
+// Eustress Engine - Manage Domains Dialog
+// Create, edit and remove the domains a space knows about, and the object
+// type each one maps onto when it is synced into the scene.
+// ============================================================================
+
+import { LineEdit, ScrollView, ComboBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// One configured domain. Mirrors `DomainConfig` on the Rust side: `id` is the
+// stable row identity every callback speaks in, `field-count` is the size of
+// the domain's schema (0 renders as "no fields yet" rather than "0 fields").
+export struct DomainEntry {
+    id: int,
+    name: string,
+    description: string,
+    object-type: string,
+    field-count: int,
+}
+
+// Section rule — the accent tick + all-caps label used by the sibling Data
+// Sources dialog, so the two Data menu surfaces read as one family.
+component DomainsSection inherits Rectangle {
+    in property <string> title: "";
+    height: 28px;
+    background: transparent;
+
+    Rectangle {
+        x: 0px;
+        // Derive the bar's y from the row so the accent and the label share one
+        // centre line even if the row height changes.
+        y: (parent.height - self.height) / 2;
+        width: 3px; height: 16px;
+        border-radius: 1.5px;
+        background: Theme.cat-data;
+    }
+
+    Text {
+        x: 10px;
+        // `vertical-alignment` centres text inside THIS element's box, so the
+        // element must span the row. Without an explicit height the box
+        // collapses to the glyph height and the label sits at the top while the
+        // accent bar stays centred — the label then reads as misaligned.
+        y: 0;
+        height: parent.height;
+        text: root.title;
+        color: Theme.text-primary;
+        font-size: Theme.font-sm;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        vertical-alignment: center;
+    }
+}
+
+// Dialog button with the three affordances this surface needs. Kept as one
+// component so hover AND pressed states stay identical everywhere; the status
+// "surface" tokens carry the success/danger fills, so nothing here is a
+// hardcoded hex.
+component DomainsButton inherits Rectangle {
+    in property <string> label: "";
+    /// "neutral" | "primary" | "danger"
+    in property <string> variant: "neutral";
+    in property <bool> enabled: true;
+
+    callback clicked();
+
+    width: 72px;
+    height: 28px;
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+    opacity: root.enabled ? 1.0 : 0.45;
+
+    background: root.variant == "primary"
+            ? (touch.pressed ? Theme.success-surface-border
+               : touch.has-hover ? Theme.success-surface-hover : Theme.success-surface)
+        : root.variant == "danger"
+            ? (touch.pressed ? Theme.error-surface-border
+               : touch.has-hover ? Theme.error-surface-hover : Theme.error-surface)
+            : (touch.pressed ? Theme.button-pressed
+               : touch.has-hover ? Theme.button-hover : Theme.button-background);
+
+    border-color: root.variant == "primary"
+            ? (touch.has-hover ? Theme.accent-green : Theme.success-surface-border)
+        : root.variant == "danger"
+            ? Theme.error-surface-border
+            : Theme.border-color;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.label;
+        color: root.variant == "primary"
+                ? (touch.has-hover ? Theme.success-surface-text-hover : Theme.accent-green)
+            : root.variant == "danger"
+                ? Theme.text-error
+                : Theme.text-primary;
+        font-size: Theme.font-sm;
+        font-weight: root.variant == "neutral" ? 400 : 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// Labelled single-line field for the add/edit form.
+component DomainsField inherits Rectangle {
+    in property <string> label: "";
+    in property <string> placeholder: "";
+    in-out property <string> value: "";
+
+    height: 30px;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: Theme.spacing-md;
+
+        Text {
+            width: 104px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+
+            Rectangle {
+                height: 24px;
+                background: Theme.input-background;
+                border-radius: Theme.radius-sm;
+                border-width: 1px;
+                border-color: Theme.input-border;
+
+                LineEdit {
+                    width: 100%;
+                    height: 100%;
+                    placeholder-text: root.placeholder;
+                    text <=> root.value;
+                }
+            }
+        }
+    }
+}
+
+export component DomainsDialog inherits Rectangle {
+    // ── Data (pushed from Rust) ──────────────────────────────────────────
+    /// Every configured domain, in render order.
+    in property <[DomainEntry]> domains: [];
+    /// Object types a domain may map onto. Defaulted so the dialog is usable
+    /// before Rust pushes the live class list.
+    in property <[string]> available-object-types: ["Part", "SpherePart", "CylinderPart", "Model", "Folder"];
+
+    // ── Form state ───────────────────────────────────────────────────────
+    // In-out because the form is driven from both ends: a row's Edit button
+    // fills it locally so the dialog works standalone, and Rust overwrites it
+    // with the authoritative record once `on-edit-domain` lands.
+    /// True while the add/edit form is expanded.
+    in-out property <bool> form-open: false;
+    /// Row being edited, or -1 when the form is composing a new domain.
+    in-out property <int> editing-id: -1;
+    in-out property <string> form-name: "";
+    in-out property <string> form-description: "";
+    in-out property <string> form-object-type: "Part";
+    /// Row armed for deletion — its × has become a "Confirm" button. -1 when
+    /// nothing is armed, so a stray click can never drop a domain outright.
+    in-out property <int> pending-delete-id: -1;
+
+    // ── Callbacks ────────────────────────────────────────────────────────
+    /// Commit the form as a NEW domain (name/description/object-type).
+    callback on-add-domain();
+    /// Commit the form onto the domain with this id.
+    callback on-save-domain(int);
+    /// A row's Edit was clicked — Rust may re-fill the form from its record.
+    callback on-edit-domain(int);
+    /// Delete confirmed for this domain id.
+    callback on-delete-domain(int);
+    callback on-close();
+
+    // A name is the one thing a domain cannot do without, so Add/Save stay
+    // disabled until there is one.
+    property <bool> form-valid: root.form-name != "";
+
+    width: 100%;
+    height: 100%;
+    background: Theme.modal-backdrop;
+
+    // Swallow keys so nothing leaks to the Explorer/viewport behind the modal.
+    // Escape backs out one level at a time: it collapses an open form first,
+    // then closes the dialog. LineEdit children take focus when clicked and
+    // keep receiving their own keystrokes normally.
+    keys := FocusScope {
+        width: 0px; height: 0px;
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                if (root.form-open) {
+                    root.form-open = false;
+                    root.editing-id = -1;
+                } else {
+                    root.on-close();
+                }
+                return accept;
+            }
+            return accept;
+        }
+        key-released(event) => { return accept; }
+    }
+
+    // Backdrop — click-away closes, and scrolling never reaches the scene.
+    TouchArea {
+        clicked => { root.on-close(); }
+        scroll-event(event) => { return accept; }
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 620px;
+        height: min(parent.height - 80px, 560px);
+        background: Theme.background-secondary;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: Theme.shadow-color;
+
+        // Clicks and wheel inside the card must not reach the backdrop.
+        TouchArea {
+            clicked => { }
+            scroll-event(event) => { return accept; }
+        }
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            // ── Title bar ──
+            Rectangle {
+                height: 46px;
+                background: Theme.dialog-titlebar-background;
+                border-radius: Theme.radius-lg;
+
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "Manage Domains";
+                    color: Theme.text-primary;
+                    font-size: Theme.font-md;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    x: parent.width - 36px;
+                    y: (parent.height - self.height) / 2;
+                    width: 28px; height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: close-ta.pressed ? Theme.error-surface-border
+                              : close-ta.has-hover ? Theme.error-surface-hover : transparent;
+
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-close(); }
+                    }
+
+                    Text {
+                        width: 100%;
+                        height: 100%;
+                        text: "×";
+                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
+                        font-size: 17px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    width: 100%; height: 1px;
+                    background: Theme.border-color;
+                }
+            }
+
+            // ── Content ──
+            ScrollView {
+                vertical-stretch: 1;
+
+                VerticalLayout {
+                    padding: Theme.spacing-xl;
+                    spacing: Theme.spacing-sm;
+                    alignment: start;
+
+                    // ── Add / edit form ──
+                    if root.form-open: VerticalLayout {
+                        spacing: Theme.spacing-sm;
+
+                        DomainsSection {
+                            title: root.editing-id < 0 ? "NEW DOMAIN" : "EDIT DOMAIN";
+                        }
+
+                        DomainsField {
+                            label: "Name";
+                            placeholder: "Patient";
+                            value <=> root.form-name;
+                        }
+
+                        DomainsField {
+                            label: "Description";
+                            placeholder: "What this domain describes";
+                            value <=> root.form-description;
+                        }
+
+                        Rectangle {
+                            height: 30px;
+                            HorizontalLayout {
+                                spacing: Theme.spacing-md;
+
+                                Text {
+                                    width: 104px;
+                                    text: "Object Type";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-sm;
+                                    vertical-alignment: center;
+                                }
+
+                                ComboBox {
+                                    horizontal-stretch: 1;
+                                    model: root.available-object-types;
+                                    current-value <=> root.form-object-type;
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "Records in this domain spawn as the chosen object type when synced.";
+                            color: Theme.text-disabled;
+                            font-size: Theme.font-xs;
+                            wrap: word-wrap;
+                        }
+
+                        Rectangle { height: Theme.spacing-sm; }
+
+                        HorizontalLayout {
+                            spacing: Theme.spacing-md;
+                            alignment: end;
+
+                            DomainsButton {
+                                label: "Cancel";
+                                clicked => {
+                                    root.form-open = false;
+                                    root.editing-id = -1;
+                                }
+                            }
+
+                            DomainsButton {
+                                label: root.editing-id < 0 ? "Add" : "Save";
+                                variant: "primary";
+                                enabled: root.form-valid;
+                                clicked => {
+                                    if (root.editing-id < 0) {
+                                        root.on-add-domain();
+                                    } else {
+                                        root.on-save-domain(root.editing-id);
+                                    }
+                                    root.form-open = false;
+                                    root.editing-id = -1;
+                                }
+                            }
+                        }
+
+                        Rectangle { height: Theme.spacing-md; }
+                    }
+
+                    DomainsSection { title: "CONFIGURED DOMAINS"; }
+
+                    // New-domain entry point. Hidden while the form is open so
+                    // there is only ever one compose surface on screen.
+                    if !root.form-open: Rectangle {
+                        height: 30px;
+                        HorizontalLayout {
+                            alignment: start;
+
+                            DomainsButton {
+                                width: 116px;
+                                height: 24px;
+                                label: "+ New Domain";
+                                variant: "primary";
+                                clicked => {
+                                    root.editing-id = -1;
+                                    root.form-name = "";
+                                    root.form-description = "";
+                                    root.form-object-type = "Part";
+                                    root.pending-delete-id = -1;
+                                    root.form-open = true;
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle { height: Theme.spacing-sm; }
+
+                    // ── Empty state ──
+                    if root.domains.length == 0: Rectangle {
+                        height: 120px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: Theme.spacing-md;
+
+                            Text {
+                                text: "No domains defined";
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-md;
+                                horizontal-alignment: center;
+                            }
+
+                            Text {
+                                text: "A domain names a kind of record and the object type it becomes in the scene.";
+                                color: Theme.text-disabled;
+                                font-size: Theme.font-xs;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+
+                    // ── Domain rows ──
+                    for d in root.domains: Rectangle {
+                        height: 54px;
+                        border-radius: Theme.radius-md;
+                        background: row-ta.has-hover ? Theme.explorer-item-hover : transparent;
+
+                        row-ta := TouchArea {
+                            // Hover surface only — the row's actions own every
+                            // click, so a stray press on the strip does nothing.
+                            clicked => { }
+                        }
+
+                        HorizontalLayout {
+                            padding: 10px;
+                            spacing: 10px;
+
+                            // Domain marker — the Data category tint.
+                            VerticalLayout {
+                                width: 8px;
+                                alignment: center;
+                                Rectangle {
+                                    width: 8px; height: 8px;
+                                    border-radius: 4px;
+                                    background: Theme.cat-data;
+                                }
+                            }
+
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 2px;
+                                alignment: center;
+
+                                Text {
+                                    text: d.name;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-sm;
+                                    font-weight: 500;
+                                    overflow: elide;
+                                }
+
+                                Text {
+                                    text: d.description != ""
+                                        ? d.description
+                                        : (d.field-count > 0 ? d.field-count + " mapped fields" : "No fields mapped yet");
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-xs;
+                                    overflow: elide;
+                                }
+                            }
+
+                            // Object-type pill.
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    height: 20px;
+                                    border-radius: Theme.radius-sm;
+                                    background: Theme.cat-data.with-alpha(0.14);
+                                    border-width: 1px;
+                                    border-color: Theme.cat-data.with-alpha(0.35);
+
+                                    HorizontalLayout {
+                                        padding-left: Theme.spacing-md;
+                                        padding-right: Theme.spacing-md;
+                                        Text {
+                                            text: d.object-type != "" ? d.object-type : "Unmapped";
+                                            color: Theme.cat-data;
+                                            font-size: Theme.font-xs;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                DomainsButton {
+                                    width: 44px;
+                                    height: 24px;
+                                    label: "Edit";
+                                    clicked => {
+                                        root.pending-delete-id = -1;
+                                        root.editing-id = d.id;
+                                        root.form-name = d.name;
+                                        root.form-description = d.description;
+                                        root.form-object-type = d.object-type;
+                                        root.form-open = true;
+                                        root.on-edit-domain(d.id);
+                                    }
+                                }
+                            }
+
+                            // Delete is two-step: the first click arms the row
+                            // and the button becomes "Confirm".
+                            VerticalLayout {
+                                alignment: center;
+                                DomainsButton {
+                                    width: root.pending-delete-id == d.id ? 62px : 26px;
+                                    height: 24px;
+                                    label: root.pending-delete-id == d.id ? "Confirm" : "×";
+                                    variant: "danger";
+                                    clicked => {
+                                        if (root.pending-delete-id == d.id) {
+                                            root.pending-delete-id = -1;
+                                            root.on-delete-domain(d.id);
+                                        } else {
+                                            root.pending-delete-id = d.id;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Footer ──
+            Rectangle {
+                height: 1px;
+                background: Theme.border-color;
+            }
+
+            Rectangle {
+                height: 52px;
+                background: Theme.dialog-titlebar-background;
+                border-radius: Theme.radius-lg;
+
+                HorizontalLayout {
+                    padding-left: Theme.spacing-xl;
+                    padding-right: Theme.spacing-xl;
+                    spacing: Theme.spacing-md;
+
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        Text {
+                            text: root.domains.length == 1
+                                ? "1 domain"
+                                : root.domains.length + " domains";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        DomainsButton {
+                            width: 80px;
+                            height: 32px;
+                            label: "Close";
+                            clicked => { root.on-close(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
