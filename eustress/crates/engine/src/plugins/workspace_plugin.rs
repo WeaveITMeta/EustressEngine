@@ -28,6 +28,15 @@ impl Plugin for WorkspacePlugin {
             .register_type::<ReplicatedStorage>()
             .register_type::<StarterPack>()
             .register_type::<StarterGui>()
-            .register_type::<StarterPlayer>();
+            .register_type::<StarterPlayer>()
+
+            // The one path from Workspace.gravity to Avian's Gravity, unit-
+            // converted through `eustress_common::units`. Runs in Update
+            // alongside the Rune bridge, which writes Workspace.gravity rather
+            // than Gravity directly, so there is exactly one writer of the Avian
+            // resource. Cost of Update over a fixed-step schedule is at most one
+            // fixed step of lag on a gravity change; gravity is constant in
+            // every shipped scene today.
+            .add_systems(Update, sync_workspace_gravity_to_avian);
     }
 }

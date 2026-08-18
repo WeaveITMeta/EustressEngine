@@ -61,6 +61,11 @@ pub struct Workspace {
     /// Gravity vector in m/s² (default: -9.80665 Y, exact SI standard gravity)
     /// Networking: Applied to all dynamic RigidBodies
     /// Note: This is the base gravity at sea level (Y=0). Use altitude_gravity() for altitude-adjusted values.
+    ///
+    /// NOTE: `scene::WorkspaceSettings.gravity` is a DIFFERENT field, authored in
+    /// studs (default 196.8). Convert it through [`crate::units`] before assigning
+    /// it here: [`sync_workspace_gravity_to_avian`] converts from meters and will
+    /// pass a studs value straight through as a 20x error.
     pub gravity: Vec3,
     
     /// Maximum allowed entity speed in m/s (anti-exploit)
@@ -140,11 +145,15 @@ impl Default for Workspace {
 /// `Gravity` resource, converting through [`crate::units`] from the authored
 /// unit ([`GRAVITY_AUTHORED_UNIT`]) to engine-native meters.
 ///
-/// This is the ONE place gravity reaches Avian. `eustress-runtime` and
-/// `eustress-networking` both schedule this function instead of each defining
-/// their own (which previously raced last-writer-wins and skipped unit
-/// conversion entirely). Runs only when an `avian3d::prelude::Gravity` resource
-/// exists, so it is harmless in editor/headless builds that never inserted one.
+/// This is the only system that writes Avian's `Gravity` during the frame.
+/// Studio schedules it from `WorkspacePlugin`; every other gravity author
+/// (scene load, the Rune `workspace_set_gravity` binding) writes
+/// `Workspace.gravity` and lets this system perform the conversion. One-shot
+/// startup inserts of `Gravity` remain, and this system converges them on the
+/// first frame that `Workspace.gravity` differs.
+///
+/// Runs only when an `avian3d::prelude::Gravity` resource exists, so it is
+/// harmless in editor/headless builds that never inserted one.
 ///
 /// Gated on common's existing `physics` feature (which pulls `avian3d`); there
 /// is intentionally no separate `avian` feature.
