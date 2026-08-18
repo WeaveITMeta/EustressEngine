@@ -334,6 +334,62 @@ mod imp {
         None
     }
 
+    /// Raw stored TOML text for an absolute in-Space path, if the DB holds
+    /// one. `None` when there is no DB, no record, or the bytes aren't UTF-8.
+    ///
+    /// Deliberately raw: callers that patch a document in place (see
+    /// `instance_loader::write_instance_changes_system`) must preserve
+    /// sections the typed `InstanceDefinition` does not model — `[material]`,
+    /// `[thermodynamic]`, `[electrochemical]`, `[material.custom]`. Round-
+    /// tripping those through the typed struct silently drops them, so the
+    /// text form is the only lossless read for that path.
+    pub fn get_instance_text(abs: &Path) -> Option<String> {
+        let g = ACTIVE.read().ok()?;
+        let a = g.as_ref()?;
+        let rel = rel_key(&a.root, abs)?;
+        let bytes = a.db.get_file(&rel).ok().flatten()?;
+        String::from_utf8(bytes).ok()
+    }
+
+    /// Store raw TOML text for an absolute in-Space path. Returns `false`
+    /// when no DB is active, so the caller keeps its disk write.
+    ///
+    /// The lossless counterpart to [`get_instance_text`]. Also refreshes the
+    /// `#bin` twin when one already exists, so a later `get_instance`
+    /// binary fast-path cannot serve a STALE record that shadows the text we
+    /// just wrote — that shadowing is exactly how an edit appears to save and
+    /// then reverts on reload.
+    pub fn put_instance_text(abs: &Path, text: &str) -> bool {
+        let Ok(g) = ACTIVE.read() else { return false };
+        let Some(a) = g.as_ref() else { return false };
+        let Some(rel) = rel_key(&a.root, abs) else { return false };
+
+        if a.db.put_file(&rel, text.as_bytes()).is_err() {
+            return false;
+        }
+
+        // Keep an existing binary twin in step. Only refresh one that is
+        // already there: creating one here would binarise instances that
+        // `put_instance` deliberately keeps on the filesystem (custom-mesh
+        // parts, and any instance with children).
+        let bin_key = format!("{rel}{BIN_SUFFIX}");
+        if matches!(a.db.get_file(&bin_key), Ok(Some(_))) {
+            match instance_loader::load_instance_definition_from_str(text) {
+                Ok(def) => {
+                    if let Ok(bin) = bincode::serialize(&def) {
+                        let _ = a.db.put_file(&bin_key, &bin);
+                    }
+                }
+                Err(_) => {
+                    // Unparseable as a typed definition — drop the stale twin
+                    // rather than leave it to shadow the good text.
+                    let _ = a.db.delete_file(&bin_key);
+                }
+            }
+        }
+        true
+    }
+
     /// Persist an instance definition as the binary ECS record. No
     /// disk, no TOML. Returns `false` when no DB is active (caller then
     /// does its legacy disk write).
@@ -980,6 +1036,16 @@ mod imp {
     pub fn get_instance(_abs: &Path) -> Option<InstanceDefinition> {
         None
     }
+    /// No DB in this build — caller reads from disk.
+    pub fn get_instance_text(_abs: &Path) -> Option<String> {
+        None
+    }
+
+    /// No DB in this build — caller keeps its disk write.
+    pub fn put_instance_text(_abs: &Path, _text: &str) -> bool {
+        false
+    }
+
     pub fn put_instance(_abs: &Path, _def: &InstanceDefinition) -> bool {
         false
     }

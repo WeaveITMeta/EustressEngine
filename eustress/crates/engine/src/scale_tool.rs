@@ -160,27 +160,26 @@ impl Plugin for ScaleToolPlugin {
 fn rebuild_collider_on_size_change(
     mut commands: Commands,
     changed: Query<
-        (Entity, &crate::classes::BasePart, Option<&crate::classes::Part>),
+        (Entity, &crate::classes::BasePart, Option<&crate::classes::Part>, &Transform),
         (Changed<crate::classes::BasePart>, With<avian3d::prelude::Collider>),
     >,
 ) {
     use avian3d::prelude::Collider;
     use crate::classes::PartType;
 
-    for (entity, base_part, part_opt) in changed.iter() {
-        // Sanitise dimensions the same way the scale-tool does — a
-        // degenerate 0 / negative / non-finite size would panic Avian's
-        // collider builder on the next physics step.
-        let half = Vec3::new(
-            if base_part.size.x.is_finite() { (base_part.size.x * 0.5).abs().max(0.05) } else { 0.05 },
-            if base_part.size.y.is_finite() { (base_part.size.y * 0.5).abs().max(0.05) } else { 0.05 },
-            if base_part.size.z.is_finite() { (base_part.size.z * 0.5).abs().max(0.05) } else { 0.05 },
+    for (entity, base_part, part_opt, transform) in changed.iter() {
+        // Sanitise dimensions first — a degenerate 0 / negative / non-finite
+        // size would panic Avian's collider builder on the next physics step.
+        let safe_size = Vec3::new(
+            if base_part.size.x.is_finite() { base_part.size.x.abs().max(0.1) } else { 0.1 },
+            if base_part.size.y.is_finite() { base_part.size.y.abs().max(0.1) } else { 0.1 },
+            if base_part.size.z.is_finite() { base_part.size.z.abs().max(0.1) } else { 0.1 },
         );
-        // Avian takes FULL extents for cuboid and FULL height for cylinder —
-        // it halves them internally. Feeding it half-extents (as this did)
-        // produced a collider half the part's visual size, so a resized part
-        // would let things sink into it. Must match `safe_collider_from`, or
-        // resizing a part would silently change its collision size.
+        // Collider dimensions are LOCAL — Avian re-applies the entity's
+        // transform scale. Use the same canonical cancellation as loading and
+        // spawning, or a resize would silently change the part's collision
+        // size relative to how it loaded.
+        let half = crate::spawn::collider_local_half(safe_size, transform.scale);
         let collider = match part_opt.map(|p| p.shape) {
             Some(PartType::Ball) => Collider::sphere(half.x),
             Some(PartType::Cylinder) | Some(PartType::Cone) => {

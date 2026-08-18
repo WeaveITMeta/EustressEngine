@@ -188,33 +188,46 @@ pub(crate) fn safe_collider_from(
     {
         return None;
     }
-    // AVIAN TAKES FULL EXTENTS, NOT HALF-EXTENTS.
+    // COLLIDER DIMENSIONS ARE IN *LOCAL* SPACE — Avian multiplies them by the
+    // entity's `GlobalTransform.scale`.
     //
-    //     pub fn cuboid(x_length, y_length, z_length) -> Self {
-    //         SharedShape::cuboid(x_length * 0.5, ...)   // halves internally
-    //     }
+    // `collider/backend.rs` runs `set_scale(scale)` in the on-insert hook,
+    // commented "This overwrites the scale set by the constructor". So the
+    // final world-space size is `constructor_arg × transform.scale`, and a
+    // constructor fed world-space dimensions gets SQUARED.
     //
-    // This previously passed `scale * 0.5`, so every cuboid collider in the
-    // engine was HALF its visual size and parts sank halfway into whatever
-    // they landed on before contact resolved. (Older Avian did take
-    // half-extents — the call sites were not updated when the API changed,
-    // and the stale "colliders take HALF-extents" comments date from then.
-    // `instance_loader.rs:3059` had already been individually corrected with
-    // an explicit `* 2.0`, which is the same bug seen from the other side.)
+    // Eustress parts are unit meshes with `Transform.scale = size`, so the
+    // correct local extent is `size / transform.scale` — normally exactly 1.
+    // Two earlier versions were both wrong for the same reason (neither
+    // accounted for the hook), for a 0.8 m cube:
     //
-    // `sphere` genuinely takes a RADIUS, so half of the diameter is correct
-    // there; `cylinder` takes (radius, FULL height).
-    const MIN_FULL: f32 = MIN_HALF * 2.0;
-    let sx = if scale.x.is_finite() { scale.x.abs().max(MIN_FULL) } else { return None; };
-    let sy = if scale.y.is_finite() { scale.y.abs().max(MIN_FULL) } else { return None; };
-    let sz = if scale.z.is_finite() { scale.z.abs().max(MIN_FULL) } else { return None; };
+    //   passed `size * 0.5` → 0.32 m collider  (parts sank in — the original)
+    //   passed `size`       → 0.64 m collider  (still short)
+    //   passed `size/scale` → 0.80 m collider  ✔
+    //
+    // Feeding world dimensions also made big parts monstrous: a 6 m plate
+    // became a 36 m collider, so neighbouring test stations silently rested on
+    // each other's colliders.
+    //
+    // Also note Avian's constructors take FULL lengths (they halve internally);
+    // `sphere` takes a RADIUS and `cylinder` takes (radius, FULL height).
+    // `spawn::collider_local_half` is the canonical implementation of that
+    // cancellation (documented and verified against the live scene, but it had
+    // no call sites — this is the first). It returns LOCAL half-extents;
+    // Avian's constructors want FULL lengths, hence the ×2.
+    let half = crate::spawn::collider_local_half(scale, transform.scale);
+    if !half.is_finite() {
+        return None;
+    }
+    let fx = (half.x * 2.0).abs().max(MIN_HALF);
+    let fy = (half.y * 2.0).abs().max(MIN_HALF);
+    let fz = (half.z * 2.0).abs().max(MIN_HALF);
     Some(match part_shape {
-        // Radius = half the diameter.
-        eustress_common::classes::PartType::Ball => Collider::sphere(sx * 0.5),
+        eustress_common::classes::PartType::Ball => Collider::sphere(fx * 0.5),
         eustress_common::classes::PartType::Cylinder | eustress_common::classes::PartType::Cone => {
-            Collider::cylinder(sx * 0.5, sy)
+            Collider::cylinder(fx * 0.5, fy)
         }
-        _ => Collider::cuboid(sx, sy, sz),
+        _ => Collider::cuboid(fx, fy, fz),
     })
 }
 
@@ -619,14 +632,14 @@ pub struct InstanceProperties {
     pub respect_gltf_materials: bool,
     /// Opt in to runtime mesh deformation for this part.
     ///
-    /// Surfaced to `BasePart.deformation`, which
+    /// Surfaced to `BasePart.destructible`, which
     /// `realism::deformation::init_deformable_meshes` watches. Without this
     /// field the flag had no authoring route at all: it existed on `BasePart`
     /// but nothing read it from TOML, so every loaded part was hard-`false`
     /// and the whole deformation pipeline was unreachable outside of code.
     /// Default false → parts stay rigid unless they ask not to be.
     #[serde(default)]
-    pub deformation: bool,
+    pub destructible: bool,
     /// Roblox `PhysicalProperties` decomposition written by the importer
     /// under `[properties.physics]`. Optional — absent for hand-authored
     /// parts. When present, the collider-insert path attaches the
@@ -765,7 +778,7 @@ impl Default for InstanceProperties {
             locked: false,
             physics: None,
             respect_gltf_materials: false,
-            deformation: false,
+            destructible: false,
         }
     }
 }
@@ -926,6 +939,37 @@ impl TomlMaterialProperties {
                     _ => None, // skip strings, bools, etc.
                 })
                 .collect(),
+        }
+    }
+
+    /// Build the TOML view of a realism material without writing it anywhere.
+    ///
+    /// Used by the Properties panel to SHOW a destructible part the constants
+    /// its `material` name already implies. Nothing is persisted: an explicit
+    /// `[material]` block should appear on disk only when someone deliberately
+    /// overrides a value, so the common case stays "name the material and get
+    /// its physics" rather than accumulating a copy of the preset in every
+    /// part file.
+    pub fn from_component(
+        m: &eustress_common::realism::materials::prelude::MaterialProperties,
+    ) -> Self {
+        Self {
+            name: m.name.clone(),
+            young_modulus: m.young_modulus,
+            poisson_ratio: m.poisson_ratio,
+            yield_strength: m.yield_strength,
+            ultimate_strength: m.ultimate_strength,
+            fracture_toughness: m.fracture_toughness,
+            hardness: m.hardness,
+            thermal_conductivity: m.thermal_conductivity,
+            specific_heat: m.specific_heat,
+            thermal_expansion: m.thermal_expansion,
+            melting_point: m.melting_point,
+            density: m.density,
+            friction_static: m.friction_static,
+            friction_kinetic: m.friction_kinetic,
+            restitution: m.restitution,
+            custom: HashMap::new(),
         }
     }
 }
@@ -1690,6 +1734,45 @@ fn attributes_from_toml_table(
     attrs
 }
 
+/// Build an `InstanceParameters` component from an instance's `[parameters]`
+/// table.
+///
+/// The on-disk table is flat (`key = value`) while the component is
+/// domain-scoped (`domain -> key -> value`), so a flat authoring shape lands in
+/// [`DEFAULT_PARAMETER_DOMAIN`] — that is what "basic by default" means: a
+/// parameter is usable before any Domain exists, and promoting it into a real
+/// domain is an edit, not a migration.
+///
+/// A dotted key (`telemetry.sample_rate`) is read as an explicit
+/// `domain.key`, so an author can opt into a domain straight from the TOML.
+fn parameters_from_toml_table(
+    table: Option<&std::collections::HashMap<String, toml::Value>>,
+) -> eustress_common::parameters::InstanceParameters {
+    use eustress_common::parameters::{
+        InstanceParameters, ParameterValue, DEFAULT_PARAMETER_DOMAIN,
+    };
+    let mut params = InstanceParameters::new();
+    let Some(map) = table else { return params };
+    for (k, v) in map {
+        let value = match v {
+            toml::Value::String(s) => ParameterValue::String(s.clone()),
+            toml::Value::Integer(i) => ParameterValue::Int(*i),
+            toml::Value::Float(f) => ParameterValue::Float(*f),
+            toml::Value::Boolean(b) => ParameterValue::Bool(*b),
+            // Arrays/tables have no scalar parameter form; keep them verbatim as
+            // JSON so nothing authored on disk is silently dropped.
+            other => ParameterValue::Json(other.to_string()),
+        };
+        match k.split_once('.') {
+            Some((domain, key)) if !domain.is_empty() && !key.is_empty() => {
+                params.set(domain, key, value)
+            }
+            _ => params.set(DEFAULT_PARAMETER_DOMAIN, k, value),
+        }
+    }
+    params
+}
+
 /// Known primitive mesh filenames that map to engine asset parts
 // ORDER MATTERS: the lookup takes the FIRST hint that appears anywhere in the
 // mesh filename, so any hint that is a substring of another must come first.
@@ -2229,7 +2312,7 @@ pub fn spawn_instance(
         material_name: instance.properties.material.clone(),
         cframe: Transform::from(safe_instance_transform.clone()),
         respect_gltf_materials: instance.properties.respect_gltf_materials,
-        deformation: instance.properties.deformation,
+        destructible: instance.properties.destructible,
         ..default()
     };
 
@@ -2330,6 +2413,12 @@ pub fn spawn_instance(
         let mut ec = commands.entity(entity);
         ec.insert(PartEntity { part_id });
         ec.insert(measure_unit);
+        // Domain-scoped Parameters, mirrored from `[parameters]` on disk so the
+        // live component is the faithful in-memory copy — the same contract
+        // `attributes_from_toml_table` establishes for Attributes. Inserted
+        // here rather than in the spawn bundle to stay clear of Bevy's tuple
+        // arity limit.
+        ec.insert(parameters_from_toml_table(instance.parameters.as_ref()));
         ec.insert(part_visibility_range(part_half_extent(scale)));
 
         // Only add physics collider when can_collide is true — avoids broadphase
@@ -2497,6 +2586,9 @@ pub fn spawn_instance(
     let mut ec = commands.entity(entity);
     ec.insert(PartEntity { part_id });
     ec.insert(measure_unit);
+    // See the sibling spawn path above: Parameters mirror `[parameters]` from
+    // disk into the live component.
+    ec.insert(parameters_from_toml_table(instance.parameters.as_ref()));
     ec.insert(part_visibility_range(part_half_extent(scale)));
 
     // Only add physics collider when can_collide is true — avoids broadphase
@@ -2566,6 +2658,27 @@ pub fn spawn_instance(
     if let Some(ref mat) = instance.material {
         ec.insert(mat.to_component());
         debug!("  + MaterialProperties: {}", mat.name);
+    } else if instance.properties.destructible {
+        // A part that opted in to deformation but authored no `[material]`
+        // block still needs mechanical constants, and the ones that matter are
+        // already implied by the material it says it is made of. Deriving them
+        // here is what lets an agent write `material = "Concrete"` and get
+        // concrete's behaviour, instead of having to supply a fracture
+        // toughness — a number it has no business guessing, since the crack
+        // threshold goes as K_IC squared.
+        //
+        // Without this the contact model fell back to generic plastic
+        // constants for EVERY part with no explicit block, so a concrete slab
+        // and a steel plate deformed identically.
+        if let Some(props) = eustress_common::realism::materials::properties::MaterialProperties
+            ::from_name(&instance.properties.material)
+        {
+            debug!(
+                "  + MaterialProperties: {} (derived from material = {:?})",
+                props.name, instance.properties.material
+            );
+            ec.insert(props);
+        }
     }
     if let Some(ref thermo) = instance.thermodynamic {
         ec.insert(thermo.to_component());
@@ -3602,8 +3715,20 @@ pub fn write_instance_changes_system(
             // [electrochemical], [material.custom], etc.).  A surgical patch on the
             // raw toml::Value preserves every section we don't touch.
             let patch_result = (|| -> Result<(), String> {
-                let text = std::fs::read_to_string(&job.path)
-                    .map_err(|e| format!("read {:?}: {}", job.path, e))?;
+                // Source the document from the DB first when a DB is active.
+                //
+                // On a MIGRATED Space the DB is authoritative and the loose
+                // `_instance.toml` may not exist at all (see
+                // `space_ops::space_is_migrated` — "the DB owns integrity").
+                // Reading straight from disk therefore failed on the very
+                // first line and abandoned the whole write, so Transform /
+                // BasePart edits never reached ANY store and silently
+                // vanished on restart. Prefer the DB copy, fall back to disk.
+                let text = match crate::space::active_db::get_instance_text(&job.path) {
+                    Some(t) => t,
+                    None => std::fs::read_to_string(&job.path)
+                        .map_err(|e| format!("read {:?}: {}", job.path, e))?,
+                };
                 let mut doc: toml::Value = text.parse()
                     .map_err(|e: toml::de::Error| format!("parse {:?}: {}", job.path, e))?;
 
@@ -3693,13 +3818,32 @@ pub fn write_instance_changes_system(
 
                 let out = toml::to_string_pretty(&doc)
                     .map_err(|e| format!("serialize {:?}: {}", job.path, e))?;
+
+                // Mirror into the DB whenever one is active. This system
+                // patches raw TOML on purpose (to preserve sections the typed
+                // `InstanceDefinition` would drop), so it bypassed the
+                // canonical `write_instance_definition` — which DOES
+                // dual-write via `active_db::put_instance`. That bypass is
+                // why gizmo/Properties/script edits persisted to disk but
+                // were invisible to a DB-primary load, and came back stale
+                // after a restart. Writing the patched TEXT keeps every
+                // unknown section intact in the DB copy too.
+                let db_ok = crate::space::active_db::put_instance_text(&job.path, &out);
+
                 // Atomic write + retry so a transient file-lock from
                 // an external reader (antivirus, text editor, the
                 // engine's reload-after-write pass) doesn't silently
                 // drop the user's edit (see `gui_loader::write_atomic`
                 // for the full rationale).
-                super::gui_loader::write_atomic(&job.path, out.as_bytes())
-                    .map_err(|e| format!("write {:?}: {}", job.path, e))?;
+                //
+                // Still written when the DB accepted it: disk stays a
+                // readable mirror, and a non-migrated Space has no DB at all.
+                // A disk failure is only fatal if the DB did not take it.
+                if let Err(e) = super::gui_loader::write_atomic(&job.path, out.as_bytes()) {
+                    if !db_ok {
+                        return Err(format!("write {:?}: {}", job.path, e));
+                    }
+                }
                 Ok(())
             })();
             if let Err(e) = patch_result {
@@ -3850,6 +3994,18 @@ pub fn ensure_tags_and_attributes_components(
             Without<eustress_common::attributes::Attributes>,
         ),
     >,
+    // Parameters get the same treatment as Attributes. They are a DIFFERENT
+    // concept — an Attribute is a static value on the part, a Parameter binds
+    // the part into a domain and, once sourced, to external data — but the
+    // panel affordance must be identical: the section is always present so its
+    // "+" is reachable on an entity that has no parameters yet.
+    needs_params: Query<
+        Entity,
+        (
+            Added<InstanceFile>,
+            Without<eustress_common::parameters::InstanceParameters>,
+        ),
+    >,
 ) {
     for entity in needs_tags.iter() {
         commands
@@ -3860,6 +4016,11 @@ pub fn ensure_tags_and_attributes_components(
         commands
             .entity(entity)
             .insert(eustress_common::attributes::Attributes::new());
+    }
+    for entity in needs_params.iter() {
+        commands
+            .entity(entity)
+            .insert(eustress_common::parameters::InstanceParameters::new());
     }
 }
 

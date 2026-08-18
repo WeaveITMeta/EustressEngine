@@ -112,15 +112,15 @@ pub fn spawn_part_glb(
         format!("{}#Mesh0/Primitive0", glb_path)
     );
 
-    // Avian takes FULL extents (it halves them internally), NOT half-extents.
-    // Passing `size * 0.5` made every collider HALF its visual size, so parts
-    // sank visibly into whatever they landed on. `sphere` genuinely takes a
-    // radius; `cylinder` takes (radius, FULL height).
-    let half = size * 0.5;
+    // This path renders a UNIT mesh and sets `transform.scale = size` (below),
+    // so the collider must be built in LOCAL space — Avian re-multiplies by
+    // that scale. `collider_local_half` performs the cancellation; its
+    // constructor args are FULL lengths, hence ×2.
+    let half = collider_local_half(size, size);
     let collider = match part.shape {
         PartType::Ball => Collider::sphere(half.x),
-        PartType::Cylinder | PartType::Cone => Collider::cylinder(half.x, size.y),
-        _ => Collider::cuboid(size.x, size.y, size.z),
+        PartType::Cylinder | PartType::Cone => Collider::cylinder(half.x, half.y * 2.0),
+        _ => Collider::cuboid(half.x * 2.0, half.y * 2.0, half.z * 2.0),
     };
 
     // Create material with special handling for Glass
@@ -218,13 +218,14 @@ pub fn spawn_part(
         PartType::Cone => meshes.add(Cylinder::new(size.x / 2.0, size.y)), // TODO: proper cone
     };
     
-    // Avian takes FULL extents (halved internally); see the note on the other
-    // spawn path above. `sphere` takes a radius, `cylinder` (radius, height).
-    let half = size * 0.5;
+    // This path bakes the mesh at ACTUAL size and leaves `transform.scale` at
+    // ONE, so there is no scale for Avian to re-apply and the local extents
+    // equal the world ones. Same helper — it is correct for both conventions.
+    let half = collider_local_half(size, Vec3::ONE);
     let collider = match part.shape {
         PartType::Ball => Collider::sphere(half.x),
-        PartType::Cylinder | PartType::Cone => Collider::cylinder(half.x, size.y),
-        _ => Collider::cuboid(size.x, size.y, size.z),
+        PartType::Cylinder | PartType::Cone => Collider::cylinder(half.x, half.y * 2.0),
+        _ => Collider::cuboid(half.x * 2.0, half.y * 2.0, half.z * 2.0),
     };
     
     // Create material with special handling for Glass
