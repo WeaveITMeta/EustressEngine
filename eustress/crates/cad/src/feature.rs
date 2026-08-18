@@ -142,6 +142,15 @@ pub enum Feature {
         axis: Option<String>,
         #[serde(default)]
         angle: Option<String>,
+        /// How the instances combine with the running body.
+        ///
+        /// Defaults to `Add`, which is what every pre-existing tree
+        /// assumed, so nothing changes meaning. Set it to `Subtract`
+        /// to pattern a cut: "four of this hole" needs the hole's
+        /// TOOL replicated and removed, which no combination of the
+        /// other fields could previously express.
+        #[serde(default)]
+        combine: FeatureOp,
     },
 
     /// Reference plane — offset from another plane, 3-point, tangent.

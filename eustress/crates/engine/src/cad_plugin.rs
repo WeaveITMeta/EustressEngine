@@ -1362,10 +1362,26 @@ fn format_status(entries: &[eustress_cad::EntryStatus], ok: bool) -> String {
         return "failed".into();
     }
     let bad: Vec<_> = entries.iter().filter(|e| !e.ok).map(|e| e.name.as_str()).collect();
-    if bad.is_empty() {
-        format!("{} features ok", entries.len())
-    } else {
+    // A degraded feature evaluated but produced a substitute body, so
+    // "N features ok" would be a true statement about the wrong thing.
+    // Surface it in the Studio status line too, not just in the
+    // validator an agent has to know to call.
+    let degraded: Vec<_> = entries
+        .iter()
+        .filter(|e| e.degraded)
+        .map(|e| e.name.as_str())
+        .collect();
+    if !bad.is_empty() {
         format!("issues: {}", bad.join(", "))
+    } else if !degraded.is_empty() {
+        format!(
+            "{} features ok, {} DEGRADED: {}",
+            entries.len(),
+            degraded.len(),
+            degraded.join(", ")
+        )
+    } else {
+        format!("{} features ok", entries.len())
     }
 }
 

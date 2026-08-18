@@ -171,6 +171,19 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "cad_add_feature"
         | "cad_edit_feature"
         | "cad_delete_feature"
+        | "cad_create_sketch"
+        | "cad_add_sketch_entity"
+        | "cad_add_constraint"
+        | "cad_dimension"
+        // Engine-registered Workshop tools that mutate state or write
+        // files — see the Read-bucket note above for why they were
+        // missing entirely.
+        | "run_scenario"
+        | "control_simulation"
+        | "set_breakpoint"
+        | "storage_optimize"
+        | "allocate_product"
+        | "export_recording"
         | "run_simulation"
         | "stop_simulation"
         | "pause_simulation"
@@ -217,6 +230,24 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "cad_validate_part"
         | "cad_measure"
         | "cad_list_templates"
+        | "cad_solve_sketch"
+        // Mode-specific Workshop tools. These are registered by the
+        // ENGINE (engine/src/workshop/mod.rs) on top of this crate's
+        // baseline, so they are advertised to callers and to the
+        // engine bridge but were never classified here — every call
+        // was refused at dispatch. Everything in this group is pure
+        // computation or a lookup, hence Read.
+        | "calculate_cost"
+        | "estimate_tax"
+        | "price_product"
+        | "estimate_shipping"
+        | "select_process"
+        | "forecast_demand"
+        | "score_supplier_risk"
+        | "inventory_check"
+        | "query_manufacturers"
+        | "query_investors"
+        | "normalize_brief"
         | "list_universes"
         | "list_spaces"
         | "list_scripts"

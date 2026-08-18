@@ -46,6 +46,7 @@
 //! docs/architecture/CAD_PLATFORM_PLAN.md Phase C).
 
 pub mod quantity;
+pub mod expr;
 pub mod feature_tree;
 pub mod sketch;
 pub mod feature;

@@ -1942,3 +1942,56 @@ impl Plugin for WorkshopPlugin {
         info!("WorkshopPlugin initialized — System 0: Ideation ready");
     }
 }
+
+#[cfg(test)]
+mod capability_guard_tests {
+    use super::*;
+
+    /// Every tool the ENGINE registers must carry a capability
+    /// classification, or it is advertised to callers and then refused
+    /// at dispatch.
+    ///
+    /// `eustress-tools` already has an equivalent guard, but it can
+    /// only see its own `register_all_tools` baseline — it is blind by
+    /// construction to the mode tools registered here. That blind spot
+    /// let all seventeen of them ship advertised-but-uncallable: the
+    /// tool appeared in the list, the model called it, and dispatch
+    /// answered "has no capability classification". This test closes
+    /// the gap on the side that actually owns the registrations.
+    #[test]
+    fn every_engine_registered_tool_is_classified() {
+        let mut registry = tools::ToolRegistry::default();
+        tools::register_all_tools(&mut registry);
+        registry.register(modes::manufacturing::NormalizeBriefTool);
+        registry.register(modes::manufacturing::QueryManufacturersTool);
+        registry.register(modes::manufacturing::QueryInvestorsTool);
+        registry.register(modes::manufacturing::AllocateProductTool);
+        registry.register(modes::simulation::ControlSimulationTool);
+        registry.register(modes::simulation::SetBreakpointTool);
+        registry.register(modes::simulation::ExportRecordingTool);
+        registry.register(modes::supply_chain::RunScenarioTool);
+        registry.register(modes::supply_chain::ForecastDemandTool);
+        registry.register(modes::supply_chain::ScoreSupplierRiskTool);
+        registry.register(modes::warehousing::InventoryCheckTool);
+        registry.register(modes::warehousing::StorageOptimizeTool);
+        registry.register(modes::finance::CalculateCostTool);
+        registry.register(modes::finance::EstimateTaxTool);
+        registry.register(modes::fabrication::SelectProcessTool);
+        registry.register(modes::shopping::PriceProductTool);
+        registry.register(modes::travel::EstimateShippingTool);
+
+        let unclassified: Vec<&str> = registry
+            .all_tools()
+            .into_iter()
+            .map(|d| d.name)
+            .filter(|name| eustress_tools::capability::capability_of(name).is_none())
+            .collect();
+
+        assert!(
+            unclassified.is_empty(),
+            "these tools are registered and advertised but have no capability \
+             classification, so every call is denied at dispatch: {unclassified:?}. \
+             Add them to capability_of() in tools/src/capability.rs."
+        );
+    }
+}

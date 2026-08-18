@@ -91,6 +91,17 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(cad_tools::CadAddFeatureTool);
     registry.register(cad_tools::CadEditFeatureTool);
     registry.register(cad_tools::CadDeleteFeatureTool);
+    // …and sketches, the layer that makes geometry POSITIONABLE.
+    // Without these a caller can extrude a profile someone else drew
+    // but cannot say where anything goes, which is why "a hole 20 mm
+    // from the edge" was previously inexpressible rather than merely
+    // hard. The constraint tools return the solver's verdict inline
+    // because a constraint's effect is global, not local to the edit.
+    registry.register(cad_tools::CadCreateSketchTool);
+    registry.register(cad_tools::CadAddSketchEntityTool);
+    registry.register(cad_tools::CadAddConstraintTool);
+    registry.register(cad_tools::CadDimensionTool);
+    registry.register(cad_tools::CadSolveSketchTool);
 
     // File I/O.
     registry.register(file_tools::ReadFileTool);

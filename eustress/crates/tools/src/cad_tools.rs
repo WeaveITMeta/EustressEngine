@@ -110,11 +110,47 @@ impl ToolHandler for CadCreatePartTool {
             .trim()
             .to_string();
 
-        let features = match template.as_str() {
-            "box" => eustress_cad::templates::BOX_TOML,
-            "cylinder" | "cyl" => eustress_cad::templates::CYLINDER_TOML,
-            _ => eustress_cad::templates::PLATE_TOML,
+        // Resolve against the SAME list `cad_list_templates` reads, so
+        // the two can never disagree again.
+        //
+        // This used to be a three-arm match with `_ => PLATE_TOML`,
+        // while `templates::all()` advertised seven. Asking for
+        // `l_bracket` produced a plate — and the response echoed the
+        // REQUESTED name back in both the message and `template`, so a
+        // caller was told it got the bracket it asked for. Four of the
+        // seven advertised templates were unreachable and silently
+        // substituted.
+        let canonical = match template.as_str() {
+            // Short forms kept working; each maps to a real entry.
+            "cyl" => "cylinder",
+            "hole" | "plate_with_hole" => "plate_hole",
+            "lbracket" | "bracket" => "l_bracket",
+            "frame" => "constrained_frame",
+            "shell" | "shelled" => "shelled_box",
+            other => other,
         };
+        let features = match eustress_cad::templates::all()
+            .iter()
+            .find(|(n, _)| *n == canonical)
+        {
+            Some((_, toml)) => *toml,
+            None => {
+                let known: Vec<&str> = eustress_cad::templates::all()
+                    .iter()
+                    .map(|(n, _)| *n)
+                    .collect();
+                return err(
+                    "cad_create_part",
+                    format!(
+                        "unknown template '{template}' — available: {}. \
+                         (Call cad_list_templates for each one's variables.)",
+                        known.join(", ")
+                    ),
+                );
+            }
+        };
+        // Report what was actually built, not what was requested.
+        let template = canonical.to_string();
 
         let rel = if parent.is_empty() {
             "Workspace".to_string()
@@ -600,6 +636,13 @@ fn entry_status_json(eval: &EvalOutput) -> Vec<serde_json::Value> {
                 "name": s.name,
                 "ok": s.ok,
                 "message": s.message,
+                // `ok` alone is not enough to trust a feature: a
+                // degraded one evaluated successfully but produced a
+                // body other than the one requested (a boolean failed
+                // and a fallback stood in). Reporting only `ok` here
+                // is what let a substituted body look identical to a
+                // correct one everywhere except cad_validate_part.
+                "degraded": s.degraded,
             })
         })
         .collect()
@@ -899,6 +942,31 @@ impl ToolHandler for CadValidatePartTool {
                 format!("{} feature(s) evaluated cleanly", eval.entry_status.len())
             } else {
                 failed.join("; ")
+            },
+        );
+
+        // A degraded feature evaluated successfully but produced a body
+        // other than the one requested — a boolean failed and a
+        // fallback stood in. It is a SEPARATE check from
+        // `all_features_ok` because it is a separate failure mode, and
+        // arguably the worse one: `ok: false` stops a caller, while a
+        // silent substitution lets it keep building on geometry it
+        // never asked for. Everything downstream then looks fine.
+        let degraded: Vec<String> = eval
+            .entry_status
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.degraded)
+            .map(|(i, s)| format!("feature[{i}] {}: {}", s.name, s.message))
+            .collect();
+        push_check(
+            &mut checks,
+            "no_degraded_features",
+            degraded.is_empty(),
+            if degraded.is_empty() {
+                "no feature fell back to a substitute body".to_string()
+            } else {
+                degraded.join("; ")
             },
         );
 
@@ -1506,10 +1574,10 @@ impl ToolHandler for CadAddFeatureTool {
                     "index": { "type": "integer", "description": "Insert position; appends when omitted" },
                     "sketch": { "type": "string", "description": "extrude/revolve: name of the sketch entry used as profile" },
                     "depth": { "type": "string", "description": "extrude/hole: unit string or variable name" },
-                    "end_condition": { "type": "string", "description": "blind | through_all | to_plane | to_surface | mid_plane | up_to_next" },
+                    "end_condition": { "type": "string", "description": "blind (fixed depth, honours both_sides) | mid_plane (half the depth each side of the sketch plane) | through_all (ignores depth and spans the whole current body). to_plane, to_surface and up_to_next are REJECTED: the feature carries no field naming the target to stop at, so they cannot be resolved." },
                     "combine": { "type": "string", "description": "new_body | add | subtract | intersect" },
                     "both_sides": { "type": "boolean" },
-                    "draft_angle": { "type": "string" },
+                    "draft_angle": { "type": "string", "description": "NOT IMPLEMENTED — only \"0 deg\" (the default) is accepted; any non-zero value is rejected rather than silently producing straight walls." },
                     "sketch_point": { "type": "string", "description": "hole: e.g. Sketch1/point-0" },
                     "diameter": { "type": "string", "description": "hole: unit string" },
                     "axis": { "type": "string" },
@@ -1919,6 +1987,679 @@ impl ToolHandler for CadDeleteFeatureTool {
                 )
             },
             data,
+        )
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Sketches and constraints — the layer everything else stands on.
+//
+// A feature tree without sketch authoring is a catalogue, not a CAD
+// system: you can extrude the profile someone else drew, but you
+// cannot say where anything goes. Every positioned feature in this
+// kernel resolves its location through a sketch, so until a caller can
+// create one, "a hole 20 mm from the edge" is inexpressible — not
+// approximated badly, simply unsayable.
+//
+// The constraint tools return the solver's verdict in the SAME
+// response as the edit. Constraint systems are globally coupled: one
+// added constraint can flip a sketch from well-constrained to
+// over-constrained, or converge it onto a mirrored solution. That is
+// not knowable from the edit alone, so a tool that returns a bare "ok"
+// hands back the one piece of information the caller cannot derive.
+// ════════════════════════════════════════════════════════════════════
+
+/// The 12 constraint kinds, with the arity the solver expects.
+/// Unary constraints act on one entity; binary ones relate two.
+const CONSTRAINT_KINDS: &[(&str, bool)] = &[
+    ("coincident", true),
+    ("concentric", true),
+    ("collinear", true),
+    ("parallel", true),
+    ("perpendicular", true),
+    ("tangent", true),
+    ("horizontal", false),
+    ("vertical", false),
+    ("equal_length", true),
+    ("equal_radius", true),
+    ("symmetric", true),
+    ("fix", false),
+];
+
+fn constraint_is_binary(kind: &str) -> Option<bool> {
+    CONSTRAINT_KINDS
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, binary)| *binary)
+}
+
+/// Locate a sketch entry by name, returning its tree index.
+fn find_sketch_index(tree: &FeatureTree, name: &str) -> Option<usize> {
+    tree.entries.iter().position(|e| {
+        let (kind, ename, _) = entry_kind(e);
+        kind == "sketch" && ename == name
+    })
+}
+
+/// Borrow the `Sketch` out of an entry at a known index.
+fn sketch_at_mut<'a>(
+    tree: &'a mut FeatureTree,
+    index: usize,
+) -> Option<&'a mut eustress_cad::Sketch> {
+    match tree.entries.get_mut(index)? {
+        eustress_cad::FeatureEntry::Sketch { body, .. } => Some(body),
+        _ => None,
+    }
+}
+
+/// Solve every sketch in the tree and report each one's status.
+///
+/// Returned by all the sketch tools so a caller always sees the
+/// consequence of what it just did.
+fn sketch_solve_report(tree: &FeatureTree) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for (i, entry) in tree.entries.iter().enumerate() {
+        let eustress_cad::FeatureEntry::Sketch { name, body } = entry else {
+            continue;
+        };
+        let mut row = serde_json::json!({
+            "index": i,
+            "name": name,
+            "plane": body.plane,
+            "entities": body.entities.len(),
+            "constraints": body.constraints.len(),
+            "dimensions": body.dimensions.len(),
+        });
+        match eustress_cad::solver::solve_sketch(body, &tree.variables) {
+            Ok(report) => {
+                row["status"] = format!("{:?}", report.status).into();
+                row["converged"] = report.converged.into();
+                row["residual"] = report.residual_norm.into();
+                row["iterations"] = report.iterations.into();
+                row["free_dof"] = report.free_dof.into();
+                // The whole point of surfacing DOF: a caller can tell
+                // "add another constraint" from "you have over-
+                // constrained this" without guessing from a status
+                // string.
+                row["advice"] = match report.free_dof {
+                    0 => "fully constrained".into(),
+                    n if n > 0 => format!(
+                        "{n} degree(s) of freedom remain — add constraints or dimensions to pin them"
+                    ),
+                    _ => "over-constrained — remove a conflicting constraint".to_string(),
+                }
+                .into();
+            }
+            Err(e) => {
+                row["status"] = "error".into();
+                row["error"] = e.to_string().into();
+            }
+        }
+        out.push(row);
+    }
+    out
+}
+
+/// Shared tail for the sketch tools: persist, re-evaluate, and fold in
+/// the solver verdict.
+fn commit_sketch_edit(
+    path: &std::path::Path,
+    tree: &FeatureTree,
+    tool: &str,
+    verb: &str,
+    before_volume: Option<f64>,
+) -> Result<serde_json::Value, ToolResult> {
+    let mut state = commit_tree(path, tree, tool, verb, before_volume)?;
+    state["sketches"] = serde_json::Value::Array(sketch_solve_report(tree));
+    Ok(state)
+}
+
+// ── cad_create_sketch ────────────────────────────────────────────────
+
+pub struct CadCreateSketchTool;
+
+impl ToolHandler for CadCreateSketchTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "cad_create_sketch",
+            description: "Add a named 2D sketch to a CadPart, on a base plane (xy | xz | yz) or a face reference. Sketches are how features get POSITIONED — a hole, for example, is drilled at the first point of the sketch it names, so a hole at a specific location needs its own sketch carrying that point. Returns the solver status and remaining degrees of freedom for every sketch in the part.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path":  { "type": "string", "description": "CadPart folder or features.toml, Space-relative" },
+                    "name":  { "type": "string", "description": "Sketch name, referenced by later features (e.g. HoleSketch)" },
+                    "plane": { "type": "string", "description": "xy | xz | yz, or a face reference like Extrude1/face-0", "default": "xy" },
+                    "index": { "type": "integer", "description": "Insert position; appends when omitted. A sketch must appear BEFORE the feature that names it." }
+                },
+                "required": ["path", "name"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &["workshop.tool.cad_create_sketch"],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        const TOOL: &str = "cad_create_sketch";
+        let path_s = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let name = input
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            return err(TOOL, "name required");
+        }
+        let plane = input
+            .get("plane")
+            .and_then(|v| v.as_str())
+            .unwrap_or("xy")
+            .trim()
+            .to_string();
+        // `resolve_plane` accepts only the three base planes. Face
+        // references are documented on the Sketch type but not
+        // implemented, and a sketch carrying one parses happily and
+        // then fails at evaluation with a message pointing at the
+        // feature rather than at the sketch that caused it. Reject it
+        // here, where the caller can still act on it.
+        if !matches!(plane.as_str(), "xy" | "xz" | "yz") {
+            return err(
+                TOOL,
+                format!(
+                    "plane '{plane}' is not supported — use xy, xz or yz. Sketching on a face \
+                     reference is described on the Sketch type but the evaluator does not \
+                     implement it yet, so such a sketch would parse and then fail to evaluate."
+                ),
+            );
+        }
+
+        let (path, mut tree, before_vol) = match load_tree_for_edit(ctx, path_s, TOOL) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        if entry_names(&tree).contains(&name) {
+            return err(TOOL, format!("an entry named '{name}' already exists in this tree"));
+        }
+
+        let entry = eustress_cad::FeatureEntry::Sketch {
+            name: name.clone(),
+            body: eustress_cad::Sketch {
+                plane: plane.clone(),
+                entities: Vec::new(),
+                dimensions: Vec::new(),
+                constraints: Vec::new(),
+            },
+        };
+        let at = match input.get("index").and_then(|v| v.as_u64()) {
+            Some(i) => (i as usize).min(tree.entries.len()),
+            None => tree.entries.len(),
+        };
+        tree.entries.insert(at, entry);
+
+        let state = match commit_sketch_edit(&path, &tree, TOOL, "create_sketch", before_vol) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        let mut data = serde_json::json!({
+            "ok": true,
+            "path": path.to_string_lossy(),
+            "created": { "name": name, "plane": plane, "index": at },
+            "entries": entry_names(&tree),
+            "next": "Add geometry with cad_add_sketch_entity; a hole needs a single point entity.",
+        });
+        merge_state(&mut data, state);
+        ok(
+            TOOL,
+            format!("Created sketch '{name}' on plane {plane} at index {at} (empty)"),
+            data,
+        )
+    }
+}
+
+// ── cad_add_sketch_entity ────────────────────────────────────────────
+
+pub struct CadAddSketchEntityTool;
+
+impl ToolHandler for CadAddSketchEntityTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "cad_add_sketch_entity",
+            description: "Add geometry to a sketch: point | line | circle | arc | rectangle | construction. Sketch coordinates are METRES in the sketch plane (a 100x60 mm plate centred on the origin spans -0.05..0.05 by -0.03..0.03). Returns the new entity's index — constraints and dimensions reference entities by index — plus the solver status for every sketch.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path":   { "type": "string", "description": "CadPart folder or features.toml, Space-relative" },
+                    "sketch": { "type": "string", "description": "Name of the sketch to add to" },
+                    "type":   { "type": "string", "description": "point | line | circle | arc | rectangle | construction" },
+                    "p":      { "type": "array", "items": { "type": "number" }, "description": "point: [x, y] in metres" },
+                    "p1":     { "type": "array", "items": { "type": "number" }, "description": "line/rectangle/construction: start or first corner [x, y]" },
+                    "p2":     { "type": "array", "items": { "type": "number" }, "description": "line/rectangle/construction: end or opposite corner [x, y]" },
+                    "center": { "type": "array", "items": { "type": "number" }, "description": "circle/arc: [x, y]" },
+                    "radius": { "type": "number", "description": "circle/arc: metres" },
+                    "start_angle": { "type": "number", "description": "arc: radians" },
+                    "sweep":  { "type": "number", "description": "arc: radians" }
+                },
+                "required": ["path", "sketch", "type"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &["workshop.tool.cad_add_sketch_entity"],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        const TOOL: &str = "cad_add_sketch_entity";
+        let path_s = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let sketch_name = input.get("sketch").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let ety = input
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if sketch_name.is_empty() {
+            return err(TOOL, "sketch required");
+        }
+
+        // Build the entity through the kernel's own serde derive so
+        // field names are validated by the code that will read it back.
+        let mut obj = serde_json::Map::new();
+        obj.insert("type".into(), serde_json::Value::String(ety.clone()));
+        for k in ["p", "p1", "p2", "center", "radius", "start_angle", "sweep"] {
+            if let Some(v) = input.get(k) {
+                obj.insert(k.to_string(), v.clone());
+            }
+        }
+        let entity: eustress_cad::SketchEntity =
+            match serde_json::from_value(serde_json::Value::Object(obj)) {
+                Ok(e) => e,
+                Err(e) => {
+                    return err(
+                        TOOL,
+                        format!(
+                            "entity type '{ety}': {e}. Expected one of point (p), line (p1,p2), \
+                             circle (center,radius), arc (center,radius,start_angle,sweep), \
+                             rectangle (p1,p2), construction (p1,p2)."
+                        ),
+                    )
+                }
+            };
+
+        let (path, mut tree, before_vol) = match load_tree_for_edit(ctx, path_s, TOOL) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let Some(si) = find_sketch_index(&tree, &sketch_name) else {
+            return err(
+                TOOL,
+                format!(
+                    "no sketch named '{sketch_name}' — sketches in this tree: [{}]",
+                    tree.entries
+                        .iter()
+                        .filter(|e| entry_kind(e).0 == "sketch")
+                        .map(|e| entry_kind(e).1)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        };
+        let entity_index = {
+            let Some(sk) = sketch_at_mut(&mut tree, si) else {
+                return err(TOOL, format!("entry {si} is not a sketch"));
+            };
+            sk.entities.push(entity);
+            sk.entities.len() - 1
+        };
+
+        let state = match commit_sketch_edit(&path, &tree, TOOL, "add_sketch_entity", before_vol) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        let mut data = serde_json::json!({
+            "ok": true,
+            "path": path.to_string_lossy(),
+            "sketch": sketch_name,
+            "added": { "type": ety, "entity_index": entity_index },
+        });
+        merge_state(&mut data, state);
+        ok(
+            TOOL,
+            format!("Added {ety} to sketch '{sketch_name}' as entity {entity_index}"),
+            data,
+        )
+    }
+}
+
+// ── cad_add_constraint ───────────────────────────────────────────────
+
+pub struct CadAddConstraintTool;
+
+impl ToolHandler for CadAddConstraintTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "cad_add_constraint",
+            description: "Add a geometric constraint between sketch entities: coincident | concentric | collinear | parallel | perpendicular | tangent | horizontal | vertical | equal_length | equal_radius | symmetric | fix. horizontal, vertical and fix take one entity; the rest take two. ALWAYS returns the post-solve status and remaining degrees of freedom, because a constraint's effect on a sketch is global and cannot be predicted from the edit alone.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path":   { "type": "string", "description": "CadPart folder or features.toml, Space-relative" },
+                    "sketch": { "type": "string", "description": "Name of the sketch" },
+                    "kind":   { "type": "string", "description": "Constraint kind (see description)" },
+                    "e1":     { "type": "integer", "description": "First entity index" },
+                    "e2":     { "type": "integer", "description": "Second entity index (binary constraints only)" }
+                },
+                "required": ["path", "sketch", "kind", "e1"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &["workshop.tool.cad_add_constraint"],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        const TOOL: &str = "cad_add_constraint";
+        let path_s = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let sketch_name = input.get("sketch").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let kind = input
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let Some(e1) = input.get("e1").and_then(|v| v.as_u64()).map(|v| v as usize) else {
+            return err(TOOL, "e1 required (entity index)");
+        };
+        let e2 = input.get("e2").and_then(|v| v.as_u64()).map(|v| v as usize);
+
+        let Some(is_binary) = constraint_is_binary(&kind) else {
+            return err(
+                TOOL,
+                format!(
+                    "unknown constraint kind '{kind}' — expected one of: {}",
+                    CONSTRAINT_KINDS.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(", ")
+                ),
+            );
+        };
+        if is_binary && e2.is_none() {
+            return err(TOOL, format!("constraint '{kind}' relates two entities — e2 is required"));
+        }
+        if !is_binary && e2.is_some() {
+            return err(
+                TOOL,
+                format!("constraint '{kind}' applies to a single entity — remove e2"),
+            );
+        }
+
+        let (path, mut tree, before_vol) = match load_tree_for_edit(ctx, path_s, TOOL) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let Some(si) = find_sketch_index(&tree, &sketch_name) else {
+            return err(TOOL, format!("no sketch named '{sketch_name}'"));
+        };
+
+        {
+            let Some(sk) = sketch_at_mut(&mut tree, si) else {
+                return err(TOOL, format!("entry {si} is not a sketch"));
+            };
+            let n = sk.entities.len();
+            // Out-of-range indices would be accepted by serde and then
+            // quietly ignored (or panic) inside the solver. Catch them
+            // where the caller can still act on the message.
+            for (label, ix) in [("e1", Some(e1)), ("e2", e2)] {
+                if let Some(ix) = ix {
+                    if ix >= n {
+                        return err(
+                            TOOL,
+                            format!(
+                                "{label} = {ix} is out of range — sketch '{sketch_name}' has {n} \
+                                 entities (valid indices 0..{})",
+                                n.saturating_sub(1)
+                            ),
+                        );
+                    }
+                }
+            }
+            let parsed_kind: eustress_cad::ConstraintKind =
+                match serde_json::from_value(serde_json::Value::String(kind.clone())) {
+                    Ok(k) => k,
+                    Err(e) => return err(TOOL, format!("constraint kind '{kind}': {e}")),
+                };
+            sk.constraints.push(eustress_cad::SketchConstraint { kind: parsed_kind, e1, e2 });
+        }
+
+        let state = match commit_sketch_edit(&path, &tree, TOOL, "add_constraint", before_vol) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        // Lift this sketch's verdict to the top of the response — it is
+        // the reason the caller invoked the tool.
+        let this = state["sketches"]
+            .as_array()
+            .and_then(|a| a.iter().find(|s| s["name"] == sketch_name.as_str()))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+
+        let mut data = serde_json::json!({
+            "ok": true,
+            "path": path.to_string_lossy(),
+            "sketch": sketch_name,
+            "added": { "kind": kind, "e1": e1, "e2": e2 },
+            "solve": this,
+        });
+        merge_state(&mut data, state);
+        let summary = if this.is_null() {
+            format!("Added {kind} constraint to '{sketch_name}'")
+        } else {
+            format!(
+                "Added {kind} to '{sketch_name}' — {}, {} dof remaining ({})",
+                this["status"].as_str().unwrap_or("?"),
+                this["free_dof"].as_i64().unwrap_or(-1),
+                this["advice"].as_str().unwrap_or("")
+            )
+        };
+        ok(TOOL, summary, data)
+    }
+}
+
+// ── cad_dimension ────────────────────────────────────────────────────
+
+pub struct CadDimensionTool;
+
+impl ToolHandler for CadDimensionTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "cad_dimension",
+            description: "Add a driving dimension to a sketch: linear (one entity) | radial (one entity) | angular (two entities). The value is a unit string (\"50 mm\"), a variable name (\"length\"), or an expression (\"length/2 - 10 mm\") — driving a dimension from a variable is what keeps a part parametric. Returns the post-solve status and remaining degrees of freedom.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path":   { "type": "string", "description": "CadPart folder or features.toml, Space-relative" },
+                    "sketch": { "type": "string", "description": "Name of the sketch" },
+                    "type":   { "type": "string", "description": "linear | radial | angular" },
+                    "e1":     { "type": "integer", "description": "First entity index" },
+                    "e2":     { "type": "integer", "description": "Second entity index (angular only)" },
+                    "value":  { "type": "string", "description": "Unit string, variable name, or expression. Never a bare number." }
+                },
+                "required": ["path", "sketch", "type", "e1", "value"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &["workshop.tool.cad_dimension"],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        const TOOL: &str = "cad_dimension";
+        let path_s = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let sketch_name = input.get("sketch").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let dty = input.get("type").and_then(|v| v.as_str()).unwrap_or("").trim().to_ascii_lowercase();
+        let Some(e1) = input.get("e1").and_then(|v| v.as_u64()).map(|v| v as usize) else {
+            return err(TOOL, "e1 required (entity index)");
+        };
+        let e2 = input.get("e2").and_then(|v| v.as_u64()).map(|v| v as usize);
+        let value = input.get("value").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if value.is_empty() {
+            return err(TOOL, "value required");
+        }
+        if !matches!(dty.as_str(), "linear" | "radial" | "angular") {
+            return err(TOOL, format!("unknown dimension type '{dty}' — expected linear, radial or angular"));
+        }
+        if dty == "angular" && e2.is_none() {
+            return err(TOOL, "angular dimensions relate two entities — e2 is required");
+        }
+
+        let (path, mut tree, before_vol) = match load_tree_for_edit(ctx, path_s, TOOL) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+
+        // Reject a value that cannot resolve, naming why. A dimension
+        // that silently fails to resolve leaves the sketch under-
+        // constrained with no indication which dimension was ignored.
+        if let Err(why) = eustress_cad::feature_tree::resolve_quantity_explained(&value, &tree.variables) {
+            return err(TOOL, format!("value '{value}' does not resolve: {why}"));
+        }
+
+        let Some(si) = find_sketch_index(&tree, &sketch_name) else {
+            return err(TOOL, format!("no sketch named '{sketch_name}'"));
+        };
+        {
+            let Some(sk) = sketch_at_mut(&mut tree, si) else {
+                return err(TOOL, format!("entry {si} is not a sketch"));
+            };
+            let n = sk.entities.len();
+            for (label, ix) in [("e1", Some(e1)), ("e2", e2)] {
+                if let Some(ix) = ix {
+                    if ix >= n {
+                        return err(
+                            TOOL,
+                            format!("{label} = {ix} is out of range — sketch has {n} entities"),
+                        );
+                    }
+                }
+            }
+            let mut obj = serde_json::Map::new();
+            obj.insert("type".into(), serde_json::Value::String(dty.clone()));
+            obj.insert("e1".into(), serde_json::Value::from(e1));
+            if let Some(e2) = e2 {
+                obj.insert("e2".into(), serde_json::Value::from(e2));
+            }
+            obj.insert("value".into(), serde_json::Value::String(value.clone()));
+            let dim: eustress_cad::SketchDimension =
+                match serde_json::from_value(serde_json::Value::Object(obj)) {
+                    Ok(d) => d,
+                    Err(e) => return err(TOOL, format!("dimension '{dty}': {e}")),
+                };
+            sk.dimensions.push(dim);
+        }
+
+        let state = match commit_sketch_edit(&path, &tree, TOOL, "dimension", before_vol) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        let this = state["sketches"]
+            .as_array()
+            .and_then(|a| a.iter().find(|s| s["name"] == sketch_name.as_str()))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let mut data = serde_json::json!({
+            "ok": true,
+            "path": path.to_string_lossy(),
+            "sketch": sketch_name,
+            "added": { "type": dty, "e1": e1, "e2": e2, "value": value },
+            "solve": this,
+        });
+        merge_state(&mut data, state);
+        let summary = format!(
+            "Added {dty} dimension {value} to '{sketch_name}' — {}, {} dof remaining",
+            this["status"].as_str().unwrap_or("?"),
+            this["free_dof"].as_i64().unwrap_or(-1)
+        );
+        ok(TOOL, summary, data)
+    }
+}
+
+// ── cad_solve_sketch ─────────────────────────────────────────────────
+
+pub struct CadSolveSketchTool;
+
+impl ToolHandler for CadSolveSketchTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "cad_solve_sketch",
+            description: "Run the 2D constraint solver over a CadPart's sketches and report the full result for each: converged or not, status (well/under/over-constrained), residual, iteration count, and remaining degrees of freedom. Read-only — reports without modifying the part.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path":   { "type": "string", "description": "CadPart folder or features.toml, Space-relative" },
+                    "sketch": { "type": "string", "description": "Limit to one sketch by name; all sketches when omitted" }
+                },
+                "required": ["path"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &["workshop.tool.cad_solve_sketch"],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        const TOOL: &str = "cad_solve_sketch";
+        let path_s = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let only = input.get("sketch").and_then(|v| v.as_str()).map(|s| s.trim().to_string());
+
+        let (path, src) = match read_features(ctx, path_s, TOOL) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let tree = match eustress_cad::parse_tree(&src) {
+            Ok(t) => t,
+            Err(e) => return err(TOOL, format!("parse {}: {e}", path.display())),
+        };
+
+        let mut reports = sketch_solve_report(&tree);
+        if let Some(ref want) = only {
+            reports.retain(|r| r["name"] == want.as_str());
+            if reports.is_empty() {
+                return err(TOOL, format!("no sketch named '{want}' in {}", path.display()));
+            }
+        }
+
+        let unconstrained: Vec<String> = reports
+            .iter()
+            .filter(|r| r["free_dof"].as_i64().unwrap_or(0) != 0)
+            .map(|r| {
+                format!(
+                    "{} ({} dof)",
+                    r["name"].as_str().unwrap_or("?"),
+                    r["free_dof"].as_i64().unwrap_or(0)
+                )
+            })
+            .collect();
+
+        let summary = if reports.is_empty() {
+            "no sketches in this part".to_string()
+        } else if unconstrained.is_empty() {
+            format!("{} sketch(es), all fully constrained", reports.len())
+        } else {
+            format!(
+                "{} sketch(es); not fully constrained: {}",
+                reports.len(),
+                unconstrained.join(", ")
+            )
+        };
+
+        ok(
+            TOOL,
+            summary,
+            serde_json::json!({
+                "ok": true,
+                "path": path.to_string_lossy(),
+                "sketches": reports,
+                "fully_constrained": unconstrained.is_empty(),
+            }),
         )
     }
 }

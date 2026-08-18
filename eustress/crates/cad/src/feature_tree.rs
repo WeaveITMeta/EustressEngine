@@ -177,5 +177,29 @@ fn resolve_quantity_depth(s: &str, vars: &HashMap<String, String>, depth: u8) ->
     if let Some(var_expr) = vars.get(s) {
         return resolve_quantity_depth(var_expr, vars, depth + 1);
     }
-    None
+    // Last: arithmetic expression ("length/2 - 10 mm").
+    //
+    // Deliberately the LAST branch. A literal and a bare variable name
+    // are both resolved above by the paths that always resolved them,
+    // so no value that worked before can change meaning here — only
+    // strings that were previously unresolvable reach this point.
+    crate::expr::eval(s, vars).ok()
+}
+
+/// Resolve a value, returning WHY it failed instead of `None`.
+///
+/// `resolve_quantity` returns an `Option` because most call sites sit
+/// deep in geometry code that has no way to surface a message. The
+/// authoring surface does, and "unknown variable 'heigth' — declared
+/// variables are: height, length, width" is worth far more to whoever
+/// wrote it than a bare failure.
+pub fn resolve_quantity_explained(
+    s: &str,
+    vars: &HashMap<String, String>,
+) -> Result<Quantity, String> {
+    if let Some(q) = Quantity::parse(s) { return Ok(q); }
+    if let Some(var_expr) = vars.get(s) {
+        return resolve_quantity_explained(var_expr, vars);
+    }
+    crate::expr::eval(s, vars)
 }

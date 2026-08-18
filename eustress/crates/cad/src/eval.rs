@@ -67,6 +67,17 @@ pub struct EntryStatus {
     pub name: String,
     pub ok: bool,
     pub message: String,
+    /// The feature produced a body, but not the one that was asked
+    /// for — a boolean failed and a fallback stood in for it.
+    ///
+    /// Distinct from `ok: false` on purpose. `ok: false` means the
+    /// feature did not evaluate; `degraded` means it evaluated to
+    /// something the author did not request. The second is the more
+    /// dangerous of the two, because everything downstream keeps
+    /// working on a silently wrong body. Callers that only check `ok`
+    /// see nothing wrong, which is exactly how a pattern of four
+    /// holes could report success while cutting none.
+    pub degraded: bool,
 }
 
 /// Tolerance ladder for normalized boolean ops. Values are relative
@@ -221,7 +232,20 @@ fn sweep_profile_along_path(profile: &Sketch, path: &Sketch) -> CadResult<Solid>
             reason: "all path segments had zero length".into(),
         });
     }
-    Ok(union_many(&parts).unwrap_or_else(|| parts[0].clone()))
+    let n = parts.len();
+    // Returning `parts[0]` on failure turned "sweep along my 4-segment
+    // path" into a single straight bar the length of segment 1, with
+    // ok: true and a watertight, manifold, positive-volume result that
+    // passed every validity check. A sweep that cannot join its
+    // segments has not swept.
+    union_many(&parts).ok_or_else(|| CadError::EvalFailed {
+        feature: "Sweep".into(),
+        reason: format!(
+            "could not join the {n} path segments into one solid — consecutive segments must \
+             overlap for the kernel to union them; a path with sharp corners or collinear \
+             duplicate points can leave them disjoint"
+        ),
+    })
 }
 
 fn path_polyline_points(path: &Sketch) -> CadResult<Vec<Point3>> {
@@ -296,6 +320,11 @@ fn solid_z_range(s: &Solid) -> (f64, f64) {
 pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
     let mut body: Option<Solid> = None;
     let mut feature_outputs: HashMap<String, Solid> = HashMap::new();
+    // Cutting features record the operand they cut WITH, separately
+    // from the result they produced. Only a subtractive Pattern reads
+    // this, but recording it is what makes "four of this hole"
+    // expressible at all.
+    let mut feature_tools: HashMap<String, Solid> = HashMap::new();
     let mut entry_status = Vec::with_capacity(tree.entries.len());
     // Max fillet/chamfer radius seen — drives mesh crease soften after tessellate.
     let mut mesh_round_radius: f64 = 0.0;
@@ -309,6 +338,7 @@ pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
                 name: entry.name().to_string(),
                 ok: true,
                 message: "(suppressed)".to_string(),
+                degraded: false,
             });
             continue;
         }
@@ -332,6 +362,7 @@ pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
                                 name: name.clone(),
                                 ok: report.converged || report.residual_norm < 1e-3,
                                 message: msg,
+                                degraded: false,
                             });
                         }
                         Err(e) => {
@@ -340,6 +371,7 @@ pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
                                 name: name.clone(),
                                 ok: false,
                                 message: format!("solver: {e}"),
+                                degraded: false,
                             });
                         }
                     }
@@ -349,6 +381,7 @@ pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
                         name: name.clone(),
                         ok: true,
                         message: "sketch loaded".to_string(),
+                        degraded: false,
                     });
                 }
             }
@@ -363,10 +396,16 @@ pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
                     &sketch_refs,
                     body.as_ref(),
                     &feature_outputs,
+                    &feature_tools,
                     &tree.variables,
                 ) {
-                    Ok(FeatureEvalResult::ReplacedBody { body: new_body, note, mesh_round }) => {
+                    Ok(FeatureEvalResult::ReplacedBody {
+                        body: new_body, note, mesh_round, tool_body, degraded,
+                    }) => {
                         feature_outputs.insert(name.clone(), new_body.clone());
+                        if let Some(t) = tool_body {
+                            feature_tools.insert(name.clone(), t);
+                        }
                         body = Some(new_body);
                         if let Some(r) = mesh_round {
                             mesh_round_radius = mesh_round_radius.max(r);
@@ -375,18 +414,21 @@ pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
                             name: name.clone(),
                             ok: true,
                             message: note.unwrap_or_else(|| "ok".to_string()),
+                            degraded: degraded.is_some(),
                         });
                     }
                     Ok(FeatureEvalResult::NoBodyChange) => {
                         entry_status.push(EntryStatus {
                             name: name.clone(), ok: true,
                             message: "reference-only (no body change)".to_string(),
+                            degraded: false,
                         });
                     }
                     Err(e) => {
                         entry_status.push(EntryStatus {
                             name: name.clone(), ok: false,
                             message: e.to_string(),
+                            degraded: false,
                         });
                     }
                 }
@@ -421,6 +463,18 @@ enum FeatureEvalResult {
         note: Option<String>,
         /// When set, max crease-soften radius for post-tessellation.
         mesh_round: Option<f64>,
+        /// The operand this feature cut/intersected WITH, kept
+        /// separately from the result.
+        ///
+        /// A Hole's result is the plate-with-a-hole; its tool is the
+        /// cylinder that made the hole. Patterning the result is
+        /// meaningless (unioning offset copies of an already-drilled
+        /// plate), while patterning the TOOL is exactly what "four of
+        /// these holes" means. Nothing could express that before,
+        /// because only the result was recorded.
+        tool_body: Option<Solid>,
+        /// Set when a boolean failed and a fallback body stood in.
+        degraded: Option<String>,
     },
     NoBodyChange,
 }
@@ -431,6 +485,8 @@ impl FeatureEvalResult {
             body,
             note: None,
             mesh_round: None,
+            tool_body: None,
+            degraded: None,
         }
     }
 }
@@ -440,15 +496,76 @@ fn evaluate_feature_into_body(
     sketches: &HashMap<String, &Sketch>,
     current: Option<&Solid>,
     prior_outputs: &HashMap<String, Solid>,
+    prior_tools: &HashMap<String, Solid>,
     vars: &HashMap<String, String>,
 ) -> CadResult<FeatureEvalResult> {
     use Feature::*;
     match feature {
-        Extrude { sketch, depth, combine, both_sides, .. } => {
+        Extrude { sketch, depth, combine, both_sides, end_condition, draft_angle } => {
             let sk = sketches.get(sketch).copied()
                 .ok_or_else(|| CadError::SketchNotFound(sketch.clone()))?;
-            let depth_m = resolve_length_meters(depth, vars)?;
-            let new_body = extrude_sketch(sk, depth_m, *both_sides)?;
+
+            // `draft_angle` has never been applied. Defaulting to
+            // "0 deg" means the overwhelmingly common case is a true
+            // no-op and stays silent, but a non-zero value must not be
+            // accepted and ignored: the user would read their own
+            // draft back out of the file and conclude the straight
+            // walls they can see are what they asked for.
+            let draft = resolve_angle_radians(draft_angle, vars).unwrap_or(0.0);
+            if draft.abs() > 1.0e-9 {
+                return Err(CadError::NotImplemented(format!(
+                    "Extrude draft_angle ({draft_angle}) is not implemented — a tapered sweep \
+                     needs a lofted side surface the kernel does not build yet. Remove the \
+                     draft_angle (or set it to \"0 deg\") to extrude with straight walls."
+                )));
+            }
+
+            use crate::EndCondition::*;
+            let new_body = match end_condition {
+                // Blind honours `both_sides`; MidPlane IS both_sides,
+                // expressed as an end condition. The machinery already
+                // existed and simply was not wired to the field.
+                Blind => extrude_sketch(sk, resolve_length_meters(depth, vars)?, *both_sides)?,
+                MidPlane => extrude_sketch(sk, resolve_length_meters(depth, vars)?, true)?,
+
+                // ThroughAll means depth stops mattering: span the
+                // running body completely. Same construction the Hole
+                // arm uses for a through-cut — start below the lowest
+                // point (or the sketch plane, whichever is lower) and
+                // finish above the highest, with an overcut at each end
+                // so the faces are never flush. Coplanar operands
+                // degenerate shapeops booleans.
+                ThroughAll => {
+                    let Some(cur) = current else {
+                        return Err(CadError::EvalFailed {
+                            feature: "Extrude".into(),
+                            reason: "end_condition = \"through_all\" needs an existing body to \
+                                     pass through; this is the first feature in the tree"
+                                .into(),
+                        });
+                    };
+                    let (z_min, z_max) = solid_z_range(cur);
+                    let span = (z_max - z_min).abs().max(1.0e-4);
+                    let overcut = (span * 0.05).max(1.0e-4);
+                    let start = z_min.min(0.0) - overcut;
+                    let length = (z_max - z_min.min(0.0)) + 2.0 * overcut;
+                    extrude_sketch_span(sk, start, length)?
+                }
+
+                // These three name a TARGET (a plane, a face, the next
+                // body) and the variant carries no field to name it —
+                // there is nothing to resolve against. Extruding Blind
+                // instead produced a wrong-but-plausible body; say so
+                // rather than guess.
+                other @ (ToPlane | ToSurface | UpToNext) => {
+                    return Err(CadError::NotImplemented(format!(
+                        "Extrude end_condition = {other:?} is not implemented: the Extrude \
+                         variant has no field naming the target plane/surface to stop at, so it \
+                         cannot be resolved. Use \"blind\" with an explicit depth, or \
+                         \"through_all\" to pass entirely through the current body."
+                    )));
+                }
+            };
             finish_combine(current, new_body, *combine)
         }
         Revolve { sketch, axis, angle, combine } => {
@@ -462,10 +579,53 @@ fn evaluate_feature_into_body(
         Hole {
             sketch_point, diameter, depth,
             counterbore_diameter, counterbore_depth,
-            countersink_diameter, countersink_angle: _,
-            tap_class: _,
+            countersink_diameter, countersink_angle,
+            tap_class,
         } => {
-            let (sk_name, _point_ix) = parse_sketch_ref(sketch_point)?;
+            // `tap_class` reaches no code — a tapped hole comes out as
+            // a plain bore, so a part specified M6 would be machined
+            // wrong from geometry that looked right.
+            if let Some(tc) = tap_class {
+                return Err(CadError::NotImplemented(format!(
+                    "Hole tap_class ({tc}) is not implemented — no thread geometry or \
+                     tap-drill sizing is applied, so the result is a plain bore at the \
+                     stated diameter. Remove tap_class and set `diameter` to the tap-drill \
+                     size you want."
+                )));
+            }
+            // `countersink_angle` is likewise discarded: the sink is cut
+            // as a straight cylinder at a hard-coded depth, so an
+            // authored angle would be silently ignored.
+            if countersink_angle.is_some() {
+                return Err(CadError::NotImplemented(
+                    "Hole countersink_angle is not implemented — the countersink is cut as a \
+                     straight counterbore, not a cone, so the angle cannot be honoured."
+                        .into(),
+                ));
+            }
+            // Counterbore needs BOTH fields; supplying one silently
+            // dropped the whole feature.
+            match (counterbore_diameter.is_some(), counterbore_depth.is_some()) {
+                (true, false) => {
+                    return Err(CadError::EvalFailed {
+                        feature: "Hole".into(),
+                        reason: "counterbore_diameter was given without counterbore_depth — \
+                                 both are required, and supplying one alone silently produced \
+                                 a plain hole"
+                            .into(),
+                    })
+                }
+                (false, true) => {
+                    return Err(CadError::EvalFailed {
+                        feature: "Hole".into(),
+                        reason: "counterbore_depth was given without counterbore_diameter — \
+                                 both are required"
+                            .into(),
+                    })
+                }
+                _ => {}
+            }
+            let (sk_name, point_ix) = parse_sketch_ref(sketch_point)?;
             let sk = sketches.get(&sk_name).copied()
                 .ok_or_else(|| CadError::SketchNotFound(sk_name.clone()))?;
             // v0: treat the named sketch-point as a circle center in
@@ -473,7 +633,7 @@ fn evaluate_feature_into_body(
             // `Point` entity. If the user wants a non-origin hole,
             // they place the sketch on the target face + dimension the
             // point.
-            let point = first_sketch_point(sk).unwrap_or([0.0, 0.0]);
+            let point = sketch_point_by_spec(sk, &point_ix)?;
             let radius = resolve_length_meters(diameter, vars)? * 0.5;
             let depth_m = resolve_length_meters(depth, vars)?;
 
@@ -530,15 +690,24 @@ fn evaluate_feature_into_body(
             let reflected = mirror_bodies(plane, features, current, prior_outputs)?;
             finish_combine(current, reflected, *combine)
         }
-        Pattern { kind, features, count, spacing, direction, axis, angle } => {
-            let source = resolve_pattern_source(features, current, prior_outputs)?;
-            // Pattern doesn't carry its own combine mode — instances
-            // always union with the running body (same behaviour as a
-            // sequence of identical Add features). When the user
-            // wants Subtract/Intersect semantics they should mark
-            // the *source* feature as such, not the Pattern.
-            let combine = crate::FeatureOp::Add;
-            let combined = match kind {
+        Pattern { kind, features, count, spacing, direction, axis, angle, combine } => {
+            let combine = *combine;
+            // A subtractive pattern replicates the source feature's
+            // TOOL, not its result. Patterning a Hole's result would
+            // mean stamping copies of an already-drilled plate; what
+            // "four of this hole" means is four of the cylinder that
+            // drilled it. Additive patterns still replicate the
+            // output body, which is what they always did.
+            let want_tool = matches!(
+                combine,
+                crate::FeatureOp::Subtract | crate::FeatureOp::Intersect
+            );
+            let source = if want_tool {
+                resolve_pattern_tool(features, prior_tools, prior_outputs, current)?
+            } else {
+                resolve_pattern_source(features, current, prior_outputs)?
+            };
+            let instances = match kind {
                 crate::PatternKind::Linear => {
                     let dir = direction.unwrap_or([1.0, 0.0, 0.0]);
                     let step = match spacing {
@@ -549,7 +718,7 @@ fn evaluate_feature_into_body(
                 }
                 crate::PatternKind::Circular => {
                     let axis_ref = axis.as_deref().unwrap_or("y");
-                    let (origin, axis_dir) = resolve_world_axis(axis_ref);
+                    let (origin, axis_dir) = resolve_world_axis(axis_ref)?;
                     let total = match angle {
                         Some(a) => resolve_angle_radians(a, vars)?,
                         None    => TAU,
@@ -567,7 +736,76 @@ fn evaluate_feature_into_body(
                     ));
                 }
             };
-            finish_combine(current, combined, combine)
+
+            // Fold the instances in one at a time rather than unioning
+            // them first. Each of these booleans meets the running
+            // body, so each has the intersection curves shapeops needs;
+            // a pre-union of the (disjoint) instances has none and
+            // always fails. Failures are counted rather than swallowed
+            // so "I asked for 4 and got 2" is visible.
+            let Some(cur0) = current else {
+                return Err(CadError::EvalFailed {
+                    feature: "Pattern".into(),
+                    reason: "no running body to pattern onto".into(),
+                });
+            };
+            let mut running = cur0.clone();
+            let mut applied = 0usize;
+            let mut failed = 0usize;
+            // `instances[0]` is the seed at identity. Its effect is
+            // ALREADY in the running body — the source feature applied
+            // it — so re-applying it is redundant, and for a subtract
+            // it fails outright because the void is already there.
+            // Counting that as a failure would flag every correct
+            // pattern as degraded. `count` includes the seed, matching
+            // the convention in every mainstream CAD package, so the
+            // work is instances 1..count.
+            for inst in instances.iter().skip(1) {
+                let attempt = match combine {
+                    crate::FeatureOp::Subtract => boolean_not(&running, inst),
+                    crate::FeatureOp::Intersect => boolean_and(&running, inst),
+                    _ => boolean_or(&running, inst),
+                };
+                match attempt {
+                    Some(next) => {
+                        running = next;
+                        applied += 1;
+                    }
+                    None => failed += 1,
+                }
+            }
+            let expected = instances.len().saturating_sub(1);
+            if expected > 0 && applied == 0 {
+                return Err(CadError::EvalFailed {
+                    feature: "Pattern".into(),
+                    reason: format!(
+                        "all {expected} patterned instances failed to combine — the pattern \
+                         source and the body may not intersect, or shapeops rejected the operands"
+                    ),
+                });
+            }
+            let note = if failed > 0 {
+                Some(format!(
+                    "{applied} of {expected} patterned instances applied ({failed} failed); \
+                     seed already present"
+                ))
+            } else {
+                Some(format!(
+                    "{} total ({applied} patterned + 1 seed)",
+                    applied + 1
+                ))
+            };
+            Ok(FeatureEvalResult::ReplacedBody {
+                body: running,
+                note,
+                mesh_round: None,
+                tool_body: None,
+                degraded: if failed > 0 {
+                    Some(format!("{failed} pattern instance(s) failed to combine"))
+                } else {
+                    None
+                },
+            })
         }
         Boolean { target, boolean_op } => {
             let Some(target_body) = prior_outputs.get(target) else {
@@ -609,7 +847,20 @@ fn evaluate_feature_into_body(
             ))?;
             Ok(FeatureEvalResult::body(remaining))
         }
-        Fillet { edges, radius, .. } => {
+        Fillet { edges, radius, propagate_tangent } => {
+            // `propagate_tangent` reaches no code — the soften is
+            // applied to every crease in the part regardless. Accepting
+            // an explicit `false` would tell the user they had narrowed
+            // the fillet when they had not. Default is `true`, so only
+            // a deliberate override is refused.
+            if !*propagate_tangent {
+                return Err(CadError::NotImplemented(
+                    "Fillet propagate_tangent = false is not implemented — the interim \
+                     mesh-crease soften has no per-edge selection, so tangent propagation \
+                     cannot be disabled. Remove the field to accept the default."
+                        .into(),
+                ));
+            }
             // truck-shapeops has no stable BRep fillet. Keep the solid
             // topology intact and flag a post-tessellation mesh crease
             // soften so edges round in the viewport / GLB. True BRep
@@ -628,9 +879,23 @@ fn evaluate_feature_into_body(
                     "mesh-edge fillet r={r:.4}m ({n_edges} edge refs) — BRep pending"
                 )),
                 mesh_round: Some(r),
+                tool_body: None,
+                degraded: None,
             })
         }
-        Chamfer { edges, distance, .. } => {
+        Chamfer { edges, distance, distance2, angle } => {
+            // Neither field reaches any code — the soften is symmetric
+            // and radius-only. An asymmetric or angled chamfer that
+            // silently came out symmetric is exactly the kind of
+            // wrong-but-plausible result this surface exists to stop.
+            if distance2.is_some() || angle.is_some() {
+                return Err(CadError::NotImplemented(
+                    "Chamfer distance2 / angle are not implemented — the interim mesh-crease \
+                     soften produces a symmetric rounding from `distance` alone. Remove them \
+                     to accept a symmetric chamfer."
+                        .into(),
+                ));
+            }
             let d = resolve_length_meters(distance, vars)?;
             let Some(cur) = current else {
                 return Err(CadError::EvalFailed {
@@ -647,6 +912,8 @@ fn evaluate_feature_into_body(
                     "mesh-edge chamfer d={d:.4}m ({n_edges} edge refs) — BRep pending"
                 )),
                 mesh_round: Some(d),
+                tool_body: None,
+                degraded: None,
             })
         }
         Shell { wall_thickness, open_faces: _ } => {
@@ -703,6 +970,8 @@ fn evaluate_feature_into_body(
                     "open-top shell t={t:.4}m (per-face open_faces pending)"
                 )),
                 mesh_round: None,
+                tool_body: None,
+                degraded: None,
             })
         }
         Sweep { profile, path, combine } => {
@@ -729,22 +998,28 @@ fn evaluate_feature_into_body(
 // Extrude — supports Rectangle / Circle / closed-polyline profiles
 // ============================================================================
 
-fn extrude_sketch(sk: &Sketch, depth_m: f64, both_sides: bool) -> CadResult<Solid> {
+/// Extrude a profile over an explicit z span.
+///
+/// `extrude_sketch` covers the two symmetric cases; `ThroughAll` needs
+/// to start below the running body and finish above it, which neither
+/// a depth nor a both_sides flag can express.
+fn extrude_sketch_span(sk: &Sketch, start_z: f64, length: f64) -> CadResult<Solid> {
+    if length.abs() < 1.0e-12 {
+        return Err(CadError::EvalFailed {
+            feature: "Extrude".into(),
+            reason: "zero-length extrusion produces no solid".into(),
+        });
+    }
     let face = build_planar_face(sk)?;
-    let vec = Vector3::new(0.0, 0.0, if both_sides { depth_m } else { depth_m });
-    // both_sides: translate the face down by half first, then sweep full depth.
-    // Simpler: produce a solid centered on the sketch plane by building from the
-    // negative half-face.
-    let (face_use, vec_use) = if both_sides {
-        let half = depth_m * 0.5;
-        (
-            builder::translated(&face, Vector3::new(0.0, 0.0, -half)),
-            Vector3::new(0.0, 0.0, depth_m),
-        )
-    } else {
-        (face, vec)
-    };
-    Ok(builder::tsweep(&face_use, vec_use))
+    let face_use = builder::translated(&face, Vector3::new(0.0, 0.0, start_z));
+    Ok(builder::tsweep(&face_use, Vector3::new(0.0, 0.0, length)))
+}
+
+fn extrude_sketch(sk: &Sketch, depth_m: f64, both_sides: bool) -> CadResult<Solid> {
+    // both_sides centres the solid on the sketch plane: start half a
+    // depth below and sweep the full depth.
+    let start_z = if both_sides { -depth_m * 0.5 } else { 0.0 };
+    extrude_sketch_span(sk, start_z, depth_m)
 }
 
 fn extrude_circle(center: [f64; 2], radius: f64, depth_m: f64, both_sides: bool) -> CadResult<Solid> {
@@ -908,9 +1183,21 @@ fn mirror_bodies(
         // Union the listed features' output bodies, then mirror the union.
         let mut bodies: Vec<Solid> = Vec::new();
         for name in features {
-            if let Some(b) = prior_outputs.get(name) {
-                bodies.push(b.clone());
-            }
+            // Silently skipping an unmatched name mirrored a smaller
+            // set than asked for, with no indication which name missed.
+            let Some(b) = prior_outputs.get(name) else {
+                let mut known: Vec<&str> = prior_outputs.keys().map(|s| s.as_str()).collect();
+                known.sort_unstable();
+                return Err(CadError::EvalFailed {
+                    feature: "Mirror".into(),
+                    reason: format!(
+                        "feature '{name}' not found — features that have produced a body so \
+                         far: [{}]. A mirrored feature must appear EARLIER in the tree.",
+                        known.join(", ")
+                    ),
+                });
+            };
+            bodies.push(b.clone());
         }
         if bodies.is_empty() {
             return Err(CadError::EvalFailed {
@@ -927,7 +1214,24 @@ fn mirror_bodies(
     // truck's `builder::transformed` takes a 4x4 matrix. Compose a
     // reflection matrix.
     let mat = reflection_matrix(origin, normal);
-    Ok(builder::transformed(&source, mat))
+    let mut out = builder::transformed(&source, mat);
+    // A reflection has determinant -1, and `builder::transformed` maps
+    // geometry while PRESERVING every face's orientation flag. For an
+    // orthogonal R with det < 0, (R·a)x(R·b) = -R·(a×b): every surface
+    // normal is negated while the topology still claims the old
+    // winding, so the result is a negative-volume solid. It renders
+    // backface-culled, its collider normals point inward, and
+    // `cad_validate_part` fails `positive_volume`. Worse, shapeops
+    // classifies faces by orientation and `boolean_not` inverts its
+    // second operand, so feeding it an already-inverted body computed
+    // an INTERSECTION instead of a difference.
+    //
+    // Translation and rotation (Pattern) keep det = +1 and are
+    // unaffected, which is why only Mirror needs this.
+    if mat.determinant() < 0.0 {
+        out.not();
+    }
+    Ok(out)
 }
 
 // ============================================================================
@@ -947,18 +1251,111 @@ fn resolve_pattern_source(
     } else {
         let mut bodies: Vec<Solid> = Vec::new();
         for name in features {
-            if let Some(b) = prior_outputs.get(name) {
-                bodies.push(b.clone());
-            }
+            // A name that matches nothing used to be skipped in
+            // silence, so a typo shrank the pattern source without a
+            // word — and if EVERY name was a typo the error blamed the
+            // features for "producing no bodies" rather than saying
+            // they did not exist.
+            let Some(b) = prior_outputs.get(name) else {
+                let mut known: Vec<&str> = prior_outputs.keys().map(|s| s.as_str()).collect();
+                known.sort_unstable();
+                return Err(CadError::EvalFailed {
+                    feature: "Pattern".into(),
+                    reason: format!(
+                        "pattern source feature '{name}' not found — features that have \
+                         produced a body so far: [{}]. Note a feature must appear EARLIER in \
+                         the tree than the pattern that references it.",
+                        known.join(", ")
+                    ),
+                });
+            };
+            bodies.push(b.clone());
         }
         union_many(&bodies).ok_or_else(|| CadError::EvalFailed {
             feature: "Pattern".into(),
-            reason: "referenced features produced no bodies".into(),
+            reason: format!(
+                "could not union the {} referenced source bodies — they are probably \
+                 disjoint, which truck-shapeops cannot union",
+                bodies.len()
+            ),
         })
     }
 }
 
-fn pattern_linear(source: &Solid, dir: [f64; 3], step: f64, count: u32) -> Solid {
+/// The pattern INSTANCES, deliberately not unioned.
+///
+/// Pre-unioning them was the bug that made "pattern this hole four
+/// times" a silent no-op. Pattern copies are normally disjoint, and
+/// truck-shapeops returns `None` for a union of disjoint solids —
+/// there are no intersection curves to work with, the same reason the
+/// enclosed-cavity Shell could never succeed. `union_many` swallowed
+/// that failure and returned just the first body, so the caller
+/// received one un-translated copy and combined it with the running
+/// body it was already identical to. Zero change, no error.
+///
+/// Returning the instances lets the caller fold them into the running
+/// body one at a time. Each of those booleans has real intersection
+/// curves (each cutter genuinely meets the part), so they can actually
+/// succeed.
+/// The TOOL body of the referenced features — the operand they cut
+/// with — for a subtractive or intersecting pattern.
+///
+/// Falls back to the output body with a clear error rather than
+/// silently patterning the wrong thing: a feature that never cut
+/// anything (a plain Extrude) has no tool, and patterning its result
+/// subtractively would carve the part away instead of replicating a
+/// cut.
+fn resolve_pattern_tool(
+    features: &[String],
+    prior_tools: &HashMap<String, Solid>,
+    prior_outputs: &HashMap<String, Solid>,
+    current: Option<&Solid>,
+) -> CadResult<Solid> {
+    if features.is_empty() {
+        // Falling back to `current` here made the ENTIRE PART the
+        // cutting tool: the pattern carved the body with translated
+        // copies of itself, which is never what anyone means by
+        // "pattern this cut". A subtractive pattern has to name the
+        // cutting feature — there is no sensible default.
+        let _ = (current, prior_outputs);
+        return Err(CadError::EvalFailed {
+            feature: "Pattern".into(),
+            reason: "a subtractive pattern must name the cutting feature in `features` \
+                     (e.g. features = [\"Hole1\"]); with none given there is no tool to \
+                     replicate, and using the whole part as its own cutter is never intended"
+                .into(),
+        });
+    }
+    let mut bodies: Vec<Solid> = Vec::new();
+    for name in features {
+        match prior_tools.get(name) {
+            Some(t) => bodies.push(t.clone()),
+            None => {
+                let known: Vec<&str> = prior_tools.keys().map(|s| s.as_str()).collect();
+                return Err(CadError::EvalFailed {
+                    feature: "Pattern".into(),
+                    reason: if prior_outputs.contains_key(name) {
+                        format!(
+                            "feature '{name}' exists but is not a cutting feature, so it has no \
+                             tool to replicate. A subtractive pattern needs a source that removes \
+                             material (hole, or a feature with combine = subtract). Features with \
+                             tools: [{}]",
+                            known.join(", ")
+                        )
+                    } else {
+                        format!("pattern source feature '{name}' not found")
+                    },
+                });
+            }
+        }
+    }
+    union_many(&bodies).ok_or_else(|| CadError::EvalFailed {
+        feature: "Pattern".into(),
+        reason: "referenced features produced no tool bodies".into(),
+    })
+}
+
+fn pattern_linear(source: &Solid, dir: [f64; 3], step: f64, count: u32) -> Vec<Solid> {
     let dir_vec = Vector3::new(dir[0], dir[1], dir[2]);
     let dir_norm = dir_vec.magnitude();
     let unit = if dir_norm > 1e-9 { dir_vec / dir_norm } else { Vector3::unit_x() };
@@ -967,18 +1364,20 @@ fn pattern_linear(source: &Solid, dir: [f64; 3], step: f64, count: u32) -> Solid
         let offset = unit * (step * i as f64);
         copies.push(builder::translated(source, offset));
     }
-    union_many(&copies).unwrap_or_else(|| source.clone())
+    copies
 }
 
+/// Circular pattern instances — see [`pattern_linear`] for why these
+/// are returned un-unioned.
 fn pattern_circular(
     source: &Solid,
     origin: Point3,
     axis: Vector3,
     total_angle: f64,
     count: u32,
-) -> Solid {
+) -> Vec<Solid> {
     if count < 2 {
-        return source.clone();
+        return vec![source.clone()];
     }
     // Full-360 sweep wraps evenly; partial sweep distributes
     // endpoints exactly.
@@ -992,7 +1391,7 @@ fn pattern_circular(
         let theta = step * i as f64;
         copies.push(builder::rotated(source, origin, axis, Rad(theta)));
     }
-    union_many(&copies).unwrap_or_else(|| source.clone())
+    copies
 }
 
 // ============================================================================
@@ -1041,13 +1440,31 @@ fn finish_combine(
     op: crate::FeatureOp,
 ) -> CadResult<FeatureEvalResult> {
     use crate::FeatureOp::*;
+    // Subtract/Intersect consume `new_body` as an OPERAND rather than
+    // contributing it to the result, which makes it this feature's
+    // tool. Recording it here covers every subtractive feature at
+    // once — a Hole passes its cutter through this exact path.
+    let tool = match op {
+        Subtract | Intersect => Some(new_body.clone()),
+        _ => None,
+    };
+    let mut degraded: Option<String> = None;
     let result = match op {
         NewBody => new_body,
         Add => match current {
             Some(cur) => boolean_or(cur, &new_body).unwrap_or_else(|| {
-                // Fallback: if union fails, keep the new body as the
-                // running result rather than silently dropping the
-                // feature's work.
+                // The union failed. Keeping the new body preserves the
+                // feature's work, but the result is NOT the union that
+                // was asked for — the running body has been dropped.
+                // Say so: a caller that cannot tell this happened will
+                // build its next operation on geometry it never asked
+                // for and misattribute the error many steps later.
+                degraded = Some(
+                    "union failed; kept this feature's body and dropped the previous running \
+                     body (truck-shapeops returns None when the operands share no intersection \
+                     curves, e.g. when they are disjoint)"
+                        .to_string(),
+                );
                 new_body
             }),
             None => new_body,
@@ -1071,7 +1488,13 @@ fn finish_combine(
             }),
         },
     };
-    Ok(FeatureEvalResult::body(result))
+    Ok(FeatureEvalResult::ReplacedBody {
+        body: result,
+        note: degraded.clone(),
+        mesh_round: None,
+        tool_body: tool,
+        degraded,
+    })
 }
 
 /// Union a slice of solids into one, via pairwise boolean-or.
@@ -1080,7 +1503,17 @@ fn union_many(bodies: &[Solid]) -> Option<Solid> {
     let mut iter = bodies.iter();
     let mut acc = iter.next().cloned()?;
     for next in iter {
-        acc = boolean_or(&acc, next).unwrap_or(acc);
+        // Propagate the failure instead of keeping `acc`.
+        //
+        // The old `.unwrap_or(acc)` made the documented "returns None
+        // if every union fails" impossible: this function could only
+        // ever return `Some`, so every caller's `.ok_or_else(...)`
+        // guard was dead code and each silently received the FIRST
+        // body in place of the union. Concretely, a Pattern over two
+        // holes replicated only the first — the cutters are disjoint
+        // cylinders, their union returns None, and the caller was
+        // handed cutter #1 with `failed = 0` and nothing to report.
+        acc = boolean_or(&acc, next)?;
     }
     Some(acc)
 }
@@ -1137,11 +1570,25 @@ fn resolve_plane(s: &str) -> CadResult<(Point3, Vector3)> {
     }
 }
 
-fn resolve_world_axis(s: &str) -> (Point3, Vector3) {
-    match s {
-        "x" => (Point3::origin(), Vector3::unit_x()),
-        "z" => (Point3::origin(), Vector3::unit_z()),
-        _   => (Point3::origin(), Vector3::unit_y()),
+/// World axis by name, for circular patterns.
+///
+/// The `_ => Y` fallback this used to have meant a typo (`"Z "`,
+/// `"vertical"`, an edge reference the resolver does not understand)
+/// silently swept the pattern about the WRONG axis and reported
+/// success. Its sibling `resolve_axis` directly below already errored
+/// on an unknown name; the two disagreeing was the whole bug.
+fn resolve_world_axis(s: &str) -> CadResult<(Point3, Vector3)> {
+    match s.trim() {
+        "x" | "world/x" => Ok((Point3::origin(), Vector3::unit_x())),
+        "y" | "world/y" => Ok((Point3::origin(), Vector3::unit_y())),
+        "z" | "world/z" => Ok((Point3::origin(), Vector3::unit_z())),
+        other => Err(CadError::EvalFailed {
+            feature: "Pattern".into(),
+            reason: format!(
+                "unknown circular-pattern axis '{other}' — expected x, y or z. \
+                 Edge references are not resolvable here yet."
+            ),
+        }),
     }
 }
 
@@ -1174,6 +1621,49 @@ fn first_sketch_point(sk: &Sketch) -> Option<[f64; 2]> {
         SketchEntity::Point { p } => Some(*p),
         _ => None,
     })
+}
+
+/// Resolve an entity spec like `"point-2"` against a sketch.
+///
+/// The index used to be parsed and then thrown away, so every
+/// `point-N` in a sketch resolved to the same first point. Four holes
+/// referencing `point-0..3` all drilled the same spot: the first
+/// succeeded and the rest failed trying to cut a void that was already
+/// there. The reference format documented an index the kernel never
+/// honoured.
+///
+/// The index counts POINT entities, not entity slots, so `point-2` is
+/// the third `Point` in the sketch regardless of any lines drawn
+/// between them.
+fn sketch_point_by_spec(sk: &Sketch, spec: &str) -> CadResult<[f64; 2]> {
+    let points: Vec<[f64; 2]> = sk
+        .entities
+        .iter()
+        .filter_map(|e| match e {
+            SketchEntity::Point { p } => Some(*p),
+            _ => None,
+        })
+        .collect();
+
+    // A bare name, or anything without a trailing index, keeps the old
+    // meaning: the first point, or the sketch origin when there is none.
+    let idx = spec
+        .rsplit_once('-')
+        .and_then(|(_, n)| n.parse::<usize>().ok());
+
+    match idx {
+        Some(i) => points.get(i).copied().ok_or_else(|| CadError::EvalFailed {
+            feature: "Hole".into(),
+            reason: format!(
+                "'{spec}' refers to point {i}, but the sketch has {} point entit{} \
+                 (valid indices 0..{}). Add the point to the sketch, or reference an existing one.",
+                points.len(),
+                if points.len() == 1 { "y" } else { "ies" },
+                points.len().saturating_sub(1)
+            ),
+        }),
+        None => Ok(points.first().copied().unwrap_or([0.0, 0.0])),
+    }
 }
 
 // ============================================================================
@@ -1217,7 +1707,28 @@ fn resolve_length_meters(s: &str, vars: &HashMap<String, String>) -> CadResult<f
             reason: format!("could not resolve '{}' as a Quantity", s),
         })?;
     match q.unit {
-        crate::Unit::Length(_) | crate::Unit::Scalar => Ok(q.to_si()),
+        crate::Unit::Length(_) => Ok(q.to_si()),
+        // A bare number has NO defensible reading as a length.
+        // `Quantity::parse` returns `Unit::Scalar` for it, and folding
+        // that into this arm meant `to_si()` handed back the raw value
+        // as METRES: `height = "10"` on a part authored in millimetres
+        // produced a body 1000x too large, with every status reporting
+        // success and every validity check passing — a 10 m plate is
+        // perfectly watertight and manifold. Unlike an angle (where a
+        // bare number sensibly means degrees) there is no sane default
+        // between metres and millimetres, so refuse and say so.
+        crate::Unit::Scalar => Err(CadError::UnitMismatch {
+            // Name BOTH the reference and what it resolved to. `s` is
+            // usually a variable name, so reporting it alone reads as
+            // "the bare number 'height'" — which is nonsense to whoever
+            // wrote `height = "10"` and is looking for the mistake.
+            expected: format!(
+                "a length with a unit, e.g. \"0.02 m\" or \"20 mm\" — '{s}' resolved to the \
+                 unitless value {}",
+                q.value
+            ),
+            got: "scalar (no unit)".into(),
+        }),
         other => Err(CadError::UnitMismatch {
             expected: "length".into(),
             got: format!("{:?}", other),
