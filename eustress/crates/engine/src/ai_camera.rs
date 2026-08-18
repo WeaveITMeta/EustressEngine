@@ -59,7 +59,22 @@ pub struct PendingCapture {
 /// so its render target holds a stale frame — or none at all on the first
 /// capture — at the moment a request arrives. The render graph needs a couple
 /// of frames to produce a current image before the readback is meaningful.
-const CAPTURE_WARMUP_FRAMES: u32 = 3;
+const CAPTURE_WARMUP_FRAMES: u32 = 6;
+
+/// Frames to keep the camera POWERED UP after the screenshot is queued.
+///
+/// This is the fix for captures coming back as a uniform white image (the
+/// `Image::new_fill` colour — i.e. a readback of a target nothing ever rendered
+/// into). The previous code set `is_active = false` in the SAME frame it
+/// spawned the `Screenshot`, so the readback was serviced on a frame where no
+/// active camera targeted that image. Bevy only prepares a view target for
+/// ACTIVE cameras, so the copy ran against a texture that was never prepared
+/// and produced the fill colour every time.
+///
+/// Holding the camera on for a few extra frames lets the render graph actually
+/// service the copy. The camera still powers down immediately afterwards, so
+/// the "off-screen camera costs nothing while idle" property is preserved.
+const CAPTURE_COOLDOWN_FRAMES: u32 = 4;
 
 /// Off-screen render-target handle + pending-capture state for the AI camera.
 #[derive(Resource, Default)]
@@ -69,6 +84,10 @@ pub struct AiCameraState {
     /// Frames the camera has been powered up for the current request; 0 when
     /// idle (camera inactive). See [`CAPTURE_WARMUP_FRAMES`].
     warmup: u32,
+    /// Frames remaining to keep the camera live AFTER a screenshot was queued,
+    /// so the render graph can service the readback. See
+    /// [`CAPTURE_COOLDOWN_FRAMES`].
+    cooldown: u32,
 }
 
 pub struct AiCameraPlugin;
@@ -193,6 +212,18 @@ fn process_ai_capture(
     mut state: ResMut<AiCameraState>,
     mut cam: Query<&mut Camera, With<AiCamera>>,
 ) {
+    // Cooldown: a screenshot is in flight. Keep the camera ACTIVE so the render
+    // graph prepares its view target and services the readback, then power down.
+    if state.cooldown > 0 {
+        state.cooldown -= 1;
+        if state.cooldown == 0 {
+            if let Ok(mut c) = cam.single_mut() {
+                c.is_active = false;
+            }
+        }
+        return;
+    }
+
     if state.pending.is_none() {
         return; // idle: camera stays powered down, costing nothing
     }
@@ -213,16 +244,18 @@ fn process_ai_capture(
         return;
     }
 
-    // Ready: consume the request and power the camera back down. Both happen
-    // before the screenshot is queued so an early return below can never leave
-    // the camera stuck on.
+    // Ready: consume the request. The camera deliberately stays ACTIVE here —
+    // powering it down in this frame (as this used to) meant the screenshot was
+    // serviced with no active camera on that render target, and every capture
+    // came back as the flat `Image::new_fill` colour. `cooldown` powers it down
+    // a few frames later instead.
     let Some(pending) = state.pending.take() else {
         return;
     };
     state.warmup = 0;
-    if let Ok(mut c) = cam.single_mut() {
-        c.is_active = false;
-    }
+    // Set BEFORE the early return below so a missing image can never leave the
+    // camera stuck on.
+    state.cooldown = CAPTURE_COOLDOWN_FRAMES;
     let Some(image) = state.image.clone() else {
         return;
     };
