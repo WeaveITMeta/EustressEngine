@@ -395,6 +395,12 @@ component DropdownSeparator inherits Rectangle {
 export component Ribbon inherits Rectangle {
     // Properties
     in property <string> current-tool: "select";
+    // Active terrain brush id ("raise", "lower", ...) and sculpt-mode flag,
+    // pushed from Rust off TerrainBrush / TerrainMode. The Terrain tab's
+    // brush buttons had no `selected` binding at all, so an armed brush
+    // looked identical to an unarmed one.
+    in property <string> current-terrain-brush: "";
+    in property <bool> terrain-edit-mode: false;
     /// Data-driven Insert-menu catalog — every creatable registered class,
     /// grouped by category, fed from Rust (`set_insert_classes`). Drives
     /// the dynamic section of the Insert dropdown below the pinned items.
@@ -1503,6 +1509,11 @@ export component Ribbon inherits Rectangle {
                                 DropdownItem { label: "Medium (512m)"; clicked => { root.on-spawn-terrain("medium"); } }
                                 DropdownItem { label: "Large (2km)"; clicked => { root.on-spawn-terrain("large"); } }
                                 DropdownSeparator {}
+                                DropdownHeader { label: "FLAT BASEPLATE"; }
+                                DropdownItem { label: "Flat Small (320 m)"; clicked => { root.on-spawn-terrain("flat-small"); } }
+                                DropdownItem { label: "Flat Medium (576 m)"; clicked => { root.on-spawn-terrain("flat"); } }
+                                DropdownItem { label: "Flat Large (1.1 km)"; clicked => { root.on-spawn-terrain("flat-large"); } }
+                                DropdownSeparator {}
                                 DropdownItem { label: "Toggle Edit Mode"; shortcut: "T"; clicked => { root.on-toggle-terrain-edit(); } }
                                 DropdownItem { label: "Show/Hide Terrain"; clicked => { root.on-menu-action("terrain:toggle-visibility"); } }
                                 DropdownSeparator {}
@@ -2483,9 +2494,9 @@ export component Ribbon inherits Rectangle {
                     label: "Edit";
                     IconButton { icon: @image-url("../../assets/icons/ui/group.svg"); label: "Group"; shortcut: root.shortcut-group; tooltip: "Group"; tint: Theme.cat-parts; clicked => { root.on-group(); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/ungroup.svg"); label: "Ungroup"; shortcut: root.shortcut-ungroup; tooltip: "Ungroup"; tint: Theme.cat-parts; clicked => { root.on-ungroup(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/lock.svg"); label: "Lock"; shortcut: root.shortcut-lock; tooltip: "Lock"; tint: Theme.accent-yellow; clicked => { root.on-menu-action("edit:lock"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/unlock.svg"); label: "Unlock All"; shortcut: root.shortcut-unlock; tooltip: "Unlock All"; tint: Theme.accent-yellow; clicked => { root.on-menu-action("edit:unlock"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/anchor.svg"); label: "Anchor"; shortcut: root.shortcut-anchor; tooltip: "Toggle Anchor"; tint: Theme.accent-purple; clicked => { root.on-menu-action("edit:anchor"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/lock.svg"); label: "Lock"; shortcut: root.shortcut-lock; tooltip: "Lock"; selected: root.current-tool == "lock"; tint: Theme.accent-yellow; clicked => { root.on-menu-action("edit:lock"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/unlock.svg"); label: "Unlock All"; shortcut: root.shortcut-unlock; tooltip: "Unlock All"; selected: root.current-tool == "unlock"; tint: Theme.accent-yellow; clicked => { root.on-menu-action("edit:unlock"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/anchor.svg"); label: "Anchor"; shortcut: root.shortcut-anchor; tooltip: "Anchor (click parts; Esc to exit)"; selected: root.current-tool == "anchor"; tint: Theme.accent-purple; clicked => { root.on-menu-action("edit:anchor"); } }
                 }
                 
                 GroupDivider {}
@@ -2886,12 +2897,17 @@ export component Ribbon inherits Rectangle {
                     IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Small"; tooltip: "Small Terrain (128m)"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("small"); } }
                     IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Medium"; tooltip: "Medium Terrain (512m)"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("medium"); } }
                     IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Large"; tooltip: "Large Terrain (2km)"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("large"); } }
+                    // Flat baseplate — a dead-level sculptable plate, written
+                    // straight to disk. Small/Medium/Large above run the full
+                    // worldgen pipeline (rivers, climate, materials) and take
+                    // a while; this one returns immediately.
+                    IconButton { icon: @image-url("../../assets/icons/ui/array-grid.svg"); label: "Flat"; tooltip: "Flat baseplate terrain (576 m, sculptable) — instant, no rivers or biomes"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("flat"); } }
                 }
                 GroupDivider {}
                 
                 ToolGroup {
                     label: "Edit";
-                    IconButton { icon: @image-url("../../assets/icons/ui/check.svg"); label: "Edit"; tooltip: "Toggle Edit Mode (T)"; tint: Theme.accent-yellow; clicked => { root.on-toggle-terrain-edit(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/check.svg"); label: "Edit"; tooltip: "Toggle Edit Mode (T)"; tint: Theme.accent-yellow; selected: root.terrain-edit-mode; clicked => { root.on-toggle-terrain-edit(); } }
                 }
                 GroupDivider {}
 
@@ -2918,6 +2934,7 @@ export component Ribbon inherits Rectangle {
                         label: "Raise"; 
                         tooltip: "Raise (1) | Hold or right-click for settings"; 
                         tint: Theme.cat-structure; 
+                        selected: root.current-terrain-brush == "raise";
                         clicked => { root.on-set-terrain-brush("raise"); }
                         right-clicked => { 
                             root.settings-brush-name = "Raise";
@@ -2939,6 +2956,7 @@ export component Ribbon inherits Rectangle {
                         label: "Lower"; 
                         tooltip: "Lower (2) | Hold or right-click for settings"; 
                         tint: Theme.accent-red; 
+                        selected: root.current-terrain-brush == "lower";
                         clicked => { root.on-set-terrain-brush("lower"); }
                         right-clicked => { 
                             root.settings-brush-name = "Lower";
@@ -2960,6 +2978,7 @@ export component Ribbon inherits Rectangle {
                         label: "Smooth"; 
                         tooltip: "Smooth (3) | Hold or right-click for settings"; 
                         tint: Theme.cat-parts; 
+                        selected: root.current-terrain-brush == "smooth";
                         clicked => { root.on-set-terrain-brush("smooth"); }
                         right-clicked => { 
                             root.settings-brush-name = "Smooth";
@@ -2981,6 +3000,7 @@ export component Ribbon inherits Rectangle {
                         label: "Flatten"; 
                         tooltip: "Flatten (4) | Hold or right-click for settings"; 
                         tint: Theme.cat-constraint; 
+                        selected: root.current-terrain-brush == "flatten";
                         clicked => { root.on-set-terrain-brush("flatten"); }
                         right-clicked => { 
                             root.settings-brush-name = "Flatten";
@@ -3002,6 +3022,7 @@ export component Ribbon inherits Rectangle {
                         label: "Paint"; 
                         tooltip: "Paint (5) | Hold or right-click for settings"; 
                         tint: Theme.accent-purple; 
+                        selected: root.current-terrain-brush == "paint";
                         clicked => { root.on-set-terrain-brush("paint"); }
                         right-clicked => { 
                             root.settings-brush-name = "Paint";
@@ -3023,6 +3044,7 @@ export component Ribbon inherits Rectangle {
                         label: "Region"; 
                         tooltip: "Region | Hold or right-click for settings"; 
                         tint: Theme.cat-parts; 
+                        selected: root.current-terrain-brush == "region";
                         clicked => { root.on-set-terrain-brush("region"); }
                         right-clicked => { 
                             root.settings-brush-name = "Region";
@@ -3044,6 +3066,7 @@ export component Ribbon inherits Rectangle {
                         label: "Fill"; 
                         tooltip: "Fill | Hold or right-click for settings"; 
                         tint: Theme.cat-structure; 
+                        selected: root.current-terrain-brush == "fill";
                         clicked => { root.on-set-terrain-brush("fill"); }
                         right-clicked => { 
                             root.settings-brush-name = "Fill";
@@ -3065,7 +3088,7 @@ export component Ribbon inherits Rectangle {
                 
                 ToolGroup {
                     label: "Water";
-                    IconButton { icon: @image-url("../../assets/icons/ui/water.svg"); label: "Water"; tooltip: "Set Sea Level"; tint: Theme.text-accent; clicked => { root.on-menu-action("terrain:water"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/water.svg"); label: "Water"; tooltip: "Show or hide the water plane at the terrain's sea level"; tint: Theme.text-accent; clicked => { root.on-menu-action("terrain:water"); } }
                 }
                 GroupDivider {}
                 

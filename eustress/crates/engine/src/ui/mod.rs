@@ -40,6 +40,9 @@ pub mod webview;
 pub mod file_icons;
 pub mod center_tabs;
 pub mod monaco_bridge;
+/// Purchase orders and RFQs into the Slint procurement panels, and the panel
+/// callbacks back into the Odoo state machine.
+pub mod procurement_bridge;
 pub mod highlight;
 #[path = "notifications.rs"]
 pub mod notifications_impl;
@@ -80,6 +83,12 @@ pub enum Tool {
     Rotate,
     Scale,
     Terrain,
+    /// Click-to-anchor paint mode — every part the user clicks toggles its
+    /// `BasePart.anchored` flag. Activated by the ribbon "Anchor" button, and
+    /// the exact mirror of [`Tool::Lock`] below: the ribbon arms a mode, the
+    /// keyboard chord (Alt+A) acts on the current selection instead. Press
+    /// Escape to return to Select.
+    Anchor,
     /// Click-to-lock paint mode — every part the user clicks toggles to
     /// `BasePart.locked = true`. Activated by the ribbon "Lock" button.
     /// Press Escape to return to Select.

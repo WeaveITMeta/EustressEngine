@@ -372,7 +372,7 @@ fn build_binary_part_def(
             locked: base.locked,
             physics: None,
             respect_gltf_materials: false,
-            deformation: base.deformation,
+            destructible: base.destructible,
         },
         metadata: InstanceMetadata {
             class_name: "Part".to_string(),
@@ -535,6 +535,19 @@ pub struct GenerateWorldEvent {
     pub spec: eustress_common::terrain::worldgen::pipeline::WorldSpec,
 }
 
+/// Event: write a dead-flat terrain plate ("baseplate") into the CURRENT
+/// Space and spawn it. Fired from the Terrain ribbon's Generate > Flat
+/// button (drain arm in `slint_ui.rs`).
+///
+/// Deliberately NOT a background task like [`GenerateWorldEvent`]: a flat
+/// plate simulates nothing, so the write + hydrate finishes inside one
+/// frame at the sizes the ribbon offers. It still takes the same
+/// single-flight gate, because it despawns and replaces the live terrain.
+#[derive(Message)]
+pub struct GenerateFlatTerrainEvent {
+    pub spec: eustress_common::terrain::worldgen::export::FlatSpec,
+}
+
 /// In-flight worldgen background task + coarse phase text for the panel.
 ///
 /// LOOP-5: initialized in `SpawnEventsPlugin` (which the ACTIVE
@@ -622,6 +635,17 @@ pub fn handle_set_terrain_brush(
     let Some(mut mode) = mode else { return };
     let Some(mut notifications) = notifications else { return };
     for event in brush_events.read() {
+        // Region and Fill have no stroke behaviour — `apply_brush_to_chunk`
+        // matches them and does nothing. Arming one would leave a lit-up
+        // button that never moves the ground, so say so and keep whichever
+        // brush was already armed.
+        if matches!(event.mode, BrushMode::Region | BrushMode::Fill) {
+            notifications.info(format!(
+                "{:?} brush is on the roadmap — not built yet, so the armed brush is unchanged",
+                event.mode
+            ));
+            continue;
+        }
         brush.mode = event.mode;
         // Auto-enable edit mode when selecting a brush tool
         if *mode != TerrainMode::Editor {
@@ -910,6 +934,91 @@ pub fn poll_worldgen_task(
     }
 }
 
+/// System: write + load a flat terrain plate for the live Space.
+///
+/// Runs the SAME disk round-trip the worldgen exporter and heightmap import
+/// use (`export_flat_to_space` -> `hydrate_terrain_from_disk` ->
+/// `spawn_terrain`), so the plate persists across a Space reload and the
+/// auto-loader treats it like any other disk terrain.
+pub fn handle_generate_flat_terrain(
+    mut request_events: MessageReader<GenerateFlatTerrainEvent>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut worldgen: ResMut<WorldgenTask>,
+    existing_terrain: Query<Entity, With<TerrainRoot>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    queue: Option<Res<eustress_common::terrain::TerrainGenerationQueue>>,
+    notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+) {
+    use eustress_common::terrain::worldgen::export::export_flat_to_space;
+
+    let mut notifications = notifications;
+    for event in request_events.read() {
+        // Same single-flight gate as handle_generate_world: replacing the
+        // terrain while chunks are still queued would orphan them.
+        let queue_busy = queue.as_deref().map(|q| q.is_generating()).unwrap_or(false);
+        if worldgen.is_busy() || queue_busy {
+            if let Some(ref mut n) = notifications {
+                n.warning("Terrain generation already running — wait for it to finish");
+            }
+            continue;
+        }
+        let Some(ref sr) = space_root else {
+            if let Some(ref mut n) = notifications {
+                n.error("Flat Terrain: no open Space");
+            }
+            continue;
+        };
+
+        let extent = event.spec.total_extent_m();
+        let terrain_dir = sr.0.join("Workspace").join("Terrain");
+
+        let summary = match export_flat_to_space(&event.spec, &sr.0) {
+            Ok(summary) => summary,
+            Err(e) => {
+                if let Some(ref mut n) = notifications {
+                    n.error(format!("Flat Terrain failed: {e}"));
+                }
+                error!("Flat terrain export failed: {}", e);
+                continue;
+            }
+        };
+
+        match crate::terrain_disk_load::hydrate_terrain_from_disk(&terrain_dir) {
+            Ok((config, data, chunk_files)) => {
+                for entity in existing_terrain.iter() {
+                    commands.entity(entity).despawn();
+                }
+                let entity =
+                    spawn_terrain(&mut commands, &mut meshes, &mut materials, config, data);
+                commands
+                    .entity(entity)
+                    .insert(crate::terrain_disk_load::DiskSourcedTerrain);
+                worldgen.meshing = true;
+                worldgen.status = "Spawning terrain chunks\u{2026}".to_string();
+                if let Some(ref mut n) = notifications {
+                    n.success(format!(
+                        "Flat terrain: {:.0}\u{d7}{:.0} m at Y={:.1}, {} chunks, meshing\u{2026}",
+                        extent, extent, event.spec.height_m, summary.chunks_written
+                    ));
+                }
+                info!(
+                    "\u{1f9f1} Flat terrain: {:.0}x{:.0} m at Y={:.1}, wrote {} chunks / {} splatmaps, loaded {} chunk files",
+                    extent, extent, event.spec.height_m,
+                    summary.chunks_written, summary.splatmaps_written, chunk_files
+                );
+            }
+            Err(e) => {
+                if let Some(ref mut n) = notifications {
+                    n.error(format!("Flat Terrain: wrote files but load failed: {e}"));
+                }
+                error!("Flat terrain load-back failed for {:?}: {}", terrain_dir, e);
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Plugin
 // ============================================================================
@@ -934,6 +1043,11 @@ impl Plugin for SpawnEventsPlugin {
             // resource. LOOP-5: registered HERE (SpawnEventsPlugin is added
             // by the ACTIVE SlintUiPlugin), never in the legacy StudioUiPlugin.
             .add_message::<GenerateWorldEvent>()
+            // Flat plate (Generate > Flat). Registered in the same block for
+            // the same LOOP-5 reason: `DrainEventWriters` takes a NON-Option
+            // writer for it, so a missing registration fails the drain's
+            // param validation and silently kills EVERY UI button.
+            .add_message::<GenerateFlatTerrainEvent>()
             .init_resource::<WorldgenTask>()
             .add_systems(Update, (
                 handle_spawn_terrain_events,
@@ -941,6 +1055,7 @@ impl Plugin for SpawnEventsPlugin {
                 handle_set_terrain_brush,
                 handle_import_terrain,
                 handle_generate_world,
+                handle_generate_flat_terrain,
                 poll_worldgen_task,
             ));
     }

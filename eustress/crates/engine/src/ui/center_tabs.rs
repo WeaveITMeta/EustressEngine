@@ -82,6 +82,13 @@ pub enum CenterTabType {
     /// Data Platform chart viewer (entity-keyed; opens from the Explorer like a
     /// script and closes the same way).
     DataChart,
+    /// RFQ Builder — compose a request for quotation against a manufacturer.
+    /// Singleton, like the API and Services browsers, because it edits the
+    /// Space-wide order registry rather than one entity.
+    RfqBuilder,
+    /// Purchase Order Tracker — every order in the Space with its state and the
+    /// transitions currently legal for it. Singleton for the same reason.
+    PurchaseOrderTracker,
 }
 
 /// Document sub-types for the Document tab
@@ -118,6 +125,8 @@ impl CenterTabType {
             CenterTabType::ApiBrowser => "api",
             CenterTabType::ServicesBrowser => "services",
             CenterTabType::DataChart => "chart",
+            CenterTabType::RfqBuilder => "rfq",
+            CenterTabType::PurchaseOrderTracker => "purchase-orders",
         }
     }
 
@@ -142,6 +151,8 @@ impl CenterTabType {
             CenterTabType::ApiBrowser => "code",
             CenterTabType::ServicesBrowser => "package",
             CenterTabType::DataChart => "viewport",
+            CenterTabType::RfqBuilder => "handshake",
+            CenterTabType::PurchaseOrderTracker => "clipboard",
         }
     }
 }
@@ -512,6 +523,66 @@ impl CenterTabManager {
             id,
             name: "Services Browser".to_string(),
             tab_type: CenterTabType::ServicesBrowser,
+            entity: None,
+            file_path: None,
+            url: None,
+            pinned: false,
+            dirty: false,
+            loading: false,
+            content: String::new(),
+            summary_content: String::new(),
+        })
+    }
+
+    /// Open or focus the RFQ Builder tab.
+    ///
+    /// Singleton by design. An RFQ is a `PurchaseOrder` in `draft`, so this
+    /// panel edits the Space-wide order registry rather than one entity, and a
+    /// second instance would only be a second view onto the same records.
+    pub fn open_rfq_builder(&mut self) -> usize {
+        if let Some(idx) = self
+            .tabs
+            .iter()
+            .position(|t| t.tab_type == CenterTabType::RfqBuilder)
+        {
+            self.active_tab = idx;
+            self.focus_only = true;
+            self.dirty = true;
+            return idx;
+        }
+        let id = self.next_id();
+        self.push_tab(CenterTabEntry {
+            id,
+            name: "RFQ Builder".to_string(),
+            tab_type: CenterTabType::RfqBuilder,
+            entity: None,
+            file_path: None,
+            url: None,
+            pinned: false,
+            dirty: false,
+            loading: false,
+            content: String::new(),
+            summary_content: String::new(),
+        })
+    }
+
+    /// Open or focus the Purchase Order Tracker tab.
+    pub fn open_purchase_order_tracker(&mut self) -> usize {
+        if let Some(idx) = self
+            .tabs
+            .iter()
+            .position(|t| t.tab_type == CenterTabType::PurchaseOrderTracker)
+        {
+            self.active_tab = idx;
+            self.focus_only = true;
+            self.dirty = true;
+            return idx;
+        }
+        let id = self.next_id();
+        self.push_tab(CenterTabEntry {
+            id,
+            name: "Purchase Orders".to_string(),
+            tab_type: CenterTabType::PurchaseOrderTracker,
             entity: None,
             file_path: None,
             url: None,

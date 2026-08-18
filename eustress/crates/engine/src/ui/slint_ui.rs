@@ -364,6 +364,10 @@ pub enum SlintAction {
     ExpandAll,                    // Expand all tree nodes in explorer
     CollapseAll,                  // Collapse all tree nodes in explorer
     Deselect,                     // Click on empty space — clear selection
+    /// Explorer search box edited. Carries the raw query; the drain writes
+    /// it to `UnifiedExplorerState::search_query`, which the tree sync
+    /// already filters on.
+    ExplorerSearch(String),
     ExplorerNavigateUp,           // Arrow up in Explorer tree
     ExplorerNavigateDown,         // Arrow down in Explorer tree
     ExplorerNavigateCollapse,     // Arrow left — collapse current node
@@ -372,6 +376,21 @@ pub enum SlintAction {
     // History panel
     HistoryJumpTo(i32),
     HistoryClear,
+
+    // Procurement — RFQ Builder and Purchase Order Tracker. Every mutation
+    // routes through the Odoo state machine in `manufacturing::purchase` and is
+    // persisted immediately, so what is on screen and what is on disk cannot
+    // diverge.
+    ProcurementCreateRfq(String),                        // manufacturer id
+    ProcurementSelectRfq(i32),
+    ProcurementSelectOrder(i32),
+    ProcurementAddLine(String),                          // order reference
+    ProcurementRemoveLine(String, i32),                  // reference, line index
+    ProcurementLineChanged(String, i32, String, String), // reference, index, field, value
+    ProcurementFieldChanged(String, String, String),     // reference, field, value
+    ProcurementTransition(String, String),               // reference, action
+    ProcurementFilterChanged(String),
+    ProcurementOpenRfqBuilder,
 
     // Properties
     PropertyChanged(String, String),
@@ -1503,6 +1522,7 @@ impl Plugin for SlintUiPlugin {
             // Axis orientation gizmo (bottom-right of viewport)
             // History panel sync
             .add_systems(Update, sync_history_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, sync_procurement_to_slint.after(SlintSystems::Drain))
             // Publish dialog state sync (for camera blocking)
             .add_systems(Update, sync_publish_dialog_state.after(SlintSystems::Drain))
             // Bridge: viewport click → SelectionManager → UnifiedExplorerState
@@ -1749,6 +1769,45 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_history_jump_to(move |id| q.push(SlintAction::HistoryJumpTo(id)));
     let q = queue.clone();
+    ui.on_procurement_create_rfq(move |id| q.push(SlintAction::ProcurementCreateRfq(id.to_string())));
+    let q = queue.clone();
+    ui.on_procurement_select_rfq(move |idx| q.push(SlintAction::ProcurementSelectRfq(idx)));
+    let q = queue.clone();
+    ui.on_procurement_select_order(move |idx| q.push(SlintAction::ProcurementSelectOrder(idx)));
+    let q = queue.clone();
+    ui.on_procurement_add_line(move |r| q.push(SlintAction::ProcurementAddLine(r.to_string())));
+    let q = queue.clone();
+    ui.on_procurement_remove_line(move |r, i| {
+        q.push(SlintAction::ProcurementRemoveLine(r.to_string(), i))
+    });
+    let q = queue.clone();
+    ui.on_procurement_line_changed(move |r, i, f, v| {
+        q.push(SlintAction::ProcurementLineChanged(
+            r.to_string(),
+            i,
+            f.to_string(),
+            v.to_string(),
+        ))
+    });
+    let q = queue.clone();
+    ui.on_procurement_field_changed(move |r, f, v| {
+        q.push(SlintAction::ProcurementFieldChanged(
+            r.to_string(),
+            f.to_string(),
+            v.to_string(),
+        ))
+    });
+    let q = queue.clone();
+    ui.on_procurement_transition(move |r, a| {
+        q.push(SlintAction::ProcurementTransition(r.to_string(), a.to_string()))
+    });
+    let q = queue.clone();
+    ui.on_procurement_filter_changed(move |f| {
+        q.push(SlintAction::ProcurementFilterChanged(f.to_string()))
+    });
+    let q = queue.clone();
+    ui.on_procurement_open_rfq_builder(move || q.push(SlintAction::ProcurementOpenRfqBuilder));
+    let q = queue.clone();
     ui.on_history_clear(move || q.push(SlintAction::HistoryClear));
     let q = queue.clone();
     ui.on_copy(move || q.push(SlintAction::Copy));
@@ -1871,6 +1930,8 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_collapse_all(move || q.push(SlintAction::CollapseAll));
     let q = queue.clone();
     ui.on_deselect(move || q.push(SlintAction::Deselect));
+    let q = queue.clone();
+    ui.on_explorer_search(move |text| q.push(SlintAction::ExplorerSearch(text.to_string())));
     let q = queue.clone();
     ui.on_explorer_navigate_up(move || q.push(SlintAction::ExplorerNavigateUp));
     let q = queue.clone();
@@ -3163,11 +3224,18 @@ pub fn update_slint_ui_focus(
     // Without this walk, click detection used panel-relative coords
     // while the render used viewport-absolute, so every button's hit
     // rect was offset by its parent panel's position.
+    // NOTE: `GuiElementDisplay` is shared by ScreenGui (screen space) AND by
+    // BillboardGui / SurfaceGui (3D surfaces). Its rect is resolved against the
+    // element's OWN canvas, so a billboard label's rect is in billboard-canvas
+    // pixels — meaningless as a viewport rect. The marker Options below are what
+    // let the hit test tell the two apart; see the ancestor walk in the body.
     gui_elements: Query<(
         Entity,
         &eustress_common::gui::billboard_renderer::GuiElementDisplay,
         Option<&eustress_common::classes::Instance>,
         Option<&ChildOf>,
+        Option<&eustress_common::gui::billboard_renderer::BillboardGuiMarker>,
+        Option<&eustress_common::gui::billboard_renderer::SurfaceGuiMarker>,
     )>,
     slint_context: Option<NonSend<SlintUiState>>,
     mouse: Res<ButtonInput<bevy::input::mouse::MouseButton>>,
@@ -3332,15 +3400,17 @@ pub fn update_slint_ui_focus(
                 &eustress_common::gui::billboard_renderer::GuiElementDisplay,
                 Option<&eustress_common::classes::Instance>,
                 Option<&ChildOf>,
+                Option<&eustress_common::gui::billboard_renderer::BillboardGuiMarker>,
+                Option<&eustress_common::gui::billboard_renderer::SurfaceGuiMarker>,
             )>,
             cache: &mut std::collections::HashMap<Entity, (f32, f32)>,
         ) -> (f32, f32) {
             if let Some(&v) = cache.get(&entity) { return v; }
-            let Ok((_, _display, _, parent)) = q.get(entity) else { return (0.0, 0.0) };
+            let Ok((_, _display, _, parent, _, _)) = q.get(entity) else { return (0.0, 0.0) };
             let out = if let Some(co) = parent {
                 let pe = co.parent();
                 let ancestor = compute_offset(pe, q, cache);
-                let parent_pos = q.get(pe).map(|(_, pd, _, _)| (pd.x, pd.y)).unwrap_or((0.0, 0.0));
+                let parent_pos = q.get(pe).map(|(_, pd, _, _, _, _)| (pd.x, pd.y)).unwrap_or((0.0, 0.0));
                 (ancestor.0 + parent_pos.0, ancestor.1 + parent_pos.1)
             } else {
                 (0.0, 0.0)
@@ -3352,12 +3422,62 @@ pub fn update_slint_ui_focus(
         // Z-order the hit test so topmost buttons win over Frames that
         // geometrically contain them. Higher z-index renders on top, so
         // a DESCENDING z_order iteration matches click priority.
+        // Is `entity` part of a 3D GUI surface (BillboardGui / SurfaceGui)
+        // rather than a screen-space ScreenGui? Walks the ChildOf chain because
+        // the marker sits on the SURFACE ROOT while `GuiElementDisplay` sits on
+        // every descendant.
+        //
+        // This gate is why clicks used to die in dead zones. A billboard label's
+        // rect is resolved in its own canvas (a 192x192 billboard quad, say) and
+        // the ChildOf walk above never leaves that canvas, so the accumulated
+        // offset stays near (0,0) — projecting a phantom clickable rect onto the
+        // viewport's top-left corner. Every billboard in the Space stacked
+        // another one there, and any click landing inside set
+        // `gui_element_hit = true`, which makes `part_selection` return before it
+        // ever raycasts. Selection simply stopped working in that region, with no
+        // error and nothing on screen to explain it.
+        let mut surface_cache: std::collections::HashMap<Entity, bool> =
+            std::collections::HashMap::new();
+        fn in_3d_surface(
+            entity: Entity,
+            q: &Query<(
+                Entity,
+                &eustress_common::gui::billboard_renderer::GuiElementDisplay,
+                Option<&eustress_common::classes::Instance>,
+                Option<&ChildOf>,
+                Option<&eustress_common::gui::billboard_renderer::BillboardGuiMarker>,
+                Option<&eustress_common::gui::billboard_renderer::SurfaceGuiMarker>,
+            )>,
+            cache: &mut std::collections::HashMap<Entity, bool>,
+        ) -> bool {
+            if let Some(&v) = cache.get(&entity) { return v; }
+            let out = match q.get(entity) {
+                Ok((_, _, _, parent, billboard, surface)) => {
+                    if billboard.is_some() || surface.is_some() {
+                        true
+                    } else if let Some(co) = parent {
+                        in_3d_surface(co.parent(), q, cache)
+                    } else {
+                        false
+                    }
+                }
+                // Not a GUI element at all — the walk left the GUI subtree, so
+                // whatever started it was screen-space.
+                Err(_) => false,
+            };
+            cache.insert(entity, out);
+            out
+        }
+
         let mut ordered: Vec<_> = gui_elements.iter().collect();
         ordered.sort_by(|a, b| b.1.z_order.cmp(&a.1.z_order));
 
-        for (entity, gui, instance, _parent) in ordered {
+        for (entity, gui, instance, _parent, _bb, _sf) in ordered {
             if !gui.visible { continue; }
             if gui.mouse_filter == "ignore" { continue; }
+            // 3D surfaces are hit-tested by the world raycast, not by this
+            // screen-space rect test.
+            if in_3d_surface(entity, &gui_elements, &mut surface_cache) { continue; }
             let (ox, oy) = compute_offset(entity, &gui_elements, &mut offset_cache);
             let gx = gui.x + ox;
             let gy = gui.y + oy;
@@ -3489,6 +3609,11 @@ struct DrainEventWriters<'w> {
     terrain_brush: MessageWriter<'w, super::spawn_events::SetTerrainBrushEvent>,
     terrain_import: MessageWriter<'w, super::spawn_events::ImportTerrainEvent>,
     worldgen_request: MessageWriter<'w, super::spawn_events::GenerateWorldEvent>,
+    /// Terrain ribbon > Generate > Flat. Registered in `SpawnEventsPlugin`
+    /// alongside `GenerateWorldEvent` — a NON-Option writer whose message
+    /// is unregistered fails the drain's param validation and takes every
+    /// UI button in the engine down with it.
+    flat_terrain_request: MessageWriter<'w, super::spawn_events::GenerateFlatTerrainEvent>,
     // Workshop Panel (System 0: Ideation)
     workshop_send: MessageWriter<'w, crate::workshop::WorkshopSendMessageEvent>,
     workshop_approve: MessageWriter<'w, crate::workshop::WorkshopApproveMcpEvent>,
@@ -3550,6 +3675,32 @@ impl BrushState {
     }
 }
 
+/// Map a `Generate` preset id to a flat-plate spec, or `None` when the id
+/// names one of the procedural worldgen presets instead.
+///
+/// Sizes are the covered extent `(2N + 1) * chunk_size` at the loader's
+/// default 64 m chunks. `height_m = 0` puts the surface at world Y = 0 (what
+/// "baseplate" means, and where parts spawn); the R16 format cannot go below
+/// that, so a fresh plate sculpts upward only until it is raised.
+fn flat_preset(id: &str) -> Option<eustress_common::terrain::worldgen::export::FlatSpec> {
+    use eustress_common::terrain::worldgen::export::FlatSpec;
+    let half_extent = match id {
+        "flat-small" => 2u32,  // 5x5 chunks, 320 m
+        "flat" => 4,           // 9x9 chunks, 576 m
+        "flat-large" => 8,     // 17x17 chunks, 1088 m
+        _ => return None,
+    };
+    Some(FlatSpec {
+        half_extent,
+        chunk_size: 64.0,
+        chunk_resolution: 64,
+        height_m: 0.0,
+        height_scale: 100.0,
+        material_slot: 0, // Grass
+        seed: 0,
+    })
+}
+
 /// Whether terrain is currently shown in the viewport. Flipped by the
 /// Terrain ribbon's Show/Hide button (`terrain:toggle-visibility`), which
 /// pushes `Visibility` onto every `TerrainRoot` + `Chunk` entity.
@@ -3594,6 +3745,13 @@ struct DrainResources<'w> {
     update_state: Option<ResMut<'w, crate::updater::UpdateState>>,
     viewport_bounds: Option<ResMut<'w, super::ViewportBounds>>,
     tab_manager: Option<ResMut<'w, super::center_tabs::CenterTabManager>>,
+    /// Purchase orders and RFQs behind the Procurement panels. Option, not a
+    /// bare ResMut, for the same reason spelled out on `water_config` below: a
+    /// missing registration in a bare param silently kills every UI click.
+    purchase_orders: Option<ResMut<'w, crate::manufacturing::PurchaseOrderRegistry>>,
+    /// Manufacturer registry, read to resolve vendor names and fill the RFQ
+    /// Builder's vendor picker.
+    manufacturing: Option<Res<'w, crate::manufacturing::ManufacturingProgramRegistry>>,
     file_registry: Option<ResMut<'w, crate::space::SpaceFileRegistry>>,
     /// Shared selection state — updated on Explorer node clicks so F-to-focus works
     selection_manager: Option<Res<'w, crate::rendering::BevySelectionManager>>,
@@ -3608,6 +3766,10 @@ struct DrainResources<'w> {
     script_analysis: Option<Res<'w, crate::script_editor::ScriptAnalysis>>,
     /// Terrain show/hide latch for the Terrain ribbon's visibility toggle.
     terrain_visibility: ResMut<'w, TerrainVisibility>,
+    /// Water plane state, flipped by the Terrain ribbon's Water button.
+    /// Option, not a bare ResMut: a missing registration here would fail
+    /// the drain's param validation and silently kill every UI click.
+    water_config: Option<ResMut<'w, eustress_common::terrain::WaterConfig>>,
     /// Material registry for resolving material names on spawned parts
     material_registry: Option<ResMut<'w, crate::space::material_loader::MaterialRegistry>>,
     /// Primitive mesh handle cache — avoids per-entity asset_server.load() for same GLB
@@ -4020,6 +4182,16 @@ struct DrainActionQueries<'w, 's> {
     loaded_from_file: Query<'w, 's, (Entity, &'static mut crate::space::LoadedFromFile)>,
     service_components: Query<'w, 's, &'static mut crate::space::service_loader::ServiceComponent>,
     terrain_roots: Query<'w, 's, Entity, With<eustress_common::terrain::TerrainRoot>>,
+    /// The live heightfield, read by Terrain > Export Heightmap.
+    terrain_field: Query<
+        'w,
+        's,
+        (
+            &'static eustress_common::terrain::TerrainConfig,
+            &'static eustress_common::terrain::TerrainData,
+        ),
+        With<eustress_common::terrain::TerrainRoot>,
+    >,
     terrain_chunks: Query<'w, 's, Entity, With<eustress_common::terrain::Chunk>>,
     camera_query: Query<'w, 's, (&'static Camera, &'static GlobalTransform)>,
     /// Mutable `Projection` access for the Camera class's FieldOfView /
@@ -4154,6 +4326,11 @@ fn snapshot_panel_property(
             .get(entity)
             .ok()
             .map(|bp| S::Bool(bp.locked)),
+        "Destructible" => queries
+            .base_parts
+            .get(entity)
+            .ok()
+            .map(|bp| S::Bool(bp.destructible)),
         _ => None,
     }
 }
@@ -4177,6 +4354,7 @@ fn canonical_undo_property(key: &str) -> Option<&'static str> {
         "Anchored" => Some("Anchored"),
         "CanCollide" => Some("CanCollide"),
         "Locked" => Some("Locked"),
+        "Destructible" => Some("Destructible"),
         "FieldOfView" => Some("FieldOfView"),
         "NearClipPlane" => Some("NearClipPlane"),
         "FarClipPlane" => Some("FarClipPlane"),
@@ -5220,6 +5398,112 @@ fn drain_slint_actions(
                 events.redo_action_events.write(crate::undo::RedoEvent);
             }
             SlintAction::HistoryJumpTo(id) => { events.history_events.write(crate::commands::HistoryActionEvent::JumpTo(id)); }
+
+            // ---- Procurement ----------------------------------------------
+            // Every arm persists straight after mutating. An order that is
+            // correct on screen and stale on disk is the failure this avoids.
+            SlintAction::ProcurementCreateRfq(manufacturer_id) => {
+                if let Some(ref mut reg) = res.purchase_orders {
+                    let reference = reg.create_rfq(&manufacturer_id);
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Raised {reference} against {manufacturer_id}"));
+                    }
+                }
+            }
+            SlintAction::ProcurementSelectRfq(_) | SlintAction::ProcurementSelectOrder(_) => {
+                // Selection lives in Slint; the sync pass reads it back. Kept as
+                // explicit arms so a future selection-dependent load has a home
+                // and so the match stays exhaustive.
+            }
+            SlintAction::ProcurementAddLine(reference) => {
+                if let Some(ref mut reg) = res.purchase_orders {
+                    if let Some(order) = reg.get_mut(&reference) {
+                        order.order_line.push(
+                            crate::manufacturing::PurchaseOrderLine::new("New item", 1.0, 0.0),
+                        );
+                        reg.save(&reference);
+                    }
+                }
+            }
+            SlintAction::ProcurementRemoveLine(reference, index) => {
+                if let Some(ref mut reg) = res.purchase_orders {
+                    if let Some(order) = reg.get_mut(&reference) {
+                        let idx = index as usize;
+                        if idx < order.order_line.len() {
+                            order.order_line.remove(idx);
+                            reg.save(&reference);
+                        }
+                    }
+                }
+            }
+            SlintAction::ProcurementLineChanged(reference, index, field, value) => {
+                if let Some(ref mut reg) = res.purchase_orders {
+                    if let Some(order) = reg.get_mut(&reference) {
+                        let changed = super::procurement_bridge::apply_line_change(
+                            order,
+                            index as usize,
+                            &field,
+                            &value,
+                        );
+                        // Only touch the disk on a real edit. A half-typed
+                        // number is refused by the bridge and must not cause a
+                        // write.
+                        if changed {
+                            reg.save(&reference);
+                        }
+                    }
+                }
+            }
+            SlintAction::ProcurementFieldChanged(reference, field, value) => {
+                if let Some(ref mut reg) = res.purchase_orders {
+                    if let Some(order) = reg.get_mut(&reference) {
+                        if super::procurement_bridge::apply_field_change(order, &field, &value) {
+                            reg.save(&reference);
+                        }
+                    }
+                }
+            }
+            SlintAction::ProcurementTransition(reference, action) => {
+                if let Some(ref mut reg) = res.purchase_orders {
+                    let outcome = reg
+                        .get_mut(&reference)
+                        .map(|order| super::procurement_bridge::apply_transition(order, &action));
+                    match outcome {
+                        Some(Ok(())) => {
+                            reg.save(&reference);
+                            let label = reg
+                                .get(&reference)
+                                .map(|o| super::procurement_bridge::state_label(o.state))
+                                .unwrap_or("unknown");
+                            if let Some(ref mut out) = res.output {
+                                out.info(format!("{reference} is now {label}"));
+                            }
+                        }
+                        // The panel only offers transitions the state machine
+                        // accepts, so this should be unreachable. Reported
+                        // rather than swallowed, because reaching it means the
+                        // probe and the machine have diverged.
+                        Some(Err(e)) => {
+                            if let Some(ref mut out) = res.output {
+                                out.warn(format!("{reference}: {e}"));
+                            }
+                        }
+                        None => {
+                            if let Some(ref mut out) = res.output {
+                                out.warn(format!("No such order: {reference}"));
+                            }
+                        }
+                    }
+                }
+            }
+            SlintAction::ProcurementFilterChanged(_) => {
+                // The filter lives in Slint and is read back by the sync pass.
+            }
+            SlintAction::ProcurementOpenRfqBuilder => {
+                if let Some(ref mut mgr) = res.tab_manager {
+                    mgr.open_rfq_builder();
+                }
+            }
             SlintAction::HistoryClear => { events.history_events.write(crate::commands::HistoryActionEvent::Clear); }
             SlintAction::Copy => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Copy)); }
             SlintAction::Cut => {
@@ -6418,6 +6702,19 @@ fn drain_slint_actions(
             
             // Terrain
             SlintAction::GenerateTerrain(size) => {
+                // Flat baseplate presets ("flat", "flat-small", "flat-large")
+                // write a dead-level plate straight to disk and load it in the
+                // same frame — no hydrology/erosion/climate pass, so the button
+                // produces ground immediately instead of after a long task.
+                if let Some(spec) = flat_preset(size.as_str()) {
+                    events
+                        .flat_terrain_request
+                        .write(super::spawn_events::GenerateFlatTerrainEvent { spec });
+                    if let Some(ref mut s) = res.state {
+                        s.show_terrain_editor = true;
+                    }
+                    continue;
+                }
                 // Quick-generate presets now route through the FULL worldgen
                 // pipeline (rivers / climate / materials), not the old flat-noise
                 // path — so the ribbon + panel Small/Medium/Large buttons produce
@@ -6544,16 +6841,67 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::ExportHeightmap => {
-                // Open file dialog for heightmap export
-                if let Some(path) = rfd::FileDialog::new()
+                // Refuse BEFORE opening the dialog — asking for a filename and
+                // then writing nothing is what this button used to do.
+                let Ok((config, data)) = queries.terrain_field.single() else {
+                    if let Some(ref mut out) = res.output {
+                        out.error("Export Heightmap: no terrain in the scene");
+                    }
+                    warn!("Export Heightmap: no TerrainRoot to export");
+                    continue;
+                };
+                if data.height_cache.is_empty() || data.cache_width == 0 || data.cache_height == 0 {
+                    if let Some(ref mut out) = res.output {
+                        out.error("Export Heightmap: terrain has no height data loaded");
+                    }
+                    continue;
+                }
+                let Some(path) = rfd::FileDialog::new()
                     .add_filter("Heightmap PNG", &["png"])
+                    .set_file_name("heightmap.png")
                     .set_title("Export Heightmap")
                     .save_file()
-                {
-                    if let Some(ref mut out) = res.output {
-                        out.info(format!("Exporting heightmap: {}", path.display()));
+                else {
+                    continue;
+                };
+
+                // 16-bit greyscale, the same normalization the .r16 chunks use
+                // (`value * 65535`, world Y = value * height_scale) so the file
+                // round-trips through Import Heightmap.
+                let (w, h) = (data.cache_width, data.cache_height);
+                let pixels: Vec<u16> = data
+                    .height_cache
+                    .iter()
+                    .map(|v| (v.clamp(0.0, 1.0) * 65535.0).round() as u16)
+                    .collect();
+                match image::ImageBuffer::<image::Luma<u16>, _>::from_raw(w, h, pixels) {
+                    Some(buffer) => match buffer.save(&path) {
+                        Ok(()) => {
+                            if let Some(ref mut out) = res.output {
+                                out.info(format!(
+                                    "Exported {}x{} heightmap (height_scale {:.1} m) to {}",
+                                    w,
+                                    h,
+                                    config.height_scale,
+                                    path.display()
+                                ));
+                            }
+                            info!("Exported heightmap {}x{} to {:?}", w, h, path);
+                        }
+                        Err(e) => {
+                            if let Some(ref mut out) = res.output {
+                                out.error(format!("Export Heightmap failed: {e}"));
+                            }
+                            error!("Heightmap export write failed for {:?}: {}", path, e);
+                        }
+                    },
+                    None => {
+                        if let Some(ref mut out) = res.output {
+                            out.error(
+                                "Export Heightmap: height cache size does not match its dimensions",
+                            );
+                        }
                     }
-                    // TODO: Export terrain data when heightmap exporter is implemented
                 }
             }
             
@@ -7591,6 +7939,19 @@ fn drain_slint_actions(
                 }
             }
 
+            SlintAction::ExplorerSearch(query) => {
+                if let Some(ref mut es) = res.explorer_state {
+                    if es.search_query != query {
+                        es.search_query = query;
+                        // The tree sync coalesces rebuilds at 4 Hz and latches on a
+                        // structure probe; a search query changes neither, so without
+                        // both flags the filter would not re-run until something else
+                        // in the scene happened to change.
+                        es.dirty = true;
+                        es.needs_immediate_sync = true;
+                    }
+                }
+            }
             SlintAction::Deselect => {
                 // Clear selection in both Explorer and 3D viewport
                 if let Some(ref mut es) = res.explorer_state {
@@ -8178,6 +8539,16 @@ fn drain_slint_actions(
                         "CanCollide" => {
                             if let Ok(mut bp) = queries.base_parts.get_mut(entity) {
                                 bp.can_collide = val == "true";
+                            }
+                        }
+                        // Toggling this off is what tears damage down:
+                        // `cleanup_deformable_meshes` watches `Changed<BasePart>`
+                        // and restores `Mesh3d` to the authored source, so a
+                        // dented part becomes pristine again rather than keeping
+                        // damage nothing can undo.
+                        "Destructible" => {
+                            if let Ok(mut bp) = queries.base_parts.get_mut(entity) {
+                                bp.destructible = val == "true";
                             }
                         }
                         "Locked" => {
@@ -11724,10 +12095,18 @@ fn drain_slint_actions(
                     // camera controller owns the actual framing distance, so
                     // there is nothing to differentiate here without inventing
                     // a second, subtly-different camera behaviour.
+                    // Route through the SAME `Action::FocusSelection` the F key
+                    // uses. This arm previously wrote a `FrameSelectionEvent`
+                    // directly — a second, parallel path that did not actually
+                    // frame anything, so the menu item was inert while F worked.
+                    // One path means the menu can never drift from the shortcut
+                    // again. Focus and Zoom both frame the selection's bounds;
+                    // there is nothing to differentiate without inventing a
+                    // second, subtly-different camera behaviour.
                     "focus-selection" | "zoom-to-selection" => {
-                        events.frame_selection.write(
-                            crate::camera_controller::FrameSelectionEvent { target_bounds: None },
-                        );
+                        events.menu_events.write(MenuActionEvent::new(
+                            crate::keybindings::Action::FocusSelection,
+                        ));
                     }
                     "toggle-anchor" => {
                         events.menu_events.write(MenuActionEvent::new(
@@ -11855,6 +12234,29 @@ fn drain_slint_actions(
                                 .unwrap_or_default();
                             ui.set_feedback_about_tool(about.into());
                             ui.set_show_feedback_dialog(true);
+                        }
+                        continue;
+                    }
+                    // Business > Supply Chain > Procurement & Logistics.
+                    // Both open singleton center tabs over the Space's order
+                    // registry. An RFQ and a purchase order are the same record
+                    // in different states, so these are two views, not two
+                    // stores.
+                    "sc:rfq_builder" => {
+                        if let Some(ref mut mgr) = res.tab_manager {
+                            let idx = mgr.open_rfq_builder();
+                            if let Some(ref mut out) = res.output {
+                                out.info(format!("Opened RFQ Builder (tab {idx})"));
+                            }
+                        }
+                        continue;
+                    }
+                    "sc:purchase_order_tracker" => {
+                        if let Some(ref mut mgr) = res.tab_manager {
+                            let idx = mgr.open_purchase_order_tracker();
+                            if let Some(ref mut out) = res.output {
+                                out.info(format!("Opened Purchase Orders (tab {idx})"));
+                            }
                         }
                         continue;
                     }
@@ -12018,16 +12420,19 @@ fn drain_slint_actions(
                         events.distribute_events.write(DistributeEntitiesEvent { axis });
                         continue;
                     }
-                    // Anchor is NOT a paint tool like Lock/Unlock below — it
-                    // flips `BasePart.anchored` on the current selection right
-                    // away. Same `MenuActionEvent` the Alt+A chord and the
-                    // viewport menu's "Toggle Anchor" fire, so all three land
-                    // in the one handler (`keybindings::handle_menu_action_events`)
-                    // that also persists the flag and pushes the undo entry.
+                    // Anchor arms a paint mode, exactly like Lock/Unlock below.
+                    // It used to fire the selection one-shot, which meant that
+                    // with nothing selected the button silently did nothing —
+                    // and with something selected it acted on THAT rather than
+                    // on whatever the user clicked next. The Alt+A chord still
+                    // toggles the current selection (see
+                    // `keybindings::handle_menu_action_events`), so the split
+                    // matches Lock's: ribbon arms a mode, keyboard acts on the
+                    // selection.
                     "edit:anchor" => {
-                        events.menu_events.write(MenuActionEvent::new(
-                            crate::keybindings::Action::ToggleAnchor,
-                        ));
+                        if let Some(ref mut s) = res.state {
+                            s.current_tool = super::Tool::Anchor;
+                        }
                         continue;
                     }
                     // Lock / Unlock paint modes — switch tool. The
@@ -12843,6 +13248,40 @@ fn drain_slint_actions(
                             if now_visible { "visible" } else { "hidden" },
                             n
                         );
+                    } else if action == "terrain:water" {
+                        // Show/hide the water plane at the terrain's sea level.
+                        // This action string was wired to a ribbon button but
+                        // had no arm here, so the button did nothing at all.
+                        let toggled = res.water_config.as_deref_mut().map(|water| {
+                            water.enabled = !water.enabled;
+                            (water.enabled, water.sea_level)
+                        });
+                        match toggled {
+                            Some((on, level)) => {
+                                // The plane is sized off the terrain footprint,
+                                // so say so rather than looking like a no-op.
+                                let no_terrain = queries.terrain_roots.iter().next().is_none();
+                                if let Some(ref mut out) = res.output {
+                                    if on && no_terrain {
+                                        out.warning(
+                                            "Water on, but there is no terrain yet — the plane is                                              sized to the terrain footprint and appears with it",
+                                        );
+                                    }
+                                    out.info(format!(
+                                        "Water {} (sea level {:.1} m)",
+                                        if on { "on" } else { "off" },
+                                        level
+                                    ));
+                                }
+                                info!("Water plane -> {} at Y={:.1}", on, level);
+                            }
+                            None => {
+                                if let Some(ref mut out) = res.output {
+                                    out.error("Water: WaterConfig resource is not registered");
+                                }
+                                warn!("terrain:water with no WaterConfig resource");
+                            }
+                        }
                     } else if action == "terrain:clear" {
                         // Clear terrain: delete Workspace/Terrain directory and despawn all terrain entities
                         let space_root = crate::space::default_space_root();
@@ -13875,6 +14314,7 @@ fn sync_bevy_to_slint(
             // reflects which mode is active.
             Tool::Lock => "lock",
             Tool::Unlock => "unlock",
+            Tool::Anchor => "anchor",
         };
         let current_tool: String = ui.get_current_tool().into();
         if current_tool != tool_str {
@@ -16616,6 +17056,89 @@ fn update_ui_performance(
 
 /// Sync UndoStack state to the Slint HistoryPanel.
 /// Shows all undoable actions (transforms, deletes, etc.).
+/// Push the Space's purchase orders into both procurement panels.
+///
+/// Runs only while one of those tabs is actually open, so a Space with a large
+/// order book costs nothing on frames where nobody is looking at it.
+///
+/// The RFQ Builder gets the records still in `draft` or `sent`; the Tracker gets
+/// whatever its filter chip admits. They are two views over one registry, which
+/// is why there is a single sync rather than one per panel.
+fn sync_procurement_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    orders: Option<Res<crate::manufacturing::PurchaseOrderRegistry>>,
+    manufacturing: Option<Res<crate::manufacturing::ManufacturingProgramRegistry>>,
+    tabs: Option<Res<super::center_tabs::CenterTabManager>>,
+) {
+    use super::procurement_bridge as bridge;
+
+    let Some(ref context) = slint_context else { return };
+    let Some(ref orders) = orders else { return };
+    let Some(ref tabs) = tabs else { return };
+
+    let active = tabs.active_tab_type_string();
+    if active != "rfq" && active != "purchase-orders" {
+        return;
+    }
+
+    let ui = &context.window;
+
+    // Resolving a vendor id needs the Manufacturer registry. Its absence is not
+    // fatal: `order_row` falls back to showing the raw id, which is better than
+    // an empty vendor column.
+    let empty_registry = crate::manufacturing::ManufacturingProgramRegistry::default();
+    let mfg = manufacturing.as_deref().unwrap_or(&empty_registry);
+
+    if active == "rfq" {
+        let rfqs: Vec<PurchaseOrderRow> = orders
+            .orders
+            .iter()
+            .filter(|o| o.is_rfq())
+            .map(|o| bridge::order_row(o, bridge::vendor_name(mfg, &o.manufacturer_id)))
+            .collect();
+        ui.set_procurement_rfqs(slint::ModelRc::new(slint::VecModel::from(rfqs)));
+        ui.set_procurement_manufacturers(slint::ModelRc::new(slint::VecModel::from(
+            bridge::manufacturer_options(mfg),
+        )));
+        return;
+    }
+
+    let filter = ui.get_procurement_state_filter().to_string();
+    let rows: Vec<PurchaseOrderRow> = orders
+        .orders
+        .iter()
+        .filter(|o| bridge::passes_filter(o, &filter))
+        .map(|o| bridge::order_row(o, bridge::vendor_name(mfg, &o.manufacturer_id)))
+        .collect();
+
+    // Committed value counts confirmed and locked orders only. Including RFQs
+    // would report money as committed that no vendor has been told about.
+    let committed: f64 = orders
+        .orders
+        .iter()
+        .filter(|o| {
+            matches!(
+                o.state,
+                crate::manufacturing::PurchaseOrderState::Purchase
+                    | crate::manufacturing::PurchaseOrderState::Done
+            )
+        })
+        .map(|o| o.amount_total())
+        .sum();
+
+    let currency = orders
+        .orders
+        .first()
+        .map(|o| o.currency.clone())
+        .unwrap_or_else(|| "USD".to_string());
+
+    ui.set_procurement_orders(slint::ModelRc::new(slint::VecModel::from(rows)));
+    ui.set_procurement_rfq_count(orders.rfq_count() as i32);
+    ui.set_procurement_order_count(orders.order_count() as i32);
+    ui.set_procurement_total_committed(format!("{committed:.2}").into());
+    ui.set_procurement_currency(currency.into());
+}
+
 fn sync_history_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     undo_stack: Option<Res<crate::undo::UndoStack>>,
@@ -16785,9 +17308,19 @@ fn sync_unified_explorer_to_slint(
     child_of_query: Query<&ChildOf>,
     service_components: Query<&crate::space::service_loader::ServiceComponent>,
     loaded_from_file: Query<&crate::space::LoadedFromFile>,
-    // Terrain entities for Explorer tree (TerrainRoot + Chunks)
-    terrain_roots: Query<(Entity, &eustress_common::terrain::TerrainConfig), With<eustress_common::terrain::TerrainRoot>>,
-    terrain_chunks: Query<(Entity, &eustress_common::terrain::Chunk)>,
+    // Terrain entities for Explorer tree (TerrainRoot + Chunks), bundled into
+    // one tuple param. Bevy caps a system at 16 params and this system is AT
+    // the cap; pairing these two (5 call sites between them) is what freed the
+    // slot for `text_labels` below.
+    terrain: (
+        Query<(Entity, &eustress_common::terrain::TerrainConfig), With<eustress_common::terrain::TerrainRoot>>,
+        Query<(Entity, &eustress_common::terrain::Chunk)>,
+    ),
+    // Text of every TextLabel in the Space, so Explorer search can match what
+    // a sign READS and not just what its node is called. A label's text is
+    // usually the only name a user knows it by — the owning Part is typically
+    // `Part-a3f9`.
+    text_labels: Query<&eustress_common::classes::TextLabel>,
     // EustressStream change-detection dirty flag
     mut panel_dirty: Option<ResMut<eustress_common::change_queue::PanelDirtyFlags>>,
     // Selection manager for multi-select highlighting in tree
@@ -16819,6 +17352,9 @@ fn sync_unified_explorer_to_slint(
     mut rebuild_requested: Local<bool>,
     mut last_rebuild_frame: Local<u64>,
 ) {
+    // Field-wise borrow of the bundled tuple so the call sites below read as
+    // they did when these were separate params.
+    let (terrain_roots, terrain_chunks) = (&terrain.0, &terrain.1);
     let Some(mut explorer_state) = explorer_state else { return };
 
     // EustressStream change-detection. In the Vehicle-Simulator steady state the
@@ -17937,9 +18473,86 @@ fn sync_unified_explorer_to_slint(
 
     if !explorer_state.search_query.is_empty() {
         let query = explorer_state.search_query.to_lowercase();
-        for node in tree_nodes.iter_mut() {
-            let name_lower: String = node.name.to_string().to_lowercase();
-            node.visible = name_lower.contains(&query);
+        // Match with whitespace collapsed on BOTH sides too, so typing the
+        // words the way they READ ("the ledger") finds a node named the way
+        // it was AUTHORED ("TheLedger"). Only used as a fallback, so a query
+        // containing a real space still prefers a literal hit.
+        let query_tight: String = query.chars().filter(|c| !c.is_whitespace()).collect();
+        let matches = |hay: &str| -> bool {
+            let h = hay.to_lowercase();
+            if h.contains(&query) {
+                return true;
+            }
+            if query_tight.is_empty() {
+                return false;
+            }
+            let h_tight: String = h.chars().filter(|c| !c.is_whitespace()).collect();
+            h_tight.contains(&query_tight)
+        };
+
+        // A node matches on its own name, or on the text of any TextLabel at
+        // or beneath it. Searching descendants is the point: a sign's text
+        // lives on a TextLabel child, while the row the user is hunting for is
+        // the Part that owns it.
+        let label_text_for = |entity: Entity| -> Option<String> {
+            let mut out = String::new();
+            let mut stack = vec![entity];
+            let mut guard = 0u32;
+            while let Some(e) = stack.pop() {
+                // Depth guard: a malformed hierarchy must not hang the UI
+                // thread on a search keystroke.
+                guard += 1;
+                if guard > 512 {
+                    break;
+                }
+                if let Ok(label) = text_labels.get(e) {
+                    out.push(' ');
+                    out.push_str(&label.text);
+                }
+                if let Ok(children) = children_query.get(e) {
+                    stack.extend(children.iter());
+                }
+            }
+            if out.is_empty() { None } else { Some(out) }
+        };
+
+        let mut matched: Vec<bool> = Vec::with_capacity(tree_nodes.len());
+        for node in tree_nodes.iter() {
+            let mut hit = matches(&node.name.to_string());
+            if !hit {
+                if let Some(entity) = explorer_state.entity_id_cache.get(&node.id).copied() {
+                    if let Some(text) = label_text_for(entity) {
+                        hit = matches(&text);
+                    }
+                }
+            }
+            matched.push(hit);
+        }
+
+        // Keep the ancestors of every hit visible. `tree_nodes` is a flat,
+        // pre-order list carrying `depth`, so an ancestor is the nearest
+        // earlier node with a smaller depth. Without this a hit rendered at
+        // depth 5 under nothing at all, which reads as a broken tree rather
+        // than a filtered one.
+        let mut visible: Vec<bool> = matched.clone();
+        for i in 0..tree_nodes.len() {
+            if !matched[i] {
+                continue;
+            }
+            let mut depth = tree_nodes[i].depth;
+            for j in (0..i).rev() {
+                if tree_nodes[j].depth < depth {
+                    visible[j] = true;
+                    depth = tree_nodes[j].depth;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        for (node, vis) in tree_nodes.iter_mut().zip(visible) {
+            node.visible = vis;
         }
     }
 
@@ -18717,6 +19330,10 @@ struct PropertyExtraQueries<'w, 's> {
     loaded_from_file: Query<'w, 's, &'static crate::space::LoadedFromFile>,
     /// Parent link — a child Series/Column resolves its parent Dataset's CSV here.
     child_of: Query<'w, 's, &'static bevy::prelude::ChildOf>,
+    /// Live domain-scoped Parameters. Read from the COMPONENT, not the TOML, so
+    /// the section also renders for DB-backed instances — the previous
+    /// TOML-only read could never fire for an entity with no `_instance.toml`.
+    params: Query<'w, 's, &'static eustress_common::parameters::InstanceParameters>,
     /// Parametric CadPart feature tree + last eval status.
     cad_part: Query<'w, 's, (
         &'static crate::cad_plugin::CadPart,
@@ -18995,6 +19612,8 @@ fn sync_properties_to_slint(
     // attribute name -> AttributeValue type name, for the Roblox-style type
     // badge + edit-dialog prefill on rows in the "Attributes" category.
     let mut attribute_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Same, for Parameter rows: label -> ParameterValue type name.
+    let mut parameter_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     // Helper to add a property to a category bucket
     let mut add_prop = |cat: &str, name: &str, value: String, prop_type: &str, editable: bool| {
@@ -19345,6 +19964,11 @@ fn sync_properties_to_slint(
             add_prop("Physics", "Anchored", toml_def.properties.anchored.to_string(), "bool", true);
             add_prop("Physics", "CanCollide", toml_def.properties.can_collide.to_string(), "bool", true);
             add_prop("Physics", "Locked", toml_def.properties.locked.to_string(), "bool", true);
+            // The destructibility gate. Off means the part can never dent or
+            // crack; on reveals the Material section below, whose values are
+            // already implied by `Material` above and only need touching to
+            // describe something the presets do not cover.
+            add_prop("Physics", "Destructible", toml_def.properties.destructible.to_string(), "bool", true);
 
             // NOTE: Tags + Attributes are NO LONGER emitted here. They were
             // previously read from disk TOML inside this non-UI-only branch,
@@ -19354,24 +19978,46 @@ fn sync_properties_to_slint(
             // class-agnostically, from the live `Tags` / `Attributes`
             // components after this block (search `ADD_ATTRIBUTE_ROW`).
 
-            // -- Parameters section (from [parameters] in TOML) --
-            if let Some(ref params) = toml_def.parameters {
-                for (key, value) in params {
-                    let val_str = match value {
-                        toml::Value::String(s) => s.clone(),
-                        toml::Value::Integer(i) => i.to_string(),
-                        toml::Value::Float(f) => format!("{:.4}", f),
-                        toml::Value::Boolean(b) => b.to_string(),
-                        other => format!("{}", other),
-                    };
-                    add_prop("Parameters", key, val_str, "string", true);
-                }
-            }
+            // Parameters are emitted from the live `InstanceParameters`
+            // component alongside Attributes (search `parameter_types`), not
+            // from `[parameters]` here. Reading the TOML at this point could
+            // only ever work for a file-backed instance, so the section was
+            // invisible for DB-backed ones; the component is the single source
+            // of truth and is loaded from that same table on spawn.
 
             } // end non-UI branch
             
-            // -- Material section (realism, optional) --
-            if let Some(ref mat) = toml_def.material {
+            // -- Material section (realism) --
+            //
+            // DISCLOSURE, NOT STORAGE. Shown when the part is Destructible, or
+            // whenever an explicit `[material]` block exists (so a part that
+            // uses these for thermal/friction still shows them). Turning
+            // Destructible off only HIDES the rows — it never deletes the
+            // block, so toggling off and back on cannot lose tuned values.
+            //
+            // With no explicit block the values are read from the preset the
+            // part's `Material` name implies, which is exactly what the
+            // simulation will use. That is the point: the rows are there to be
+            // read, not filled in.
+            let derived_material = toml_def.material.is_none().then(|| {
+                eustress_common::realism::materials::properties::MaterialProperties::from_name(
+                    &toml_def.properties.material,
+                )
+            }).flatten();
+            let shown_material = toml_def
+                .material
+                .as_ref()
+                .map(std::borrow::Cow::Borrowed)
+                .or_else(|| {
+                    (toml_def.properties.destructible)
+                        .then(|| derived_material.as_ref().map(|p| {
+                            std::borrow::Cow::Owned(
+                                crate::space::instance_loader::TomlMaterialProperties::from_component(p),
+                            )
+                        }))
+                        .flatten()
+                });
+            if let Some(ref mat) = shown_material {
                 add_prop("Material", "Name", mat.name.clone(), "string", true);
                 add_prop("Material", "YoungModulus", format!("{:.2e}", mat.young_modulus), "float", true);
                 add_prop("Material", "PoissonRatio", format!("{:.4}", mat.poisson_ratio), "float", true);
@@ -19676,11 +20322,34 @@ fn sync_properties_to_slint(
                 add_prop("Attributes", key, attribute_value_to_edit_string(value), "string", true);
             }
         }
+
+        // Parameters — the SAME affordance, a different concept. An Attribute
+        // is a static value on this part; a Parameter places the part in a
+        // domain and is what an external source ultimately feeds. Rows are
+        // domain-scoped, so a key outside the default domain renders as
+        // `domain.key` and the basic case stays a bare key.
+        if let Ok(params) = extra_q.params.get(selected_entity) {
+            use eustress_common::parameters::DEFAULT_PARAMETER_DOMAIN;
+            for (domain, keys) in params.domains.iter() {
+                for (key, value) in keys.iter() {
+                    let label = if domain == DEFAULT_PARAMETER_DOMAIN {
+                        key.clone()
+                    } else {
+                        format!("{domain}.{key}")
+                    };
+                    parameter_types.insert(label.clone(), value.type_name().to_string());
+                    add_prop("Parameters", &label, value.edit_string(), "string", true);
+                }
+            }
+        }
     }
     // Always render the empty Attributes header so the "+" add button is
     // reachable even when the entity has no attributes yet. Done AFTER the
     // last `add_prop` call so it doesn't alias the closure's &mut borrow.
     categorized.entry("Attributes".to_string()).or_default();
+    // Same for Parameters: the section is always present so the entity can be
+    // given its first parameter without hunting for an entry point.
+    categorized.entry("Parameters".to_string()).or_default();
 
     // NOTE: the Tag chips/registry models AND the Tags-section collapse flag
     // are handled by the dedicated, NON-focus-gated `sync_tags_to_slint`
@@ -20616,6 +21285,7 @@ fn route_property(key: &str, val: &str) -> Option<(&'static str, &'static str, t
         "Transparency"   => parse_finite(val).map(|v| ("properties", "transparency", Value::Float(v))),
         "Reflectance"    => parse_finite(val).map(|v| ("properties", "reflectance", Value::Float(v))),
         "Locked"         => Some(("properties", "locked", bool_value(val))),
+        "Destructible"   => Some(("properties", "destructible", bool_value(val))),
         "CastShadow"     => Some(("properties", "cast_shadow", bool_value(val))),
 
         // ── [gaussian_splats] (per-cloud correction toggles) ─────────
@@ -20806,7 +21476,7 @@ fn is_undo_wired_property(name: &str) -> bool {
         name,
         "Name" | "Position" | "Orientation" | "Size" | "Scale" | "Color"
             | "Material" | "Transparency" | "Reflectance" | "Anchored"
-            | "CanCollide" | "CanTouch" | "Locked"
+            | "CanCollide" | "CanTouch" | "Locked" | "Destructible"
             | "FieldOfView" | "NearClipPlane" | "FarClipPlane"
     )
 }

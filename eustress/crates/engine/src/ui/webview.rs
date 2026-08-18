@@ -251,9 +251,34 @@ fn sync_webviews(
                 }
             }
         }
-        // Update bounds to match viewport area
+        // Update bounds to match viewport area.
+        //
+        // `ViewportBounds` is PHYSICAL pixels (see `ui/mod.rs`), but
+        // `set_bounds` hands wry `Position::Logical` / `Size::Logical`.
+        // Feeding physical values straight in placed and sized the native
+        // WebView2 child window in the wrong space on any display with DPI
+        // scaling != 1.0 — at 150% it lands 1.5x too far right/down and 1.5x
+        // too large, so the page renders off the visible content area (the
+        // tab chrome around it still draws, which is why this looked like
+        // "the browser is blank"), and the oversized child window covers the
+        // tab strip and swallows clicks meant for the tab and its X.
+        //
+        // Same physical-vs-logical trap `ViewportBounds::contains_logical`
+        // exists to prevent for cursor hit-testing.
         if let Some(ref vb) = viewport_bounds {
-            webview_mgr.set_bounds(idx, vb.x as f64, vb.y as f64, vb.width as f64, vb.height as f64);
+            let scale = winit_windows
+                .as_ref()
+                .and_then(|w| primary_window.single().ok().and_then(|e| w.get_window(e)))
+                .map(|w| w.scale_factor())
+                .unwrap_or(1.0)
+                .max(0.0001);
+            webview_mgr.set_bounds(
+                idx,
+                vb.x as f64 / scale,
+                vb.y as f64 / scale,
+                vb.width as f64 / scale,
+                vb.height as f64 / scale,
+            );
         }
     }
 

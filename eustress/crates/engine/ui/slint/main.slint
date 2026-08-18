@@ -72,6 +72,7 @@ import { SyncDomainDialog } from "sync_domain.slint";
 import { WorkshopPanel, ChatMessage, PipelineStepData, ConversationSummary, MentionItemData } from "workshop_panel.slint";
 import { ApiReferencePanel, ApiEntryData } from "api_reference_panel.slint";
 import { ServicesBrowserPanel, ServiceBrowserEntry, ServicePropertySummary } from "services_browser.slint";
+import { RfqBuilderPanel, PurchaseOrderTrackerPanel, PurchaseOrderRow, PurchaseOrderLineRow, ManufacturerOption } from "procurement.slint";
 import { UniverseBrowser, UniverseItem, SpaceItem } from "universe_browser.slint";
 
 // ============================================================================
@@ -420,6 +421,33 @@ export component StudioWindow inherits Window {
     in-out property <int> services-browser-selected: 0;
     callback services-browser-open-url(string);
     callback services-browser-selected-changed(int);
+
+    // ---- Procurement: RFQ Builder + Purchase Order Tracker ----
+    // Both read the same Space-wide order registry. `procurement-rfqs` is the
+    // subset still in draft or sent; `procurement-orders` is whatever the
+    // Tracker's filter currently admits. The `can-*` flags inside each row are
+    // computed by the Rust state machine, never re-derived in Slint.
+    in property <[PurchaseOrderRow]> procurement-rfqs: [];
+    in property <[PurchaseOrderRow]> procurement-orders: [];
+    in property <[ManufacturerOption]> procurement-manufacturers: [];
+    in-out property <int> procurement-rfq-selected: -1;
+    in-out property <int> procurement-order-selected: -1;
+    in-out property <int> procurement-vendor-index: 0;
+    in-out property <string> procurement-state-filter: "all";
+    in property <int> procurement-rfq-count: 0;
+    in property <int> procurement-order-count: 0;
+    in property <string> procurement-total-committed: "0.00";
+    in property <string> procurement-currency: "USD";
+    callback procurement-create-rfq(string);
+    callback procurement-select-rfq(int);
+    callback procurement-select-order(int);
+    callback procurement-line-changed(string, int, string, string);
+    callback procurement-add-line(string);
+    callback procurement-remove-line(string, int);
+    callback procurement-transition(string, string);
+    callback procurement-field-changed(string, string, string);
+    callback procurement-filter-changed(string);
+    callback procurement-open-rfq-builder();
 
     // Scene name for exit confirmation
     in-out property <string> scene-name: "Untitled";
@@ -1200,6 +1228,11 @@ export component StudioWindow inherits Window {
         // ====================================================================
         Ribbon {
             current-tool: root.current-tool;
+            // Terrain active-state: which brush is armed and whether sculpt
+            // mode is on, so the Terrain tab's buttons light up like every
+            // other tool button does.
+            current-terrain-brush: root.terrain-brush;
+            terrain-edit-mode: root.terrain-edit-mode;
             // Eustress Modes — mode list + active id/icon + data-driven
             // ribbon-tab subset, all pushed from Rust's ModeRegistry.
             available-modes: root.available-modes;
@@ -2859,6 +2892,44 @@ export component StudioWindow inherits Window {
                         selected-index <=> root.services-browser-selected;
                         open-service-url(url) => { root.services-browser-open-url(url); }
                         service-selected(idx) => { root.services-browser-selected-changed(idx); }
+                    }
+
+                    // RFQ Builder — Business > Supply Chain > Procurement &
+                    // Logistics > Sourcing & Procurement.
+                    if root.active-tab-type == "rfq": RfqBuilderPanel {
+                        width: parent.width;
+                        height: parent.height;
+                        rfqs: root.procurement-rfqs;
+                        manufacturers: root.procurement-manufacturers;
+                        selected-index <=> root.procurement-rfq-selected;
+                        vendor-index <=> root.procurement-vendor-index;
+
+                        create-rfq(id) => { root.procurement-create-rfq(id); }
+                        select-rfq(idx) => { root.procurement-select-rfq(idx); }
+                        line-changed(r, i, f, v) => { root.procurement-line-changed(r, i, f, v); }
+                        add-line(r) => { root.procurement-add-line(r); }
+                        remove-line(r, i) => { root.procurement-remove-line(r, i); }
+                        transition(r, a) => { root.procurement-transition(r, a); }
+                        field-changed(r, f, v) => { root.procurement-field-changed(r, f, v); }
+                    }
+
+                    // Purchase Order Tracker — the whole order population, and
+                    // the transitions each one currently permits.
+                    if root.active-tab-type == "purchase-orders": PurchaseOrderTrackerPanel {
+                        width: parent.width;
+                        height: parent.height;
+                        orders: root.procurement-orders;
+                        selected-index <=> root.procurement-order-selected;
+                        state-filter <=> root.procurement-state-filter;
+                        rfq-count: root.procurement-rfq-count;
+                        order-count: root.procurement-order-count;
+                        total-committed: root.procurement-total-committed;
+                        currency: root.procurement-currency;
+
+                        select-order(idx) => { root.procurement-select-order(idx); }
+                        transition(r, a) => { root.procurement-transition(r, a); }
+                        filter-changed(f) => { root.procurement-filter-changed(f); }
+                        open-rfq-builder() => { root.procurement-open-rfq-builder(); }
                     }
 
                     // API Reference Browser (shown for "api" tab type)
