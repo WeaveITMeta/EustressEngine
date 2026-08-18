@@ -88,6 +88,12 @@ eustress-cad = { path = "../cad" }
 eustress-tools = { path = "../tools", features = ["bevy"] }
 bevy-camera-controller = { path = "../common/bevy-camera-controller" }
 eustress-geo = { path = "../geo" }
+# World-model generative spine (Phases 4-6): candidate schema, closed-form
+# fitness, generate->score->optimize loop, 1D linear FEA verifier. Pure logic
+# (serde only), so no feature gate: every gate in this manifest exists to keep a
+# HEAVY dependency out of the default graph (arrow/parquet,
+# bevy_gaussian_splatting, openraft, tower-lsp), and this crate adds nothing to it.
+eustress-genesis = { path = "../genesis" }
 # TODO: Fix Bevy 0.17 compatibility issues in eustress-networking
 # eustress-networking = { path = "../common/eustress-networking", features = ["server", "client", "physics"] }
 

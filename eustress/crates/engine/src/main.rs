@@ -30,7 +30,7 @@ use eustress_engine::{
     camera_controller, class_registry, classes, clipboard, commands, commit_flash,
     constraint_editor_tool, cursor_badge, decal_place_tool, default_scene, duplicate_place_tool,
     editor_settings, embedded_client, embedvec_dispatch, engine_bridge, entity_utils,
-    forge, frame_diagnostics, generative_pipeline, geom_snap, gizmo_tools, grouping,
+    forge, frame_diagnostics, generative_arch, generative_pipeline, geom_snap, gizmo_tools, grouping,
     history_stream, interaction, io_manager, keybindings, lasso_paint_select,
     light_cull, light_sync, lock_tool, manufacturing, material_sync, math_utils,
     measure_tool, mesh_import, mirror_link, modal_tool, move_handles, move_tool,
@@ -515,6 +515,12 @@ fn main() {
         .add_plugins(updater::UpdaterPlugin)
         // Generative pipeline
         .add_plugins(generative_pipeline::GenerativePipelinePlugin)
+        // Generative architecture overlay (editor tier only). Draws the best
+        // candidate from GenerativeArchLedger as gizmo lines coloured by FEA
+        // utilization. Split out of GenerativeArchPlugin because the headless
+        // shell has no GizmoPlugin, and a `Gizmos` system param there fails
+        // validation and silently skips.
+        .add_plugins(generative_arch::GenerativeArchGizmoPlugin)
         // VIGA
         .add_plugins(viga::VigaPlugin)
         // IoManager

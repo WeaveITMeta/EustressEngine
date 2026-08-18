@@ -2,6 +2,8 @@
 name = "eustress-genesis"
 version = "0.1.0"
 edition = "2021"
+authors = ["EustressEngine Contributors"]
+license = "PolyForm-Shield-1.0.0"
 description = "World-model generative spine (Phases 4-6): candidate schema, closed-form fitness, generate->score->optimize loop, 1D linear FEA verifier, and vendor-agnostic ingest contracts. Pure logic, no engine types — runs headless + deterministically."
 
 [dependencies]

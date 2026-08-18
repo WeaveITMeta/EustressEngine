@@ -157,6 +157,7 @@ pub mod entity_utils;
 pub mod spatial_query_bridge;
 pub mod usd_loader;
 pub mod physics_proxy;
+pub mod generative_arch;
 pub mod generative_pipeline;
 pub mod viga;
 pub mod scenarios;

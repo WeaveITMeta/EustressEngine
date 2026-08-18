@@ -241,6 +241,16 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
         // PlayModeState; drains MCP sim-commands.jsonl; writes telemetry).
         .add_plugins(crate::simulation::SimulationPlugin::default())
         .add_plugins(crate::simulation::ElectrochemistryPlugin)
+        // World-model generative spine (Phase 5). Wraps the engine-free
+        // `eustress-genesis` crate: generate -> score -> optimize over an
+        // ArchCandidate, with the 1D FEA verifier wired in as a hard yield gate
+        // (closed-form fitness carries no strength term, so an ungated run just
+        // shrinks every member toward zero area). Inert until a
+        // RunGenerativeArchEvent arrives or EUSTRESS_GENESIS_ITERS is set.
+        // Headless-safe: no render or Slint dependency. The Gizmos overlay is a
+        // SEPARATE editor-tier plugin, because MinimalPlugins carries no
+        // GizmoPlugin.
+        .add_plugins(crate::generative_arch::GenerativeArchPlugin)
         // Platform services
         .add_plugins(TeamServicePlugin)
         // In-process play server (PlayModeCorePlugin's server-mode
@@ -270,7 +280,16 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
         // Portals — free-camera Space↔Space teleport in Studio. Reads
         // `portal_target` off any instance's `[attributes]`; inert when no
         // instance carries one, so this costs a single query on other Spaces.
-        .add_plugins(crate::portal::PortalPlugin);
+        .add_plugins(crate::portal::PortalPlugin)
+        // Purchase orders and RFQs — loads `<SpaceRoot>/Manufacturing/
+        // PurchaseOrders/*.toml` into the registry the Procurement ribbon
+        // panels read. Costs one directory scan at startup and nothing after.
+        .add_plugins(crate::manufacturing::PurchaseOrderPlugin)
+        // Manufacturer and investor registries. This plugin existed but was
+        // never registered, so `ManufacturingProgramRegistry` was a resource no
+        // running app ever held. The RFQ Builder resolves vendor names and
+        // fills its vendor picker from it, so it has to be live.
+        .add_plugins(crate::manufacturing::ManufacturingPlugin::default());
 
     // WorldDb — Fjall-backed authoritative ECS store. Opens
     // `<SpaceRoot>/world.fjalldb/` and persists runtime edits.
