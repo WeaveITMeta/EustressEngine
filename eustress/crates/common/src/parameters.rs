@@ -301,6 +301,87 @@ impl Default for ParameterValue {
     }
 }
 
+impl ParameterValue {
+    /// Type badge shown in the Properties panel — mirrors
+    /// [`crate::attributes::AttributeValue::type_name`] so a Parameter row and
+    /// an Attribute row read the same way.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Bool(_) => "Bool",
+            Self::Int(_) => "Int",
+            Self::Float(_) => "Float",
+            Self::String(_) => "String",
+            Self::Vector3(_) => "Vector3",
+            Self::Color(_) => "Color",
+            Self::EntityRef(_) => "EntityRef",
+            Self::Json(_) => "Json",
+            Self::Binary(_) => "Binary",
+        }
+    }
+
+    /// Round-trippable text for the editable Properties row. Binary is opaque,
+    /// so it reports size rather than pretending to be editable text.
+    pub fn edit_string(&self) -> String {
+        match self {
+            Self::Bool(b) => b.to_string(),
+            Self::Int(i) => i.to_string(),
+            Self::Float(f) => format!("{f}"),
+            Self::String(s) => s.clone(),
+            Self::Vector3(v) => format!("{}, {}, {}", v[0], v[1], v[2]),
+            Self::Color(c) => format!("{}, {}, {}, {}", c[0], c[1], c[2], c[3]),
+            Self::EntityRef(e) => e.map(|v| v.to_string()).unwrap_or_default(),
+            Self::Json(j) => j.clone(),
+            Self::Binary(b) => format!("<{} bytes>", b.len()),
+        }
+    }
+
+    /// Parse a value back from the type badge + edited text. Returns `None`
+    /// when the text does not fit the type, so a bad edit is rejected rather
+    /// than silently coerced.
+    pub fn parse(type_name: &str, text: &str) -> Option<Self> {
+        let t = text.trim();
+        let nums = |n: usize| -> Option<Vec<f32>> {
+            let parts: Vec<f32> = t
+                .split(',')
+                .filter_map(|p| p.trim().parse::<f32>().ok())
+                .collect();
+            (parts.len() == n).then_some(parts)
+        };
+        Some(match type_name {
+            "Bool" => Self::Bool(matches!(t, "true" | "True" | "1")),
+            "Int" => Self::Int(t.parse().ok()?),
+            "Float" => Self::Float(t.parse().ok()?),
+            "String" => Self::String(t.to_string()),
+            "Vector3" => {
+                let v = nums(3)?;
+                Self::Vector3([v[0], v[1], v[2]])
+            }
+            "Color" => {
+                let v = nums(4)?;
+                Self::Color([v[0], v[1], v[2], v[3]])
+            }
+            "EntityRef" => Self::EntityRef(if t.is_empty() { None } else { Some(t.parse().ok()?) }),
+            "Json" => Self::Json(t.to_string()),
+            // Binary is not editable as text — refuse rather than corrupt it.
+            _ => return None,
+        })
+    }
+
+    /// The type names offered in the add/edit dialog, in menu order. `Binary`
+    /// is deliberately excluded: it has no text representation to author.
+    pub const EDITABLE_TYPES: [&'static str; 8] = [
+        "String", "Float", "Int", "Bool", "Vector3", "Color", "EntityRef", "Json",
+    ];
+}
+
+/// The domain a Parameter lands in when the author has not chosen one.
+///
+/// Parameters are domain-scoped by design (domain → key → value), but the
+/// Properties panel must stay usable before any Domain has been defined — so an
+/// un-domained Parameter is basic-by-default and lives here until it is
+/// promoted into a real domain.
+pub const DEFAULT_PARAMETER_DOMAIN: &str = "instance";
+
 // ============================================================================
 // Parameter Router (Change Detection & Export via EustressStream)
 // ============================================================================
