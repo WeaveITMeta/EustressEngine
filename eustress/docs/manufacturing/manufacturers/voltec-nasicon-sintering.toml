@@ -1,0 +1,62 @@
+# Sinters the Sc-doped NASICON membrane at 1200 C and applies the 5nm ALD alumina interlayer. Idle whenever scandium is late.
+#
+# Voltec V-Cell supply base. Scenario data authored for the Supply Chain demo
+# Space, not a real vendor record. See README.md in this directory.
+
+id = "voltec-nasicon-sintering"
+name = "Ceramic Membrane Works"
+status = "approved"
+country = "US"
+region = "Midwest"
+lead_time_days = 42
+
+[capabilities]
+processes = ["ceramic_sintering", "ald_coating", "membrane_lapping"]
+materials = ["NASICON_ceramics", "scandium_oxide", "zirconia", "alumina"]
+max_part_dimensions_mm = [400.0, 300.0, 120.0]
+min_feature_size_mm = 0.05
+
+[certifications]
+iso_9001 = true
+iso_14001 = false
+iatf_16949 = false
+ul_certified = false
+reach_compliant = true
+rohs_compliant = true
+ul_battery_certified = false
+additional = []
+
+[capacity]
+monthly_units_available = 9000
+min_order_quantity = 100
+dedicated_line_available = false
+dedicated_line_setup_weeks = 0
+
+[[pricing]]
+min_qty = 1
+max_qty = 499
+price_per_unit_usd = 88.0
+
+[[pricing]]
+min_qty = 500
+max_qty = 4999
+price_per_unit_usd = 61.5
+
+[[pricing]]
+min_qty = 5000
+max_qty = 200000
+price_per_unit_usd = 47.25
+
+
+[quality]
+historical_defect_rate_pct = 1.4
+on_time_delivery_rate_pct = 93.5
+ncr_count_12mo = 4
+last_audit_date = "2026-06-30"
+audit_score = 88
+
+[logistics]
+incoterms_offered = ["EXW", "FOB", "DDP"]
+freight_partners = ["Summit Global Logistics"]
+export_license_held = true
+hazmat_certified = true

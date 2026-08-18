@@ -28,9 +28,15 @@
 /// the vendor bound to this module's [`Manufacturer`] registry.
 pub mod purchase;
 
+/// Where those orders live on disk, how they are numbered, and the Bevy
+/// resource the ribbon panels read. Kept separate from [`purchase`] so the
+/// domain model stays free of I/O and Bevy, and testable on its own.
+pub mod purchase_store;
+
 pub use purchase::{
     InvoiceStatus, PurchaseError, PurchaseOrder, PurchaseOrderLine, PurchaseOrderState,
 };
+pub use purchase_store::{PurchaseOrderPlugin, PurchaseOrderRegistry};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -517,21 +523,67 @@ impl Default for ManufacturingPlugin {
     }
 }
 
+impl ManufacturingPlugin {
+    /// Resolve a registry directory against the plausible working directories.
+    ///
+    /// The configured path is relative, so what it means depends on where the
+    /// binary was launched from: the workspace root and the repository root are
+    /// both real possibilities, and they are different directories. Rather than
+    /// bet on one, try each and take the first that exists. Returning the
+    /// resolved path lets the caller log which one won, so a registry that
+    /// loaded from an unexpected place is visible rather than mysterious.
+    fn resolve(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        if dir.is_absolute() {
+            return dir.is_dir().then(|| dir.to_path_buf());
+        }
+        ["", "..", "../..", "../../.."]
+            .iter()
+            .map(|prefix| {
+                if prefix.is_empty() {
+                    dir.to_path_buf()
+                } else {
+                    std::path::Path::new(prefix).join(dir)
+                }
+            })
+            .find(|candidate| candidate.is_dir())
+    }
+}
+
 impl Plugin for ManufacturingPlugin {
     fn build(&self, app: &mut App) {
+        let investors = Self::resolve(&self.investors_dir);
+        let manufacturers = Self::resolve(&self.manufacturers_dir);
+
         let mut registry = ManufacturingProgramRegistry::default();
-        registry.investors = ManufacturingProgramRegistry::load_from_dir(&self.investors_dir);
-        registry.manufacturers = ManufacturingProgramRegistry::load_from_dir(&self.manufacturers_dir);
+        if let Some(ref dir) = investors {
+            registry.investors = ManufacturingProgramRegistry::load_from_dir(dir);
+        }
+        if let Some(ref dir) = manufacturers {
+            registry.manufacturers = ManufacturingProgramRegistry::load_from_dir(dir);
+        }
 
         let investor_count = registry.investors.len();
         let manufacturer_count = registry.manufacturers.len();
 
         app.insert_resource(registry);
 
-        tracing::info!(
-            "ManufacturingPlugin loaded: {} investors, {} manufacturers",
-            investor_count,
-            manufacturer_count
-        );
+        // Said out loud, because an empty manufacturer registry leaves the RFQ
+        // Builder with nothing to raise an order against, and "the button does
+        // nothing" is a much worse symptom to debug than a startup line saying
+        // the directory was not found.
+        match manufacturers {
+            Some(ref dir) => tracing::info!(
+                "ManufacturingPlugin loaded: {} investors, {} manufacturers from {}",
+                investor_count,
+                manufacturer_count,
+                dir.display()
+            ),
+            None => tracing::warn!(
+                "ManufacturingPlugin: no manufacturer registry found at {} \
+                 (searched upward from the working directory). The RFQ Builder \
+                 will have no vendors to raise orders against.",
+                self.manufacturers_dir.display()
+            ),
+        }
     }
 }

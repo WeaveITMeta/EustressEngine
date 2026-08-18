@@ -1,0 +1,62 @@
+# Positive and negative terminals, turned and contact-plated.
+#
+# Voltec V-Cell supply base. Scenario data authored for the Supply Chain demo
+# Space, not a real vendor record. See README.md in this directory.
+
+id = "voltec-terminal-machining"
+name = "Precision Contact Works"
+status = "approved"
+country = "MX"
+region = "North America"
+lead_time_days = 18
+
+[capabilities]
+processes = ["cnc_turning", "electroplating", "passivation"]
+materials = ["copper", "nickel", "aluminum_alloys"]
+max_part_dimensions_mm = [400.0, 300.0, 120.0]
+min_feature_size_mm = 0.05
+
+[certifications]
+iso_9001 = true
+iso_14001 = true
+iatf_16949 = false
+ul_certified = true
+reach_compliant = true
+rohs_compliant = true
+ul_battery_certified = false
+additional = ["IATF_16949_pending"]
+
+[capacity]
+monthly_units_available = 52000
+min_order_quantity = 250
+dedicated_line_available = true
+dedicated_line_setup_weeks = 6
+
+[[pricing]]
+min_qty = 1
+max_qty = 999
+price_per_unit_usd = 8.9
+
+[[pricing]]
+min_qty = 1000
+max_qty = 9999
+price_per_unit_usd = 5.4
+
+[[pricing]]
+min_qty = 10000
+max_qty = 600000
+price_per_unit_usd = 3.85
+
+
+[quality]
+historical_defect_rate_pct = 0.4
+on_time_delivery_rate_pct = 98.0
+ncr_count_12mo = 0
+last_audit_date = "2026-06-30"
+audit_score = 96
+
+[logistics]
+incoterms_offered = ["EXW", "FOB", "DDP"]
+freight_partners = ["Summit Global Logistics"]
+export_license_held = true
+hazmat_certified = false

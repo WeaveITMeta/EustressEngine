@@ -515,8 +515,33 @@ export default {
   // (same snapshot). Sequential — both read the same day's scores.
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
-      try { await runDailyDistribution(env); } catch (e) { console.error('distribution failed:', e); }
-      try { await runDailyPayout(env); } catch (e) { console.error('payout failed:', e); }
+      let distribution = null;
+      let payout = null;
+      let backup = null;
+      let failed = [];
+      try { distribution = await runDailyDistribution(env); }
+      catch (e) { failed.push(`distribution: ${e.message}`); console.error('distribution failed:', e); }
+      try { payout = await runDailyPayout(env); }
+      catch (e) { failed.push(`payout: ${e.message}`); console.error('payout failed:', e); }
+      // Backup LAST so it captures the state this run produced.
+      try { backup = await backupLedger(env); }
+      catch (e) { failed.push(`backup: ${e.message}`); console.error('backup failed:', e); }
+
+      // Durable run record. Cron failures used to vanish into console.error
+      // with nothing queryable afterwards, so a silently skipped day was
+      // invisible. `/api/admin/cron-health` reads these.
+      const today = new Date().toISOString().split('T')[0];
+      await env.PAYOUTS.put(`cronrun:${today}`, JSON.stringify({
+        ran_at: new Date().toISOString(),
+        ok: failed.length === 0,
+        failed,
+        minted_minor: distribution?.minted_minor ?? 0,
+        contributors: distribution?.contributor_count ?? 0,
+        truncated: distribution?.truncated ?? false,
+        concentration_flag: distribution?.concentration_flag ?? false,
+        paid_usd: payout?.total_paid_usd ?? 0,
+        backup_key: backup?.key ?? null,
+      }), { expirationTtl: 86400 * 365 });
     })());
   },
 
@@ -665,6 +690,16 @@ export default {
         return handlePayoutHistory(request, env, cors);
       if (url.pathname === '/api/payouts/rate' && request.method === 'GET')
         return handlePayoutRate(env, cors);
+
+      // Ledger transparency (public, read-only) + operational health
+      if (url.pathname === '/api/ledger/summary' && request.method === 'GET')
+        return handleLedgerSummary(env, cors);
+      if (url.pathname.startsWith('/api/ledger/distribution/') && request.method === 'GET')
+        return handleLedgerDistribution(url.pathname.split('/').pop(), env, cors);
+      if (url.pathname === '/api/ledger/me' && request.method === 'GET')
+        return handleLedgerMe(request, env, cors);
+      if (url.pathname === '/api/admin/cron-health' && request.method === 'GET')
+        return handleCronHealth(request, env, cors);
 
       // Node heartbeat
       if (url.pathname === '/api/node/heartbeat' && request.method === 'POST')
@@ -942,7 +977,7 @@ async function handleRegister(request, env, cors) {
     }
   }
 
-  return json({ token, user: publicUser(user), backup_emailed }, 200, cors);
+  return json({ token, user: await publicUser(user, env), backup_emailed }, 200, cors);
 }
 
 async function handleChallenge(request, env, cors) {
@@ -1006,7 +1041,7 @@ async function handleVerify(request, env, cors) {
 
   const token = await createJwt(userId, env.JWT_SECRET);
 
-  return json({ token, user: publicUser(user) }, 200, cors);
+  return json({ token, user: await publicUser(user, env) }, 200, cors);
 }
 
 // ── Identity Backup Email (Cloudflare Email Workers) ────────────────────────
@@ -1167,7 +1202,7 @@ async function handleMe(request, env, cors) {
   const userData = await env.USERS.get(`user:${userId}`);
   if (!userData) return json({ error: 'User not found' }, 404, cors);
 
-  return json(publicUser(JSON.parse(userData)), 200, cors);
+  return json(await publicUser(JSON.parse(userData), env), 200, cors);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3550,8 +3585,13 @@ async function handlePayoutRate(env, cors) {
   const dailyDripUsd = treasuryUsd * dripRate;
 
   // Live emission from the ledger (falls back to genesis defaults
-  // before the first distribution has run).
-  const supply = parseFloat(await env.PAYOUTS.get('bliss:current_supply') || String(BLISS_INITIAL_SUPPLY));
+  // before the first distribution has run). Minor units are authoritative;
+  // the legacy float key is only a pre-migration fallback.
+  const supplyMinorRaw = parseInt(await env.PAYOUTS.get('bliss:supply_minor') || '0', 10);
+  const distributedMinorRaw = parseInt(await env.PAYOUTS.get('bliss:distributed_minor') || '0', 10);
+  const supply = supplyMinorRaw
+    ? fromMinor(supplyMinorRaw)
+    : parseFloat(await env.PAYOUTS.get('bliss:current_supply') || String(BLISS_INITIAL_SUPPLY));
   const genesis = await env.PAYOUTS.get('bliss:genesis_date');
   const years = genesis
     ? Math.max(0, Math.floor((Date.now() - Date.parse(genesis)) / (365 * 86400 * 1000)))
@@ -3570,7 +3610,9 @@ async function handlePayoutRate(env, cors) {
     daily_bls_emission: dailyBls,
     annual_emission_rate: annualRate,
     current_supply: supply,
-    total_distributed: parseFloat(await env.PAYOUTS.get('bliss:total_distributed') || '0'),
+    total_distributed: distributedMinorRaw
+      ? fromMinor(distributedMinorRaw)
+      : parseFloat(await env.PAYOUTS.get('bliss:total_distributed') || '0'),
     genesis_date: genesis || null,
     bls_to_usd_rate: blsToUsd,
     rate_display: blsToUsd > 0 ? `$${blsToUsd.toFixed(6)}/BLS` : 'No treasury funds',
@@ -3772,11 +3814,7 @@ async function handleNodeHeartbeat(request, env, cors) {
   let bliss_balance = 0;
   let pending_score = 0;
   if (user_id) {
-    const userData = await env.USERS.get(`user:${user_id}`);
-    if (userData) {
-      const user = JSON.parse(userData);
-      bliss_balance = user.bliss_balance || 0;
-    }
+    bliss_balance = fromMinor(await ledgerBalanceMinor(env, user_id));
 
     // SESSION HOURS — written to dedicated keys, NEVER back into `user:`.
     //
@@ -4424,6 +4462,346 @@ const MAX_DAILY_SCORE = 3200;
 // the session resumes. Presence is thus wall-clock bounded.
 const PRESENCE_MAX_STEP = 150;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// BLS LEDGER — integer minor units, append-only, auditable
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// WHY THIS EXISTS. Balances used to be an f64 field mutated in place on the
+// user record. That had three disqualifying properties for money:
+//   1. Floats don't reconcile — two systems disagree on the last digits and
+//      no amount of rounding makes a float ledger auditable.
+//   2. Read-modify-write on KV (no compare-and-set) loses updates: a
+//      concurrent write could silently erase credited BLS.
+//   3. There was no record of HOW a balance got to its value. You could not
+//      reconstruct, audit, or dispute it.
+//
+// The fix is the standard one: an append-only log of integer entries is the
+// truth; a balance is a derived number.
+//
+// PRECISION: **2 decimals**. 1 BLS = 100 minor units. This deliberately
+// diverges from `bliss-core`'s 18-decimal constant — that figure targets an
+// on-chain token, and this is an off-chain ledger where exact integer math
+// and human-readable amounts matter more. Every stored amount is an INTEGER
+// number of minor units. Never store a fractional BLS amount.
+//
+// KEYS (in the PAYOUTS namespace):
+//   entry:{userId}:{ts}:{id}  append-only entry {amount_minor, kind, ref, ts}
+//   bal:{userId}              integer cache of the summed entries
+//   cp:{userId}               {balance_minor, through} checkpoint for fast sums
+//
+// IDEMPOTENCY: entry keys are deterministic for automated credits (the daily
+// distribution uses the score date), so replaying a cron cannot double-credit
+// — the append is a no-op if the key already exists.
+//
+// The `bal:` cache is an optimization, NOT the source of truth. The daily
+// cron re-derives every touched balance from entries and rewrites the cache,
+// so any drift is self-healing within 24h.
+
+/// Minor units per whole BLS. 2 decimal places.
+const BLISS_UNIT = 100;
+
+/// Whole-BLS float -> integer minor units. Only for migration and for
+/// converting emission math; never for storing user input.
+function toMinor(bls) {
+  return Math.round((Number(bls) || 0) * BLISS_UNIT);
+}
+
+/// Integer minor units -> whole-BLS number for JSON responses.
+function fromMinor(minor) {
+  return (Number(minor) || 0) / BLISS_UNIT;
+}
+
+/// Human display, always 2dp.
+function formatBliss(minor) {
+  return fromMinor(minor).toFixed(2);
+}
+
+/// Append a ledger entry. Returns true if written, false if the key already
+/// existed (idempotent replay). `id` MUST be stable for automated credits.
+async function ledgerAppend(env, userId, { amount_minor, kind, ref, ts, id }) {
+  const amount = Math.trunc(Number(amount_minor) || 0);
+  if (amount === 0) return false;
+  const stamp = ts || new Date().toISOString();
+  const key = `entry:${userId}:${stamp}:${id}`;
+  if (await env.PAYOUTS.get(key)) return false;
+  await env.PAYOUTS.put(
+    key,
+    JSON.stringify({ amount_minor: amount, kind, ref: ref || null, ts: stamp })
+  );
+  // Advance the cache. Truth is the entries; this is a fast-read convenience
+  // that the daily reconcile rebuilds.
+  const cur = parseInt(await env.PAYOUTS.get(`bal:${userId}`) || '0', 10);
+  await env.PAYOUTS.put(`bal:${userId}`, String(cur + amount));
+  return true;
+}
+
+/// Sum every entry for a user (authoritative). Uses the checkpoint to avoid
+/// re-reading history that has already been folded in.
+async function ledgerDeriveMinor(env, userId) {
+  const cpRaw = await env.PAYOUTS.get(`cp:${userId}`);
+  const cp = cpRaw ? JSON.parse(cpRaw) : { balance_minor: 0, through: '' };
+  let total = Math.trunc(cp.balance_minor || 0);
+  let newest = cp.through || '';
+  const prefix = `entry:${userId}:`;
+  let cursor;
+  while (true) {
+    const list = await env.PAYOUTS.list({ prefix, limit: 1000, cursor });
+    for (const k of list.keys) {
+      if (cp.through && k.name <= cp.through) continue;
+      const v = await env.PAYOUTS.get(k.name);
+      if (!v) continue;
+      total += Math.trunc(JSON.parse(v).amount_minor || 0);
+      if (k.name > newest) newest = k.name;
+    }
+    if (list.list_complete || !list.cursor) break;
+    cursor = list.cursor;
+  }
+  return { balance_minor: total, through: newest };
+}
+
+/// Fast balance read (cache). Falls back to deriving when the cache is absent,
+/// and LAZILY MIGRATES a legacy float balance if this account has no ledger
+/// history yet.
+///
+/// The lazy path matters: the distribution cron only migrates accounts that
+/// scored that day, so a holder who stopped contributing would otherwise have
+/// no entries and no cache — and would read as a balance of ZERO. Migrating
+/// on first read guarantees every legacy balance survives.
+async function ledgerBalanceMinor(env, userId) {
+  const cached = await env.PAYOUTS.get(`bal:${userId}`);
+  if (cached !== null && cached !== undefined) return parseInt(cached, 10) || 0;
+
+  let { balance_minor } = await ledgerDeriveMinor(env, userId);
+  if (balance_minor === 0) {
+    const raw = await env.USERS.get(`user:${userId}`);
+    if (raw) {
+      const user = JSON.parse(raw);
+      if (!user.ledger_migrated && (Number(user.bliss_balance) || 0) > 0) {
+        await ledgerMigrateUser(env, userId, user);
+        ({ balance_minor } = await ledgerDeriveMinor(env, userId));
+      }
+    }
+  }
+  await env.PAYOUTS.put(`bal:${userId}`, String(balance_minor));
+  return balance_minor;
+}
+
+/// Re-derive from entries, rewrite the cache and checkpoint. Self-heals any
+/// cache drift. Called for each credited account by the daily cron.
+async function ledgerReconcile(env, userId) {
+  const { balance_minor, through } = await ledgerDeriveMinor(env, userId);
+  await env.PAYOUTS.put(`bal:${userId}`, String(balance_minor));
+  await env.PAYOUTS.put(`cp:${userId}`, JSON.stringify({ balance_minor, through }));
+  return balance_minor;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LEDGER TRANSPARENCY — public, read-only
+// ═══════════════════════════════════════════════════════════════════════════
+// The docs claim "the ledger is public; anyone can verify the math." These
+// endpoints are what make that true. They expose aggregate supply/emission
+// and per-day distribution records (which contain per-recipient amounts that
+// are already keyed by opaque account ids) — never emails or tokens.
+
+async function handleLedgerSummary(env, cors) {
+  // Fall back to the legacy float keys until the first post-migration cron
+  // writes the minor-unit counters. Without this the endpoint reported
+  // supply=100,000,000 and distributed=0 while the real ledger held ~178k
+  // distributed — a transparency endpoint publishing a wrong number is worse
+  // than publishing none.
+  let supplyMinor = parseInt(await env.PAYOUTS.get('bliss:supply_minor') || '0', 10);
+  if (!supplyMinor) {
+    supplyMinor = toMinor(
+      parseFloat(await env.PAYOUTS.get('bliss:current_supply') || String(BLISS_INITIAL_SUPPLY))
+    );
+  }
+  let distributedMinor = parseInt(await env.PAYOUTS.get('bliss:distributed_minor') || '0', 10);
+  if (!distributedMinor) {
+    distributedMinor = toMinor(parseFloat(await env.PAYOUTS.get('bliss:total_distributed') || '0'));
+  }
+  const genesis = await env.PAYOUTS.get('bliss:genesis_date');
+  const years = genesis
+    ? Math.max(0, Math.floor((Date.now() - Date.parse(genesis)) / (365 * 86400 * 1000)))
+    : 0;
+
+  // Recent distributions so anyone can re-derive today's emission by hand.
+  const list = await env.PAYOUTS.list({ prefix: 'distribution:', limit: 30 });
+  const recent = [];
+  for (const k of list.keys) {
+    const v = await env.PAYOUTS.get(k.name);
+    if (!v) continue;
+    const r = JSON.parse(v);
+    recent.push({
+      date: r.date,
+      emission_pool: r.emission_pool,
+      minted: r.minted,
+      total_score: r.total_score,
+      contributors: r.contributor_count ?? (r.recipients || []).length,
+      concentration_flag: r.concentration_flag ?? false,
+      truncated: r.truncated ?? false,
+    });
+  }
+  recent.sort((a, b) => (a.date < b.date ? 1 : -1));
+
+  return json({
+    unit: { decimals: 2, minor_per_bls: BLISS_UNIT },
+    supply: fromMinor(supplyMinor),
+    supply_minor: supplyMinor,
+    total_distributed: fromMinor(distributedMinor),
+    total_distributed_minor: distributedMinor,
+    genesis_date: genesis,
+    annual_emission_rate: blissEmissionRate(years),
+    emission_model: {
+      initial_rate: BLISS_INITIAL_RATE,
+      halving_period_years: BLISS_HALVING_YEARS,
+      tail_rate: BLISS_TAIL_RATE,
+      initial_supply: BLISS_INITIAL_SUPPLY,
+    },
+    treasury_usd: parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0'),
+    recent_distributions: recent,
+  }, 200, cors);
+}
+
+async function handleLedgerDistribution(date, env, cors) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) return json({ error: 'Bad date' }, 400, cors);
+  const raw = await env.PAYOUTS.get(`distribution:${date}`);
+  if (!raw) return json({ error: 'No distribution for that date' }, 404, cors);
+  return json(JSON.parse(raw), 200, cors);
+}
+
+/// A contributor's own entry history — the audit trail for their balance.
+async function handleLedgerMe(request, env, cors) {
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+
+  // Go through the cached read FIRST — it carries the lazy migration for
+  // accounts whose legacy float balance has no ledger entries yet. Calling
+  // ledgerDeriveMinor directly would report a balance of 0 for them.
+  await ledgerBalanceMinor(env, userId);
+
+  const prefix = `entry:${userId}:`;
+  const items = [];
+  let cursor;
+  while (true) {
+    const list = await env.PAYOUTS.list({ prefix, limit: 1000, cursor });
+    for (const k of list.keys) {
+      const v = await env.PAYOUTS.get(k.name);
+      if (!v) continue;
+      const e = JSON.parse(v);
+      items.push({
+        ts: e.ts, kind: e.kind, ref: e.ref,
+        amount: fromMinor(e.amount_minor), amount_minor: e.amount_minor,
+      });
+    }
+    if (list.list_complete || !list.cursor) break;
+    cursor = list.cursor;
+  }
+  items.sort((a, b) => (a.ts < b.ts ? 1 : -1));
+
+  const derived = await ledgerDeriveMinor(env, userId);
+  const cached = parseInt(await env.PAYOUTS.get(`bal:${userId}`) || '0', 10);
+  return json({
+    balance: fromMinor(derived.balance_minor),
+    balance_minor: derived.balance_minor,
+    balance_display: formatBliss(derived.balance_minor),
+    // Surfaced so drift between the fast cache and the authoritative entries
+    // is visible rather than silent. The daily reconcile self-heals it.
+    cache_in_sync: cached === derived.balance_minor,
+    entry_count: items.length,
+    entries: items,
+  }, 200, cors);
+}
+
+async function handleCronHealth(request, env, cors) {
+  const adminId = await requireAdmin(request, env);
+  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
+  const list = await env.PAYOUTS.list({ prefix: 'cronrun:', limit: 30 });
+  const runs = [];
+  for (const k of list.keys) {
+    const v = await env.PAYOUTS.get(k.name);
+    if (v) runs.push({ date: k.name.slice('cronrun:'.length), ...JSON.parse(v) });
+  }
+  runs.sort((a, b) => (a.date < b.date ? 1 : -1));
+  const lastOk = runs.find((r) => r.ok);
+  return json({
+    runs,
+    last_success: lastOk ? lastOk.date : null,
+    // A gap here means a day was silently skipped — distribution is
+    // idempotent per date, so a missed day needs a manual re-run.
+    missing_days: (() => {
+      const have = new Set(runs.map((r) => r.date));
+      const out = [];
+      for (let i = 1; i <= 14; i++) {
+        const d = new Date(Date.now() - i * 86400 * 1000).toISOString().split('T')[0];
+        if (!have.has(d)) out.push(d);
+      }
+      return out;
+    })(),
+  }, 200, cors);
+}
+
+/// Snapshot the entire BLS ledger to R2. Without this, losing or corrupting
+/// the KV namespace would destroy every balance with no recovery path — the
+/// entries ARE the money, so they need to exist somewhere else too.
+///
+/// Writes a single JSON object per day: every entry, every cached balance,
+/// and the supply counters. Restoring is replaying the entries.
+async function backupLedger(env) {
+  if (!env.SCENES) return null; // R2 not bound — nothing to write to
+  const date = new Date().toISOString().split('T')[0];
+
+  const entries = [];
+  for (const prefix of ['entry:', 'bal:', 'cp:']) {
+    let cursor;
+    while (true) {
+      const list = await env.PAYOUTS.list({ prefix, limit: 1000, cursor });
+      for (const k of list.keys) {
+        const v = await env.PAYOUTS.get(k.name);
+        if (v !== null && v !== undefined) entries.push([k.name, v]);
+      }
+      if (list.list_complete || !list.cursor) break;
+      cursor = list.cursor;
+    }
+  }
+
+  const snapshot = {
+    version: 1,
+    taken_at: new Date().toISOString(),
+    unit_minor_per_bls: BLISS_UNIT,
+    supply_minor: parseInt(await env.PAYOUTS.get('bliss:supply_minor') || '0', 10),
+    distributed_minor: parseInt(await env.PAYOUTS.get('bliss:distributed_minor') || '0', 10),
+    genesis_date: await env.PAYOUTS.get('bliss:genesis_date'),
+    treasury_usd: parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0'),
+    record_count: entries.length,
+    records: entries,
+  };
+
+  const key = `ledger-backups/${date}.json`;
+  await env.SCENES.put(key, JSON.stringify(snapshot), {
+    httpMetadata: { contentType: 'application/json' },
+  });
+  return { key, record_count: entries.length };
+}
+
+/// One-time migration: fold a legacy float `user.bliss_balance` into an
+/// opening ledger entry so historical balances survive the format change.
+/// Idempotent — the opening entry key is fixed per user.
+async function ledgerMigrateUser(env, userId, user) {
+  if (user.ledger_migrated) return;
+  const legacy = Number(user.bliss_balance) || 0;
+  if (legacy > 0) {
+    await ledgerAppend(env, userId, {
+      amount_minor: toMinor(legacy),
+      kind: 'migration_opening',
+      ref: 'legacy float balance',
+      ts: '1970-01-01T00:00:00.000Z', // sorts first — it is the opening entry
+      id: 'opening',
+    });
+  }
+  user.ledger_migrated = true;
+  await env.USERS.put(`user:${userId}`, JSON.stringify(user));
+}
+
 /// Annual emission rate for a given year since genesis (tail emission).
 function blissEmissionRate(yearsSinceGenesis) {
   const halvings = Math.floor(yearsSinceGenesis / BLISS_HALVING_YEARS);
@@ -4480,7 +4858,20 @@ async function runDailyDistribution(env) {
     await env.PAYOUTS.put('bliss:genesis_date', genesis);
   }
   const years = Math.max(0, Math.floor((Date.parse(yesterday) - Date.parse(genesis)) / (365 * 86400 * 1000)));
-  const supply = parseFloat(await env.PAYOUTS.get('bliss:current_supply') || String(BLISS_INITIAL_SUPPLY));
+  // Supply in integer minor units, migrating off the legacy float key the
+  // first time this runs after the ledger change.
+  let supplyMinor = parseInt(await env.PAYOUTS.get('bliss:supply_minor') || '0', 10);
+  if (!supplyMinor) {
+    supplyMinor = toMinor(
+      parseFloat(await env.PAYOUTS.get('bliss:current_supply') || String(BLISS_INITIAL_SUPPLY))
+    );
+    await env.PAYOUTS.put('bliss:supply_minor', String(supplyMinor));
+    const legacyDist = parseFloat(await env.PAYOUTS.get('bliss:total_distributed') || '0');
+    if (legacyDist > 0 && !(await env.PAYOUTS.get('bliss:distributed_minor'))) {
+      await env.PAYOUTS.put('bliss:distributed_minor', String(toMinor(legacyDist)));
+    }
+  }
+  const supply = fromMinor(supplyMinor);
   const rate = blissEmissionRate(years);
   const dailyEmission = supply * rate / 365;
 
@@ -4518,36 +4909,56 @@ async function runDailyDistribution(env) {
   }
 
   if (totalScore > 0) {
-    let minted = 0;
+    // Integer minor units throughout. `floor` on each share guarantees the
+    // sum of credits never exceeds the pool (leftover dust stays unminted
+    // rather than inflating supply).
+    const poolMinor = Math.floor(dailyEmission * BLISS_UNIT);
+    let mintedMinor = 0;
     for (const e of entries) {
-      // PER-USER IDEMPOTENCY. The whole-run guard (`distribution:{date}`) is
-      // only written after the loop, so a run cut short mid-way (KV error,
-      // CPU limit) previously re-credited everyone who already got paid on
-      // the retry. This marker makes each credit exactly-once per day.
-      const creditKey = `distcredit:${yesterday}:${e.userId}`;
-      if (await env.PAYOUTS.get(creditKey)) continue;
-
       const userData = await env.USERS.get(`user:${e.userId}`);
       if (!userData) continue;
       const user = JSON.parse(userData);
       if (user.banned) continue;
-      const bls = dailyEmission * (e.score / totalScore);
-      user.bliss_balance = (user.bliss_balance || 0) + bls;
-      await env.USERS.put(`user:${e.userId}`, JSON.stringify(user));
-      await env.PAYOUTS.put(creditKey, String(bls), { expirationTtl: 86400 * 30 });
-      // Advance the supply counters per credit rather than once at the end,
-      // so an interrupted run leaves supply consistent with balances instead
-      // of silently under-counting minted BLS.
-      const supplyNow = parseFloat(await env.PAYOUTS.get('bliss:current_supply') || String(BLISS_INITIAL_SUPPLY));
-      await env.PAYOUTS.put('bliss:current_supply', String(supplyNow + bls));
-      const distNow = parseFloat(await env.PAYOUTS.get('bliss:total_distributed') || '0');
-      await env.PAYOUTS.put('bliss:total_distributed', String(distNow + bls));
-      record.recipients.push({ user_id: e.userId, score: e.score, bls });
-      minted += bls;
+      await ledgerMigrateUser(env, e.userId, user);
+
+      const shareMinor = Math.floor(poolMinor * (e.score / totalScore));
+      if (shareMinor <= 0) continue;
+
+      // Deterministic entry id => replaying this cron is a no-op. This
+      // REPLACES the old separate `distcredit:` marker: idempotency is now a
+      // property of the ledger itself, not a side table.
+      const wrote = await ledgerAppend(env, e.userId, {
+        amount_minor: shareMinor,
+        kind: 'emission',
+        ref: yesterday,
+        ts: `${yesterday}T00:00:00.000Z`,
+        id: 'dist',
+      });
+      if (!wrote) continue; // already credited on a previous run
+
+      // Rebuild this account's cache/checkpoint from entries — self-heals any
+      // drift introduced by concurrent writes.
+      await ledgerReconcile(env, e.userId);
+
+      mintedMinor += shareMinor;
+      record.recipients.push({
+        user_id: e.userId,
+        score: e.score,
+        bls: fromMinor(shareMinor),
+        bls_minor: shareMinor,
+      });
     }
-    // NOTE: supply/total_distributed are advanced INSIDE the loop, per
-    // credit. Do not also add `minted` here — that would double-count.
-    record.minted = minted;
+    // Supply counters in minor units, advanced by exactly what was credited.
+    if (mintedMinor > 0) {
+      const supplyMinorNow = parseInt(
+        await env.PAYOUTS.get('bliss:supply_minor') || String(toMinor(BLISS_INITIAL_SUPPLY)), 10
+      );
+      await env.PAYOUTS.put('bliss:supply_minor', String(supplyMinorNow + mintedMinor));
+      const distMinorNow = parseInt(await env.PAYOUTS.get('bliss:distributed_minor') || '0', 10);
+      await env.PAYOUTS.put('bliss:distributed_minor', String(distMinorNow + mintedMinor));
+    }
+    record.minted = fromMinor(mintedMinor);
+    record.minted_minor = mintedMinor;
   }
 
   await env.PAYOUTS.put(`distribution:${yesterday}`, JSON.stringify(record), { expirationTtl: 86400 * 365 * 5 });
@@ -4670,14 +5081,19 @@ async function runDailyPayout(env) {
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════════
 
-function publicUser(user) {
+async function publicUser(user, env) {
+  // Balance comes from the append-only ledger, not the (legacy) float field
+  // on the user record. `env` is optional so old call sites degrade to 0
+  // rather than throwing.
+  const minor = env && user && user.id ? await ledgerBalanceMinor(env, user.id) : 0;
   return {
     id: user.id,
     username: user.username,
     email: user.email || null,
     avatar_url: user.avatar_url || null,
     discord_id: user.discord_id || null,
-    bliss_balance: user.bliss_balance || 0,
+    bliss_balance: fromMinor(minor),
+    bliss_balance_minor: minor,
     // The web app deserializes this into User.ticket_balance. Omitting it
     // meant every /api/auth/me refresh reset the displayed Ticket balance to
     // zero and re-persisted that zero to localStorage.

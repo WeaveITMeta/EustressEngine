@@ -1,0 +1,62 @@
+# Aluminium nitride thermal pads. High thermal conductivity, electrically insulating.
+#
+# Voltec V-Cell supply base. Scenario data authored for the Supply Chain demo
+# Space, not a real vendor record. See README.md in this directory.
+
+id = "voltec-aln-thermal"
+name = "Nitride Thermal Products"
+status = "approved"
+country = "JP"
+region = "East Asia"
+lead_time_days = 49
+
+[capabilities]
+processes = ["powder_pressing", "nitride_sintering", "surface_grinding"]
+materials = ["aluminum_nitride", "sintering_aids"]
+max_part_dimensions_mm = [400.0, 300.0, 120.0]
+min_feature_size_mm = 0.05
+
+[certifications]
+iso_9001 = true
+iso_14001 = true
+iatf_16949 = false
+ul_certified = false
+reach_compliant = true
+rohs_compliant = true
+ul_battery_certified = false
+additional = ["IATF_16949_pending"]
+
+[capacity]
+monthly_units_available = 11000
+min_order_quantity = 200
+dedicated_line_available = true
+dedicated_line_setup_weeks = 6
+
+[[pricing]]
+min_qty = 1
+max_qty = 999
+price_per_unit_usd = 41.2
+
+[[pricing]]
+min_qty = 1000
+max_qty = 9999
+price_per_unit_usd = 29.7
+
+[[pricing]]
+min_qty = 10000
+max_qty = 250000
+price_per_unit_usd = 22.15
+
+
+[quality]
+historical_defect_rate_pct = 0.5
+on_time_delivery_rate_pct = 95.8
+ncr_count_12mo = 2
+last_audit_date = "2026-06-30"
+audit_score = 93
+
+[logistics]
+incoterms_offered = ["EXW", "FOB", "DDP"]
+freight_partners = ["Summit Global Logistics"]
+export_license_held = true
+hazmat_certified = false

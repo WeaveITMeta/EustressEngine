@@ -1,0 +1,1062 @@
+// ============================================================================
+// Eustress Engine Studio - Procurement Panels
+//
+// Two center tabs over one set of records: RFQ Builder and Purchase Order
+// Tracker. They are two views of the same thing, because in the Odoo model an
+// RFQ is not a separate entity. It is a purchase.order in state `draft` or
+// `sent`, and confirming it turns that same record into a purchase order with
+// its id, lines, and history intact. So the Builder is the pre-confirmation
+// face and the Tracker is the whole population.
+//
+// One rule drives the design: this file never decides which transitions are
+// legal. Every `can-*` flag arrives already computed by the Rust state machine
+// in `manufacturing::purchase`. A button that is visible here is a button the
+// engine will accept. Re-deriving the rules in Slint would create a second
+// source of truth that silently drifts from the first.
+//
+// Table of Contents:
+//   1. Data Structures — PurchaseOrderLineRow, PurchaseOrderRow, ManufacturerOption
+//   2. StateBadge — the state pill, coloured from Rust
+//   3. OrderListRow — one row in the left-hand list
+//   4. OrderLinesTable — the line items of one order
+//   5. TransitionBar — the legal transitions for one order
+//   6. RfqBuilderPanel — compose and send an RFQ
+//   7. PurchaseOrderTrackerPanel — every order and its state
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, ScrollView, LineEdit, Button, ComboBox } from "std-widgets.slint";
+import { Theme, PanelHeader } from "theme.slint";
+
+// ============================================================================
+// 1. Data Structures
+// ============================================================================
+
+// One line on an order. `display-type` mirrors Odoo: a "section" or "note"
+// line is presentational and contributes nothing to the totals.
+export struct PurchaseOrderLineRow {
+    description: string,
+    product-id: string,
+    quantity: string,
+    uom: string,
+    unit-price: string,
+    discount: string,
+    tax-percent: string,
+    subtotal: string,
+    qty-received: string,
+    qty-invoiced: string,
+    display-type: string,   // "product", "section", "note"
+}
+
+// One order. Every `can-*` flag is computed by the Rust state machine, never
+// inferred here.
+export struct PurchaseOrderRow {
+    reference: string,          // "PO00001"
+    manufacturer-id: string,
+    manufacturer-name: string,
+    state: string,              // Odoo wire value: draft, sent, to approve, purchase, done, cancel
+    state-label: string,        // "RFQ", "RFQ Sent", "To Approve", "Purchase Order", "Locked", "Cancelled"
+    state-color: color,
+    is-rfq: bool,
+    date-order: string,
+    date-planned: string,
+    currency: string,
+    amount-untaxed: string,
+    amount-tax: string,
+    amount-total: string,
+    invoice-status: string,
+    partner-ref: string,
+    notes: string,
+    line-count: int,
+    lines: [PurchaseOrderLineRow],
+
+    can-send: bool,
+    can-confirm: bool,
+    can-approve: bool,
+    can-lock: bool,
+    can-unlock: bool,
+    can-cancel: bool,
+    can-reset-draft: bool,
+}
+
+// A vendor the user can raise an RFQ against, drawn from the Manufacturer
+// registry rather than a free-text field, so an order cannot name a vendor
+// that does not exist.
+export struct ManufacturerOption {
+    id: string,
+    name: string,
+    status: string,
+    lead-time: string,
+    certifications: string,
+}
+
+// ============================================================================
+// 2. StateBadge
+// ============================================================================
+
+component StateBadge inherits Rectangle {
+    in property <string> label;
+    in property <color> tint;
+
+    width: badge-text.preferred-width + 16px;
+    height: 20px;
+    border-radius: 10px;
+    background: root.tint.with-alpha(0.18);
+    border-width: 1px;
+    border-color: root.tint.with-alpha(0.55);
+
+    badge-text := Text {
+        text: root.label;
+        color: root.tint;
+        font-size: 11px;
+        font-weight: 600;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+}
+
+// ============================================================================
+// 3. OrderListRow
+// ============================================================================
+
+component OrderListRow inherits Rectangle {
+    in property <PurchaseOrderRow> order;
+    in property <bool> selected;
+    callback clicked();
+
+    height: 56px;
+    background: root.selected ? Theme.selection-background
+        : (touch.has-hover ? Theme.tab-hover : transparent);
+    border-width: root.selected ? 1px : 0px;
+    border-color: Theme.selection-border;
+    border-radius: 4px;
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+
+                Text {
+                    text: root.order.reference;
+                    color: Theme.text-primary;
+                    font-size: 13px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+
+                StateBadge {
+                    label: root.order.state-label;
+                    tint: root.order.state-color;
+                }
+            }
+
+            Text {
+                text: root.order.manufacturer-name;
+                color: Theme.text-secondary;
+                font-size: 11px;
+                overflow: elide;
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+
+            Text {
+                text: root.order.amount-total + " " + root.order.currency;
+                color: Theme.text-primary;
+                font-size: 12px;
+                font-weight: 600;
+                horizontal-alignment: right;
+            }
+
+            Text {
+                text: root.order.line-count == 1 ? "1 line" : root.order.line-count + " lines";
+                color: Theme.text-secondary;
+                font-size: 10px;
+                horizontal-alignment: right;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 4. OrderLinesTable
+// ============================================================================
+
+component OrderLinesTable inherits VerticalLayout {
+    in property <PurchaseOrderRow> order;
+    in property <bool> editable;
+
+    callback line-changed(string, int, string, string);  // reference, index, field, value
+    callback remove-line(string, int);
+    callback add-line(string);
+
+    spacing: 0px;
+
+    // ---- Column header ----
+    Rectangle {
+        height: 26px;
+        background: Theme.header-background;
+
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 6px;
+
+            Text {
+                text: "Description";
+                color: Theme.text-secondary;
+                font-size: 10px;
+                font-weight: 600;
+                width: 34%;
+                vertical-alignment: center;
+            }
+            Text {
+                text: "Qty";
+                color: Theme.text-secondary;
+                font-size: 10px;
+                font-weight: 600;
+                width: 11%;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+            }
+            Text {
+                text: "Unit Price";
+                color: Theme.text-secondary;
+                font-size: 10px;
+                font-weight: 600;
+                width: 15%;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+            }
+            Text {
+                text: "Disc %";
+                color: Theme.text-secondary;
+                font-size: 10px;
+                font-weight: 600;
+                width: 11%;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+            }
+            Text {
+                text: "Tax %";
+                color: Theme.text-secondary;
+                font-size: 10px;
+                font-weight: 600;
+                width: 11%;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+            }
+            Text {
+                text: "Subtotal";
+                color: Theme.text-secondary;
+                font-size: 10px;
+                font-weight: 600;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+            }
+        }
+    }
+
+    // ---- Rows ----
+    for line[idx] in root.order.lines: Rectangle {
+        height: line.display-type == "product" ? 32px : 26px;
+        background: line.display-type == "section" ? Theme.background-tertiary : transparent;
+
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 6px;
+
+            // A section or note line spans the full width and carries no money,
+            // exactly as in Odoo.
+            if line.display-type != "product": Text {
+                text: line.display-type == "section" ? line.description : "// " + line.description;
+                color: line.display-type == "section" ? Theme.text-primary : Theme.text-secondary;
+                font-size: 11px;
+                font-weight: line.display-type == "section" ? 600 : 400;
+                font-italic: line.display-type == "note";
+                vertical-alignment: center;
+            }
+
+            if line.display-type == "product": HorizontalLayout {
+                spacing: 6px;
+
+                if root.editable: LineEdit {
+                    text: line.description;
+                    font-size: 11px;
+                    width: 34%;
+                    edited(t) => { root.line-changed(root.order.reference, idx, "description", t); }
+                }
+                if !root.editable: Text {
+                    text: line.description;
+                    color: Theme.text-primary;
+                    font-size: 11px;
+                    width: 34%;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                if root.editable: LineEdit {
+                    text: line.quantity;
+                    font-size: 11px;
+                    width: 11%;
+                    horizontal-alignment: right;
+                    edited(t) => { root.line-changed(root.order.reference, idx, "quantity", t); }
+                }
+                if !root.editable: Text {
+                    text: line.quantity;
+                    color: Theme.text-primary;
+                    font-size: 11px;
+                    width: 11%;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                }
+
+                if root.editable: LineEdit {
+                    text: line.unit-price;
+                    font-size: 11px;
+                    width: 15%;
+                    horizontal-alignment: right;
+                    edited(t) => { root.line-changed(root.order.reference, idx, "unit-price", t); }
+                }
+                if !root.editable: Text {
+                    text: line.unit-price;
+                    color: Theme.text-primary;
+                    font-size: 11px;
+                    width: 15%;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                }
+
+                if root.editable: LineEdit {
+                    text: line.discount;
+                    font-size: 11px;
+                    width: 11%;
+                    horizontal-alignment: right;
+                    edited(t) => { root.line-changed(root.order.reference, idx, "discount", t); }
+                }
+                if !root.editable: Text {
+                    text: line.discount;
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    width: 11%;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                }
+
+                if root.editable: LineEdit {
+                    text: line.tax-percent;
+                    font-size: 11px;
+                    width: 11%;
+                    horizontal-alignment: right;
+                    edited(t) => { root.line-changed(root.order.reference, idx, "tax-percent", t); }
+                }
+                if !root.editable: Text {
+                    text: line.tax-percent;
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    width: 11%;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                }
+
+                Text {
+                    text: line.subtotal;
+                    color: Theme.text-primary;
+                    font-size: 11px;
+                    font-weight: 600;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                }
+
+                if root.editable: Rectangle {
+                    width: 22px;
+                    background: remove-touch.has-hover ? Theme.error-surface : transparent;
+                    border-radius: 3px;
+
+                    Text {
+                        text: "x";
+                        color: remove-touch.has-hover ? Theme.text-error : Theme.text-disabled;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                    }
+
+                    remove-touch := TouchArea {
+                        clicked => { root.remove-line(root.order.reference, idx); }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.order.line-count == 0: Rectangle {
+        height: 56px;
+        Text {
+            text: root.editable
+                ? "No lines yet. Add one to make this RFQ sendable."
+                : "This order has no lines.";
+            color: Theme.text-disabled;
+            font-size: 11px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    if root.editable: Rectangle {
+        height: 34px;
+        HorizontalLayout {
+            padding: 6px;
+            alignment: start;
+            Button {
+                text: "Add Line";
+                clicked => { root.add-line(root.order.reference); }
+            }
+        }
+    }
+
+    // ---- Totals ----
+    Rectangle {
+        height: 1px;
+        background: Theme.border-color;
+    }
+
+    Rectangle {
+        height: 62px;
+        HorizontalLayout {
+            padding: 8px;
+            alignment: end;
+
+            VerticalLayout {
+                spacing: 2px;
+                width: 220px;
+
+                HorizontalLayout {
+                    Text {
+                        text: "Untaxed";
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: root.order.amount-untaxed + " " + root.order.currency;
+                        color: Theme.text-primary;
+                        font-size: 11px;
+                        horizontal-alignment: right;
+                    }
+                }
+                HorizontalLayout {
+                    Text {
+                        text: "Tax";
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: root.order.amount-tax + " " + root.order.currency;
+                        color: Theme.text-primary;
+                        font-size: 11px;
+                        horizontal-alignment: right;
+                    }
+                }
+                HorizontalLayout {
+                    Text {
+                        text: "Total";
+                        color: Theme.text-primary;
+                        font-size: 13px;
+                        font-weight: 700;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: root.order.amount-total + " " + root.order.currency;
+                        color: Theme.text-accent;
+                        font-size: 13px;
+                        font-weight: 700;
+                        horizontal-alignment: right;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 5. TransitionBar
+// ============================================================================
+
+// Only the transitions the Rust state machine will actually accept. Each button
+// maps one-to-one onto an Odoo `button_*` method.
+component TransitionBar inherits Rectangle {
+    in property <PurchaseOrderRow> order;
+    callback transition(string, string);   // reference, action
+
+    height: 42px;
+    background: Theme.background-secondary;
+
+    HorizontalLayout {
+        padding: 6px;
+        spacing: 6px;
+        alignment: start;
+
+        if root.order.can-send: Button {
+            text: "Send to Vendor";
+            clicked => { root.transition(root.order.reference, "send"); }
+        }
+        if root.order.can-confirm: Button {
+            text: "Confirm Order";
+            primary: true;
+            clicked => { root.transition(root.order.reference, "confirm"); }
+        }
+        if root.order.can-approve: Button {
+            text: "Approve";
+            primary: true;
+            clicked => { root.transition(root.order.reference, "approve"); }
+        }
+        if root.order.can-lock: Button {
+            text: "Lock";
+            clicked => { root.transition(root.order.reference, "lock"); }
+        }
+        if root.order.can-unlock: Button {
+            text: "Unlock";
+            clicked => { root.transition(root.order.reference, "unlock"); }
+        }
+        if root.order.can-reset-draft: Button {
+            text: "Reset to RFQ";
+            clicked => { root.transition(root.order.reference, "draft"); }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        if root.order.can-cancel: Button {
+            text: "Cancel";
+            clicked => { root.transition(root.order.reference, "cancel"); }
+        }
+    }
+}
+
+// ============================================================================
+// 6. RfqBuilderPanel
+// ============================================================================
+
+export component RfqBuilderPanel inherits Rectangle {
+    in property <[PurchaseOrderRow]> rfqs;
+    in property <[ManufacturerOption]> manufacturers;
+    in-out property <int> selected-index: -1;
+    in-out property <int> vendor-index: 0;
+    in property <string> empty-hint: "No open RFQs. Pick a vendor and raise one.";
+
+    callback create-rfq(string);                          // manufacturer id
+    callback select-rfq(int);
+    callback line-changed(string, int, string, string);
+    callback add-line(string);
+    callback remove-line(string, int);
+    callback transition(string, string);
+    callback field-changed(string, string, string);       // reference, field, value
+
+    property <bool> has-selection: root.selected-index >= 0
+        && root.selected-index < root.rfqs.length;
+
+    background: Theme.panel-background;
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        // ---- Left: vendor picker + open RFQs ----
+        Rectangle {
+            width: 300px;
+            background: Theme.background-secondary;
+
+            VerticalLayout {
+                spacing: 0px;
+
+                PanelHeader { title: "Raise an RFQ"; }
+
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 6px;
+
+                    Text {
+                        text: "Vendor";
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                        font-weight: 600;
+                    }
+
+                    ComboBox {
+                        model: root.manufacturers.length > 0
+                            ? [root.manufacturers[root.vendor-index].name]
+                            : ["No manufacturers registered"];
+                        current-index: 0;
+                    }
+
+                    // The vendor list is the Manufacturer registry, so an order
+                    // cannot be raised against a vendor that does not exist.
+                    if root.manufacturers.length > 0: Text {
+                        text: root.manufacturers[root.vendor-index].status
+                            + " · lead time " + root.manufacturers[root.vendor-index].lead-time;
+                        color: Theme.text-disabled;
+                        font-size: 10px;
+                        wrap: word-wrap;
+                    }
+
+                    Button {
+                        text: "New RFQ";
+                        primary: true;
+                        enabled: root.manufacturers.length > 0;
+                        clicked => {
+                            root.create-rfq(root.manufacturers[root.vendor-index].id);
+                        }
+                    }
+
+                    if root.manufacturers.length == 0: Text {
+                        text: "Register a manufacturer under docs/manufacturing/manufacturers first.";
+                        color: Theme.text-warning;
+                        font-size: 10px;
+                        wrap: word-wrap;
+                    }
+                }
+
+                Rectangle { height: 1px; background: Theme.border-color; }
+
+                PanelHeader { title: "Open RFQs"; }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 4px;
+                        spacing: 2px;
+                        alignment: start;
+
+                        for order[idx] in root.rfqs: OrderListRow {
+                            order: order;
+                            selected: idx == root.selected-index;
+                            clicked => {
+                                root.selected-index = idx;
+                                root.select-rfq(idx);
+                            }
+                        }
+
+                        if root.rfqs.length == 0: Text {
+                            text: root.empty-hint;
+                            color: Theme.text-disabled;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle { width: 1px; background: Theme.border-color; }
+
+        // ---- Right: the selected RFQ ----
+        Rectangle {
+            horizontal-stretch: 1;
+            background: Theme.panel-background;
+
+            if !root.has-selection: Text {
+                text: "Select an RFQ, or raise a new one.";
+                color: Theme.text-disabled;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            if root.has-selection: VerticalLayout {
+                spacing: 0px;
+
+                // Header
+                Rectangle {
+                    height: 66px;
+                    background: Theme.header-background;
+
+                    HorizontalLayout {
+                        padding: 12px;
+                        spacing: 10px;
+
+                        VerticalLayout {
+                            spacing: 4px;
+                            alignment: center;
+
+                            HorizontalLayout {
+                                spacing: 10px;
+                                alignment: start;
+
+                                Text {
+                                    text: root.rfqs[root.selected-index].reference;
+                                    color: Theme.text-primary;
+                                    font-size: 18px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+
+                                StateBadge {
+                                    label: root.rfqs[root.selected-index].state-label;
+                                    tint: root.rfqs[root.selected-index].state-color;
+                                }
+                            }
+
+                            Text {
+                                text: root.rfqs[root.selected-index].manufacturer-name
+                                    + " · ordered " + root.rfqs[root.selected-index].date-order;
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                            }
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: root.rfqs[root.selected-index].amount-total
+                                    + " " + root.rfqs[root.selected-index].currency;
+                                color: Theme.text-accent;
+                                font-size: 18px;
+                                font-weight: 700;
+                                horizontal-alignment: right;
+                            }
+                        }
+                    }
+                }
+
+                // Vendor reference
+                Rectangle {
+                    height: 46px;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        padding-top: 6px;
+                        spacing: 8px;
+
+                        Text {
+                            text: "Vendor reference";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            width: 120px;
+                            vertical-alignment: center;
+                        }
+
+                        LineEdit {
+                            text: root.rfqs[root.selected-index].partner-ref;
+                            placeholder-text: "the vendor's own quote number";
+                            font-size: 11px;
+                            edited(t) => {
+                                root.field-changed(root.rfqs[root.selected-index].reference, "partner-ref", t);
+                            }
+                        }
+                    }
+                }
+
+                // Lines
+                ScrollView {
+                    vertical-stretch: 1;
+                    OrderLinesTable {
+                        order: root.rfqs[root.selected-index];
+                        editable: true;
+                        line-changed(r, i, f, v) => { root.line-changed(r, i, f, v); }
+                        add-line(r) => { root.add-line(r); }
+                        remove-line(r, i) => { root.remove-line(r, i); }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Theme.border-color; }
+
+                TransitionBar {
+                    order: root.rfqs[root.selected-index];
+                    transition(r, a) => { root.transition(r, a); }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 7. PurchaseOrderTrackerPanel
+// ============================================================================
+
+export component PurchaseOrderTrackerPanel inherits Rectangle {
+    in property <[PurchaseOrderRow]> orders;
+    in-out property <int> selected-index: -1;
+    in-out property <string> state-filter: "all";
+    in property <int> rfq-count: 0;
+    in property <int> order-count: 0;
+    in property <string> total-committed: "0.00";
+    in property <string> currency: "USD";
+
+    callback select-order(int);
+    callback transition(string, string);
+    callback filter-changed(string);
+    callback open-rfq-builder();
+
+    property <bool> has-selection: root.selected-index >= 0
+        && root.selected-index < root.orders.length;
+
+    background: Theme.panel-background;
+
+    VerticalLayout {
+        spacing: 0px;
+
+        // ---- Summary strip ----
+        Rectangle {
+            height: 62px;
+            background: Theme.background-secondary;
+
+            HorizontalLayout {
+                padding: 12px;
+                spacing: 26px;
+                alignment: start;
+
+                VerticalLayout {
+                    spacing: 2px;
+                    Text {
+                        text: root.rfq-count;
+                        color: Theme.text-accent;
+                        font-size: 20px;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: "open RFQs";
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 2px;
+                    Text {
+                        text: root.order-count;
+                        color: Theme.text-primary;
+                        font-size: 20px;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: "committed orders";
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 2px;
+                    Text {
+                        text: root.total-committed + " " + root.currency;
+                        color: Theme.text-primary;
+                        font-size: 20px;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: "committed value";
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                    }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                VerticalLayout {
+                    alignment: center;
+                    Button {
+                        text: "New RFQ";
+                        clicked => { root.open-rfq-builder(); }
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Theme.border-color; }
+
+        // ---- Filter chips ----
+        Rectangle {
+            height: 36px;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                spacing: 6px;
+                alignment: start;
+
+                for chip in [
+                    { id: "all", label: "All" },
+                    { id: "rfq", label: "RFQs" },
+                    { id: "purchase", label: "Purchase Orders" },
+                    { id: "done", label: "Locked" },
+                    { id: "cancel", label: "Cancelled" },
+                ]: Rectangle {
+                    width: chip-text.preferred-width + 20px;
+                    height: 24px;
+                    border-radius: 12px;
+                    background: root.state-filter == chip.id
+                        ? Theme.selection-background
+                        : (chip-touch.has-hover ? Theme.tab-hover : Theme.background-tertiary);
+                    border-width: 1px;
+                    border-color: root.state-filter == chip.id
+                        ? Theme.selection-border : Theme.border-color;
+
+                    chip-text := Text {
+                        text: chip.label;
+                        color: root.state-filter == chip.id
+                            ? Theme.text-primary : Theme.text-secondary;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                    }
+
+                    chip-touch := TouchArea {
+                        clicked => {
+                            root.state-filter = chip.id;
+                            root.filter-changed(chip.id);
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle { height: 1px; background: Theme.border-color; }
+
+        // ---- List + detail ----
+        HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: 0px;
+
+            Rectangle {
+                width: 320px;
+                background: Theme.background-secondary;
+
+                ScrollView {
+                    VerticalLayout {
+                        padding: 4px;
+                        spacing: 2px;
+                        alignment: start;
+
+                        for order[idx] in root.orders: OrderListRow {
+                            order: order;
+                            selected: idx == root.selected-index;
+                            clicked => {
+                                root.selected-index = idx;
+                                root.select-order(idx);
+                            }
+                        }
+
+                        if root.orders.length == 0: Text {
+                            text: "No orders match this filter.";
+                            color: Theme.text-disabled;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+
+            Rectangle { width: 1px; background: Theme.border-color; }
+
+            Rectangle {
+                horizontal-stretch: 1;
+
+                if !root.has-selection: Text {
+                    text: "Select an order to see its lines and what it can do next.";
+                    color: Theme.text-disabled;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                if root.has-selection: VerticalLayout {
+                    spacing: 0px;
+
+                    Rectangle {
+                        height: 76px;
+                        background: Theme.header-background;
+
+                        HorizontalLayout {
+                            padding: 12px;
+                            spacing: 10px;
+
+                            VerticalLayout {
+                                spacing: 4px;
+                                alignment: center;
+
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    alignment: start;
+
+                                    Text {
+                                        text: root.orders[root.selected-index].reference;
+                                        color: Theme.text-primary;
+                                        font-size: 18px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+
+                                    StateBadge {
+                                        label: root.orders[root.selected-index].state-label;
+                                        tint: root.orders[root.selected-index].state-color;
+                                    }
+                                }
+
+                                Text {
+                                    text: root.orders[root.selected-index].manufacturer-name;
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                }
+
+                                Text {
+                                    text: "Billing: " + root.orders[root.selected-index].invoice-status
+                                        + " · expected " + root.orders[root.selected-index].date-planned;
+                                    color: Theme.text-disabled;
+                                    font-size: 10px;
+                                }
+                            }
+
+                            Rectangle { horizontal-stretch: 1; }
+
+                            VerticalLayout {
+                                alignment: center;
+                                Text {
+                                    text: root.orders[root.selected-index].amount-total
+                                        + " " + root.orders[root.selected-index].currency;
+                                    color: Theme.text-accent;
+                                    font-size: 18px;
+                                    font-weight: 700;
+                                    horizontal-alignment: right;
+                                }
+                            }
+                        }
+                    }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        OrderLinesTable {
+                            order: root.orders[root.selected-index];
+                            editable: false;
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: Theme.border-color; }
+
+                    TransitionBar {
+                        order: root.orders[root.selected-index];
+                        transition(r, a) => { root.transition(r, a); }
+                    }
+                }
+            }
+        }
+    }
+}
