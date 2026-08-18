@@ -702,6 +702,8 @@ fn handle_start_play(
 
         // Save lighting time_of_day so it can be restored on stop
         runtime.saved_time_of_day = res.lighting.as_ref().map(|l| l.time_of_day);
+        // The WHOLE service, not just the clock. See `saved_lighting`.
+        runtime.saved_lighting = res.lighting.as_ref().map(|l| (**l).clone());
         
         // Create comprehensive world snapshot
         let mut snapshot = WorldSnapshot::new(0, "Play Start");
@@ -916,6 +918,7 @@ fn handle_stop_play(
     play_mode_entities: Query<Entity, Or<(With<PlayModeCharacter>, With<PlayModeCamera>)>>,
     mut lighting: Option<ResMut<eustress_common::services::LightingService>>,
     mut sim_clock: Option<ResMut<crate::studio_plugins::api::SimClock>>,
+    mut despawn_avatars: MessageWriter<eustress_common::avatar::DespawnAllAvatars>,
 ) {
     if events.read().next().is_none() { return; }
     events.clear();
@@ -1126,6 +1129,13 @@ fn handle_stop_play(
         
         // Clear snapshot stack and runtime state
         // Restore lighting time_of_day to pre-play value
+        // Whole-service restore first: sun angular radius, intensity, colour,
+        // fog and shadows all live here and none of them were being put back.
+        if let (Some(saved), Some(ref mut lighting)) = (runtime.saved_lighting.take(), &mut lighting) {
+            **lighting = saved;
+            lighting.update_clock_time();
+            info!("💡 Lighting restored to pre-play state");
+        }
         if let (Some(saved_tod), Some(ref mut lighting)) = (runtime.saved_time_of_day, &mut lighting) {
             lighting.time_of_day = saved_tod;
             lighting.update_clock_time();
@@ -1177,6 +1187,9 @@ fn restore_scene_on_enter_edit(
     >,
     spawned_during_play: Query<Entity, With<SpawnedDuringPlayMode>>,
     play_mode_entities: Query<Entity, Or<(With<PlayModeCharacter>, With<PlayModeCamera>)>>,
+    // The avatar teardown this function already writes below — the writer was
+    // declared on the sibling stop-play system but not on this one.
+    mut despawn_avatars: MessageWriter<eustress_common::avatar::DespawnAllAvatars>,
 ) {
     // Edit mode never simulates physics.
     physics_time.pause();
@@ -1204,6 +1217,17 @@ fn restore_scene_on_enter_edit(
         restored
     };
     info!("🔄 Safety-net restored {} transforms to pre-play state", restored);
+
+    // The AVATAR is not ours to despawn by query.
+    //
+    // Play spawns it through `SpawnAvatar`, so it carries
+    // `SpawnedByAvatarRuntime` — not `PlayModeCharacter` or
+    // `SpawnedDuringPlayMode`, which is all the loops below match. Stopping
+    // therefore left the character standing in the editor, and its camera with
+    // it: the runtime's play camera outranks the editor camera (order 10 via
+    // `HostSeams`), so the viewport kept rendering from the dead character's
+    // point of view. The runtime owns both and tears down both.
+    despawn_avatars.write(eustress_common::avatar::DespawnAllAvatars);
 
     // Remove anything play mode spawned (character, follow camera, runtime parts).
     for e in spawned_during_play.iter() {

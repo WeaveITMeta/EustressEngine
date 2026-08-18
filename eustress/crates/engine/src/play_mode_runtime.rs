@@ -95,8 +95,19 @@ pub struct PlayModeRuntime {
     pub camera_distance: f32,
     /// Physics enabled during play
     pub physics_enabled: bool,
-    /// Saved time_of_day from LightingService before play started
+    /// Saved time_of_day from LightingService before play started.
+    ///
+    /// Superseded by `saved_lighting`, which captures the WHOLE service.
+    /// Retained because other code reads it.
     pub saved_time_of_day: Option<f32>,
+    /// The entire `LightingService` as it stood before Play started.
+    ///
+    /// Stop used to restore `time_of_day` and nothing else — one field out of
+    /// roughly twenty. Sun angular radius, sun intensity and colour, fog and
+    /// shadow settings all kept whatever the simulation left them at, so
+    /// stopping did not return the scene to its pre-play state and the sun in
+    /// particular stayed however large the run had made it.
+    pub saved_lighting: Option<eustress_common::services::LightingService>,
 }
 
 impl PlayModeRuntime {
