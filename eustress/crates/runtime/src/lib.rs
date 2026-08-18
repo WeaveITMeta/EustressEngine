@@ -104,5 +104,5 @@ pub mod prelude {
     pub use super::replication::{ReplicationSyncPlugin, sync_basepart_to_network};
     
     #[cfg(feature = "physics")]
-    pub use super::physics::{RuntimePhysicsPlugin, apply_workspace_gravity};
+    pub use super::physics::RuntimePhysicsPlugin;
 }

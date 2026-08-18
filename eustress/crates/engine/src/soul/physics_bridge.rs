@@ -72,15 +72,31 @@ pub fn apply_rune_velocity_commands(
     }
 }
 
-/// Bevy system: sync workspace gravity from Rune thread-local to Avian3d Gravity resource.
+/// Bevy system: push a Rune-authored gravity change into `Workspace.gravity`,
+/// the single source of truth. The canonical
+/// `eustress_common::services::workspace::sync_workspace_gravity_to_avian` then
+/// converts it into Avian's `Gravity`, so this is not a second writer of the
+/// physics resource.
+///
+/// Only pushes when a script actually CHANGED the value. Comparing the
+/// thread-local against `Workspace.gravity` instead would let the stale Rune
+/// default (9.80665) clobber a scene- or tool-authored gravity every frame.
 pub fn sync_rune_gravity(
-    mut gravity: ResMut<Gravity>,
+    workspace: Option<ResMut<eustress_common::services::workspace::Workspace>>,
+    mut last_seen: Local<Option<f64>>,
 ) {
     let rune_gravity = rune_ecs_module::WORKSPACE_GRAVITY.with(|g| *g.borrow());
-    let current = gravity.0.y.abs() as f64;
-    if (current - rune_gravity).abs() > 0.001 {
-        gravity.0 = Vec3::new(0.0, -(rune_gravity as f32), 0.0);
+    if *last_seen == Some(rune_gravity) {
+        return;
     }
+    let first_observation = last_seen.is_none();
+    *last_seen = Some(rune_gravity);
+    // Boot: adopt the initial value silently, never write it.
+    if first_observation {
+        return;
+    }
+    let Some(mut ws) = workspace else { return };
+    ws.gravity = Vec3::new(0.0, -(rune_gravity as f32), 0.0);
 }
 
 /// Bevy system: snapshot Avian3d physics state into Rune thread-locals.

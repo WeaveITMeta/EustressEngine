@@ -1,12 +1,15 @@
 //! # Physics Integration
 //!
 //! Integrates with Avian physics, reading configuration from `Workspace` service.
-//! Handles gravity application and anti-exploit validation.
+//! Handles anti-exploit validation.
+//!
+//! Gravity is NOT applied here. `eustress_common::services::workspace::
+//! sync_workspace_gravity_to_avian` is the only system that writes Avian's
+//! `Gravity`, so that the authored value is unit-converted exactly once.
 //!
 //! ## Service-Driven Configuration
 //!
 //! All physics bounds come from `Workspace`:
-//! - `gravity` -> Applied to all dynamic RigidBodies
 //! - `max_entity_speed` -> Velocity clamping
 //! - `max_acceleration` -> Acceleration validation
 //! - `teleport_threshold` -> Large movement detection
@@ -25,7 +28,6 @@ pub struct RuntimePhysicsPlugin;
 impl Plugin for RuntimePhysicsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Update, (
-            apply_workspace_gravity,
             validate_velocities,
             clamp_to_world_bounds,
         ));
@@ -35,22 +37,6 @@ impl Plugin for RuntimePhysicsPlugin {
 // ============================================================================
 // Systems
 // ============================================================================
-
-/// Apply gravity from Workspace to Avian's Gravity resource.
-///
-/// This allows per-scene gravity configuration.
-pub fn apply_workspace_gravity(
-    workspace: Option<Res<Workspace>>,
-    mut gravity: ResMut<Gravity>,
-) {
-    if let Some(ws) = workspace {
-        // Only update if changed
-        if gravity.0 != ws.gravity {
-            gravity.0 = ws.gravity;
-            info!("Gravity updated to {:?} studs/s²", ws.gravity);
-        }
-    }
-}
 
 /// Validate velocities against Workspace limits.
 ///

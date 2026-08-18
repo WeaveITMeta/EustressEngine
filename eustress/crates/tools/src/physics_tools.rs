@@ -22,7 +22,8 @@ impl ToolHandler for QueryMaterialTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "query_material",
-            description: "Look up physical and PBR rendering properties for a material preset. Returns roughness, metallic, reflectance, density, thermal conductivity, and visual characteristics. Available presets: Plastic, SmoothPlastic, Wood, WoodPlanks, Metal, CorrodedMetal, DiamondPlate, Foil, Grass, Concrete, Brick, Granite, Marble, Slate, Sand, Fabric, Glass, Neon, Ice.",
+            description: "Look up the rendering AND mechanical properties of a material preset. Returns roughness/metallic/reflectance for appearance, plus young_modulus, yield_strength, ultimate_strength, fracture_toughness (K_IC), hardness and density for physics. Available presets: Plastic, SmoothPlastic, Wood, WoodPlanks, Metal, CorrodedMetal, DiamondPlate, Foil, Grass, Concrete, Brick, Granite, Marble, Slate, Sand, Fabric, Glass, Neon, Ice. \
+                          DESTRUCTIBILITY: a Part dents and cracks only when its `deformation` property is true. It then takes these mechanical constants from its `material` name automatically, so setting an accurate material is normally all that is needed and no numbers have to be supplied. Whether an impact cracks a part rather than denting it is decided by fracture energy G_c = fracture_toughness^2 / young_modulus x smallest cross-section area: Concrete (K_IC 1e6) shatters easily, Metal (5e7) essentially never does. Dent DEPTH is set by yield_strength. Override these with an explicit [material] block only for something the presets do not cover — the crack threshold goes as K_IC SQUARED, so a guessed value silently flips shatters into never-cracks.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -60,13 +61,49 @@ impl ToolHandler for QueryMaterialTool {
         let m = ((metallic     as f64) * 1000.0).round() / 1000.0;
         let f = ((reflectance  as f64) * 1000.0).round() / 1000.0;
 
+        // Mechanical constants come from the SAME lookup the engine uses to
+        // give a deformable part its physics, so what an agent is told here is
+        // exactly what it will get at runtime. Reporting appearance alone —
+        // which is all this returned before — left the agent no way to reach
+        // the numbers that decide crack-vs-dent except by inventing them.
+        let mech = eustress_common::realism::materials::properties::MaterialProperties
+            ::from_name(material_name);
+
+        let mech_json = mech.as_ref().map(|p| {
+            serde_json::json!({
+                "preset": p.name,
+                "young_modulus_pa": p.young_modulus,
+                "poisson_ratio": p.poisson_ratio,
+                "yield_strength_pa": p.yield_strength,
+                "ultimate_strength_pa": p.ultimate_strength,
+                "fracture_toughness_pa_sqrt_m": p.fracture_toughness,
+                "hardness": p.hardness,
+                "density_kg_m3": p.density,
+            })
+        });
+
+        let mech_text = mech
+            .as_ref()
+            .map(|p| {
+                format!(
+                    " | mechanical: E={:.3e}Pa, yield={:.3e}Pa, K_IC={:.3e}Pa·√m, density={:.0}kg/m³ \
+                     (used automatically when deformation = true)",
+                    p.young_modulus, p.yield_strength, p.fracture_toughness, p.density
+                )
+            })
+            .unwrap_or_else(|| {
+                " | no mechanical preset for this name — a deformable part using it needs an \
+                  explicit [material] block"
+                    .to_string()
+            });
+
         ToolResult {
             tool_name: "query_material".to_string(),
             tool_use_id: String::new(),
             success: true,
             content: format!(
-                "{}: roughness={:.2}, metallic={:.2}, reflectance={:.2} — {}",
-                material_name, roughness, metallic, reflectance, description
+                "{}: roughness={:.2}, metallic={:.2}, reflectance={:.2} — {}{}",
+                material_name, roughness, metallic, reflectance, description, mech_text
             ),
             structured_data: Some(serde_json::json!({
                 "material": material_name,
@@ -74,6 +111,8 @@ impl ToolHandler for QueryMaterialTool {
                 "metallic": m,
                 "reflectance": f,
                 "description": description,
+                "mechanical": mech_json,
+                "destructible_requires": "Part property `deformation = true`",
             })),
             stream_topic: None,
         }
