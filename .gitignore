@@ -129,3 +129,9 @@ eustress/.patches/wgpu-fresh/
 .trunk-web-target/
 target-verify/
 **/target-verify/
+
+# Cargo target tree used by the data-platform test harness. Same class as the
+# `target-*` siblings above: a build directory that was never listed, so it
+# surfaced as untracked build output at commit time.
+.data-test-target/
+**/.data-test-target/
