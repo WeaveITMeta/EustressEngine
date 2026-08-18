@@ -57,6 +57,8 @@ import { SimulationSettingsDialog, WatchpointData, SimOutputBinding } from "simu
 import { ForgeConnectDialog } from "forge_connect.slint";
 import { StressTestDialog } from "stress_test.slint";
 import { DataSourcesDialog } from "data_sources.slint";
+import { DomainsDialog, DomainEntry } from "domains_dialog.slint";
+import { GlobalVariablesDialog, GlobalVariableEntry } from "global_variables_dialog.slint";
 import { KeybindingsDialog, ShortcutEntry } from "keybindings.slint";
 import { AboutDialog } from "about_dialog.slint";
 import { NewUniverseDialog } from "new_universe_dialog.slint";
@@ -1019,6 +1021,7 @@ export component StudioWindow inherits Window {
     callback expand-all();   // Expand all explorer tree nodes
     callback collapse-all(); // Collapse all explorer tree nodes
     callback deselect();     // Click on empty space — clear selection
+    callback explorer-search(string); // Explorer search box edited
     callback explorer-navigate-up();       // Arrow up in Explorer
     callback explorer-navigate-down();     // Arrow down in Explorer
     callback explorer-navigate-collapse(); // Arrow left — collapse node
@@ -1640,6 +1643,7 @@ export component StudioWindow inherits Window {
                             on-expand-all() => { root.expand-all(); }
                             on-collapse-all() => { root.collapse-all(); }
                             on-deselect() => { root.deselect(); }
+                            on-search-changed(text) => { root.explorer-search(text); }
                             navigate-up() => { root.explorer-navigate-up(); }
                             navigate-down() => { root.explorer-navigate-down(); }
                             navigate-collapse() => { root.explorer-navigate-collapse(); }
@@ -3896,6 +3900,55 @@ export component StudioWindow inherits Window {
     if root.show-sync-domain-dialog: SyncDomainDialog {
         on-sync => { root.show-sync-domain-dialog = false; }
         on-close => { root.show-sync-domain-dialog = false; }
+    }
+
+    // Domains dialog. Form state lives in the component's own in-out
+    // properties, so the surface is fully navigable before Rust persistence
+    // exists; these handlers drive that state and the close path.
+    if root.show-domains-window: dom := DomainsDialog {
+        on-add-domain => {
+            dom.editing-id = -1;
+            dom.form-name = "";
+            dom.form-description = "";
+            dom.form-object-type = "Part";
+            dom.form-open = true;
+        }
+        on-edit-domain(id) => {
+            dom.editing-id = id;
+            dom.form-open = true;
+        }
+        on-save-domain(id) => {
+            dom.form-open = false;
+            dom.editing-id = -1;
+        }
+        on-delete-domain(id) => {
+            dom.pending-delete-id = -1;
+        }
+        on-close => { root.show-domains-window = false; }
+    }
+
+    // Global variables dialog. Same pattern: self-contained state, so add /
+    // edit / filter all respond immediately; writing values through to the
+    // engine is the follow-up.
+    if root.show-global-variables-window: gv := GlobalVariablesDialog {
+        on-filter-changed(query) => { gv.filter-text = query; }
+        on-clear-filter => { gv.filter-text = ""; }
+        on-begin-add => {
+            gv.new-key = "";
+            gv.new-value = "";
+            gv.new-type = "string";
+            gv.adding = true;
+        }
+        on-cancel-add => { gv.adding = false; }
+        on-new-key-edited(key) => { gv.new-key = key; }
+        on-add-variable(key, value, type) => { gv.adding = false; }
+        on-begin-edit(id) => { gv.editing-id = id; }
+        on-cancel-edit => { gv.editing-id = -1; }
+        on-edit-key-edited(id, key) => { gv.edit-key = key; }
+        on-commit-edit(id, key, value, type) => { gv.editing-id = -1; }
+        on-select-variable(id) => { gv.selected-id = id; }
+        on-delete-variable(id) => { gv.selected-id = -1; }
+        on-close => { root.show-global-variables-window = false; }
     }
 
     // Keyboard shortcuts dialog

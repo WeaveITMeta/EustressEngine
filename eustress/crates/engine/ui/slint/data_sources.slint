@@ -581,15 +581,22 @@ export component DataSourcesDialog inherits Rectangle {
                 background: Theme.dialog-titlebar-background;
                 border-radius: Theme.radius-md;
 
-                HorizontalLayout {
+                // Centre on BOTH axes: the horizontal layout only centres across,
+                // so a fixed-height button in a taller footer needs the vertical
+                // wrapper to sit on the footer's centre line.
+                VerticalLayout {
                     alignment: center;
 
-                    DSButton {
-                        width: 80px;
-                        height: 32px;
-                        label: "Close";
-                        font-size: Theme.font-md;
-                        clicked => { root.on-close(); }
+                    HorizontalLayout {
+                        alignment: center;
+
+                        DSButton {
+                            width: 80px;
+                            height: 32px;
+                            label: "Close";
+                            font-size: Theme.font-md;
+                            clicked => { root.on-close(); }
+                        }
                     }
                 }
             }

@@ -254,7 +254,16 @@ export component SyncDomainDialog inherits Rectangle {
                 border-top-right-radius: Theme.radius-md;
 
                 HorizontalBox {
-                    padding: 16px;
+                    // A 48px header cannot give 16px of padding to a 28px close
+                    // button: that leaves 16px of content room, which squeezes
+                    // the button down and clips the title's descenders. 10px
+                    // top/bottom leaves exactly 28px, so the button centres and
+                    // the title sits clear; the tighter right padding pulls the
+                    // close control back toward the corner.
+                    padding-left: 16px;
+                    padding-right: 10px;
+                    padding-top: 10px;
+                    padding-bottom: 10px;
 
                     Text {
                         text: "Sync Domain to Object Type";
