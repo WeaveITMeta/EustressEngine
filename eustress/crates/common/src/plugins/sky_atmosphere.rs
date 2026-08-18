@@ -169,7 +169,7 @@ impl Default for SkyConfig {
     fn default() -> Self {
         Self {
             mode_override: sky_mode_override(),
-            star_brightness: env_f32("EUSTRESS_STAR_BRIGHTNESS", 1500.0),
+            star_brightness: env_f32("EUSTRESS_STAR_BRIGHTNESS", 2600.0),
             environment_map_size: 512,
             base_ev100: env_f32("EUSTRESS_EV100", 13.0),
         }
@@ -856,6 +856,39 @@ pub const STAR_FIELD_SIZE: u32 = 1024;
 /// Edge length in pixels of one star candidate cell.
 const STAR_CELL: u32 = 8;
 
+/// Draw a star's magnitude from a uniform sample.
+///
+/// A real sky gains roughly 3x more stars per magnitude step fainter, so the
+/// visible population is overwhelmingly faint with a handful of bright ones.
+/// The fifth power reproduces that tail: the median lands near 3% of peak.
+#[inline]
+fn star_magnitude(uniform: f32) -> f32 {
+    let m = uniform.clamp(0.0, 1.0);
+    m * m * m * m * m
+}
+
+/// Core brightness for a magnitude, before the skybox's own scaling.
+///
+/// Two constraints pull against each other here.
+///
+/// The **ceiling** keeps all but the brightest few percent below 1.0. Values
+/// above 1.0 clamp in an 8-bit texture, so a generous multiplier does not make
+/// bright stars brighter — it flattens everything above the clamp into
+/// identical white dots. An earlier multiplier of 2.75 saturated a quarter of
+/// the sky that way.
+///
+/// The **floor** is what decides whether a typical star is visible at all, and
+/// it matters more than it looks. Filmic tonemapping compresses highlights
+/// hard: measured on a live frame, raising the skybox brightness from 1500 to
+/// 3400 left the brightest pixel unchanged at 172/255, because the sky was
+/// already on the shoulder of the curve. Overall gain is therefore a dead
+/// lever, while lifting the floor moves the median star straight up the steep
+/// part of the curve where the eye can still see a difference.
+#[inline]
+fn star_peak(magnitude: f32) -> f32 {
+    0.12 + magnitude * 1.30
+}
+
 /// Peak radius of the very brightest star, in texels.
 ///
 /// Real stars are point sources: even Sirius is under a thousandth of a degree,
@@ -991,7 +1024,10 @@ pub fn create_star_field(star_count: u32) -> Image {
                 // Squared so the faint edges fall away fast and the band has a
                 // core instead of a uniform glow across a third of the sky.
                 let mottle = n * n;
-                let intensity = band * (0.12 + 0.88 * mottle) * 0.052;
+                // Scaled against the same tonemapping shoulder the stars face:
+                // at 0.052 the band was mathematically present and visually
+                // absent on screen.
+                let intensity = band * (0.12 + 0.88 * mottle) * 0.16;
 
                 let i = face_base + (py * size + px) * 4;
                 // Very close to neutral. The Milky Way is not orange; the first
@@ -1016,16 +1052,11 @@ pub fn create_star_field(star_count: u32) -> Image {
                 let fx = cx as f32 * STAR_CELL as f32 + rand01(seed ^ 0x9e37_79b9) * STAR_CELL as f32;
                 let fy = cy as f32 * STAR_CELL as f32 + rand01(seed ^ 0x85eb_ca6b) * STAR_CELL as f32;
 
-                // Magnitude. Real skies gain roughly 3x as many stars per step
-                // fainter, so the visible population is overwhelmingly faint
-                // with a handful of bright ones. The fifth power gives that
-                // tail: half of all stars land under 4% of peak brightness.
-                let m = rand01(seed ^ 0xc2b2_ae35);
-                let magnitude = m * m * m * m * m;
+                let magnitude = star_magnitude(rand01(seed ^ 0xc2b2_ae35));
 
                 // Brightness carries magnitude; size barely moves. Letting size
                 // track magnitude is what produced moon-sized discs.
-                let peak = 0.05 + magnitude * 2.75;
+                let peak = star_peak(magnitude);
                 let radius = 0.34 + magnitude * (STAR_MAX_RADIUS - 0.34);
 
                 // Colour. Stars span blue-white to amber in principle, but at
@@ -1404,6 +1435,23 @@ mod tests {
     }
 
     #[test]
+    fn a_typical_star_is_actually_visible() {
+        // The failure this guards is subtle: a mathematically correct magnitude
+        // distribution whose median star renders at 10/255 and is invisible
+        // after tonemapping, giving an empty-looking sky that measures fine.
+        //
+        // Raw gain cannot fix it — filmic tonemapping compresses the top of the
+        // range, so the floor is the lever. Median magnitude is ~0.03, so this
+        // pins what that star is worth.
+        let median_peak = star_peak(star_magnitude(0.5));
+        assert!(
+            median_peak > 0.10,
+            "the median star renders at {:.0}/255 before scaling — invisible",
+            median_peak * 255.0
+        );
+    }
+
+    #[test]
     fn star_field_carries_no_baked_sky() {
         // The regression this guards: the old cubemap baked a full day gradient
         // (blue above, grey ground below) which the atmosphere then added its own
@@ -1458,23 +1506,44 @@ mod tests {
     #[test]
     fn faint_stars_vastly_outnumber_bright_ones() {
         // A real sky gains roughly 3x more stars per magnitude step fainter. A
-        // uniform distribution gives a flat field of equally-bright dots, which
-        // reads as noise rather than as a sky.
-        let image = create_star_field(9000);
-        let data = image.data.as_ref().unwrap();
-        let lit: Vec<u8> = data
-            .chunks_exact(4)
-            .map(|p| p[0].max(p[1]).max(p[2]))
-            .filter(|v| *v > 12)
-            .collect();
-        assert!(!lit.is_empty(), "no stars were drawn at all");
+        // flat distribution gives a field of equally-bright dots, which reads as
+        // noise rather than as a sky.
+        //
+        // Tested on the DISTRIBUTION, not on lit texels. Counting texels cannot
+        // see this: every star above the clamp renders an identical white core,
+        // so a sky of uniformly blinding stars and a properly graded one produce
+        // the same pixel histogram.
+        let n = 20_000;
+        let mags: Vec<f32> =
+            (0..n).map(|i| star_magnitude(i as f32 / n as f32)).collect();
 
-        let bright = lit.iter().filter(|v| **v > 180).count();
+        let median = mags[n / 2];
+        assert!(median < 0.06, "median magnitude {median:.3} — the sky is too uniformly bright");
+
+        let bright = mags.iter().filter(|m| **m > 0.5).count();
         assert!(
-            bright * 8 < lit.len(),
-            "{bright} of {} lit texels are near-peak; the tail is too flat",
-            lit.len()
+            bright * 5 < n,
+            "{bright} of {n} stars are in the top half of brightness; the tail is too flat"
         );
+    }
+
+    #[test]
+    fn only_the_very_brightest_stars_clip_to_white() {
+        // An 8-bit texture clamps at 1.0, so a peak above it does not render
+        // brighter — it erases the difference between stars. At a 2.75
+        // multiplier a quarter of the sky clipped to identical white dots.
+        let n = 20_000;
+        let clipped = (0..n)
+            .filter(|i| star_peak(star_magnitude(*i as f32 / n as f32)) >= 1.0)
+            .count();
+        let pct = clipped as f32 / n as f32;
+        assert!(
+            pct < 0.08,
+            "{:.1}% of stars clip to pure white; tonal range is lost above the clamp",
+            pct * 100.0
+        );
+        // ...but the brightest must still reach it, or nothing anchors the sky.
+        assert!(star_peak(star_magnitude(1.0)) > 1.0, "no star is bright enough to read as brilliant");
     }
 
     #[test]
