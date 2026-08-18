@@ -32,6 +32,18 @@ pub struct AvatarContract {
     pub gravity_y: f32,
     pub camera_order: isize,
     pub camera_fov_deg: f32,
+    /// How far ahead of the eyes the first-person camera sits.
+    pub first_person_forward_m: f32,
+    /// Which bones first person collapses, sorted.
+    ///
+    /// Hiding the head but not the neck left the neck standing in full view
+    /// directly under the camera. That was invisible to this contract until
+    /// the set was part of it.
+    pub first_person_hidden_bones: Vec<String>,
+    /// Eye height derived from the default descriptor — where the camera
+    /// actually sits. A shell that hardcoded a height instead of deriving one
+    /// would differ here.
+    pub eye_height_bits: u32,
     /// Sorted short type names on a freshly spawned avatar.
     pub spawned_components: Vec<String>,
     /// Metrics derived from the default descriptor at the nominal bind height.
@@ -109,11 +121,20 @@ pub fn avatar_contract(app: &mut App) -> AvatarContract {
         &super::AvatarDescriptor::default().morphs.metrics(NOMINAL_BIND_HEIGHT_M),
     );
 
+    let mut first_person_hidden_bones: Vec<String> = super::control::FIRST_PERSON_HIDDEN_BONES
+        .iter()
+        .map(|b| format!("{b:?}"))
+        .collect();
+    first_person_hidden_bones.sort();
+
     AvatarContract {
         fixed_hz,
         gravity_y,
         camera_order,
         camera_fov_deg: super::control::AVATAR_FOV_DEG,
+        first_person_forward_m: super::control::FIRST_PERSON_FORWARD_M,
+        first_person_hidden_bones,
+        eye_height_bits: default_metrics.eye_height,
         spawned_components,
         default_metrics,
     }
@@ -293,6 +314,15 @@ mod tests {
         assert_eq!(s.fixed_hz, c.fixed_hz, "fixed timestep drifted");
         assert_eq!(s.gravity_y, c.gravity_y, "gravity drifted");
         assert_eq!(s.camera_fov_deg, c.camera_fov_deg, "camera FOV drifted");
+        assert_eq!(
+            s.first_person_forward_m, c.first_person_forward_m,
+            "first-person camera offset drifted"
+        );
+        assert_eq!(
+            s.first_person_hidden_bones, c.first_person_hidden_bones,
+            "the two shells hide different bones in first person"
+        );
+        assert_eq!(s.eye_height_bits, c.eye_height_bits, "eye height drifted");
         assert_eq!(s.default_metrics, c.default_metrics, "derived body metrics drifted");
         assert_eq!(
             s.spawned_components, c.spawned_components,
@@ -313,6 +343,34 @@ mod tests {
         assert!(s.camera_order > c.camera_order);
         assert_ne!(s.escape_action, c.escape_action);
     }
+
+    /// First person must hide everything the camera sits inside, not just the
+    /// head.
+    ///
+    /// Cross-host equality cannot catch this: both shells share one runtime, so
+    /// both were equally wrong. The head was collapsed and the neck was not, so
+    /// the neck stood in full view directly under the camera on every downward
+    /// glance. This asserts the property itself.
+    #[test]
+    fn first_person_hides_the_whole_head_and_neck() {
+        use crate::avatar::control::{FIRST_PERSON_HIDDEN_BONES, FIRST_PERSON_FORWARD_M};
+        use crate::avatar::rig::HumanoidBone;
+
+        for required in [HumanoidBone::Neck, HumanoidBone::Head, HumanoidBone::HeadTop] {
+            assert!(
+                FIRST_PERSON_HIDDEN_BONES.contains(&required),
+                "{required:?} is visible in first person — the camera is inside it"
+            );
+        }
+
+        // Ahead of the eyes, but still inside the skull. A large offset would
+        // put the viewpoint out in front of the character's face.
+        assert!(
+            (0.02..=0.25).contains(&FIRST_PERSON_FORWARD_M),
+            "first-person camera offset {FIRST_PERSON_FORWARD_M} m is outside the head"
+        );
+    }
+
 
     #[test]
     fn despawn_removes_every_avatar() {

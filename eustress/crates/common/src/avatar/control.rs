@@ -380,6 +380,20 @@ fn escape_owner(
     out.write(AvatarEscapePressed(cfg.seams.escape_action));
 }
 
+/// How far ahead of the eyes the first-person camera sits, in metres.
+pub(crate) const FIRST_PERSON_FORWARD_M: f32 = 0.12;
+
+/// The bones collapsed while in first person.
+///
+/// Named rather than written inline so the parity contract can compare it
+/// between shells. Hiding the head but not the neck is the exact drift this
+/// list exists to make visible.
+pub(crate) const FIRST_PERSON_HIDDEN_BONES: [super::rig::HumanoidBone; 3] = [
+    super::rig::HumanoidBone::Neck,
+    super::rig::HumanoidBone::Head,
+    super::rig::HumanoidBone::HeadTop,
+];
+
 fn camera_follow(
     time: Res<Time>,
     bodies: Query<(&Transform, &AvatarBody), (With<SpawnedByAvatarRuntime>, Without<AvatarCamera>)>,
@@ -396,7 +410,15 @@ fn camera_follow(
             + Vec3::Y * body.metrics.eye_height;
 
         if cam.first_person {
-            cam_tf.translation = eye;
+            // Slightly AHEAD of the eyes, not exactly on them.
+            //
+            // Sitting on the eye point leaves the throat and upper chest in
+            // front of the near plane the moment the view pitches down. Real
+            // first-person cameras are pushed forward for this reason. Kept
+            // small, and horizontal only, so looking down does not slide the
+            // viewpoint out of the head.
+            let facing = Quat::from_rotation_y(cam.yaw);
+            cam_tf.translation = eye + facing * (Vec3::NEG_Z * FIRST_PERSON_FORWARD_M);
             cam_tf.rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, -cam.pitch, 0.0);
             continue;
         }
@@ -450,7 +472,14 @@ fn hide_head_in_first_person(
     }
 
     for rig in rigs.iter() {
-        for bone in [HumanoidBone::Head, HumanoidBone::HeadTop] {
+        // The NECK collapses too.
+        //
+        // Hiding only the head left the neck standing in open view directly
+        // under the camera — visible on every downward glance, and the reason
+        // first person looked like it was filmed from inside someone's throat.
+        // The neck's children are the head bones, which are collapsed anyway,
+        // so nothing else is affected.
+        for bone in FIRST_PERSON_HIDDEN_BONES {
             let Some(e) = rig.bone(bone) else { continue };
             let Ok(mut t) = bones.get_mut(e) else { continue };
             t.scale = if first_person {

@@ -206,22 +206,6 @@ fn validate_physics_state(
     }
 }
 
-/// Sync Workspace gravity to Avian's Gravity resource.
-/// 
-/// This allows per-scene gravity configuration from the Workspace service.
-fn sync_workspace_gravity(
-    workspace: Option<Res<Workspace>>,
-    mut gravity: ResMut<Gravity>,
-) {
-    if let Some(ws) = workspace {
-        // Only update if changed to avoid unnecessary work
-        if gravity.0 != ws.gravity {
-            gravity.0 = ws.gravity;
-            info!("Gravity synced from Workspace: {:?} studs/s²", ws.gravity);
-        }
-    }
-}
-
 /// Freeze physics for entities marked as frozen.
 fn freeze_physics(
     mut query: Query<(&mut LinearVelocity, &mut AngularVelocity), Added<PhysicsFrozen>>,
@@ -269,7 +253,6 @@ impl Plugin for NetworkPhysicsPlugin {
         app.add_systems(
             Update,
             (
-                sync_workspace_gravity,
                 sync_velocity_to_network,
                 freeze_physics,
                 unfreeze_physics,
