@@ -1305,11 +1305,22 @@ pub struct BasePart {
     #[serde(default = "default_true")]
     pub cast_shadow: bool,
 
-    // === Deformation ===
-    /// Enable soft body deformation simulation
-    /// When true: mesh vertices deform from stress, temperature, and impacts
-    /// When false: behaves as rigid body (default)
-    pub deformation: bool,
+    // === Destructibility ===
+    /// Whether this part can be damaged: dented by impacts, and cracked into
+    /// separate physics bodies when an impact exceeds its fracture energy.
+    ///
+    /// False by default, so nothing is ever destructible by accident. Setting
+    /// it back to false tears the damage down and restores the authored mesh.
+    ///
+    /// The mechanical constants that decide dent-vs-crack come from the part's
+    /// `material` name unless an explicit `[material]` block overrides them, so
+    /// turning this on normally requires no other authoring.
+    ///
+    /// NAMED for what it does to the part, not for the technique. It was
+    /// `deformation`, which read as visual-only and hid the fact that the same
+    /// flag governs fracture into separate bodies.
+    #[serde(default, alias = "deformation")]
+    pub destructible: bool,
 
     /// Gap 5 — when true, the engine does NOT apply its single derived
     /// `StandardMaterial` over this part; the mesh keeps the material it
@@ -1357,7 +1368,7 @@ impl Default for BasePart {
             mass: 900.0,
             locked: false,
             cast_shadow: true,
-            deformation: false,
+            destructible: false,
             texture_repeat: [1.0, 1.0],
             respect_gltf_materials: false,
         }

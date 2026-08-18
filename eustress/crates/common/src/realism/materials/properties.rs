@@ -228,6 +228,73 @@ impl MaterialProperties {
         }
     }
     
+    /// Create rigid plastic (ABS-like) material
+    pub fn plastic() -> Self {
+        Self {
+            name: "Plastic (ABS)".to_string(),
+            young_modulus: 2.3e9,
+            poisson_ratio: 0.35,
+            yield_strength: 4.0e7,
+            ultimate_strength: 4.5e7,
+            fracture_toughness: 3.0e6, // ~3 MPa·√m, tough for a polymer
+            hardness: 10.0,
+            thermal_conductivity: 0.17,
+            specific_heat: 1400.0,
+            thermal_expansion: 90e-6,
+            melting_point: 378.0, // softening, not a true melt
+            density: 1050.0,
+            friction_static: 0.35,
+            friction_kinetic: 0.30,
+            restitution: 0.4,
+            custom_properties: HashMap::new(),
+        }
+    }
+
+    /// Look up a preset by name, accepting the APPEARANCE material names parts
+    /// are actually authored with as well as the physical ones.
+    ///
+    /// This is the bridge between what a part says it is made of and the
+    /// mechanical constants that decide whether it dents or cracks. Without it
+    /// the presets below were reachable only by calling their constructors from
+    /// Rust — so a part authored as `material = "Concrete"` and one authored as
+    /// `material = "Metal"` fell back to the SAME generic plastic constants and
+    /// behaved identically under impact, which is not a subtle error: fracture
+    /// threshold goes as K_IC squared, and K_IC spans five orders of magnitude
+    /// across these materials.
+    ///
+    /// Names are matched case-insensitively and ignore spaces and underscores,
+    /// so "CorrodedMetal", "corroded metal" and "corroded_metal" all resolve.
+    /// Returns `None` for an unknown name rather than guessing, leaving the
+    /// caller to decide what a sensible default is.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let key: String = name
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '_' && *c != '-')
+            .flat_map(|c| c.to_lowercase())
+            .collect();
+
+        Some(match key.as_str() {
+            // Metals. The appearance variants differ only in how they LOOK.
+            "steel" | "metal" | "corrodedmetal" | "diamondplate" => Self::steel(),
+            "aluminum" | "aluminium" | "foil" => Self::aluminum(),
+
+            // Brittle mineral solids. Brick, granite, marble and slate all sit
+            // within about 1.5x of concrete's fracture toughness (~1 MPa·√m),
+            // so sharing the preset is a fair approximation rather than a
+            // placeholder — they genuinely shatter alike.
+            "concrete" | "brick" | "granite" | "marble" | "slate" | "cobblestone" => {
+                Self::concrete()
+            }
+
+            "glass" => Self::glass(),
+            "ice" => Self::ice(),
+            "wood" | "woodplanks" => Self::wood(),
+            "rubber" | "fabric" | "grass" => Self::rubber(),
+            "plastic" | "smoothplastic" | "neon" | "sand" | "pebble" => Self::plastic(),
+            _ => return None,
+        })
+    }
+
     /// Create custom material
     pub fn custom(name: &str) -> Self {
         Self {
@@ -487,6 +554,48 @@ impl StructuralBundle {
 mod tests {
     use super::*;
     
+    /// Every appearance material a part can be authored with must resolve to
+    /// real mechanical constants, because that lookup is the ONLY thing
+    /// standing between "the agent named a material" and "the agent had to
+    /// invent a fracture toughness".
+    #[test]
+    fn every_authored_material_name_resolves() {
+        // The full set `query_material` advertises.
+        let authored = [
+            "Plastic", "SmoothPlastic", "Wood", "WoodPlanks", "Metal",
+            "CorrodedMetal", "DiamondPlate", "Foil", "Grass", "Concrete",
+            "Brick", "Granite", "Marble", "Slate", "Sand", "Fabric", "Glass",
+            "Neon", "Ice",
+        ];
+        for name in authored {
+            let m = MaterialProperties::from_name(name)
+                .unwrap_or_else(|| panic!("authored material {name:?} has no mechanical preset"));
+            assert!(m.young_modulus > 0.0, "{name}: non-physical modulus");
+            assert!(m.fracture_toughness > 0.0, "{name}: non-physical K_IC");
+            assert!(m.density > 0.0, "{name}: non-physical density");
+        }
+    }
+
+    /// Naming a material has to actually CHANGE the physics, or the lookup is
+    /// decorative. Concrete must stay far more brittle than steel.
+    #[test]
+    fn material_name_selects_distinct_physics() {
+        let steel = MaterialProperties::from_name("Metal").unwrap();
+        let concrete = MaterialProperties::from_name("Concrete").unwrap();
+        assert!(
+            steel.fracture_toughness > concrete.fracture_toughness * 10.0,
+            "steel K_IC {} vs concrete {} — these must not be interchangeable",
+            steel.fracture_toughness,
+            concrete.fracture_toughness
+        );
+        // Case and separators must not matter: parts are authored by hand.
+        assert_eq!(
+            MaterialProperties::from_name("corroded_metal").unwrap().name,
+            MaterialProperties::from_name("CorrodedMetal").unwrap().name
+        );
+        assert!(MaterialProperties::from_name("Unobtainium").is_none());
+    }
+
     #[test]
     fn test_derived_properties() {
         let steel = MaterialProperties::steel();

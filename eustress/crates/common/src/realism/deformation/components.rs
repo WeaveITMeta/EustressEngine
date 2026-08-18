@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 // ============================================================================
 
 /// Marks an entity as having deformable mesh vertices
-/// Added automatically when BasePart.deformation = true
+/// Added automatically when BasePart.destructible = true
 #[derive(Component, Reflect, Clone, Debug)]
 #[reflect(Component)]
 pub struct DeformableMesh {
@@ -62,7 +62,22 @@ impl Default for DeformableMesh {
     }
 }
 
-/// Marks a part that wants deformation (`BasePart.deformation = true`) but
+/// The persistent adaptive-refinement structure for one deformable mesh.
+///
+/// Impacts are REPEATED — a bouncing impactor refines the same part again and
+/// again — and this is what makes that stable. Rendering needs a green closure
+/// (thin transition triangles stitching a refined region to its coarser
+/// neighbours), and those must never be refined further: they are slivers by
+/// construction. Keeping the tree between impacts means the closure is
+/// re-derived from the leaves each time and never becomes structure, so what
+/// gets split is always the well-shaped red subdivision.
+///
+/// Deliberately NOT `Reflect`: this is derived runtime state rebuilt from the
+/// authored mesh on the next Play, never authored or saved.
+#[derive(Component, Default)]
+pub struct MeshRefinement(pub super::vertex::RefineForest);
+
+/// Marks a part that wants deformation (`BasePart.destructible = true`) but
 /// whose mesh asset had not finished loading when
 /// [`init_deformable_meshes`](super::systems::init_deformable_meshes) first
 /// saw it.
@@ -167,6 +182,37 @@ impl VertexDisplacements {
         self.total_displacement = vec![Vec3::ZERO; vertex_count];
     }
     
+    /// Append entries for vertices created by adaptive refinement.
+    ///
+    /// `parents` is [`Refinement::added_parents`](super::vertex::Refinement),
+    /// so each new vertex is the midpoint of an edge between two vertices that
+    /// already existed. It inherits the AVERAGE of their displacement rather
+    /// than zero: refinement can land inside a crater a previous impact already
+    /// dented, and a zeroed midpoint there would sit on the undeformed surface
+    /// and punch a spike straight through the dent.
+    ///
+    /// Parents are always older than the vertex they produce, so a midpoint of
+    /// a midpoint reads values this loop has already appended.
+    pub fn grow_interpolated(&mut self, parents: &[(u32, u32)]) {
+        self.elastic_displacement.reserve(parents.len());
+        self.plastic_displacement.reserve(parents.len());
+        self.thermal_displacement.reserve(parents.len());
+        self.total_displacement.reserve(parents.len());
+
+        for &(a, b) in parents {
+            let (ia, ib) = (a as usize, b as usize);
+            let push_mid = |v: &mut Vec<Vec3>| {
+                let x = v.get(ia).copied().unwrap_or(Vec3::ZERO);
+                let y = v.get(ib).copied().unwrap_or(Vec3::ZERO);
+                v.push((x + y) * 0.5);
+            };
+            push_mid(&mut self.elastic_displacement);
+            push_mid(&mut self.plastic_displacement);
+            push_mid(&mut self.thermal_displacement);
+            push_mid(&mut self.total_displacement);
+        }
+    }
+
     /// Update total displacement from components
     pub fn update_total(&mut self) {
         self.max_displacement = 0.0;
@@ -330,18 +376,35 @@ pub struct DeformationConfig {
     pub gpu_threshold: usize,
     /// Update frequency (frames between updates)
     pub update_interval: u32,
-    /// Target edge length (metres) for the deformable copy of a mesh.
+    /// COARSEST edge length (metres) refinement will settle for.
     ///
     /// Deformation moves existing vertices and cannot create new ones, so an
     /// authored 24-vertex cube — every vertex at a corner — has nothing to
-    /// displace under a localized impact and looks totally unreactive. The
-    /// mesh is subdivided at init until its edges are roughly this long, which
-    /// puts several vertices inside a typical impact radius.
+    /// displace under a localized impact and looks totally unreactive. The mesh
+    /// is refined on impact until the crater is spanned by triangles roughly
+    /// this long or shorter.
+    ///
+    /// The actual target is normally FINER than this: it is derived from the
+    /// crater radius (see `MIN_REFINE_EDGE_M` and the derivation in
+    /// [`apply_impact_deformation`](super::systems::apply_impact_deformation)),
+    /// and this value only caps how coarse a very large crater is allowed to
+    /// get.
     pub target_edge_m: f32,
-    /// Hard cap on subdivision levels. Each level QUADRUPLES triangle count,
-    /// so this bounds a large part from exploding into millions of triangles
-    /// chasing a small target edge.
+    /// Hard cap on refinement depth. Each level quarters the edge length of the
+    /// triangles it touches, so this bounds a small crater on a huge part from
+    /// recursing indefinitely.
+    ///
+    /// Higher than it would have to be for uniform subdivision, because the
+    /// cost here is LOCAL: only the triangles the crater actually covers reach
+    /// the deepest levels.
     pub max_subdivision_levels: u32,
+    /// Triangle budget for one deformable part.
+    ///
+    /// Refinement stops adding detail once it would exceed this, and refuses
+    /// outright if it cannot finish enforcing conformity inside it — a
+    /// half-balanced mesh renders with cracks, which is worse than a slightly
+    /// coarse dent.
+    pub max_triangles: usize,
 }
 
 impl Default for DeformationConfig {
@@ -359,7 +422,8 @@ impl Default for DeformationConfig {
             gpu_threshold: 10000,
             update_interval: 1,
             target_edge_m: 0.12,
-            max_subdivision_levels: 5,
+            max_subdivision_levels: 8,
+            max_triangles: 8000,
         }
     }
 }

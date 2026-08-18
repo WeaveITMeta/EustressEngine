@@ -11,6 +11,33 @@ reflectance = 0.0
 material = "Plastic"
 locked = false
 
+# Destructibility. OFF unless set: a part never dents or cracks by accident,
+# and setting this back to false restores the authored mesh immediately.
+#
+# When true, the part dents where things hit it and cracks in half if the
+# impact exceeds its fracture energy. Both are decided from real contact
+# mechanics using the mechanical constants of `material` above, so naming an
+# accurate material is all that is normally required — Concrete shatters,
+# Metal dents, Glass is brittle. Add an explicit [material] block ONLY to
+# describe something the presets do not cover.
+destructible = false
+
+# Optional. Overrides the mechanical constants implied by `material`.
+# Units are SI. `fracture_toughness` (K_IC, Pa·√m) decides crack-vs-dent via
+# G_c = K_IC^2 / young_modulus x smallest cross-section; `yield_strength` (Pa)
+# sets how deep the dent goes. Prefer naming an accurate `material` over
+# inventing these — the crack threshold goes as K_IC SQUARED, so a plausible
+# guess silently turns "shatters" into "never cracks".
+# [material]
+# name = "Concrete"
+# young_modulus = 3.0e10
+# poisson_ratio = 0.20
+# yield_strength = 3.0e7
+# ultimate_strength = 3.0e7
+# fracture_toughness = 1.0e6
+# hardness = 500.0
+# density = 2400.0
+
 [transform]
 position = [0.0, 0.0, 0.0]
 rotation = [0.0, 0.0, 0.0, 1.0]  # Quaternion (x, y, z, w)

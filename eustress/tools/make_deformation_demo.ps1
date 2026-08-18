@@ -102,7 +102,7 @@ function New-Part {
     [void]$sb.AppendLine("material = `"$MaterialName`"")
     # The opt-in that makes the whole vertex-deformation pipeline consider this
     # part at all. Without it there is no DeformableMesh and nothing happens.
-    [void]$sb.AppendLine("deformation = $($Deformation.ToString().ToLower())")
+    [void]$sb.AppendLine("destructible = $($Deformation.ToString().ToLower())")
     [void]$sb.AppendLine('')
 
     if ($PhysicsDensity -gt 0) {
@@ -149,8 +149,16 @@ New-Part -Name 'A_DentPlate_Soft' -Pos @(0.0, 1.0, 0.0) -Size @(3.0, 0.5, 2.5) `
         name               = '"SoftAlloy"'
         young_modulus      = '1.0e8'   # very compliant -> big visible dent
         poisson_ratio      = '0.33'
-        yield_strength     = '5.0e5'   # yields early -> permanent dent
-        ultimate_strength  = '8.0e5'
+        # Dent depth is d = sqrt(E / (pi * R * 3*yield_strength)), so yield
+        # strength is the dial that decides whether the crater is visible.
+        # 5.0e5 (a soft alloy) gave a physically correct but ~1 cm dimple on
+        # this ~1 kJ impact. 5.0e3 is putty/soft-lead territory and drives the
+        # dent to the 25%-of-thickness clamp, i.e. obvious damage.
+        # NOTE this does NOT risk cracking: the fracture threshold is
+        # G_c = K_IC^2 / E_young times cross-section, and depends on neither
+        # yield strength nor this change.
+        yield_strength     = '5.0e3'
+        ultimate_strength  = '8.0e3'
         fracture_toughness = '5.0e6'   # VERY tough -> E_f ~600 kJ, never cracks
         hardness           = '30.0'
         density            = '2700.0'

@@ -146,24 +146,19 @@ struct Dent {
     permanent: bool,
 }
 
-/// Convert a solved contact impulse into an indentation.
+/// Convert impact ENERGY into an indentation.
 ///
-/// `inv_mass_sum` is `1/m₁ + 1/m₂` — taking it in inverse form is what makes
-/// static bodies (inverse mass 0) fall out naturally as "infinitely heavy".
-fn dent_from_impulse(
-    impulse: f32,
-    inv_mass_sum: f32,
+/// Takes energy rather than the solved impulse deliberately. The impulse is
+/// only meaningful once the solver has acted, whereas the closing speed this
+/// energy is derived from is known on the very step contact begins — so an
+/// energy-driven model measures every impact instead of only the ones whose
+/// timing happened to line up.
+fn dent_from_energy(
+    energy: f32,
     target: ContactMaterial,
     impactor: ContactMaterial,
     impactor_radius_m: f32,
 ) -> Option<Dent> {
-    if !(impulse > 0.0) || !(inv_mass_sum > 0.0) {
-        // Zero impulse, or two static bodies — no energy to dissipate.
-        return None;
-    }
-
-    let m_eff = 1.0 / inv_mass_sum;
-    let energy = (impulse * impulse) / (2.0 * m_eff);
     if !energy.is_finite() || energy <= 0.0 {
         return None;
     }
@@ -361,9 +356,22 @@ pub fn bridge_collisions_to_deformation(
                 .filter(|r| *r > 0.0)
                 .unwrap_or(0.25);
 
-            let Some(dent) =
-                dent_from_impulse(impulse, inv_mass_sum, target, impactor, impactor_radius_m)
-            else {
+            // Impact energy from the CLOSING SPEED, not the solved impulse.
+            //
+            // `E = ½·m_eff·v²` is the kinetic energy the collision has to
+            // absorb, and both terms are known on the first step of contact.
+            // Deriving it from the accumulated normal impulse instead made the
+            // result depend on catching the exact step where the solver had
+            // acted but the bodies had not yet separated — which is why one
+            // plate fractured and an identical one never dented.
+            //
+            // Treated as fully inelastic (all approach energy dissipates),
+            // which is the right assumption for permanent denting; a bouncy
+            // material would return some of it.
+            let m_eff = if inv_mass_sum > 0.0 { 1.0 / inv_mass_sum } else { 0.0 };
+            let energy = 0.5 * m_eff * approach * approach;
+
+            let Some(dent) = dent_from_energy(energy, target, impactor, impactor_radius_m) else {
                 continue;
             };
 
@@ -383,17 +391,10 @@ pub fn bridge_collisions_to_deformation(
 
             // ── crack instead of dent when the hit is hard enough ─────────
             //
-            // Recompute the collision energy here (the same quantity
-            // `dent_from_impulse` used) and compare it against the Griffith
-            // threshold. Above it, the part splits and the dent is skipped —
-            // denting a body that is about to be replaced by two fragments
-            // would be wasted work and a visible double-response.
-            let m_eff = if inv_mass_sum > 0.0 { 1.0 / inv_mass_sum } else { 0.0 };
-            let energy = if m_eff > 0.0 {
-                (impulse * impulse) / (2.0 * m_eff)
-            } else {
-                0.0
-            };
+            // Same `energy` the dent model used, compared against the Griffith
+            // threshold. Above it the part splits and the dent is skipped —
+            // denting a body about to be replaced by two fragments would be
+            // wasted work and a visible double-response.
             let threshold = fracture_energy_threshold(target, base_part.size);
 
             if energy > threshold {

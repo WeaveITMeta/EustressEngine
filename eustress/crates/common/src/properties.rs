@@ -92,7 +92,7 @@ impl PropertyAccess for BasePart {
             "AssemblyAngularVelocity" => Some(PropertyValue::Vector3(self.assembly_angular_velocity)),
             "CollisionGroup" => Some(PropertyValue::String(self.collision_group.clone())),
             "Locked" => Some(PropertyValue::Bool(self.locked)),
-            "Deformation" => Some(PropertyValue::Bool(self.deformation)),
+            "Destructible" => Some(PropertyValue::Bool(self.destructible)),
             _ => None,
         }
     }
@@ -160,8 +160,8 @@ impl PropertyAccess for BasePart {
                 self.locked = b;
                 Ok(())
             }
-            ("Deformation", PropertyValue::Bool(b)) => {
-                self.deformation = b;
+            ("Destructible", PropertyValue::Bool(b)) => {
+                self.destructible = b;
                 Ok(())
             }
             ("Density", PropertyValue::Float(f)) => {
@@ -199,7 +199,7 @@ impl PropertyAccess for BasePart {
             PropertyDescriptor { name: "Size".to_string(), property_type: "Vector3".to_string(), read_only: false, category: "Transform".to_string() },
             PropertyDescriptor { name: "Density".to_string(), property_type: "float".to_string(), read_only: false, category: "Physics".to_string() },
             PropertyDescriptor { name: "Mass".to_string(), property_type: "float".to_string(), read_only: false, category: "Physics".to_string() },
-            PropertyDescriptor { name: "Deformation".to_string(), property_type: "bool".to_string(), read_only: false, category: "Physics".to_string() },
+            PropertyDescriptor { name: "Destructible".to_string(), property_type: "bool".to_string(), read_only: false, category: "Physics".to_string() },
         ]
     }
 }

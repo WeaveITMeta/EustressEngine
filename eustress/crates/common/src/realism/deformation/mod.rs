@@ -11,7 +11,7 @@
 //!
 //! ## Architecture
 //!
-//! When `BasePart.deformation = true`:
+//! When `BasePart.destructible = true`:
 //! - Mesh vertices are displaced based on stress tensor
 //! - Temperature gradients cause thermal expansion/contraction
 //! - Impact forces create permanent plastic deformation
