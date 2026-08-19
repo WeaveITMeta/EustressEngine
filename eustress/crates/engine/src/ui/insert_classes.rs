@@ -146,7 +146,7 @@ pub fn category_for(class: ClassName) -> &'static str {
         | Bone | WrapDeformer | WrapLayer | WrapTarget => "Meshes",
 
         // ── Data Platform + data/curves/chat/misc ──
-        Dataset | Series | Column | Run | Connector
+        Dataset | Series | Column | Run | Connector | Domain | ExportTarget
         | DataStoreGetOptions | DataStoreSetOptions | DataStoreIncrementOptions
         | DataStoreOptions | FloatCurve | RotationCurve | EulerRotationCurve
         | Vector3Curve | MarkerCurve | Path2D | LocalizationTable | Noise

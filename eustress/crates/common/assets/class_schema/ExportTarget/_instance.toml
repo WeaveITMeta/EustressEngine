@@ -1,0 +1,27 @@
+# ExportTarget — Data Platform: an outbound destination for parameter values.
+# The mirror of Connector: a Connector reads data IN, an ExportTarget writes it
+# OUT. They are siblings and are represented the same way — both are class
+# objects under DataService, both keep configuration in [attributes], and
+# neither ever stores a secret.
+#
+# Domains reference targets by name (see the Domain class's `export_targets`),
+# so a value's route out of the scene is a property of its domain rather than
+# of any single instance.
+
+[metadata]
+class_name = "ExportTarget"
+archivable = true
+
+[attributes]
+# Postgres | Firebase | JsonFile | CsvFile | McpServer | Webhook | CloudStorage
+target_type = "JsonFile"
+# Connection string, URL, or file path, depending on target_type.
+connection = ""
+# Table / collection / dataset name at the destination.
+schema = ""
+# NAME of an environment variable or credential-store key holding the secret —
+# never the secret itself, so this file is safe to commit.
+secret_ref = ""
+# Inert until explicitly enabled, so creating a target can never start
+# unattended outbound traffic.
+enabled = false

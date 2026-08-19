@@ -192,6 +192,123 @@ pub struct DomainSchema {
     pub version: u32,
 }
 
+impl DomainSchema {
+    /// Build a schema from a `Domain` class instance's `_instance.toml`.
+    ///
+    /// Domains are class objects, not registry entries, so the file on disk is
+    /// the source of truth and [`DomainRegistry`] is only an index over the
+    /// loaded instances — the same relationship `MaterialRegistry` has with
+    /// `.mat.toml` files. Keeping the store on the instance is what lets a
+    /// domain fork with a copy-on-write branch instead of leaking across every
+    /// branch as global mutable state.
+    ///
+    /// `name` is the instance name, which is the domain's identity; the file
+    /// never repeats it.
+    pub fn from_instance_toml(name: &str, source: &str) -> Result<Self, String> {
+        let doc: toml::Value = source
+            .parse()
+            .map_err(|e| format!("domain '{name}': {e}"))?;
+
+        let attrs = doc.get("attributes");
+        let s = |k: &str| -> Option<&str> { attrs?.get(k)?.as_str() };
+
+        let export_targets = s("export_targets")
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .collect();
+
+        let mut keys = HashMap::new();
+        if let Some(table) = doc.get("keys").and_then(|k| k.as_table()) {
+            for (key_name, def) in table {
+                keys.insert(
+                    key_name.clone(),
+                    DomainKeyDef::from_toml(key_name, def)
+                        .map_err(|e| format!("domain '{name}', key '{key_name}': {e}"))?,
+                );
+            }
+        }
+
+        Ok(Self {
+            id: name.to_string(),
+            name: name.to_string(),
+            description: s("description").unwrap_or("").to_string(),
+            keys,
+            export_targets,
+            requires_ai_consent: attrs
+                .and_then(|a| a.get("requires_ai_consent"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            version: attrs
+                .and_then(|a| a.get("version"))
+                .and_then(|v| v.as_integer())
+                .unwrap_or(1) as u32,
+        })
+    }
+
+    /// Whether a value satisfies this domain's contract for `key`.
+    ///
+    /// An unknown key is allowed: a domain describes the keys it governs, not
+    /// an exhaustive whitelist, so an instance may carry extra ones. A key that
+    /// IS governed must match its declared type.
+    pub fn validate(&self, key: &str, value: &ParameterValue) -> Result<(), String> {
+        let Some(def) = self.keys.get(key) else { return Ok(()) };
+        let expected = &def.value_type;
+        let actual = value.type_name();
+        let matches = matches!(
+            (expected, value),
+            (ParameterValueType::Bool, ParameterValue::Bool(_))
+                | (ParameterValueType::Int, ParameterValue::Int(_))
+                | (ParameterValueType::Float, ParameterValue::Float(_))
+                | (ParameterValueType::String, ParameterValue::String(_))
+                | (ParameterValueType::Vector3, ParameterValue::Vector3(_))
+                | (ParameterValueType::Color, ParameterValue::Color(_))
+                | (ParameterValueType::EntityRef, ParameterValue::EntityRef(_))
+                | (ParameterValueType::Json, ParameterValue::Json(_))
+                | (ParameterValueType::Binary, ParameterValue::Binary(_))
+        );
+        if !matches {
+            return Err(format!("expected {expected:?}, got {actual}"));
+        }
+        Ok(())
+    }
+
+    /// Keys this domain requires that the given parameters do not define.
+    pub fn missing_required(&self, values: &HashMap<String, ParameterValue>) -> Vec<&str> {
+        self.keys
+            .values()
+            .filter(|d| d.required && !values.contains_key(&d.name))
+            .map(|d| d.name.as_str())
+            .collect()
+    }
+}
+
+impl DomainRegistry {
+    /// Rebuild the index from the loaded `Domain` instances.
+    ///
+    /// Called with `(instance name, file source)` for every Domain in the
+    /// Space. Replaces the contents wholesale, so deleting a Domain instance
+    /// removes it from the index rather than leaving a ghost.
+    pub fn reindex<'a>(&mut self, domains: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<String> {
+        self.domains.clear();
+        let mut errors = Vec::new();
+        for (name, source) in domains {
+            match DomainSchema::from_instance_toml(name, source) {
+                Ok(schema) => {
+                    self.domains.insert(name.to_string(), schema);
+                }
+                // A malformed domain is reported, never silently skipped — an
+                // unparsed contract would let every value in it through
+                // unvalidated.
+                Err(e) => errors.push(e),
+            }
+        }
+        errors
+    }
+}
+
 /// Definition of a key within a domain
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DomainKeyDef {
@@ -207,6 +324,71 @@ pub struct DomainKeyDef {
     pub validation: Vec<ValidationRule>,
     /// Description
     pub description: String,
+}
+
+impl DomainKeyDef {
+    /// Parse one `[keys.<name>]` entry from a Domain instance's TOML.
+    ///
+    /// `min` / `max` become [`ValidationRule`]s rather than dedicated fields,
+    /// so a domain can grow new rule kinds without changing this struct.
+    pub fn from_toml(name: &str, def: &toml::Value) -> Result<Self, String> {
+        let type_name = def
+            .get("type")
+            .and_then(|v| v.as_str())
+            .ok_or("missing `type`")?;
+        let value_type = ParameterValueType::parse(type_name)
+            .ok_or_else(|| format!("unknown type '{type_name}'"))?;
+
+        let mut validation = Vec::new();
+        for rule in ["min", "max"] {
+            if let Some(v) = def.get(rule) {
+                let as_text = match v {
+                    toml::Value::Integer(i) => i.to_string(),
+                    toml::Value::Float(f) => f.to_string(),
+                    toml::Value::String(s) => s.clone(),
+                    other => return Err(format!("`{rule}` must be a number, got {other}")),
+                };
+                validation.push(ValidationRule {
+                    field: name.to_string(),
+                    rule_type: rule.to_string(),
+                    value: as_text,
+                });
+            }
+        }
+
+        Ok(Self {
+            name: name.to_string(),
+            value_type,
+            default: def.get("default").and_then(|v| v.as_str()).map(str::to_string),
+            required: def.get("required").and_then(|v| v.as_bool()).unwrap_or(false),
+            validation,
+            description: def
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+    }
+}
+
+impl ParameterValueType {
+    /// Parse the type name a Domain's TOML uses. Matches
+    /// [`ParameterValue::type_name`], so a declared type and an authored value
+    /// are named the same thing everywhere.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "Bool" => Self::Bool,
+            "Int" => Self::Int,
+            "Float" => Self::Float,
+            "String" => Self::String,
+            "Vector3" => Self::Vector3,
+            "Color" => Self::Color,
+            "EntityRef" => Self::EntityRef,
+            "Json" => Self::Json,
+            "Binary" => Self::Binary,
+            _ => return None,
+        })
+    }
 }
 
 /// Parameter value types
@@ -233,6 +415,85 @@ pub enum ParameterValueType {
 pub struct InstanceParameters {
     /// Domain → key → value mappings for this entity
     pub domains: HashMap<String, HashMap<String, ParameterValue>>,
+    /// Domain → key → binding, for the keys wired to the outside world.
+    ///
+    /// A SIBLING map rather than a field on the value, so an unbound parameter
+    /// costs exactly what it did before and older serialized data still loads.
+    /// Bindings are per-key state, not things in their own right — which is why
+    /// they live here instead of becoming class objects. One instance can carry
+    /// hundreds; making each an Explorer node is the mistake Roblox made with
+    /// ValueObjects and corrected with Attributes.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub bindings: HashMap<String, HashMap<String, ParameterBinding>>,
+}
+
+/// How one parameter key reaches the outside world.
+///
+/// Names a [`ClassName::Connector`](crate::classes::ClassName::Connector) and a
+/// field within it for the inbound direction; outbound routing is NOT named
+/// here — it belongs to the domain, so `publish` only decides whether this key
+/// participates in the targets its domain already declares.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ParameterBinding {
+    /// Connector instance name. `None` means the value is authored locally.
+    pub connector: Option<String>,
+    /// Field / column within that source (e.g. `zone_3.temp_c`).
+    pub field: Option<String>,
+    /// Seconds between reads. `None` = manual only, never a background poll.
+    pub refresh_seconds: Option<u64>,
+    /// Whether this key participates in its domain's export targets.
+    pub publish: bool,
+    /// Simulation time of the last successful read, for the row's age display.
+    pub last_read_s: Option<f64>,
+    /// Why the last attempt failed. A binding that cannot reach its source must
+    /// say so rather than let the previous value pass as current.
+    pub last_error: Option<String>,
+}
+
+/// What a bound key is doing, derived rather than stored so the two can never
+/// disagree. Backs the Properties row's appearance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindingState {
+    /// No binding: the instance owns the value, and the row reads like an
+    /// Attribute row.
+    Local,
+    /// A source owns the value; the field is read-only.
+    Sourced,
+    /// The instance owns the value and every change exports.
+    Published,
+    /// Read in, forward out.
+    Relay,
+    /// Bound, but the last attempt failed.
+    Faulted,
+}
+
+impl ParameterBinding {
+    /// Whether a source feeds this key.
+    pub fn is_sourced(&self) -> bool {
+        self.connector.as_deref().is_some_and(|c| !c.is_empty())
+    }
+
+    /// Current state. A fault outranks everything: a binding that errored is
+    /// reported as faulted even though it is still configured, because the
+    /// alternative is showing a stale number as if it were live.
+    pub fn state(&self) -> BindingState {
+        if self.last_error.is_some() {
+            return BindingState::Faulted;
+        }
+        match (self.is_sourced(), self.publish) {
+            (true, true) => BindingState::Relay,
+            (true, false) => BindingState::Sourced,
+            (false, true) => BindingState::Published,
+            (false, false) => BindingState::Local,
+        }
+    }
+
+    /// A sourced key is owned by its source, so the panel must refuse edits
+    /// rather than accept one the next poll would silently discard.
+    pub fn value_is_read_only(&self) -> bool {
+        self.is_sourced()
+    }
 }
 
 impl InstanceParameters {
@@ -261,6 +522,56 @@ impl InstanceParameters {
     /// Get all domains this entity participates in
     pub fn active_domains(&self) -> impl Iterator<Item = &String> {
         self.domains.keys()
+    }
+
+    /// Read the binding for one key, if it has one.
+    pub fn binding(&self, domain: &str, key: &str) -> Option<&ParameterBinding> {
+        self.bindings.get(domain)?.get(key)
+    }
+
+    /// Attach or replace a key's binding.
+    pub fn bind(&mut self, domain: &str, key: &str, binding: ParameterBinding) {
+        self.bindings
+            .entry(domain.to_string())
+            .or_default()
+            .insert(key.to_string(), binding);
+    }
+
+    /// Drop a key's binding, returning the instance to owning the value. The
+    /// VALUE is deliberately left in place: unbinding should hand back the last
+    /// known number, not blank the field.
+    pub fn unbind(&mut self, domain: &str, key: &str) -> Option<ParameterBinding> {
+        let removed = self.bindings.get_mut(domain)?.remove(key);
+        if self.bindings.get(domain).is_some_and(|m| m.is_empty()) {
+            self.bindings.remove(domain);
+        }
+        removed
+    }
+
+    /// State of one key. An unbound key is [`BindingState::Local`], which is
+    /// what makes a parameter usable before any source or domain exists.
+    pub fn binding_state(&self, domain: &str, key: &str) -> BindingState {
+        self.binding(domain, key)
+            .map(ParameterBinding::state)
+            .unwrap_or(BindingState::Local)
+    }
+
+    /// Record a successful read from a bound source.
+    pub fn record_read(&mut self, domain: &str, key: &str, value: ParameterValue, at_s: f64) {
+        self.set(domain, key, value);
+        if let Some(b) = self.bindings.get_mut(domain).and_then(|m| m.get_mut(key)) {
+            b.last_read_s = Some(at_s);
+            b.last_error = None;
+        }
+    }
+
+    /// Record a failed read. The previous VALUE is left untouched so a caller
+    /// can still show it, but the binding is now faulted and the panel is
+    /// obliged to say so rather than present it as current.
+    pub fn record_error(&mut self, domain: &str, key: &str, error: impl Into<String>) {
+        if let Some(b) = self.bindings.get_mut(domain).and_then(|m| m.get_mut(key)) {
+            b.last_error = Some(error.into());
+        }
     }
 
     /// Check if AI training is enabled (convenience method)
@@ -1053,5 +1364,228 @@ impl MappingTargetType {
             Self::Anchored | Self::CanCollide | Self::CanTouch | 
             Self::Locked | Self::Visible | Self::Transparency | Self::Reflectance => "BasePart",
         }
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    fn sourced() -> ParameterBinding {
+        ParameterBinding {
+            connector: Some("Building Sensors".into()),
+            field: Some("zone_3.temp_c".into()),
+            refresh_seconds: Some(30),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_unbound_key_is_local() {
+        let p = InstanceParameters::new();
+        assert_eq!(p.binding_state("hvac", "setpoint"), BindingState::Local);
+    }
+
+    #[test]
+    fn direction_determines_state() {
+        let mut b = ParameterBinding::default();
+        assert_eq!(b.state(), BindingState::Local);
+        b.publish = true;
+        assert_eq!(b.state(), BindingState::Published);
+
+        let mut s = sourced();
+        assert_eq!(s.state(), BindingState::Sourced);
+        s.publish = true;
+        assert_eq!(s.state(), BindingState::Relay);
+    }
+
+    #[test]
+    fn a_fault_outranks_every_other_state() {
+        let mut s = sourced();
+        s.publish = true;
+        assert_eq!(s.state(), BindingState::Relay);
+        s.last_error = Some("connection refused".into());
+        // Still fully configured, but must not read as healthy.
+        assert_eq!(s.state(), BindingState::Faulted);
+    }
+
+    #[test]
+    fn an_empty_connector_name_does_not_count_as_sourced() {
+        let b = ParameterBinding { connector: Some(String::new()), ..Default::default() };
+        assert!(!b.is_sourced());
+        assert_eq!(b.state(), BindingState::Local);
+    }
+
+    #[test]
+    fn a_sourced_value_is_read_only_but_a_published_one_is_not() {
+        assert!(sourced().value_is_read_only());
+        let published = ParameterBinding { publish: true, ..Default::default() };
+        assert!(!published.value_is_read_only());
+    }
+
+    #[test]
+    fn a_successful_read_stores_the_value_and_clears_the_fault() {
+        let mut p = InstanceParameters::new();
+        p.bind("hvac", "temperature", sourced());
+        p.record_error("hvac", "temperature", "timeout");
+        assert_eq!(p.binding_state("hvac", "temperature"), BindingState::Faulted);
+
+        p.record_read("hvac", "temperature", ParameterValue::Float(21.4), 12.0);
+        assert_eq!(p.binding_state("hvac", "temperature"), BindingState::Sourced);
+        assert_eq!(p.get("hvac", "temperature"), Some(&ParameterValue::Float(21.4)));
+        assert_eq!(p.binding("hvac", "temperature").unwrap().last_read_s, Some(12.0));
+    }
+
+    #[test]
+    fn a_failed_read_keeps_the_previous_value_visible() {
+        let mut p = InstanceParameters::new();
+        p.bind("hvac", "temperature", sourced());
+        p.record_read("hvac", "temperature", ParameterValue::Float(21.4), 1.0);
+        p.record_error("hvac", "temperature", "connection refused");
+        // The number survives for display; the STATE is what tells the truth.
+        assert_eq!(p.get("hvac", "temperature"), Some(&ParameterValue::Float(21.4)));
+        assert_eq!(p.binding_state("hvac", "temperature"), BindingState::Faulted);
+    }
+
+    #[test]
+    fn unbinding_hands_the_value_back_rather_than_blanking_it() {
+        let mut p = InstanceParameters::new();
+        p.bind("hvac", "temperature", sourced());
+        p.record_read("hvac", "temperature", ParameterValue::Float(21.4), 1.0);
+
+        let removed = p.unbind("hvac", "temperature");
+        assert!(removed.is_some());
+        assert_eq!(p.binding_state("hvac", "temperature"), BindingState::Local);
+        assert_eq!(p.get("hvac", "temperature"), Some(&ParameterValue::Float(21.4)));
+        // The empty domain map is cleaned up rather than left behind.
+        assert!(p.bindings.get("hvac").is_none());
+    }
+
+    #[test]
+    fn parameter_values_round_trip_through_their_edit_string() {
+        for v in [
+            ParameterValue::Bool(true),
+            ParameterValue::Int(-7),
+            ParameterValue::Float(21.4),
+            ParameterValue::String("zone 3".into()),
+            ParameterValue::Vector3([1.0, 2.0, 3.0]),
+        ] {
+            let parsed = ParameterValue::parse(v.type_name(), &v.edit_string());
+            assert_eq!(parsed.as_ref(), Some(&v), "{} did not round-trip", v.type_name());
+        }
+    }
+
+    #[test]
+    fn a_value_that_does_not_fit_its_type_is_refused_not_coerced() {
+        assert!(ParameterValue::parse("Int", "not a number").is_none());
+        assert!(ParameterValue::parse("Float", "").is_none());
+        assert!(ParameterValue::parse("Vector3", "1, 2").is_none());
+        // Binary has no text form and must never be authored as one.
+        assert!(ParameterValue::parse("Binary", "AAAA").is_none());
+    }
+}
+
+#[cfg(test)]
+mod domain_tests {
+    use super::*;
+
+    const HVAC: &str = r#"
+[metadata]
+class_name = "Domain"
+
+[attributes]
+description = "Building climate control"
+version = 3
+requires_ai_consent = true
+export_targets = "warehouse_pg, training_mcp"
+
+[keys.setpoint]
+type = "Float"
+required = true
+min = -40.0
+max = 120.0
+description = "Target zone temperature"
+
+[keys.mode]
+type = "String"
+"#;
+
+    #[test]
+    fn a_domain_instance_parses_into_its_schema() {
+        let d = DomainSchema::from_instance_toml("hvac", HVAC).expect("parses");
+        assert_eq!(d.id, "hvac");
+        assert_eq!(d.version, 3);
+        assert!(d.requires_ai_consent);
+        assert_eq!(d.description, "Building climate control");
+        assert_eq!(d.keys.len(), 2);
+    }
+
+    #[test]
+    fn export_targets_split_and_trim() {
+        let d = DomainSchema::from_instance_toml("hvac", HVAC).unwrap();
+        assert_eq!(d.export_targets, vec!["warehouse_pg", "training_mcp"]);
+    }
+
+    #[test]
+    fn a_key_carries_its_type_requiredness_and_bounds() {
+        let d = DomainSchema::from_instance_toml("hvac", HVAC).unwrap();
+        let sp = &d.keys["setpoint"];
+        assert_eq!(sp.value_type, ParameterValueType::Float);
+        assert!(sp.required);
+        // min + max became validation rules
+        assert_eq!(sp.validation.len(), 2);
+        assert!(sp.validation.iter().any(|r| r.rule_type == "min" && r.value.starts_with("-40")));
+        // an unspecified `required` defaults to false
+        assert!(!d.keys["mode"].required);
+    }
+
+    #[test]
+    fn an_unknown_key_type_is_an_error_not_a_silent_default() {
+        let bad = "[keys.x]\ntype = \"Quaternion\"\n";
+        let err = DomainSchema::from_instance_toml("d", bad).unwrap_err();
+        assert!(err.contains("Quaternion"), "{err}");
+    }
+
+    #[test]
+    fn validate_enforces_a_governed_key_but_allows_an_ungoverned_one() {
+        let d = DomainSchema::from_instance_toml("hvac", HVAC).unwrap();
+        assert!(d.validate("setpoint", &ParameterValue::Float(21.0)).is_ok());
+        assert!(d.validate("setpoint", &ParameterValue::String("warm".into())).is_err());
+        // A domain describes what it governs; extra keys are not an error.
+        assert!(d.validate("not_in_schema", &ParameterValue::Bool(true)).is_ok());
+    }
+
+    #[test]
+    fn missing_required_keys_are_reported() {
+        let d = DomainSchema::from_instance_toml("hvac", HVAC).unwrap();
+        let mut vals = HashMap::new();
+        assert_eq!(d.missing_required(&vals), vec!["setpoint"]);
+        vals.insert("setpoint".to_string(), ParameterValue::Float(21.0));
+        assert!(d.missing_required(&vals).is_empty());
+    }
+
+    #[test]
+    fn the_registry_is_an_index_that_rebuilds_wholesale() {
+        let mut reg = DomainRegistry::default();
+        let errs = reg.reindex([("hvac", HVAC)]);
+        assert!(errs.is_empty(), "{errs:?}");
+        assert!(reg.domains.contains_key("hvac"));
+
+        // Re-indexing without hvac drops it, rather than leaving a ghost behind
+        // after the instance is deleted from the Explorer.
+        let errs = reg.reindex([("telemetry", "[keys]\n")]);
+        assert!(errs.is_empty());
+        assert!(!reg.domains.contains_key("hvac"));
+        assert!(reg.domains.contains_key("telemetry"));
+    }
+
+    #[test]
+    fn a_malformed_domain_is_reported_rather_than_skipped() {
+        let mut reg = DomainRegistry::default();
+        let errs = reg.reindex([("good", "[keys]\n"), ("bad", "[keys.x]\ntype = \"Nope\"\n")]);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("bad"), "{:?}", errs);
+        // the good one still landed
+        assert!(reg.domains.contains_key("good"));
     }
 }

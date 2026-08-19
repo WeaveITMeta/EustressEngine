@@ -1,0 +1,44 @@
+# Domain — Data Platform: the CONTRACT a set of parameter keys must satisfy.
+# A domain declares each key's type, whether it is required, how it validates,
+# and which ExportTargets values in this domain route to. Instances reference a
+# domain BY NAME from their [parameters] table (`hvac.setpoint = 22.0`).
+#
+# Why a class object rather than a registry entry: many instances reference one
+# domain, so it needs a name and a place to be edited — and because an instance
+# forks with a copy-on-write WorldDb branch, a rehearsal branch can revise a
+# schema and commit or discard it along with the world. A global resource would
+# escape branching and become shared mutable state.
+#
+# Lives under DataService alongside Connector (inbound) and ExportTarget
+# (outbound). The DomainRegistry indexes these instances; it does not own them.
+
+[metadata]
+class_name = "Domain"
+archivable = true
+
+[attributes]
+description = ""
+# Bumped when a key's type or requiredness changes, so a reader can tell an
+# old value apart from one written against the current contract.
+version = 1
+# Entities in this domain must opt into AI use before anything exports.
+requires_ai_consent = false
+# Comma-separated ExportTarget instance names. Targets belong to the DOMAIN,
+# not to individual parameters, so one instance can never quietly ship
+# somewhere its peers do not.
+export_targets = ""
+
+# Key definitions. One entry per parameter key this domain governs.
+#   type      Bool | Int | Float | String | Vector3 | Color | EntityRef | Json
+#   required  a member of this domain must define the key
+#   unit      display + conversion hint (informational)
+#   min/max   numeric bounds, checked on write
+#
+# [keys.setpoint]
+# type = "Float"
+# required = true
+# unit = "C"
+# min = -40.0
+# max = 120.0
+# description = "Target zone temperature"
+[keys]

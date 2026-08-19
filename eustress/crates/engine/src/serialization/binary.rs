@@ -745,6 +745,8 @@ impl ClassId {
             ClassName::Column => ClassId::Folder,
             ClassName::Run => ClassId::Folder,
             ClassName::Connector => ClassId::Folder,
+            ClassName::Domain => ClassId::Folder,
+            ClassName::ExportTarget => ClassId::Folder,
         }
     }
 

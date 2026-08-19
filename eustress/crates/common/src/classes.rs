@@ -289,6 +289,19 @@ pub enum ClassName {
     /// Data Platform: a live data source (REST / stream-topic / SQL / cloud).
     /// Non-visual, Folder-like; connection config lives in its attributes.
     Connector,
+    /// A Parameter domain: the CONTRACT a set of parameter keys must satisfy
+    /// (types, required-ness, validation) plus the export targets that domain
+    /// routes to. A class object rather than a registry entry because many
+    /// instances reference one domain by name — and because an instance forks
+    /// with a copy-on-write WorldDb branch, so a rehearsal branch can revise a
+    /// schema and commit or discard it with the world. A global resource would
+    /// silently escape that and become shared mutable state across branches.
+    Domain,
+    /// An outbound destination for parameter values (Postgres, Firebase, a
+    /// JSON/CSV file, an MCP server, a webhook, cloud storage). The mirror of
+    /// [`ClassName::Connector`], which is inbound — the two are siblings and
+    /// are represented the same way.
+    ExportTarget,
     BillboardGui,
     SurfaceGui,
     ScreenGui,
@@ -587,6 +600,8 @@ impl ClassName {
             ClassName::Column => "Column",
             ClassName::Run => "Run",
             ClassName::Connector => "Connector",
+            ClassName::Domain => "Domain",
+            ClassName::ExportTarget => "ExportTarget",
             ClassName::BillboardGui => "BillboardGui",
             ClassName::SurfaceGui => "SurfaceGui",
             ClassName::ScreenGui => "ScreenGui",
@@ -867,6 +882,8 @@ impl ClassName {
             "Column" => Ok(ClassName::Column),
             "Run" => Ok(ClassName::Run),
             "Connector" => Ok(ClassName::Connector),
+            "Domain" => Ok(ClassName::Domain),
+            "ExportTarget" => Ok(ClassName::ExportTarget),
             "BillboardGui" => Ok(ClassName::BillboardGui),
             "SurfaceGui" => Ok(ClassName::SurfaceGui),
             "ScreenGui" => Ok(ClassName::ScreenGui),
