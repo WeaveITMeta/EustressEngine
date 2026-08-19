@@ -39,6 +39,9 @@ pub mod spectral;
 #[cfg(feature = "import")]
 pub mod import;
 
+/// Provenance: content-addressed records, source rights, verifiable manifest.
+pub mod provenance;
+
 /// Data sources — the provider seam behind the Studio's Data menu.
 pub mod source;
 
