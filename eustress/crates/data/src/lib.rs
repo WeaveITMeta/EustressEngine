@@ -42,6 +42,11 @@ pub mod import;
 /// Provenance: content-addressed records, source rights, verifiable manifest.
 pub mod provenance;
 
+/// HuggingFace-shaped export (parquet shards + derived data card).
+/// Requires the `export` feature.
+#[cfg(feature = "export")]
+pub mod export;
+
 /// Data sources — the provider seam behind the Studio's Data menu.
 pub mod source;
 

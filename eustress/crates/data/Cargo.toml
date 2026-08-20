@@ -32,6 +32,8 @@ parquet = ["dep:arrow", "dep:parquet", "dep:bytes"]
 spectral = ["dep:rustfft"]
 # P6 file import (CSV + JSON/JSONL → Frame, with dtype + unit inference).
 import = ["dep:csv", "dep:serde_json"]
+# HuggingFace-shaped export: parquet shards + data card + manifest.json.
+export = ["parquet", "dep:serde_json"]
 # Note: the `numerics` (stats / derivative / integral / interpolation /
 # curve-fit) and `decimate` (min-max LOD) modules are pure std and are ALWAYS
 # compiled — they add no dependency.
