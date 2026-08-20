@@ -34,6 +34,9 @@ pub mod mention_resolver;
 pub mod mention_searcher_vortex;
 pub mod claude_bridge;
 pub mod artifact_gen;
+/// Splits a reply into prose and tables so the chat bubble can draw a grid
+/// instead of raw `|---|---|` rows.
+pub mod markdown;
 pub mod modes;
 /// Opt-in AAA quality loop — build → observe → critique → fix before "done".
 pub mod gauntlet;

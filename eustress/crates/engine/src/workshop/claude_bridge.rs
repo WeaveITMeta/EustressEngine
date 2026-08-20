@@ -1019,12 +1019,30 @@ pub fn poll_agentic_responses(
                     // tools (truly unregistered) drop to `false` now so
                     // dispatch runs and returns an "Unknown tool" error
                     // Claude can recover from, rather than hanging.
-                    let requires_approval = tool_registry.as_ref()
+                    let declared_approval = tool_registry.as_ref()
                         .and_then(|r| r.all_tools()
                             .into_iter()
                             .find(|d| d.name == tool_use.name))
                         .map(|d| d.requires_approval)
                         .unwrap_or(false);
+
+                    // Auto mode drops the confirmation prompt for the whole
+                    // session. It bypasses the PROMPT and nothing else: the tool
+                    // still goes through `ToolRegistry::dispatch`, which calls
+                    // `capability::authorize` and refuses anything unclassified
+                    // or outside the grant. So this changes how often Workshop
+                    // stops to ask, never what it is allowed to do.
+                    let auto_approve = global_settings
+                        .as_ref()
+                        .map(|g| g.workshop_auto_approve)
+                        .unwrap_or(false);
+                    let requires_approval = declared_approval && !auto_approve;
+                    if declared_approval && auto_approve {
+                        info!(
+                            "Workshop: auto mode approved '{}' without prompting",
+                            tool_use.name
+                        );
+                    }
 
                     // Create the Mcp message card.
                     let card_content = format!("{}({})", tool_use.name,

@@ -20,6 +20,27 @@ export { MentionItemData }
 // 1. Data Structures
 // ============================================================================
 
+// A table lifted out of a reply by `workshop::markdown::parse_blocks`.
+//
+// Cells are flattened row-major rather than nested, because Slint models do not
+// nest arrays. `columns` is what turns the flat list back into a grid, and the
+// Rust side guarantees `cells.length == rows * columns` by padding or
+// truncating ragged rows, so the index arithmetic below can never read out of
+// bounds.
+export struct ChatTable {
+    headers: [string],
+    cells: [string],
+    columns: int,
+    rows: int,
+}
+
+// One renderable run of a message: prose or a table, in order.
+export struct ChatBlock {
+    kind: string,        // "text" | "table"
+    text: string,        // populated when kind == "text"
+    table: ChatTable,    // populated when kind == "table"
+}
+
 // A single message in the ideation conversation
 export struct ChatMessage {
     id: int,
@@ -46,6 +67,9 @@ export struct ChatMessage {
     // only known at runtime.
     attachment: image,
     has-attachment: bool,
+    // Message body split into prose and tables. Always at least one block, so
+    // the renderer never has to special-case an empty message.
+    blocks: [ChatBlock],
 }
 
 // Past conversation summary for history browser
@@ -293,15 +317,75 @@ component ChatBubble inherits Rectangle {
                 // Message content — hidden for pure MCP tool-call cards
                 // (the badge + status indicator already convey what ran;
                 // the raw argument JSON is noisy and unreadable).
-                if root.role != "mcp": TextInput {
-                    text: root.content;
-                    color: root.role == "error" ? Theme.text-error : Theme.text-primary;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                    read-only: true;
-                    single-line: false;
-                    selection-background-color: Theme.selection-background;
-                    selection-foreground-color: Theme.text-primary;
+                if root.role != "mcp": VerticalLayout {
+                    spacing: 8px;
+
+                    for block in root.blocks: VerticalLayout {
+                        // ---- Prose ----------------------------------------
+                        if block.kind != "table": TextInput {
+                            text: block.text;
+                            color: root.role == "error" ? Theme.text-error : Theme.text-primary;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                            read-only: true;
+                            single-line: false;
+                            selection-background-color: Theme.selection-background;
+                            selection-foreground-color: Theme.text-primary;
+                        }
+
+                        // ---- Table ----------------------------------------
+                        // Drawn as a real grid. Columns share the width evenly
+                        // via horizontal-stretch rather than measuring content,
+                        // because a chat bubble is narrow and a content-sized
+                        // column would push the table off the panel.
+                        if block.kind == "table": Rectangle {
+                            border-width: 1px;
+                            border-color: Theme.border-color;
+                            border-radius: 3px;
+                            background: Theme.background-secondary;
+
+                            VerticalLayout {
+                                padding: 1px;
+                                spacing: 0px;
+
+                                // Header row
+                                Rectangle {
+                                    background: Theme.background-tertiary;
+                                    HorizontalLayout {
+                                        padding: 6px;
+                                        spacing: 10px;
+                                        for h in block.table.headers: Text {
+                                            text: h;
+                                            horizontal-stretch: 1;
+                                            color: Theme.text-secondary;
+                                            font-size: 10.5px;
+                                            font-weight: 700;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+
+                                // Body. `r` and `c` are integer models, so the
+                                // flat cell list is addressed as r * columns + c.
+                                for r in block.table.rows: Rectangle {
+                                    background: mod(r, 2) == 1
+                                        ? Theme.background-tertiary.with-alpha(0.35)
+                                        : transparent;
+                                    HorizontalLayout {
+                                        padding: 6px;
+                                        spacing: 10px;
+                                        for c in block.table.columns: Text {
+                                            text: block.table.cells[r * block.table.columns + c];
+                                            horizontal-stretch: 1;
+                                            color: Theme.text-primary;
+                                            font-size: 11px;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Artifact file path (clickable)
@@ -645,6 +729,13 @@ export component WorkshopPanel inherits Rectangle {
     // sync with GlobalSoulSettings::workshop_gauntlet.
     in-out property <bool> gauntlet-enabled: false;
     callback on-gauntlet-toggled(bool);
+
+    // Auto mode: run approval-gated tools without stopping to ask. Syncs with
+    // GlobalSoulSettings::workshop_auto_approve. Green rather than the
+    // gauntlet's amber, because this one saves you work instead of spending
+    // tokens.
+    in-out property <bool> auto-enabled: false;
+    callback on-auto-toggled(bool);
 
     // ── Chat scroll position ─────────────────────────────────────────────
     // Two-way bound to the chat ScrollView's viewport-y and out to the
@@ -1612,6 +1703,41 @@ export component WorkshopPanel inherits Rectangle {
                                 color: root.gauntlet-enabled ? #f0a022 : Theme.text-secondary;
                                 font-size: 10px;
                                 font-weight: root.gauntlet-enabled ? 700 : 400;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Auto mode pill, sibling to the Gauntlet one.
+                    Rectangle {
+                        width: auto-label.preferred-width + 26px;
+                        height: 24px;
+                        background: root.auto-enabled
+                            ? Theme.accent-green.with-alpha(0.2)
+                            : (auto-touch.has-hover ? Theme.background-tertiary : transparent);
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: root.auto-enabled ? Theme.accent-green : Theme.border-color;
+
+                        auto-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.auto-enabled = !root.auto-enabled;
+                                root.on-auto-toggled(root.auto-enabled);
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            spacing: 4px;
+                            alignment: center;
+
+                            auto-label := Text {
+                                text: "▶ Auto";
+                                color: root.auto-enabled ? Theme.accent-green : Theme.text-secondary;
+                                font-size: 10px;
+                                font-weight: root.auto-enabled ? 700 : 400;
                                 vertical-alignment: center;
                             }
                         }

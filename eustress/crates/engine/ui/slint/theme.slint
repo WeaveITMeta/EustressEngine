@@ -441,6 +441,18 @@ export component IconButton inherits Rectangle {
     in property <bool> enabled: true;
     in property <color> tint: #d4d4d4; // Tint color for SVG icon (default matches base icon grey)
 
+    // ── Vote feedback ────────────────────────────────────────────────────
+    // Most of the discipline surface is aspirational: clicking a tool that
+    // isn't built yet records a vote for it (usage_telemetry.rs). A toast
+    // says so, but a toast is easy to miss and appears far from the thing
+    // you pressed — so the button answers for itself. `votes` is the running
+    // session tally; `vote-feedback` gates the whole thing on telemetry
+    // actually being enabled, because claiming a vote we never record would
+    // be a lie.
+    in property <int> votes: 0;
+    in property <bool> vote-feedback: false;
+    property <bool> voting: false;
+
     callback clicked();
     callback right-clicked();
     callback long-pressed();
@@ -480,6 +492,10 @@ export component IconButton inherits Rectangle {
         mouse-cursor: root.enabled ? pointer : default;
         clicked => {
             root.is-pressing = false;
+            if root.vote-feedback {
+                root.voting = true;
+                vote-burst-timer.restart();
+            }
             root.clicked();
         }
         pointer-event(event) => {
@@ -527,6 +543,53 @@ export component IconButton inherits Rectangle {
         }
     }
     
+    // One-shot burst. `voting` snaps true on click and drops back 40ms
+    // later; every animation below uses 0ms on the way in and a long ease
+    // on the way out, which is how Slint expresses "flash, then drift".
+    vote-burst-timer := Timer {
+        interval: 40ms;
+        running: root.voting;
+        triggered => { root.voting = false; }
+    }
+
+    // Ring flash around the pressed button. Declared before the content so
+    // it paints behind the icon.
+    if root.vote-feedback: Rectangle {
+        x: -3px;
+        y: -3px;
+        width: root.width + 6px;
+        height: root.height + 6px;
+        border-radius: Theme.radius-md + 3px;
+        border-width: 2px;
+        border-color: Theme.accent-eustress;
+        background: Theme.accent-eustress.with-alpha(0.10);
+        opacity: root.voting ? 1.0 : 0.0;
+        animate opacity { duration: root.voting ? 0ms : 520ms; easing: ease-out; }
+    }
+
+    // "+1" chip that rises off the button and fades.
+    if root.vote-feedback: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.voting ? -7px : -26px;
+        width: 26px;
+        height: 15px;
+        border-radius: 7px;
+        background: Theme.accent-eustress;
+        opacity: root.voting ? 1.0 : 0.0;
+        animate y { duration: root.voting ? 0ms : 620ms; easing: ease-out; }
+        animate opacity { duration: root.voting ? 0ms : 620ms; easing: ease-out; }
+        Text {
+            width: 100%;
+            height: 100%;
+            text: "+1";
+            font-size: 9px;
+            font-weight: 800;
+            color: #06222a;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
     // Unified icon-over-label layout. Every child is horizontally
     // centered within the button's full width; the VerticalLayout centers
     // the whole stack on the button's cross-axis. Previously the Image
@@ -570,6 +633,33 @@ export component IconButton inherits Rectangle {
         }
     }
     
+    // Running session tally, painted above the icon. Watching this climb is
+    // what makes "your click was counted" believable rather than a promise.
+    if root.vote-feedback && root.votes > 0: Rectangle {
+        x: root.width - self.width - 1px;
+        y: 1px;
+        width: root.votes > 99 ? 24px : (root.votes > 9 ? 19px : 16px);
+        // Square at one digit so the pill is a true circle, and the radius is
+        // derived from the height so it stays one at every digit count.
+        height: 16px;
+        border-radius: self.height / 2;
+        background: Theme.accent-eustress;
+        border-width: 1px;
+        border-color: #06222a;
+        // Centred on the glyph's own bounds rather than by alignment inside a
+        // full-bleed box. `vertical-alignment: center` centres the LINE box,
+        // and a digit has no descender, so its visible mass sits above that
+        // centre and the number reads high in the circle.
+        badge-text := Text {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            text: "\{root.votes}";
+            font-size: 10px;
+            font-weight: 700;
+            color: #06222a;
+        }
+    }
+
     // Tooltip popup — uses PopupWindow for correct z-ordering above all panels
     tooltip-popup := PopupWindow {
         x: 0px;
