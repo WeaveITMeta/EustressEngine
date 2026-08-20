@@ -1,0 +1,145 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #0e0e0e; }
+    a { color: #4dd0e1; } a:hover { color: #7fe3f5; }
+    .lbl { font-size: 11px; color: #808080; }
+    .val { font-size: 11px; color: #d4d4d4; }
+    .cap { font-size: 10px; letter-spacing: 0.6px; color: #4a4a4a; text-transform: uppercase; }
+    .note { font-size: 11px; color: #808080; line-height: 1.5; }
+    .field { height: 20px; background: #161616; border: 1px solid #2a2a2a; border-radius: 2px; display: flex; align-items: center; padding: 0 6px; }
+    .row { height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 10px; }
+  </style>
+</helmet>
+
+<div style="padding: 28px; background: #0e0e0e; color: #d4d4d4; display: flex; flex-direction: column; gap: 20px;">
+
+  <div style="display: flex; flex-direction: column; gap: 6px;">
+    <div style="font-size: 17px; font-weight: 600;">Bound parameter &middot; expanded</div>
+    <div class="note" style="max-width: 470px;">The chevron on a bound row opens this. Everything here is inert until a direction is switched on, which is what keeps the basic case basic.</div>
+  </div>
+
+  <div style="width: 470px; background: #121212; border: 1px solid #222222; border-radius: 4px; overflow: hidden;">
+
+    <!-- the row itself, still visible as the anchor -->
+    <div class="row" style="background: #4dd0e10a; border-left: 2px solid #4dd0e1;">
+      <div style="width: 126px; display: flex; align-items: center; gap: 5px;">
+        <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#4dd0e1" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 2.5v8M5 7.8l3 3 3-3M3 13h10"/>
+        </svg>
+        <span class="lbl">temperature</span>
+      </div>
+      <div class="field" style="flex-grow: 1; background: #101617; border-color: #4dd0e133; gap: 6px;">
+        <span class="val">21.4</span><span style="font-size: 9px; color: #4a4a4a;">°C</span>
+        <div style="flex-grow: 1;"></div>
+        <span style="font-size: 9px; color: #4dd0e1;">2s</span>
+      </div>
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#808080" stroke-width="1.4" stroke-linecap="round" style="transform: rotate(180deg);">
+        <path d="M4 6.5 8 10.5 12 6.5"/>
+      </svg>
+    </div>
+
+    <div style="background: #0e0e0e; border-top: 1px solid #222222; padding: 4px 0 10px 0;">
+
+      <!-- DOMAIN -->
+      <div style="height: 26px; display: flex; align-items: center; gap: 8px; padding: 0 12px;">
+        <span class="cap">Domain</span><div style="flex-grow: 1; height: 1px; background: #1c1c1c;"></div>
+      </div>
+      <div class="row" style="padding-left: 14px;">
+        <span class="lbl" style="width: 108px;">Schema</span>
+        <div class="field" style="flex-grow: 1; justify-content: space-between;">
+          <span class="val">hvac</span>
+          <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="#808080" stroke-width="1.6"><path d="M4 6.5 8 10.5 12 6.5"/></svg>
+        </div>
+      </div>
+      <div class="row" style="padding-left: 14px;">
+        <span class="lbl" style="width: 108px;">Key contract</span>
+        <div style="flex-grow: 1; display: flex; align-items: center; gap: 6px;">
+          <span style="font-size: 9px; padding: 1px 5px; border-radius: 2px; background: #252525; color: #808080;">FLOAT</span>
+          <span style="font-size: 9px; padding: 1px 5px; border-radius: 2px; background: #cca7001f; color: #cca700;">REQUIRED</span>
+          <span style="font-size: 10px; color: #4a4a4a;">range
+ -40 … 120</span>
+        </div>
+      </div>
+
+      <!-- INBOUND -->
+      <div style="height: 26px; display: flex; align-items: center; gap: 8px; padding: 0 12px; margin-top: 4px;">
+        <span class="cap" style="color: #4dd0e1;">Inbound</span>
+        <div style="flex-grow: 1; height: 1px; background: #1c1c1c;"></div>
+        <div style="width: 26px; height: 14px; border-radius: 7px; background: #4dd0e1; display: flex; align-items: center; justify-content: flex-end; padding: 0 2px;">
+          <div style="width: 10px; height: 10px; border-radius: 5px; background: #0e0e0e;"></div>
+        </div>
+      </div>
+      <div class="row" style="padding-left: 14px;">
+        <span class="lbl" style="width: 108px;">Connector</span>
+        <div class="field" style="flex-grow: 1; justify-content: space-between;">
+          <span class="val">Building Sensors</span>
+          <span style="font-size: 9px; color: #4a4a4a;">REST</span>
+        </div>
+      </div>
+      <div class="row" style="padding-left: 14px;">
+        <span class="lbl" style="width: 108px;">Field</span>
+        <div class="field" style="flex-grow: 1; justify-content: space-between;">
+          <span class="val">zone_3.temp_c</span>
+          <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="#808080" stroke-width="1.6"><path d="M4 6.5 8 10.5 12 6.5"/></svg>
+        </div>
+      </div>
+      <div class="row" style="padding-left: 14px;">
+        <span class="lbl" style="width: 108px;">Refresh</span>
+        <div class="field" style="width: 84px;"><span class="val">30</span><span style="font-size: 9px; color: #4a4a4a; margin-left: 4px;">sec</span></div>
+        <span style="font-size: 10px; color: #4a4a4a;">blank = manual only</span>
+      </div>
+
+      <!-- OUTBOUND -->
+      <div style="height: 26px; display: flex; align-items: center; gap: 8px; padding: 0 12px; margin-top: 4px;">
+        <span class="cap" style="color: #3cba54;">Outbound</span>
+        <div style="flex-grow: 1; height: 1px; background: #1c1c1c;"></div>
+        <div style="width: 26px; height: 14px; border-radius: 7px; background: #252525; display: flex; align-items: center; padding: 0 2px;">
+          <div style="width: 10px; height: 10px; border-radius: 5px; background: #4a4a4a;"></div>
+        </div>
+      </div>
+      <div class="row" style="padding-left: 14px;">
+        <span class="lbl" style="width: 108px;">Targets</span>
+        <span style="font-size: 11px; color: #4a4a4a;">inherited from domain &mdash; 2 configured</span>
+      </div>
+
+      <!-- DIAGNOSTICS -->
+      <div style="height: 26px; display: flex; align-items: center; gap: 8px; padding: 0 12px; margin-top: 4px;">
+        <span class="cap">Diagnostics</span><div style="flex-grow: 1; height: 1px; background: #1c1c1c;"></div>
+      </div>
+      <div style="padding: 0 14px; display: flex; flex-direction: column; gap: 5px;">
+        <div style="display: flex; gap: 8px;"><span class="lbl" style="width: 108px;">Last read</span><span style="font-size: 11px; color: #d4d4d4;">21.4 &middot; 2s ago</span></div>
+        <div style="display: flex; gap: 8px;"><span class="lbl" style="width: 108px;">Last error</span><span style="font-size: 11px; color: #4a4a4a;">none</span></div>
+      </div>
+
+      <!-- ACTIONS -->
+      <div style="display: flex; gap: 6px; padding: 12px 14px 0 14px;">
+        <div style="height: 22px; padding: 0 10px; border-radius: 2px; background: #252525; border: 1px solid #2a2a2a; display: flex; align-items: center;"><span style="font-size: 11px; color: #d4d4d4;">Test</span></div>
+        <div style="height: 22px; padding: 0 10px; border-radius: 2px; background: #252525; border: 1px solid #2a2a2a; display: flex; align-items: center;"><span style="font-size: 11px; color: #d4d4d4;">Sync now</span></div>
+        <div style="flex-grow: 1;"></div>
+        <div style="height: 22px; padding: 0 10px; border-radius: 2px; border: 1px solid #f14c4c44; display: flex; align-items: center;"><span style="font-size: 11px; color: #f14c4c;">Unbind</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 10px; max-width: 620px;">
+    <div class="note"><strong style="color:#d4d4d4;">The domain is chosen first, not last.</strong> A DomainSchema already carries the key's type, whether it is required, its validation and its export targets — so picking the domain fills in most of this panel and narrows every later choice. Binding to a source before knowing the contract is how you get a value nothing can validate.</div>
+    <div class="note"><strong style="color:#d4d4d4;">Outbound inherits.</strong> Export targets belong to the domain, not the parameter, so one instance never quietly ships to somewhere its peers do not. The row-level toggle only decides whether <em>this</em> parameter participates.</div>
+  </div>
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

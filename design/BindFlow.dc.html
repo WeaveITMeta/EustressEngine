@@ -1,0 +1,159 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #0e0e0e; }
+    a { color: #4dd0e1; } a:hover { color: #7fe3f5; }
+    .cap { font-size: 10px; letter-spacing: 0.6px; color: #4a4a4a; text-transform: uppercase; }
+    .note { font-size: 11px; color: #808080; line-height: 1.5; }
+    .step { width: 232px; background: #1a1a1a; border: 1px solid #222222; border-radius: 4px; display: flex; flex-direction: column; }
+    .steph { height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 10px; background: #13131f; border-bottom: 1px solid #222222; }
+    .opt { height: 26px; display: flex; align-items: center; gap: 7px; padding: 0 9px; border-radius: 2px; }
+    .num { width: 16px; height: 16px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; }
+  </style>
+</helmet>
+
+<div style="padding: 28px; background: #0e0e0e; color: #d4d4d4; display: flex; flex-direction: column; gap: 20px;">
+
+  <div style="display: flex; flex-direction: column; gap: 6px;">
+    <div style="font-size: 17px; font-weight: 600;">Bind flow</div>
+    <div class="note" style="max-width: 560px;">Opened from the link glyph on a Local row. Four steps, each one narrowing the next — the domain decides the contract, the contract decides which sources can satisfy it.</div>
+  </div>
+
+  <div style="display: flex; align-items: flex-start; gap: 12px;">
+
+    <!-- STEP 1 -->
+    <div class="step">
+      <div class="steph">
+        <div class="num" style="background: #4dd0e1; color: #0e0e0e;">1</div>
+        <span style="font-size: 11px; font-weight: 600;">Domain</span>
+      </div>
+      <div style="padding: 8px; display: flex; flex-direction: column; gap: 2px;">
+        <div class="opt" style="background: #4dd0e114; border: 1px solid #4dd0e133;">
+          <div style="width: 3px; height: 12px; background: #4dd0e1; border-radius: 1.5px;"></div>
+          <span style="font-size: 11px; color: #d4d4d4;">hvac</span>
+          <div style="flex-grow: 1;"></div>
+          <span style="font-size: 9px; color: #4a4a4a;">8 keys</span>
+        </div>
+        <div class="opt"><div style="width: 3px; height: 12px; background: #2a2a2a; border-radius: 1.5px;"></div><span style="font-size: 11px; color: #808080;">telemetry</span><div style="flex-grow: 1;"></div><span style="font-size: 9px; color: #4a4a4a;">14</span></div>
+        <div class="opt"><div style="width: 3px; height: 12px; background: #2a2a2a; border-radius: 1.5px;"></div><span style="font-size: 11px; color: #808080;">ai_training</span><div style="flex-grow: 1;"></div><span style="font-size: 9px; color: #4a4a4a;">5</span></div>
+        <div style="height: 1px; background: #222222; margin: 5px 0;"></div>
+        <div class="opt"><span style="font-size: 11px; color: #808080;">instance</span><div style="flex-grow: 1;"></div><span style="font-size: 9px; color: #4a4a4a;">no contract</span></div>
+        <div class="opt" style="color: #4dd0e1;">
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="#4dd0e1" stroke-width="1.6" stroke-linecap="round"><path d="M8 3.5v9M3.5 8h9"/></svg>
+          <span style="font-size: 11px;">New domain…</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="height: 130px; display: flex; align-items: center;"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#2a2a2a" stroke-width="1.6" stroke-linecap="round"><path d="M5.5 3 10.5 8l-5 5"/></svg></div>
+
+    <!-- STEP 2 -->
+    <div class="step">
+      <div class="steph">
+        <div class="num" style="background: #4dd0e1; color: #0e0e0e;">2</div>
+        <span style="font-size: 11px; font-weight: 600;">Direction</span>
+      </div>
+      <div style="padding: 8px; display: flex; flex-direction: column; gap: 5px;">
+        <div style="border: 1px solid #4dd0e133; background: #4dd0e10f; border-radius: 3px; padding: 7px 8px; display: flex; flex-direction: column; gap: 2px;">
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#4dd0e1" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.5v8M5 7.8l3 3 3-3M3 13h10"/></svg>
+            <span style="font-size: 11px; color: #d4d4d4;">Read from a source</span>
+          </div>
+          <span style="font-size: 10px; color: #808080; line-height: 1.4;">External data owns the value.</span>
+        </div>
+        <div style="border: 1px solid #222222; border-radius: 3px; padding: 7px 8px; display: flex; flex-direction: column; gap: 2px;">
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#3cba54" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13.5v-8M5 8.2l3-3 3 3M3 3h10"/></svg>
+            <span style="font-size: 11px; color: #808080;">Publish to targets</span>
+          </div>
+          <span style="font-size: 10px; color: #4a4a4a; line-height: 1.4;">You own it; changes export.</span>
+        </div>
+        <div style="border: 1px solid #222222; border-radius: 3px; padding: 7px 8px; display: flex; flex-direction: column; gap: 2px;">
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#808080" stroke-width="1.5" stroke-linecap="round"><path d="M3 5.5h10M10.5 3 13 5.5 10.5 8M13 10.5H3M5.5 8 3 10.5 5.5 13"/></svg>
+            <span style="font-size: 11px; color: #808080;">Relay &mdash; both</span>
+          </div>
+          <span style="font-size: 10px; color: #4a4a4a; line-height: 1.4;">Read in, forward out.</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="height: 130px; display: flex; align-items: center;"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#2a2a2a" stroke-width="1.6" stroke-linecap="round"><path d="M5.5 3 10.5 8l-5 5"/></svg></div>
+
+    <!-- STEP 3 -->
+    <div class="step">
+      <div class="steph">
+        <div class="num" style="background: #4dd0e1; color: #0e0e0e;">3</div>
+        <span style="font-size: 11px; font-weight: 600;">Source &amp; field</span>
+      </div>
+      <div style="padding: 8px; display: flex; flex-direction: column; gap: 6px;">
+        <div style="display: flex; flex-direction: column; gap: 3px;">
+          <span class="cap">Connector</span>
+          <div style="height: 22px; background: #161616; border: 1px solid #2a2a2a; border-radius: 2px; display: flex; align-items: center; padding: 0 7px; gap: 6px;">
+            <span style="font-size: 11px; color: #d4d4d4;">Building Sensors</span>
+            <div style="flex-grow: 1;"></div>
+            <span style="font-size: 9px; color: #4a4a4a;">REST</span>
+          </div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 3px;">
+          <span class="cap">Field</span>
+          <div style="height: 22px; background: #161616; border: 1px solid #4dd0e133; border-radius: 2px; display: flex; align-items: center; padding: 0 7px;">
+            <span style="font-size: 11px; color: #d4d4d4;">zone_3.temp_c</span>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px; padding: 5px 7px; background: #4ec9b00f; border: 1px solid #4ec9b033; border-radius: 3px;">
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#4ec9b0" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5 6.5 11.5 12.5 4.5"/></svg>
+          <span style="font-size: 10px; color: #4ec9b0; line-height: 1.35;">float &middot; matches contract</span>
+        </div>
+        <div style="font-size: 10px; color: #4a4a4a; line-height: 1.4;">Fields whose type cannot satisfy the key are listed but not selectable.</div>
+      </div>
+    </div>
+
+    <div style="height: 130px; display: flex; align-items: center;"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#2a2a2a" stroke-width="1.6" stroke-linecap="round"><path d="M5.5 3 10.5 8l-5 5"/></svg></div>
+
+    <!-- STEP 4 -->
+    <div class="step">
+      <div class="steph">
+        <div class="num" style="background: #252525; color: #808080;">4</div>
+        <span style="font-size: 11px; font-weight: 600;">Confirm</span>
+      </div>
+      <div style="padding: 8px; display: flex; flex-direction: column; gap: 7px;">
+        <div style="font-size: 11px; color: #808080; line-height: 1.5;">
+          <span style="color: #4dd0e1;">hvac.temperature</span> reads
+          <span style="color: #d4d4d4;">zone_3.temp_c</span> from
+          <span style="color: #d4d4d4;">Building Sensors</span> every
+          <span style="color: #d4d4d4;">30s</span>.
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px; padding: 6px 7px; background: #161616; border: 1px solid #2a2a2a; border-radius: 3px;">
+          <span style="font-size: 10px; color: #808080;">Test read</span>
+          <div style="flex-grow: 1;"></div>
+          <span style="font-size: 10px; color: #4ec9b0;">21.4 °C</span>
+        </div>
+        <div style="display: flex; gap: 5px;">
+          <div style="flex-grow: 1; height: 24px; border-radius: 2px; background: #0078d4; display: flex; align-items: center; justify-content: center;"><span style="font-size: 11px; color: #ffffff;">Bind</span></div>
+          <div style="height: 24px; padding: 0 10px; border-radius: 2px; background: #252525; border: 1px solid #2a2a2a; display: flex; align-items: center;"><span style="font-size: 11px; color: #d4d4d4;">Cancel</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note" style="max-width: 700px; border-left: 2px solid #222222; padding-left: 12px;">
+    Step 4 tests before it commits. A binding that has never successfully read once is the most expensive kind of dead UI — it looks configured and produces nothing, which is exactly the failure this whole system exists to end.
+  </div>
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

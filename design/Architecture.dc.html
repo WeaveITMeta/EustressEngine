@@ -1,0 +1,161 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #0e0e0e; }
+    a { color: #4dd0e1; } a:hover { color: #7fe3f5; }
+    .cap { font-size: 10px; letter-spacing: 0.6px; color: #4a4a4a; text-transform: uppercase; }
+    .note { font-size: 11px; color: #808080; line-height: 1.5; }
+    .box { border-radius: 4px; border: 1px solid #222222; background: #121212; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+    .ty { font-size: 11px; color: #d4d4d4; font-family: Consolas, "Cascadia Mono", monospace; }
+    .sub { font-size: 10px; color: #808080; line-height: 1.4; }
+    .pill { font-size: 8px; letter-spacing: 0.4px; padding: 1px 5px; border-radius: 2px; }
+    .chip { font-size: 10px; color: #808080; padding: 2px 6px; border-radius: 2px; background: #1a1a1a; border: 1px solid #222222; }
+  </style>
+</helmet>
+
+<div style="padding: 28px; background: #0e0e0e; color: #d4d4d4; display: flex; flex-direction: column; gap: 20px; width: 1060px;">
+
+  <div style="display: flex; flex-direction: column; gap: 6px;">
+    <div style="font-size: 17px; font-weight: 600;">Parameter data flow</div>
+    <div class="note" style="max-width: 660px;">Two external-data systems point in opposite directions and share provider names without being the same thing. <span style="color:#d4d4d4;">DomainSchema is the contract in the middle</span> — it is what makes a value in one direction legible to the other.</div>
+  </div>
+
+  <!-- status legend -->
+  <div style="display: flex; gap: 8px; align-items: center;">
+    <span class="pill" style="background: #4ec9b01f; color: #4ec9b0;">BUILT</span>
+    <span class="pill" style="background: #cca7001f; color: #cca700;">DESIGNED, UNWIRED</span>
+    <span class="pill" style="background: #f14c4c1f; color: #f14c4c;">MISSING</span>
+  </div>
+
+  <!-- ── the three columns ─────────────────────────────── -->
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start;">
+
+    <!-- INBOUND -->
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 7px;">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#4dd0e1" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.5v8M5 7.8l3 3 3-3M3 13h10"/></svg>
+        <span style="font-size: 12px; font-weight: 600; color: #4dd0e1;">Inbound</span>
+      </div>
+      <div class="box" style="border-color: #4dd0e133;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span class="ty">Connector</span>
+          <span class="pill" style="background: #4ec9b01f; color: #4ec9b0;">BUILT</span>
+        </div>
+        <div class="sub">An instance in the Explorer under DataService. Holds config, never a secret.</div>
+      </div>
+      <div style="display: flex; justify-content: center;"><svg width="12" height="16" viewBox="0 0 12 16" fill="none" stroke="#2a2a2a" stroke-width="1.5" stroke-linecap="round"><path d="M6 1v11M2.5 9 6 12.5 9.5 9"/></svg></div>
+      <div class="box" style="border-color: #4dd0e133;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span class="ty">DataSource</span>
+          <span class="pill" style="background: #4ec9b01f; color: #4ec9b0;">BUILT</span>
+        </div>
+        <div class="sub">validate_config is pure — no network — so every provider is testable offline.</div>
+        <div style="display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px;">
+          <span class="chip">REST</span><span class="chip">GraphQL</span><span class="chip">CSV</span>
+          <span class="chip">Supabase</span><span class="chip">Firebase</span><span class="chip">Azure</span>
+          <span class="chip">Oracle</span><span class="chip" style="color:#4a4a4a;">Postgres</span><span class="chip" style="color:#4a4a4a;">S3</span>
+        </div>
+        <div class="sub" style="color: #4a4a4a;">364 tests, no credentials, no network.</div>
+      </div>
+    </div>
+
+    <!-- CONTRACT -->
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 7px;">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#d4d4d4" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5h8v11H4zM6 5.5h4M6 8h4M6 10.5h2.5"/></svg>
+        <span style="font-size: 12px; font-weight: 600;">Contract</span>
+      </div>
+      <div class="box" style="border-color: #333333;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span class="ty">DomainSchema</span>
+          <span class="pill" style="background: #cca7001f; color: #cca700;">UNWIRED</span>
+        </div>
+        <div class="sub">keys · types · validation · required · export_targets · version</div>
+        <div class="sub" style="color: #4a4a4a;">Decides what a value must be, and where it may go.</div>
+      </div>
+      <div style="display: flex; justify-content: center;"><svg width="12" height="16" viewBox="0 0 12 16" fill="none" stroke="#2a2a2a" stroke-width="1.5" stroke-linecap="round"><path d="M6 1v11M2.5 9 6 12.5 9.5 9"/></svg></div>
+      <div class="box" style="border-color: #4dd0e14d; background: #101617;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span class="ty" style="color: #4dd0e1;">InstanceParameters</span>
+          <span class="pill" style="background: #4ec9b01f; color: #4ec9b0;">BUILT</span>
+        </div>
+        <div class="sub">domain → key → ParameterValue, on the entity.</div>
+        <div class="sub" style="color: #4a4a4a;">Attached to every file-backed instance; renders in Properties.</div>
+      </div>
+      <div style="display: flex; justify-content: center;"><svg width="12" height="16" viewBox="0 0 12 16" fill="none" stroke="#2a2a2a" stroke-width="1.5" stroke-linecap="round"><path d="M6 1v11M2.5 9 6 12.5 9.5 9"/></svg></div>
+      <div class="box" style="border-color: #f14c4c4d;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span class="ty" style="color: #f14c4c;">ParameterBinding</span>
+          <span class="pill" style="background: #f14c4c1f; color: #f14c4c;">MISSING</span>
+        </div>
+        <div class="sub">The one piece that does not exist: which Connector field feeds this key, how often, and last state.</div>
+      </div>
+    </div>
+
+    <!-- OUTBOUND -->
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 7px;">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#3cba54" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13.5v-8M5 8.2l3-3 3 3M3 3h10"/></svg>
+        <span style="font-size: 12px; font-weight: 600; color: #3cba54;">Outbound</span>
+      </div>
+      <div class="box" style="border-color: #3cba5433;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span class="ty">ParameterRouter</span>
+          <span class="pill" style="background: #cca7001f; color: #cca700;">UNWIRED</span>
+        </div>
+        <div class="sub">Publishes ExportRecord to EustressStream topics.</div>
+        <div style="display: flex; flex-direction: column; gap: 2px; margin-top: 2px;">
+          <span style="font-size: 9px; color: #4a4a4a; font-family: Consolas, monospace;">parameter.changed</span>
+          <span style="font-size: 9px; color: #4a4a4a; font-family: Consolas, monospace;">parameter.exports</span>
+        </div>
+      </div>
+      <div style="display: flex; justify-content: center;"><svg width="12" height="16" viewBox="0 0 12 16" fill="none" stroke="#2a2a2a" stroke-width="1.5" stroke-linecap="round"><path d="M6 1v11M2.5 9 6 12.5 9.5 9"/></svg></div>
+      <div class="box" style="border-color: #3cba5433;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span class="ty">ExportTarget</span>
+          <span class="pill" style="background: #cca7001f; color: #cca700;">UNWIRED</span>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 3px;">
+          <span class="chip">Postgres</span><span class="chip">Firebase</span><span class="chip">JsonFile</span>
+          <span class="chip">CsvFile</span><span class="chip" style="color:#4dd0e1; border-color:#4dd0e133;">McpServer</span>
+          <span class="chip">Webhook</span><span class="chip">CloudStorage</span>
+        </div>
+        <div class="sub" style="color: #4a4a4a;">McpServer is the one no inbound provider has — it is how a live scene feeds a model.</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="height: 1px; background: #222222;"></div>
+
+  <!-- the three decisions -->
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px;">
+    <div style="display: flex; flex-direction: column; gap: 4px;">
+      <div class="cap">Not the same as attributes</div>
+      <div class="note">An Attribute is a value on the part. A Parameter is a value <em>in a domain</em>, which is what makes it addressable by something outside the scene. Keeping them separate is what lets one be free-form and the other be governed.</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px;">
+      <div class="cap">Direction is not symmetric</div>
+      <div class="note">Inbound reads a Frame and narrows it to one value; outbound takes one value and fans it to many targets. Sharing a provider name (Postgres, Firebase) does not make them one code path — and pretending otherwise is the trap.</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px;">
+      <div class="cap">The gap is one struct</div>
+      <div class="note">Both ends exist. What is missing is the binding that names a Connector field for a domain key and remembers its last read — plus the system that ticks it. That is the smallest change that makes the whole diagram live.</div>
+    </div>
+  </div>
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

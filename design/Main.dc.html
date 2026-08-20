@@ -1,0 +1,171 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #0e0e0e; }
+    a { color: #4dd0e1; } a:hover { color: #7fe3f5; }
+    .cap { font-size: 10px; letter-spacing: 0.6px; color: #4a4a4a; text-transform: uppercase; }
+    .note { font-size: 11px; color: #808080; line-height: 1.5; }
+  </style>
+</helmet>
+
+<div style="padding: 28px; background: #0e0e0e; color: #d4d4d4; display: flex; flex-direction: column; gap: 22px;">
+
+  <div style="display: flex; flex-direction: column; gap: 6px;">
+    <div style="font-size: 17px; font-weight: 600; color: #d4d4d4;">Parameter row states</div>
+    <div class="note" style="max-width: 460px;">A Parameter is domain-scoped and can be bound in two directions. The row reads the same as an Attribute row until it is bound; binding is what earns the extra chrome.</div>
+  </div>
+
+  <!-- ── The panel ─────────────────────────────────────────────── -->
+  <div style="width: 460px; background: #121212; border: 1px solid #222222; border-radius: 4px; overflow: hidden;">
+
+    <!-- section header, matching the shipped 32px header + accent bar -->
+    <div style="height: 32px; display: flex; align-items: center; gap: 10px; padding: 0 10px; background: #121212;">
+      <div style="width: 3px; height: 16px; border-radius: 1.5px; background: {{accent}};"></div>
+      <div style="font-size: 11px; font-weight: 700; letter-spacing: 0.5px; color: #d4d4d4;">PARAMETERS</div>
+      <div style="flex-grow: 1;"></div>
+      <div style="width: 18px; height: 18px; border-radius: 2px; background: #252525; display: flex; align-items: center; justify-content: center;">
+        <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="#808080" stroke-width="1.6" stroke-linecap="round">
+          <path d="M8 3.5v9M3.5 8h9"/>
+        </svg>
+      </div>
+    </div>
+
+    <!-- ── LOCAL ── -->
+    <div style="height: 28px; display: flex; align-items: center; padding: 0 10px; gap: 8px;">
+      <div style="width: 128px; font-size: 11px; color: #808080;">sample_rate</div>
+      <div style="flex-grow: 1; height: 20px; background: #161616; border: 1px solid #2a2a2a; border-radius: 2px; display: flex; align-items: center; padding: 0 6px;">
+        <span style="font-size: 11px; color: #d4d4d4;">60</span>
+      </div>
+      <div style="height: 15px; padding: 0 5px; border-radius: 2px; background: #252525; display: flex; align-items: center;">
+        <span style="font-size: 8px; letter-spacing: 0.4px; color: #808080;">INT</span>
+      </div>
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#4a4a4a" stroke-width="1.4" stroke-linecap="round">
+        <path d="M6.5 9.5 9.5 6.5M6.8 4.6l1.1-1.1a2.6 2.6 0 0 1 3.6 3.6l-1.1 1.1M9.2 11.4l-1.1 1.1a2.6 2.6 0 0 1-3.6-3.6l1.1-1.1"/>
+      </svg>
+    </div>
+
+    <!-- ── SOURCED ── -->
+    <div style="height: 28px; display: flex; align-items: center; padding: 0 10px; gap: 8px; background: #4dd0e10a; border-left: 2px solid {{accent}};">
+      <div style="width: 126px; display: flex; align-items: center; gap: 5px;">
+        <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="{{accent}}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 2.5v8M5 7.8l3 3 3-3M3 13h10"/>
+        </svg>
+        <span style="font-size: 11px; color: #808080;">temperature</span>
+      </div>
+      <div style="flex-grow: 1; height: 20px; background: #101617; border: 1px solid #4dd0e133; border-radius: 2px; display: flex; align-items: center; padding: 0 6px; gap: 6px;">
+        <span style="font-size: 11px; color: #d4d4d4;">21.4</span>
+        <span style="font-size: 9px; color: #4a4a4a;">°C</span>
+        <div style="flex-grow: 1;"></div>
+        <span style="font-size: 9px; color: {{accent}};">2s</span>
+      </div>
+      <div style="height: 15px; padding: 0 5px; border-radius: 2px; background: #4dd0e11f; display: flex; align-items: center;">
+        <span style="font-size: 8px; letter-spacing: 0.4px; color: {{accent}};">FLOAT</span>
+      </div>
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#808080" stroke-width="1.4" stroke-linecap="round">
+        <path d="M4 6.5 8 10.5 12 6.5"/>
+      </svg>
+    </div>
+
+    <!-- ── PUBLISHED ── -->
+    <div style="height: 28px; display: flex; align-items: center; padding: 0 10px; gap: 8px; background: #3cba540a; border-left: 2px solid #3cba54;">
+      <div style="width: 126px; display: flex; align-items: center; gap: 5px;">
+        <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#3cba54" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 13.5v-8M5 8.2l3-3 3 3M3 3h10"/>
+        </svg>
+        <span style="font-size: 11px; color: #808080;">occupancy</span>
+      </div>
+      <div style="flex-grow: 1; height: 20px; background: #161616; border: 1px solid #2a2a2a; border-radius: 2px; display: flex; align-items: center; padding: 0 6px;">
+        <span style="font-size: 11px; color: #d4d4d4;">142</span>
+        <div style="flex-grow: 1;"></div>
+        <span style="font-size: 9px; color: #3cba54;">synced</span>
+      </div>
+      <div style="height: 15px; padding: 0 5px; border-radius: 2px; background: #3cba541f; display: flex; align-items: center;">
+        <span style="font-size: 8px; letter-spacing: 0.4px; color: #3cba54;">INT</span>
+      </div>
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#808080" stroke-width="1.4" stroke-linecap="round">
+        <path d="M4 6.5 8 10.5 12 6.5"/>
+      </svg>
+    </div>
+
+    <!-- ── ERROR, the state that must never be silent ── -->
+    <div style="height: 28px; display: flex; align-items: center; padding: 0 10px; gap: 8px; background: #f14c4c0a; border-left: 2px solid #f14c4c;">
+      <div style="width: 126px; display: flex; align-items: center; gap: 5px;">
+        <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#f14c4c" stroke-width="1.5" stroke-linecap="round">
+          <path d="M8 4.5v4M8 11h.01"/><circle cx="8" cy="8" r="5.6"/>
+        </svg>
+        <span style="font-size: 11px; color: #808080;">pressure</span>
+      </div>
+      <div style="flex-grow: 1; height: 20px; background: #161616; border: 1px solid #f14c4c44; border-radius: 2px; display: flex; align-items: center; padding: 0 6px; gap: 6px;">
+        <span style="font-size: 11px; color: #4a4a4a;">—</span>
+        <div style="flex-grow: 1;"></div>
+        <span style="font-size: 9px; color: #f14c4c;">source unreachable</span>
+      </div>
+      <div style="height: 15px; padding: 0 5px; border-radius: 2px; background: #252525; display: flex; align-items: center;">
+        <span style="font-size: 8px; letter-spacing: 0.4px; color: #808080;">FLOAT</span>
+      </div>
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#808080" stroke-width="1.4" stroke-linecap="round">
+        <path d="M4 6.5 8 10.5 12 6.5"/>
+      </svg>
+    </div>
+
+    <div style="height: 1px; background: #222222;"></div>
+
+    <!-- domain grouping: a key outside the default domain carries it -->
+    <div style="height: 28px; display: flex; align-items: center; padding: 0 10px; gap: 8px;">
+      <div style="width: 128px; font-size: 11px; color: #808080;">
+        <span style="color: #4a4a4a;">hvac.</span>setpoint
+      </div>
+      <div style="flex-grow: 1; height: 20px; background: #161616; border: 1px solid #2a2a2a; border-radius: 2px; display: flex; align-items: center; padding: 0 6px;">
+        <span style="font-size: 11px; color: #d4d4d4;">22.0</span>
+      </div>
+      <div style="height: 15px; padding: 0 5px; border-radius: 2px; background: #252525; display: flex; align-items: center;">
+        <span style="font-size: 8px; letter-spacing: 0.4px; color: #808080;">FLOAT</span>
+      </div>
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#4a4a4a" stroke-width="1.4" stroke-linecap="round">
+        <path d="M6.5 9.5 9.5 6.5M6.8 4.6l1.1-1.1a2.6 2.6 0 0 1 3.6 3.6l-1.1 1.1M9.2 11.4l-1.1 1.1a2.6 2.6 0 0 1-3.6-3.6l1.1-1.1"/>
+      </svg>
+    </div>
+  </div>
+
+  <!-- ── legend ─────────────────────────────────────────────── -->
+  <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 26px; max-width: 620px;">
+    <div style="display: flex; flex-direction: column; gap: 3px;">
+      <div class="cap">Local</div>
+      <div class="note">Value lives on the instance. Editable, no chrome beyond the link affordance. This is the default, so a Parameter is useful before any Domain exists.</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 3px;">
+      <div class="cap" style="color: {{accent}};">Sourced &middot; inbound</div>
+      <div class="note">A DataSource owns the value, so the field is read-only and carries its age. Editing is refused rather than silently overwritten on next poll.</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 3px;">
+      <div class="cap" style="color: #3cba54;">Published &middot; outbound</div>
+      <div class="note">You still own the value; every change emits an ExportRecord to the domain's targets. Editable, with delivery state on the row.</div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 3px;">
+      <div class="cap" style="color: #f14c4c;">Faulted</div>
+      <div class="note">A binding that cannot reach its source says so on the row. A stale value must never masquerade as a live one.</div>
+    </div>
+  </div>
+
+  <div class="note" style="max-width: 620px; border-left: 2px solid #222222; padding-left: 12px;">
+    A parameter can be sourced <em>and</em> published at once — that is a relay, and the row shows both glyphs. The dotted prefix (<span style="color:#4a4a4a;">hvac.</span>) appears only for keys outside the default domain, so the basic case stays uncluttered.
+  </div>
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{"accent":{"editor":"color","default":"#4dd0e1","options":["#4dd0e1","#00bcd4","#0078d4","#e8912d"]}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { accent: this.props.accent ?? '#4dd0e1' };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html", "x": 0, "y": 0, "w": 560, "h": 800, "title": "Row states" },
+    { "file": "Expanded.dc.html", "x": 620, "y": 0, "w": 560, "h": 800, "title": "Expanded panel" },
+    { "file": "BindFlow.dc.html", "x": 1240, "y": 0, "w": 1120, "h": 420, "title": "Bind flow" },
+    { "file": "Architecture.dc.html", "x": 1240, "y": 480, "w": 1120, "h": 720, "title": "Data flow" }
+  ],
+  "annotations": [
+    { "id": "premise", "x": 0, "y": -150, "w": 520, "text": "Parameters vs Attributes\n\nAn Attribute is a static value on a part.\nA Parameter places the part in a DOMAIN and is what an external source feeds.\n\nBasic by default: a Parameter with no domain and no binding reads exactly like an Attribute row. Everything else is earned by binding." },
+    { "id": "gap", "x": 1240, "y": 1240, "w": 560, "text": "The honest status: inbound is built and tested, the contract and outbound exist but were never wired, and the binding between them does not exist yet. That last one is the smallest change that makes the rest live." }
+  ],
+  "launch": { "view": "canvas" }
+}
