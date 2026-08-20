@@ -9,7 +9,7 @@
   <a href="https://discord.gg/FztQJJacbw"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2.svg?logo=discord&logoColor=white"></a>
 </p>
 
-> **The platform Roblox should have been.** A universal world-model engine, source-available, forkable, AI- and MCP-native, and photoreal, built to **simulate the world, not just render a scene.**
+> **Design it, prove it, then build it.** An AI-native simulation and data platform that models the real world in real units, so you can find the failure before it costs you steel, capital, or a recall.
 
 <p align="center">
   <img src="docs/marketing/screenshot.png" alt="Eustress Engine studio: a live V-Cell battery simulation in the native 3D viewport, with the scene Explorer, real-time Properties, and the built-in AI Workshop assistant" width="900">
@@ -17,33 +17,109 @@
 
 <p align="center"><em>The Eustress Engine studio in action: a native Bevy 3D viewport running a live <strong>V-Cell</strong> battery-monitor simulation, alongside the scene Explorer, real-time Properties, and the built-in <strong>AI Workshop</strong> assistant, all in a single Rust + Slint window.</em></p>
 
+---
+
+## What you can do with it
+
+Most of the world gets built once, at full cost and full risk. Eustress moves that loop into software: design it, stress it to the break point, fix it, and only then commit the steel and the capital.
+
+**Engineer a product end to end.** Model a part in the built-in CAD kernel, give it real materials, run first-principles physics across a dozen domains, and watch where it deforms, overheats, or fails. Every length is a real meter and every law is unit-correct, so the result maps to the thing you will actually machine.
+
+**Run the design loop in software before hardware.** Simulate the system in the loop, iterate until the design holds, and carry the same model forward into physical testing. Software-in-the-loop is where a design gets cheap to be wrong.
+
+**Model the supply chain that builds it.** Registries of manufacturers and investors live in your project, and an allocation engine scores capability, certification, capacity, and price to match each product to the right manufacturer and the smallest sufficient investor set. Purchase orders included.
+
+**Turn any data into a model you can see.** Pull from Postgres, Oracle, S3, Azure, Supabase, Firebase, a graph database, GraphQL, REST, or any HTTP endpoint. Load Parquet and CSV. Then chart it in 2D, place it in 3D next to the parts it describes, fit curves, and cluster it.
+
+**Let an AI operate all of it.** The Model Context Protocol bridge gives an agent real hands on a live world: it builds the model, runs the experiment, reads the telemetry, and proposes the next change, with its own camera so it can see what it made.
+
+**Reconfigure the whole studio for your work.** 11 Modes, 72 Disciplines, and over 2,000 tools, from mechanical and electrical engineering to health, civil, legal, government, and business.
+
+---
+
 ## Mission
 
 Eustress exists to be the **open substrate for modeling reality**, a world-model engine general enough that _anything you can describe, you can build and run inside it_. Games are the on-ramp; the destination is everything else a simulation can become: training grounds for AI agents, living digital twins of factories and markets, governance and justice models, and laboratories where scientists and engineers validate their own theories against a photoreal, real-time world.
 
-It rests on a single load-bearing bet: **the engine simulates the world rather than rendering a scene.** Render-first engines draw what you tell them to draw; Eustress is built to _compute what would actually happen_, with millions of entities evolving under real, rewritable laws. If that bet holds, Eustress is infrastructure and games are merely the first thing built on top of it. If it doesn't, it's one more engine in a crowded field. Everything else follows from that one fact.
+It rests on a single load-bearing bet: **the engine simulates the world rather than rendering a scene.** Render-first engines draw what you tell them to draw; Eustress is built to _compute what would actually happen_, with millions of entities evolving under real, rewritable laws.
 
-And it must be **owned by the people who build it.** Eustress is the platform Roblox should have been, but source-available, forkable, and merit-paid, so the builders who create the worlds and the engineers who extend the engine capture the value they create instead of renting it back from a landlord.
-
-## What it is
-
-Eustress is **not (only) a game engine.** It's a general-purpose **simulation and proof-of-work substrate** that anything can be built on: AI model training, manufacturing dashboards, financial-market visualization, government and justice systems, kernel-law science validation, life-science research, and games as one use case among many. If you can model it, you can build it inside Eustress.
+And it must be **owned by the people who build it**: source-available, forkable, and merit-paid, so the builders who create the worlds and the engineers who extend the engine capture the value they create instead of renting it back from a landlord.
 
 ## Why it's different
 
+- **Meter-native and physically faithful.** Geometry, forces, diffusion, and mechanics compute in real SI units. A simulated part and the machined part share the same numbers.
 - **Simulation-first.** Built to drive millions of entities under real kernel-level laws; the design target is order-of-_a-year-of-simulation-per-second_ throughput, not just frames on screen.
-- **Source-available & forkable.** Closed source kills the moat; an open community ships faster. Read it, fork it, embed it, rewrite it — free until you reach commercial scale.
-- **AI-native.** A built-in **Workshop** AI assistant plus a **Model Context Protocol (MCP)** bridge let AI agents inspect, drive, and build inside a _live_ world, even from their own independent off-screen camera, so the AI can _see_ what it is making and iterate alongside you.
-- **Kernel laws: the gold-collar unlock.** Engineers and scientists can rewrite how the engine processes physics, chemistry, and more _at the kernel level_ to validate their **own** simulations (e.g. the bundled V-Cell solid-state-battery model). Lose this and it is just a game engine; this is _the_ unlock.
-- **Photoreal & native.** One Rust window: a native **Bevy** 3D viewport with a declarative **Slint** UI overlay, and no web stack, no IPC, no overhead.
-- **Data-native.** The same studio that builds a world also ingests, models, and charts data: `Dataset`s are first-class instances with live stats, curve fits, and interactive charts, so a digital twin's telemetry lives in the same scene as the parts it describes.
+- **AI-native from the first line.** A built-in **Workshop** assistant plus an **MCP** bridge let agents inspect, drive, and build inside a _live_ world, from their own independent off-screen camera.
+- **Kernel laws: the gold-collar unlock.** Engineers and scientists can rewrite how the engine processes physics, chemistry, and more _at the kernel level_ to validate their **own** models (see the bundled V-Cell solid-state-battery simulation). Lose this and it is just a game engine; this is _the_ unlock.
+- **Data-native.** The same studio that builds a world ingests, models, and charts the data that describes it, on the same store and under the same tools.
+- **Source-available and forkable.** Read it, fork it, embed it, rewrite it, and sell what you build with it, free until you compete with the engine itself.
+- **Photoreal and native.** One Rust window: a native **Bevy** 3D viewport with a declarative **Slint** UI overlay. No web stack, no IPC, no overhead.
 
 ## Principles (the non-negotiables)
 
-1. **Source-available & forkable.** Not a slogan, but a velocity thesis: an open community ships faster than any closed team, and closing the source would kill the moat. Eustress stays free to read, fork, modify, and build products with; the only restricted use is competing with the engine itself (see [License](#license)).
-2. **The gold-collar unlock.** Engineers and scientists can rewrite the engine's **kernel laws** (the physics, chemistry, and rules that govern a simulation) to validate their _own_ models inside a real-time, photoreal world. This is the unlock everything else serves.
-3. **The two-token wall.** Buyer-money and builder-money never share a denomination, and the split that funds builders is **constitutional, not a tunable cut**, the lever Roblox kept for itself and refused here by design.
-4. **Merit only.** Standing comes from contribution, not connections: a meritocracy, automated and open, not an oligarchy.
+1. **Source-available and forkable.** Not a slogan, but a velocity thesis: an open community ships faster than any closed team, and closing the source would kill the moat.
+2. **The gold-collar unlock.** Engineers and scientists can rewrite the engine's **kernel laws** to validate their _own_ models inside a real-time, photoreal world.
+3. **The two-token wall.** Buyer-money and builder-money never share a denomination, and the split that funds builders is **constitutional, not a tunable cut**.
+4. **Merit only.** Standing comes from contribution, not connections: a meritocracy, automated and open.
+
+---
+
+## Modes and Disciplines
+
+A **Mode** reconfigures the entire studio for a kind of work: which ribbon tabs appear, the default panel layout, and an accent color. Each Mode carries **Disciplines** that specialize it further. Modes are plain TOML data, so you can copy one, change its `id`, and it appears in the Modes dropdown.
+
+| Mode | Disciplines | Mode | Disciplines |
+|---|---|---|---|
+| Engineering | 7 (mechanical, electrical, …) | Government | 12 |
+| Business | 7 | Health | 6 |
+| AI | 7 | Legal | 6 |
+| Civil | 9 | Military | 6 |
+| Student | 9 | Justice | 3 |
+| Gaming | the on-ramp | | |
+
+**11 Modes, 72 Disciplines, and over 2,000 tools.** Add your own by dropping a TOML file in `%LOCALAPPDATA%/Eustress/Modes/`.
+
+## The Studio
+
+- Native **Bevy 3D viewport** with a **Slint** overlay, in a single window with zero IPC
+- **Scene Explorer** hierarchy and a **real-time Properties** editor
+- **Move / Rotate / Scale** gizmos and smart build tools
+- **CAD kernel** (B-rep via `truck`) and half-edge **mesh editing** (extrude, inset, bevel)
+- **Kernel-law realism** sections (thermodynamic, electrochemical, and more) attached per entity
+- **Terrain**, materials, and photoreal lighting
+- **Live AI co-creation**: the Workshop assistant and MCP bridge build alongside you
+- Console, undo history, and a timeline
+
+## Data Platform
+
+The same studio that builds a 3D world is also a **data workbench**. A digital twin's telemetry, an experiment's measurements, or a market's history live in the same scene as the parts they describe.
+
+- **Datasets are instances.** A `Dataset` sits in the Explorer alongside `Part` and `Light`, under a `DataService`, nesting `Series` (columns and timeseries) and `Run` (scenarios) the way a Model nests parts.
+- **One polymorphic inspector.** Select a Dataset and the same Properties panel that shows a Part's Appearance and Physics shows the data's **Schema**, **Source and provenance**, **live Stats** (n, mean, min/max, σ), and **Storage**.
+- **Connect to what you already have.** Connectors for **Postgres**, **Oracle**, **S3**, **Azure**, **Supabase**, **Firebase**, **graph databases**, **GraphQL**, **REST**, and raw **HTTP**, plus **Parquet** and **CSV** files, so partner data and your own systems land in one model.
+- **See it in 2D and 3D.** Auto-scaling interactive charts with point hover, least-squares fits and their equations, Chart / Grid / Split views, and a spreadsheet-style Data Grid, next to the 3D scene the data describes.
+- **Analysis built in.** The `eustress-data` crate (Polars and Arrow backed) supplies stats, curve fits, and clustering (k-means, kNN) that the **Data** ribbon runs on the selected Dataset.
+- **Provenance and export.** Content-addressed provenance records and a verifiable manifest, with export paths including HuggingFace data cards.
+
+It is **domain-agnostic**: nothing about a factory line, a portfolio, or a genome is baked into the engine.
+
+## From design to manufacture
+
+Eustress carries a product from the first sketch to the purchase order.
+
+- **Design and simulate.** CAD geometry, real materials, and first-principles physics across a dozen domains, all meter-native.
+- **Software in the loop.** Iterate the system against simulated physics until the design holds, where being wrong is cheap.
+- **Match the supply base.** The Manufacturing Program keeps two registries in your project: **manufacturers** (capabilities, certifications, capacity, pricing tiers, quality) and **investors** (focus, capacity, terms, track record). An allocation engine scores capability matches and assigns the optimal single manufacturer and the minimum sufficient investor set per product.
+- **Order it.** Purchase orders are first-class, and the registry is Space-local, because a supply base varies per project.
+
+## AI-native
+
+- **Workshop.** A built-in assistant that co-creates inside the running studio.
+- **MCP bridge.** External agents (Claude and others) discover entities, author and execute Rune or Luau scripts, run experiments with git branching, capture camera frames, tail telemetry, and compare runs.
+- **Independent AI camera.** The agent can observe the simulation even when no human viewport is open, so it can see its own work and iterate.
+- **Scriptable.** Rune (safety and performance) and Luau (expressiveness), both hot-reloadable.
+
+---
 
 ## Architecture
 
@@ -54,17 +130,18 @@ Eustress is **not (only) a game engine.** It's a general-purpose **simulation an
 | UI | Slint (declarative, native) |
 | Physics | Avian |
 | World store | Binary, log-structured **WorldDb** on [Fjall](https://github.com/fjall-rs/fjall) (LSM-tree), holding live entity state as compact records so a world scales to millions of entities and loads fast |
+| Analytics | Polars / Arrow |
 | Platforms | Desktop (Windows, macOS, Linux); mobile player in progress |
 
 Eustress is a Rust monorepo. The most important crates (`eustress/crates/`):
 
 | Crate | Role |
 |---|---|
-| `engine` | Desktop 3D editor / studio: viewport, Explorer, Properties, build & transform tools |
+| `engine` | Desktop 3D studio: viewport, Explorer, Properties, build and transform tools, Modes |
 | `client` · `player-mobile` | Generative player / renderer |
 | `common` | Shared scene format, instance classes, services, units, and realism / kernel laws |
 | `worlddb` · `eustress-fjall` | Binary simulation store (the Fjall LSM-tree `WorldDb`) |
-| `data` | Data Platform analytics leaf: columnar frames, stats, curve fits, and clustering (Polars/Arrow), bridged into the world store |
+| `data` | Data Platform: columnar frames, connectors, stats, curve fits, clustering, provenance |
 | `mcp` · `mcp-server` | Model Context Protocol, letting AI inspect and drive the live engine |
 | `workshop` | Built-in AI Workshop assistant |
 | `cad` | CAD / B-rep kernel (via `truck`) |
@@ -98,40 +175,18 @@ cd eustress
 cargo build --workspace --release      # binaries → eustress/target/release/
 ```
 
-## Studio features
-
-- Native **Bevy 3D viewport** with a **Slint** overlay, in a single window with zero IPC
-- **Scene Explorer** hierarchy + **real-time Properties** editor
-- **Move / Rotate / Scale** gizmos and smart build tools
-- **Live AI co-creation**: the Workshop assistant and MCP bridge let AI build with you, with its own independent camera to view its work
-- **Kernel-law realism** sections (thermodynamic, electrochemical, …) attached per entity
-- **Data Platform**: `Dataset` instances with a live Schema/Stats Properties inspector, interactive charts, and a Data Grid (see [Data Platform](#data-platform))
-- Console / output panel, undo history, and a timeline
-
-## Data Platform
-
-The same studio that builds a 3D world is also a **data workbench**. Eustress treats data as a first-class citizen, so a digital twin's telemetry, an experiment's measurements, or a market's history live in the same scene as the parts they describe, on the same store, under the same tools.
-
-- **Datasets are instances.** A `Dataset` sits in the Explorer alongside `Part` and `Light`, under a `DataService`, nesting `Series` (columns / timeseries) and `Run` (scenarios) the way a Model nests parts.
-- **One polymorphic inspector.** Select a Dataset and the same Properties panel that shows a Part's Appearance / Physics shows the data's **Schema**, **Source & provenance**, **live Stats** (n, mean, min/max, σ), and **Storage**, computed on the fly from the backing data.
-- **Interactive charts & grids.** A Dataset opens as a chart tab: an auto-scaling plot with point hover, a least-squares fit and its equation, Chart / Grid / Split views, and adjustable axes, plus a spreadsheet-style Data Grid.
-- **Analysis built in.** The `eustress-data` crate (Polars / Arrow-backed) supplies the stats, curve fits, and clustering (k-means, kNN) that the **Data** ribbon runs on the selected Dataset.
-- **Connect & persist.** A `Connector` configures an external source (CSV, REST, stream); datasets, parts, and simulation state all persist in the same copy-on-write **WorldDb**, so you can fork a world and rehearse a scenario against real data.
-
-It is **domain-agnostic**: climate modeling is the first tenant, but nothing about a factory line, a portfolio, or a genome is baked into the engine.
-
 ## Project structure
 
 ```
 eustress/                  # Cargo workspace
 ├── Cargo.toml
 ├── crates/
-│   ├── engine/            # Desktop editor / studio
+│   ├── engine/            # Desktop studio (viewport, Modes, tools)
 │   ├── client/            # Player / renderer
 │   ├── common/            # Scene format, classes, kernel laws
 │   ├── worlddb/           # Binary WorldDb trait
 │   ├── eustress-fjall/    # Fjall LSM-tree backend
-│   ├── data/              # Data Platform: frames, stats, fits, clustering
+│   ├── data/              # Data Platform: connectors, frames, stats, fits
 │   ├── mcp-server/        # MCP server (AI tooling)
 │   ├── workshop/          # AI Workshop assistant
 │   ├── cad/  mesh-edit/   # CAD + mesh kernels
@@ -142,11 +197,11 @@ eustress/                  # Cargo workspace
 
 ## The economy that pays its builders
 
-Eustress is designed so contribution converts to income **without the platform skimming**, a real labor market, not a company store:
+Eustress is designed so contribution converts to income **without the platform skimming**, a real labor market rather than a company store:
 
 - **Two-token wall.** **Tickets** (bought in USD, spent across the publication gallery) are buyer-money; **Bliss** (earned through contribution, cash-outable to USD) is builder-money. They never share a denomination.
-- **Constitutional 50/50.** Half of every Ticket dollar structurally funds builders, half funds the engine, written into how the tokens work, not a cut the platform can quietly change later (the "Robux mistake" Eustress refuses by design).
-- **Merit-only ladder.** Install the engine, contribute (PRs, fixes), earn rank, become a Contributor, earn Bliss, publish, and cash out. Demand flows in, the constitution routes half to merit, and contribution draws it back out as cash.
+- **Constitutional 50/50.** Half of every Ticket dollar structurally funds builders, half funds the engine, written into how the tokens work rather than left as a cut the platform can quietly change later.
+- **Merit-only ladder.** Install the engine, contribute, earn rank, become a Contributor, earn Bliss, publish, and cash out.
 
 ## Contributing
 

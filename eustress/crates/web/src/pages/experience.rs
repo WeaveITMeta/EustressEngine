@@ -860,7 +860,7 @@ impl Platform {
             Platform::MacOS => "https://downloads.eustress.dev/player/mac/EustressPlayer.dmg",
             Platform::Linux => "https://downloads.eustress.dev/player/linux/EustressPlayer.AppImage",
             Platform::Android => "https://downloads.eustress.dev/player/android/EustressPlayer.apk",
-            Platform::IOS => "https://apps.apple.com/app/eustress-player/id123456789",
+            Platform::IOS => "https://eustress.dev/download",
             Platform::Unknown => "https://downloads.eustress.dev/",
         }
     }
@@ -956,7 +956,7 @@ fn PlayModal(
                                 <img src="/assets/icons/android.svg" alt="Android" />
                                 "Android"
                             </a>
-                            <a href="https://apps.apple.com/app/eustress-player/id123456789" class="platform-link">
+                            <a href="https://eustress.dev/download" class="platform-link">
                                 <img src="/assets/icons/ios.svg" alt="iOS" />
                                 "iOS"
                             </a>

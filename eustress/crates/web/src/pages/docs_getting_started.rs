@@ -380,9 +380,9 @@ pub fn DocsGettingStartedPage() -> impl IntoView {
                                 <pre><code class="language-powershell">{r#"# Download and run the installer
 winget install Eustress.Engine
 
-# Or download the MSI directly
-Invoke-WebRequest -Uri https://eustress.dev/dl/eustress-latest-x64.msi -OutFile eustress.msi
-Start-Process msiexec -ArgumentList '/i eustress.msi' -Wait"#}</code></pre>
+# Or download the installer directly
+Invoke-WebRequest -Uri https://releases.eustress.dev/latest/EustressEngine-Setup.exe -OutFile EustressEngine-Setup.exe
+Start-Process .\EustressEngine-Setup.exe -Wait"#}</code></pre>
                             </div>
 
                             <div class="code-block">
@@ -393,25 +393,22 @@ Start-Process msiexec -ArgumentList '/i eustress.msi' -Wait"#}</code></pre>
 brew install eustress-engine
 
 # Or download the .dmg
-curl -LO https://eustress.dev/dl/eustress-latest-universal.dmg
-open eustress-latest-universal.dmg"#}</code></pre>
+curl -fLO https://releases.eustress.dev/latest/eustress-engine-macos-arm64.dmg
+open eustress-engine-macos-arm64.dmg"#}</code></pre>
                             </div>
 
                             <div class="code-block">
                                 <div class="code-header">
                                     <span class="code-lang">"Linux (Terminal)"</span>
                                 </div>
-                                <pre><code class="language-bash">{r#"# Flatpak (recommended)
-flatpak install flathub dev.eustress.Engine
+                                <pre><code class="language-bash">{r#"# Download the portable tarball, then verify the SHA-256 from the release notes
+curl -fLO https://releases.eustress.dev/latest/eustress-engine-linux-x64.tar.gz
+tar -xzf eustress-engine-linux-x64.tar.gz
+./eustress-engine/eustress-engine
 
-# Debian / Ubuntu
-curl -fsSL https://eustress.dev/gpg | sudo gpg --dearmor -o /usr/share/keyrings/eustress.gpg
-echo "deb [signed-by=/usr/share/keyrings/eustress.gpg] https://apt.eustress.dev stable main" \
-  | sudo tee /etc/apt/sources.list.d/eustress.list
-sudo apt update && sudo apt install eustress-engine
-
-# Arch Linux (AUR)
-paru -S eustress-engine"#}</code></pre>
+# System packages (.deb / .rpm / Flatpak / AUR) are on the roadmap. Until a
+# signed repository is published, use the tarball above or the installer at
+# https://eustress.dev/download"#}</code></pre>
                             </div>
                         </div>
 
