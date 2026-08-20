@@ -135,4 +135,16 @@ target-verify/
 # surfaced as untracked build output at commit time.
 .data-test-target/
 **/.data-test-target/
+
+# LSP/type-check target tree. Two of its files were committed before this rule
+# existed; they are removed in the same commit that adds it.
+target-lsp-check/
+**/target-lsp-check/
+
+# Published Claude Design canvas bundles. The artboards (`*.dc.html`) and
+# `canvas.json` beside them ARE the source and are tracked; this is the
+# self-contained export with the whole editor inlined, ~2.3 MB per publish and
+# regenerable from the artboards. Keeping it out of history avoids permanent
+# repo bloat on every redeploy.
+design/*-flow.html
 .export-demo/
