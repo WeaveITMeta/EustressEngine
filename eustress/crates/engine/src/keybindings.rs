@@ -1732,7 +1732,36 @@ fn handle_menu_action_events(
                     .map(|sm| sm.0.read().get_selected().into_iter().collect())
                     .unwrap_or_default();
                 if selected_ids.is_empty() {
-                    info!("⌨️ {}: nothing selected", event.action.name());
+                    // Nothing selected is the COMMON case for these two, not an
+                    // error: the user reaches for Lock or Anchor meaning "let me
+                    // click the parts I want flipped". Bailing here made the
+                    // chord look dead — it logged `nothing selected` and did
+                    // nothing visible. Arm the matching paint mode instead, so
+                    // the chord and the ribbon button end in the same state and
+                    // the next click flips whatever is under the cursor.
+                    //
+                    // Unlock is deliberately excluded. `Tool::Unlock` is the
+                    // one-shot "unlock every part in the Space" escape hatch,
+                    // and arming that from a stray keystroke is not something a
+                    // user can undo by looking at the screen. Lock mode already
+                    // TOGGLES on click (see `lock_tool_toggle_click`), so
+                    // clicking a locked part in Lock mode frees it anyway.
+                    match event.action {
+                        Action::ToggleAnchor => {
+                            studio_state.current_tool = crate::ui::Tool::Anchor;
+                            info!("⚓ Anchor mode armed — click parts to toggle, Esc to exit");
+                        }
+                        Action::LockSelection => {
+                            studio_state.current_tool = crate::ui::Tool::Lock;
+                            info!("🔒 Lock mode armed — click parts to toggle, Esc to exit");
+                        }
+                        _ => {
+                            info!(
+                                "⌨️ {}: nothing selected (Unlock All is on the ribbon)",
+                                event.action.name(),
+                            );
+                        }
+                    }
                     continue;
                 }
 

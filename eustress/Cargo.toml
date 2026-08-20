@@ -149,6 +149,28 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 3
 
+# `eustress-engine` alone drops debug info entirely.
+#
+# The workspace `debug = "line-tables-only"` above was the previous escape from
+# the 4 GiB archive ceiling, and the crate has since grown back through it:
+# measured 4,292,603,846 bytes, which is 99.94% of 4 GiB (4,294,967,296) and
+# 2.36 MB short of the limit. Past it, `ar` long-name string-table offsets
+# overflow and the linker reports `could not get child name for archive ...
+# (string table at long name offset N not terminated)` — the same class of
+# failure as the older `LNK4003`, and equally immune to `cargo clean`, because
+# the archive is simply too large to address.
+#
+# Scoped to this ONE package so every other crate keeps file/line info for
+# panics and backtraces; only frames inside the monolith lose their line
+# numbers. The build lands roughly 300-400 MB under the ceiling instead of
+# 2 MB under it, so ordinary growth stops being a coin flip on whether the
+# link succeeds.
+#
+# This buys headroom; it does not remove the ceiling. The real fix is
+# splitting the monolith so no single rlib approaches 4 GiB.
+[profile.dev.package.eustress-engine]
+debug = 0
+
 # Hotpatching profile - use with: cargo run --profile hotpatch
 [profile.hotpatch]
 inherits = "dev"

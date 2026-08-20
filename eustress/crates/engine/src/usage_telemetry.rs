@@ -98,6 +98,18 @@ impl Default for UsageTelemetry {
 }
 
 impl UsageTelemetry {
+    /// Votes recorded for `tool` so far this session. Drives the ribbon's
+    /// per-button vote badge: "counted as a vote" is a claim, and a number
+    /// that visibly climbs on the button you just pressed is the evidence.
+    /// Returns 0 when telemetry is off, so the UI can never show a tally we
+    /// are not actually keeping.
+    pub fn votes_for(&self, tool: &str) -> i32 {
+        if !self.enabled {
+            return 0;
+        }
+        self.session_counts.get(tool).copied().unwrap_or(0) as i32
+    }
+
     /// Record a click. No-op when disabled — the opt-out is enforced at the
     /// source, so a disabled install never even buffers.
     pub fn record(&mut self, tool: &str, mode: &str, disc: &str, wired: bool) {
@@ -187,6 +199,14 @@ impl UsageTelemetry {
 
 /// `%LOCALAPPDATA%/Eustress/telemetry` (or the platform equivalent).
 pub fn telemetry_dir() -> Option<std::path::PathBuf> {
+    // `EUSTRESS_TELEMETRY_DIR` exists so tests can exercise the outbox without
+    // writing into the real user profile, and so a support session can point a
+    // build at a scratch directory. Same override posture as the URL vars.
+    if let Ok(d) = std::env::var("EUSTRESS_TELEMETRY_DIR") {
+        if !d.is_empty() {
+            return Some(std::path::PathBuf::from(d));
+        }
+    }
     dirs::data_local_dir().map(|d| d.join("Eustress").join("telemetry"))
 }
 
@@ -582,6 +602,28 @@ impl UsageTelemetry {
     /// best-effort thread spawned right after, or next launch's drain).
     /// Writing BEFORE sending is the crash/offline guarantee.
     pub fn write_outbox(&mut self) {
+        self.write_outbox_inner(true);
+    }
+
+    /// Refresh the outbox mid-session. Called from the periodic flush so the
+    /// aggregate is durable even if the process is killed rather than closed.
+    ///
+    /// 43 of the first 77 sessions on the author's machine ended "orphaned"
+    /// (see `sessions.jsonl`), and until this existed every one of them threw
+    /// its counts away: `write_outbox` ran only on a clean `AppExit`, and
+    /// `drain_outbox` reads the outbox directory, never the JSONL. Debug
+    /// builds are killed constantly - cargo relinking the running exe,
+    /// taskkill, stopping from the IDE - so telemetry appeared to work only in
+    /// release, when in truth it only worked when the window was closed.
+    pub fn checkpoint_outbox(&mut self) {
+        self.write_outbox_inner(false);
+    }
+
+    /// `final_write` clears the counts because the session is over. A periodic
+    /// checkpoint must NOT clear them: the file carries the cumulative total
+    /// and is overwritten in place, so clearing would make each rewrite hold
+    /// only the delta since the last one and silently drop everything earlier.
+    fn write_outbox_inner(&mut self, final_write: bool) {
         if !self.enabled || self.session_counts.is_empty() {
             return;
         }
@@ -596,12 +638,26 @@ impl UsageTelemetry {
             "mode": self.session_mode,
             "counts": self.session_counts,
         });
-        let path = outbox.join(format!("session-{}.json", now_millis()));
+        let path = outbox.join(session_outbox_name());
         if let Err(e) = std::fs::write(&path, payload.to_string()) {
             warn!("usage telemetry: outbox write failed: {e}");
         }
-        self.session_counts.clear();
+        if final_write {
+            self.session_counts.clear();
+        }
     }
+}
+
+/// Outbox filename for THIS process, chosen once.
+///
+/// Stable so the periodic checkpoint overwrites one file instead of leaving a
+/// trail of partial ones (which the server would count as separate sessions);
+/// unique per process so a new session can never clobber an earlier session's
+/// file that is still waiting to be delivered.
+fn session_outbox_name() -> String {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| format!("session-{}.json", now_millis()))
+        .clone()
 }
 
 /// Fire-and-forget comment post (Help ▸ Send Feedback). Runs on its own
@@ -718,6 +774,10 @@ fn flush_usage_telemetry(
     if telemetry.since_flush >= FLUSH_INTERVAL_SECS {
         telemetry.since_flush = 0.0;
         telemetry.flush();
+        // Durability, not delivery: a killed process never reaches
+        // `flush_on_exit`, so the aggregate has to already be on disk. The
+        // next launch's `startup_drain` sends it.
+        telemetry.checkpoint_outbox();
     }
 }
 
@@ -825,6 +885,69 @@ impl Plugin for UsageTelemetryPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A killed process never reaches `flush_on_exit`, so the session
+    /// aggregate has to already be on disk before then. This pins the two
+    /// halves of that: a periodic checkpoint WRITES the file but KEEPS the
+    /// counts (they are cumulative and the file is overwritten in place), and
+    /// it reuses one stable filename so the server never sees a single session
+    /// as several. Regression guard for the bug where 43 of 77 sessions
+    /// silently discarded everything they recorded.
+    #[test]
+    fn checkpoint_outbox_survives_a_hard_kill() {
+        let dir = std::env::temp_dir().join(format!("eustress-tel-test-{}", now_millis()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("EUSTRESS_TELEMETRY_DIR", &dir);
+
+        let mut t = UsageTelemetry {
+            enabled: true,
+            install_id: "test-install".into(),
+            buffer: Vec::new(),
+            since_flush: 0.0,
+            notice_shown: true,
+            session_counts: std::collections::HashMap::new(),
+            session_mode: "ai".into(),
+            last_dream_tool: String::new(),
+        };
+        t.record("hub:export_dataset", "ai", "publishing", false);
+        t.record("hub:export_dataset", "ai", "publishing", false);
+        t.record("rl:reward_designer", "ai", "reinforcement", false);
+
+        t.checkpoint_outbox();
+        assert_eq!(
+            t.session_counts.get("hub:export_dataset"),
+            Some(&2),
+            "a checkpoint must KEEP cumulative counts - clearing them would make \
+             the next overwrite hold only the delta and drop everything earlier"
+        );
+
+        let outbox = dir.join("outbox");
+        let files = |d: &std::path::Path| -> Vec<std::path::PathBuf> {
+            std::fs::read_dir(d)
+                .map(|it| it.flatten().map(|e| e.path()).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(files(&outbox).len(), 1, "checkpoint must write exactly one file");
+
+        // A second checkpoint overwrites rather than accumulating, otherwise
+        // one session would be counted once per flush.
+        t.record("rl:reward_designer", "ai", "reinforcement", false);
+        t.checkpoint_outbox();
+        let after = files(&outbox);
+        assert_eq!(after.len(), 1, "checkpoints must overwrite one stable filename");
+
+        let body = std::fs::read_to_string(&after[0]).unwrap();
+        assert!(body.contains("\"hub:export_dataset\":2"), "cumulative counts, got: {body}");
+        assert!(body.contains("\"rl:reward_designer\":2"), "cumulative counts, got: {body}");
+
+        // The clean-exit path is the only one that clears.
+        t.write_outbox();
+        assert!(t.session_counts.is_empty(), "final write ends the session");
+        assert_eq!(files(&outbox).len(), 1, "final write reuses the session file");
+
+        std::env::remove_var("EUSTRESS_TELEMETRY_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn disabled_records_nothing() {

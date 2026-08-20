@@ -623,6 +623,8 @@ pub enum SlintAction {
     WorkshopModelChanged(String),
     /// User flipped the Gauntlet (AAA verify-loop) toggle.
     WorkshopGauntletToggled(bool),
+    /// Auto mode: run approval-gated Workshop tools without prompting.
+    WorkshopAutoToggled(bool),
 
     // Problems panel — VS Code-style diagnostic list
     /// Click a row → jump the editor to that file/line/column.
@@ -1522,6 +1524,7 @@ impl Plugin for SlintUiPlugin {
             // Axis orientation gizmo (bottom-right of viewport)
             // History panel sync
             .add_systems(Update, sync_history_to_slint.after(SlintSystems::Drain))
+            .init_resource::<super::procurement_bridge::ProcurementFocus>()
             .add_systems(Update, sync_procurement_to_slint.after(SlintSystems::Drain))
             // Publish dialog state sync (for camera blocking)
             .add_systems(Update, sync_publish_dialog_state.after(SlintSystems::Drain))
@@ -2395,6 +2398,8 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_workshop_model_changed(move |m| q.push(SlintAction::WorkshopModelChanged(m.to_string())));
     let q = queue.clone();
     ui.on_workshop_gauntlet_toggled(move |v| q.push(SlintAction::WorkshopGauntletToggled(v)));
+    let q = queue.clone();
+    ui.on_workshop_auto_toggled(move |v| q.push(SlintAction::WorkshopAutoToggled(v)));
     let q = queue.clone();
     ui.on_workshop_mention_query_changed(move |text| q.push(SlintAction::WorkshopMentionQueryChanged(text.to_string())));
     let q = queue.clone();
@@ -3752,6 +3757,8 @@ struct DrainResources<'w> {
     /// Manufacturer registry, read to resolve vendor names and fill the RFQ
     /// Builder's vendor picker.
     manufacturing: Option<Res<'w, crate::manufacturing::ManufacturingProgramRegistry>>,
+    /// Set when the Explorer asks a Procurement panel to reveal one record.
+    procurement_focus: Option<ResMut<'w, super::procurement_bridge::ProcurementFocus>>,
     file_registry: Option<ResMut<'w, crate::space::SpaceFileRegistry>>,
     /// Shared selection state — updated on Explorer node clicks so F-to-focus works
     selection_manager: Option<Res<'w, crate::rendering::BevySelectionManager>>,
@@ -6513,6 +6520,33 @@ fn drain_slint_actions(
                     crate::workshop::gauntlet::WorkshopSetGauntletEvent { enabled },
                 );
             }
+            SlintAction::WorkshopAutoToggled(enabled) => {
+                // Mirror into the UI, then persist. There is no ECS event to
+                // fire: `poll_agentic_responses` reads GlobalSoulSettings
+                // directly on the next tool call, so the setting IS the switch.
+                if let Some(ui) = ui {
+                    ui.set_workshop_auto_enabled(enabled);
+                }
+                if let Some(ref mut gs) = res.global_soul_settings {
+                    gs.workshop_auto_approve = enabled;
+                    if let Err(e) = gs.save() {
+                        if let Some(ref mut out) = res.output {
+                            out.warn(format!("Workshop: failed to persist Auto mode: {}", e));
+                        }
+                    }
+                }
+                if let Some(ref mut out) = res.output {
+                    out.info(
+                        if enabled {
+                            "Workshop Auto mode ON. Approval-gated tools run without asking.                              Capability limits still apply."
+                                .to_string()
+                        } else {
+                            "Workshop Auto mode off. Tools that need approval will ask again."
+                                .to_string()
+                        },
+                    );
+                }
+            }
             SlintAction::SoulApiKeySaved => {
                 // Pull both typed keys out of Slint and commit them. The
                 // Anthropic key goes to both the space-level and global Soul
@@ -7459,6 +7493,81 @@ fn drain_slint_actions(
                                     let idx = mgr.open_data_chart(entity, &inst.name);
                                     if let Some(ref mut out) = res.output {
                                         out.info(format!("Opened Chart: {} (tab {})", inst.name, idx));
+                                    }
+                                }
+                            } else if inst.class_name
+                                == eustress_common::classes::ClassName::PurchaseOrder
+                                || inst.class_name
+                                    == eustress_common::classes::ClassName::PurchaseOrderLine
+                            {
+                                // Open the order in the Tracker with it selected.
+                                //
+                                // A line resolves to its parent order, because a
+                                // line has no view of its own: it is a row inside
+                                // the order's detail pane, so revealing the line
+                                // means revealing the order that holds it. The
+                                // reference is the parent folder's name, which is
+                                // the same string `PurchaseOrderRegistry` keys on.
+                                let reference = if inst.class_name
+                                    == eustress_common::classes::ClassName::PurchaseOrderLine
+                                {
+                                    queries.loaded_from_file.get(entity).ok().and_then(|(_, l)| {
+                                        // .../PO00003/001 Some line/_instance.toml
+                                        l.path
+                                            .parent()
+                                            .and_then(|p| p.parent())
+                                            .and_then(|p| p.file_name())
+                                            .map(|n| n.to_string_lossy().to_string())
+                                    })
+                                } else {
+                                    Some(inst.name.clone())
+                                };
+
+                                if let Some(reference) = reference {
+                                    if let Some(ref mut f) = res.procurement_focus {
+                                        f.order = Some(reference.clone());
+                                    }
+                                    if let Some(ref mut mgr) = res.tab_manager {
+                                        let idx = mgr.open_purchase_order_tracker();
+                                        if let Some(ref mut out) = res.output {
+                                            out.info(format!(
+                                                "Opened {} in Purchase Orders (tab {idx})",
+                                                reference
+                                            ));
+                                        }
+                                    }
+                                }
+                            } else if inst.class_name
+                                == eustress_common::classes::ClassName::Manufacturer
+                            {
+                                // Open the RFQ Builder with this vendor picked, so
+                                // double-clicking a supplier means "raise an order
+                                // against them" rather than just "look at them".
+                                //
+                                // The picker is keyed on the Manufacturer's `id`
+                                // attribute, not its display name, so read the id
+                                // rather than assuming the two match.
+                                let vendor_id = queries
+                                    .loaded_from_file
+                                    .get(entity)
+                                    .ok()
+                                    .and_then(|(_, l)| std::fs::read_to_string(&l.path).ok())
+                                    .and_then(|t| toml::from_str::<toml::Value>(&t).ok())
+                                    .and_then(|v| {
+                                        v.get("id").and_then(|x| x.as_str()).map(str::to_string)
+                                    })
+                                    .unwrap_or_else(|| inst.name.clone());
+
+                                if let Some(ref mut f) = res.procurement_focus {
+                                    f.vendor = Some(vendor_id);
+                                }
+                                if let Some(ref mut mgr) = res.tab_manager {
+                                    let idx = mgr.open_rfq_builder();
+                                    if let Some(ref mut out) = res.output {
+                                        out.info(format!(
+                                            "Opened RFQ Builder for {} (tab {idx})",
+                                            inst.name
+                                        ));
                                     }
                                 }
                             } else if inst.class_name == eustress_common::classes::ClassName::WorkshopConversation {
@@ -12198,8 +12307,19 @@ fn drain_slint_actions(
                         .as_ref()
                         .map(|r| (r.active_id.clone(), r.active_submode_id.clone()))
                         .unwrap_or_default();
+                    let mut voted = false;
                     if let Some(ref mut t) = res.usage_telemetry {
                         t.record(action, &mode_id, &submode_id, meta.wired);
+                        voted = t.enabled;
+                    }
+                    // Bump the tally on the button that was just pressed, so
+                    // the badge climbs the instant the vote lands instead of
+                    // waiting for the next ribbon rebuild. Same id can appear
+                    // in several sections of a tab — update every instance.
+                    if voted {
+                        if let Some(w) = ui {
+                            bump_tool_vote_badge(w, action);
+                        }
                     }
                     if !meta.wired {
                         events.notification.write(
@@ -14722,6 +14842,9 @@ fn sync_workshop_to_slint(
     ui.set_workshop_gauntlet_enabled(
         global_settings.as_ref().map(|g| g.workshop_gauntlet).unwrap_or(false),
     );
+    ui.set_workshop_auto_enabled(
+        global_settings.as_ref().map(|g| g.workshop_auto_approve).unwrap_or(false),
+    );
     ui.set_workshop_pipeline_state(pipeline.state_string().into());
     ui.set_workshop_product_name(pipeline.product_name.as_str().into());
     ui.set_workshop_total_artifacts(pipeline.artifacts.len() as i32);
@@ -14770,6 +14893,10 @@ fn sync_workshop_to_slint(
                 .as_ref()
                 .map(|p| p.exists())
                 .unwrap_or(false),
+            // Split the reply into prose and tables so the bubble can draw a
+            // grid. A message with no table comes back as a single text block,
+            // which renders identically to the old single-TextInput path.
+            blocks: chat_blocks_for(&msg.content),
         }
     }).collect();
     let msg_model = std::rc::Rc::new(slint::VecModel::from(messages));
@@ -16068,6 +16195,10 @@ fn sync_active_mode_to_slint(
     registry: Option<Res<crate::studio_modes::ModeRegistry>>,
     roles: Option<Res<crate::studio_modes::UserRoles>>,
     mut pushed: ResMut<ModeSyncSignature>,
+    // Seeds each tool button's vote tally so the badge survives a tab or
+    // mode switch — the live bump in `drain_slint_actions` only touches the
+    // model rows that exist right now.
+    usage: Option<Res<crate::usage_telemetry::UsageTelemetry>>,
 ) {
     let Some(ref ctx) = slint_context else { return };
     let Some(registry) = registry else { return };
@@ -16234,6 +16365,10 @@ fn sync_active_mode_to_slint(
                         action_id: tool_action.clone().into(),
                         icon_id: meta.as_ref().map(|m| m.icon).unwrap_or("settings").into(),
                         tint: section_tint,
+                        votes: usage
+                            .as_ref()
+                            .map(|u| u.votes_for(tool_action))
+                            .unwrap_or(0),
                     });
                 }
             }
@@ -16243,6 +16378,24 @@ fn sync_active_mode_to_slint(
     ctx.window.set_custom_tab_sections(slint::ModelRc::from(section_model));
     let tool_model = std::rc::Rc::new(slint::VecModel::from(tool_rows));
     ctx.window.set_custom_tab_tools(slint::ModelRc::from(tool_model));
+}
+
+/// Increment the on-button vote tally for `action` in the live ribbon model.
+///
+/// The tally is seeded from `UsageTelemetry::votes_for` whenever the ribbon is
+/// rebuilt; this keeps it truthful between rebuilds. Cheap enough to scan
+/// linearly — the model only ever holds the ACTIVE mode's tools (tens), never
+/// the whole ~1,400-tool surface.
+fn bump_tool_vote_badge(window: &StudioWindow, action: &str) {
+    use slint::Model;
+    let model = window.get_custom_tab_tools();
+    for i in 0..model.row_count() {
+        let Some(mut row) = model.row_data(i) else { continue };
+        if row.action_id.as_str() == action {
+            row.votes = row.votes.saturating_add(1);
+            model.set_row_data(i, row);
+        }
+    }
 }
 
 /// A short display label for a menu-action id (`"data:chart"` → `"Chart"`)
@@ -17056,6 +17209,51 @@ fn update_ui_performance(
 
 /// Sync UndoStack state to the Slint HistoryPanel.
 /// Shows all undoable actions (transforms, deletes, etc.).
+/// Convert a reply into the block model the chat bubble renders.
+///
+/// The flattening matters: Slint models do not nest, so a table's cells go out
+/// row-major with a `columns` count to rebuild the grid. `parse_blocks` already
+/// pads and truncates ragged rows to the header width, which is what lets the
+/// Slint side index `r * columns + c` without a bounds check.
+fn chat_blocks_for(content: &str) -> slint::ModelRc<ChatBlock> {
+    use crate::workshop::markdown::{parse_blocks, Block};
+
+    let blocks: Vec<ChatBlock> = parse_blocks(content)
+        .into_iter()
+        .map(|b| match b {
+            Block::Text(t) => ChatBlock {
+                kind: "text".into(),
+                text: t.into(),
+                table: ChatTable::default(),
+            },
+            Block::Table(t) => {
+                let columns = t.headers.len();
+                let cells: Vec<slint::SharedString> = t
+                    .rows
+                    .iter()
+                    .flat_map(|r| r.iter().map(|c| c.clone().into()))
+                    .collect();
+                ChatBlock {
+                    kind: "table".into(),
+                    text: Default::default(),
+                    table: ChatTable {
+                        headers: slint::ModelRc::new(slint::VecModel::from(
+                            t.headers
+                                .into_iter()
+                                .map(slint::SharedString::from)
+                                .collect::<Vec<_>>(),
+                        )),
+                        rows: t.rows.len() as i32,
+                        columns: columns as i32,
+                        cells: slint::ModelRc::new(slint::VecModel::from(cells)),
+                    },
+                }
+            }
+        })
+        .collect();
+    slint::ModelRc::new(slint::VecModel::from(blocks))
+}
+
 /// Push the Space's purchase orders into both procurement panels.
 ///
 /// Runs only while one of those tabs is actually open, so a Space with a large
@@ -17069,6 +17267,10 @@ fn sync_procurement_to_slint(
     orders: Option<Res<crate::manufacturing::PurchaseOrderRegistry>>,
     manufacturing: Option<Res<crate::manufacturing::ManufacturingProgramRegistry>>,
     tabs: Option<Res<super::center_tabs::CenterTabManager>>,
+    // A record the Explorer asked to reveal, consumed once and cleared.
+    focus: Option<ResMut<super::procurement_bridge::ProcurementFocus>>,
+    // Last (tab, filter) this system pushed, so an unchanged frame can skip.
+    mut last_push: Local<(String, String)>,
 ) {
     use super::procurement_bridge as bridge;
 
@@ -17083,6 +17285,38 @@ fn sync_procurement_to_slint(
 
     let ui = &context.window;
 
+    // Only rebuild when something actually changed.
+    //
+    // Without this the whole ModelRc was replaced every frame the tab was open,
+    // which breaks selection: the row under the cursor is destroyed and rebuilt
+    // before the click resolves, so `selected-index` never sticks. It is also
+    // pure waste, since `order_row` clones each order seven times to probe its
+    // legal transitions, which was running for every order on every frame.
+    //
+    // Three things can invalidate the model: the registry itself (a transition,
+    // an edit, a new RFQ), the Tracker's filter chip, and switching between the
+    // two tabs, which show different subsets.
+    let mut focus = focus;
+    let pending_focus = focus.as_ref().map(|f| f.is_pending()).unwrap_or(false);
+
+    // A double-click must reveal its record even when the current filter chip
+    // would hide it, so revealing an order widens the filter to All first.
+    let mut filter = ui.get_procurement_state_filter().to_string();
+    if pending_focus && focus.as_ref().and_then(|f| f.order.as_ref()).is_some() && filter != "all" {
+        filter = "all".to_string();
+        ui.set_procurement_state_filter("all".into());
+    }
+
+    let dirty = orders.is_changed()
+        || pending_focus
+        || last_push.0 != active
+        || last_push.1 != filter;
+    if !dirty {
+        return;
+    }
+    last_push.0 = active.to_string();
+    last_push.1 = filter.clone();
+
     // Resolving a vendor id needs the Manufacturer registry. Its absence is not
     // fatal: `order_row` falls back to showing the raw id, which is better than
     // an empty vendor column.
@@ -17096,14 +17330,38 @@ fn sync_procurement_to_slint(
             .filter(|o| o.is_rfq())
             .map(|o| bridge::order_row(o, bridge::vendor_name(mfg, &o.manufacturer_id)))
             .collect();
+        // Resolve the focus against the rows we just built, before they move
+        // into the model and the indices stop being ours to reason about.
+        let rfq_pick = focus
+            .as_ref()
+            .and_then(|f| f.order.as_ref())
+            .and_then(|r| rfqs.iter().position(|row| row.reference == r.as_str()));
+        let vendor_pick = focus.as_ref().and_then(|f| f.vendor.clone());
+
+        let options = bridge::manufacturer_options(mfg);
+        let vendor_idx = vendor_pick
+            .as_ref()
+            .and_then(|v| options.iter().position(|o| o.id == v.as_str()));
+
         ui.set_procurement_rfqs(slint::ModelRc::new(slint::VecModel::from(rfqs)));
-        ui.set_procurement_manufacturers(slint::ModelRc::new(slint::VecModel::from(
-            bridge::manufacturer_options(mfg),
-        )));
+        ui.set_procurement_manufacturers(slint::ModelRc::new(slint::VecModel::from(options)));
+        if let Some(i) = rfq_pick {
+            ui.set_procurement_rfq_selected(i as i32);
+        }
+        if let Some(i) = vendor_idx {
+            ui.set_procurement_vendor_index(i as i32);
+        }
+        if let Some(ref mut f) = focus {
+            // Only clear once this tab could act on it. Leaving it set would
+            // re-yank the selection on every later filter change.
+            if rfq_pick.is_some() || vendor_idx.is_some() {
+                f.order = None;
+                f.vendor = None;
+            }
+        }
         return;
     }
 
-    let filter = ui.get_procurement_state_filter().to_string();
     let rows: Vec<PurchaseOrderRow> = orders
         .orders
         .iter()
@@ -17132,7 +17390,21 @@ fn sync_procurement_to_slint(
         .map(|o| o.currency.clone())
         .unwrap_or_else(|| "USD".to_string());
 
+    // Same as the RFQ branch: resolve the reveal against these rows, then hand
+    // them to the model.
+    let order_pick = focus
+        .as_ref()
+        .and_then(|f| f.order.as_ref())
+        .and_then(|r| rows.iter().position(|row| row.reference == r.as_str()));
+
     ui.set_procurement_orders(slint::ModelRc::new(slint::VecModel::from(rows)));
+    if let Some(i) = order_pick {
+        ui.set_procurement_order_selected(i as i32);
+        if let Some(ref mut f) = focus {
+            f.order = None;
+            f.vendor = None;
+        }
+    }
     ui.set_procurement_rfq_count(orders.rfq_count() as i32);
     ui.set_procurement_order_count(orders.order_count() as i32);
     ui.set_procurement_total_committed(format!("{committed:.2}").into());
@@ -22694,6 +22966,11 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
         ClassName::Dataset => "dataset",
         ClassName::Series => "series",
         ClassName::Run => "run",
+        // Procurement nouns. Same accent as their DataService siblings, since
+        // that is where they live in the tree.
+        ClassName::Manufacturer => "manufacturer",
+        ClassName::PurchaseOrder => "purchaseorder",
+        ClassName::PurchaseOrderLine => "purchaseorderline",
         ClassName::Column => "column",
         ClassName::Connector => "connector",
         // Workshop folder uses wrench icon (not a ClassName but handled via name match below)

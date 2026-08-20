@@ -79,6 +79,114 @@ use eustress_engine::startup::{StartupPlugin, StartupArgs};
 use eustress_engine::workshop::WorkshopPlugin;
 use eustress_engine::space::SpaceRoot;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Engine log file
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// How many runs' logs to keep. Older ones are pruned when the engine starts.
+const ENGINE_LOG_RETAIN: usize = 5;
+
+/// Directory holding the engine's rolling logs.
+///
+/// `~/.eustress_engine/logs/`, next to the engine's other per-user state
+/// (`settings.json`, `bliss_tracker.toml`, `soul_settings.json`), so there is
+/// ONE place to ask a user for when a bug report arrives.
+///
+/// A Space-relative `<space>/.eustress/output.log` is deliberately not used.
+/// `LogPlugin` builds before the Space tree is opened, and `SpaceRoot` moves
+/// again on every Universe/Space switch, so a Space-relative file would capture
+/// the first few seconds of a session and then quietly stop following it — the
+/// half-log is worse than no log because it looks complete.
+///
+/// Falls back to an exe-adjacent `logs/` directory if no home directory
+/// resolves, and to no log at all if even that fails.
+fn engine_log_dir() -> Option<std::path::PathBuf> {
+    dirs::home_dir()
+        .map(|home| home.join(".eustress_engine").join("logs"))
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|d| d.join("logs")))
+        })
+}
+
+/// Drop everything but the newest `ENGINE_LOG_RETAIN` logs, so the directory
+/// stays bounded without any single run's file being truncated mid-session.
+///
+/// A file another live instance still holds open cannot be deleted on Windows,
+/// which is exactly the outcome wanted: pruning never touches a log that is
+/// still being written.
+fn prune_engine_logs(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut logs: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("engine-") || !name.ends_with(".log") {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect();
+    logs.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    for (_, stale) in logs.into_iter().skip(ENGINE_LOG_RETAIN) {
+        let _ = std::fs::remove_file(stale);
+    }
+}
+
+/// The `LogPlugin::fmt_layer` hook — console output PLUS a log file.
+///
+/// Release builds set `windows_subsystem = "windows"`, which detaches the
+/// console, so stderr goes nowhere a user can reach. Every diagnostic the
+/// engine already emits (billboard atlas capacity, sub-1.0 content scale,
+/// asset-load failures) is therefore invisible in exactly the builds where it
+/// matters most. `fmt_layer` REPLACES `LogPlugin`'s single formatting layer, so
+/// this returns two of them in a `Vec` (which is itself a `Layer`): Bevy's own
+/// stderr layer, unchanged, and a second, ANSI-free layer over the file. Both
+/// sit above the plugin's `EnvFilter`, so the file records exactly what the
+/// console records — no second filter to keep in sync.
+///
+/// Each run gets its own `engine-<pid>.log` and the directory is pruned to the
+/// last few, so the logs stay bounded. A fixed file name would not survive the
+/// second engine window: nothing stops two instances running at once (hence the
+/// "Instance {pid}" window title), and the second one's truncating open would
+/// silently wipe the first one's live log.
+///
+/// The `Mutex` around the handle serialises writes from the render and async
+/// task pools. `File` is a `MakeWriter` on its own, but concurrent writes to a
+/// single handle share one file cursor and can interleave mid-line; the lock is
+/// held only for the duration of one already-formatted event.
+///
+/// Returning `None` on any I/O failure hands `LogPlugin` back its own default
+/// layer, so a read-only home directory costs the log file and nothing else.
+fn engine_log_fmt_layer(_app: &mut App) -> Option<bevy::log::BoxedFmtLayer> {
+    use bevy::log::tracing_subscriber::fmt;
+
+    let dir = engine_log_dir()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    prune_engine_logs(&dir);
+
+    let path = dir.join(format!("engine-{}.log", std::process::id()));
+    let file = std::fs::File::create(&path).ok()?;
+    println!("Engine log: {}", path.display());
+
+    // Byte-for-byte Bevy's default: `Layer::default()` reads NO_COLOR to decide
+    // on ANSI, and stderr keeps log output off the stdout the CLI writes to.
+    let console: bevy::log::BoxedFmtLayer =
+        Box::new(fmt::Layer::default().with_writer(std::io::stderr));
+    let to_file: bevy::log::BoxedFmtLayer = Box::new(
+        fmt::Layer::default()
+            // Escape codes in a file are noise in every reader that opens it.
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file)),
+    );
+    let both: bevy::log::BoxedFmtLayer = Box::new(vec![console, to_file]);
+    Some(both)
+}
+
 fn main() {
     println!("Starting Eustress Engine...");
     
@@ -208,12 +316,17 @@ fn main() {
             // Per-system frame micro-profiler hook (feature `profiling`).
             // `profiler::custom_layer` adds a tracing Layer to THIS subscriber
             // that times each Bevy `"system"` span. With the feature off it is
-            // `|_| None`, so this `.set` is a no-op clone of the default
-            // LogPlugin and changes nothing about logging. With the feature on
-            // it still does nothing until `EUSTRESS_PROFILE` is set. All other
-            // LogPlugin fields stay at their defaults (filter/level/fmt_layer).
+            // `|_| None`, so it changes nothing about logging. With the feature
+            // on it still does nothing until `EUSTRESS_PROFILE` is set.
+            //
+            // `engine_log_fmt_layer` is the FORMATTING side: it emits Bevy's
+            // usual stderr layer plus a second one over a log file, so the
+            // diagnostics the engine already prints survive a release build
+            // where `windows_subsystem = "windows"` hides the console.
+            // `filter`/`level` stay at their defaults.
             .set(bevy::log::LogPlugin {
                 custom_layer: profiler::custom_layer,
+                fmt_layer: engine_log_fmt_layer,
                 ..default()
             })
         )

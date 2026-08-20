@@ -2091,8 +2091,13 @@ component BrickColorRow inherits Rectangle {
     brick-color-popup := PopupWindow {
         x: 140px;
         y: parent.height;
-        width: 310px;
-        height: 340px;
+        width: 330px;
+        height: 372px;
+        // Slint defaults to `close-on-click`, which dismisses the popup on ANY
+        // click inside it — so picking a wheel closed the picker instead of
+        // drilling into that wheel. The drill is a two-step flow inside ONE
+        // popup, so only a click OUTSIDE may close it.
+        close-policy: close-on-click-outside;
 
         Rectangle {
             width: 100%;
@@ -2122,18 +2127,23 @@ component BrickColorRow inherits Rectangle {
                         font-weight: 700;
                     }
 
+                    // Each row carries its themed glyph, its position on the
+                    // two axes, and the lexicon its 127 swatches are named from.
+                    // `tint` is the wheel's own character color, so the list
+                    // reads as the axis diagram it stands for: good at the top,
+                    // evil at the bottom, neutral Stone in the middle.
                     for w in [
-                        { id: "aether",  name: "Aether",  desc: "abstract · good — bright neons" },
-                        { id: "halo",    name: "Halo",    desc: "light · good — ethereal" },
-                        { id: "verdure", name: "Verdure", desc: "realistic · good — natural" },
-                        { id: "stone",   name: "Stone",   desc: "neutral greys" },
-                        { id: "char",    name: "Char",    desc: "realistic · evil — ash" },
-                        { id: "hex",     name: "Hex",     desc: "abstract · evil — chaotic" },
-                        { id: "umbra",   name: "Umbra",   desc: "dark · evil — voids" },
+                        { id: "aether",  name: "Aether",  axis: "abstract · good",  scheme: "virtues, radiant concepts", icon: @image-url("../../assets/icons/ui/sparkle.svg"), tint: #3ce6dc },
+                        { id: "halo",    name: "Halo",    axis: "light · good",     scheme: "the 72 angels",             icon: @image-url("../../assets/icons/ui/sun.svg"),     tint: #e2e2e2 },
+                        { id: "verdure", name: "Verdure", axis: "realistic · good", scheme: "flora and growth",          icon: @image-url("../../assets/icons/ui/leaf.svg"),    tint: #6fae32 },
+                        { id: "stone",   name: "Stone",   axis: "neutral centre",   scheme: "minerals and materials",    icon: @image-url("../../assets/icons/ui/block.svg"),   tint: #b6b6b6 },
+                        { id: "char",    name: "Char",    axis: "realistic · evil", scheme: "scars and ash",             icon: @image-url("../../assets/icons/ui/fire.svg"),    tint: #6d5a4c },
+                        { id: "hex",     name: "Hex",     axis: "abstract · evil",  scheme: "curses and afflictions",    icon: @image-url("../../assets/icons/ui/flask.svg"),   tint: #a02fd8 },
+                        { id: "umbra",   name: "Umbra",   axis: "dark · evil",      scheme: "the 72 demons",             icon: @image-url("../../assets/icons/ui/eye.svg"),     tint: #7d7d7d },
                     ]: Rectangle {
-                        height: 38px;
+                        height: 42px;
                         background: wheel-touch.has-hover ? Theme.button-hover : transparent;
-                        border-radius: 4px;
+                        border-radius: 5px;
 
                         wheel-touch := TouchArea {
                             mouse-cursor: pointer;
@@ -2142,30 +2152,52 @@ component BrickColorRow inherits Rectangle {
                             clicked => { root.active-wheel-id = w.id; }
                         }
 
-                        HorizontalLayout {
-                            padding-left: 8px;
-                            padding-right: 8px;
-                            alignment: space-between;
-                            VerticalLayout {
-                                alignment: center;
-                                Text {
-                                    text: w.name;
-                                    color: Theme.text-primary;
-                                    font-size: 12px;
-                                    font-weight: 600;
-                                }
-                                Text {
-                                    text: w.desc;
-                                    color: Theme.text-secondary;
-                                    font-size: 9px;
-                                }
+                        // Absolute placement, not a HorizontalLayout: the layout
+                        // cross-stretched the glyph over the full row height, so
+                        // icons sat above their text instead of centred on it.
+                        Rectangle {
+                            x: 8px;
+                            y: (parent.height - self.height) / 2;
+                            width: 26px;
+                            height: 26px;
+                            border-radius: 13px;
+                            background: w.tint.with-alpha(0.18);
+                            border-width: 1px;
+                            border-color: w.tint.with-alpha(0.45);
+
+                            Image {
+                                width: 14px;
+                                height: 14px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                source: w.icon;
+                                image-fit: contain;
+                                colorize: w.tint;
                             }
-                            Text {
-                                text: "›";
-                                color: Theme.text-secondary;
-                                font-size: 14px;
-                                vertical-alignment: center;
-                            }
+                        }
+
+                        Text {
+                            x: 42px;
+                            y: 7px;
+                            text: w.name;
+                            color: Theme.text-primary;
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+                        Text {
+                            x: 42px;
+                            y: 23px;
+                            text: w.axis + "  ·  " + w.scheme;
+                            color: Theme.text-secondary;
+                            font-size: 9px;
+                        }
+
+                        Text {
+                            x: parent.width - self.width - 12px;
+                            y: (parent.height - self.height) / 2;
+                            text: "›";
+                            color: Theme.text-secondary;
+                            font-size: 14px;
                         }
                     }
                 }

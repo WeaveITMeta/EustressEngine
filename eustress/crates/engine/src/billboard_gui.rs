@@ -112,18 +112,15 @@ pub(crate) const TILE_H: u32 = 192;
 /// **Why this alone doesn't fix oversized text.** Layout must ALSO run in
 /// TRUE (unclamped) pixel space — see `update_and_render_billboards`. If
 /// `collect_subtree` resolved child sizes against the CLAMPED canvas, a
-/// `TextScaled` label would auto-fit to "fill 100% of the shrunken canvas"
-/// well before its 72-px ceiling ever binds (a giant billboard's canvas
-/// shrinks so much that 100%-width text needs far fewer than 72 px), and
-/// that near-100%-filled shrunken canvas then UV-stretches back out to
-/// fill nearly the ENTIRE (large) world quad — text that should have been
-/// capped at ~1.44 studs (72 px ÷ 50 px/stud) instead grows to fill the
-/// whole sign. Doing layout unclamped and applying this scale ONLY at the
-/// final raster step (in `render_element` / `render_text`) keeps the true
-/// 72-px ceiling meaningful in world terms regardless of tile budget —
-/// oversized billboards render their (correctly-proportioned, correctly-
-/// sized-relative-to-the-billboard) content smaller/blurrier instead of
-/// magnified past their true footprint.
+/// `TextScaled` label would auto-fit against the shrunken canvas and that
+/// near-100%-filled shrunken canvas would then UV-stretch back out to fill
+/// nearly the ENTIRE (large) world quad — text sized for a 192-px tile
+/// magnified across a 1400-px sign. Doing layout unclamped and applying
+/// this scale ONLY at the final raster step (in `render_element` /
+/// `render_text`) keeps the auto-fit answer meaningful in world terms
+/// regardless of tile budget — oversized billboards render their
+/// (correctly-proportioned, correctly-sized-relative-to-the-billboard)
+/// content smaller/blurrier instead of magnified past their true footprint.
 fn tile_content_scale(raw_w_px: f32, raw_h_px: f32) -> f32 {
     (TILE_W as f32 / raw_w_px.max(1.0))
         .min(TILE_H as f32 / raw_h_px.max(1.0))
@@ -166,6 +163,18 @@ const INITIAL_ATLAS_ROWS: u32 = 8;
 /// falling back to the historically-safe 8192 if a device limit can't be
 /// read at all (should not happen once rendering is initialized).
 const MAX_ATLAS_DIM: u32 = 16384;
+
+/// Camera radius (metres — 1 stud = 1 m) inside which a billboard is part of
+/// the "render neighbourhood": it may hold an atlas slot
+/// (`spawn_billboard_render_state`) and is repainted when its content changes
+/// (`update_and_render_billboards`). Outside it a billboard is not drawn at
+/// all, so in practice it bounds every *other* distance knob as well,
+/// `BillboardGui.MaxDistance` included.
+///
+/// `recycle_offscreen_billboard_slots` evicts at 360 (a 1.2× hysteresis band)
+/// rather than exactly here, so a billboard sitting on the boundary cannot
+/// thrash allocate↔evict every frame.
+pub(crate) const BILLBOARD_ALLOC_RADIUS: f32 = 300.0;
 
 // ── NonSend resources ──────────────────────────────────────────────────────
 
@@ -263,6 +272,61 @@ impl BillboardSpatialGrid {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Stand `bevy_ui` down for every GUI element owned by a BillboardGui.
+///
+/// GUI leaves (TextLabel / Frame / TextButton / …) are spawned with a
+/// `bevy::ui::Node` unconditionally, because the SAME class also serves
+/// screen-space ScreenGui content. Under a billboard that is one renderer too
+/// many: this module already rasterises the subtree into the shared atlas and
+/// maps it onto the 3D quad, while `bevy_ui` independently lays the very same
+/// `Node` out in SCREEN space (`position_type: Absolute`) and draws it pinned
+/// to the viewport — the "2D overlay that follows me everywhere" on top of the
+/// correct 3D label.
+///
+/// `Display::None` (rather than `Visibility::Hidden`) is deliberate: it takes
+/// the node out of `bevy_ui`'s layout entirely, so it costs nothing and cannot
+/// contribute to a parent's computed size. The atlas renderer reads
+/// `GuiElementDisplay`, never `Node`, so the 3D billboard is unaffected.
+///
+/// Runs on ADDED nodes and on re-parent (`Changed<ChildOf>`), so an element
+/// dragged out of a billboard and into a ScreenGui becomes visible again.
+fn hide_billboard_owned_ui_nodes(
+    mut nodes: Query<
+        (Entity, &mut bevy::ui::Node),
+        (
+            With<eustress_common::gui::billboard_renderer::GuiElementDisplay>,
+            Or<(Added<bevy::ui::Node>, Changed<ChildOf>)>,
+        ),
+    >,
+    billboard_q: Query<(), With<BillboardGuiMarker>>,
+    parent_q: Query<&ChildOf>,
+) {
+    for (entity, mut node) in &mut nodes {
+        // Walk to the nearest billboard ancestor, if any.
+        let mut cur = entity;
+        let mut under_billboard = false;
+        loop {
+            if billboard_q.get(cur).is_ok() {
+                under_billboard = true;
+                break;
+            }
+            match parent_q.get(cur) {
+                Ok(p) => cur = p.parent(),
+                Err(_) => break,
+            }
+        }
+
+        let want = if under_billboard {
+            bevy::ui::Display::None
+        } else {
+            bevy::ui::Display::Flex
+        };
+        if node.display != want {
+            node.display = want;
         }
     }
 }
@@ -495,10 +559,12 @@ fn ensure_billboard_marker(
 ///   `Transform` is local to `ChildOf(parent)`.
 ///
 /// - `units_offset_world_space` — Roblox `StudsOffsetWorldSpace`.
-///   World-axis offset; **not** rotated by parent. Implemented by
-///   inverse-rotating with the parent's world rotation before adding
-///   to `Transform.translation` so the parent transform chain
-///   re-applies the rotation and the net offset stays world-axis.
+///   World-axis offset in true studs; **neither** rotated **nor** scaled
+///   by the parent. Implemented by inverse-rotating with the parent's
+///   world rotation AND dividing by the parent's world scale before
+///   adding to `Transform.translation`, so the parent transform chain
+///   re-applies both and the net offset is exactly the authored
+///   world-axis displacement whatever the parent is doing.
 ///
 /// `extents_offset` / `extents_offset_world_space` need adornee
 /// bounding-box info and are still a follow-up.
@@ -517,7 +583,7 @@ fn sync_billboard_class_to_marker(
     // (registry FolderSpawner, legacy `spawn_folder`, TOML instance
     // loader) is covered.
     parent_class: Query<(Option<&Folder>, Option<&Instance>)>,
-    mut last_offsets: Local<HashMap<Entity, [f32; 6]>>,
+    mut last_offsets: Local<HashMap<Entity, [f32; 13]>>,
 ) {
     for (entity, class, mut marker, mut transform, child_of) in &mut q {
         // Geometry. `class.size` is `UDim2` for Roblox parity (Scale =
@@ -626,22 +692,64 @@ fn sync_billboard_class_to_marker(
         // rotating with the parent's world rotation does exactly that —
         // for an unrotated parent (or no parent) the inverse is identity
         // and the two offsets simply add componentwise.
-        let parent_rot = child_of
+        //
+        // The parent's world SCALE has to come out the same way, and for the
+        // same reason. Bevy composes a child as `parent_affine * local`, and a
+        // TRS parent's linear part is `R_p · S_p` — so a local translation `t`
+        // lands `R_p · (S_p · t)` away in world space, i.e. the scale
+        // multiplies the offset just like the rotation turns it. Undoing only
+        // the rotation left the scale in: on a block scaled 16 in Y an
+        // authored 8.4-stud world offset arrived as ~134 studs. Dividing by
+        // `S_p` after the inverse rotation (the order matters — the scale acts
+        // in the parent's LOCAL frame, inside the rotation) makes
+        // `units_offset_world_space` genuinely scale-invariant, which is what
+        // "world space" promises. `units_offset` is deliberately NOT divided:
+        // Roblox `StudsOffset` is parent-relative and is supposed to grow with
+        // the parent.
+        //
+        // Both come from one `to_scale_rotation_translation` because
+        // `GlobalTransform::rotation()` and `::scale()` each recompute the
+        // decomposition internally.
+        let (parent_scale, parent_rot) = child_of
             .and_then(|c| parent_globals.get(c.parent()).ok())
-            .map(|gt| gt.rotation())
-            .unwrap_or(Quat::IDENTITY);
+            .map(|gt| {
+                let (s, r, _) = gt.to_scale_rotation_translation();
+                (s, r)
+            })
+            .unwrap_or((Vec3::ONE, Quat::IDENTITY));
+        // A degenerate axis (a part flattened to 0 on one axis, or a scale
+        // still 0 on the frame it spawns) would divide the offset to
+        // infinity/NaN and teleport the quad out of the world. Fall back to
+        // "no correction" on any axis too small to invert — the offset is
+        // then wrong by that axis's scale, which is strictly better than a
+        // non-finite Transform poisoning the whole propagation chain.
+        const MIN_INVERTIBLE_SCALE: f32 = 1e-4;
+        let unscale = |s: f32| if s.abs() >= MIN_INVERTIBLE_SCALE { 1.0 / s } else { 1.0 };
+        let inv_parent_scale = Vec3::new(
+            unscale(parent_scale.x),
+            unscale(parent_scale.y),
+            unscale(parent_scale.z),
+        );
         let local_uo = Vec3::from(class.units_offset);
         let world_uo = Vec3::from(class.units_offset_world_space);
-        let combined = local_uo + parent_rot.inverse() * world_uo;
+        let combined = local_uo + (parent_rot.inverse() * world_uo) * inv_parent_scale;
 
-        // Cache against the 6-tuple (local + world) so a Properties-panel
-        // edit to EITHER offset rewrites Transform on the next sync, but
-        // unchanged frames don't fight other transform writers.
-        let key: [f32; 6] = [
+        // Cache against everything `combined` was computed from — both
+        // offsets AND the parent rotation/scale that convert the world-space
+        // half into parent-local space — so a Properties-panel edit to either
+        // offset, or a parent that has been turned or resized since the last
+        // write, rewrites Transform on the next sync, while unchanged frames
+        // don't fight other transform writers.
+        // `to_array` rather than field access: glam's SIMD `Quat` is a
+        // newtype over the vector register and exposes no public components.
+        let pr = parent_rot.to_array();
+        let key: [f32; 13] = [
             class.units_offset[0], class.units_offset[1], class.units_offset[2],
             class.units_offset_world_space[0],
             class.units_offset_world_space[1],
             class.units_offset_world_space[2],
+            pr[0], pr[1], pr[2], pr[3],
+            parent_scale.x, parent_scale.y, parent_scale.z,
         ];
         let cached = last_offsets.get(&entity).copied();
         let offsets_changed = cached.map_or(true, |c| c != key);
@@ -663,8 +771,13 @@ fn spawn_billboard_render_state(
     cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
     // Near-camera candidate enumeration — see pass 1 below.
     grid: Res<BillboardSpatialGrid>,
+    // `&mut BillboardGuiMarker` for write access to its change tick only —
+    // no field is written. Allocating a slot re-arms the marker so
+    // `sync_billboard_properties` (ordered after this system) re-derives the
+    // whole render state from it; see the `set_changed` call at the bottom of
+    // the loop.
     mut billboards: Query<
-        (Entity, &BillboardGuiMarker, Option<&GlobalTransform>, &mut Transform),
+        (Entity, &mut BillboardGuiMarker, Option<&GlobalTransform>, &mut Transform),
         Without<BillboardRenderHandle>,
     >,
     // Existing billboards (already have a tile) — needed to refresh their
@@ -685,8 +798,8 @@ fn spawn_billboard_render_state(
     mut shared_quad: Local<Option<Handle<Mesh>>>,
 ) {
     // Near-camera gate. A billboard outside this radius is never repainted by
-    // `update_and_render_billboards` (same BILLBOARD_CULL_RADIUS_SQ = 300^2),
-    // so spending a scarce atlas slot + a full quad/UV/mesh build on it is
+    // `update_and_render_billboards` (same BILLBOARD_ALLOC_RADIUS), so
+    // spending a scarce atlas slot + a full quad/UV/mesh build on it is
     // wasted work. Skipping far billboards here (a) bounds this system's
     // per-frame cost to the handful of billboards actually near the camera
     // even when ~16.5K can never get a slot, and (b) reserves the 512 atlas
@@ -694,7 +807,7 @@ fn spawn_billboard_render_state(
     // `Without<BillboardRenderHandle>` query and will allocate the instant the
     // camera comes within range. With no camera yet (startup), fall through
     // and allocate ungated so the first billboards still appear.
-    const SPAWN_ALLOC_RADIUS_SQ: f32 = 300.0 * 300.0;
+    const SPAWN_ALLOC_RADIUS_SQ: f32 = BILLBOARD_ALLOC_RADIUS * BILLBOARD_ALLOC_RADIUS;
     let cam_pos = cameras
         .iter()
         .find(|(_, c)| c.order == 0)
@@ -716,7 +829,7 @@ fn spawn_billboard_render_state(
         // billboard in the world every frame (the other dominant
         // O(all-billboards) cost). `billboards.get` re-applies the
         // un-slotted filter, so results are identical.
-        grid.for_each_in_radius(cp, 300.0, |e| {
+        grid.for_each_in_radius(cp, BILLBOARD_ALLOC_RADIUS, |e| {
             let Ok((entity, _m, global_tf, transform)) = billboards.get(e) else { return };
             let bb_pos = global_tf
                 .map(|g: &GlobalTransform| g.translation())
@@ -740,7 +853,7 @@ fn spawn_billboard_render_state(
     candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
     for (cand_entity, _dist) in candidates {
-        let Ok((entity, marker, global_tf, mut transform)) = billboards.get_mut(cand_entity)
+        let Ok((entity, mut marker, global_tf, mut transform)) = billboards.get_mut(cand_entity)
         else {
             continue;
         };
@@ -842,7 +955,24 @@ fn spawn_billboard_render_state(
         let (uv_min, uv_max) = atlas.slot_uv(slot);
 
         let world_pos = global_tf.map(|g: &GlobalTransform| g.translation()).unwrap_or(Vec3::ZERO);
-        let (size_x, size_y) = meters_from_pixels([w as f32, h as f32]);
+        // World quad size comes from the RAW (unclamped) authored pixels, the
+        // same expression `sync_billboard_properties` uses — `w`/`h` are the
+        // atlas-tile canvas and are capped at TILE_W/TILE_H, which is a
+        // texture-budget fact about the raster, not a statement about how big
+        // the sign is in the world.
+        //
+        // This is the single source of the billboard's world size on the
+        // allocation path, and allocation is not a one-time event:
+        // `recycle_offscreen_billboard_slots` drops `BillboardRenderHandle`
+        // whenever a billboard leaves the render neighbourhood, so zooming out
+        // and back in runs this code again. `sync_billboard_properties` cannot
+        // repair a wrong value afterwards — it is gated on
+        // `Changed<BillboardGuiMarker>`, and nothing about an eviction touches
+        // the marker — so whatever is written here is what the user sees until
+        // they next edit the billboard. Deriving it from the clamped canvas
+        // would therefore make a re-allocated sign silently snap back to
+        // `TILE_W / PIXELS_PER_METER` (3.84 m) and stay there.
+        let (size_x, size_y) = meters_from_pixels([raw_w_px, raw_h_px]);
         // ONE shared quad mesh for every billboard (they are geometrically
         // identical; per-billboard sizing lives in the uniform, UVs in
         // BillboardUv). Previously this was `meshes.add(...)` PER billboard
@@ -895,6 +1025,11 @@ fn spawn_billboard_render_state(
             },
             crate::billboard_pipeline::BillboardDepth(!marker.always_on_top),
             BillboardAtlasTile { slot },
+            // Every field recomputed from `marker` right now — never carried
+            // over from a previous grant. `last_label_hash: 0` is both "no
+            // tile painted yet" and the flag `update_and_render_billboards`
+            // reads to repaint a freshly-zeroed slot even when the epoch gate
+            // would otherwise skip it.
             BillboardRenderHandle {
                 width: w,
                 height: h,
@@ -914,6 +1049,21 @@ fn spawn_billboard_render_state(
         }
 
         transform.scale = Vec3::new(size_x, size_y, 1.0);
+        // Re-arm the marker's change tick so `sync_billboard_properties`
+        // (ordered after this system) treats every grant as a fresh authored
+        // value and re-derives world scale, UV window, depth mode, visibility
+        // and lock-axis from it.
+        //
+        // A grant is NOT once per entity: `recycle_offscreen_billboard_slots`
+        // drops the render state whenever a billboard leaves the render
+        // neighbourhood, so a zoom out and back in re-enters this loop. The
+        // marker itself is untouched by that round trip, so without this the
+        // marker-driven sync would not run again for the rest of the session
+        // and the returning billboard would be stuck with whatever this
+        // allocation pass happened to compute. Re-arming keeps ONE authority
+        // for render state (the marker) instead of two paths that have to be
+        // kept in agreement by hand.
+        marker.set_changed();
         let _ = world_pos;
     }
 }
@@ -994,7 +1144,7 @@ fn recycle_offscreen_billboard_slots(
     else {
         return;
     };
-    const RENDER_RADIUS_SQ: f32 = 300.0 * 300.0;
+    const RENDER_RADIUS_SQ: f32 = BILLBOARD_ALLOC_RADIUS * BILLBOARD_ALLOC_RADIUS;
     // 360² — hysteresis band beyond the 300² alloc/render radius, so a billboard
     // hovering at the boundary can't thrash allocate↔evict every frame.
     const EVICT_RADIUS_SQ: f32 = 360.0 * 360.0;
@@ -1037,7 +1187,7 @@ fn recycle_offscreen_billboard_slots(
             }
             dists.push(gt.translation().distance_squared(cam_pos));
         }
-        grid.for_each_in_radius(cam_pos, 300.0, |e| {
+        grid.for_each_in_radius(cam_pos, BILLBOARD_ALLOC_RADIUS, |e| {
             let Ok((gt, marker)) = unslotted.get(e) else { return };
             if !marker.visible {
                 return;
@@ -1071,7 +1221,7 @@ fn recycle_offscreen_billboard_slots(
         // Count via the grid, not a full-world scan (the old diag itself
         // was an O(all-billboards) pass every 2 s).
         let mut in_range = 0usize;
-        grid.for_each_in_radius(cam_pos, 300.0, |e| {
+        grid.for_each_in_radius(cam_pos, BILLBOARD_ALLOC_RADIUS, |e| {
             if let Ok((gt, m)) = unslotted.get(e) {
                 if m.visible && gt.translation().distance_squared(cam_pos) <= RENDER_RADIUS_SQ {
                     in_range += 1;
@@ -1456,7 +1606,7 @@ fn update_and_render_billboards(
     // billboards; collecting + hashing every one each frame cost ~208 ms (31%
     // of the frame). Only billboards within this radius of the order-0 camera
     // are (re)built; the rest keep their last atlas tile (still drawn).
-    const BILLBOARD_CULL_RADIUS_SQ: f32 = 300.0 * 300.0;
+    const BILLBOARD_CULL_RADIUS_SQ: f32 = BILLBOARD_ALLOC_RADIUS * BILLBOARD_ALLOC_RADIUS;
     let cam_pos = cameras
         .iter()
         .find(|(_, c)| c.order == 0)
@@ -1503,8 +1653,8 @@ fn update_and_render_billboards(
         // see `tile_content_scale`). Laying out (and auto-fitting
         // `TextScaled` text) against the unclamped size keeps a child's
         // `Size = UDim2(1, 0, 1, 0)` filling the billboard's true pixel
-        // canvas exactly and keeps the 72-px `TextScaled` ceiling meaningful
-        // in world terms (72px ÷ 50px/stud) regardless of tile budget.
+        // canvas exactly, and keeps the `TextScaled` auto-fit answer stated
+        // in world terms (true px ÷ 50 px/stud) regardless of tile budget.
         // `render_element`/`render_text` apply `content_scale` at the final
         // raster step so oversized billboards still fit inside their
         // (possibly much smaller) atlas tile.
@@ -1784,16 +1934,17 @@ fn render_text(
     // `abs_x`/`abs_y`/`clip_rect` and `elem.width`/`elem.height` are all
     // TRUE (unclamped) pixel space here — see `tile_content_scale`'s doc
     // comment. The auto-fit search below MUST run against the unclamped
-    // `elem.width`/`elem.height`: that's what keeps the `72`-px ceiling
-    // meaning "~1.44 studs" regardless of how small the atlas tile forces
-    // the actual raster to be. `content_scale` is applied once, further
-    // down, to convert the chosen (TRUE-space) font size and the fit-box
-    // into the raster-space values cosmic-text actually shapes/draws with.
+    // `elem.width`/`elem.height`: the answer is then a statement about the
+    // billboard's true footprint (px ÷ 50 px/stud) rather than about the
+    // atlas tile it happens to be squeezed into. `content_scale` is applied
+    // once, further down, to convert the chosen (TRUE-space) font size and
+    // the fit-box into the raster-space values cosmic-text actually
+    // shapes/draws with.
     //
     // Resolve font size — either the user-specified `font_size` or, when
     // `TextScaled` is on, the largest size that fits inside the
     // element's rect via binary-search. The search shape-tests at each
-    // candidate size; ~6 iterations get to ±1 px in the [8, 72] band.
+    // candidate size over a band whose top scales with the rect.
     let font_size = if elem.text_scaled && !elem.text.is_empty()
         && elem.width > 0.0 && elem.height > 0.0
     {
@@ -1844,13 +1995,33 @@ fn render_text(
             total_h <= elem.height && max_w <= elem.width
         };
 
-        // Binary search in [1, 72]. 1 px is the lower readability floor;
-        // 72 is the canonical FontSize cap from the Properties panel —
-        // TextScaled honours it so users can't get a label that ignores
-        // their own clamp.
+        // Binary search in `[1, hi]`. 1 px is the lower readability floor.
+        //
+        // The UPPER bound scales with the box, because `TextScaled` means
+        // "as large as fits" and what fits is a property of the rect, not a
+        // constant. `elem.height` is the natural bound: line height is 1.4×
+        // the font size, so a single line at `font = elem.height` already
+        // overspills vertically and `fits_at(elem.height)` is false for any
+        // non-empty string — exactly the "upper end never fits" invariant a
+        // bisection needs, and it grows with the billboard so a 1400×420 px
+        // sign gets ~300 px glyphs instead of glyphs 5% of its own height.
+        // (A fixed ceiling made `TextScaled` read backwards — the bigger the
+        // billboard, the smaller its text looked, since `content_scale`
+        // shrinks the raster of an oversized canvas on top of the cap.)
+        //
+        // The 72 floor keeps the historical band for ordinary small labels:
+        // a 20-px-tall rect still searches up to 72 and still converges on
+        // whatever genuinely fits, so nothing about existing content moves.
+        // Because `hi` is a bound that provably cannot fit, the search always
+        // reports a real fit rather than a clamp, and there is no "hit the
+        // ceiling" case left to warn about.
         let mut lo: f32 = 1.0;
-        let mut hi: f32 = 72.0;
-        let max_iters = 8;
+        let mut hi: f32 = elem.height.max(72.0);
+        // Two halvings more than a fixed-72 band needed. The band is now as
+        // tall as the box, so signage-scale text would otherwise converge
+        // several px short of its true fit; `lo` only ever advances to sizes
+        // that fit, so extra iterations refine, never overflow.
+        let max_iters = 10;
         for _ in 0..max_iters {
             let mid = (lo + hi) * 0.5;
             if fits_at(mid) { lo = mid; } else { hi = mid; }
@@ -2813,7 +2984,11 @@ impl Plugin for BillboardGuiPlugin {
             // Grid maintenance runs before anything queries it this frame.
             .add_systems(
                 Update,
-                maintain_billboard_spatial_grid.before(recycle_offscreen_billboard_slots),
+                (
+                    maintain_billboard_spatial_grid.before(recycle_offscreen_billboard_slots),
+                    // bevy_ui must not draw billboard-owned GUI in screen space.
+                    hide_billboard_owned_ui_nodes,
+                ),
             )
             // Register DoubleClickedPart alongside the systems that read it.
             // History: the engine crate used to be DUAL-COMPILED (lib + bin

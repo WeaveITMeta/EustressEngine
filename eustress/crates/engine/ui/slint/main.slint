@@ -366,6 +366,8 @@ export component StudioWindow inherits Window {
     in-out property <string> workshop-active-mode-name: "General";
     in-out property <string> workshop-active-model-name: "Sonnet 5";
     in-out property <bool>   workshop-gauntlet-enabled: false;
+    // Auto mode: run approval-gated Workshop tools without prompting.
+    in-out property <bool>   workshop-auto-enabled: false;
     // Chat scroll offset, held at window root so it outlives the Workshop
     // panel's `if right-tab-index == 3` teardown. The host swaps this value
     // per Workshop session.
@@ -518,9 +520,9 @@ export component StudioWindow inherits Window {
     callback update-clicked();
 
     // Bliss node state
-    in-out property <string> bliss-balance: "0.000000000000000000";
+    in-out property <string> bliss-balance: "0.00";
     in-out property <string> bliss-balance-short: "0.00";
-    in-out property <string> bliss-pending: "+0.000000000000000000";
+    in-out property <string> bliss-pending: "+0.0 pts today";
     in-out property <string> bliss-node-mode: "Light";
     in-out property <string> bliss-bonus: "1.0x";
     in-out property <bool> bliss-enabled: true;
@@ -1183,6 +1185,7 @@ export component StudioWindow inherits Window {
     callback workshop-mode-changed(string); // user picked a different mode
     callback workshop-model-changed(string); // user picked a different model
     callback workshop-gauntlet-toggled(bool); // user flipped the AAA verify-loop mode
+    callback workshop-auto-toggled(bool);     // user flipped auto-approve
     /// Close a session tab in the Workshop panel. Host removes the
     /// session from the in-memory list and optionally deletes the
     /// folder under SoulService/Workshop/ (policy TBD — for now
@@ -1228,6 +1231,7 @@ export component StudioWindow inherits Window {
         // ====================================================================
         Ribbon {
             current-tool: root.current-tool;
+            telemetry-enabled: root.usage-telemetry-enabled;
             // Terrain active-state: which brush is armed and whether sculpt
             // mode is on, so the Terrain tab's buttons light up like every
             // other tool button does.
@@ -3465,6 +3469,8 @@ export component StudioWindow inherits Window {
                             // Gauntlet (AAA verify-loop) toggle
                             gauntlet-enabled <=> root.workshop-gauntlet-enabled;
                             on-gauntlet-toggled(v) => { root.workshop-gauntlet-toggled(v); }
+                            auto-enabled <=> root.workshop-auto-enabled;
+                            on-auto-toggled(v) => { root.workshop-auto-toggled(v); }
 
                             // Per-session chat scroll position
                             chat-scroll-y <=> root.workshop-chat-scroll-y;

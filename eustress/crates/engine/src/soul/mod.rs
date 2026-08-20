@@ -92,6 +92,20 @@ pub struct GlobalSoulSettings {
     /// an explicit opt-in, never a silent default.
     #[serde(default)]
     pub workshop_gauntlet: bool,
+    /// Whether Workshop executes approval-gated tools without asking.
+    ///
+    /// Defaults to OFF, and stays an explicit opt-in for the same reason the
+    /// gauntlet does: the tools behind this gate are the ones that write files
+    /// and run commands. Turning it on trades the per-call confirmation for
+    /// speed, which is the right trade during a long working session and the
+    /// wrong one by default.
+    ///
+    /// This bypasses the *prompt*, never the capability check. An unclassified
+    /// or disallowed tool is still refused at dispatch by
+    /// `tools::capability::authorize`, so auto mode cannot widen what Workshop
+    /// is permitted to do, only how often it stops to ask.
+    #[serde(default)]
+    pub workshop_auto_approve: bool,
 }
 
 fn default_workshop_model() -> String {
