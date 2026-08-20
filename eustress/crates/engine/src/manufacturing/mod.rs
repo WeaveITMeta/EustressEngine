@@ -15,8 +15,12 @@
 //!
 //! ## Key Design Principles
 //!
-//! - **File-system-first**: All registry data lives in TOML files under
-//!   `docs/manufacturing/investors/` and `docs/manufacturing/manufacturers/`
+//! - **File-system-first, and Space-local**: registry data lives as class
+//!   instances under the open Space's own `DataService/Vendors/` and
+//!   `DataService/Investors/`, created on demand. It used to live in one global
+//!   `docs/manufacturing/` directory shared by every Space, which was wrong: a
+//!   supply base varies per project, and a global list lets an order in one
+//!   project name a vendor that only exists for another.
 //! - **Single-source per product**: One manufacturer covers the full BOM assembly.
 //!   Split at sub-assembly level only when truly impossible.
 //! - **Minimum investors**: Select the fewest investors whose combined check size
@@ -507,83 +511,100 @@ pub fn score_manufacturer(
 // 6. ManufacturingPlugin
 // ============================================================================
 
-pub struct ManufacturingPlugin {
-    /// Path to the investors TOML directory
-    pub investors_dir: std::path::PathBuf,
-    /// Path to the manufacturers TOML directory
-    pub manufacturers_dir: std::path::PathBuf,
-}
+/// Loads the open Space's own supply base.
+///
+/// Vendors are Space-LOCAL, and deliberately so. An earlier version read a
+/// single global `docs/manufacturing/manufacturers/` directory, which meant
+/// every Space in every Universe shared one vendor list. A supply base varies
+/// from project to project, and a global list lets an order in one project name
+/// a vendor that only exists for another.
+///
+/// Both directories are created on demand by the tools that write them, never
+/// scaffolded at Space creation, so a Space that never opens the Procurement
+/// tools carries none of this.
+pub struct ManufacturingPlugin;
 
 impl Default for ManufacturingPlugin {
     fn default() -> Self {
-        Self {
-            investors_dir: std::path::PathBuf::from("docs/manufacturing/investors"),
-            manufacturers_dir: std::path::PathBuf::from("docs/manufacturing/manufacturers"),
-        }
+        Self
     }
 }
 
-impl ManufacturingPlugin {
-    /// Resolve a registry directory against the plausible working directories.
+/// Vendors, relative to the Space root.
+pub const VENDORS_DIR: &str = "DataService/Vendors";
+/// Investors, relative to the Space root.
+pub const INVESTORS_DIR: &str = "DataService/Investors";
+
+impl ManufacturingProgramRegistry {
+    /// Load one `T` per child folder of `dir`, from its `_instance.toml`.
     ///
-    /// The configured path is relative, so what it means depends on where the
-    /// binary was launched from: the workspace root and the repository root are
-    /// both real possibilities, and they are different directories. Rather than
-    /// bet on one, try each and take the first that exists. Returning the
-    /// resolved path lets the caller log which one won, so a registry that
-    /// loaded from an unexpected place is visible rather than mysterious.
-    fn resolve(dir: &std::path::Path) -> Option<std::path::PathBuf> {
-        if dir.is_absolute() {
-            return dir.is_dir().then(|| dir.to_path_buf());
+    /// The instance file carries `[metadata]`, `[properties]` and `[attributes]`
+    /// alongside the record's own fields. `Manufacturer` and `Investor` do not
+    /// set `deny_unknown_fields`, so serde ignores those sections and reads the
+    /// record it recognises.
+    pub fn load_instances_from_dir<T: serde::de::DeserializeOwned>(
+        dir: &std::path::Path,
+    ) -> Vec<T> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return vec![];
+        };
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let folder = entry.path();
+            if !folder.is_dir() {
+                continue;
+            }
+            let inst = folder.join("_instance.toml");
+            let Ok(text) = std::fs::read_to_string(&inst) else {
+                continue;
+            };
+            match toml::from_str::<T>(&text) {
+                Ok(v) => out.push(v),
+                // Loud, not silent: a folder the user believes is a vendor that
+                // silently fails to parse becomes a vendor missing from the RFQ
+                // Builder with no explanation.
+                Err(e) => tracing::error!(
+                    "ManufacturingPlugin: {} failed to parse and was NOT loaded: {e}",
+                    inst.display()
+                ),
+            }
         }
-        ["", "..", "../..", "../../.."]
-            .iter()
-            .map(|prefix| {
-                if prefix.is_empty() {
-                    dir.to_path_buf()
-                } else {
-                    std::path::Path::new(prefix).join(dir)
-                }
-            })
-            .find(|candidate| candidate.is_dir())
+        out
     }
 }
 
 impl Plugin for ManufacturingPlugin {
     fn build(&self, app: &mut App) {
-        let investors = Self::resolve(&self.investors_dir);
-        let manufacturers = Self::resolve(&self.manufacturers_dir);
+        let root = crate::space::default_space_root();
+        let vendors_dir = root.join(VENDORS_DIR);
+        let investors_dir = root.join(INVESTORS_DIR);
 
         let mut registry = ManufacturingProgramRegistry::default();
-        if let Some(ref dir) = investors {
-            registry.investors = ManufacturingProgramRegistry::load_from_dir(dir);
-        }
-        if let Some(ref dir) = manufacturers {
-            registry.manufacturers = ManufacturingProgramRegistry::load_from_dir(dir);
-        }
+        registry.manufacturers =
+            ManufacturingProgramRegistry::load_instances_from_dir(&vendors_dir);
+        registry.investors =
+            ManufacturingProgramRegistry::load_instances_from_dir(&investors_dir);
 
-        let investor_count = registry.investors.len();
         let manufacturer_count = registry.manufacturers.len();
+        let investor_count = registry.investors.len();
 
         app.insert_resource(registry);
 
-        // Said out loud, because an empty manufacturer registry leaves the RFQ
-        // Builder with nothing to raise an order against, and "the button does
-        // nothing" is a much worse symptom to debug than a startup line saying
-        // the directory was not found.
-        match manufacturers {
-            Some(ref dir) => tracing::info!(
-                "ManufacturingPlugin loaded: {} investors, {} manufacturers from {}",
-                investor_count,
+        // Said out loud, because an empty vendor list leaves the RFQ Builder
+        // with nothing to raise an order against, and "the button does nothing"
+        // is a far worse symptom to debug than a startup line.
+        if manufacturer_count == 0 {
+            tracing::info!(
+                "ManufacturingPlugin: no vendors at {} — the RFQ Builder will have                  none to offer until one is registered. This is normal for a Space                  that does not do procurement.",
+                vendors_dir.display()
+            );
+        } else {
+            tracing::info!(
+                "ManufacturingPlugin loaded: {} vendors, {} investors from {}",
                 manufacturer_count,
-                dir.display()
-            ),
-            None => tracing::warn!(
-                "ManufacturingPlugin: no manufacturer registry found at {} \
-                 (searched upward from the working directory). The RFQ Builder \
-                 will have no vendors to raise orders against.",
-                self.manufacturers_dir.display()
-            ),
+                investor_count,
+                vendors_dir.display()
+            );
         }
     }
 }

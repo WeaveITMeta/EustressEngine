@@ -21,12 +21,38 @@
 //! A handful of clones per visible row is nothing next to a UI that can offer an
 //! illegal action.
 
+use bevy::prelude::Resource;
+
 use crate::manufacturing::{
     InvoiceStatus, PurchaseError, PurchaseOrder, PurchaseOrderLine, PurchaseOrderState,
 };
 use crate::manufacturing::purchase::LineDisplayType;
 
 use crate::ui::slint_ui::{ManufacturerOption, PurchaseOrderLineRow, PurchaseOrderRow};
+
+/// A record the Explorer asked the Procurement panels to reveal.
+///
+/// Double-clicking a `PurchaseOrder` opens the Tracker, but "open the tab" and
+/// "select the right row" cannot happen in the same place: the row list is
+/// rebuilt by `sync_procurement_to_slint`, which runs after the click handler
+/// and orders rows by the current filter. So the handler records *what* to
+/// reveal and the sync turns that into an index once it has the rows in hand.
+///
+/// Cleared by the sync as soon as it lands, so a later filter change does not
+/// yank the selection back.
+#[derive(Debug, Default, Resource)]
+pub struct ProcurementFocus {
+    /// A `PurchaseOrder` reference such as `"PO00003"`.
+    pub order: Option<String>,
+    /// A `Manufacturer` id to preselect in the RFQ Builder's vendor picker.
+    pub vendor: Option<String>,
+}
+
+impl ProcurementFocus {
+    pub fn is_pending(&self) -> bool {
+        self.order.is_some() || self.vendor.is_some()
+    }
+}
 
 /// Odoo's `po_double_validation_amount`: orders above this total route through
 /// an approval step instead of confirming straight to `purchase`.

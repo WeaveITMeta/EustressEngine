@@ -1,0 +1,16 @@
+# PurchaseOrderLine — Procurement: one line on a PurchaseOrder.
+#
+# Child of a PurchaseOrder, mirroring Series under Dataset.
+#
+# Fields live in `[attributes]`: name, sequence, product_id, product_qty,
+# product_uom, price_unit, discount, tax_percent, date_planned, qty_received,
+# qty_invoiced, display_type.
+#
+# `display_type` mirrors Odoo: an empty value is a real product line, while
+# `line_section` and `line_note` are presentational and contribute nothing to
+# the order totals. Note the wire values are `line_section` / `line_note`, not
+# `section` / `note`.
+
+[metadata]
+class_name = "PurchaseOrderLine"
+archivable = true

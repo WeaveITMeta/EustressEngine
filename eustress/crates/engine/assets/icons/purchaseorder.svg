@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- PurchaseOrder: an order document with line items -->
+  <path d="M3.4 1.9 h6 L12.9 5.4 V14.1 H3.4 Z" fill="none" stroke="#38bdf8" stroke-width="1" stroke-linejoin="round"/>
+  <path d="M9.4 1.9 V5.4 H12.9" fill="#38bdf8" opacity="0.45" stroke="#38bdf8" stroke-width="0.8" stroke-linejoin="round"/>
+  <path d="M5.4 8.1 H11 M5.4 10.3 H11 M5.4 12.5 H8.6" stroke="#38bdf8" stroke-width="0.9" stroke-linecap="round" opacity="0.85"/>
+</svg>

@@ -1,0 +1,19 @@
+# PurchaseOrder — Procurement: one order, ported from Odoo 17's `purchase.order`.
+#
+# An RFQ is NOT a separate class. It is a PurchaseOrder whose `state` is `draft`
+# (labelled "RFQ") or `sent` ("RFQ Sent"); confirming it turns this same record
+# into a purchase order, keeping its reference, lines and history. A separate
+# RequestForQuote class would have to copy fields across on confirmation, which
+# is the drifted-copy bug class Odoo's design avoids.
+#
+# Holds its line items as child PurchaseOrderLine entities, the way a Dataset
+# holds its Series, so a line is selectable in the Explorer.
+#
+# Fields live in `[attributes]`: state, manufacturer_id, date_order,
+# date_approve, date_planned, currency, partner_ref, origin, buyer, has_invoices.
+# `state` uses Odoo's exact wire values (draft, sent, "to approve", purchase,
+# done, cancel) so a record round-trips to a real Odoo instance untranslated.
+
+[metadata]
+class_name = "PurchaseOrder"
+archivable = true

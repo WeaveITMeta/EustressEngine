@@ -1,0 +1,16 @@
+# Manufacturer — Procurement: a qualified vendor in this Space's supply base.
+#
+# Non-visual container modelled on Dataset. Every field lives in `[attributes]`
+# so the Properties panel renders and edits it generically, type-preserving,
+# without a hand-written query in `sync_properties_to_slint`.
+#
+# Space-LOCAL by design. A supply base varies per project, so these live under
+# the Space's DataService/Vendors rather than in a global directory.
+#
+# Only `status = "approved"` vendors are offered in the RFQ Builder's picker:
+# the rest cannot be allocated work elsewhere in the manufacturing module, so
+# offering one would create an order the program then refuses to honour.
+
+[metadata]
+class_name = "Manufacturer"
+archivable = true

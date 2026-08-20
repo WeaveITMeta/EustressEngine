@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- PurchaseOrderLine: one row of an order, quantity then description -->
+  <rect x="2.2" y="5.4" width="3.2" height="5.2" rx="0.9" fill="#38bdf8" opacity="0.45" stroke="#38bdf8" stroke-width="0.9"/>
+  <path d="M7.2 7.1 H13.8 M7.2 9.6 H11.6" stroke="#38bdf8" stroke-width="1.1" stroke-linecap="round"/>
+</svg>
