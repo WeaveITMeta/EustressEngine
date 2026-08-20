@@ -1218,7 +1218,7 @@ function handleJurisdiction(request, env, cors) {
     return json({
       detected: true, iso2: country, name: jurisdiction.name, colo,
       accepted_ids: jurisdiction.natural_ids,
-      r2_prefix: jurisdiction.r2_prefix, notes: jurisdiction.notes,
+      notes: jurisdiction.notes,
       minors: jurisdiction.minors || null,
     }, 200, cors);
   }
@@ -1226,7 +1226,6 @@ function handleJurisdiction(request, env, cors) {
   return json({
     detected: false, iso2: country, name: `Unknown (${country})`, colo,
     accepted_ids: JURISDICTIONS.fallback.require,
-    r2_prefix: `kyc-${country.toLowerCase()}-`,
     notes: 'Fallback: enhanced due diligence', flag: 'manual_review',
   }, 200, cors);
 }
@@ -2151,7 +2150,6 @@ async function handleCommunityLeaderboard(env, cors) {
       username: user.username,
       avatar_url: user.avatar_url || null,
       hours: Math.round(hours * 10) / 10,
-      bliss_balance: user.bliss_balance || 0,
       spaces_created: spacesCreated,
       total_visits: user.total_visits || 0,
       last_active: user.last_active || user.created_at,
@@ -2165,7 +2163,6 @@ async function handleCommunityLeaderboard(env, cors) {
     username: e.username,
     avatar_url: e.avatar_url,
     hours: e.hours,
-    bliss_balance: e.bliss_balance,
     spaces_created: e.spaces_created,
     total_visits: e.total_visits,
   }));
@@ -5104,13 +5101,34 @@ async function publicUser(user, env) {
 
 function json(data, status, headers) {
   return new Response(JSON.stringify(data), {
-    status, headers: { ...headers, 'Content-Type': 'application/json' },
+    status, headers: {
+      ...headers,
+      'Content-Type': 'application/json',
+      'Strict-Transport-Security': 'max-age=31536000; includeSubDomains; preload',
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'strict-origin-when-cross-origin',
+    },
   });
 }
 
+// Origins allowed to read cross-origin API responses. The API is bearer-token
+// (Authorization header) auth, never cookies, so this list is the browser-facing
+// surface only; non-browser clients (engine, updater) send no Origin and are
+// unaffected. NEVER pair a reflected/allowlisted origin with
+// Access-Control-Allow-Credentials: true.
+const ALLOWED_ORIGINS = new Set([
+  'https://eustress.dev',
+  'https://www.eustress.dev',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+]);
+
 function corsHeaders(request) {
+  const origin = request.headers.get('Origin');
+  const allow = origin && ALLOWED_ORIGINS.has(origin) ? origin : 'https://eustress.dev';
   return {
-    'Access-Control-Allow-Origin': request.headers.get('Origin') || '*',
+    'Access-Control-Allow-Origin': allow,
+    'Vary': 'Origin',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-ID-Type',
     'Access-Control-Max-Age': '86400',

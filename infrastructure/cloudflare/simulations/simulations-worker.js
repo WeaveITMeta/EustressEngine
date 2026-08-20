@@ -17,22 +17,35 @@ const corsHeaders = {
 // JWT validation (simplified - in production use a proper library)
 async function validateJWT(token, secret) {
   if (!token || !secret) return null;
-  
+
   try {
     const [headerB64, payloadB64, signature] = token.split('.');
     if (!headerB64 || !payloadB64 || !signature) return null;
-    
+
+    // Verify the HMAC-SHA256 signature BEFORE trusting any claim. This function
+    // previously trusted the payload without checking the signature, so any
+    // forged token carrying `sub` + `user_id` was accepted as a valid user.
+    const enc = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      'raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
+    );
+    const sigBytes = Uint8Array.from(
+      atob(signature.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)
+    );
+    const valid = await crypto.subtle.verify(
+      'HMAC', key, sigBytes, enc.encode(`${headerB64}.${payloadB64}`)
+    );
+    if (!valid) return null;
+
     const payload = JSON.parse(atob(payloadB64.replace(/-/g, '+').replace(/_/g, '/')));
-    
+
     // Check expiration
     if (payload.exp && payload.exp < Date.now() / 1000) {
       return null;
     }
-    
-    // In production, verify signature with crypto.subtle
-    // For now, trust the payload if it has required fields
+
     if (!payload.sub || !payload.user_id) return null;
-    
+
     return payload;
   } catch (e) {
     console.error('JWT validation error:', e);

@@ -1,0 +1,7 @@
+# Eustress vulnerability disclosure (RFC 9116)
+Contact: https://github.com/WeaveITMeta/EustressEngine/security/advisories/new
+Contact: mailto:security@eustress.dev
+Expires: 2027-08-18T00:00:00.000Z
+Preferred-Languages: en
+Canonical: https://eustress.dev/.well-known/security.txt
+Policy: https://github.com/WeaveITMeta/EustressEngine/security/policy

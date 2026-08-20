@@ -230,11 +230,23 @@ function jsonResponse(data, status, headers) {
   });
 }
 
+const ALLOWED_ORIGINS = new Set([
+  'https://eustress.dev',
+  'https://www.eustress.dev',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+]);
+
 function corsHeaders(request) {
+  const origin = request.headers.get('Origin');
+  const allow = origin && ALLOWED_ORIGINS.has(origin) ? origin : 'https://eustress.dev';
   return {
-    'Access-Control-Allow-Origin': request.headers.get('Origin') || '*',
+    'Access-Control-Allow-Origin': allow,
+    'Vary': 'Origin',
     'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Max-Age': '86400',
+    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains; preload',
+    'X-Content-Type-Options': 'nosniff',
   };
 }

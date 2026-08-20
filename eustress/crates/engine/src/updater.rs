@@ -216,10 +216,11 @@ pub fn start_download(state: &mut UpdateState) {
 
     let url = state.download_url.clone();
     let expected_hash = state.expected_hash.clone();
+    let expected_size = state.size_bytes;
     let async_state = state.async_state.clone();
 
     std::thread::spawn(move || {
-        match download_and_verify(&url, &expected_hash, async_state.clone()) {
+        match download_and_verify(&url, &expected_hash, expected_size, async_state.clone()) {
             Ok(path) => {
                 if let Ok(mut s) = async_state.lock() {
                     s.status = "ready".to_string();
@@ -241,12 +242,24 @@ pub fn start_download(state: &mut UpdateState) {
 fn download_and_verify(
     url: &str,
     expected_hash: &str,
+    expected_size: u64,
     progress: Arc<Mutex<AsyncUpdateState>>,
 ) -> Result<std::path::PathBuf, String> {
     use sha2::{Sha256, Digest};
     use std::io::Read;
 
-    let resp = ureq::get(url)
+    // Only ever fetch the update from the official release host over HTTPS, and
+    // never follow redirects — otherwise a hostile manifest `url` could aim the
+    // auto-installer at an arbitrary origin (or bounce through one).
+    const RELEASE_PREFIX: &str = "https://releases.eustress.dev/";
+    if !url.starts_with(RELEASE_PREFIX) {
+        return Err(format!(
+            "Refusing update: artifact URL {url:?} is not under {RELEASE_PREFIX}"
+        ));
+    }
+
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    let resp = agent.get(url)
         .timeout(std::time::Duration::from_secs(300))
         .call()
         .map_err(|e| format!("Download failed: {}", e))?;
@@ -254,6 +267,14 @@ fn download_and_verify(
     let total = resp.header("Content-Length")
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
+
+    // Hard cap on bytes written so a hostile/oversized manifest cannot fill the
+    // disk. Prefer the manifest's declared size (+1 MiB slack); otherwise fall
+    // back to a 2 GiB absolute ceiling.
+    let max_bytes: u64 = if expected_size > 0 { expected_size + (1u64 << 20) } else { 2u64 << 30 };
+    if total > max_bytes {
+        return Err(format!("Refusing update: advertised size {total} exceeds cap {max_bytes}"));
+    }
 
     let download_dir = dirs::cache_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -282,6 +303,10 @@ fn download_and_verify(
         hasher.update(&buf[..n]);
 
         downloaded += n as u64;
+        if downloaded > max_bytes {
+            std::fs::remove_file(&download_path).ok();
+            return Err(format!("Refusing update: download exceeded {max_bytes} bytes"));
+        }
         if total > 0 {
             let pct = (downloaded * 100 / total) as u32;
             if let Ok(mut s) = progress.lock() {
@@ -290,11 +315,21 @@ fn download_and_verify(
         }
     }
 
-    // Verify hash
+    // Verify hash — fail CLOSED. A missing/short/non-hex hash means the manifest
+    // cannot vouch for these bytes, so refuse rather than install something
+    // unverified. (Previously an empty `sha256` silently skipped verification.)
     let hash = format!("{:x}", hasher.finalize());
-    if !expected_hash.is_empty() && hash != expected_hash {
+    let expected = expected_hash.trim().to_ascii_lowercase();
+    let is_sha256 = expected.len() == 64 && expected.bytes().all(|b| b.is_ascii_hexdigit());
+    if !is_sha256 {
         std::fs::remove_file(&download_path).ok();
-        return Err(format!("SHA-256 mismatch: expected {}, got {}", expected_hash, hash));
+        return Err(format!(
+            "Refusing update: manifest has no valid SHA-256 for this artifact ({expected_hash:?})"
+        ));
+    }
+    if hash != expected {
+        std::fs::remove_file(&download_path).ok();
+        return Err(format!("SHA-256 mismatch: expected {expected}, got {hash}"));
     }
 
     info!("✅ Update downloaded and verified: {:?}", download_path);
