@@ -59,9 +59,7 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
-use super::rest::{
-    default_transport, frame_from_json_value, parse_json, HttpRequest, HttpResponse, HttpTransport,
-};
+use super::rest::{HttpMethod, default_transport, frame_from_json_value, parse_json, HttpRequest, HttpResponse, HttpTransport,};
 use super::{validate_config, ConnectionStatus, DataSource, SourceConfig, SourceKind};
 use crate::{DataError, Frame, Result};
 
@@ -236,7 +234,7 @@ impl FirebaseSource {
             })?;
             headers.push(("Authorization".to_string(), format!("Bearer {token}")));
         }
-        Ok(HttpRequest { method: "GET".to_string(), url, headers, body: None })
+        Ok(HttpRequest { method: HttpMethod::Get, url, headers, body: None })
     }
 
     /// Issue one GET, turning a non-2xx into an error that carries Firestore's
@@ -248,10 +246,10 @@ impl FirebaseSource {
                 "Firestore returned HTTP {} for collection '{}': {}",
                 response.status,
                 self.collection(),
-                error_detail(&response.body)
+                error_detail(&response.text())
             )));
         }
-        parse_json(&response.body)
+        parse_json(&response.text())
     }
 }
 
@@ -266,7 +264,7 @@ impl DataSource for FirebaseSource {
         let request = self.request(self.request_url(1, None))?;
         match self.transport.send(&request) {
             Ok(response) if is_success(&response) => {
-                let count = parse_json(&response.body)
+                let count = parse_json(&response.text())
                     .map(|payload| documents_of(&payload).len())
                     .unwrap_or(0);
                 Ok(ConnectionStatus::ok(format!(
@@ -278,7 +276,7 @@ impl DataSource for FirebaseSource {
             Ok(response) => Ok(ConnectionStatus::failed(format!(
                 "Firestore returned HTTP {}: {}",
                 response.status,
-                error_detail(&response.body)
+                error_detail(&response.text())
             ))),
             Err(e) => Ok(ConnectionStatus::failed(e.to_string())),
         }
@@ -491,7 +489,7 @@ mod tests {
                     replies
                         .into_iter()
                         .rev()
-                        .map(|(status, body)| HttpResponse { status, body: body.to_string() })
+                        .map(|(status, body)| HttpResponse::new(status, body))
                         .collect(),
                 ),
                 seen: Mutex::new(Vec::new()),

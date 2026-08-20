@@ -51,112 +51,12 @@ const PUBLIC_SUFFIX: &str = "blob.core.windows.net";
 const MAX_BLOB_CHARS: usize = 1024;
 
 // ── The HTTP seam ────────────────────────────────────────────────────────────
-
-/// The HTTP verbs this crate's providers issue. A source reads; there is
-/// deliberately no way to express a write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HttpMethod {
-    /// Read a resource.
-    Get,
-    /// Read a resource's metadata only — the liveness probe.
-    Head,
-}
-
-impl HttpMethod {
-    /// The wire token.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Get => "GET",
-            Self::Head => "HEAD",
-        }
-    }
-}
-
-/// One blocking HTTP request, fully resolved.
-///
-/// [`fmt::Debug`] is implemented by hand: it redacts the URL query string and
-/// every credential-bearing header, so a request can be logged or surfaced in
-/// an error without leaking a SAS or bearer token.
-#[derive(Clone, PartialEq, Eq)]
-pub struct HttpRequest {
-    /// Verb.
-    pub method: HttpMethod,
-    /// Absolute URL, including any query string.
-    pub url: String,
-    /// Header name/value pairs, in send order.
-    pub headers: Vec<(String, String)>,
-}
-
-impl fmt::Debug for HttpRequest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let headers: Vec<(&str, &str)> = self
-            .headers
-            .iter()
-            .map(|(k, v)| (k.as_str(), if is_secret_header(k) { "<redacted>" } else { v.as_str() }))
-            .collect();
-        f.debug_struct("HttpRequest")
-            .field("method", &self.method)
-            .field("url", &redact_query(&self.url))
-            .field("headers", &headers)
-            .finish()
-    }
-}
-
-/// Whether a header's value must never be printed.
-fn is_secret_header(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    n == "authorization"
-        || n == "cookie"
-        || n.contains("token")
-        || n.contains("secret")
-        || n.contains("-key")
-        || n.contains("signature")
-}
-
-/// Strip a URL's query string — a SAS token lives there.
-fn redact_query(url: &str) -> String {
-    match url.split_once('?') {
-        Some((base, _)) => format!("{base}?<redacted>"),
-        None => url.to_string(),
-    }
-}
-
-/// One HTTP response.
-#[derive(Clone, PartialEq, Eq)]
-pub struct HttpResponse {
-    /// Status code.
-    pub status: u16,
-    /// Body bytes (empty for a `HEAD`).
-    pub body: Vec<u8>,
-}
-
-impl HttpResponse {
-    /// A 2xx status.
-    pub fn is_success(&self) -> bool {
-        (200..300).contains(&self.status)
-    }
-}
-
-impl fmt::Debug for HttpResponse {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Bodies can be large and can echo a signed URL; print shape, not content.
-        f.debug_struct("HttpResponse")
-            .field("status", &self.status)
-            .field("body_len", &self.body.len())
-            .finish()
-    }
-}
-
-/// A blocking HTTP client, injected by the caller.
-///
-/// `eustress-data` deliberately links none: the engine already carries `ureq`,
-/// and the leaf must stay dependency-free (invariant **D2**). Implementations
-/// must be usable from any thread, because a live source polls on a worker.
-pub trait HttpTransport: Send + Sync {
-    /// Issue `request` and return the response. Return `Err` only for transport
-    /// failures (DNS, connect, TLS, read); a 404 is a successful round trip.
-    fn send(&self, request: &HttpRequest) -> Result<HttpResponse>;
-}
+//
+// Re-exported from `super::http`. This module previously defined a SECOND
+// transport with no request body and its own redaction rules, which meant a
+// stub written for one provider could not drive another, and the "no header
+// value is ever formattable" property held on only one of the two paths.
+pub use super::http::{HttpMethod, HttpRequest, HttpResponse, HttpTransport};
 
 // ── Resolved target ──────────────────────────────────────────────────────────
 
@@ -358,7 +258,7 @@ impl AzureBlobSource {
                 headers.push(("Authorization".to_string(), format!("Bearer {}", self.secret()?)));
             }
         }
-        Ok(HttpRequest { method, url, headers })
+        Ok(HttpRequest { method, url, headers, body: None })
     }
 
     /// The credential named by [`SourceConfig::secret_ref`], read now.
@@ -445,17 +345,7 @@ fn status_hint(status: u16) -> &'static str {
 /// A short, single-line, printable slice of a response body — enough to
 /// diagnose a service's error payload without pasting a megabyte into a log.
 /// Shared with [`super::oracle`].
-pub(super) fn excerpt(body: &[u8]) -> String {
-    let cut = body.len().min(240);
-    let text = String::from_utf8_lossy(&body[..cut]);
-    let flat = text.replace(['\n', '\r', '\t'], " ");
-    let trimmed = flat.trim().to_string();
-    if body.len() > cut {
-        format!("{trimmed}…")
-    } else {
-        trimmed
-    }
-}
+pub(super) use super::http::excerpt;
 
 // ── Decoding (shared with `super::oracle`) ───────────────────────────────────
 
@@ -827,13 +717,7 @@ fn resolve_emulator_base(config: &SourceConfig) -> Result<Option<String>> {
 }
 
 /// Whether `host[:port]` addresses this machine.
-pub(super) fn is_loopback_authority(authority: &str) -> bool {
-    let host = match authority.strip_prefix('[') {
-        Some(rest) => rest.split(']').next().unwrap_or(""),
-        None => authority.split(':').next().unwrap_or(""),
-    };
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
-}
+pub(super) use super::http::is_loopback_authority;
 
 fn resolve_timeout_seconds(config: &SourceConfig) -> Result<Option<u64>> {
     let Some(raw) = non_empty(config.option("timeout_seconds")) else {
@@ -969,7 +853,7 @@ pub(crate) mod testing {
             let rest = request.url.strip_prefix("http://").ok_or_else(|| {
                 DataError::Io(std::io::Error::other(format!(
                     "the test transport speaks only http://, got {}",
-                    super::redact_query(&request.url)
+                    crate::source::http::redact_query(&request.url)
                 )))
             })?;
             let (authority, path) = match rest.split_once('/') {
@@ -1386,6 +1270,7 @@ mod tests {
                 ("x-ms-version".to_string(), DEFAULT_API_VERSION.to_string()),
                 ("Authorization".to_string(), "Bearer SUPERSECRET".to_string()),
             ],
+            body: None,
         };
         let rendered = format!("{req:?}");
         assert!(!rendered.contains("SUPERSECRET"), "credential leaked: {rendered}");

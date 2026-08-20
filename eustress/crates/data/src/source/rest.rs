@@ -42,73 +42,12 @@ use super::{validate_config, ConnectionStatus, DataSource, SourceConfig, SourceK
 use crate::{DataError, Frame, Result};
 
 // ── The transport seam ───────────────────────────────────────────────────────
-
-/// One HTTP request, reduced to what a data provider actually needs.
-///
-/// Header *values* are deliberately unreachable through `Debug` (see the manual
-/// impl below) because one of them routinely carries a resolved secret.
-#[derive(Clone)]
-pub struct HttpRequest {
-    /// Uppercase verb — `GET`, `POST`, or `HEAD`.
-    pub method: String,
-    /// Absolute URL, including scheme.
-    pub url: String,
-    /// Header name/value pairs, in send order.
-    pub headers: Vec<(String, String)>,
-    /// Request body, if any.
-    pub body: Option<String>,
-}
-
-impl std::fmt::Debug for HttpRequest {
-    /// Renders header NAMES only. A data source's auth header holds a live
-    /// credential, and `Debug` output reaches logs, panic messages, and error
-    /// reports — so no header value is ever formattable, not just the ones this
-    /// module happens to know are sensitive.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let names: Vec<&str> = self.headers.iter().map(|(k, _)| k.as_str()).collect();
-        f.debug_struct("HttpRequest")
-            .field("method", &self.method)
-            .field("url", &self.url)
-            .field("headers", &names)
-            .field("body_bytes", &self.body.as_ref().map(String::len).unwrap_or(0))
-            .finish()
-    }
-}
-
-/// What a transport got back. A non-2xx status is a *successful* transport
-/// call — the provider decides what the status means.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HttpResponse {
-    /// HTTP status code.
-    pub status: u16,
-    /// Response body, decoded as UTF-8.
-    pub body: String,
-}
-
-/// Blocking HTTP transport. `Send + Sync` so a source holding one stays
-/// `Send + Sync` and satisfies [`DataSource`].
-pub trait HttpTransport: Send + Sync {
-    /// Perform `req`. Returns `Err` only when the exchange never completed
-    /// (DNS, connect, TLS, timeout, malformed response) — an HTTP error status
-    /// comes back as `Ok`.
-    fn send(&self, req: &HttpRequest) -> Result<HttpResponse>;
-}
-
-/// The transport used when the `http` feature is off: it fails loudly rather
-/// than pretending a fetch happened.
-#[cfg(not(feature = "http"))]
-struct NotCompiledIn;
-
-#[cfg(not(feature = "http"))]
-impl HttpTransport for NotCompiledIn {
-    fn send(&self, _req: &HttpRequest) -> Result<HttpResponse> {
-        Err(DataError::Io(IoError::new(
-            ErrorKind::Unsupported,
-            "eustress-data was built without the `http` feature, so no HTTP transport is compiled \
-             in; rebuild with --features http, or inject a transport with `with_transport`",
-        )))
-    }
-}
+//
+// Re-exported from `super::http`, which is the single seam every remote
+// provider shares. Kept as a re-export so existing `super::rest::HttpRequest`
+// paths keep resolving, and so there is no second definition that could drift
+// from the one the security properties are proven against.
+pub use super::http::{HttpMethod, HttpRequest, HttpResponse, HttpTransport};
 
 /// The default transport for a source built with `new`.
 pub(super) fn default_transport() -> Arc<dyn HttpTransport> {
@@ -118,7 +57,7 @@ pub(super) fn default_transport() -> Arc<dyn HttpTransport> {
     }
     #[cfg(not(feature = "http"))]
     {
-        Arc::new(NotCompiledIn)
+        Arc::new(super::http::UnavailableTransport)
     }
 }
 
@@ -141,30 +80,32 @@ impl Default for UreqTransport {
 #[cfg(feature = "http")]
 impl HttpTransport for UreqTransport {
     fn send(&self, req: &HttpRequest) -> Result<HttpResponse> {
+        use std::io::Read;
         let agent = ureq::AgentBuilder::new().timeout(self.timeout).build();
-        let mut r = agent.request(&req.method, &req.url);
+        let mut r = agent.request(req.method.as_str(), &req.url);
         for (k, v) in &req.headers {
             r = r.set(k, v);
         }
         let sent = match &req.body {
-            Some(b) => r.send_string(b),
+            Some(b) => r.send_bytes(b),
             None => r.call(),
+        };
+        // Bodies are read as BYTES: a blob store returns parquet and images, and
+        // decoding those as text to fit a String would corrupt them silently.
+        let read_body = |resp: ureq::Response| -> Vec<u8> {
+            let mut buf = Vec::new();
+            let _ = resp.into_reader().take(64 * 1024 * 1024).read_to_end(&mut buf);
+            buf
         };
         match sent {
             Ok(resp) => {
                 let status = resp.status();
-                let body = resp.into_string().map_err(|e| {
-                    DataError::Io(IoError::new(
-                        ErrorKind::InvalidData,
-                        format!("could not read the response body from {}: {e}", req.url),
-                    ))
-                })?;
-                Ok(HttpResponse { status, body })
+                Ok(HttpResponse { status, body: read_body(resp) })
             }
             // ureq reports a non-2xx status as an error; the provider wants it
             // as a normal response so every status flows through one code path.
             Err(ureq::Error::Status(status, resp)) => {
-                Ok(HttpResponse { status, body: resp.into_string().unwrap_or_default() })
+                Ok(HttpResponse { status, body: read_body(resp) })
             }
             Err(ureq::Error::Transport(t)) => Err(DataError::Io(IoError::new(
                 ErrorKind::Other,
@@ -175,6 +116,7 @@ impl HttpTransport for UreqTransport {
         }
     }
 }
+
 
 // ── The provider ─────────────────────────────────────────────────────────────
 
@@ -220,10 +162,16 @@ impl RestSource {
             set_header(&mut headers, "Content-Type", "application/json");
         }
         Ok(HttpRequest {
-            method: method.to_string(),
+            // `rest_method` has already validated the verb; map it onto the
+            // shared seam's typed method.
+            method: match method {
+                "POST" => HttpMethod::Post,
+                "HEAD" => HttpMethod::Head,
+                _ => HttpMethod::Get,
+            },
             url: self.config.endpoint.clone(),
             headers,
-            body: if method == "POST" { body } else { None },
+            body: if method == "POST" { body.map(String::into_bytes) } else { None },
         })
     }
 }
@@ -252,7 +200,7 @@ impl DataSource for RestSource {
 
     fn test_connection(&self) -> Result<ConnectionStatus> {
         let mut probe = self.request()?;
-        probe.method = "HEAD".into();
+        probe.method = HttpMethod::Head;
         probe.body = None;
         match self.transport.send(&probe) {
             Err(e) => Ok(ConnectionStatus::failed(format!("{} unreachable: {e}", probe.url))),
@@ -273,7 +221,7 @@ impl DataSource for RestSource {
         let req = self.request()?;
         let resp = self.transport.send(&req)?;
         require_success(SourceKind::Rest, &req, &resp)?;
-        frame_from_json_body(&resp.body, self.config.option("json_path"))
+        frame_from_json_body(&resp.text(), self.config.option("json_path"))
     }
 }
 
@@ -369,7 +317,7 @@ pub(super) fn require_success(
     if is_success(resp.status) {
         return Ok(());
     }
-    let snippet: String = resp.body.trim().chars().take(200).collect();
+    let snippet: String = resp.text().trim().chars().take(200).collect();
     let because = if snippet.is_empty() { String::new() } else { format!(": {snippet}") };
     Err(DataError::Io(IoError::new(
         ErrorKind::Other,
@@ -631,7 +579,7 @@ pub(super) mod testing {
                 wire.push_str(&format!("{k}: {v}\r\n"));
             }
             wire.push_str("\r\n");
-            wire.push_str(&body);
+            wire.push_str(&String::from_utf8_lossy(&body));
 
             let mut stream = TcpStream::connect(authority)?;
             stream.write_all(wire.as_bytes())?;
@@ -646,7 +594,7 @@ pub(super) mod testing {
                 .nth(1)
                 .and_then(|s| s.parse::<u16>().ok())
                 .unwrap_or(0);
-            Ok(HttpResponse { status, body: body.to_string() })
+            Ok(HttpResponse::new(status, body))
         }
     }
 

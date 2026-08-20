@@ -30,6 +30,9 @@ use crate::{DataError, Frame, Result};
 // menu. Modules that need a network client or a parser gate those parts
 // internally, so this list stays unconditional and every provider's pure
 // config validation is always compiled and always testable.
+/// The single HTTP seam every remote provider shares.
+pub mod http;
+
 pub mod azure;
 pub mod csv;
 pub mod firebase;

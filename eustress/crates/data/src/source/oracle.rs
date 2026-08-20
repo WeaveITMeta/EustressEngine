@@ -205,7 +205,13 @@ impl OracleSource {
             })?;
             headers.push(("Authorization".to_string(), format!("Bearer {token}")));
         }
-        Ok(HttpRequest { method, url: self.target.request_url(limit_override), headers })
+        Ok(HttpRequest {
+            method,
+            url: self.target.request_url(limit_override),
+            headers,
+            // A blob/row read carries no request body.
+            body: None,
+        })
     }
 
     fn transport(&self) -> Result<&dyn HttpTransport> {

@@ -54,10 +54,8 @@
 use std::sync::Arc;
 
 use super::firebase::{encode_path, encode_query};
-use super::rest::{
-    check_json_path, default_transport, frame_from_json_body, parse_json, HttpRequest, HttpResponse,
-    HttpTransport,
-};
+use super::rest::{HttpMethod, check_json_path, default_transport, frame_from_json_body, parse_json, HttpRequest, HttpResponse,
+    HttpTransport,};
 use super::{validate_config, ConnectionStatus, DataSource, SourceConfig, SourceKind};
 use crate::{DataError, Frame, Result};
 
@@ -189,7 +187,7 @@ impl SupabaseSource {
             headers.push(("apikey".to_string(), key.clone()));
             headers.push(("Authorization".to_string(), format!("Bearer {key}")));
         }
-        Ok(HttpRequest { method: "GET".to_string(), url, headers, body: None })
+        Ok(HttpRequest { method: HttpMethod::Get, url, headers, body: None })
     }
 
     /// Issue one GET, turning a non-2xx into an error that carries PostgREST's
@@ -202,7 +200,7 @@ impl SupabaseSource {
                 "Supabase returned HTTP {} for table '{}': {}",
                 response.status,
                 self.table(),
-                error_detail(&response.body)
+                error_detail(&response.text())
             )));
         }
         Ok(response)
@@ -220,7 +218,7 @@ impl DataSource for SupabaseSource {
         let request = self.request(self.request_url(1)?)?;
         match self.transport.send(&request) {
             Ok(response) if is_success(&response) => {
-                let rows = parse_json(&response.body)
+                let rows = parse_json(&response.text())
                     .map(|payload| match payload {
                         serde_json::Value::Array(items) => items.len(),
                         _ => 1,
@@ -235,7 +233,7 @@ impl DataSource for SupabaseSource {
             Ok(response) => Ok(ConnectionStatus::failed(format!(
                 "Supabase returned HTTP {}: {}",
                 response.status,
-                error_detail(&response.body)
+                error_detail(&response.text())
             ))),
             Err(e) => Ok(ConnectionStatus::failed(e.to_string())),
         }
@@ -245,7 +243,7 @@ impl DataSource for SupabaseSource {
         let response = self.send(self.request_url(self.limit())?)?;
         // The shared JSON → Frame path: same dtype and null inference as the
         // REST provider and the JSONL importer.
-        frame_from_json_body(&response.body, self.config.option("json_path"))
+        frame_from_json_body(&response.text(), self.config.option("json_path"))
     }
 }
 
@@ -303,7 +301,7 @@ mod tests {
     impl RecordingTransport {
         fn new(status: u16, body: &str) -> Arc<Self> {
             Arc::new(Self {
-                reply: HttpResponse { status, body: body.to_string() },
+                reply: HttpResponse::new(status, body),
                 seen: Mutex::new(Vec::new()),
             })
         }

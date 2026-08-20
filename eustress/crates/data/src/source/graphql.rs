@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::rest::{HttpRequest, HttpResponse, HttpTransport};
+use super::rest::{HttpMethod, HttpRequest, HttpResponse, HttpTransport};
 use super::{validate_config, ConnectionStatus, DataSource, SourceConfig, SourceKind};
 use crate::{DataError, Frame, Result};
 
@@ -92,10 +92,10 @@ impl GraphQlSource {
         super::rest::set_header(&mut headers, "Content-Type", "application/json");
 
         Ok(HttpRequest {
-            method: "POST".into(),
+            method: HttpMethod::Post,
             url: self.config.endpoint.clone(),
             headers,
-            body: Some(Value::Object(envelope).to_string()),
+            body: Some(Value::Object(envelope).to_string().into_bytes()),
         })
     }
 
@@ -165,7 +165,7 @@ impl DataSource for GraphQlSource {
         }
         // A GraphQL server answers `{__typename}` with the query root's type
         // name; anything else means the endpoint is not speaking GraphQL.
-        match super::rest::parse_json(&resp.body).and_then(|v| unwrap_data(&v).map(Value::clone)) {
+        match super::rest::parse_json(&resp.text()).and_then(|v| unwrap_data(&v).map(Value::clone)) {
             Ok(Value::Object(m)) => {
                 let root = m.get("__typename").and_then(Value::as_str).unwrap_or("(unnamed)");
                 Ok(ConnectionStatus::ok(format!("GraphQL endpoint reachable — query root {root}")))
@@ -181,7 +181,7 @@ impl DataSource for GraphQlSource {
         let req = self.request()?;
         let resp = self.transport.send(&req)?;
         require_graphql_success(&req, &resp)?;
-        let root = super::rest::parse_json(&resp.body)?;
+        let root = super::rest::parse_json(&resp.text())?;
         let data = unwrap_data(&root)?;
         super::rest::frame_from_json_value(data, self.config.option("json_path"))
     }
@@ -192,7 +192,7 @@ impl DataSource for GraphQlSource {
 /// envelope, so neither shape is silently normalized into an empty frame.
 fn require_graphql_success(req: &HttpRequest, resp: &HttpResponse) -> Result<()> {
     super::rest::require_success(SourceKind::GraphQl, req, resp)?;
-    let root = super::rest::parse_json(&resp.body)?;
+    let root = super::rest::parse_json(&resp.text())?;
     if let Some(errors) = root.get("errors").filter(|v| !v.is_null()) {
         return Err(DataError::Schema(format!(
             "GraphQL endpoint {} returned errors: {}",

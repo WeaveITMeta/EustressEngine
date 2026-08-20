@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::rest::{HttpRequest, HttpResponse, HttpTransport};
+use super::rest::{HttpMethod, HttpRequest, HttpResponse, HttpTransport};
 use super::{validate_config, ConnectionStatus, DataSource, SourceConfig, SourceKind};
 use crate::graph::Graph;
 use crate::{DataError, Frame, Result};
@@ -115,7 +115,7 @@ fn check_errors(root: &Value) -> Result<()> {
 /// reason.
 fn check_status(resp: &HttpResponse) -> Result<()> {
     if !(200..300).contains(&resp.status) {
-        let detail = resp.body.chars().take(300).collect::<String>();
+        let detail = resp.text().chars().take(300).collect::<String>();
         return Err(DataError::Schema(format!(
             "graph endpoint returned HTTP {}: {}",
             resp.status, detail
@@ -129,7 +129,7 @@ fn run_frame<S: CypherSource>(src: &S) -> Result<Frame> {
     let req = src.request()?;
     let resp = src.transport().send(&req)?;
     check_status(&resp)?;
-    src.frame_from_body(&resp.body)
+    src.frame_from_body(&resp.text())
 }
 
 /// Run the query and rebuild a [`Graph`] from the edge columns.
@@ -231,10 +231,10 @@ impl CypherSource for Neo4jSource {
         ];
         headers.extend(auth_headers(&self.config, "Basic"));
         Ok(HttpRequest {
-            method: "POST".to_string(),
+            method: HttpMethod::Post,
             url: self.url()?,
             headers,
-            body: Some(body.to_string()),
+            body: Some(body.to_string().into_bytes()),
         })
     }
 
@@ -338,10 +338,10 @@ impl CypherSource for NeptuneSource {
         // mystery 403.
         headers.extend(auth_headers(&self.config, "Bearer"));
         Ok(HttpRequest {
-            method: "POST".to_string(),
+            method: HttpMethod::Post,
             url: format!("{base}/openCypher"),
             headers,
-            body: Some(serde_json::json!({ "query": query }).to_string()),
+            body: Some(serde_json::json!({ "query": query }).to_string().into_bytes()),
         })
     }
 
@@ -388,7 +388,7 @@ mod tests {
     impl Stub {
         fn new(status: u16, body: &str) -> Arc<Self> {
             Arc::new(Self {
-                response: HttpResponse { status, body: body.to_string() },
+                response: HttpResponse::new(status, body),
                 seen: Mutex::new(Vec::new()),
             })
         }
@@ -458,9 +458,9 @@ mod tests {
         src.fetch().unwrap();
 
         let req = stub.last();
-        assert_eq!(req.method, "POST");
+        assert_eq!(req.method, HttpMethod::Post);
         assert_eq!(req.url, "http://graph.internal:7474/db/neo4j/tx/commit");
-        assert!(req.body.unwrap().contains("statements"));
+        assert!(req.body_text().unwrap().contains("statements"));
     }
 
     #[test]
