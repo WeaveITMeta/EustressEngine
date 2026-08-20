@@ -69,7 +69,9 @@ pub fn wheel_colors(w: Wheel) -> Vec<(&'static str, u8, u8, u8)> {
 /// One cell of a wheel's honeycomb.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HoneycombCell {
-    /// Hover label — the curated swatch name (e.g. `"Seraph Blue"`).
+    /// Hover label — the swatch name from THIS wheel's lexicon (e.g. `"Mumiah"`
+    /// on Halo, `"Andromalius"` on Umbra, `"Fjord Water"` on Stone). The wheels
+    /// share cell geometry, so the name is what distinguishes a pick.
     pub name: String,
     pub r: u8,
     pub g: u8,
@@ -77,6 +79,10 @@ pub struct HoneycombCell {
     /// Left/top px position inside the 286x264 honeycomb box.
     pub x: f32,
     pub y: f32,
+    /// The wheel's numerology for this cell: gematria of the name on Aether and
+    /// Hex, the canonical 1..=72 rank on Halo and Umbra, plain index elsewhere.
+    /// See [`crate::wheel_lexicons::numerology`].
+    pub numerology: u32,
 }
 
 /// A single curated base swatch: a name, an sRGB color, and a fixed `(x, y)`
@@ -314,17 +320,24 @@ fn transform_color(wheel: Wheel, rgb: [u8; 3]) -> [u8; 3] {
 /// names and `(x, y)` positions are identical across all seven wheels; only the
 /// colors differ.
 pub fn wheel_honeycomb(wheel: Wheel) -> Vec<HoneycombCell> {
+    // Each wheel names its cells from its own lexicon; Stone alone keeps the
+    // curated base names. Geometry and cell order are shared, so index `i` is
+    // the same cell on every wheel and only the name and color change.
+    let lexicon = crate::wheel_lexicons::wheel_lexicon(wheel);
     BASE_PALETTE
         .iter()
-        .map(|b| {
+        .enumerate()
+        .map(|(i, b)| {
             let [r, g, bl] = transform_color(wheel, [b.r, b.g, b.b]);
+            let name = lexicon.map(|lex| lex[i]).unwrap_or(b.name);
             HoneycombCell {
-                name: b.name.to_string(),
+                name: name.to_string(),
                 r,
                 g,
                 b: bl,
                 x: b.x,
                 y: b.y,
+                numerology: crate::wheel_lexicons::numerology(wheel, i, name),
             }
         })
         .collect()
@@ -384,16 +397,41 @@ mod tests {
     }
 
     #[test]
-    fn wheels_share_names_and_positions() {
-        // Every wheel reuses Stone's 127 names + (x, y); only colors differ.
+    fn wheels_share_positions_but_not_names() {
+        // Cell geometry is shared so index `i` is the same cell on every wheel.
+        // Names are NOT shared: each wheel draws from its own lexicon, which is
+        // what makes `Halo -> Mumiah` and `Umbra -> Andromalius` distinct picks
+        // rather than the same mineral name wearing seven colors.
         let stone = wheel_honeycomb(Wheel::Stone);
         for w in Wheel::ALL {
             let cells = wheel_honeycomb(w);
+            assert_eq!(cells.len(), stone.len());
             for (c, s) in cells.iter().zip(stone.iter()) {
-                assert_eq!(c.name, s.name);
-                assert_eq!((c.x, c.y), (s.x, s.y));
+                assert_eq!((c.x, c.y), (s.x, s.y), "wheel {:?} moved a cell", w);
+                if w != Wheel::Stone {
+                    assert_ne!(c.name, s.name, "wheel {:?} still uses Stone names", w);
+                }
             }
         }
+    }
+
+    #[test]
+    fn numerology_is_populated_per_wheel_scheme() {
+        // Halo/Umbra carry the canonical rank; Aether/Hex carry gematria.
+        let halo = wheel_honeycomb(Wheel::Halo);
+        assert_eq!(halo[0].name, "Vehuiah");
+        assert_eq!(halo[0].numerology, 1);
+        assert_eq!(halo[71].numerology, 72);
+
+        let umbra = wheel_honeycomb(Wheel::Umbra);
+        assert_eq!(umbra[0].name, "Bael");
+        assert_eq!(umbra[71].name, "Andromalius");
+
+        let aether = wheel_honeycomb(Wheel::Aether);
+        assert_eq!(
+            aether[0].numerology,
+            crate::wheel_lexicons::gematria(&aether[0].name)
+        );
     }
 
     #[test]

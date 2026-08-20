@@ -46,6 +46,7 @@ pub mod ui_types;
 pub mod brick_palette;
 // Seven-wheel categorical color-picker state (ActiveColorWheel / ColorFavorites).
 pub mod color_wheels;
+pub mod wheel_lexicons;
 // Scene delta types (always available — rkyv is non-optional)
 pub mod scene_delta;
 // EustressStream change queue: Bevy Resource + producer/consumer (feature-gated)

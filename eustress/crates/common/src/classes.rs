@@ -286,6 +286,19 @@ pub enum ClassName {
     Series,
     Column,
     Run,
+    // Procurement — non-visual data nouns modelled on the Data Platform ones
+    // above: Folder-like containers whose fields live in `[attributes]`, so the
+    // Properties panel edits them generically rather than needing a hand-written
+    // query in `sync_properties_to_slint` (which is already at its param
+    // ceiling). A `PurchaseOrder` holds its `PurchaseOrderLine` children the way
+    // a `Dataset` holds its `Series`.
+    //
+    // An RFQ is NOT a separate class. It is a PurchaseOrder whose `state` is
+    // `draft` or `sent`, exactly as in Odoo, so confirming one never copies a
+    // record.
+    Manufacturer,
+    PurchaseOrder,
+    PurchaseOrderLine,
     /// Data Platform: a live data source (REST / stream-topic / SQL / cloud).
     /// Non-visual, Folder-like; connection config lives in its attributes.
     Connector,
@@ -599,6 +612,9 @@ impl ClassName {
             ClassName::Series => "Series",
             ClassName::Column => "Column",
             ClassName::Run => "Run",
+            ClassName::Manufacturer => "Manufacturer",
+            ClassName::PurchaseOrder => "PurchaseOrder",
+            ClassName::PurchaseOrderLine => "PurchaseOrderLine",
             ClassName::Connector => "Connector",
             ClassName::Domain => "Domain",
             ClassName::ExportTarget => "ExportTarget",
@@ -881,6 +897,9 @@ impl ClassName {
             "Series" => Ok(ClassName::Series),
             "Column" => Ok(ClassName::Column),
             "Run" => Ok(ClassName::Run),
+            "Manufacturer" => Ok(ClassName::Manufacturer),
+            "PurchaseOrder" => Ok(ClassName::PurchaseOrder),
+            "PurchaseOrderLine" => Ok(ClassName::PurchaseOrderLine),
             "Connector" => Ok(ClassName::Connector),
             "Domain" => Ok(ClassName::Domain),
             "ExportTarget" => Ok(ClassName::ExportTarget),
