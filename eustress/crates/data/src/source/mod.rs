@@ -34,6 +34,8 @@ pub mod azure;
 pub mod csv;
 pub mod firebase;
 pub mod graphql;
+/// Neo4j + Amazon Neptune (Cypher over HTTP).
+pub mod graphdb;
 pub mod oracle;
 pub mod postgres;
 pub mod rest;
@@ -55,6 +57,10 @@ pub enum SourceKind {
     Supabase,
     AzureBlob,
     Oracle,
+    /// Neo4j over its HTTP transaction API (Cypher).
+    Neo4j,
+    /// Amazon Neptune over its openCypher HTTP endpoint.
+    Neptune,
 }
 
 impl SourceKind {
@@ -71,6 +77,8 @@ impl SourceKind {
             SourceKind::Supabase => "Supabase",
             SourceKind::AzureBlob => "AzureBlob",
             SourceKind::Oracle => "Oracle",
+            SourceKind::Neo4j => "Neo4j",
+            SourceKind::Neptune => "Neptune",
         }
     }
 
@@ -88,12 +96,14 @@ impl SourceKind {
             "supabase" => SourceKind::Supabase,
             "azureblob" | "azure blob" | "azure_blob" | "azure" => SourceKind::AzureBlob,
             "oracle" | "oracle cloud" => SourceKind::Oracle,
+            "neo4j" => SourceKind::Neo4j,
+            "neptune" | "aws neptune" | "amazon neptune" => SourceKind::Neptune,
             _ => return None,
         })
     }
 
     /// Every provider the Data menu offers, in menu order.
-    pub const ALL: [SourceKind; 9] = [
+    pub const ALL: [SourceKind; 11] = [
         SourceKind::Rest,
         SourceKind::GraphQl,
         SourceKind::Postgres,
@@ -103,6 +113,8 @@ impl SourceKind {
         SourceKind::S3,
         SourceKind::AzureBlob,
         SourceKind::Oracle,
+        SourceKind::Neo4j,
+        SourceKind::Neptune,
     ];
 
     /// Whether this provider reads from the local filesystem rather than a
@@ -268,7 +280,17 @@ fn looks_like_endpoint(endpoint: &str, kind: SourceKind) -> bool {
             endpoint.starts_with("https://") || endpoint.starts_with("azure://")
         }
         SourceKind::Csv => true,
-        // REST / GraphQL / Firebase / Supabase / Oracle are all HTTP(S).
+        // Neo4j is commonly written with its native schemes. They are accepted
+        // here so a familiar connection string is not rejected as malformed;
+        // the provider explains at connect time that reads use the HTTP API.
+        SourceKind::Neo4j => {
+            endpoint.starts_with("http://")
+                || endpoint.starts_with("https://")
+                || endpoint.starts_with("bolt://")
+                || endpoint.starts_with("neo4j://")
+                || endpoint.starts_with("neo4j+s://")
+        }
+        // REST / GraphQL / Firebase / Supabase / Oracle / Neptune are HTTP(S).
         _ => endpoint.starts_with("http://") || endpoint.starts_with("https://"),
     }
 }
@@ -302,6 +324,14 @@ fn provider_requirements(config: &SourceConfig) -> Result<()> {
                 && !config.endpoint.contains('/')
             {
                 return Err(missing("key"));
+            }
+        }
+        // A graph database is queried, never listed: without a query there is
+        // no meaningful default, and returning "the whole graph" from a supply
+        // chain would be a denial of service against your own warehouse.
+        SourceKind::Neo4j | SourceKind::Neptune => {
+            if config.option("query").map(str::trim).unwrap_or("").is_empty() {
+                return Err(missing("query"));
             }
         }
         SourceKind::Firebase | SourceKind::Supabase => {

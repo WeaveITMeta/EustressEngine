@@ -46,6 +46,11 @@
 //! throwaway loopback server — with no network, no credentials, and no live
 //! Supabase.
 
+// This provider parses JSON and shares the HTTP seam in `rest`, both of
+// which live behind `import`. Without this gate the leaf fails to build
+// with default features, which is the D2 purity contract in lib.rs.
+#![cfg(feature = "import")]
+
 use std::sync::Arc;
 
 use super::firebase::{encode_path, encode_query};

@@ -30,6 +30,11 @@
 //! URL query and every credential-bearing header — a request struct can be
 //! logged without leaking the credential that makes it work.
 
+// This provider parses JSON and shares the HTTP seam in `rest`, both of
+// which live behind `import`. Without this gate the leaf fails to build
+// with default features, which is the D2 purity contract in lib.rs.
+#![cfg(feature = "import")]
+
 use std::fmt;
 use std::sync::Arc;
 

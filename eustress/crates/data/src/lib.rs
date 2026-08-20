@@ -39,6 +39,10 @@ pub mod spectral;
 #[cfg(feature = "import")]
 pub mod import;
 
+/// Property graph: typed nodes and edges, traversal, and Frame conversion.
+/// Pure std — always compiled.
+pub mod graph;
+
 /// Provenance: content-addressed records, source rights, verifiable manifest.
 pub mod provenance;
 

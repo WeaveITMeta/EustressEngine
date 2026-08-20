@@ -27,6 +27,9 @@
 //! [`SourceConfig::secret_ref`] names the environment variable holding the
 //! OAuth2 access token; it is read at call time and never stored.
 
+// Reads over the HTTP seam in `azure`, which lives behind `import`.
+#![cfg(feature = "import")]
+
 use std::fmt;
 use std::sync::Arc;
 
