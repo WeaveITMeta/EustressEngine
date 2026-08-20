@@ -116,7 +116,20 @@ pub struct SelectByMaterialEvent {
     pub material: String,
 }
 
-/// Get the part_id for an entity (from PartEntity or Instance)
+/// The selection id for an entity: always `"{index}v{generation}"`.
+///
+/// The `PartEntity` / `Instance` arguments are an EXISTENCE check only — they
+/// decide whether the entity is addressable at all, never what it is called.
+/// Their own `part_id` field is deliberately ignored, because parts loaded from
+/// a Space carry their folder NAME there (`file_loader` sets
+/// `part_id: file_meta.name`) and a name is not a stable identity: two Spaces
+/// can hold two different "Column_10", and a rename would silently orphan the
+/// selection.
+///
+/// This is the one key the whole engine agrees on, so anything writing into the
+/// `SelectionManager` must build it the same way or its selection lands under a
+/// key nothing reads — the entity gets no `Selected`, draws no selection box,
+/// and shows nothing in Properties, while the click itself looks like it worked.
 fn get_part_id(entity: Entity, _part_entity: Option<&PartEntity>, instance: Option<&Instance>) -> Option<String> {
     if _part_entity.is_some() || instance.is_some() {
         return Some(format!("{}v{}", entity.index(), entity.generation()));

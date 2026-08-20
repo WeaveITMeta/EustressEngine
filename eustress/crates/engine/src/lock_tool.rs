@@ -58,7 +58,13 @@ fn cursor_part(
     cameras: &Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     spatial_query: &SpatialQuery,
 ) -> Option<Entity> {
-    if ui_focus.as_ref().map(|f| f.has_focus || f.text_input_focused).unwrap_or(false) {
+    // Only a focused TEXT INPUT blocks a paint click. `has_focus` used to be
+    // checked here too, but it is just `!in_viewport` computed by a different
+    // system on a different frame, so it duplicated the ViewportBounds test
+    // below while disagreeing with it whenever the two ran out of step — the
+    // same stale gate that made ordinary selection unreliable. Geometry is the
+    // authority: if the cursor is inside the viewport rect, the click counts.
+    if ui_focus.as_ref().map(|f| f.text_input_focused).unwrap_or(false) {
         return None;
     }
     let window = windows.single().ok()?;

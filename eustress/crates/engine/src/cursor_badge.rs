@@ -46,6 +46,22 @@ impl Plugin for CursorBadgePlugin {
     }
 }
 
+/// NOTE FOR WHOEVER PICKS THIS UP: [`CursorBadgeState`] currently has **no
+/// renderer**. This system computes `icon_path` + `visible` every frame and
+/// nothing anywhere reads them — `grep -rn CursorBadgeState src/` returns only
+/// this file. No badge has ever appeared on screen, for modal tools or anything
+/// else, so do not treat "the badge will show it" as working feedback.
+///
+/// Rendering it is not a one-liner: `WinitPlugin` is disabled (Slint owns the
+/// window), so Bevy's `CursorIcon` does not apply, and the obvious Slint route
+/// — a `TouchArea` over `viewport-sizer` carrying `mouse-cursor` — would sit on
+/// top of the transparent hole the 3D scene is composited through and risks
+/// swallowing viewport clicks. The safe route is a small absolutely-positioned
+/// `Image` in the Slint overlay that follows the cursor and never takes input.
+///
+/// Feedback that IS live today for the paint modes: the ribbon button lights up
+/// (`selected: root.current-tool == "lock"` etc.) and `lock_tool` draws a
+/// wireframe box around the part under the cursor.
 fn sync_cursor_badge_state(
     mut state: ResMut<CursorBadgeState>,
     active: Res<crate::modal_tool::ActiveModalTool>,

@@ -123,7 +123,9 @@ pub fn part_selection_system(
     selection_manager: Option<Res<BevySelectionManager>>,
     tool_states: PartSelectionToolStates,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
-    ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
+    // Retained so the gate can be reinstated per-widget later; selection itself
+    // is deliberately UI-blind (see the note above the viewport-bounds check).
+    _ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
     spatial_query: avian3d::prelude::SpatialQuery,
     // Used to signal "scroll the Explorer to the just-selected entity"
     // when a single-click happens in the 3D viewport. Multi-select
@@ -159,23 +161,32 @@ pub fn part_selection_system(
 
     debug!("[select] LEFT CLICK detected — processing selection");
 
-    // Block selection when Slint UI has focus (mouse over panels)
-    if let Some(ref focus) = ui_focus {
-        if focus.has_focus {
-            debug!("[select] blocked — SlintUIFocus.has_focus=true");
-            return;
-        }
-    }
-
-    // Block selection if click is over a ScreenGui element (BatteryHUD, etc.)
-    // ScreenGui elements are rendered in the Slint overlay but positioned within the viewport.
-    // Without this check, clicks on GUI buttons fall through to 3D selection.
-    if let Some(ref focus) = ui_focus {
-        if focus.gui_element_hit {
-            debug!("[select] blocked — click over ScreenGui element");
-            return;
-        }
-    }
+    // Selection deliberately ignores UI hit-state. The ONLY thing that gates a
+    // viewport click is geometry: is the cursor inside the 3D viewport rect
+    // (checked below).
+    //
+    // Two gates used to live here and both cost more than they bought:
+    //
+    // * `SlintUIFocus.has_focus` — set as `!in_viewport`, so it duplicated the
+    //   `ViewportBounds` test below while being computed in a DIFFERENT system
+    //   on a DIFFERENT frame. Any lag between the two produced a click that the
+    //   geometry accepted and the flag rejected: selection that failed at
+    //   random with nothing on screen to explain it.
+    //
+    // * `gui_element_hit` — a screen-space rect test over every entity carrying
+    //   `GuiElementDisplay`. That component is shared by ScreenGui AND by
+    //   BillboardGui/SurfaceGui, whose rects resolve against their own canvas,
+    //   not the viewport — so every billboard label in the Space projected a
+    //   phantom blocking rect near the viewport origin.
+    //
+    // Double-clicking a billboard to edit its text still works: that path is
+    // driven by `DoubleClickedPart`, which this very system emits further down,
+    // so it rides on selection rather than competing with it.
+    //
+    // Consequence to keep in mind: a click on a ScreenGui button now ALSO
+    // reaches 3D selection. That is the intended trade for now — a part
+    // selected behind a HUD is a visible, recoverable annoyance, whereas a
+    // click silently vanishing is not.
 
     // Check if click is within the viewport bounds (not on UI panels)
     let window = match windows.single() {
@@ -403,27 +414,30 @@ pub fn part_selection_system(
             }
         }
 
-        let part_id = if let Some(pe) = part_entity {
-            if !pe.part_id.is_empty() {
-                pe.part_id.clone()
-            } else if instance.is_some() {
-                entity_id.clone()
-            } else {
-                continue;
-            }
-        } else if let Some(pem) = part_entity_marker {
-            if !pem.part_id.is_empty() {
-                pem.part_id.clone()
-            } else if instance.is_some() {
-                entity_id.clone()
-            } else {
-                continue;
-            }
-        } else if instance.is_some() {
-            entity_id.clone()
-        } else {
-            continue; // No identifier, skip
-        };
+        // The selection id is ALWAYS `"{index}v{generation}"`. It is the one
+        // key the whole engine agrees on — `selection_sync::get_part_id` /
+        // `make_part_id`, `keybindings` (Delete / Select All / Anchor / Lock),
+        // `clipboard`, `csg`, `cad_plugin`, the Explorer, the engine bridge and
+        // the Rune bindings all build it that way, 42 sites in 12 files.
+        //
+        // This used to prefer `PartEntity::part_id` / `PartEntityMarker::part_id`
+        // whenever they were non-empty, and that is a DIFFERENT key: parts loaded
+        // from a Space get their folder NAME there (`file_loader.rs` sets
+        // `part_id: file_meta.name`, so "Column_10"). Clicking such a part wrote
+        // "Column_10" into the SelectionManager while `sync_selection_components`
+        // looked up "2078v0", found no match, and never inserted `Selected` — so
+        // the click registered, the manager held a selection, and nothing on
+        // screen changed: no selection box, no Properties. Parts with an empty
+        // stored id happened to agree on the entity format and worked, which is
+        // why it presented as selection being unreliable rather than broken.
+        //
+        // Only the identity requirement survives from the old branch: an entity
+        // with no `PartEntity` / `PartEntityMarker` / `Instance` is engine
+        // scaffolding, not scene content, and stays unselectable.
+        if part_entity.is_none() && part_entity_marker.is_none() && instance.is_none() {
+            continue;
+        }
+        let part_id = entity_id.clone();
         
         // Skip locked parts - they cannot be selected!
         if let Some(bp) = basepart {
@@ -690,13 +704,18 @@ pub fn part_selection_system(
                 let mut count = 0;
                 
                 for (entity, part_entity, part_entity_marker, instance, transform, _mesh, _basepart, _child_of) in part_entities_query.iter() {
-                    // Get part ID from either component (format: "indexVgeneration")
-                    let entity_id = entity_to_id_string(entity);
-                    let part_id = part_entity.map(|pe| pe.part_id.clone())
-                        .filter(|id| !id.is_empty())
-                        .or_else(|| part_entity_marker.map(|pem| pem.part_id.clone()).filter(|id| !id.is_empty()))
-                        .or_else(|| instance.map(|_| entity_id));
-                    
+                    // Same canonical id as everywhere else. The comment here used
+                    // to claim `"indexVgeneration"` while the code preferred the
+                    // components' stored `part_id`, which for disk-loaded parts is
+                    // the folder NAME — so this lookup missed every such part,
+                    // `count` stayed 0, the gizmo-centre guard below never ran, and
+                    // a click near the gizmo fell through to "empty space" and
+                    // cleared the selection.
+                    let part_id = (part_entity.is_some()
+                        || part_entity_marker.is_some()
+                        || instance.is_some())
+                        .then(|| entity_to_id_string(entity));
+
                     if let Some(id) = part_id {
                         if selected.contains(&id) {
                             let t = transform.compute_transform();
