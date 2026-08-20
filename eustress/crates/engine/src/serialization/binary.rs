@@ -747,6 +747,11 @@ impl ClassId {
             ClassName::Connector => ClassId::Folder,
             ClassName::Domain => ClassId::Folder,
             ClassName::ExportTarget => ClassId::Folder,
+            // Procurement nouns fold to Folder for the same reason: they are
+            // containers whose payload is `[attributes]`, not geometry.
+            ClassName::Manufacturer => ClassId::Folder,
+            ClassName::PurchaseOrder => ClassId::Folder,
+            ClassName::PurchaseOrderLine => ClassId::Folder,
         }
     }
 

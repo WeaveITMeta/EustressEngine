@@ -23,13 +23,19 @@
 use std::collections::{HashSet, VecDeque};
 
 use bevy::prelude::*;
-use eustress_worlddb::{keys::world_to_cell, MortonKeyEncoder};
+use eustress_worlddb::{
+    keys::{cell_to_world_min, world_to_cell},
+    MortonKeyEncoder,
+};
 
 use super::active_db;
 use super::file_loader::LoadInProgress;
 use super::instance_loader::PrimitiveMeshCache;
 use super::material_loader::MaterialRegistry;
 use super::service_loader::ServiceComponent;
+use super::stream_predict::{
+    cell_priority, cell_wanted, directional_evict_radius, predicted_focus, CameraMotion,
+};
 use super::world_db_binary::{spawn_binary_core, BinaryEcsInstance};
 use super::SpaceRoot;
 
@@ -79,6 +85,34 @@ pub struct ResidencyConfig {
     /// and read whether render+present ms drops with the live count
     /// (draw-call-bound) or not (pixel-bound) — the M2a gate.
     pub cull_radius: f32,
+
+    // ── Velocity prediction (see `super::stream_predict`) ────────────────
+    /// Seconds ahead the prefetch aims for. The predicted focus is
+    /// `camera + velocity * lead`, so this is "how much warning the streamer
+    /// gets" — at 40 m/s a 2 s lead reaches 80 m past the camera. Env:
+    /// `EUSTRESS_RESIDENCY_LEAD_SECS`. `0` disables prediction and restores
+    /// pure proximity streaming.
+    pub lead_time_secs: f32,
+    /// Hard cap on how far ahead the predicted focus may sit, metres. Bounds
+    /// the prefetch cost by the configured radius rather than by whatever
+    /// speed the user reaches. Env: `EUSTRESS_RESIDENCY_MAX_LEAD`.
+    pub max_lead_distance: f32,
+    /// Radius of the corridor around the predicted focus, metres. Smaller
+    /// than `load_radius` on purpose: the far end of the prediction is a
+    /// guess, so it buys a narrower tube than the certain ball around the
+    /// camera. Env: `EUSTRESS_RESIDENCY_PREFETCH_RADIUS`.
+    pub prefetch_radius: f32,
+    /// Eviction radius for entities BEHIND the camera, metres. Tighter than
+    /// `evict_radius` so leaving a region frees budget for the direction of
+    /// travel. Env: `EUSTRESS_RESIDENCY_EVICT_BEHIND`.
+    pub evict_radius_behind: f32,
+    /// Heading dot-product below which the plan is rebuilt and off-path
+    /// prefetch cancelled. 0.85 is about 32 degrees. Env:
+    /// `EUSTRESS_RESIDENCY_COURSE_COS`.
+    pub course_change_cos: f32,
+    /// EMA weight for each new velocity sample, `0.0..=1.0`. Higher tracks
+    /// turns faster and is noisier. Env: `EUSTRESS_RESIDENCY_VEL_SMOOTHING`.
+    pub velocity_smoothing: f32,
 }
 
 impl Default for ResidencyConfig {
@@ -142,6 +176,27 @@ impl Default for ResidencyConfig {
             .and_then(|s| s.parse::<f32>().ok())
             .filter(|v| *v > 0.0)
             .unwrap_or(load);
+        // ── Velocity prediction knobs ────────────────────────────────────
+        let envf = |key: &str, default: f32, min: f32| -> f32 {
+            std::env::var(key)
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok())
+                .filter(|v| *v >= min && v.is_finite())
+                .unwrap_or(default)
+        };
+        // 2 s of warning: at the ~40 m/s a fly-camera reaches that is ~80 m,
+        // roughly a third of a 256 m cell — enough to scan and spawn the next
+        // cell before it is on screen, without over-committing on a guess.
+        // Floor of 0.0 so `=0` is a legal "disable prediction".
+        let lead_secs = envf("EUSTRESS_RESIDENCY_LEAD_SECS", 2.0, 0.0);
+        // 3x the load radius. Past that the guess is worth less than the cost.
+        let max_lead = envf("EUSTRESS_RESIDENCY_MAX_LEAD", load * 3.0, 1.0);
+        // 0.75x the load ball: a narrower tube for the less-certain region.
+        let prefetch = envf("EUSTRESS_RESIDENCY_PREFETCH_RADIUS", load * 0.75, 1.0);
+        // 0.6x the forward evict radius. Generous enough that an ordinary
+        // turn does not immediately re-load what was just dropped.
+        let evict_behind = envf("EUSTRESS_RESIDENCY_EVICT_BEHIND", evict * 0.6, 1.0)
+            .min(evict);
         Self {
             load_radius: load,
             evict_radius: evict,
@@ -152,6 +207,12 @@ impl Default for ResidencyConfig {
             cadence_frames: cadence,
             big_space_threshold: 100_000,
             cull_radius: cull,
+            lead_time_secs: lead_secs,
+            max_lead_distance: max_lead,
+            prefetch_radius: prefetch,
+            evict_radius_behind: evict_behind,
+            course_change_cos: envf("EUSTRESS_RESIDENCY_COURSE_COS", 0.85, -1.0).min(1.0),
+            velocity_smoothing: envf("EUSTRESS_RESIDENCY_VEL_SMOOTHING", 0.25, 0.0).min(1.0),
         }
     }
 }
@@ -218,6 +279,30 @@ fn cell_of(pos: Vec3) -> Cell {
     )
 }
 
+/// World-space centre of a cell — what the prediction math scores against.
+/// Uses the same encoder as everything else so the centre lines up with the
+/// box the cores were keyed into.
+fn cell_center(c: Cell) -> Vec3 {
+    let cs = MortonKeyEncoder::default().chunk_size;
+    let half = cs * 0.5;
+    Vec3::new(
+        cell_to_world_min(c.0, cs) + half,
+        cell_to_world_min(c.1, cs) + half,
+        cell_to_world_min(c.2, cs) + half,
+    )
+}
+
+/// Smallest box containing both inputs. The candidate region is the union of
+/// the near ball and the prefetch corridor; enumerating one box is far
+/// cheaper than merging two cell lists, and `cell_wanted` trims the corners
+/// the union introduces.
+fn union_box(a: (Cell, Cell), b: (Cell, Cell)) -> (Cell, Cell) {
+    (
+        (a.0 .0.min(b.0 .0), a.0 .1.min(b.0 .1), a.0 .2.min(b.0 .2)),
+        (a.1 .0.max(b.1 .0), a.1 .1.max(b.1 .1), a.1 .2.max(b.1 .2)),
+    )
+}
+
 fn in_box(c: Cell, b: (Cell, Cell)) -> bool {
     let (lo, hi) = b;
     c.0 >= lo.0 && c.0 <= hi.0 && c.1 >= lo.1 && c.1 <= hi.1 && c.2 >= lo.2 && c.2 <= hi.2
@@ -255,6 +340,11 @@ pub fn sys_residency_load(
     cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
     mut state: ResMut<ResidencyState>,
     cfg: Res<ResidencyConfig>,
+    // Velocity prediction: sampled here (the one place that already has the
+    // authoritative camera) and read by `sys_residency_evict` for the
+    // asymmetric behind-the-camera radius.
+    mut motion: ResMut<CameraMotion>,
+    time: Res<Time>,
 ) {
     if !state.enabled || load_in_progress.active || !active_db::is_active() {
         return;
@@ -282,20 +372,74 @@ pub fn sys_residency_load(
     let campos = cam_tf.translation();
     let cam_cell = cell_of(campos);
 
-    // Recompute desired/keep boxes only when the camera crosses a cell
-    // boundary (most frames it hasn't).
-    if state.last_camera_cell != Some(cam_cell) {
+    // Fold this tick into the smoothed velocity BEFORE deciding whether to
+    // re-plan — the course-change test below reads it. A jump larger than the
+    // evict radius is a teleport (Space switch, camera "go to"), not motion,
+    // and resets the estimate rather than registering as enormous speed.
+    motion.sample(
+        campos,
+        time.delta_secs(),
+        cfg.velocity_smoothing,
+        cfg.evict_radius.max(1.0),
+    );
+
+    // Re-plan on a cell crossing OR on a genuine course change.
+    //
+    // The second condition is what lets the stream ADAPT mid-flight. Keyed
+    // only on cell crossings, a U-turn would keep draining a queue ordered
+    // for the old heading until the camera happened to cross a boundary —
+    // which, having just reversed, may be a long way off.
+    let crossed = state.last_camera_cell != Some(cam_cell);
+    let turned = motion.course_changed(cfg.course_change_cos);
+    if crossed || turned {
         state.last_camera_cell = Some(cam_cell);
-        let load_box = camera_cell_box(campos, cfg.load_radius);
+        motion.mark_planned();
+
+        let predicted = predicted_focus(
+            campos,
+            &motion,
+            cfg.lead_time_secs,
+            cfg.max_lead_distance,
+        );
+        // Candidate region spans the near ball AND the prefetch corridor.
+        // Enumerating one union box is much cheaper than merging two cell
+        // lists; `cell_wanted` then trims the corners the union adds (which
+        // matter on a diagonal heading, where the box is mostly corner).
+        let candidates = union_box(
+            camera_cell_box(campos, cfg.load_radius),
+            camera_cell_box(predicted, cfg.prefetch_radius),
+        );
         let keep_box = camera_cell_box(campos, cfg.evict_radius);
         state.keep_box = Some(keep_box);
 
-        // Enqueue load-box cells not already resident or pending.
-        let new_cells: Vec<Cell> = cells_in_box(load_box)
+        let mut desired: Vec<(f32, Cell)> = cells_in_box(candidates)
             .into_iter()
-            .filter(|c| !state.resident_cells.contains(c) && !state.pending_set.contains(c))
+            .filter(|c| {
+                cell_wanted(
+                    cell_center(*c),
+                    campos,
+                    predicted,
+                    cfg.load_radius,
+                    cfg.prefetch_radius,
+                )
+            })
+            .filter(|c| !state.resident_cells.contains(c))
+            .map(|c| (cell_priority(cell_center(c), campos, &motion), c))
             .collect();
-        for c in new_cells {
+        // Arrival order: soonest-reached first. `total_cmp` because these are
+        // f32 seconds and a NaN from a degenerate heading must not panic the
+        // sort.
+        desired.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        // CANCEL, then re-queue. Rebuilding rather than appending is the
+        // point: a cell queued for the previous heading and no longer wanted
+        // is dropped here instead of being scanned out of Fjall for nothing.
+        // Cells still wanted simply reappear, now in their new priority
+        // position — nothing already RESIDENT is disturbed, so this cannot
+        // cause a reload of visible geometry.
+        state.pending_cells.clear();
+        state.pending_set.clear();
+        for (_, c) in desired {
             state.pending_set.insert(c);
             state.pending_cells.push_back(c);
         }
@@ -433,6 +577,9 @@ pub fn sys_residency_evict(
     // has residency but no delta emitter, so there is nothing to suppress and
     // the resource is simply absent — recording is then a no-op.
     mut evicted: Option<ResMut<eustress_common::change_queue::EvictedRecently>>,
+    // Read-only here: `sys_residency_load` owns the sampling. Chained before
+    // this system, so the heading is this tick's.
+    motion: Res<CameraMotion>,
 ) {
     if !state.enabled {
         return;
@@ -448,7 +595,6 @@ pub fn sys_residency_evict(
         .iter()
         .find(|(_, c)| c.order == 0)
         .map(|(t, _)| t.translation());
-    let cull_sq = cfg.cull_radius * cfg.cull_radius;
 
     let mut despawned = 0usize;
     for (e, gt) in entities.iter() {
@@ -458,8 +604,23 @@ pub fn sys_residency_evict(
         let pos = gt.translation();
         let in_keep = in_box(cell_of(pos), keep);
         // M2a: beyond the per-entity cull radius? (only when a camera exists)
+        //
+        // The radius is now DIRECTIONAL: geometry behind the camera evicts at
+        // `evict_radius_behind` instead of `cull_radius`, because the camera
+        // is leaving it and the budget is better spent ahead. Reduces to the
+        // old symmetric behaviour whenever the camera is stationary, so
+        // stopping never triggers a mass evict of everything behind.
         let beyond_cull = cam
-            .map(|c| (pos - c).length_squared() > cull_sq)
+            .map(|c| {
+                let radius = directional_evict_radius(
+                    pos,
+                    c,
+                    &motion,
+                    cfg.cull_radius,
+                    cfg.evict_radius_behind.min(cfg.cull_radius),
+                );
+                (pos - c).length_squared() > radius * radius
+            })
             .unwrap_or(false);
         // Survives only if inside the keep-box AND within the cull radius.
         if in_keep && !beyond_cull {

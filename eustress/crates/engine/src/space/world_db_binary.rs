@@ -1234,6 +1234,7 @@ pub fn register(app: &mut App) {
         .init_resource::<PendingBinaryRecreate>()
         .init_resource::<super::residency::ResidencyState>()
         .init_resource::<super::residency::ResidencyConfig>()
+        .init_resource::<super::stream_predict::CameraMotion>()
         // HLOD (merged-cell proxies) — the whole-map render. Shares the
         // streaming gate with residency (enabled together for a large Space).
         .init_resource::<super::hlod::HlodState>()

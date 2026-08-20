@@ -12,6 +12,39 @@ use std::time::Duration;
 
 use super::file_loader::{FileType, SpaceFileRegistry};
 
+/// How long a burst must go without a new watcher event before we act on
+/// it. Anything shorter than the notify debounce (300ms) would let a
+/// single logical write land in two batches again.
+const BURST_QUIET_PERIOD: Duration = Duration::from_millis(350);
+
+/// Ceiling on how long a burst may keep deferring itself. A writer that
+/// paces its files just under the quiet period would otherwise hold the
+/// batch open indefinitely; this flushes what we have and starts a fresh
+/// window. It also bounds how stale a `RecentlyWrittenFiles` mark can be
+/// when its batch finally runs — worst case is this plus the notify
+/// debounce, which must stay under that resource's 2-second suppression
+/// or the engine's own writes would stop being recognised as its own.
+const BURST_MAX_WAIT: Duration = Duration::from_millis(1200);
+
+/// Watcher events accumulated since the last settled flush.
+///
+/// The whole point of buffering here rather than acting per poll is that
+/// `notify_debouncer_full` splits ONE logical write across several poll
+/// batches whenever a path's queue straddles its 300ms expiry boundary —
+/// so a `Remove`/`Modify` for a path can be delivered a frame or two
+/// BEFORE that same path's `Create`. Handling each batch on its own made
+/// the engine act on half a story; buffering to quiescence means every
+/// event for a path is in hand before any of them is interpreted.
+#[derive(Default)]
+struct PendingBurst {
+    /// Events seen since the last flush, in arrival order.
+    events: Vec<FileChangeEvent>,
+    /// Arrival of the first buffered event — drives `BURST_MAX_WAIT`.
+    first_seen: Option<std::time::Instant>,
+    /// Arrival of the most recent event — drives `BURST_QUIET_PERIOD`.
+    last_seen: Option<std::time::Instant>,
+}
+
 /// File watcher resource
 #[derive(Resource)]
 pub struct SpaceFileWatcher {
@@ -24,6 +57,11 @@ pub struct SpaceFileWatcher {
     /// Timestamp when the watcher was created — used to ignore spurious
     /// Modify events that `notify` fires for pre-existing files on startup.
     created_at: std::time::Instant,
+    /// Burst-coalescing buffer. Behind a `Mutex` (not a separate
+    /// `Resource`) so the state lives and dies with the watcher itself —
+    /// switching Spaces drops the resource and the half-collected burst
+    /// with it, which is exactly the desired reset.
+    pending: std::sync::Mutex<PendingBurst>,
 }
 
 impl SpaceFileWatcher {
@@ -55,9 +93,56 @@ impl SpaceFileWatcher {
             receiver: rx,
             space_path,
             created_at: std::time::Instant::now(),
+            pending: std::sync::Mutex::new(PendingBurst::default()),
         })
     }
-    
+
+    /// Drain the watcher channel into the burst buffer and hand back a
+    /// batch only once the burst has SETTLED — either `BURST_QUIET_PERIOD`
+    /// has passed with no new event, or the batch has been open for
+    /// `BURST_MAX_WAIT`. `None` means "still filling, come back next
+    /// frame".
+    ///
+    /// Acting on every poll instead let one logical write be interpreted
+    /// from a half-delivered event set: the debouncer emits a path's queue
+    /// only up to the first entry younger than its 300ms timeout, so a
+    /// `Remove`/`Modify` could reach the engine a frame or two ahead of the
+    /// `Create` for the SAME path. Settling first is what makes the
+    /// downstream ordering pass (Creates shallow-first, then everything
+    /// else) meaningful across a whole burst rather than per 300ms slice.
+    pub fn poll_settled_events(&self) -> Option<Vec<FileChangeEvent>> {
+        let fresh = self.poll_events();
+
+        // A panic elsewhere must not wedge hot-reload for the rest of the
+        // session, so recover a poisoned guard instead of propagating.
+        let mut pending = match self.pending.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if !fresh.is_empty() {
+            if pending.events.is_empty() {
+                pending.first_seen = Some(std::time::Instant::now());
+            }
+            pending.last_seen = Some(std::time::Instant::now());
+            pending.events.extend(fresh);
+        }
+
+        if pending.events.is_empty() {
+            return None;
+        }
+
+        let quiet = pending.last_seen.is_none_or(|t| t.elapsed() >= BURST_QUIET_PERIOD);
+        let capped = pending.first_seen.is_none_or(|t| t.elapsed() >= BURST_MAX_WAIT);
+        if !quiet && !capped {
+            return None;
+        }
+
+        pending.first_seen = None;
+        pending.last_seen = None;
+        Some(std::mem::take(&mut pending.events))
+    }
+
     /// Poll for file events (non-blocking)
     pub fn poll_events(&self) -> Vec<FileChangeEvent> {
         let _start = std::time::Instant::now();
@@ -85,7 +170,7 @@ impl SpaceFileWatcher {
         
         let elapsed = _start.elapsed();
         if raw_event_count > 0 {
-            warn!("🔍 File watcher received {} raw events, processed {} change events in {:.1}ms", 
+            warn!("🔍 File watcher received {} raw events, buffered {} change events in {:.1}ms",
                 raw_event_count, events.len(), elapsed.as_secs_f64() * 1000.0);
         }
         
@@ -106,21 +191,8 @@ impl SpaceFileWatcher {
         let path = event.paths.first()?.clone();
 
         // Ignore churn OUTSIDE the editable Space content, BEFORE any
-        // syscall. The watcher is recursive over the whole Space, which
-        // also covers: the binary Fjall DB (`world.fjalldb/` — journals +
-        // segments rewritten constantly + compaction) and the autosave
-        // git repo (`.git/` — rewritten by `git add -A` every autosave
-        // interval). Without this, every autosave tick produced a burst
-        // of raw events that the main thread drained with a
-        // `path.is_file()` stat EACH — the ~5-second editor stutter.
-        // `.eustress/` is sidecar/trash, also not editable content. Cheap
-        // path-component scan; no filesystem access.
-        if path.components().any(|c| {
-            matches!(
-                c.as_os_str().to_str(),
-                Some("world.fjalldb") | Some(".git") | Some(".eustress")
-            )
-        }) {
+        // syscall.
+        if is_engine_internal_path(&path) {
             return None;
         }
 
@@ -152,14 +224,35 @@ impl SpaceFileWatcher {
     
     /// Extract service name from file path
     fn extract_service_from_path(&self, path: &Path) -> Option<String> {
-        // Get relative path from space root
-        let relative = path.strip_prefix(&self.space_path).ok()?;
-        
-        // First component should be the service name
-        let service = relative.components().next()?.as_os_str().to_str()?;
-        
-        Some(service.to_string())
+        service_from_space_root(&self.space_path, path)
     }
+}
+
+/// True for paths the watcher must never treat as editable Space content.
+///
+/// The watcher is recursive over the whole Space, which also covers: the
+/// binary Fjall DB (`world.fjalldb/` — journals + segments rewritten
+/// constantly + compaction) and the autosave git repo (`.git/` —
+/// rewritten by `git add -A` every autosave interval). Without this,
+/// every autosave tick produced a burst of raw events that the main
+/// thread drained with a `path.is_file()` stat EACH — the ~5-second
+/// editor stutter. `.eustress/` is sidecar/trash, also not editable
+/// content. Cheap path-component scan; no filesystem access.
+fn is_engine_internal_path(path: &Path) -> bool {
+    path.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some("world.fjalldb") | Some(".git") | Some(".eustress")
+        )
+    })
+}
+
+/// Service name for a path — the first path component below the Space
+/// root (`Workspace`, `StarterGui`, `Lighting`, …).
+fn service_from_space_root(space_path: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(space_path).ok()?;
+    let service = relative.components().next()?.as_os_str().to_str()?;
+    Some(service.to_string())
 }
 
 /// File change event
@@ -315,33 +408,47 @@ pub fn process_file_changes(
         );
     }
     
-    let events = watcher.poll_events();
+    // Act on a whole SETTLED burst, never on a single poll. `notify`'s
+    // debouncer expires a path's queue entry-by-entry, so one logical write
+    // can be split across consecutive polls — and a `Remove`/`Modify` for a
+    // path can reach us a frame or two BEFORE that path's own `Create`.
+    // Buffering to quiescence puts every event for a path in the same batch,
+    // which is what the ordering pass below then relies on.
+    let Some(events) = watcher.poll_settled_events() else {
+        return;
+    };
 
-    if !events.is_empty() {
-        // Mark asset manager and explorer caches stale so they rescan on next sync
-        if let Some(ref mut ams) = asset_manager_state {
-            ams.cache_stale = true;
-            ams.dirty = true;
-        }
-        if let Some(ref mut es) = explorer_state {
-            es.explorer_fs_stale = true;
-            es.needs_immediate_sync = true;
-        }
+    // Grace period: ignore Modified events for the first 5 seconds after watcher
+    // creation. `notify` fires spurious Modify events for pre-existing files when
+    // the watcher starts — those files were already loaded by load_space_files_system.
+    let in_grace_period = watcher.created_at.elapsed() < Duration::from_secs(5);
 
-        let elapsed = _start.elapsed();
-        if elapsed.as_millis() > 50 {
-            warn!("🐌 process_file_changes took {:.1}ms ({} events)", elapsed.as_secs_f64() * 1000.0, events.len());
-        }
+    // Mark asset manager and explorer caches stale so they rescan on next
+    // sync. Once per settled burst rather than once per poll — a bulk write
+    // used to force the Explorer through a filesystem rescan for every
+    // 300ms slice of the same operation.
+    if let Some(ref mut ams) = asset_manager_state {
+        ams.cache_stale = true;
+        ams.dirty = true;
+    }
+    if let Some(ref mut es) = explorer_state {
+        es.explorer_fs_stale = true;
+        es.needs_immediate_sync = true;
+    }
+
+    let elapsed = _start.elapsed();
+    if elapsed.as_millis() > 50 {
+        warn!("🐌 process_file_changes took {:.1}ms ({} events)", elapsed.as_secs_f64() * 1000.0, events.len());
     }
 
     // Coalesce external renames. On most filesystems an `mv Foo Bar`
-    // arrives as a Remove + Create pair in the same poll window —
+    // arrives as a Remove + Create pair in the same settled batch —
     // processing them naively would despawn the entity and re-spawn
     // a fresh one, losing any transient ECS state (physics velocity,
     // animation progress, in-flight tool results, etc.). We detect
     // the pair by matching final-filename equality (same basename,
     // different full path) and promote it to an in-place path update.
-    let (mut events, renames) = coalesce_renames(events);
+    let (mut events, renames) = coalesce_renames(events, &registry);
     for (old_ev, new_ev) in renames {
         handle_file_renamed(&old_ev.path, &new_ev.path, &mut registry, &mut commands, &file_entities);
     }
@@ -368,11 +475,6 @@ pub fn process_file_changes(
         FileChangeType::Created => e.path.components().count(),
         _ => usize::MAX,
     });
-
-    // Grace period: ignore Modified events for the first 5 seconds after watcher
-    // creation. `notify` fires spurious Modify events for pre-existing files when
-    // the watcher starts — those files were already loaded by load_space_files_system.
-    let in_grace_period = watcher.created_at.elapsed() < Duration::from_secs(5);
 
     for event in events {
         // Skip files that were recently written by the engine (prevents hot-reload loops)
@@ -405,7 +507,17 @@ pub fn process_file_changes(
                 // When we hot-reload and insert Transform, it triggers Changed<Transform>,
                 // which would trigger write_instance_changes_system. By marking it here,
                 // that system will skip writing this file.
-                recently_written.mark_written(event.path.clone());
+                //
+                // Only for a path that already backs a live entity, because
+                // that loop needs an entity to run through — `handle_file_modified`
+                // is a no-op for anything else. Marking an unowned path instead
+                // BLOCKS it: the 2-second suppression window is longer than a
+                // burst, so a `Create` arriving for the same path afterwards is
+                // dropped by the guard at the top of this loop and the file never
+                // loads at all.
+                if registry.get_entity(&event.path).is_some() {
+                    recently_written.mark_written(event.path.clone());
+                }
 
                 handle_file_modified(
                     &event,
@@ -449,7 +561,15 @@ pub fn process_file_changes(
                     && event.path.exists()
                     && !registry.rename_in_progress.contains(&event.path)
                 {
-                    recently_written.mark_written(event.path.clone());
+                    // Same rule as the Modify arm: the write-back suppression
+                    // is only meaningful for a path we already own. An
+                    // atomic-write Remove that lands before its partner Create
+                    // (the debouncer can split one path's queue across polls)
+                    // would otherwise mark a path we have never loaded and
+                    // silently veto its own Create.
+                    if registry.get_entity(&event.path).is_some() {
+                        recently_written.mark_written(event.path.clone());
+                    }
                     handle_file_modified(
                         &event,
                         &mut registry,
@@ -1433,12 +1553,16 @@ fn handle_file_created(
 /// the surviving non-rename events plus the matched pairs.
 ///
 /// The heuristic is intentionally conservative: the two events must
-/// appear in the SAME poll batch (~one frame), so a human-scale
-/// delete-then-create a few hundred milliseconds apart won't be
-/// mistaken for a rename. A matching filename across different paths in
-/// the same frame is overwhelmingly a filesystem rename.
+/// appear in the SAME settled batch, so a human-scale delete-then-create
+/// seconds apart won't be mistaken for a rename. A matching filename
+/// across different paths inside one burst is overwhelmingly a filesystem
+/// rename — but "overwhelmingly" is not "always", and a wrong guess here
+/// is silent content loss, because fusing CONSUMES the create. Hence the
+/// four preconditions below; anything that fails them falls back to plain
+/// Remove + Create, which costs a respawn but never loses the file.
 fn coalesce_renames(
     events: Vec<FileChangeEvent>,
+    registry: &SpaceFileRegistry,
 ) -> (Vec<FileChangeEvent>, Vec<(FileChangeEvent, FileChangeEvent)>) {
     let mut consumed = vec![false; events.len()];
     let mut renames: Vec<(FileChangeEvent, FileChangeEvent)> = Vec::new();
@@ -1446,15 +1570,13 @@ fn coalesce_renames(
     // Paths that are CREATED somewhere in this batch. A `Remove` whose path is
     // ALSO `Create`d in the same batch is an atomic-write in-place rewrite
     // (temp file → rename over the SAME path), NOT a `mv` — so it must never be
-    // a rename candidate. This is the guard that fixes group-move corruption:
-    // every folder entity's marker is named `_instance.toml`, so moving N
-    // entities at once emits N Remove + N Create events all sharing that
-    // basename. Without this guard the basename match below greedily cross-
-    // paired e.g. `Remove(Center/_instance.toml)` with
-    // `Create(Edge_09/_instance.toml)` → a FALSE rename that rekeyed Center's
-    // entity onto Edge_09's path (the name↔source scramble) AND freed Center's
-    // path so its own atomic re-Create spawned a DUPLICATE Center. Only a path
-    // that is gone and NOT re-created in the batch is a genuine rename.
+    // a rename candidate. Left unguarded, the basename match below cross-paired
+    // e.g. `Remove(Center/_instance.toml)` with `Create(Edge_09/_instance.toml)`
+    // → a FALSE rename that rekeyed Center's entity onto Edge_09's path (the
+    // name↔source scramble) AND freed Center's path so its own atomic re-Create
+    // spawned a DUPLICATE Center. This covers the same-path case; the
+    // unambiguous-partner rule further down covers the other shape of the same
+    // hazard, where N entities move at once and every marker is `_instance.toml`.
     let created_paths: std::collections::HashSet<std::path::PathBuf> = events.iter()
         .filter(|e| e.change_type == FileChangeType::Created)
         .map(|e| e.path.clone())
@@ -1464,18 +1586,44 @@ fn coalesce_renames(
         if consumed[i] || events[i].change_type != FileChangeType::Removed { continue; }
         // Same-path re-Create in this batch ⇒ atomic-write rewrite, not a `mv`.
         if created_paths.contains(&events[i].path) { continue; }
+        // A `mv` leaves the source GONE. A path still on disk was replaced,
+        // not moved, so there is nothing to rekey.
+        if events[i].path.exists() { continue; }
+        // No registered entity at the source ⇒ nothing to preserve, and
+        // `handle_file_renamed` would bail — but the create it consumed is
+        // gone by then, so the new file never spawns. Leave both events
+        // alone and let the normal handlers do their jobs.
+        if registry.get_entity(&events[i].path).is_none() { continue; }
         let rm_basename = match events[i].path.file_name() {
             Some(n) => n.to_os_string(),
             None => continue,
         };
+        // Require an UNAMBIGUOUS partner. Every folder entity's marker is
+        // named `_instance.toml`, so a batch that carries a bulk write and a
+        // move at once offers many equally-good basename matches; picking the
+        // first would rekey one entity onto another's path (a name↔source
+        // scramble) and swallow that path's create. Two or more candidates
+        // means we cannot tell, so we decline to guess.
+        let mut partners: Vec<usize> = Vec::new();
         for j in (i + 1)..events.len() {
             if consumed[j] || events[j].change_type != FileChangeType::Created { continue; }
             if events[j].path == events[i].path { continue; }
-            if events[j].path.file_name() == Some(rm_basename.as_os_str()) {
+            if events[j].path.file_name() != Some(rm_basename.as_os_str()) { continue; }
+            partners.push(j);
+            if partners.len() > 1 { break; }
+        }
+        match partners.as_slice() {
+            [j] => {
                 consumed[i] = true;
-                consumed[j] = true;
-                renames.push((events[i].clone(), events[j].clone()));
-                break;
+                consumed[*j] = true;
+                renames.push((events[i].clone(), events[*j].clone()));
+            }
+            [] => {}
+            _ => {
+                debug!(
+                    "🔀 Ambiguous rename candidates for {:?} in this batch — treating as delete + create",
+                    events[i].path
+                );
             }
         }
     }

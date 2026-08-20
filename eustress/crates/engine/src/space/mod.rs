@@ -60,6 +60,10 @@ pub mod promote;
 pub mod db_export;
 #[cfg(feature = "world-db")]
 pub mod residency;
+/// Velocity-predictive streaming: prefetch along the heading, order the
+/// queue by arrival time, and cancel work the camera turned away from.
+#[cfg(feature = "world-db")]
+pub mod stream_predict;
 /// Merged-cell HLOD: far Morton cells render as ONE merged proxy mesh
 /// instead of thousands of individual entities, so the whole map draws
 /// cheaply while residency keeps only the near ring as live parts.
