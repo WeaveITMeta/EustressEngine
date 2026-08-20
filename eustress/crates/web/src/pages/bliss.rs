@@ -219,7 +219,8 @@ pub fn BlissPage() -> impl IntoView {
                             // bliss_balance is whole BLS (see state::User). Show 4
                             // decimals — NOT divided by 1e18; the ledger stores
                             // whole BLS, not base units.
-                            let balance = format!("{:.4}", user.bliss_balance);
+                            // 2dp — matches the ledger unit (100 minor units per BLS).
+                            let balance = format!("{:.2}", user.bliss_balance);
                             view! {
                                 <div class="bliss-account-panel">
                                     // Balance + Payout side by side

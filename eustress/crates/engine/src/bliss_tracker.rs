@@ -768,7 +768,10 @@ fn drain_net_events(
     // climbing number that will never be credited.
     if tracker.display_dirty {
         tracker.display_dirty = false;
-        display.balance = format!("{:.18}", tracker.server_balance);
+        // 2dp everywhere — the ledger stores integer minor units
+        // (1 BLS = 100), so more digits would be inventing precision
+        // that does not exist and rendering float noise.
+        display.balance = format!("{:.2}", tracker.server_balance);
         display.balance_short = format!("{:.2}", tracker.server_balance);
         display.pending = match tracker.earn_state.hint() {
             Some(hint) => hint.to_string(),

@@ -64,16 +64,16 @@ impl Default for AuthState {
 
 /// Bliss node state — tracks node mode and balance for the engine UI.
 /// Light node runs by default. Full node is opt-in (+10% BLS bonus).
-/// BLS has 18 decimal places.
+/// BLS has 2 decimal places (1 BLS = 100 minor units in the ledger).
 #[derive(Resource, Clone, Debug)]
 pub struct BlissNodeState {
     /// "Light" or "Full"
     pub mode: String,
-    /// Current BLS balance — full 18 decimals (for dropdown)
+    /// Current BLS balance — 2 decimals, full precision (for dropdown)
     pub balance: String,
     /// Current BLS balance — shortened 2 decimals (for badge)
     pub balance_short: String,
-    /// Pending BLS (display string, e.g. "+0.000000000000000000")
+    /// Pending contribution score for today (display string, e.g. "+9.8 pts today")
     pub pending: String,
     /// Bonus multiplier display (e.g. "1.0x" or "1.1x")
     pub bonus: String,
@@ -85,9 +85,9 @@ impl Default for BlissNodeState {
     fn default() -> Self {
         Self {
             mode: "Light".to_string(),
-            balance: "0.000000000000000000".to_string(),
+            balance: "0.00".to_string(),
             balance_short: "0.00".to_string(),
-            pending: "+0.000000000000000000".to_string(),
+            pending: "+0.0 pts today".to_string(),
             bonus: "1.0x".to_string(),
             enabled: true,
         }
