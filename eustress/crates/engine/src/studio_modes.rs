@@ -483,6 +483,7 @@ pub fn load_builtin_modes() -> Vec<ModeManifest> {
         (include_str!("../modes/student.toml"), "student"),
         (include_str!("../modes/business.toml"), "business"),
         (include_str!("../modes/legal.toml"), "legal"),
+        (include_str!("../modes/ai.toml"), "ai"),
         (include_str!("../modes/civil.toml"), "civil"),
         (include_str!("../modes/engineering.toml"), "engineering"),
         (include_str!("../modes/justice.toml"), "justice"),
@@ -716,7 +717,19 @@ mod tests {
     #[test]
     fn builtins_parse() {
         let modes = load_builtin_modes();
-        assert_eq!(modes.len(), 10, "all ten built-in modes must parse");
+        // Assert the exact SET, not a count: a bare number says "11 != 10" when
+        // a manifest silently fails to parse and gets dropped, which tells you
+        // nothing about which one. Order matters too - source order in
+        // `load_builtin_modes` is dropdown order.
+        let ids: Vec<&str> = modes.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "gaming", "student", "business", "legal", "ai", "civil",
+                "engineering", "justice", "health", "military", "government",
+            ],
+            "every built-in manifest must parse, in dropdown order"
+        );
         let eng = modes.iter().find(|m| m.id == "engineering").unwrap();
         assert_eq!(eng.tabs.len(), KNOWN_TAB_IDS.len(), "engineering shows all tabs");
         let jus = modes.iter().find(|m| m.id == "justice").unwrap();
@@ -915,6 +928,71 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn ai_mode_shape() {
+        // AI sits between Legal and Civil in the dropdown — source order in
+        // `load_builtin_modes` IS display order, so a reorder there silently
+        // moves the mode; pin it.
+        let modes = load_builtin_modes();
+        let ids: Vec<&str> = modes.iter().map(|m| m.id.as_str()).collect();
+        let ai = ids.iter().position(|i| *i == "ai").expect("ai mode missing");
+        assert_eq!(ids[ai - 1], "legal", "AI must follow Legal in the Modes dropdown");
+        assert_eq!(ids[ai + 1], "civil", "AI must precede Civil in the Modes dropdown");
+
+        let m = modes.iter().find(|m| m.id == "ai").unwrap();
+        assert!(!m.submodes.is_empty(), "AI must be discipline-gated, never directly selectable");
+
+        // Universal tabs are carried verbatim into every discipline. Without
+        // this, a submode override silently makes the wired `data:*` corpus
+        // tools unreachable — the exact regression the carry-forward
+        // convention exists to prevent.
+        for sub in &m.submodes {
+            let tabs = m.effective_custom_tabs(&sub.id);
+            assert!(
+                tabs.iter().any(|t| t.id == "corpus"),
+                "ai '{}' missing universal tab 'corpus'",
+                sub.id
+            );
+            assert!(
+                tabs.iter().any(|t| t.id == "runs"),
+                "ai '{}' missing universal tab 'runs'",
+                sub.id
+            );
+            // Publishing drops `hub` deliberately: its own three tabs
+            // supersede it. Every other discipline must carry it.
+            let has_hub = tabs.iter().any(|t| t.id == "hub");
+            if sub.id == "publishing" {
+                assert!(!has_hub, "ai publishing should supersede the universal 'hub' tab, not duplicate it");
+                assert!(
+                    tabs.iter().any(|t| t.id == "hub-release"),
+                    "ai publishing missing its own 'hub-release' tab"
+                );
+            } else {
+                assert!(has_hub, "ai '{}' missing universal tab 'hub'", sub.id);
+            }
+        }
+
+        // The Corpus tab is the honest part of this mode: every id in it is a
+        // really-wired action, so the AI mode is useful on day one rather than
+        // being entirely aspirational. If one of these ever stops being wired,
+        // this fails instead of quietly demoting the tab to dream buttons.
+        let corpus = m
+            .custom_tabs
+            .iter()
+            .find(|t| t.id == "corpus")
+            .expect("ai fallback tabs missing 'corpus'");
+        for sec in &corpus.sections {
+            for tool in &sec.tools {
+                let meta = crate::tool_metadata::tool_meta(tool)
+                    .unwrap_or_else(|| panic!("ai corpus tool '{tool}' has no metadata"));
+                assert!(
+                    meta.wired,
+                    "ai corpus tool '{tool}' is not wired — the Corpus tab must stay real"
+                );
+            }
+        }
+    }
+
     fn justice_public_but_judge_submode_gated() {
         // Justice mode is visible to everyone (no mode-level gate)...
         let modes = load_builtin_modes();

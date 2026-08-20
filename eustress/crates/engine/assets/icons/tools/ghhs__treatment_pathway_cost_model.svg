@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
-<g transform="translate(0.96 0.96) scale(0.92)"><rect x="8.5" y="2.5" width="7" height="5" rx="1" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <path d="M12 7.5v3.5M12 11l-6 3M12 11l6 3" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <rect x="2.5" y="14" width="7" height="5" rx="1" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <rect x="14.5" y="14" width="7" height="5" rx="1" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></g>
+<g transform="translate(0.96 0.96) scale(0.92)"><g transform="scale(1.5000)"><path d="M8 14V8" stroke="#d4d4d4" stroke-width="1" stroke-linecap="round"/>
+  <path d="M5 3c-2 0-3 1.5-3 3s1.5 3 3 3h1" fill="none" stroke="#d4d4d4" stroke-width="1.2" stroke-linecap="round"/>
+  <path d="M11 3c2 0 3 1.5 3 3s-1.5 3-3 3h-1" fill="none" stroke="#d4d4d4" stroke-width="1.2" stroke-linecap="round"/>
+  <path d="M6 4c0-1.5 1-2.5 2-2.5s2 1 2 2.5" fill="none" stroke="#d4d4d4" stroke-width="1" stroke-linecap="round"/></g></g>
 </svg>

@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
 <mask id="kb"><rect x="0" y="0" width="24" height="24" fill="white"/><circle cx="17.6" cy="17.6" r="6.1" fill="black"/></mask>
-<g mask="url(#kb)"><g transform="scale(0.82)"><path d="M9.5 10 8.8 4.9A2.4 2.4 0 0 1 11.2 2.5h1.6a2.4 2.4 0 0 1 2.4 2.4L14.5 10" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <path d="M5 15a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v2.5H5V15z" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <line x1="5" y1="20.5" x2="19" y2="20.5" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></g></g>
+<g mask="url(#kb)"><g transform="scale(0.82)"><path d="M7 12a5 5 0 0 1 10 0c0 3-.5 6-1.5 8.5" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M12 12c0 3.5-.5 7-2 9.5" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M4.5 9A8.5 8.5 0 0 1 19.5 9" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M12 15.5c-.3 2-.8 4-1.6 5.7" transform="translate(4.5 1)" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></g></g>
 <circle cx="17.6" cy="17.6" r="4.5" stroke="#d4d4d4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
 <path d="M15.6 19.6l.4-1.6 2.9-2.9 1.2 1.2-2.9 2.9-1.6.4z" stroke="#d4d4d4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
 </svg>

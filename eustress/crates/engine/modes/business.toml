@@ -43,7 +43,7 @@ icon = "calc"
 [[submodes]]
 id = "operations"
 name = "Operations"
-icon = "gear"
+icon = "gears"
 
 [[submodes]]
 id = "supply-chain"

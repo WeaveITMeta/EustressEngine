@@ -157,6 +157,23 @@ ID_BASE = {
 # domain+action combo (the source of the 150+ same-section twins).
 # Scanned right-to-left over the id's tokens (action suffix excluded).
 TOKEN_BASE = {
+    # ── AI mode (2026-08-20): ML/RL vocabulary, so composed glyphs read as
+    # their subject rather than falling back to the prefix archetype.
+    "reward": "trophy", "policy": "robot", "rollout": "robot",
+    "episode": "gamepad", "env": "gamepad", "agent": "robot",
+    "checkpoint": "save", "shard": "package", "parquet": "package",
+    "corpus": "database", "dataset": "database", "dataloader": "database",
+    "card": "document", "manifest": "certificate", "license": "certificate",
+    "rights": "certificate", "merkle": "fingerprint", "hash": "fingerprint",
+    "lineage": "route", "provenance": "route", "payout": "coin",
+    "contributor": "users", "tokenizer": "sigma", "embedding": "sigma",
+    "gradient": "trend-up", "grad": "trend-up", "loss": "chart-line",
+    "benchmark": "trophy", "leaderboard": "trophy", "eval": "gauge",
+    "metric": "gauge", "label": "tag", "annotate": "tag",
+    "split": "separate", "leakage": "shield", "holdout": "shield",
+    "sensor": "antenna", "telemetry": "antenna", "harvest": "import",
+    "model": "brain", "adapter": "puzzle", "sweep": "radar",
+    "run": "play", "hub": "rocket", "bias": "scales",
     "balance": "scales", "income": "trend-up", "cash": "coin",
     "statement": "document", "ratio": "chart-pie", "variance": "chart-bar",
     "accrual": "calendar", "matching": "link", "reconciliation": "link",

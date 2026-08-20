@@ -1,0 +1,928 @@
+# Eustress Mode - "AI".
+#
+# Eustress as a DATA PLATFORM for machine learning: acquire a corpus (from the
+# simulation itself, from live feeds, or synthesized), curate and label it,
+# prove where every record came from, train and evaluate against it, and export
+# it as a HuggingFace-loadable dataset.
+#
+# Placed between Legal and Civil in the Modes dropdown - source order in
+# `studio_modes.rs::load_builtin_modes` IS display order.
+#
+# HONESTY NOTE - read before wiring anything here:
+# The `Corpus` tab is genuinely functional: every id in it is an already-wired
+# `data:*` action (import, connect, record, grid, chart, stats, fit, fft,
+# cluster, anomaly). Everything else is an aspirational "dream" button that
+# records a vote and says so in a toast - the same contract the other nine
+# modes follow.
+#
+# In particular the `hub:*` export tools are NOT yet wired, even though
+# `eustress-data`'s `export::export_huggingface()` is fully implemented. The
+# gap is provenance, not export: that function REFUSES to write unless handed a
+# `provenance::Manifest` that passes `verify()` with no undeclared sources, and
+# nothing in the engine constructs a Manifest yet. Wiring `hub:export_dataset`
+# therefore means building the `prov:*` capture path first - declaring sources
+# and recording per-record lineage as data is ingested. Shipping an "Export to
+# HuggingFace" button that silently produced an unattributed corpus would
+# defeat the entire point of that layer.
+
+[mode]
+id = "ai"
+name = "AI"
+icon = "brain"
+# Mode-selection-menu color - matches [theme] accent below, per the rule that
+# the dropdown swatch and the in-editor selection highlight are the same hue.
+color = "#6366f1"
+version = "1.0"
+author = "Eustress"
+
+[ribbon]
+tabs = ["home", "data", "test", "mindspace", "plugins"]
+
+[layout]
+preset = "Wide Panels"
+
+[theme]
+# Indigo - deliberately distinct from Gaming's light violet (#c084fc) and
+# Student's deeper blue (#0D69AC), the two nearest neighbours in the dropdown.
+accent = "#6366f1"
+
+# AI itself is NOT directly selectable (any mode with submodes only expands its
+# submenu - see ribbon.slint's mode-row-touch handler); pick a discipline.
+
+[[submodes]]
+id = "acquisition"
+name = "Acquisition"
+icon = "radar"
+
+[[submodes]]
+id = "curation"
+name = "Curation"
+icon = "funnel"
+
+[[submodes]]
+id = "provenance"
+name = "Provenance"
+icon = "fingerprint"
+
+[[submodes]]
+id = "training"
+name = "Training"
+icon = "brain"
+
+[[submodes]]
+id = "reinforcement"
+name = "Reinforcement"
+icon = "robot"
+
+[[submodes]]
+id = "evaluation"
+name = "Evaluation"
+icon = "gauge"
+
+[[submodes]]
+id = "publishing"
+name = "Publishing"
+icon = "rocket"
+
+# -- Fallback tabs -----------------------------------------------------------
+# Used only if AI is ever reached without a discipline (it cannot be selected
+# directly today). Identical to the universal set carried into every discipline
+# below, so the surface never differs by accident.
+
+[[tabs]]
+id = "corpus"
+name = "Corpus"
+color = "#22d3ee"
+
+  [[tabs.sections]]
+  name = "Ingest"
+  tools = ["data:import", "data:connect", "data:record"]
+
+  [[tabs.sections]]
+  name = "Inspect"
+  tools = ["data:grid", "data:chart", "data:stats"]
+
+  [[tabs.sections]]
+  name = "Analyze"
+  tools = ["data:fit", "data:fft", "data:cluster", "data:anomaly"]
+
+
+[[tabs]]
+id = "runs"
+name = "Runs"
+color = "#a78bfa"
+
+  [[tabs.sections]]
+  name = "Experiments"
+  tools = ["ai:run_launcher", "ai:run_queue", "ai:sweep_planner"]
+
+  [[tabs.sections]]
+  name = "Checkpoints"
+  tools = ["ai:checkpoint_browser", "ai:checkpoint_diff", "ai:resume_run"]
+
+  [[tabs.sections]]
+  name = "Compare"
+  tools = ["ai:run_compare", "ai:metric_overlay", "ai:leaderboard"]
+
+
+[[tabs]]
+id = "hub"
+name = "Hub"
+color = "#f59e0b"
+
+  [[tabs.sections]]
+  name = "Package"
+  tools = ["hub:corpus_assemble", "hub:shard_size", "hub:split_manifest"]
+
+  [[tabs.sections]]
+  name = "Data Card"
+  tools = ["hub:data_card", "hub:license_select", "hub:task_categories"]
+
+  [[tabs.sections]]
+  name = "Publish"
+  tools = ["hub:rights_gate", "hub:hub_push", "hub:revision_tag"]
+
+
+# -- Per-discipline tabs -----------------------------------------------------
+# `[[submode_tabs]]` REPLACES the mode's tab list for that submode (see
+# `ModeManifest::effective_custom_tabs`), so the universal tabs are repeated
+# verbatim in each block. Dropping one is always deliberate, never an omission:
+# Publishing drops `hub` because its own three tabs supersede it.
+
+# -- Acquisition --
+[[submode_tabs]]
+submode = "acquisition"
+id = "acq-sources"
+name = "Sources"
+color = "#38bdf8"
+
+  [[submode_tabs.sections]]
+  name = "Simulation Capture"
+  tools = ["acq:sim_recorder", "acq:episode_capture", "acq:viewport_frames", "acq:state_sampler"]
+
+  [[submode_tabs.sections]]
+  name = "Live Feeds"
+  tools = ["acq:sensor_stream", "acq:telemetry_tap", "acq:socket_source"]
+
+  [[submode_tabs.sections]]
+  name = "Files and Web"
+  tools = ["acq:bulk_loader", "acq:web_harvest", "acq:api_puller"]
+
+
+[[submode_tabs]]
+submode = "acquisition"
+id = "acq-synthesis"
+name = "Synthesis"
+color = "#34d399"
+
+  [[submode_tabs.sections]]
+  name = "Procedural"
+  tools = ["acq:scene_randomizer", "acq:domain_randomize", "acq:variant_sweep"]
+
+  [[submode_tabs.sections]]
+  name = "Augment"
+  tools = ["acq:noise_inject", "acq:occlusion_mask", "acq:time_warp"]
+
+  [[submode_tabs.sections]]
+  name = "Balance"
+  tools = ["acq:class_balancer", "acq:rare_event_boost"]
+
+
+[[submode_tabs]]
+submode = "acquisition"
+id = "acq-quality"
+name = "Capture Quality"
+color = "#fbbf24"
+
+  [[submode_tabs.sections]]
+  name = "Coverage"
+  tools = ["acq:coverage_map", "acq:gap_finder", "acq:sampling_audit"]
+
+  [[submode_tabs.sections]]
+  name = "Fidelity"
+  tools = ["acq:sensor_calibration", "acq:drift_monitor"]
+
+  [[submode_tabs.sections]]
+  name = "Throughput"
+  tools = ["acq:capture_budget", "acq:stream_health"]
+
+
+[[submode_tabs]]
+submode = "acquisition"
+id = "corpus"
+name = "Corpus"
+color = "#22d3ee"
+
+  [[submode_tabs.sections]]
+  name = "Ingest"
+  tools = ["data:import", "data:connect", "data:record"]
+
+  [[submode_tabs.sections]]
+  name = "Inspect"
+  tools = ["data:grid", "data:chart", "data:stats"]
+
+  [[submode_tabs.sections]]
+  name = "Analyze"
+  tools = ["data:fit", "data:fft", "data:cluster", "data:anomaly"]
+
+
+[[submode_tabs]]
+submode = "acquisition"
+id = "runs"
+name = "Runs"
+color = "#a78bfa"
+
+  [[submode_tabs.sections]]
+  name = "Experiments"
+  tools = ["ai:run_launcher", "ai:run_queue", "ai:sweep_planner"]
+
+  [[submode_tabs.sections]]
+  name = "Checkpoints"
+  tools = ["ai:checkpoint_browser", "ai:checkpoint_diff", "ai:resume_run"]
+
+  [[submode_tabs.sections]]
+  name = "Compare"
+  tools = ["ai:run_compare", "ai:metric_overlay", "ai:leaderboard"]
+
+
+[[submode_tabs]]
+submode = "acquisition"
+id = "hub"
+name = "Hub"
+color = "#f59e0b"
+
+  [[submode_tabs.sections]]
+  name = "Package"
+  tools = ["hub:corpus_assemble", "hub:shard_size", "hub:split_manifest"]
+
+  [[submode_tabs.sections]]
+  name = "Data Card"
+  tools = ["hub:data_card", "hub:license_select", "hub:task_categories"]
+
+  [[submode_tabs.sections]]
+  name = "Publish"
+  tools = ["hub:rights_gate", "hub:hub_push", "hub:revision_tag"]
+
+
+# -- Curation --
+[[submode_tabs]]
+submode = "curation"
+id = "cur-shape"
+name = "Shape"
+color = "#38bdf8"
+
+  [[submode_tabs.sections]]
+  name = "Schema"
+  tools = ["cur:schema_editor", "cur:type_caster", "cur:column_mapper"]
+
+  [[submode_tabs.sections]]
+  name = "Clean"
+  tools = ["cur:null_policy", "cur:outlier_filter", "cur:unit_normalizer"]
+
+  [[submode_tabs.sections]]
+  name = "Dedupe"
+  tools = ["cur:near_duplicate", "cur:hash_dedupe"]
+
+
+[[submode_tabs]]
+submode = "curation"
+id = "cur-label"
+name = "Labeling"
+color = "#f472b6"
+
+  [[submode_tabs.sections]]
+  name = "Annotate"
+  tools = ["cur:label_workbench", "cur:bbox_tagger", "cur:span_marker"]
+
+  [[submode_tabs.sections]]
+  name = "Agreement"
+  tools = ["cur:inter_rater", "cur:label_audit", "cur:gold_set"]
+
+  [[submode_tabs.sections]]
+  name = "Weak Supervision"
+  tools = ["cur:heuristic_labeler", "cur:label_propagation"]
+
+
+[[submode_tabs]]
+submode = "curation"
+id = "cur-splits"
+name = "Splits"
+color = "#34d399"
+
+  [[submode_tabs.sections]]
+  name = "Partition"
+  tools = ["cur:split_designer", "cur:stratified_split", "cur:group_holdout"]
+
+  [[submode_tabs.sections]]
+  name = "Leakage"
+  tools = ["cur:leakage_scan", "cur:temporal_guard"]
+
+  [[submode_tabs.sections]]
+  name = "Versioning"
+  tools = ["cur:snapshot_tag", "cur:diff_report"]
+
+
+[[submode_tabs]]
+submode = "curation"
+id = "corpus"
+name = "Corpus"
+color = "#22d3ee"
+
+  [[submode_tabs.sections]]
+  name = "Ingest"
+  tools = ["data:import", "data:connect", "data:record"]
+
+  [[submode_tabs.sections]]
+  name = "Inspect"
+  tools = ["data:grid", "data:chart", "data:stats"]
+
+  [[submode_tabs.sections]]
+  name = "Analyze"
+  tools = ["data:fit", "data:fft", "data:cluster", "data:anomaly"]
+
+
+[[submode_tabs]]
+submode = "curation"
+id = "runs"
+name = "Runs"
+color = "#a78bfa"
+
+  [[submode_tabs.sections]]
+  name = "Experiments"
+  tools = ["ai:run_launcher", "ai:run_queue", "ai:sweep_planner"]
+
+  [[submode_tabs.sections]]
+  name = "Checkpoints"
+  tools = ["ai:checkpoint_browser", "ai:checkpoint_diff", "ai:resume_run"]
+
+  [[submode_tabs.sections]]
+  name = "Compare"
+  tools = ["ai:run_compare", "ai:metric_overlay", "ai:leaderboard"]
+
+
+[[submode_tabs]]
+submode = "curation"
+id = "hub"
+name = "Hub"
+color = "#f59e0b"
+
+  [[submode_tabs.sections]]
+  name = "Package"
+  tools = ["hub:corpus_assemble", "hub:shard_size", "hub:split_manifest"]
+
+  [[submode_tabs.sections]]
+  name = "Data Card"
+  tools = ["hub:data_card", "hub:license_select", "hub:task_categories"]
+
+  [[submode_tabs.sections]]
+  name = "Publish"
+  tools = ["hub:rights_gate", "hub:hub_push", "hub:revision_tag"]
+
+
+# -- Provenance --
+[[submode_tabs]]
+submode = "provenance"
+id = "prov-sources"
+name = "Sources and Rights"
+color = "#38bdf8"
+
+  [[submode_tabs.sections]]
+  name = "Declare"
+  tools = ["prov:source_register", "prov:rights_holder", "prov:license_terms"]
+
+  [[submode_tabs.sections]]
+  name = "Attribution"
+  tools = ["prov:record_lineage", "prov:transform_log", "prov:content_hash"]
+
+  [[submode_tabs.sections]]
+  name = "Undeclared"
+  tools = ["prov:undeclared_scan", "prov:orphan_records"]
+
+
+[[submode_tabs]]
+submode = "provenance"
+id = "prov-verify"
+name = "Verify"
+color = "#34d399"
+
+  [[submode_tabs.sections]]
+  name = "Manifest"
+  tools = ["prov:manifest_build", "prov:manifest_verify", "prov:merkle_root"]
+
+  [[submode_tabs.sections]]
+  name = "Audit"
+  tools = ["prov:chain_audit", "prov:tamper_check"]
+
+  [[submode_tabs.sections]]
+  name = "Volume"
+  tools = ["prov:volume_by_source", "prov:share_report"]
+
+
+[[submode_tabs]]
+submode = "provenance"
+id = "prov-payout"
+name = "Compensation"
+color = "#fbbf24"
+
+  [[submode_tabs.sections]]
+  name = "Tiers"
+  tools = ["prov:payout_tier", "prov:rate_card"]
+
+  [[submode_tabs.sections]]
+  name = "Settlement"
+  tools = ["prov:payout_preview", "prov:contributor_ledger", "prov:payout_export"]
+
+
+[[submode_tabs]]
+submode = "provenance"
+id = "corpus"
+name = "Corpus"
+color = "#22d3ee"
+
+  [[submode_tabs.sections]]
+  name = "Ingest"
+  tools = ["data:import", "data:connect", "data:record"]
+
+  [[submode_tabs.sections]]
+  name = "Inspect"
+  tools = ["data:grid", "data:chart", "data:stats"]
+
+  [[submode_tabs.sections]]
+  name = "Analyze"
+  tools = ["data:fit", "data:fft", "data:cluster", "data:anomaly"]
+
+
+[[submode_tabs]]
+submode = "provenance"
+id = "runs"
+name = "Runs"
+color = "#a78bfa"
+
+  [[submode_tabs.sections]]
+  name = "Experiments"
+  tools = ["ai:run_launcher", "ai:run_queue", "ai:sweep_planner"]
+
+  [[submode_tabs.sections]]
+  name = "Checkpoints"
+  tools = ["ai:checkpoint_browser", "ai:checkpoint_diff", "ai:resume_run"]
+
+  [[submode_tabs.sections]]
+  name = "Compare"
+  tools = ["ai:run_compare", "ai:metric_overlay", "ai:leaderboard"]
+
+
+[[submode_tabs]]
+submode = "provenance"
+id = "hub"
+name = "Hub"
+color = "#f59e0b"
+
+  [[submode_tabs.sections]]
+  name = "Package"
+  tools = ["hub:corpus_assemble", "hub:shard_size", "hub:split_manifest"]
+
+  [[submode_tabs.sections]]
+  name = "Data Card"
+  tools = ["hub:data_card", "hub:license_select", "hub:task_categories"]
+
+  [[submode_tabs.sections]]
+  name = "Publish"
+  tools = ["hub:rights_gate", "hub:hub_push", "hub:revision_tag"]
+
+
+# -- Training --
+[[submode_tabs]]
+submode = "training"
+id = "trn-setup"
+name = "Setup"
+color = "#38bdf8"
+
+  [[submode_tabs.sections]]
+  name = "Task"
+  tools = ["trn:task_definition", "trn:objective_picker", "trn:tokenizer_config"]
+
+  [[submode_tabs.sections]]
+  name = "Data"
+  tools = ["trn:dataloader_config", "trn:batch_planner", "trn:curriculum_order"]
+
+  [[submode_tabs.sections]]
+  name = "Model"
+  tools = ["trn:base_model", "trn:adapter_config", "trn:precision_mode"]
+
+
+[[submode_tabs]]
+submode = "training"
+id = "trn-optimize"
+name = "Optimization"
+color = "#a78bfa"
+
+  [[submode_tabs.sections]]
+  name = "Schedule"
+  tools = ["trn:learning_rate_schedule", "trn:warmup_config", "trn:early_stop"]
+
+  [[submode_tabs.sections]]
+  name = "Regularize"
+  tools = ["trn:weight_decay", "trn:dropout_config", "trn:grad_clip"]
+
+  [[submode_tabs.sections]]
+  name = "Scale"
+  tools = ["trn:distributed_plan", "trn:grad_accumulation", "trn:memory_profile"]
+
+
+[[submode_tabs]]
+submode = "training"
+id = "trn-monitor"
+name = "Monitor"
+color = "#34d399"
+
+  [[submode_tabs.sections]]
+  name = "Curves"
+  tools = ["trn:loss_curve", "trn:grad_norm", "trn:lr_trace"]
+
+  [[submode_tabs.sections]]
+  name = "Diagnostics"
+  tools = ["trn:overfit_detector", "trn:activation_stats"]
+
+  [[submode_tabs.sections]]
+  name = "Artifacts"
+  tools = ["trn:checkpoint_policy", "trn:run_manifest"]
+
+
+[[submode_tabs]]
+submode = "training"
+id = "corpus"
+name = "Corpus"
+color = "#22d3ee"
+
+  [[submode_tabs.sections]]
+  name = "Ingest"
+  tools = ["data:import", "data:connect", "data:record"]
+
+  [[submode_tabs.sections]]
+  name = "Inspect"
+  tools = ["data:grid", "data:chart", "data:stats"]
+
+  [[submode_tabs.sections]]
+  name = "Analyze"
+  tools = ["data:fit", "data:fft", "data:cluster", "data:anomaly"]
+
+
+[[submode_tabs]]
+submode = "training"
+id = "runs"
+name = "Runs"
+color = "#a78bfa"
+
+  [[submode_tabs.sections]]
+  name = "Experiments"
+  tools = ["ai:run_launcher", "ai:run_queue", "ai:sweep_planner"]
+
+  [[submode_tabs.sections]]
+  name = "Checkpoints"
+  tools = ["ai:checkpoint_browser", "ai:checkpoint_diff", "ai:resume_run"]
+
+  [[submode_tabs.sections]]
+  name = "Compare"
+  tools = ["ai:run_compare", "ai:metric_overlay", "ai:leaderboard"]
+
+
+[[submode_tabs]]
+submode = "training"
+id = "hub"
+name = "Hub"
+color = "#f59e0b"
+
+  [[submode_tabs.sections]]
+  name = "Package"
+  tools = ["hub:corpus_assemble", "hub:shard_size", "hub:split_manifest"]
+
+  [[submode_tabs.sections]]
+  name = "Data Card"
+  tools = ["hub:data_card", "hub:license_select", "hub:task_categories"]
+
+  [[submode_tabs.sections]]
+  name = "Publish"
+  tools = ["hub:rights_gate", "hub:hub_push", "hub:revision_tag"]
+
+
+# -- Reinforcement --
+[[submode_tabs]]
+submode = "reinforcement"
+id = "rl-env"
+name = "Environments"
+color = "#38bdf8"
+
+  [[submode_tabs.sections]]
+  name = "Build"
+  tools = ["rl:env_builder", "rl:observation_space", "rl:action_space"]
+
+  [[submode_tabs.sections]]
+  name = "Physics"
+  tools = ["rl:step_budget", "rl:determinism_check", "rl:episode_reset"]
+
+  [[submode_tabs.sections]]
+  name = "Scenarios"
+  tools = ["rl:task_variants", "rl:difficulty_curve"]
+
+
+[[submode_tabs]]
+submode = "reinforcement"
+id = "rl-reward"
+name = "Reward"
+color = "#fbbf24"
+
+  [[submode_tabs.sections]]
+  name = "Design"
+  tools = ["rl:reward_designer", "rl:shaping_terms", "rl:penalty_budget"]
+
+  [[submode_tabs.sections]]
+  name = "Verify"
+  tools = ["rl:reward_hacking_probe", "rl:reward_sweep"]
+
+  [[submode_tabs.sections]]
+  name = "Preference"
+  tools = ["rl:preference_pairs", "rl:human_feedback"]
+
+
+[[submode_tabs]]
+submode = "reinforcement"
+id = "rl-policy"
+name = "Policy"
+color = "#34d399"
+
+  [[submode_tabs.sections]]
+  name = "Train"
+  tools = ["rl:policy_trainer", "rl:rollout_buffer", "rl:advantage_config"]
+
+  [[submode_tabs.sections]]
+  name = "Explore"
+  tools = ["rl:exploration_policy", "rl:self_play"]
+
+  [[submode_tabs.sections]]
+  name = "Deploy"
+  tools = ["rl:policy_export", "rl:behavior_clone"]
+
+
+[[submode_tabs]]
+submode = "reinforcement"
+id = "corpus"
+name = "Corpus"
+color = "#22d3ee"
+
+  [[submode_tabs.sections]]
+  name = "Ingest"
+  tools = ["data:import", "data:connect", "data:record"]
+
+  [[submode_tabs.sections]]
+  name = "Inspect"
+  tools = ["data:grid", "data:chart", "data:stats"]
+
+  [[submode_tabs.sections]]
+  name = "Analyze"
+  tools = ["data:fit", "data:fft", "data:cluster", "data:anomaly"]
+
+
+[[submode_tabs]]
+submode = "reinforcement"
+id = "runs"
+name = "Runs"
+color = "#a78bfa"
+
+  [[submode_tabs.sections]]
+  name = "Experiments"
+  tools = ["ai:run_launcher", "ai:run_queue", "ai:sweep_planner"]
+
+  [[submode_tabs.sections]]
+  name = "Checkpoints"
+  tools = ["ai:checkpoint_browser", "ai:checkpoint_diff", "ai:resume_run"]
+
+  [[submode_tabs.sections]]
+  name = "Compare"
+  tools = ["ai:run_compare", "ai:metric_overlay", "ai:leaderboard"]
+
+
+[[submode_tabs]]
+submode = "reinforcement"
+id = "hub"
+name = "Hub"
+color = "#f59e0b"
+
+  [[submode_tabs.sections]]
+  name = "Package"
+  tools = ["hub:corpus_assemble", "hub:shard_size", "hub:split_manifest"]
+
+  [[submode_tabs.sections]]
+  name = "Data Card"
+  tools = ["hub:data_card", "hub:license_select", "hub:task_categories"]
+
+  [[submode_tabs.sections]]
+  name = "Publish"
+  tools = ["hub:rights_gate", "hub:hub_push", "hub:revision_tag"]
+
+
+# -- Evaluation --
+[[submode_tabs]]
+submode = "evaluation"
+id = "evl-bench"
+name = "Benchmarks"
+color = "#38bdf8"
+
+  [[submode_tabs.sections]]
+  name = "Suites"
+  tools = ["evl:benchmark_suite", "evl:task_battery", "evl:baseline_compare"]
+
+  [[submode_tabs.sections]]
+  name = "Held-out"
+  tools = ["evl:holdout_runner", "evl:contamination_scan"]
+
+  [[submode_tabs.sections]]
+  name = "Regression"
+  tools = ["evl:regression_gate", "evl:eval_history"]
+
+
+[[submode_tabs]]
+submode = "evaluation"
+id = "evl-metrics"
+name = "Metrics"
+color = "#a78bfa"
+
+  [[submode_tabs.sections]]
+  name = "Quality"
+  tools = ["evl:metric_builder", "evl:confusion_matrix", "evl:calibration_plot"]
+
+  [[submode_tabs.sections]]
+  name = "Robustness"
+  tools = ["evl:perturbation_test", "evl:ood_probe", "evl:stress_eval"]
+
+  [[submode_tabs.sections]]
+  name = "Fairness"
+  tools = ["evl:slice_analysis", "evl:bias_audit"]
+
+
+[[submode_tabs]]
+submode = "evaluation"
+id = "evl-report"
+name = "Reporting"
+color = "#34d399"
+
+  [[submode_tabs.sections]]
+  name = "Model Card"
+  tools = ["evl:model_card", "evl:limitation_notes"]
+
+  [[submode_tabs.sections]]
+  name = "Evidence"
+  tools = ["evl:eval_bundle", "evl:reproduce_script", "evl:sign_off"]
+
+
+[[submode_tabs]]
+submode = "evaluation"
+id = "corpus"
+name = "Corpus"
+color = "#22d3ee"
+
+  [[submode_tabs.sections]]
+  name = "Ingest"
+  tools = ["data:import", "data:connect", "data:record"]
+
+  [[submode_tabs.sections]]
+  name = "Inspect"
+  tools = ["data:grid", "data:chart", "data:stats"]
+
+  [[submode_tabs.sections]]
+  name = "Analyze"
+  tools = ["data:fit", "data:fft", "data:cluster", "data:anomaly"]
+
+
+[[submode_tabs]]
+submode = "evaluation"
+id = "runs"
+name = "Runs"
+color = "#a78bfa"
+
+  [[submode_tabs.sections]]
+  name = "Experiments"
+  tools = ["ai:run_launcher", "ai:run_queue", "ai:sweep_planner"]
+
+  [[submode_tabs.sections]]
+  name = "Checkpoints"
+  tools = ["ai:checkpoint_browser", "ai:checkpoint_diff", "ai:resume_run"]
+
+  [[submode_tabs.sections]]
+  name = "Compare"
+  tools = ["ai:run_compare", "ai:metric_overlay", "ai:leaderboard"]
+
+
+[[submode_tabs]]
+submode = "evaluation"
+id = "hub"
+name = "Hub"
+color = "#f59e0b"
+
+  [[submode_tabs.sections]]
+  name = "Package"
+  tools = ["hub:corpus_assemble", "hub:shard_size", "hub:split_manifest"]
+
+  [[submode_tabs.sections]]
+  name = "Data Card"
+  tools = ["hub:data_card", "hub:license_select", "hub:task_categories"]
+
+  [[submode_tabs.sections]]
+  name = "Publish"
+  tools = ["hub:rights_gate", "hub:hub_push", "hub:revision_tag"]
+
+
+# -- Publishing --
+[[submode_tabs]]
+submode = "publishing"
+id = "hub-prep"
+name = "Prepare"
+color = "#38bdf8"
+
+  [[submode_tabs.sections]]
+  name = "Assemble"
+  tools = ["hub:corpus_assemble", "hub:split_manifest", "hub:schema_freeze"]
+
+  [[submode_tabs.sections]]
+  name = "Shard"
+  tools = ["hub:shard_size", "hub:parquet_writer", "hub:stream_check"]
+
+  [[submode_tabs.sections]]
+  name = "Preflight"
+  tools = ["hub:rights_gate", "hub:preflight_report"]
+
+
+[[submode_tabs]]
+submode = "publishing"
+id = "hub-card"
+name = "Data Card"
+color = "#fbbf24"
+
+  [[submode_tabs.sections]]
+  name = "Describe"
+  tools = ["hub:data_card", "hub:pretty_name", "hub:description_editor", "hub:language_codes"]
+
+  [[submode_tabs.sections]]
+  name = "Classify"
+  tools = ["hub:task_categories", "hub:tag_picker", "hub:size_category"]
+
+  [[submode_tabs.sections]]
+  name = "Terms"
+  tools = ["hub:license_select", "hub:usage_terms", "hub:citation_block"]
+
+
+[[submode_tabs]]
+submode = "publishing"
+id = "hub-release"
+name = "Release"
+color = "#34d399"
+
+  [[submode_tabs.sections]]
+  name = "Publish"
+  tools = ["hub:export_dataset", "hub:hub_push", "hub:private_toggle"]
+
+  [[submode_tabs.sections]]
+  name = "Version"
+  tools = ["hub:revision_tag", "hub:changelog", "hub:deprecate_notice"]
+
+  [[submode_tabs.sections]]
+  name = "Verify"
+  tools = ["hub:load_test", "hub:download_stats"]
+
+
+[[submode_tabs]]
+submode = "publishing"
+id = "corpus"
+name = "Corpus"
+color = "#22d3ee"
+
+  [[submode_tabs.sections]]
+  name = "Ingest"
+  tools = ["data:import", "data:connect", "data:record"]
+
+  [[submode_tabs.sections]]
+  name = "Inspect"
+  tools = ["data:grid", "data:chart", "data:stats"]
+
+  [[submode_tabs.sections]]
+  name = "Analyze"
+  tools = ["data:fit", "data:fft", "data:cluster", "data:anomaly"]
+
+
+[[submode_tabs]]
+submode = "publishing"
+id = "runs"
+name = "Runs"
+color = "#a78bfa"
+
+  [[submode_tabs.sections]]
+  name = "Experiments"
+  tools = ["ai:run_launcher", "ai:run_queue", "ai:sweep_planner"]
+
+  [[submode_tabs.sections]]
+  name = "Checkpoints"
+  tools = ["ai:checkpoint_browser", "ai:checkpoint_diff", "ai:resume_run"]
+
+  [[submode_tabs.sections]]
+  name = "Compare"
+  tools = ["ai:run_compare", "ai:metric_overlay", "ai:leaderboard"]
+

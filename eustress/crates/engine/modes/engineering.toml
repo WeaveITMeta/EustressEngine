@@ -8,7 +8,7 @@
 [mode]
 id = "engineering"
 name = "Engineering"
-icon = "gear"          # allowed: gear, gavel
+icon = "gears"         # allowed: gears, gavel (gear.svg does not exist)
 version = "1.0"
 author = "Eustress"
 
@@ -30,7 +30,7 @@ preset = "Default"     # Default | Scripting | Building | Minimal | Wide Panels
 [[submodes]]
 id = "mechanical"
 name = "Mechanical"
-icon = "gear"
+icon = "gears"
 
 [[submodes]]
 id = "electrical"
