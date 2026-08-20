@@ -26,6 +26,7 @@
 //! cannot regress that way.
 
 use std::fmt;
+use std::sync::Arc;
 
 use crate::{DataError, Result};
 
@@ -207,6 +208,75 @@ impl HttpTransport for UnavailableTransport {
             request.method,
             redact_query(&request.url)
         )))
+    }
+}
+
+/// The default transport for a source built with `new`.
+pub(super) fn default_transport() -> Arc<dyn HttpTransport> {
+    #[cfg(feature = "http")]
+    {
+        Arc::new(UreqTransport::default())
+    }
+    #[cfg(not(feature = "http"))]
+    {
+        Arc::new(UnavailableTransport)
+    }
+}
+
+/// Real blocking transport, on `ureq` — the same client the rest of the
+/// workspace already links. Requires the `http` feature.
+#[cfg(feature = "http")]
+#[derive(Debug, Clone)]
+pub struct UreqTransport {
+    /// Connect + read timeout.
+    pub timeout: std::time::Duration,
+}
+
+#[cfg(feature = "http")]
+impl Default for UreqTransport {
+    fn default() -> Self {
+        Self { timeout: std::time::Duration::from_secs(30) }
+    }
+}
+
+#[cfg(feature = "http")]
+impl HttpTransport for UreqTransport {
+    fn send(&self, req: &HttpRequest) -> Result<HttpResponse> {
+        use std::io::Read;
+        let agent = ureq::AgentBuilder::new().timeout(self.timeout).build();
+        let mut r = agent.request(req.method.as_str(), &req.url);
+        for (k, v) in &req.headers {
+            r = r.set(k, v);
+        }
+        let sent = match &req.body {
+            Some(b) => r.send_bytes(b),
+            None => r.call(),
+        };
+        // Bodies are read as BYTES: a blob store returns parquet and images, and
+        // decoding those as text to fit a String would corrupt them silently.
+        let read_body = |resp: ureq::Response| -> Vec<u8> {
+            let mut buf = Vec::new();
+            let _ = resp.into_reader().take(64 * 1024 * 1024).read_to_end(&mut buf);
+            buf
+        };
+        match sent {
+            Ok(resp) => {
+                let status = resp.status();
+                Ok(HttpResponse { status, body: read_body(resp) })
+            }
+            // ureq reports a non-2xx status as an error; the provider wants it
+            // as a normal response so every status flows through one code path.
+            Err(ureq::Error::Status(status, resp)) => {
+                Ok(HttpResponse { status, body: read_body(resp) })
+            }
+            Err(ureq::Error::Transport(t)) => Err(DataError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                // The URL is config, never a secret; the auth header is not in
+                // the transport error.
+                // The path is config; the query can hold a pre-signed credential.
+                format!("{} {} failed: {t}", req.method, redact_query(&req.url)),
+            ))),
+        }
     }
 }
 

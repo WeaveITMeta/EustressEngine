@@ -169,6 +169,15 @@ pub struct Neo4jSource {
 }
 
 impl Neo4jSource {
+    /// Build on the live transport, when one is compiled in.
+    ///
+    /// Validates the config; still never touches the network here. Without the
+    /// `http` feature this succeeds and the first `fetch` explains what is
+    /// missing, so a misconfiguration and a missing client stay distinguishable.
+    pub fn new(config: SourceConfig) -> Result<Self> {
+        Self::with_transport(config, super::rest::default_transport())
+    }
+
     /// Build on a caller-supplied transport. Validates first; never touches the
     /// network.
     pub fn with_transport(config: SourceConfig, transport: Arc<dyn HttpTransport>) -> Result<Self> {
@@ -297,6 +306,12 @@ pub struct NeptuneSource {
 }
 
 impl NeptuneSource {
+    /// Build on the live transport, when one is compiled in. See
+    /// [`Neo4jSource::new`].
+    pub fn new(config: SourceConfig) -> Result<Self> {
+        Self::with_transport(config, super::rest::default_transport())
+    }
+
     pub fn with_transport(config: SourceConfig, transport: Arc<dyn HttpTransport>) -> Result<Self> {
         if config.kind != SourceKind::Neptune {
             return Err(DataError::Schema(format!(
@@ -431,6 +446,29 @@ mod tests {
     fn neptune_config() -> SourceConfig {
         SourceConfig::new(SourceKind::Neptune, "https://cluster.neptune.amazonaws.com:8182")
             .with_option("query", "MATCH (s)-[r]->(k) RETURN s.id AS supplier")
+    }
+
+    #[test]
+    fn a_graph_source_builds_on_the_live_transport() {
+        // Construction must succeed whether or not a client is compiled in:
+        // a bad config and a missing client are different problems and must
+        // fail at different moments.
+        let src = Neo4jSource::new(neo4j_config()).expect("valid config builds");
+        assert_eq!(src.kind(), SourceKind::Neo4j);
+        assert!(NeptuneSource::new(neptune_config()).is_ok());
+
+        // And an invalid config is still refused up front, not at fetch time.
+        let no_query = SourceConfig::new(SourceKind::Neo4j, "http://host:7474");
+        assert!(Neo4jSource::new(no_query).is_err());
+    }
+
+    #[cfg(not(feature = "http"))]
+    #[test]
+    fn without_the_http_feature_a_live_fetch_says_exactly_that() {
+        let err = Neo4jSource::new(neo4j_config()).unwrap().fetch().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("`http` feature"), "{msg}");
+        assert!(msg.contains("with_transport"), "the error names the way out: {msg}");
     }
 
     #[test]
