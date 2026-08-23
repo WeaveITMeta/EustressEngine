@@ -250,8 +250,15 @@ pub mod na_s {
     /// Theoretical specific capacity of sodium (mAh/g)
     pub const SODIUM_CAPACITY_MAH_G: f32 = 1_166.0;
 
-    /// Theoretical gravimetric energy density (Wh/kg) — pure reactants
-    pub const THEORETICAL_ENERGY_DENSITY: f32 = 5_517.0;
+    /// Theoretical gravimetric energy density (Wh/kg) — pure reactants.
+    ///
+    /// This was 5_517.0, which is the figure in JOULES per gram: nFE/M gives
+    /// 2 x 96485 x 2.23 / 0.078044 = 5.514 MJ/kg, and dividing by 3600 is what
+    /// turns it into Wh/kg. Labelling J/g as Wh/kg inflates the ceiling 3.6x,
+    /// and a ceiling that is 3.6x too high stops being a check at all: a V-Cell
+    /// campaign once reported 778 Wh/kg from an arithmetic slip and this
+    /// constant waved it through.
+    pub const THEORETICAL_ENERGY_DENSITY: f32 = 1_531.6;
 
     /// Sulfur volume expansion on full discharge S → Na₂S (fraction)
     pub const SULFUR_VOLUME_EXPANSION: f32 = 0.80;
@@ -270,6 +277,35 @@ pub mod na_s {
 
     /// S₈ molar mass (g/mol) — elemental sulfur ring
     pub const S8_MOLAR_MASS: f32 = 256.48;
+}
+
+/// Lithium-sulfur couple.
+///
+/// A cell carries its own couple through `ElectrochemicalState`; these are the
+/// reference values to author it with, and the ceiling to check a Li-S claim
+/// against.
+pub mod li_s {
+    /// Standard cell potential for 2Li + S → Li₂S (V)
+    pub const STANDARD_POTENTIAL: f32 = 2.20;
+
+    /// Mean discharge voltage under load (V) — the plateau, not the OCV
+    pub const MEAN_DISCHARGE_VOLTAGE: f32 = 2.15;
+
+    /// Electrons transferred per formula unit (Li₂S)
+    pub const ELECTRONS: f32 = 2.0;
+
+    /// Li₂S molar mass (g/mol)
+    pub const LI2S_MOLAR_MASS: f32 = 45.947;
+
+    /// Theoretical specific capacity of Li₂S (mAh/g)
+    pub const LI2S_CAPACITY_MAH_G: f32 = 1_166.6;
+
+    /// Theoretical gravimetric energy density (Wh/kg) — pure reactants.
+    /// nFE/M = 2 x 96485 x 2.20 / 0.045947 = 9.24 MJ/kg, / 3600 = 2567 Wh/kg.
+    pub const THEORETICAL_ENERGY_DENSITY: f32 = 2_567.0;
+
+    /// Entropic coefficient dE/dT for Li-S (V/K)
+    pub const ENTROPY_COEFFICIENT: f32 = -0.000_11;
 }
 
 /// Sc-doped NASICON solid electrolyte (Na₂.₈Sc₀.₂Zr₁.₈Si₂PO₁₂)

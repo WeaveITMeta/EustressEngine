@@ -519,6 +519,100 @@ pub struct ElectrochemicalState {
     pub heat_generation: f32,
     /// Dendrite risk factor (0.0 = safe, ≥1.0 = risk)
     pub dendrite_risk: f32,
+    /// TOTAL electrode area of the cell (m²) — every layer of a stack summed,
+    /// not one layer's footprint.
+    ///
+    /// The dendrite model is a current-DENSITY criterion, so this is the
+    /// divisor that decides whether a cell reads as safe or as shorting. It
+    /// used to be a hardcoded `0.03` in the tick, which is one ~300 cm² layer:
+    /// for a 26-layer V-Cell (26 × 284 cm² = 0.7384 m²) that ran 24.6× high and
+    /// pinned `dendrite_risk` at 1.0 at every rate, including rates 12× inside
+    /// the real limit. A stacked cell MUST set this.
+    pub electrode_area_m2: f32,
+    /// Fractional cycles accumulated so far.
+    ///
+    /// `cycle_count` is a `u32`, and the per-tick increment is ~1e-6 cycles, so
+    /// accumulating into the integer truncated every increment back to zero and
+    /// the counter never moved — which meant capacity fade never ran and cycle
+    /// life could not be simulated at all. The fraction accrues here and only
+    /// crosses into `cycle_count` when it reaches a whole cycle.
+    pub cycle_accum: f32,
+    /// Lumped heat capacity of the cell (J/K) = mass × specific heat.
+    ///
+    /// The tick hardcoded `0.695 kg × 900 J/(kg·K)` = 625.5 J/K. Any cell that
+    /// is not 0.695 kg heats at the wrong rate, and the error is linear in the
+    /// mass ratio: a 3.55 kg cell integrated 5.1× too fast and reached 2292 °C
+    /// on a discharge that physically settles near 40 °C. Temperature feeds the
+    /// Nernst term, so a wrong thermal mass corrupts VOLTAGE too, not just the
+    /// temperature readout. Leave at 0.0 to keep the legacy 625.5 J/K.
+    pub thermal_mass_j_per_k: f32,
+    /// Cell-to-ambient thermal resistance (K/W).
+    ///
+    /// Sets the steady-state rise: ΔT = Q × R. The tick hardcoded 2.0 K/W,
+    /// which is a small-pouch number — on a 0.14 m² prismatic can dissipating
+    /// 47 W it predicts a 94 K rise where free convection alone gives ~34 K.
+    /// Leave at 0.0 to keep the legacy 2.0 K/W.
+    pub thermal_resistance_k_per_w: f32,
+    /// Standard cell potential of THIS cell's couple (V).
+    ///
+    /// The tick built its Nernst curve from `constants::na_s::STANDARD_POTENTIAL`,
+    /// so every cell in every Space was a sodium-sulfur cell no matter what its
+    /// materials said. A lithium-sulfur design measured on that curve reports a
+    /// sodium-sulfur voltage, and since energy is volts times amp-hours, the
+    /// mismatch lands directly on the headline number rather than announcing
+    /// itself. Leave at 0.0 to keep the legacy Na-S 2.23 V.
+    pub standard_potential_v: f32,
+    /// Entropic coefficient dE/dT of this couple (V/K), for entropic heat.
+    /// Leave at 0.0 to keep the legacy Na-S value.
+    pub entropy_coefficient_v_per_k: f32,
+
+    // ── Cycle life ────────────────────────────────────────────────────
+    // Capacity fade was a blind power law in cycle count: no dependence on how
+    // deeply the cell was cycled, how fast it was plated, how hot it ran, or
+    // whether it carried a metal reservoir. Every one of those is a first-order
+    // lever on a metal-anode cell, so the model could not be used to choose
+    // between designs, which is the only thing a life model is for.
+    //
+    // The replacement tracks LITHIUM INVENTORY. Each cycle consumes a little
+    // metal into interphase; retention holds at 1.0 while a reservoir covers
+    // that loss and falls once it is spent. That is why an anode-LEAN cell
+    // outlives an anode-free one, and the model now shows it instead of
+    // asserting it.
+    /// Critical plating current density (A/m2). 0.0 falls back to the
+    /// Monroe-Newman estimate from the legacy Na/NASICON constants.
+    pub j_crit_a_per_m2: f32,
+    /// Coulombic efficiency at reference conditions (0-1). Fraction of plated
+    /// metal recovered each cycle; the remainder is lost to interphase.
+    /// 0.0 keeps a 0.995 default.
+    pub coulombic_efficiency_ref: f32,
+    /// Excess metal carried as a reservoir, as a fraction of nominal capacity.
+    /// 0.0 is anode-free: no reservoir, so the first metal lost is capacity.
+    pub li_reservoir_frac: f32,
+    /// Stack pressure (MPa). Higher pressure suppresses the voids that form on
+    /// stripping. 0.0 keeps a 2.0 MPa default.
+    pub stack_pressure_mpa: f32,
+    /// Running total of metal lost to interphase, as a fraction of nominal.
+    ///
+    /// f64, and it has to be. This accumulates one small increment per SUBSTEP,
+    /// and a long run substeps thousands of times per frame: at 3000x time
+    /// compression the per-substep loss is around 1e-11 of nominal. Held in f32,
+    /// the epsilon at a quarter is 3e-8, so once the total passed roughly 0.25
+    /// every subsequent addition rounded to nothing and the cell simply stopped
+    /// ageing. Capacity retention pinned at exactly 0.95 and stayed there for
+    /// hundreds of cycles, which reads as a cell that has stabilised rather than
+    /// as arithmetic that has run out of mantissa. Worse, the threshold depends
+    /// on the timestep, so the same design ages differently at a different clock.
+    pub li_inventory_lost: f64,
+    /// State of charge at the last direction reversal, and the deepest
+    /// excursion reached since it.
+    ///
+    /// Fade must depend on how deep the CYCLE goes, not on how much charge
+    /// moved in one substep. A per-substep depth is a function of the timestep,
+    /// so a model built on it changes its answer when the clock changes, which
+    /// makes it useless for comparing designs. These two track the excursion so
+    /// the depth term means what it says.
+    pub soc_turn: f32,
+    pub excursion_depth: f32,
 }
 
 impl Default for ElectrochemicalState {
@@ -536,6 +630,21 @@ impl Default for ElectrochemicalState {
             capacity_retention: 1.0,
             heat_generation: 0.0,
             dendrite_risk: 0.0,
+            // One ~300 cm² electrode. Correct for a single-layer coin/pouch
+            // cell; a stack must override it with layers × per-layer area.
+            electrode_area_m2: 0.03,
+            cycle_accum: 0.0,
+            thermal_mass_j_per_k: 0.0,
+            thermal_resistance_k_per_w: 0.0,
+            standard_potential_v: 0.0,
+            entropy_coefficient_v_per_k: 0.0,
+            j_crit_a_per_m2: 0.0,
+            coulombic_efficiency_ref: 0.0,
+            li_reservoir_frac: 0.0,
+            stack_pressure_mpa: 0.0,
+            li_inventory_lost: 0.0,
+            soc_turn: 1.0,
+            excursion_depth: 0.0,
         }
     }
 }
@@ -556,6 +665,20 @@ impl ElectrochemicalState {
             capacity_retention: 1.0,
             heat_generation: 0.0,
             dendrite_risk: 0.0,
+            // 26 layers × 284 cm² (PATENT.md 6.2 / 12.1 rev 1.2).
+            electrode_area_m2: 0.7384,
+            cycle_accum: 0.0,
+            thermal_mass_j_per_k: 0.0,
+            thermal_resistance_k_per_w: 0.0,
+            standard_potential_v: 0.0,
+            entropy_coefficient_v_per_k: 0.0,
+            j_crit_a_per_m2: 0.0,
+            coulombic_efficiency_ref: 0.0,
+            li_reservoir_frac: 0.0,
+            stack_pressure_mpa: 0.0,
+            li_inventory_lost: 0.0,
+            soc_turn: 1.0,
+            excursion_depth: 0.0,
         }
     }
 }

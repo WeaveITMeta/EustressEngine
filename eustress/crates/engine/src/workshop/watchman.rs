@@ -88,13 +88,29 @@ impl Default for WatchmanConfig {
     fn default() -> Self {
         let mut thresholds = HashMap::new();
 
-        // Default battery safety thresholds (VCell case study)
+        // Default battery safety thresholds (V-Cell case study).
+        //
+        // CORRECTED 2026-08-21. The previous defaults were lithium-ion numbers
+        // applied to a sodium-sulfur cell, compared against the wrong units:
+        //
+        //   voltage 2.50–4.25 V  — a Li-ion window. The Na-S window is 1.8–2.5 V
+        //     with a 2.23 V OCV, so a perfectly healthy cell sat below the FLOOR
+        //     and alerted forever.
+        //   capacity_retention min 70.0 — but the value is a 0–1 FRACTION, so a
+        //     pristine 1.0 read as "1.00% < 70.00%". Permanent false alarm.
+        //   dendrite_risk max 80.0 — also a 0–1 fraction, so the threshold could
+        //     never be crossed. The one alert that matters was permanently mute.
+        //   soc 0–100 against a 0–1 fraction — same class, harmless but wrong.
+        //
+        // Two permanent false positives plus one permanently silent real hazard
+        // is worse than no monitoring: it trained everyone to ignore the alerts.
+        // Fractions are now compared as fractions and the window is Na-S.
         let defaults = [
             ("battery.temperature_c", None, Some(60.0), "Cell Temperature", "°C"),
-            ("battery.voltage", Some(2.5), Some(4.25), "Cell Voltage", "V"),
-            ("battery.soc", Some(0.0), Some(100.0), "State of Charge", "%"),
-            ("battery.dendrite_risk", None, Some(80.0), "Dendrite Risk", "%"),
-            ("battery.capacity_retention", Some(70.0), None, "Capacity Retention", "%"),
+            ("battery.voltage", Some(1.8), Some(2.5), "Cell Voltage", "V"),
+            ("battery.soc", Some(0.0), Some(1.0), "State of Charge", "fraction"),
+            ("battery.dendrite_risk", None, Some(0.8), "Dendrite Risk", "fraction"),
+            ("battery.capacity_retention", Some(0.7), None, "Capacity Retention", "fraction"),
         ];
 
         for (key, min, max, label, unit) in defaults {

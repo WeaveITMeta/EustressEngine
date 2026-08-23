@@ -122,6 +122,9 @@ impl Default for GlobalSoulSettings {
             global_xai_api_key: String::new(),
             // Opt-in only, per the field's contract.
             workshop_gauntlet: false,
+            // Likewise: the tools behind the approval gate are the ones that
+            // write files and run commands, so this is never a silent default.
+            workshop_auto_approve: false,
         }
     }
 }

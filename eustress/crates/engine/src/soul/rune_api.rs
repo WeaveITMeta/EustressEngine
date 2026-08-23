@@ -564,6 +564,33 @@ pub fn compile_scripts_on_play(
     module_registry: Res<RuneModuleRegistry>,
 ) {
     let total_scripts = scripts.iter().count();
+    // Say WHY a script was skipped. A silent skip here presents downstream as
+    // "the simulation ran but no controller did anything", which is
+    // indistinguishable from a controller that ran and chose to do nothing —
+    // and cost a full V-Cell campaign before the cause was found.
+    let mut skipped_empty = 0usize;
+    let mut skipped_context = 0usize;
+    let mut skipped_ext: Vec<String> = Vec::new();
+    for (_e, name, data, loaded) in scripts.iter() {
+        if data.source.is_empty() {
+            skipped_empty += 1;
+            warn!("  ⏭ '{}' skipped: SoulScriptData.source is EMPTY (not loaded from disk/DB)", name.as_str());
+        } else if data.run_context != super::SoulRunContext::Rune {
+            skipped_context += 1;
+            warn!("  ⏭ '{}' skipped: run_context is {:?}, not Rune", name.as_str(), data.run_context);
+        } else if let Some(l) = loaded {
+            let ext = l.path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !matches!(ext, "rune" | "soul") {
+                skipped_ext.push(format!("{} (.{})", name.as_str(), ext));
+            }
+        }
+    }
+    if skipped_empty > 0 || skipped_context > 0 || !skipped_ext.is_empty() {
+        warn!(
+            "🎮 compile_scripts_on_play: skipping {} empty-source, {} wrong-context, {} wrong-extension {:?}",
+            skipped_empty, skipped_context, skipped_ext.len(), skipped_ext
+        );
+    }
     let sources: Vec<ScriptSource> = scripts.iter()
         .filter(|(_, _name, data, loaded)| {
             if data.source.is_empty() { return false; }

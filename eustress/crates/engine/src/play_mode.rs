@@ -360,6 +360,23 @@ pub struct EntitySnapshot {
     pub part: Option<PartSnapshot>,
     /// Model-specific data
     pub model: Option<ModelSnapshot>,
+    /// Battery / fuel-cell simulation state — voltage, SOC, current, cycle
+    /// count, capacity retention, dendrite risk.
+    ///
+    /// This is the SOURCE the HUD ultimately displays. `electrochemical_tick`
+    /// mutates it during play, `data_binding` republishes it into
+    /// `SimValuesResource`, and a script's `on_update` renders that mirror into
+    /// `GuiElementDisplay`. Restoring only the display (see
+    /// `restore_gui_on_stop`) put the pixels back while leaving the simulation
+    /// exactly where play left it, so the next Play repainted the old numbers
+    /// instantly and Stop never actually reset anything.
+    ///
+    /// Stored as the whole component rather than a field list so state added to
+    /// it later is covered without touching this file.
+    pub electrochemical: Option<eustress_common::realism::particles::components::ElectrochemicalState>,
+    /// Thermal state — the HUD's temperature reading, advanced from
+    /// `heat_generation` by the same tick and equally un-restored before.
+    pub thermodynamic: Option<eustress_common::realism::particles::components::ThermodynamicState>,
 }
 
 impl EntitySnapshot {
@@ -372,6 +389,8 @@ impl EntitySnapshot {
             humanoid: None,
             part: None,
             model: None,
+            electrochemical: None,
+            thermodynamic: None,
         }
     }
 }
@@ -676,6 +695,8 @@ fn handle_start_play(
         Option<&Humanoid>,
         Option<&Part>,
         Option<&Model>,
+        Option<&eustress_common::realism::particles::components::ElectrochemicalState>,
+        Option<&eustress_common::realism::particles::components::ThermodynamicState>,
     ), Without<PlayModeCharacter>>,
 ) {
     // Only the first request in a frame is honored — matches the old
@@ -708,9 +729,16 @@ fn handle_start_play(
         // Create comprehensive world snapshot
         let mut snapshot = WorldSnapshot::new(0, "Play Start");
         
-        for (entity, transform, instance, basepart, humanoid, part, model) in snapshot_query.iter() {
+        for (entity, transform, instance, basepart, humanoid, part, model, echem, thermo)
+            in snapshot_query.iter()
+        {
             let entity_index = entity.to_bits() as u64;
             let mut entity_snapshot = EntitySnapshot::new(entity_index);
+
+            // Simulation state, captured BEFORE the tick runs so Stop rewinds
+            // the cell to the charge/temperature it held at Play.
+            entity_snapshot.electrochemical = echem.cloned();
+            entity_snapshot.thermodynamic = thermo.cloned();
             
             // Capture transform
             if true /* capture_transforms */ {
@@ -912,6 +940,8 @@ fn handle_stop_play(
         Option<&mut Instance>,
         Option<&mut BasePart>,
         Option<&mut Humanoid>,
+        Option<&mut eustress_common::realism::particles::components::ElectrochemicalState>,
+        Option<&mut eustress_common::realism::particles::components::ThermodynamicState>,
     ), (With<Instance>, Without<PlayModeCharacter>, Without<SpawnedDuringPlayMode>)>,
     spawned_during_play: Query<Entity, With<SpawnedDuringPlayMode>>,
     all_entities: Query<Entity, With<Instance>>,
@@ -1005,7 +1035,9 @@ fn handle_stop_play(
             // Restore entity states
             let mut restored_count = 0;
             let mut transform_restored = 0;
-            for (entity, transform, instance, basepart, humanoid) in restore_query.iter_mut() {
+            for (entity, transform, instance, basepart, humanoid, echem, thermo)
+                in restore_query.iter_mut()
+            {
                 let entity_index = entity.to_bits() as u64;
                 
                 if let Some(entity_snapshot) = snapshot.entities.get(&entity_index) {
@@ -1037,6 +1069,17 @@ fn handle_stop_play(
                         h.max_health = hs.max_health;
                         h.walk_speed = hs.walk_speed;
                         h.jump_power = hs.jump_power;
+                    }
+
+                    // Restore simulation state. Whole-component assignment, so
+                    // every field rewinds together — a partial restore would
+                    // leave e.g. SOC rewound but cycle_count advanced, which
+                    // reads as a corrupted cell rather than a reset one.
+                    if let (Some(mut e), Some(snap)) = (echem, &entity_snapshot.electrochemical) {
+                        *e = snap.clone();
+                    }
+                    if let (Some(mut t), Some(snap)) = (thermo, &entity_snapshot.thermodynamic) {
+                        *t = snap.clone();
                     }
                 }
             }
@@ -1182,7 +1225,13 @@ fn restore_scene_on_enter_edit(
     mut play_mode: ResMut<PlayMode>,
     mut physics_time: ResMut<Time<Physics>>,
     mut restore_query: Query<
-        (Entity, Option<&mut Transform>, Option<&mut BasePart>),
+        (
+            Entity,
+            Option<&mut Transform>,
+            Option<&mut BasePart>,
+            Option<&mut eustress_common::realism::particles::components::ElectrochemicalState>,
+            Option<&mut eustress_common::realism::particles::components::ThermodynamicState>,
+        ),
         (With<Instance>, Without<PlayModeCharacter>, Without<SpawnedDuringPlayMode>),
     >,
     spawned_during_play: Query<Entity, With<SpawnedDuringPlayMode>>,
@@ -1203,7 +1252,7 @@ fn restore_scene_on_enter_edit(
             snapshot.entities.len()
         );
         let mut restored = 0;
-        for (entity, transform, basepart) in restore_query.iter_mut() {
+        for (entity, transform, basepart, echem, thermo) in restore_query.iter_mut() {
             let Some(es) = snapshot.entities.get(&entity.to_bits()) else { continue };
             if let (Some(mut t), Some(ts)) = (transform, &es.transform) {
                 ts.apply_to(&mut t);
@@ -1212,6 +1261,15 @@ fn restore_scene_on_enter_edit(
             if let (Some(mut bp), Some(bps)) = (basepart, &es.basepart) {
                 bp.anchored = bps.anchored;
                 bp.can_collide = bps.can_collide;
+            }
+            // Sim state must rewind on EVERY stop path, not just the Slint
+            // Stop button — MCP stop_simulation, sim auto-stop and F8/Escape
+            // all land here instead.
+            if let (Some(mut e), Some(snap)) = (echem, &es.electrochemical) {
+                *e = snap.clone();
+            }
+            if let (Some(mut th), Some(snap)) = (thermo, &es.thermodynamic) {
+                *th = snap.clone();
             }
         }
         restored
