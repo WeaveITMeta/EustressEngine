@@ -20,6 +20,44 @@
  */
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+// xAI / Grok
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Model used for document verification, background screening, and search.
+const GROK_MODEL = 'grok-4.6';
+
+/// Single entry point for every xAI call.
+///
+/// The Responses API is STATEFUL: it stores prompts and outputs for 30 days by
+/// default, retrievable later by response id. For these calls that payload is
+/// photographs of government identity documents plus applicants' legal names
+/// and dates of birth, so `store: false` is mandatory, not a preference.
+///
+/// The privacy fields are applied AFTER the caller's body is spread, so a call
+/// site cannot override them, and routing every request through here means a
+/// new call site cannot forget them.
+///
+/// Two limits this cannot reach, both account-level rather than per-request:
+///   - xAI retains API traffic for 30 days for abuse auditing (encrypted at
+///     rest, then deleted). Removing that needs a Zero Data Retention
+///     agreement arranged with xAI on the account.
+///   - xAI states it does not train on API data.
+async function grokFetch(body, apiKey) {
+  return fetch('https://api.x.ai/v1/responses', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      ...body,
+      model: GROK_MODEL,
+      store: false,
+    }),
+  });
+}
+
 // KYC jurisdiction ontology
 // ═══════════════════════════════════════════════════════════════════════════
 // Per-country accepted identity documents + the local age of majority.
@@ -1479,7 +1517,7 @@ async function handleKycSubmit(request, env, cors) {
       verdict_found: grokResult.verdict_found,
       details: grokResult.screening_details,
       screened_at: new Date().toISOString(),
-      model: 'grok-4.20-reasoning',
+      model: GROK_MODEL,
     }), { expirationTtl: 86400 * 365 * 7 });
 
     // ── Age verification ───────────────────────────────────────────────────
@@ -1732,17 +1770,7 @@ Screening rules:
     }
     input.push({ type: 'text', text: prompt });
 
-    const resp = await fetch('https://api.x.ai/v1/responses', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${env.GROK_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: 'grok-4.20-reasoning',
-        input,
-      }),
-    });
+    const resp = await grokFetch({ input }, env.GROK_API_KEY);
 
     if (!resp.ok) {
       const errText = await resp.text();
@@ -1784,7 +1812,7 @@ Screening rules:
       verdict_found: r.verdict_found || false,
       screening_details: r.screening_details || '',
       confidence: Math.min(100, Math.max(0, r.confidence || 0)),
-      model: 'grok-4.20-reasoning',
+      model: GROK_MODEL,
     };
   } catch (e) {
     console.error('Grok KYC exception:', e);
@@ -2086,17 +2114,9 @@ async function handleCommunitySearch(request, env, cors) {
 }
 
 async function searchWithGrok(query, apiKey) {
-  const resp = await fetch('https://api.x.ai/v1/responses', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: 'grok-4.20-reasoning',
-      input: `The user is searching for "${query}" on the Eustress Engine community platform. Eustress is a Rust-based game engine with a Bliss cryptocurrency. Suggest what they might be looking for: a username, a simulation, a feature, or a concept. Reply in 1-2 short sentences only.`,
-    }),
-  });
+  const resp = await grokFetch({
+    input: `The user is searching for "${query}" on the Eustress Engine community platform. Eustress is a Rust-based simulation and data platform with a Bliss currency. Suggest what they might be looking for: a username, a simulation, a feature, or a concept. Reply in 1-2 short sentences only.`,
+  }, apiKey);
 
   if (!resp.ok) return null;
   const data = await resp.json();
@@ -2429,17 +2449,7 @@ Rules:
 - A username is a chosen handle, NOT a legal name. Do not search for the username as a real name.
 - Only consider PUBLICLY DOCUMENTED court verdicts from official sources`;
 
-    const resp = await fetch('https://api.x.ai/v1/responses', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${env.GROK_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: 'grok-4.20-reasoning',
-        input: prompt,
-      }),
-    });
+    const resp = await grokFetch({ input: prompt }, env.GROK_API_KEY);
 
     if (!resp.ok) {
       return { decision: 'APPROVE', risk_score: 0, reason: 'Screening service unavailable', flags: [], screened_at };
@@ -2464,7 +2474,7 @@ Rules:
       verdict_found: result.verdict_found || false,
       details: result.details || '',
       screened_at,
-      model: 'grok-4.20-reasoning',
+      model: GROK_MODEL,
     };
   } catch (e) {
     return { decision: 'APPROVE', risk_score: 0, reason: `Screening error: ${e.message}`, flags: [], screened_at };
