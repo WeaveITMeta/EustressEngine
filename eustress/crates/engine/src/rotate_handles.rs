@@ -59,13 +59,13 @@ pub struct RotateCenterPivot;
 
 /// Ring radius = group half-diagonal × this factor, so ring is just
 /// outside the bounding sphere. Matches rotate_tool::compute_ring_radius.
-const RING_RADIUS_FRAC: f32 = 1.15;
+pub(crate) const RING_RADIUS_FRAC: f32 = 1.15;
 /// Minor (tube) radius as a fraction of major radius.
 const RING_MINOR_FRAC: f32 = 0.035;
 /// Center sphere radius as a fraction of major radius.
 const CENTER_SPHERE_FRAC: f32 = 0.05;
 /// Camera-distance floor for readability on tiny selections.
-const MIN_SCREEN_FRACTION: f32 = 0.10;
+pub(crate) const MIN_SCREEN_FRACTION: f32 = 0.10;
 
 // ============================================================================
 // Plugin

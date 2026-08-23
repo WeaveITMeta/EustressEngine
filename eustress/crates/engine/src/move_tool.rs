@@ -170,7 +170,7 @@ fn manage_tool_activation(
 
 /// Compute the handle scale so gizmos stay a constant screen size regardless
 /// of how far the camera is from the selection.
-fn camera_scale_factor(camera_pos: Vec3, target: Vec3, fov_radians: f32) -> f32 {
+pub(crate) fn camera_scale_factor(camera_pos: Vec3, target: Vec3, fov_radians: f32) -> f32 {
     let dist = (target - camera_pos).length().max(0.1);
     // Keep handles ~8% of screen height in world units
     dist * (fov_radians * 0.5).tan() * 0.16
@@ -260,13 +260,6 @@ fn draw_move_gizmos(
     if count == 0 { return; }
 
     let center = (bounds_min + bounds_max) * 0.5;
-    // Half-extent of the selection AABB — used to keep the gizmo
-    // outside the object body. Without this, dragging a large part
-    // close to the camera produced gizmo arrows visibly shorter than
-    // the part itself ("gizmos do not size up to the object"). We
-    // scale `handle_len` by `max(camera_scale, half_extent * factor)`
-    // so the arrows always poke beyond the selection box.
-    let half_extent = (bounds_max - bounds_min).max_element() * 0.5;
 
     // --- Camera-distance-scaled handle length ---
     let Some((_, cam_gt, projection)) = cameras.iter().find(|(c, _, _)| c.order == 0) else { return };
@@ -274,11 +267,13 @@ fn draw_move_gizmos(
         Projection::Perspective(p) => p.fov,
         _ => std::f32::consts::FRAC_PI_4,
     };
-    let scale = camera_scale_factor(cam_gt.translation(), center, fov);
-    // Handle length must be at least the half-extent + a margin so the
-    // arrow tip sits outside the object's bounding box; the
-    // camera-scale floor keeps very small objects' gizmos visible.
-    let handle_len = scale.max(half_extent * 1.5);
+    // Pure camera distance, matching `move_handles::sync_move_handle_root`
+    // (`dist * tan(fov/2) * SCREEN_FRACTION`, SCREEN_FRACTION = 0.16 — the
+    // same value `camera_scale_factor` uses). The MESH handles spawned by
+    // `move_handles` are what the user actually sees and clicks, so their
+    // sizing is the single source of truth: any extra term here, however
+    // reasonable in isolation, moves this geometry off the visible arrows.
+    let handle_len = camera_scale_factor(cam_gt.translation(), center, fov);
     // Cone size scales with the handle so the arrowheads stay
     // proportional whether the gizmo is small (far away) or big
     // (close + chunky object).
@@ -307,7 +302,7 @@ fn draw_move_gizmos(
     // Small center sphere
     gizmos.sphere(
         Isometry3d::from_translation(center),
-        scale * 0.08,
+        handle_len * 0.08,
         Color::srgba(1.0, 1.0, 1.0, 0.8),
     );
 }
@@ -412,6 +407,28 @@ fn handle_move_interaction(
     let MoveToolInputs { settings, studio_state, mouse, keys, viewport_bounds, auth } = inputs;
     let MoveToolSnapCtx { spatial_query, geom_snap, smart_guides, snap_candidates_q } = snap;
 
+    // A mouse RELEASE always ends a drag, wherever the cursor happens to be.
+    //
+    // Every guard below can skip the rest of this system — the tool going
+    // inactive, the cursor leaving the window, the cursor leaving the viewport
+    // rect. The release branch lives past all of them, so releasing outside the
+    // viewport (or switching tools mid-drag) left `dragged_axis` /
+    // `dragged_plane` / `free_drag` set forever. `select_tool`'s marquee reads
+    // exactly those three as `handle_grabbed`, so box-select then aborted on
+    // every press with `handle=true` and never recovered — not even on a tool
+    // change, because `!state.active` returns before any clear could run.
+    //
+    // Releasing the button is unambiguous: it cannot mean "still dragging",
+    // whatever the cursor is over. So the latch is dropped here, first, before
+    // anything can early-return. The full release branch further down still
+    // does the real work (undo entry, `BeingDragged` cleanup) on the normal
+    // path where the guards pass.
+    if mouse.just_released(MouseButton::Left) && !state.active {
+        state.dragged_axis = None;
+        state.dragged_plane = None;
+        state.free_drag = false;
+    }
+
     if !state.active { return; }
 
     // Read the transform mode once for this frame. World mode uses
@@ -478,13 +495,36 @@ fn handle_move_interaction(
     }
 
     let Ok(window) = windows.single() else { return };
-    let Some(cursor_pos) = window.cursor_position() else { return };
-    
+
+    // Is a drag underway, in ANY of the three grab modes?
+    let drag_in_progress =
+        state.dragged_axis.is_some() || state.dragged_plane.is_some() || state.free_drag;
+    let released = mouse.just_released(MouseButton::Left);
+
+    // Losing the cursor (alt-tab, cursor off-window) must not strand a drag.
+    // The release branch at the bottom needs no cursor at all — it reads
+    // transforms, pushes the undo entry and clears the latch — but it sits past
+    // this guard, so an early `return` here meant the drag never ended: the
+    // latch stayed set (box-select then read `handle=true` forever) AND the
+    // `TransformEntities` undo entry was never pushed, so the accidental move
+    // could not be undone. Substituting a dummy is safe because every branch
+    // that actually consumes the cursor is gated on press/hold, never release.
+    let cursor_pos = match window.cursor_position() {
+        Some(p) => p,
+        None if released || drag_in_progress => Vec2::ZERO,
+        None => return,
+    };
+
     // Block NEW drags when cursor is over UI panels (outside 3D viewport).
     // Allow in-progress drags to continue even if cursor leaves the viewport.
     // ViewportBounds is physical px, cursor_pos is logical — go through
     // contains_logical so DPI-scaled displays don't reject every click.
-    if state.dragged_axis.is_none() && !state.free_drag {
+    //
+    // `dragged_plane` belongs in the exemption alongside the other two grab
+    // modes. Leaving it out meant a PLANE-handle drag released outside the
+    // viewport hit the `return` and never cleared, which is the same stranded
+    // latch as above with a narrower trigger.
+    if !drag_in_progress && !released {
         if let Some(vb) = viewport_bounds.as_deref() {
             let scale = window.scale_factor() as f32;
             if !vb.contains_logical(cursor_pos, scale) { return; }
@@ -541,14 +581,14 @@ fn handle_move_interaction(
             Projection::Perspective(p) => p.fov,
             _ => std::f32::consts::FRAC_PI_4,
         };
-        let scale = camera_scale_factor(camera_transform.translation(), c, fov);
-        // Mirror the visual gizmo's size floor so click hit-zones line
-        // up with the drawn arrows. Without this, dragging a large
-        // part would visually show a chunky gizmo but the axis-hit
-        // rect would still be the small camera-distance one, leaving
-        // the visible cones unclickable.
-        let half_extent = (bmax - bmin).max_element() * 0.5;
-        let len = scale.max(half_extent * 1.5);
+        // Hit-zone length MUST equal the length the visible handles are
+        // drawn at, or clicks land where nothing is rendered. The visible
+        // handles are the meshes from `move_handles`, which size purely by
+        // camera distance. A previous half-extent floor here mirrored the
+        // older immediate-mode gizmo instead, so on a large part the hit
+        // zones sat far outside the drawn arrows and clicks registered
+        // nowhere near them.
+        let len = camera_scale_factor(camera_transform.translation(), c, fov);
         (c, (bmax - bmin).max_element(), len)
     };
 
@@ -1244,7 +1284,20 @@ pub fn detect_axis_hit(
     rotation: Quat,
 ) -> Option<Axis3d> {
     // Hit radius scales with handle length so small and large handles are equally clickable
-    let hit_radius = (handle_len * 0.18).clamp(0.05, 0.6);
+    // Floor only, deliberately NO ceiling — the same shape `scale_tool` uses.
+    //
+    // `handle_len` already grows with camera distance, so `handle_len * 0.18`
+    // is a constant slice of the SCREEN and stays correctly proportioned to
+    // the drawn arrow at any distance. An absolute upper clamp destroys that:
+    // the old `.clamp(0.05, 0.6)` saturated once `handle_len` passed 3.33,
+    // which at a 45 degree FOV is only ~50 m of camera distance. Beyond that
+    // the arrows kept growing on screen while the clickable cylinder stayed
+    // frozen at 0.6 m, so in terrain-scale spaces the visible arrow was much
+    // fatter than its own hit zone and clicks on it registered nothing.
+    //
+    // The 0.05 floor is kept: it only engages under ~5 m, where it makes a
+    // tiny gizmo MORE forgiving rather than less.
+    let hit_radius = (handle_len * 0.18).max(0.05);
 
     let mut best: Option<(Axis3d, f32)> = None;
 

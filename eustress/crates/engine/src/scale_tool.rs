@@ -423,13 +423,24 @@ fn handle_scale_interaction(
     }
 
     let Ok(window) = windows.single() else { return };
-    let Some(cursor_pos) = window.cursor_position() else { return };
-    
+
+    // Losing the cursor must not strand a drag: the release branch below needs
+    // no cursor, but it sits past this guard, so returning here left
+    // `dragged_axis` set forever (box-select reads it as `handle=true`) and
+    // skipped the `ScaleEntities` undo push. See the same fix in `move_tool`.
+    let drag_in_progress = state.dragged_axis.is_some();
+    let released = mouse.just_released(MouseButton::Left);
+    let cursor_pos = match window.cursor_position() {
+        Some(p) => p,
+        None if released || drag_in_progress => Vec2::ZERO,
+        None => return,
+    };
+
     // Block NEW drags when cursor is over UI panels (outside 3D viewport).
     // Allow in-progress drags to continue even if cursor leaves the viewport.
     // ViewportBounds is physical px, cursor_pos is logical — go through
     // contains_logical so DPI-scaled displays don't reject every click.
-    if state.dragged_axis.is_none() {
+    if !released && state.dragged_axis.is_none() {
         if let Some(vb) = extras.viewport_bounds.as_deref() {
             let scale = window.scale_factor() as f32;
             if !vb.contains_logical(cursor_pos, scale) { return; }

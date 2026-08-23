@@ -291,14 +291,21 @@ pub fn part_selection_system(
             if count > 0 {
                 let center = (bounds_min + bounds_max) * 0.5;
 
-                // MUST match move_tool.rs camera_scale_factor exactly!
+                // Sized by `move_tool::camera_scale_factor` — the same function
+                // `move_handles` uses to lay out the meshes the user actually
+                // sees and clicks. This used to restate the formula inline under
+                // a "MUST match ... exactly!" comment; a comment cannot enforce
+                // that, and the sibling guard in the deselect branch below had
+                // already drifted to an entirely different one.
                 let fov = match projection {
                     Projection::Perspective(p) => p.fov,
                     _ => std::f32::consts::FRAC_PI_4,
                 };
-                let cam_dist = (center - camera_transform.translation()).length().max(0.1);
-                let scale = cam_dist * (fov * 0.5).tan() * 0.16;
-                let handle_length = scale * 1.0;
+                let handle_length = crate::move_tool::camera_scale_factor(
+                    camera_transform.translation(),
+                    center,
+                    fov,
+                );
 
                 let gizmo_rotation = crate::move_tool::gizmo_rotation_for(
                     transform_mode,
@@ -508,8 +515,28 @@ pub fn part_selection_system(
     {
         for (entity, _pe, _pem, _inst, transform, _mesh, basepart, _child_of) in part_entities_query.iter() {
             if !entity_part_ids.contains_key(&entity) { continue; }
-            // Skip parts the physics raycast already handled precisely.
-            if click_extras.collider_q.get(entity).is_ok() { continue; }
+            // NO collider-based skip here.
+            //
+            // This used to `continue` for any entity carrying a `Collider`, on
+            // the assumption that the physics raycast above had already resolved
+            // it precisely. Having a `Collider` COMPONENT is not the same as
+            // being in Avian's broadphase: a part that just spawned, streamed
+            // in, or had its collider rebuilt owns the component while the BVH
+            // has not picked it up yet. Such a part missed the physics pass AND
+            // was skipped here, so it was simply unclickable — for a frame, or
+            // for as long as the rebuild took. That is the "selecting takes
+            // three clicks, sometimes it does not work at all" symptom: the
+            // clicks that appeared to do nothing landed in that window, and
+            // `closest_hit` staying `None` made them read as empty space, which
+            // CLEARED the selection instead of leaving it alone.
+            //
+            // Running the OBB test for every part and merging by nearest
+            // distance is strictly more robust: when the collider IS in the BVH
+            // both passes resolve the same entity, so the result is unchanged;
+            // when it is not, the box still catches the click. The cost is that
+            // a click just outside a concave part but inside its bounding box
+            // can now hit it — a precision trade that is plainly better than the
+            // part not being selectable.
             let t = transform.compute_transform();
             // Bounds priority: BasePart.size (Parts) → render Aabb
             // (Gaussian Splat clouds — bevy_gaussian_splatting inserts a
@@ -729,7 +756,29 @@ pub fn part_selection_system(
                 if count > 0 {
                     center /= count as f32;
                     let avg_scale = total_scale / count as f32;
-                    let handle_length = (avg_scale * 0.5) + 1.5;
+                    // Camera-distance sizing, identical to the pre-raycast guard
+                    // above and to the handles `move_handles` draws.
+                    //
+                    // This read `(avg_scale * 0.5) + 1.5` — a world-space length
+                    // with no camera term at all. `detect_axis_hit` derives its
+                    // hit radius as `handle_len * 0.18`, so a selection with
+                    // avg_scale ~100 produced a 51 m handle and a 9 m hit
+                    // cylinder along each axis. Clicking empty space anywhere in
+                    // that volume matched "about to click a handle" and returned
+                    // instead of clearing, so the selection never dropped. A
+                    // click on a LOCKED part reaches this same branch (locked
+                    // parts are excluded from the hit candidates, so they yield
+                    // no hit), which is why both symptoms appeared together and
+                    // only while the Move tool was active.
+                    let fov_m = match projection {
+                        Projection::Perspective(p) => p.fov,
+                        _ => std::f32::consts::FRAC_PI_4,
+                    };
+                    let handle_length = crate::move_tool::camera_scale_factor(
+                        camera_transform.translation(),
+                        center,
+                        fov_m,
+                    );
 
                     let gizmo_rotation = crate::move_tool::gizmo_rotation_for(
                         transform_mode,

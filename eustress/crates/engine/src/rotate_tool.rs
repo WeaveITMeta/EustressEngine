@@ -219,13 +219,23 @@ fn handle_rotate_interaction(
     }
 
     let Ok(window) = windows.single() else { return };
-    let Some(cursor_pos) = window.cursor_position() else { return };
-    
+    // Losing the cursor must not strand a drag: the release branch below needs
+    // no cursor, but it sits past this guard, so returning here left
+    // `dragged_axis` set forever (box-select reads it as `handle=true`) and
+    // skipped the `TransformEntities` undo push. See the same fix in `move_tool`.
+    let drag_in_progress = state.dragged_axis.is_some();
+    let released = mouse.just_released(MouseButton::Left);
+    let cursor_pos = match window.cursor_position() {
+        Some(p) => p,
+        None if released || drag_in_progress => Vec2::ZERO,
+        None => return,
+    };
+
     // Block NEW drags when cursor is over UI panels (outside 3D viewport).
     // Allow in-progress drags to continue even if cursor leaves the viewport.
     // ViewportBounds is physical px, cursor_pos is logical — go through
     // contains_logical so DPI-scaled displays don't reject every click.
-    if state.dragged_axis.is_none() {
+    if !released && state.dragged_axis.is_none() {
         if let Some(vb) = viewport_bounds.as_deref() {
             let scale = window.scale_factor() as f32;
             if !vb.contains_logical(cursor_pos, scale) { return; }
@@ -495,13 +505,21 @@ pub fn compute_ring_radius(
         Projection::Perspective(p) => p.fov,
         _ => std::f32::consts::FRAC_PI_4,
     };
+    // Both terms come from `rotate_handles`, which owns the ring geometry the
+    // user actually sees. Importing them rather than restating the numbers is
+    // the point: this function previously hardcoded a 0.18 camera fraction
+    // against the handles' 0.10, so on any object small enough for the camera
+    // term to win, the clickable ring was 80% wider than the drawn one and
+    // ring clicks landed on empty space.
+    use crate::rotate_handles::{MIN_SCREEN_FRACTION, RING_RADIUS_FRAC};
+
     let dist = (center - cam_gt.translation()).length().max(0.1);
     // Camera-distance minimum so the ring is always visible
-    let cam_radius = dist * (fov * 0.5).tan() * 0.18;
+    let cam_radius = dist * (fov * 0.5).tan() * MIN_SCREEN_FRACTION;
     // Object bounding sphere radius (half diagonal of bounding box)
     let object_radius = bbox_extent.length() * 0.5;
     // Use the larger of the two, with some padding so the ring wraps outside the object
-    (object_radius * 1.15).max(cam_radius)
+    (object_radius * RING_RADIUS_FRAC).max(cam_radius)
 }
 
 /// Check if the ray hits any rotation ring. Used by part_selection to avoid
