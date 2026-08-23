@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 70" width="520" height="70">
+  <defs>
+    <!-- Clean steel gradient -->
+    <linearGradient id="steel" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#e8ecf0"/>
+      <stop offset="40%" stop-color="#c8d0d8"/>
+      <stop offset="60%" stop-color="#a8b4c0"/>
+      <stop offset="100%" stop-color="#8090a0"/>
+    </linearGradient>
+    
+    <!-- Subtle shadow -->
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="130%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#000" flood-opacity="0.4"/>
+    </filter>
+  </defs>
+  
+  <!-- EUSTRESS ENGINE text -->
+  <text x="260" y="52" 
+        text-anchor="middle"
+        font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" 
+        font-size="48" 
+        font-weight="700"
+        letter-spacing="3"
+        fill="url(#steel)"
+        filter="url(#shadow)">EUSTRESS ENGINE</text>
+</svg>

@@ -1,0 +1,45 @@
+EUSTRESS ENGINE - BRAND ASSETS
+==============================
+
+Contents
+--------
+eustress-logo.svg / .png        Primary logo with wordmark. Use on dark backgrounds.
+eustress-logo-dark.svg / .png   Inverted wordmark. Use on light or white backgrounds.
+eustress-icon.svg / .png        Gear mark. Use for app icons and small spaces.
+bliss-icon.svg / .png           Bliss (BLS) currency icon.
+
+PNGs are transparent. The wordmark ships at 2080x280 and the icons at 1024x1024,
+which is large enough for print at 300 DPI.
+
+Usage
+-----
+Do    keep the logo's original proportions
+Do    leave clear space around the logo of at least the height of the "E"
+Do    use the light-background variant on white or pale surfaces
+Do    use the PNG when you need the exact rendering shown on eustress.dev
+
+Do not stretch, distort, or rotate the logo
+Do not recolor the logo or replace its gradient
+Do not add effects, outlines, or containers
+Do not use the logo to imply endorsement or partnership
+
+Minimum sizes
+-------------
+Wordmark   120 px wide on screen, 25 mm in print
+Icon        24 px on screen, 8 mm in print
+
+A note on the SVG wordmark
+--------------------------
+The SVG sets the wordmark in Segoe UI with fallbacks to Helvetica Neue and
+Arial. On a machine without Segoe UI it falls back, so the letterforms shift
+slightly. When you need the exact rendering, use the PNG.
+
+Naming
+------
+Write it as "Eustress Engine" on first mention and "Eustress" after that.
+Eustress Engine is source-available software under the PolyForm Shield license.
+
+Press contact
+-------------
+press@eustress.dev
+https://eustress.dev/press

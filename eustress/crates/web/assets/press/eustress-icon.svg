@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="gearGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6a7280;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#4a5260;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <!-- Outer gear body with 8 teeth - centered at 32,32 -->
+  <path d="M30 6 L34 6 L35 12 C37.5 12.5 39.8 13.5 41.8 14.8 L46.5 10.5 L50 14 L45.7 18.7 C47 20.7 48 23 48.5 25.5 L54.5 26.5 L54.5 30.5 L48.5 31.5 C48 34 47 36.3 45.7 38.3 L50 43 L46.5 46.5 L41.8 42.2 C39.8 43.5 37.5 44.5 35 45 L34 51 L30 51 L29 45 C26.5 44.5 24.2 43.5 22.2 42.2 L17.5 46.5 L14 43 L18.3 38.3 C17 36.3 16 34 15.5 31.5 L9.5 30.5 L9.5 26.5 L15.5 25.5 C16 23 17 20.7 18.3 18.7 L14 14 L17.5 10.5 L22.2 14.8 C24.2 13.5 26.5 12.5 29 12 L30 6 Z" 
+        fill="url(#gearGradient)" stroke="#8090a0" stroke-width="1.5"/>
+  <!-- Inner circle - centered -->
+  <circle cx="32" cy="28.5" r="10" fill="#1a1d24" stroke="#8090a0" stroke-width="1.5"/>
+  <!-- Center dot -->
+  <circle cx="32" cy="28.5" r="4" fill="#8090a0"/>
+</svg>
