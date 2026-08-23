@@ -374,12 +374,42 @@ fn apply_power_settings(
     focus_state: Res<WindowFocusState>,
     settings: Res<IdleSettings>,
     mut winit_settings: ResMut<WinitSettings>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
 ) {
-    // Only update if changed
-    if !focus_state.is_changed() {
+    // A RUNNING SIMULATION overrides every power mode.
+    //
+    // Background throttling exists so an editor the user has clicked away from
+    // stops burning a core on nothing. A simulation is the opposite case: the
+    // whole point is that it keeps computing while attention is elsewhere. With
+    // the throttle applied, clicking to another window dropped the loop to
+    // 4 FPS, and because the tick sub-steps a frame's worth of compressed time
+    // against a fixed sub-step ceiling, fewer frames means less simulated time
+    // per second, not the same work spread thinner. A long run therefore slowed
+    // by more than an order of magnitude the moment it stopped being watched,
+    // and silently produced a result that took fifteen times longer to reach
+    // than an identical run whose window happened to stay focused.
+    //
+    // Unfocused now stays Continuous while Playing. Idle and Minimized are
+    // still honoured for the focused/visible cases below, but never at the cost
+    // of a run in progress.
+    let simulating = play_state
+        .map(|s| *s.get() == crate::play_mode::PlayModeState::Playing)
+        .unwrap_or(false);
+    if simulating {
+        if winit_settings.unfocused_mode != UpdateMode::Continuous {
+            winit_settings.focused_mode = UpdateMode::Continuous;
+            winit_settings.unfocused_mode = UpdateMode::Continuous;
+            info!("⚡ Simulation running — holding Continuous updates regardless of focus");
+        }
         return;
     }
-    
+
+    // Reassert every frame rather than only on change. The simulation override
+    // above leaves the settings forced to Continuous, and a `is_changed()` guard
+    // on the focus state would then never fire to put them back once the run
+    // ended, so the editor would stay at full power indefinitely after a single
+    // simulation. Writing two enum fields is free; missing the restore is not.
+
     match focus_state.power_mode {
         PowerMode::Active => {
             winit_settings.focused_mode = UpdateMode::Continuous;
