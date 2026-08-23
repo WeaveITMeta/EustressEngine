@@ -57,7 +57,15 @@ fn ok(tool_name: &str, content: String, data: Value) -> ToolResult {
 // ---------------------------------------------------------------------------
 
 /// How long to wait for a capture PNG to finish landing on disk.
-const CAPTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
+///
+/// Sized for a SLOW scene, not a fast one. The AI camera holds a fixed frame
+/// budget either side of its readback (warm up, queue, cool down), so the wall
+/// time to produce a PNG is that frame count divided by the engine's current
+/// framerate — on a heavy Space running at ~2 FPS that is several seconds, and
+/// the atmosphere pass this camera now runs makes those frames dearer still.
+/// A tight bound here turns "the engine is busy" into a spurious "the capture
+/// failed", so the cap is generous and the timeout message says what to check.
+const CAPTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Largest PNG we inline as base64. Bigger frames stay path-only: a 4K
 /// screenshot base64s to well past what a client will accept in one message,
@@ -84,7 +92,7 @@ fn wait_for_png(path: &std::path::Path) -> Result<Vec<u8>, String> {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     Err(format!(
-        "timed out after {}s waiting for {} ({last_err})",
+        "timed out after {}s waiting for {} ({last_err}) — if the engine is running at a very          low framerate the capture may simply need longer than this",
         CAPTURE_WAIT.as_secs(),
         path.display()
     ))
