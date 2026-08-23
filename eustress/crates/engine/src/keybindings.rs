@@ -386,15 +386,17 @@ impl Default for KeyBindings {
         //     menu prints next to "Save Space As...". A File shortcut the
         //     menu advertises always wins over a selection convenience.
         //   Ctrl+I       → Invert Selection
-        bindings.insert(Action::SelectChildren, KeyBinding::new(KeyCode::KeyV).with_ctrl().with_shift());
-        // Ctrl+Alt+V reaches Select Children too. Ctrl+Shift+V is also the
-        // near-universal "paste special" chord, so reaching for Ctrl+Alt+V
-        // instead is a reasonable instinct — and an unbound chord gives no
-        // feedback at all, which reads as "Select Children is broken" rather
-        // than "wrong key".
+        // Ctrl+Alt is the PRIMARY namespace for the hierarchy commands: Ctrl+Shift+V
+        // and Ctrl+Shift+D collide with the near-universal "paste special" and
+        // "duplicate" chords, and the primary is what every menu renders. The old
+        // Ctrl+Shift chords stay on as alternates so existing muscle memory keeps
+        // working.
+        bindings.insert(Action::SelectChildren, KeyBinding::new(KeyCode::KeyV).with_ctrl().with_alt());
         alternates.entry(Action::SelectChildren).or_default()
-            .push(KeyBinding::new(KeyCode::KeyV).with_ctrl().with_alt());
-        bindings.insert(Action::SelectDescendants, KeyBinding::new(KeyCode::KeyD).with_ctrl().with_shift());
+            .push(KeyBinding::new(KeyCode::KeyV).with_ctrl().with_shift());
+        bindings.insert(Action::SelectDescendants, KeyBinding::new(KeyCode::KeyD).with_ctrl().with_alt());
+        alternates.entry(Action::SelectDescendants).or_default()
+            .push(KeyBinding::new(KeyCode::KeyD).with_ctrl().with_shift());
         bindings.insert(Action::SelectParent, KeyBinding::new(KeyCode::KeyU).with_ctrl().with_shift());
         bindings.insert(Action::SelectSiblings, KeyBinding::new(KeyCode::KeyA).with_ctrl().with_shift());
         bindings.insert(Action::InvertSelection, KeyBinding::new(KeyCode::KeyI).with_ctrl());
