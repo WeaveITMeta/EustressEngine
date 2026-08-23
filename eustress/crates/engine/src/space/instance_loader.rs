@@ -1234,9 +1234,50 @@ pub struct TomlElectrochemicalState {
     pub heat_generation: f32,
     #[serde(default)]
     pub dendrite_risk: f32,
+    /// TOTAL electrode area of the cell in m² — every layer summed, not one
+    /// layer's footprint. Drives the dendrite current-density criterion.
+    /// Defaults to a single ~300 cm² electrode; a stacked cell must set it.
+    #[serde(default = "default_electrode_area")]
+    pub electrode_area_m2: f32,
+    /// Lumped heat capacity, J/K = cell mass x specific heat. 0.0 keeps the
+    /// tick's legacy 625.5 J/K, which is right only for a 0.695 kg pouch.
+    #[serde(default)]
+    pub thermal_mass_j_per_k: f32,
+    /// Cell-to-ambient thermal resistance, K/W. Sets the steady-state rise
+    /// dT = Q x R. 0.0 keeps the tick's legacy 2.0 K/W.
+    #[serde(default)]
+    pub thermal_resistance_k_per_w: f32,
+    /// Standard cell potential of this cell's couple, V. 0.0 keeps the tick's
+    /// legacy Na-S 2.23 V, which is wrong for any cell that is not Na-S.
+    #[serde(default)]
+    pub standard_potential_v: f32,
+    /// Entropic coefficient dE/dT of this couple, V/K. 0.0 keeps the legacy Na-S value.
+    #[serde(default)]
+    pub entropy_coefficient_v_per_k: f32,
+
+    // ── Cycle life ────────────────────────────────────────────────────
+    // These belong in the instance file rather than anywhere else, because a
+    // Space is a git repository: authoring them here puts the design and the
+    // telemetry it produces in the same commit, so a branch-per-variant sweep
+    // diffs the change and its outcome as one artifact.
+    /// Critical plating current density, A/m2. 0.0 falls back to a
+    /// Monroe-Newman estimate built from Na/oxide constants.
+    #[serde(default)]
+    pub j_crit_a_per_m2: f32,
+    /// Coulombic efficiency at reference conditions, 0-1. 0.0 keeps 0.995.
+    #[serde(default)]
+    pub coulombic_efficiency_ref: f32,
+    /// Excess metal carried as a reservoir, fraction of nominal capacity.
+    /// 0.0 is anode-free: the first metal lost to interphase is capacity lost.
+    #[serde(default)]
+    pub li_reservoir_frac: f32,
+    /// Stack pressure, MPa. 0.0 keeps 2.0.
+    #[serde(default)]
+    pub stack_pressure_mpa: f32,
 }
 
 fn default_voltage() -> f32 { 2.23 }
+fn default_electrode_area() -> f32 { 0.03 }
 
 impl TomlElectrochemicalState {
     /// Convert to realism ElectrochemicalState component
@@ -1254,6 +1295,19 @@ impl TomlElectrochemicalState {
             capacity_retention: self.capacity_retention,
             heat_generation: self.heat_generation,
             dendrite_risk: self.dendrite_risk,
+            electrode_area_m2: self.electrode_area_m2,
+            cycle_accum: 0.0,
+            j_crit_a_per_m2: self.j_crit_a_per_m2,
+            coulombic_efficiency_ref: self.coulombic_efficiency_ref,
+            li_reservoir_frac: self.li_reservoir_frac,
+            stack_pressure_mpa: self.stack_pressure_mpa,
+            li_inventory_lost: 0.0,
+            soc_turn: 1.0,
+            excursion_depth: 0.0,
+            thermal_mass_j_per_k: self.thermal_mass_j_per_k,
+            thermal_resistance_k_per_w: self.thermal_resistance_k_per_w,
+            standard_potential_v: self.standard_potential_v,
+            entropy_coefficient_v_per_k: self.entropy_coefficient_v_per_k,
         }
     }
 }

@@ -1671,13 +1671,40 @@ pub fn spawn_directory_entry(
             _                                          => "video",
         };
         let section = toml_value.as_ref().and_then(|v| v.get(section_name));
-        let size_xy = section
-            .and_then(|s| s.get("size"))
+        // Quad extent, in priority order:
+        //   1. `[transform].scale` — what the Scale gizmo maintains. The
+        //      quad's mesh is a unit square, so x/y ARE the world size and
+        //      z is unused. The class template already ships this key
+        //      (4, 4, 1 for Image), matching the size default below.
+        //   2. `[image].size` / `[video].size` — the authored property.
+        //   3. The per-class default.
+        //
+        // Reading `size` first would make the object un-resizable: the
+        // transform writer persists gizmo edits into `[transform].scale`,
+        // so a size-first loader would discard every resize on reload and
+        // snap the quad back to its authored value.
+        let scale_xy = toml_value
+            .as_ref()
+            .and_then(|v| v.get("transform"))
+            .and_then(|t| t.get("scale"))
             .and_then(|s| s.as_array())
             .and_then(|arr| {
                 let x = arr.first()?.as_float().map(|f| f as f32)?;
                 let y = arr.get(1)?.as_float().map(|f| f as f32)?;
-                Some([x, y])
+                // A degenerate axis would collapse the quad to nothing and
+                // leave no way to grab it again, so treat it as unset.
+                (x.abs() > 1.0e-4 && y.abs() > 1.0e-4).then_some([x, y])
+            });
+        let size_xy = scale_xy
+            .or_else(|| {
+                section
+                    .and_then(|s| s.get("size"))
+                    .and_then(|s| s.as_array())
+                    .and_then(|arr| {
+                        let x = arr.first()?.as_float().map(|f| f as f32)?;
+                        let y = arr.get(1)?.as_float().map(|f| f as f32)?;
+                        Some([x, y])
+                    })
             })
             .unwrap_or(match class_name {
                 eustress_common::classes::ClassName::Image => [4.0, 4.0],
@@ -1793,6 +1820,20 @@ pub fn spawn_directory_entry(
             Transform::from_translation(position).with_scale(Vec3::new(size_xy[0], size_xy[1], 1.0)),
             Visibility::default(),
             bevy::light::NotShadowCaster,
+            // Imported media is an ordinary editable object, so it needs the
+            // same disk identity every other instance carries.
+            // `write_instance_changes_system` requires `&InstanceFile` in its
+            // query, so an entity without one is invisible to the transform
+            // writer: the gizmos move, rotate and scale the quad on screen and
+            // nothing is ever written back, which reads as "the tools do not
+            // work on Images". For a media quad the Transform IS the authored
+            // state (scale carries `[image].size`), so persisting it is the
+            // whole contract.
+            super::instance_loader::InstanceFile {
+                toml_path: dir_meta.path.join("_instance.toml"),
+                mesh_path: std::path::PathBuf::new(),
+                name: dir_meta.name.clone(),
+            },
         )).id();
 
         if is_video {
@@ -1874,8 +1915,20 @@ pub fn spawn_directory_entry(
                         run_context: Default::default(),
                     },
                     LoadedFromFile {
-                        path: dir_meta.path.clone(),
-                        file_type: FileType::Directory,
+                        // The SOURCE FILE, not the folder that holds it.
+                        //
+                        // This recorded `dir_meta.path`, the folder, which has no
+                        // extension. `compile_scripts_on_play` selects what to
+                        // compile with `loaded.path.extension()` matched against
+                        // "rune" | "soul", so every script packaged as a folder
+                        // presented an empty extension, failed that match, and was
+                        // silently skipped: the source was read, the entity was
+                        // spawned, the Explorer showed it, and it never ran. Bare
+                        // `.rune` files in a scripts/ directory were unaffected,
+                        // which is why the failure looked like it belonged to the
+                        // scripts rather than to the loader.
+                        path: src_path.clone(),
+                        file_type: FileType::Rune,
                         service: dir_meta.service.clone(),
                     },
                     Name::new(script_name),

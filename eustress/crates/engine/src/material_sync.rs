@@ -71,7 +71,14 @@ fn set_material_textures_to_repeat(
                 match &image.sampler {
                     bevy::image::ImageSampler::Default => true,
                     bevy::image::ImageSampler::Descriptor(desc) => {
+                        // Wrap AND filtering both have to be right. Testing only
+                        // the address mode meant a texture that already tiled but
+                        // sampled Nearest counted as done, so the filtering fix
+                        // below could never reach it.
                         desc.address_mode_u != bevy::image::ImageAddressMode::Repeat
+                            || desc.min_filter != bevy::image::ImageFilterMode::Linear
+                            || desc.mipmap_filter != bevy::image::ImageFilterMode::Linear
+                            || desc.anisotropy_clamp < 2
                     }
                 }
             } else {
@@ -81,12 +88,46 @@ fn set_material_textures_to_repeat(
             };
             if needs_update {
                 if let Some(mut image) = images.get_mut(&opt_handle) {
+                    // Change ONLY the address modes; keep whatever filtering the
+                    // asset arrived with.
+                    //
+                    // This used to spread `..Default::default()`, and Bevy's
+                    // `ImageFilterMode` defaults to `Nearest` (`bevy_image`'s
+                    // enum carries `#[default] Nearest`). So making a texture
+                    // tile also silently set mag/min/mipmap to Nearest and
+                    // `anisotropy_clamp: 1` — it fixed the wrap and destroyed the
+                    // filtering in the same statement.
+                    //
+                    // On a large flat surface seen at a grazing angle that reads
+                    // exactly like a broken texture: nearest MIPMAP filtering
+                    // gives hard, unblended mip boundaries (an abrupt smeared
+                    // band partway across the face), no anisotropy over-blurs
+                    // everything past the first mip, and nearest magnification
+                    // aliases the detail near the camera. The tiling itself was
+                    // fine; the sampling was not.
+                    let base = match &image.sampler {
+                        bevy::image::ImageSampler::Descriptor(d) => d.clone(),
+                        // Arrived unconfigured — Nearest by Bevy default, which
+                        // is wrong for a tiled surface texture.
+                        bevy::image::ImageSampler::Default => {
+                            bevy::image::ImageSamplerDescriptor::linear()
+                        }
+                    };
                     image.sampler = bevy::image::ImageSampler::Descriptor(
                         bevy::image::ImageSamplerDescriptor {
                             address_mode_u: bevy::image::ImageAddressMode::Repeat,
                             address_mode_v: bevy::image::ImageAddressMode::Repeat,
                             address_mode_w: bevy::image::ImageAddressMode::Repeat,
-                            ..Default::default()
+                            // Anisotropy is the specific fix for ground/road
+                            // surfaces: without it a tiled plane viewed edge-on
+                            // collapses into a blur a short distance out. wgpu
+                            // requires all three filters to be Linear when this
+                            // is > 1, so they are forced together.
+                            mag_filter: bevy::image::ImageFilterMode::Linear,
+                            min_filter: bevy::image::ImageFilterMode::Linear,
+                            mipmap_filter: bevy::image::ImageFilterMode::Linear,
+                            anisotropy_clamp: 16,
+                            ..base
                         }
                     );
                 }

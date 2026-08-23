@@ -28,6 +28,43 @@ use crate::modal_tool::{
 // State
 // ============================================================================
 
+/// What a surface placement produces.
+///
+/// All three project the same asset onto a face; they differ in how the
+/// result is authored. Decal and Texture become surface properties of the
+/// part, while Image becomes a real 3D quad parented to it, so it can be
+/// moved, rotated and scaled with the normal Studio tools afterwards.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SurfaceMediaKind {
+    /// Single projected image, stored as a `[decal]` surface property.
+    #[default]
+    Decal,
+    /// Repeating image, stored as a `[texture]` surface property with tiling.
+    Texture,
+    /// Standalone textured quad, written as an `Image` child of the part.
+    Image,
+}
+
+impl SurfaceMediaKind {
+    /// Class name written to disk.
+    pub fn class_name(self) -> &'static str {
+        match self {
+            Self::Decal => "Decal",
+            Self::Texture => "Texture",
+            Self::Image => "Image",
+        }
+    }
+
+    /// Parse the radial menu's choice. Unknown values fall back to Decal.
+    pub fn from_class_name(name: &str) -> Self {
+        match name {
+            "Texture" => Self::Texture,
+            "Image" => Self::Image,
+            _ => Self::Decal,
+        }
+    }
+}
+
 /// Active surface-placement session. Set by [`begin_surface_placement`];
 /// cleared when the user places or cancels.
 #[derive(Resource, Default)]
@@ -35,8 +72,8 @@ pub struct SurfacePlacement {
     pub active: bool,
     /// Universe-relative asset path of the image being applied.
     pub rel_path: String,
-    /// Texture (tiled) vs Decal (single projected image).
-    pub is_texture: bool,
+    /// What the placement produces on commit.
+    pub kind: SurfaceMediaKind,
     /// The ghost preview quad + its material handle (spawned lazily).
     pub preview: Option<Entity>,
     pub preview_material: Option<Handle<StandardMaterial>>,
@@ -46,7 +83,7 @@ impl SurfacePlacement {
     fn reset(&mut self) {
         self.active = false;
         self.rel_path.clear();
-        self.is_texture = false;
+        self.kind = SurfaceMediaKind::default();
         self.preview = None;
         self.preview_material = None;
     }
@@ -54,14 +91,14 @@ impl SurfacePlacement {
 
 /// Begin a surface-placement session for the given asset. Called from the
 /// radial-choice dispatch (a `&mut World` command closure).
-pub fn begin_surface_placement(world: &mut World, rel_path: String, is_texture: bool) {
+pub fn begin_surface_placement(world: &mut World, rel_path: String, kind: SurfaceMediaKind) {
     if let Some(mut sp) = world.get_resource_mut::<SurfacePlacement>() {
         // A fresh session — drop any stale preview handle (the entity, if
         // any, is despawned by the run system when active flips).
         sp.reset();
         sp.active = true;
         sp.rel_path = rel_path;
-        sp.is_texture = is_texture;
+        sp.kind = kind;
     }
 }
 
@@ -210,9 +247,9 @@ fn run_surface_placement(
         if let Some((_, part_gt)) = part {
             let face = face_from_normal(hit_normal, part_gt.rotation());
             let rel_path = placement.rel_path.clone();
-            let is_texture = placement.is_texture;
+            let kind = placement.kind;
             commands.queue(move |world: &mut World| {
-                place_on_part(world, hit_entity, rel_path, is_texture, face);
+                place_on_part(world, hit_entity, rel_path, kind, face);
                 despawn_preview(world);
                 if let Some(mut sp) = world.get_resource_mut::<SurfacePlacement>() {
                     sp.reset();
@@ -348,10 +385,10 @@ fn place_on_part(
     world: &mut World,
     part_entity: Entity,
     rel_path: String,
-    is_texture: bool,
+    kind: SurfaceMediaKind,
     face: eustress_common::classes::Face,
 ) {
-    let class_name = if is_texture { "Texture" } else { "Decal" };
+    let class_name = kind.class_name();
 
     // Resolve the part's on-disk folder from its InstanceFile.
     let part_folder = world
@@ -385,15 +422,45 @@ fn place_on_part(
         }
     };
 
-    // Patch the texture path + face into the class section. Both Decal and
-    // Texture store the asset in `<section>.texture` with a string `face`.
-    let section = if is_texture { "texture" } else { "decal" };
-    let _ = crate::ui::file_event_handler::patch_toml_string_field(
-        &created.toml_path, section, "texture", &rel_path,
-    );
-    let _ = crate::ui::file_event_handler::patch_toml_string_field(
-        &created.toml_path, section, "face", face.as_str(),
-    );
+    match kind {
+        // Decal / Texture are SURFACE PROPERTIES: the asset lives in
+        // `<section>.texture` with a string `face`, and the renderer builds
+        // the quad from the parent's own dimensions.
+        SurfaceMediaKind::Decal | SurfaceMediaKind::Texture => {
+            let section = if kind == SurfaceMediaKind::Texture { "texture" } else { "decal" };
+            let _ = crate::ui::file_event_handler::patch_toml_string_field(
+                &created.toml_path, section, "texture", &rel_path,
+            );
+            let _ = crate::ui::file_event_handler::patch_toml_string_field(
+                &created.toml_path, section, "face", face.as_str(),
+            );
+        }
+        // Image is a REAL 3D QUAD parented to the part. It carries its own
+        // Transform, so once placed it is an ordinary object the Move /
+        // Rotate / Scale tools operate on — which is the point of offering
+        // it as a surface target rather than only a Decal.
+        //
+        // The transform is written in the PARENT'S LOCAL SPACE because the
+        // instance folder is created underneath the part: `face_placement`
+        // returns the local offset (already nudged clear of the surface to
+        // avoid z-fighting), the rotation that turns the quad's +Z to face
+        // outward, and the face's own width/height so the image defaults to
+        // covering the whole face. Scale x/y ARE the world size for this
+        // mesh (a unit quad), which is also what the Scale gizmo maintains.
+        SurfaceMediaKind::Image => {
+            let part_size = world
+                .get::<eustress_common::classes::BasePart>(part_entity)
+                .map(|b| b.size)
+                .unwrap_or(Vec3::ONE);
+            let (offset, rot, dims) = face_placement(face, part_size);
+            let _ = crate::ui::file_event_handler::patch_toml_string_field(
+                &created.toml_path, "asset", "path", &rel_path,
+            );
+            if let Err(e) = write_quad_transform(&created.toml_path, offset, rot, dims) {
+                warn!("placed Image but could not write its transform: {}", e);
+            }
+        }
+    }
 
     notify(world, format!("Applied {} to surface ({} face)", class_name, face.as_str()));
     info!(
@@ -522,6 +589,43 @@ fn parse_face(s: &str) -> Face {
 /// the rotation that turns a +Z-normal `Rectangle` to face outward, and the
 /// face's (width, height) in studs. A small epsilon lifts the quad off the
 /// surface to avoid z-fighting.
+/// Write `[transform]` for a placed Image quad, in the parent part's local
+/// space. Values that are not transform keys are left untouched, so the
+/// class template's own defaults survive.
+fn write_quad_transform(
+    toml_path: &std::path::Path,
+    position: Vec3,
+    rotation: Quat,
+    dims: Vec2,
+) -> Result<(), String> {
+    let text = std::fs::read_to_string(toml_path)
+        .map_err(|e| format!("read {:?}: {}", toml_path, e))?;
+    let mut doc: toml::Value = text
+        .parse()
+        .map_err(|e: toml::de::Error| format!("parse {:?}: {}", toml_path, e))?;
+    let root = doc
+        .as_table_mut()
+        .ok_or_else(|| format!("TOML root is not a table: {:?}", toml_path))?;
+    let tf = root
+        .entry("transform".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+        .as_table_mut()
+        .ok_or("transform is not a table")?;
+
+    let f = |v: f32| toml::Value::Float(v as f64);
+    tf.insert("position".into(), toml::Value::Array(vec![f(position.x), f(position.y), f(position.z)]));
+    tf.insert(
+        "rotation".into(),
+        toml::Value::Array(vec![f(rotation.x), f(rotation.y), f(rotation.z), f(rotation.w)]),
+    );
+    // z stays 1: the quad mesh is flat, so only x/y carry size.
+    tf.insert("scale".into(), toml::Value::Array(vec![f(dims.x), f(dims.y), f(1.0)]));
+
+    let out = toml::to_string_pretty(&doc)
+        .map_err(|e| format!("serialize {:?}: {}", toml_path, e))?;
+    std::fs::write(toml_path, out).map_err(|e| format!("write {:?}: {}", toml_path, e))
+}
+
 fn face_placement(face: Face, size: Vec3) -> (Vec3, Quat, Vec2) {
     use std::f32::consts::{FRAC_PI_2, PI};
     let e = 0.02;

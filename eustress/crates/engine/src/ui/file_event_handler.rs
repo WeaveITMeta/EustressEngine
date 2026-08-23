@@ -1155,16 +1155,39 @@ pub fn do_materialize_media(world: &mut World, rel_path: String, class_name: Str
         }
     };
 
-    // StarterGui is created on-demand for older Spaces that predate the service.
-    let starter_gui = space_root.join("StarterGui");
-    if !starter_gui.exists() {
-        if let Err(e) = std::fs::create_dir_all(&starter_gui) {
-            notify_err(world, format!("Could not create StarterGui: {}", e));
+    // Where the instance belongs depends on WHAT it is, not on where media
+    // happened to be parked historically:
+    //   * GUI classes (ImageLabel / ImageButton / VideoFrame) are screen-space
+    //     UI and live under StarterGui.
+    //   * Image / Video are 3D quads in the world and belong under Workspace,
+    //     alongside every other spatial object. Filing them under StarterGui
+    //     put a world object inside a UI service, where the Explorer groups it
+    //     with screen UI and the usual Workspace tooling does not expect it.
+    // `class_asset_field` already distinguishes the two, so reuse it rather
+    // than maintaining a second list that could drift.
+    let class_field = class_asset_field(&class_name);
+    let is_gui_class = class_field.is_some();
+    let (service_dir, service_class, service_icon) = if is_gui_class {
+        (space_root.join("StarterGui"), "StarterGui", "startergui")
+    } else {
+        (space_root.join("Workspace"), "Workspace", "workspace")
+    };
+
+    // Created on-demand for older Spaces that predate the service folder.
+    if !service_dir.exists() {
+        if let Err(e) = std::fs::create_dir_all(&service_dir) {
+            notify_err(world, format!("Could not create {}: {}", service_class, e));
             return;
         }
         let _ = std::fs::write(
-            starter_gui.join("_service.toml"),
-            "[service]\nclass_name = \"StarterGui\"\nicon = \"startergui\"\n",
+            service_dir.join("_service.toml"),
+            format!(
+                "[service]
+class_name = \"{}\"
+icon = \"{}\"
+",
+                service_class, service_icon
+            ),
         );
     }
 
@@ -1179,14 +1202,13 @@ pub fn do_materialize_media(world: &mut World, rel_path: String, class_name: Str
     // / `[video].video`), NOT the generic `[asset].path` that Image/Video 3D
     // quads use — so only pass the `asset_path` override for the latter, and
     // post-patch the class-specific field for the former.
-    let class_field = class_asset_field(&class_name);
     let overrides = eustress_common::instance_create::InstanceOverrides {
         display_name: Some(entity_name.clone()),
         asset_path: if class_field.is_none() { Some(rel_path.clone()) } else { None },
         ..Default::default()
     };
     let created = match eustress_common::instance_create::create_instance(
-        &starter_gui,
+        &service_dir,
         &class_name,
         Some(&entity_name),
         overrides,
