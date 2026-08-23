@@ -62,6 +62,138 @@ pub fn numerology(wheel: Wheel, index: usize, name: &str) -> u32 {
     }
 }
 
+// ============================================================================
+// Angelic correspondences — the ruling color of each Shem HaMephorash angel
+// ============================================================================
+
+/// The twelve zodiac signs, in order from Aries.
+pub const ZODIAC: [&str; 12] = [
+    "Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo",
+    "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces",
+];
+
+/// The nine choirs, in order, eight angels each.
+pub const CHOIRS: [&str; 9] = [
+    "Seraphim", "Cherubim", "Thrones", "Dominions", "Powers",
+    "Virtues", "Principalities", "Archangels", "Angels",
+];
+
+/// The sephira / planetary ruler traditionally paired with each choir, in the
+/// same order as [`CHOIRS`]. Carried for display; the swatch takes only the
+/// saturation weighting below.
+pub const CHOIR_RULERS: [&str; 9] = [
+    "Chokmah · Neptune", "Binah · Saturn", "Chesed · Jupiter",
+    "Geburah · Mars", "Tiphareth · Sol", "Netzach · Venus",
+    "Hod · Mercury", "Yesod · Luna", "Malkuth · Earth",
+];
+
+/// Hue in degrees for each sign, following the Golden Dawn King Scale rather
+/// than an even 30 degree split — the traditional scale is compressed through
+/// the warm quadrant and stretched through blue, which is what makes the ring
+/// read as the zodiac and not as a plain rainbow.
+const SIGN_HUE: [f32; 12] = [
+    0.0,   // Aries        scarlet
+    25.0,  // Taurus       red-orange
+    45.0,  // Gemini       orange
+    60.0,  // Cancer       amber
+    75.0,  // Leo          yellow
+    90.0,  // Virgo        yellow-green
+    120.0, // Libra        emerald
+    165.0, // Scorpio      green-blue
+    210.0, // Sagittarius  blue
+    250.0, // Capricorn    indigo
+    280.0, // Aquarius     violet
+    320.0, // Pisces       crimson
+];
+
+/// Saturation weighting per choir, highest nearest the source. The choir sets
+/// how PURE the ruling hue reads; the hue itself comes from the sign.
+const CHOIR_SATURATION: [f32; 9] = [
+    0.95, // Seraphim
+    0.88, // Cherubim
+    0.82, // Thrones
+    0.76, // Dominions
+    0.70, // Powers
+    0.64, // Virtues
+    0.58, // Principalities
+    0.52, // Archangels
+    0.46, // Angels
+];
+
+/// Where angel `rank` (1..=72) sits in the system: sign, choir, and the degrees
+/// of the zodiac it governs.
+///
+/// Each angel rules 5 degrees, in sequence from 0 Aries, so six fall in every
+/// sign and eight in every choir. Returns `None` outside 1..=72 — the Halo
+/// wheel's entries past 72 are thematic, not canonical, and carry no rulership.
+pub fn angel_rulership(rank: u32) -> Option<AngelRulership> {
+    if rank == 0 || rank > 72 {
+        return None;
+    }
+    let i = (rank - 1) as usize;
+    Some(AngelRulership {
+        rank,
+        sign: ZODIAC[i / 6],
+        sign_index: i / 6,
+        choir: CHOIRS[i / 8],
+        choir_ruler: CHOIR_RULERS[i / 8],
+        choir_index: i / 8,
+        degrees_start: (i as f32) * 5.0,
+    })
+}
+
+/// One angel's place in the zodiacal / choral scheme.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AngelRulership {
+    pub rank: u32,
+    pub sign: &'static str,
+    pub sign_index: usize,
+    pub choir: &'static str,
+    pub choir_ruler: &'static str,
+    pub choir_index: usize,
+    /// Absolute ecliptic longitude where this angel's 5 degrees begin.
+    pub degrees_start: f32,
+}
+
+/// The ruling color of angel `rank` (1..=72) as sRGB, at a given `lightness`.
+///
+/// Hue is the sign's King Scale hue, saturation is the choir's purity. The
+/// caller supplies lightness so the wheel can still brighten toward its centre
+/// — identity comes from rulership, elevation from position.
+///
+/// Ranks outside 1..=72 return `None`; the Halo wheel falls back to its
+/// generic light transform for those.
+pub fn angel_ruling_color(rank: u32, lightness: f32) -> Option<[u8; 3]> {
+    let r = angel_rulership(rank)?;
+    Some(hsl_to_srgb(
+        SIGN_HUE[r.sign_index],
+        CHOIR_SATURATION[r.choir_index],
+        lightness.clamp(0.0, 1.0),
+    ))
+}
+
+/// Minimal HSL -> sRGB. Local copy so the correspondence table does not depend
+/// on `color_wheels`' private helpers.
+fn hsl_to_srgb(h: f32, s: f32, l: f32) -> [u8; 3] {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = (h.rem_euclid(360.0)) / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    [
+        (((r + m) * 255.0).round().clamp(0.0, 255.0)) as u8,
+        (((g + m) * 255.0).round().clamp(0.0, 255.0)) as u8,
+        (((b + m) * 255.0).round().clamp(0.0, 255.0)) as u8,
+    ]
+}
+
 /// Simple English gematria: `a`=1 through `z`=26, summed over the name.
 /// Non-letters are skipped, so `Nith-Haiah` scores the same as `NithHaiah`.
 pub fn gematria(name: &str) -> u32 {
@@ -139,20 +271,20 @@ const VERDURE: [&str; WHEEL_SWATCHES] = [
     "Willow", "Alder", "Birch", "Rowan", "Hawthorn", "Blackthorn",
     "Hazel", "Elder", "Aspen", "Linden", "Sycamore", "Chestnut",
     "Hornbeam", "Beech", "Larch", "Cedar", "Juniper", "Cypress", "Yew",
-    "Spruce", "Fir", "Pine", "Redwood", "Sequoia", "Mangrove",
+    "Spruce", "Fir", "Pine", "Cedarwood", "Sequoia", "Mangrove",
     "Bulrush", "Sedge", "Reed", "Rush", "Cattail", "Marsh Marigold",
-    "Meadowsweet", "Yarrow", "Tansy", "Chicory", "Comfrey", "Borage",
-    "Chamomile", "Lavender", "Rosemary", "Thyme", "Sage", "Marjoram",
-    "Fennel", "Dill", "Angelica", "Lovage", "Mallow", "Foxglove",
-    "Columbine", "Larkspur", "Delphinium", "Lupine", "Snapdragon",
-    "Hollyhock", "Cornflower", "Poppy", "Bluebell", "Harebell",
-    "Campion", "Primrose", "Cowslip", "Violet", "Periwinkle", "Speedwell",
-    "Forget-me-not", "Anemone", "Celandine", "Buttercup", "Trefoil",
+    "Meadowsweet", "Yarrow", "Tansy", "Chervil", "Comfrey", "Purslane",
+    "Chamomile", "Lovage", "Rosemary", "Thyme", "Sage", "Marjoram",
+    "Fennel", "Dill", "Angelica", "Lambsquarter", "Mallow", "Fiddlehead",
+    "Cotyledon Leaf", "Lemongrass", "Duckweed", "Liverleaf", "Samphire",
+    "Houseleek", "Coriander", "Pennywort", "Bilberry Leaf", "Hartstongue",
+    "Caraway", "Pipsissewa", "Cleavers", "Vervain", "Pellitory", "Spleenwort",
+    "Feverfew", "Agrimony", "Chickweed", "Burnet", "Trefoil",
     "Sainfoin", "Lucerne", "Timothy", "Fescue", "Ryegrass", "Bentgrass",
     "Barley", "Millet", "Sorghum", "Amaranth", "Buckwheat", "Flax",
     "Hemp", "Nettle", "Burdock", "Dock", "Plantain", "Dandelion",
     "Coltsfoot", "Butterbur", "Hogweed", "Cow Parsley", "Hedgerow",
-    "Bramble", "Briar", "Sloe", "Rosehip", "Elderflower", "Hazelnut",
+    "Bramble", "Briar", "Sloe", "Rockcress", "Eyebright", "Hazelnut",
     "Acorn", "Catkin", "Sapling", "Seedling", "Cotyledon", "Tendril",
     "Rhizome", "Taproot", "Heartwood", "Sapwood", "Cambium", "Bark",
     "Lichen", "Liverwort", "Hornwort", "Frond", "Canopy", "Understory",

@@ -85,8 +85,20 @@ pub struct HoneycombCell {
     pub numerology: u32,
 }
 
+/// Rendered size of one honeycomb cell, matching `ColorSwatchCell` in
+/// `properties.slint`. Cell `(x, y)` is its top-left corner, so the centre of
+/// the grid is offset by half a cell.
+pub const CELL_W: f32 = 22.0;
+pub const CELL_H: f32 = 19.0;
+
+/// Full extent of the laid-out honeycomb: the cells span `x 0..264` and
+/// `y 0..228`, plus one cell of width and height. The Slint side sizes its
+/// container to exactly this.
+pub const HONEYCOMB_W: f32 = 264.0 + CELL_W;
+pub const HONEYCOMB_H: f32 = 228.0 + CELL_H;
+
 /// A single curated base swatch: a name, an sRGB color, and a fixed `(x, y)`
-/// position inside the 286x264 honeycomb box. The Stone wheel renders these
+/// position inside the honeycomb box. The Stone wheel renders these
 /// unchanged; the other wheels keep the name + position and transform the color.
 struct Base {
     name: &'static str,
@@ -321,15 +333,75 @@ fn transform_color(wheel: Wheel, rgb: [u8; 3]) -> [u8; 3] {
 /// colors differ.
 pub fn wheel_honeycomb(wheel: Wheel) -> Vec<HoneycombCell> {
     // Each wheel names its cells from its own lexicon; Stone alone keeps the
-    // curated base names. Geometry and cell order are shared, so index `i` is
-    // the same cell on every wheel and only the name and color change.
+    // curated base names and its original flat layout.
     let lexicon = crate::wheel_lexicons::wheel_lexicon(wheel);
+
+    // RADIAL RANK — the wheel reads from the centre outward.
+    //
+    // Rank 1 sits at the middle and the sequence spirals out to rank 127 at the
+    // rim, so Halo puts Vehuiah (the first angel) at the centre and Umbra puts
+    // Bael (the first demon) at its own centre, keeping the two mirrored. The
+    // ordering is by distance from the honeycomb's centre, ties broken by cell
+    // index so the layout is stable between runs.
+    //
+    // Assigning by raw array index instead — which is what this did — scattered
+    // rank across the grid, so neither the names nor the colors formed any
+    // readable structure.
+    let centre_x = (HONEYCOMB_W - CELL_W) * 0.5;
+    let centre_y = (HONEYCOMB_H - CELL_H) * 0.5;
+    let mut by_radius: Vec<(usize, f32)> = BASE_PALETTE
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let dx = b.x - centre_x;
+            let dy = b.y - centre_y;
+            (i, dx * dx + dy * dy)
+        })
+        .collect();
+    by_radius.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    // rank_of[palette index] = 0 at the centre .. 126 at the rim.
+    let mut rank_of = [0usize; 127];
+    for (rank, (idx, _)) in by_radius.iter().enumerate() {
+        rank_of[*idx] = rank;
+    }
+
     BASE_PALETTE
         .iter()
         .enumerate()
         .map(|(i, b)| {
-            let [r, g, bl] = transform_color(wheel, [b.r, b.g, b.b]);
-            let name = lexicon.map(|lex| lex[i]).unwrap_or(b.name);
+            let rank = rank_of[i];
+            // 0.0 at the centre, 1.0 at the rim.
+            let t = rank as f32 / (BASE_PALETTE.len() - 1) as f32;
+
+            // Halo's first 72 take their hue from the angel's RULERSHIP — the
+            // King Scale hue of the sign it governs, at the purity of its choir
+            // — rather than from the shared base palette. Identity comes from
+            // rulership; elevation still comes from position, so lightness runs
+            // from near-white at the centre out to a saturated rim.
+            //
+            // Without this every angel was the same wash of pale, because the
+            // generic `Halo` transform only lightened whatever base swatch
+            // happened to sit under it, and the base palette carries no
+            // angelic meaning.
+            let [r, g, bl] = if matches!(wheel, Wheel::Halo) && rank < 72 {
+                // Centre 0.78 down to rim 0.40. The centre is still the
+                // brightest point, so rank still ascends inward — but the range
+                // stays inside the band where a hue is recognisable. Running it
+                // up to 0.94 washed the inner ranks to near-white and threw away
+                // the rulership the color is supposed to carry.
+                let lightness = 0.40 + (1.0 - t) * 0.38;
+                crate::wheel_lexicons::angel_ruling_color(rank as u32 + 1, lightness)
+                    .unwrap_or_else(|| radial_shade(wheel, transform_color(wheel, [b.r, b.g, b.b]), t))
+            } else {
+                radial_shade(wheel, transform_color(wheel, [b.r, b.g, b.b]), t)
+            };
+            // Stone keeps its curated name on its own cell; every other wheel
+            // draws the entry whose rank matches this cell's ring.
+            let name = lexicon.map(|lex| lex[rank]).unwrap_or(b.name);
             HoneycombCell {
                 name: name.to_string(),
                 r,
@@ -337,10 +409,44 @@ pub fn wheel_honeycomb(wheel: Wheel) -> Vec<HoneycombCell> {
                 b: bl,
                 x: b.x,
                 y: b.y,
-                numerology: crate::wheel_lexicons::numerology(wheel, i, name),
+                numerology: crate::wheel_lexicons::numerology(wheel, rank, name),
             }
         })
         .collect()
+}
+
+/// Push a cell toward its wheel's extreme as it approaches the centre.
+///
+/// `t` is 0.0 at the centre and 1.0 at the rim. Halo brightens inward, so the
+/// most radiant swatch sits under the first angel; Umbra darkens inward, so the
+/// deepest void sits under the first demon. The two are deliberate mirrors.
+///
+/// Aether and Hex get the same treatment in their own direction — abstract good
+/// intensifies toward light, abstract evil toward saturated dark — because a
+/// wheel whose colors are uniform across the grid gives the eye nothing to
+/// navigate by. Verdure, Char and Stone are left flat: their lexicons are
+/// unranked, so implying a centre would be meaningless.
+fn radial_shade(wheel: Wheel, rgb: [u8; 3], t: f32) -> [u8; 3] {
+    // How strongly the centre pulls, and in which direction.
+    let (toward_light, strength) = match wheel {
+        Wheel::Halo => (true, 0.55),
+        Wheel::Aether => (true, 0.35),
+        Wheel::Umbra => (false, 0.75),
+        Wheel::Hex => (false, 0.40),
+        Wheel::Verdure | Wheel::Char | Wheel::Stone => return rgb,
+    };
+    let (h, s, l) = rgb_to_hsl(rgb);
+    // Full effect at the centre, tapering to none at the rim.
+    let k = (1.0 - t) * strength;
+    let l = if toward_light {
+        l + (1.0 - l) * k
+    } else {
+        l * (1.0 - k)
+    };
+    // Light centres desaturate toward white; dark centres hold their hue so the
+    // void stays a color rather than turning flat black.
+    let s = if toward_light { s * (1.0 - k * 0.5) } else { s };
+    hsl_to_rgb(h, s.clamp(0.0, 1.0), l.clamp(0.0, 1.0))
 }
 
 /// The name of the [`BASE_PALETTE`] swatch nearest to `rgb` by squared RGB
@@ -416,22 +522,77 @@ mod tests {
     }
 
     #[test]
-    fn numerology_is_populated_per_wheel_scheme() {
-        // Halo/Umbra carry the canonical rank; Aether/Hex carry gematria.
+    /// The centre cell of the honeycomb — the one the wheel reads outward from.
+    fn centre_cell(cells: &[HoneycombCell]) -> &HoneycombCell {
+        let cx = (HONEYCOMB_W - CELL_W) * 0.5;
+        let cy = (HONEYCOMB_H - CELL_H) * 0.5;
+        cells
+            .iter()
+            .min_by(|a, b| {
+                let d = |c: &HoneycombCell| (c.x - cx).powi(2) + (c.y - cy).powi(2);
+                d(a).partial_cmp(&d(b)).unwrap()
+            })
+            .expect("honeycomb is never empty")
+    }
+
+    #[test]
+    fn rank_one_sits_at_the_centre() {
+        // The wheel reads from the middle out: the first angel and the first
+        // demon each occupy their own wheel's centre cell, which is what keeps
+        // Halo and Umbra mirrored on screen and not just in the arrays.
         let halo = wheel_honeycomb(Wheel::Halo);
-        assert_eq!(halo[0].name, "Vehuiah");
-        assert_eq!(halo[0].numerology, 1);
-        assert_eq!(halo[71].numerology, 72);
+        assert_eq!(centre_cell(&halo).name, "Vehuiah");
+        assert_eq!(centre_cell(&halo).numerology, 1);
 
         let umbra = wheel_honeycomb(Wheel::Umbra);
-        assert_eq!(umbra[0].name, "Bael");
-        assert_eq!(umbra[71].name, "Andromalius");
+        assert_eq!(centre_cell(&umbra).name, "Bael");
+        assert_eq!(centre_cell(&umbra).numerology, 1);
+    }
 
+    #[test]
+    fn centre_is_the_extreme_of_its_wheel() {
+        // Halo ascends to light at the centre, Umbra descends to dark. Compare
+        // the centre against the mean so the assertion cannot pass on a flat
+        // wheel, which is exactly the state this replaced.
+        let mean = |cells: &[HoneycombCell]| -> f32 {
+            cells
+                .iter()
+                .map(|c| (c.r as f32 + c.g as f32 + c.b as f32) / 3.0)
+                .sum::<f32>()
+                / cells.len() as f32
+        };
+        let lum = |c: &HoneycombCell| (c.r as f32 + c.g as f32 + c.b as f32) / 3.0;
+
+        let halo = wheel_honeycomb(Wheel::Halo);
+        assert!(
+            lum(centre_cell(&halo)) > mean(&halo),
+            "Halo centre {} should be brighter than its mean {}",
+            lum(centre_cell(&halo)),
+            mean(&halo),
+        );
+
+        let umbra = wheel_honeycomb(Wheel::Umbra);
+        assert!(
+            lum(centre_cell(&umbra)) < mean(&umbra),
+            "Umbra centre {} should be darker than its mean {}",
+            lum(centre_cell(&umbra)),
+            mean(&umbra),
+        );
+    }
+
+    #[test]
+    fn numerology_is_populated_per_wheel_scheme() {
+        // Aether/Hex carry gematria of the name rather than a rank.
         let aether = wheel_honeycomb(Wheel::Aether);
         assert_eq!(
             aether[0].numerology,
             crate::wheel_lexicons::gematria(&aether[0].name)
         );
+        // Every Halo cell carries a rank in 1..=127, each used exactly once.
+        let halo = wheel_honeycomb(Wheel::Halo);
+        let mut ranks: Vec<u32> = halo.iter().map(|c| c.numerology).collect();
+        ranks.sort_unstable();
+        assert_eq!(ranks, (1..=127).collect::<Vec<u32>>());
     }
 
     #[test]
