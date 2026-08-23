@@ -339,34 +339,74 @@ const CRATER_SAMPLES: f32 = 4.0;
 /// out. See the seam-guard note in [`apply_impact_deformation`].
 const SEAM_FADE_M: f32 = 0.05;
 
-/// The outward surface normal at an impact point, taken from the authored
-/// normal of the nearest reference-pose vertex.
+/// The outward surface normal of the face an impact actually struck.
 ///
-/// Used to aim the dent perpendicular to the surface. The nearest vertex is
-/// measured in WORLD metres (local offsets scaled by the part's size) so a
-/// flat, non-uniformly scaled plate does not pick a vertex on its rim just
-/// because that axis is compressed in local space.
+/// Used to aim the dent perpendicular to the surface. Distances are measured in
+/// WORLD metres (local offsets scaled by the part's size) so a flat,
+/// non-uniformly scaled plate does not pick a vertex on its rim just because
+/// that axis is compressed in local space.
 ///
-/// Reads the authored normals rather than recomputing from triangles: they are
-/// already the reference-pose surface direction, and they stay correct while
-/// the surface around them is being displaced.
-fn nearest_surface_normal(deform_mesh: &DeformableMesh, point: Vec3, size: Vec3) -> Option<Vec3> {
+/// PICKING THE NEAREST VERTEX ALONE IS NOT ENOUGH. On an authored 24-vertex
+/// cube every vertex is a corner, and each corner position carries THREE
+/// coincident copies — one per adjoining face, each with that face's own
+/// normal. The nearest vertex to the middle of a face is therefore a tie
+/// between three different answers, and taking whichever happened to come first
+/// in the vertex buffer could return a SIDE face's horizontal normal for a
+/// straight-down blow. The dent then aimed sideways, the seam guard faded it
+/// out along the axis every struck-face vertex sits exactly on, and the impact
+/// silently moved nothing: a refined mesh with no dent in it.
+///
+/// So coincident candidates are broken by which one actually FACES the blow.
+/// A face whose outward normal points away from the incoming direction cannot
+/// be the one that was hit.
+fn impact_surface_normal(
+    deform_mesh: &DeformableMesh,
+    point: Vec3,
+    size: Vec3,
+    direction: Vec3,
+) -> Option<Vec3> {
     if deform_mesh.original_normals.len() != deform_mesh.original_positions.len() {
         return None;
     }
-    let mut best: Option<(f32, Vec3)> = None;
+
+    // Vertices closer than this (in metres) are treated as the same point, so
+    // the facing test decides between them rather than buffer order.
+    const COINCIDENT_M: f32 = 1.0e-4;
+
+    let mut best_d2 = f32::INFINITY;
+    let mut best_facing = f32::NEG_INFINITY;
+    let mut best: Option<Vec3> = None;
+
     for (p, n) in deform_mesh
         .original_positions
         .iter()
         .zip(deform_mesh.original_normals.iter())
     {
-        let d = ((*p - point) * size).length_squared();
-        if best.map_or(true, |(bd, _)| d < bd) {
-            best = Some((d, *n));
+        let n = n.normalize_or_zero();
+        if !n.is_finite() || n == Vec3::ZERO {
+            continue;
+        }
+        // How squarely this face meets the blow. Negative means the blow is
+        // travelling out through its back, so it is not the struck face.
+        let facing = direction.dot(-n);
+        if facing <= 1.0e-3 {
+            continue;
+        }
+
+        let d2 = ((*p - point) * size).length_squared();
+        let d = d2.max(0.0).sqrt();
+        let best_d = best_d2.max(0.0).sqrt();
+
+        let closer = d < best_d - COINCIDENT_M;
+        let tied_and_squarer = (d - best_d).abs() <= COINCIDENT_M && facing > best_facing;
+        if closer || tied_and_squarer || best.is_none() {
+            best_d2 = d2;
+            best_facing = facing;
+            best = Some(n);
         }
     }
-    best.map(|(_, n)| n.normalize_or_zero())
-        .filter(|n| n.is_finite() && *n != Vec3::ZERO)
+
+    best
 }
 
 /// Add mesh resolution where an impact is about to land.
@@ -552,7 +592,7 @@ pub fn apply_impact_deformation(
         // It is also the better physics: the component along the inward normal
         // is what actually indents, so a glancing blow now dents less than a
         // square one instead of dragging the surface along with it.
-        let surface_normal = nearest_surface_normal(&deform_mesh, event.point, size);
+        let surface_normal = impact_surface_normal(&deform_mesh, event.point, size, direction);
         let dent_dir = match surface_normal {
             // Into the surface, i.e. opposite the outward normal.
             Some(n) => -n,
@@ -995,45 +1035,81 @@ mod tests {
         }
     }
 
-    /// The dent has to aim along the SURFACE normal, and finding that normal
-    /// has to measure distance in world metres.
+    /// The regression that made a plate refine but never dent.
     ///
-    /// On a flat, non-uniformly scaled plate the local-space nearest vertex is
-    /// not the world-space nearest one: local Y is compressed 6x relative to X
-    /// on a 3.0 x 0.5 x 2.5 part, so a naive local-space search picks a vertex
-    /// on the far rim of the struck face — or worse, one on the opposite face —
-    /// and aims the dent sideways, which is exactly the tangential displacement
-    /// that folds the surface.
+    /// An authored cube has 24 vertices — every one a CORNER — and each corner
+    /// position carries three coincident copies, one per adjoining face, each
+    /// with that face's own normal. So the nearest vertex to the middle of the
+    /// top face is a three-way tie between +Y, +X and +Z. Taking whichever came
+    /// first in the buffer returned a SIDE normal for a straight-down blow; the
+    /// dent then aimed sideways, the seam guard faded it out along the axis
+    /// every top-face vertex sits exactly on, and the impact moved nothing.
+    ///
+    /// The side copy is deliberately placed FIRST here, which is the ordering
+    /// that used to fail.
+    #[test]
+    fn coincident_corner_normals_resolve_to_the_struck_face() {
+        let size = Vec3::new(3.0, 0.5, 2.5);
+        let corner = Vec3::new(0.5, 0.5, 0.5);
+        let m = mesh_with(
+            vec![corner, corner, corner],
+            vec![Vec3::X, Vec3::Y, Vec3::Z], // side first, top second
+        );
+
+        // Straight down onto the top face.
+        let n = impact_surface_normal(&m, Vec3::new(0.0, 0.5, 0.0), size, Vec3::NEG_Y)
+            .expect("a downward blow must find the top face");
+        assert_eq!(n, Vec3::Y, "picked a face the blow could not have struck");
+
+        // The same geometry hit from the side must resolve to the side face.
+        let n = impact_surface_normal(&m, Vec3::new(0.5, 0.0, 0.0), size, Vec3::NEG_X)
+            .expect("a sideways blow must find the +X face");
+        assert_eq!(n, Vec3::X);
+    }
+
+    /// Distance has to be measured in world metres. On a 3.0 x 0.5 x 2.5 plate
+    /// local Y is compressed 6x against X, so a local-space search picks a
+    /// vertex on the far rim of the struck face — or the opposite face — and
+    /// aims the dent sideways.
     #[test]
     fn surface_normal_is_taken_in_world_space() {
         let size = Vec3::new(3.0, 0.5, 2.5);
-        // Top-face vertex directly under the impact, and a bottom-face vertex
-        // that is CLOSER in raw local units but far away in metres.
         let m = mesh_with(
             vec![
-                Vec3::new(0.02, 0.5, 0.0),  // top, 0.06 m away in world
-                Vec3::new(0.0, -0.5, 0.0),  // bottom, 1.0 local but 0.5 m away
+                Vec3::new(0.02, 0.5, 0.0),  // top, 0.06 m away
+                Vec3::new(0.0, -0.5, 0.0),  // bottom, 1.0 LOCAL but 0.5 m away
             ],
             vec![Vec3::Y, Vec3::NEG_Y],
         );
 
-        let n = nearest_surface_normal(&m, Vec3::new(0.0, 0.5, 0.0), size)
+        let n = impact_surface_normal(&m, Vec3::new(0.0, 0.5, 0.0), size, Vec3::NEG_Y)
             .expect("authored normals present");
         assert_eq!(n, Vec3::Y, "picked the wrong face's normal");
+    }
+
+    /// A face whose outward normal points away from the blow cannot be the one
+    /// that was struck, however close it happens to be.
+    #[test]
+    fn back_faces_are_never_selected() {
+        let m = mesh_with(
+            vec![Vec3::new(0.0, -0.5, 0.0), Vec3::new(0.0, 0.5, 0.0)],
+            vec![Vec3::NEG_Y, Vec3::Y],
+        );
+        // Hit from above, standing right next to the bottom face.
+        let n = impact_surface_normal(&m, Vec3::new(0.0, -0.5, 0.0), Vec3::ONE, Vec3::NEG_Y)
+            .expect("the top face still faces this blow");
+        assert_eq!(n, Vec3::Y);
     }
 
     #[test]
     fn surface_normal_declines_without_authored_normals() {
         let m = mesh_with(vec![Vec3::Y * 0.5], Vec::new());
         assert!(
-            nearest_surface_normal(&m, Vec3::ZERO, Vec3::ONE).is_none(),
+            impact_surface_normal(&m, Vec3::ZERO, Vec3::ONE, Vec3::NEG_Y).is_none(),
             "must fall back rather than invent a normal"
         );
     }
 
-    /// A blow travelling ALONG the surface must not dent it, and a square blow
-    /// must dent at full depth. This is the projection that removes the
-    /// tangential component responsible for folding.
     #[test]
     fn obliquity_scales_from_square_to_grazing() {
         let into = Vec3::NEG_Y; // dent direction for a top-face hit
