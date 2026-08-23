@@ -131,9 +131,30 @@ pub struct EditorSettings {
     /// per launch.
     #[serde(default)]
     pub telemetry_notice_shown: bool,
+
+    /// Bliss node mode — "Light" or "Full". Persisted because opting into a
+    /// Full node is a deliberate resource commitment (~2GB RAM, stores chain
+    /// data, +10% earning bonus); silently reverting to Light on every launch
+    /// both loses the user's choice and quietly costs them the bonus.
+    #[serde(default = "default_bliss_node_mode")]
+    pub bliss_node_mode: String,
+
+    /// Whether Bliss participation is enabled at all (the badge's on/off
+    /// toggle). Same reasoning: an explicit opt-out must survive a restart.
+    #[serde(default = "default_bliss_enabled")]
+    pub bliss_enabled: bool,
 }
 
 fn default_usage_telemetry_enabled() -> bool {
+    true
+}
+
+fn default_bliss_node_mode() -> String {
+    // Light is the zero-setup default; Full is always an explicit opt-in.
+    "Light".to_string()
+}
+
+fn default_bliss_enabled() -> bool {
     true
 }
 
@@ -209,6 +230,8 @@ impl Default for EditorSettings {
             layout_preset_by_mode: std::collections::HashMap::new(),
             usage_telemetry_enabled: default_usage_telemetry_enabled(),
             telemetry_notice_shown: false,
+            bliss_node_mode: default_bliss_node_mode(),
+            bliss_enabled: default_bliss_enabled(),
         }
     }
 }

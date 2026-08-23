@@ -675,12 +675,37 @@ impl Plugin for StudioAuthPlugin {
         app.init_resource::<AuthState>()
             .init_resource::<BlissNodeState>()
             .init_resource::<BlissNodeHandle>()
-            .add_systems(Startup, start_bliss_node);
+            // `.chain()` matters: the saved mode must be applied BEFORE the
+            // node starts, otherwise a user who chose Full would boot a Light
+            // node for the session and only see the label flip.
+            .add_systems(Startup, (restore_bliss_settings, start_bliss_node).chain());
         // NOTE: `auth_poll_system` is registered by `SlintUiPlugin`
         // (ui/slint_ui.rs), which always coexists with this plugin in
         // the studio bin — adding it here too would run it twice per
         // frame. Earning systems live in `BlissTrackerPlugin`.
     }
+}
+
+/// Restore the persisted Bliss node mode + enabled flag from EditorSettings.
+///
+/// Without this the badge reset to Light on every launch, silently discarding
+/// an opt-in to Full (and its +10% earning bonus). Runs before
+/// `start_bliss_node` so the node actually boots in the chosen mode.
+fn restore_bliss_settings(
+    settings: Option<Res<crate::editor_settings::EditorSettings>>,
+    mut bliss: ResMut<BlissNodeState>,
+) {
+    let Some(settings) = settings else { return };
+    if settings.bliss_node_mode == "Full" {
+        bliss.set_full();
+    } else {
+        bliss.set_light();
+    }
+    bliss.enabled = settings.bliss_enabled;
+    info!(
+        "Bliss: restored node mode {} (enabled: {})",
+        bliss.mode, bliss.enabled
+    );
 }
 
 /// Start the Bliss node API server on engine startup.

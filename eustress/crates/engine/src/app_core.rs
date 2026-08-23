@@ -241,6 +241,15 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
         // PlayModeState; drains MCP sim-commands.jsonl; writes telemetry).
         .add_plugins(crate::simulation::SimulationPlugin::default())
         .add_plugins(crate::simulation::ElectrochemistryPlugin)
+        // Scenarios — the branching what-if engine. `scenarios/` carries a full
+        // implementation (store, graph, Monte Carlo runner, Bayesian update,
+        // evidence, soft pruning, Rune scripting) and `lib.rs` exposes the
+        // module, but the plugin was never added to the app, so none of its
+        // resources existed, none of its messages were registered and every one
+        // of its systems was unreachable at runtime. Anything sending a
+        // `CreateScenarioEvent` was writing to a message type Bevy had never
+        // heard of. Registering it here is what makes the module reachable.
+        .add_plugins(crate::scenarios::ScenariosPlugin)
         // World-model generative spine (Phase 5). Wraps the engine-free
         // `eustress-genesis` crate: generate -> score -> optimize over an
         // ArchCandidate, with the 1D FEA verifier wired in as a hard yield gate
