@@ -3370,8 +3370,35 @@ pub fn update_slint_ui_focus(
         // geometric test so camera input still works during startup.
         .unwrap_or(true);
 
+    // A Slint PopupWindow (every menu-bar dropdown, the Insert catalog, the
+    // unit / account / Bliss menus) is drawn OVER the viewport rect, so the
+    // geometric test alone reports "inside the viewport" while the pointer is
+    // on a menu. Wheel events then scrolled the menu AND zoomed the camera,
+    // and dragging a menu's scrollbar also started a box-selection behind it.
+    //
+    // Slint owns the authoritative answer: `active_popups()` is non-empty for
+    // exactly as long as a popup is up, and it clears itself when the popup
+    // closes however that happens (item chosen, click outside, Escape). That
+    // is why this asks Slint rather than tracking per-popup open flags, which
+    // would need a `closed` hook this Slint version does not expose and would
+    // have to be repeated for all fifteen popups.
+    //
+    // While a menu is open the world takes NO pointer input at all, regardless
+    // of where the cursor sits. That matches how a menu behaves everywhere
+    // else: it is modal until dismissed.
+    let popup_open = slint_context
+        .as_ref()
+        .map(|ctx| {
+            use slint::private_unstable_api::re_exports::WindowInner;
+            !WindowInner::from_pub(&ctx.adapter.slint_window)
+                .active_popups()
+                .is_empty()
+        })
+        .unwrap_or(false);
+
     // Check if cursor is inside the 3D viewport bounds (logical pixels)
     let in_viewport = scene_tab_active
+        && !popup_open
         && cursor_pos.x >= vb_x
         && cursor_pos.x <= vb_x + vb_w
         && cursor_pos.y >= vb_y
@@ -3736,6 +3763,11 @@ struct DrainResources<'w> {
     undo_stack: Option<ResMut<'w, crate::undo::UndoStack>>,
     explorer_state: Option<ResMut<'w, UnifiedExplorerState>>,
     space_root: Option<Res<'w, crate::space::SpaceRoot>>,
+    /// WorldDb/Fjall handle — needed by `do_reparent_node`. A drag-drop move
+    /// renames the folder on disk, but for a migrated Space the loader spawns
+    /// from the DB `tree` and the disk reconcile is ADD-ONLY, so a move that
+    /// never touches the DB is undone by the next load.
+    world_db: Option<Res<'w, crate::space::world_db_plugin::WorldDbHandle>>,
     view_state: Option<ResMut<'w, super::ViewSelectorState>>,
     /// SimulationClock — the Save button on Simulation Settings writes
     /// the chosen preset's time_scale into this resource so the change
@@ -4593,14 +4625,47 @@ fn do_reparent_node(
         return;
     };
 
-    let Some(target) = target_entity else {
-        warn!("📂 Reparent ABORT: target_id={} not in entity_id_cache", target_id);
-        if let Some(ref mut out) = res.output {
-            out.warn(format!("Reparent: could not find target entity (id={})", target_id));
+    // The Explorer renders two kinds of row, and they carry different IDs.
+    // Entity rows use the entity's own id and resolve through
+    // `entity_id_cache`. SERVICE roots (Workspace, StarterGui, ...) are drawn
+    // by `make_service_node` with a stable NEGATIVE `service_name_to_id` hash
+    // and are never in that cache — so every drop onto a service aborted right
+    // here, before any disk or DB work was attempted. That is the "it just
+    // stays where it was" report: dragging onto Workspace was a no-op.
+    //
+    // Matched on `ServiceComponent.class_name` rather than `Instance.name` so a
+    // regular Part that happens to be named "Workspace" cannot be mistaken for
+    // the service, and so dynamically-registered services work too.
+    let target = match target_entity {
+        Some(e) => {
+            info!("📂 target resolved via entity_id_cache: {:?}", e);
+            e
         }
-        return;
+        None => {
+            let mut svc_entity: Option<Entity> = None;
+            for (e, _inst) in queries.instances.iter() {
+                if let Ok(svc) = queries.service_components.get(e) {
+                    if service_name_to_id(&svc.class_name) == target_id {
+                        svc_entity = Some(e);
+                        break;
+                    }
+                }
+            }
+            match svc_entity {
+                Some(e) => {
+                    info!("📂 target resolved as SERVICE root {:?} (id={})", e, target_id);
+                    e
+                }
+                None => {
+                    warn!("📂 Reparent ABORT: target_id={} is neither an entity row nor a service root", target_id);
+                    if let Some(ref mut out) = res.output {
+                        out.warn(format!("Reparent: could not find target entity (id={})", target_id));
+                    }
+                    return;
+                }
+            }
+        }
     };
-    info!("📂 target resolved via entity_id_cache: {:?}", target);
 
     // Unified path lookup: folder-form entities (Parts, Models) only
     // carry `InstanceFile` and never get a `LoadedFromFile`; loose
@@ -4613,14 +4678,21 @@ fn do_reparent_node(
     // would hold the immutable borrow alive across those iter_muts.
     let resolve_path = |entity: Entity,
                         instance_files: &Query<&'static mut crate::space::instance_loader::InstanceFile>,
-                        loaded_from_file: &Query<(Entity, &'static mut crate::space::LoadedFromFile)>|
+                        loaded_from_file: &Query<(Entity, &'static mut crate::space::LoadedFromFile)>,
+                        service_components: &Query<&'static mut crate::space::service_loader::ServiceComponent>|
         -> Option<std::path::PathBuf>
     {
+        // Third probe: a service root carries neither `InstanceFile` nor
+        // `LoadedFromFile`, but its `ServiceComponent` knows its
+        // `_service.toml`. `target_dir_for` maps that to the service's own
+        // directory exactly as it does for `_instance.toml`, so services need
+        // no special-casing downstream.
         instance_files.get(entity).ok().map(|inst| inst.toml_path.clone())
             .or_else(|| loaded_from_file.get(entity).ok().map(|(_, lff)| lff.path.clone()))
+            .or_else(|| service_components.get(entity).ok().map(|svc| svc.toml_path.clone()))
     };
 
-    let Some(tgt_path) = resolve_path(target, &queries.instance_files, &queries.loaded_from_file) else {
+    let Some(tgt_path) = resolve_path(target, &queries.instance_files, &queries.loaded_from_file, &queries.service_components) else {
         warn!("📂 Reparent ABORT: target {:?} has neither InstanceFile nor LoadedFromFile (drop on a service-root or non-file entity)", target);
         if let Some(ref mut out) = res.output {
             out.warn("Reparent: target entity has no on-disk folder to receive children".to_string());
@@ -4641,7 +4713,7 @@ fn do_reparent_node(
                 info!("📂 skipping: source == target ({:?})", source);
                 return None;
             }
-            match resolve_path(source, &queries.instance_files, &queries.loaded_from_file) {
+            match resolve_path(source, &queries.instance_files, &queries.loaded_from_file, &queries.service_components) {
                 Some(p) => Some((source, p)),
                 None => {
                     warn!("📂 source {:?} has neither InstanceFile nor LoadedFromFile — cannot move on disk; skipping", source);
@@ -4786,6 +4858,56 @@ fn do_reparent_node(
                         );
                     } else {
                         let _ = registry.rename_file(&src_entry, dest.clone());
+                    }
+                }
+
+                // Mirror the move into the WorldDb tree.
+                //
+                // The disk rename alone does not stick: for a migrated Space
+                // the loader spawns from the Fjall `tree` and the disk
+                // reconcile is ADD-ONLY, so the pre-move keys still describe
+                // the old parent and the object returns to where it started on
+                // the next load. The tree is path-keyed, so a reparent IS a
+                // key-prefix rewrite — the same shape as the folder rename
+                // just performed on disk.
+                if let (Some(db_handle), Some(root)) = (res.world_db.as_ref(), res.space_root.as_ref()) {
+                    if let Some(db) = db_handle.0.as_ref() {
+                        let src_rel = crate::space::space_source::rel_from_root(&root.0, &src_entry);
+                        let dst_rel = crate::space::space_source::rel_from_root(&root.0, &dest);
+                        if let (Some(src_rel), Some(dst_rel)) = (src_rel, dst_rel) {
+                            // Collect BEFORE mutating — re-keying while the
+                            // tree iterator is live would mutate what we read.
+                            let child_prefix = format!("{}/", src_rel);
+                            let old_keys: Vec<String> = db
+                                .iter_tree_keys()
+                                .map(|it| {
+                                    it.filter_map(|k| k.ok())
+                                        .filter(|k| *k == src_rel || k.starts_with(&child_prefix))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+
+                            let mut rekeyed = 0usize;
+                            for old_key in &old_keys {
+                                // Suffix-preserving so the whole subtree moves
+                                // with the folder, not just its root entry.
+                                let new_key = format!("{}{}", dst_rel, &old_key[src_rel.len()..]);
+                                if let Ok(Some(bytes)) = db.get_file(old_key) {
+                                    if db.put_file(&new_key, &bytes).is_ok() {
+                                        let _ = db.delete_file(old_key);
+                                        rekeyed += 1;
+                                    } else {
+                                        warn!("📂 WorldDb: failed writing '{}' — leaving '{}' in place", new_key, old_key);
+                                    }
+                                }
+                            }
+                            let _ = db.flush();
+                            info!("📂 WorldDb: rekeyed {}/{} tree entries '{}' → '{}'",
+                                rekeyed, old_keys.len(), src_rel, dst_rel);
+                        } else {
+                            warn!("📂 WorldDb: '{}' or '{}' is outside the Space root — tree NOT updated, so this move will NOT survive a reload",
+                                src_entry.display(), dest.display());
+                        }
                     }
                 }
             }
@@ -5335,9 +5457,15 @@ fn drain_slint_actions(
                         warn!("radial choice '{}' but no pending media staged", class_name);
                         return;
                     };
-                    if class_name == "Decal" || class_name == "Texture" {
-                        let is_texture = class_name == "Texture";
-                        crate::decal_place_tool::begin_surface_placement(world, rel_path, is_texture);
+                    // Decal, Texture and Image all project onto a face, so all
+                    // three enter surface placement. Image differs in what it
+                    // leaves behind: a real 3D quad parented to the part, which
+                    // the Move / Rotate / Scale tools can then edit.
+                    if matches!(class_name.as_str(), "Decal" | "Texture" | "Image") {
+                        let kind = crate::decal_place_tool::SurfaceMediaKind::from_class_name(
+                            class_name.as_str(),
+                        );
+                        crate::decal_place_tool::begin_surface_placement(world, rel_path, kind);
                     } else {
                         super::file_event_handler::do_materialize_media(world, rel_path, class_name);
                     }
@@ -6198,12 +6326,19 @@ fn drain_slint_actions(
             }
 
             // Bliss node mode
+            // Bliss node mode + enable are PERSISTED to EditorSettings.
+            // `auto_save_settings` writes the file on change detection, so
+            // touching the resource is all that's needed — the choice then
+            // survives a restart instead of silently reverting to Light.
             SlintAction::BlissSetLight => {
                 if let Some(ref mut bliss) = res.bliss_state {
                     bliss.set_light();
                     if let Some(ref mut out) = res.output {
                         out.info("Bliss node mode: Light (1.0x bonus)".to_string());
                     }
+                }
+                if let Some(ref mut settings) = res.editor_settings {
+                    settings.bliss_node_mode = "Light".to_string();
                 }
             }
             SlintAction::BlissSetFull => {
@@ -6213,14 +6348,22 @@ fn drain_slint_actions(
                         out.info("Bliss node mode: Full (+10% bonus, ~2GB RAM)".to_string());
                     }
                 }
+                if let Some(ref mut settings) = res.editor_settings {
+                    settings.bliss_node_mode = "Full".to_string();
+                }
             }
             SlintAction::BlissToggleEnabled => {
+                let mut now_enabled = None;
                 if let Some(ref mut bliss) = res.bliss_state {
                     bliss.enabled = !bliss.enabled;
+                    now_enabled = Some(bliss.enabled);
                     let status = if bliss.enabled { "enabled" } else { "disabled" };
                     if let Some(ref mut out) = res.output {
                         out.info(format!("Bliss integration {}", status));
                     }
+                }
+                if let (Some(enabled), Some(ref mut settings)) = (now_enabled, res.editor_settings.as_mut()) {
+                    settings.bliss_enabled = enabled;
                 }
             }
 
@@ -6681,7 +6824,23 @@ fn drain_slint_actions(
             
             // Web browser
             SlintAction::OpenWebTab(url) => {
-                if let Some(ref mut s) = res.state {
+                // Open through the CenterTabManager, which is the owner of tab
+                // identity, ordering, selection and close. Pushing straight
+                // into `StudioState.center_tabs` (what `pending_open_web`
+                // does) creates a tab the manager has never heard of: it shows
+                // in the strip, but `sync_tab_manager_to_studio_state`
+                // overwrites `active_center_tab` from `mgr.active_tab` on its
+                // next dirty pass, so re-selecting the tab does not stick, its
+                // close button resolves to nothing, and `active_tab_type`
+                // never becomes "web" so the WebBrowser is never instantiated.
+                //
+                // `open_web_tab` sets `dirty`, so the existing sync carries it
+                // into Slint on the next frame; the `pending_open_web` path
+                // stays as the fallback for a build with no manager resource.
+                let title = if url == "about:blank" { "New Tab" } else { url.as_str() };
+                if let Some(ref mut mgr) = res.tab_manager {
+                    mgr.open_web_tab(url.as_str(), title);
+                } else if let Some(ref mut s) = res.state {
                     s.pending_open_web = Some(url.clone());
                 }
                 if let Some(ref mut out) = res.output {
@@ -8461,6 +8620,33 @@ fn drain_slint_actions(
                     s.parse::<f32>().ok().filter(|v| v.is_finite())
                 }
 
+                /// `#RRGGBB`, bare `RRGGBB`, `#RGB` shorthand, or `#RRGGBBAA`
+                /// (alpha accepted and dropped — `BasePart` carries opacity on
+                /// `transparency`, not in the colour) as 0-255 channels.
+                ///
+                /// Returns `None` for anything that is not hex so the caller can
+                /// fall through to the `"r, g, b"` form; that keeps ONE colour
+                /// entry point rather than a second parallel path that could
+                /// drift from it.
+                fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
+                    let h = s.trim().trim_start_matches('#');
+                    if !h.chars().all(|c| c.is_ascii_hexdigit()) {
+                        return None;
+                    }
+                    let byte = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
+                    match h.len() {
+                        // #RGB — each digit doubled, so `f0a` is `ff00aa`.
+                        3 => {
+                            let d = |i: usize| {
+                                u8::from_str_radix(&h[i..i + 1], 16).ok().map(|v| v * 17)
+                            };
+                            Some([d(0)?, d(1)?, d(2)?])
+                        }
+                        6 | 8 => Some([byte(0)?, byte(2)?, byte(4)?]),
+                        _ => None,
+                    }
+                }
+
                 if let Some(entity) = selected_entity {
                     // ── Undo capture (AAA audit fix) ──
                     // Properties-panel edits previously bypassed the undo
@@ -8616,9 +8802,18 @@ fn drain_slint_actions(
                         // BasePart fields
                         "Color" => {
                             if let Ok(mut bp) = queries.base_parts.get_mut(entity) {
-                                let parts: Vec<f32> = val.split(',')
-                                    .filter_map(|s| parse_finite(s.trim()))
-                                    .collect();
+                                // Hex first: the picker's hex field sends its raw
+                                // text down this same path, so `#RRGGBB`, bare
+                                // `RRGGBB`, and the `#RGB` shorthand all land here.
+                                // Parsing lives on the Rust side because every
+                                // colour entry route already funnels through this
+                                // arm — Slint never has to hex-decode.
+                                let parts: Vec<f32> = match parse_hex_color(&val) {
+                                    Some([r, g, b]) => vec![r as f32, g as f32, b as f32],
+                                    None => val.split(',')
+                                        .filter_map(|s| parse_finite(s.trim()))
+                                        .collect(),
+                                };
                                 if parts.len() >= 3 {
                                     let (r, g, b) = (parts[0], parts[1], parts[2]);
                                     let a = parts.get(3).copied().unwrap_or(255.0);
@@ -8894,21 +9089,50 @@ fn drain_slint_actions(
                             // before reaching the Transform — otherwise
                             // typing "5" in ft mode would set the
                             // translation to 5m, not 1.524m.
-                            if let Ok(mut tf) = queries.transforms.get_mut(entity) {
-                                let parts: Vec<f32> = val.split(',')
-                                    .filter_map(|s| parse_finite(s.trim()))
-                                    .collect();
-                                if parts.len() >= 3 {
-                                    let from = res.display_unit.as_deref()
-                                        .map(|d| d.0)
-                                        .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
-                                    let m = eustress_common::units::convert_vec3_f32(
-                                        [parts[0], parts[1], parts[2]],
-                                        from, eustress_common::units::ENGINE_NATIVE_UNIT,
-                                    );
-                                    tf.translation.x = m[0];
-                                    tf.translation.y = m[1];
-                                    tf.translation.z = m[2];
+                            let parts: Vec<f32> = val.split(',')
+                                .filter_map(|s| parse_finite(s.trim()))
+                                .collect();
+                            if parts.len() >= 3 {
+                                let from = res.display_unit.as_deref()
+                                    .map(|d| d.0)
+                                    .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+                                let m = eustress_common::units::convert_vec3_f32(
+                                    [parts[0], parts[1], parts[2]],
+                                    from, eustress_common::units::ENGINE_NATIVE_UNIT,
+                                );
+                                let target_pos = Vec3::new(m[0], m[1], m[2]);
+
+                                // Multi-selection moves as a GROUP: the typed value
+                                // lands on the primary (the row the panel is showing)
+                                // and every other selected object shifts by the same
+                                // DELTA. Writing the absolute position to all of them
+                                // would stack the whole selection on one point, which
+                                // is never what typing a coordinate means.
+                                //
+                                // `Size` and the value-like properties stay absolute
+                                // ("make them all this"); placement is the case where
+                                // the relative arrangement has to survive.
+                                let old_pos = queries.transforms.get(entity)
+                                    .map(|t| t.translation)
+                                    .unwrap_or(target_pos);
+                                let delta = target_pos - old_pos;
+
+                                let all_selected: Vec<Entity> =
+                                    queries.selected_entities.iter().collect();
+                                let targets = if all_selected.is_empty() {
+                                    vec![entity]
+                                } else {
+                                    all_selected
+                                };
+                                for e in targets {
+                                    if let Ok(mut tf) = queries.transforms.get_mut(e) {
+                                        if e == entity {
+                                            // Exact typed value, no float drift.
+                                            tf.translation = target_pos;
+                                        } else {
+                                            tf.translation += delta;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -8917,17 +9141,41 @@ fn drain_slint_actions(
                             // convert to quaternion the same way the
                             // rotate gizmo does so the two stay in sync.
                             // `>= 3` — see Position branch rationale.
-                            if let Ok(mut tf) = queries.transforms.get_mut(entity) {
-                                let parts: Vec<f32> = val.split(',')
-                                    .filter_map(|s| parse_finite(s.trim()))
-                                    .collect();
-                                if parts.len() >= 3 {
-                                    tf.rotation = Quat::from_euler(
-                                        EulerRot::XYZ,
-                                        parts[0].to_radians(),
-                                        parts[1].to_radians(),
-                                        parts[2].to_radians(),
-                                    );
+                            let parts: Vec<f32> = val.split(',')
+                                .filter_map(|s| parse_finite(s.trim()))
+                                .collect();
+                            if parts.len() >= 3 {
+                                let target_rot = Quat::from_euler(
+                                    EulerRot::XYZ,
+                                    parts[0].to_radians(),
+                                    parts[1].to_radians(),
+                                    parts[2].to_radians(),
+                                );
+
+                                // Same group rule as Position: the primary takes the
+                                // typed orientation exactly, and the rest turn by the
+                                // same DELTA about their own origins, so a selection
+                                // that was deliberately fanned out stays fanned out.
+                                let old_rot = queries.transforms.get(entity)
+                                    .map(|t| t.rotation)
+                                    .unwrap_or(target_rot);
+                                let delta = target_rot * old_rot.inverse();
+
+                                let all_selected: Vec<Entity> =
+                                    queries.selected_entities.iter().collect();
+                                let targets = if all_selected.is_empty() {
+                                    vec![entity]
+                                } else {
+                                    all_selected
+                                };
+                                for e in targets {
+                                    if let Ok(mut tf) = queries.transforms.get_mut(e) {
+                                        if e == entity {
+                                            tf.rotation = target_rot;
+                                        } else {
+                                            tf.rotation = (delta * tf.rotation).normalize();
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -11936,7 +12184,40 @@ fn drain_slint_actions(
                         // absolute paths). Single-select keeps producing
                         // exactly one path, no trailing newline, so existing
                         // workflows are unchanged.
-                        let multi_selected: Vec<Entity> = queries.selected_entities.iter().collect();
+                        // Read the SelectionManager, not the `Selected`
+                        // component. `selection_sync::ABSTRACT_CLASSES` never
+                        // grants `Selected` to SoulScript, Folder, Sky, Star,
+                        // Moon or Atmosphere, because those have no spatial
+                        // selection box to draw. Copy Path is a text
+                        // operation and cares about none of that: a
+                        // component-based read silently collapsed a
+                        // multi-selection of scripts or folders down to the
+                        // single `explorer_state.selected` fallback, so only
+                        // one path reached the clipboard.
+                        //
+                        // The manager is the same source the Explorer
+                        // highlights from, so what gets copied is exactly
+                        // what looks selected. Falls back to the component
+                        // when no manager is present.
+                        let multi_selected: Vec<Entity> = {
+                            let ids: std::collections::HashSet<String> = res
+                                .selection_manager
+                                .as_ref()
+                                .map(|sm| sm.0.read().get_selected().into_iter().collect())
+                                .unwrap_or_default();
+                            if ids.is_empty() {
+                                queries.selected_entities.iter().collect()
+                            } else {
+                                queries
+                                    .instances
+                                    .iter()
+                                    .filter(|(e, _)| {
+                                        ids.contains(&format!("{}v{}", e.index(), e.generation()))
+                                    })
+                                    .map(|(e, _)| e)
+                                    .collect()
+                            }
+                        };
 
                         let payload: Option<String> = if let Some(ent) = viewport_entity
                             .filter(|e| !(multi_selected.len() > 1 && multi_selected.contains(e)))
@@ -17223,15 +17504,28 @@ fn chat_blocks_for(content: &str) -> slint::ModelRc<ChatBlock> {
         .map(|b| match b {
             Block::Text(t) => ChatBlock {
                 kind: "text".into(),
-                text: t.into(),
+                // Flatten AFTER splitting, never before: the split keys on
+                // pipes and dashes, and flattening first would be one more pass
+                // that could disturb them. Flattening at all is required because
+                // the bubble now renders these blocks instead of `content`, and
+                // `content` was already flattened, so skipping it here would
+                // bring the `**bold**` markers back on Windows where Segoe UI
+                // has no math-alphanumeric glyphs.
+                text: flatten_markdown_for_display(&t).into(),
                 table: ChatTable::default(),
             },
             Block::Table(t) => {
                 let columns = t.headers.len();
+                // Cells and headers get the same flattening as prose: a model
+                // reply routinely bolds a header or a total, and an unflattened
+                // `**` inside a grid cell is more obviously wrong than in a
+                // paragraph.
                 let cells: Vec<slint::SharedString> = t
                     .rows
                     .iter()
-                    .flat_map(|r| r.iter().map(|c| c.clone().into()))
+                    .flat_map(|r| {
+                        r.iter().map(|c| flatten_markdown_for_display(c).into())
+                    })
                     .collect();
                 ChatBlock {
                     kind: "table".into(),
@@ -17239,13 +17533,24 @@ fn chat_blocks_for(content: &str) -> slint::ModelRc<ChatBlock> {
                     table: ChatTable {
                         headers: slint::ModelRc::new(slint::VecModel::from(
                             t.headers
-                                .into_iter()
-                                .map(slint::SharedString::from)
+                                .iter()
+                                .map(|h| {
+                                    slint::SharedString::from(
+                                        flatten_markdown_for_display(h),
+                                    )
+                                })
                                 .collect::<Vec<_>>(),
                         )),
-                        rows: t.rows.len() as i32,
                         columns: columns as i32,
                         cells: slint::ModelRc::new(slint::VecModel::from(cells)),
+                        // 0..n-1 for each axis, so the Slint side iterates real
+                        // models rather than relying on an integer being one.
+                        row_indices: slint::ModelRc::new(slint::VecModel::from(
+                            (0..t.rows.len() as i32).collect::<Vec<i32>>(),
+                        )),
+                        col_indices: slint::ModelRc::new(slint::VecModel::from(
+                            (0..columns as i32).collect::<Vec<i32>>(),
+                        )),
                     },
                 }
             }
@@ -17622,7 +17927,11 @@ fn sync_unified_explorer_to_slint(
     // NOTE: these two Local params MUST remain LAST in declaration order — Bevy
     // resolves Local by type position, so a future param addition must go above.
     mut rebuild_requested: Local<bool>,
-    mut last_rebuild_frame: Local<u64>,
+    // `(last_rebuild_frame, last_selection_generation)`. Packed into ONE Local
+    // because this system is AT Bevy's 16-param ceiling — a 17th is a hard
+    // compile error, and the selection generation has to be remembered
+    // somewhere for the rebuild gate below to notice it changing.
+    mut last_rebuild_frame: Local<(u64, u64)>,
 ) {
     // Field-wise borrow of the bundled tuple so the call sites below read as
     // they did when these were separate params.
@@ -17675,6 +17984,27 @@ fn sync_unified_explorer_to_slint(
         *rebuild_requested = true;
     }
 
+    // A SELECTION change is a rebuild reason on its own. `structure_probe` only
+    // latches when the Instance set / names / parenting change, and selecting
+    // something changes none of those — so the hierarchy commands (Select
+    // Children / Descendants / Parent / Siblings / Invert), lasso paint, CSG,
+    // MCP and Rune all wrote a new selection into the manager and the tree kept
+    // rendering the OLD `selected` flags. Explorer clicks looked fine only
+    // because their own handler sets `needs_immediate_sync`; anything that could
+    // not reach `UnifiedExplorerState` silently did not show.
+    //
+    // Checked here, once, against the manager's own generation counter, so every
+    // selection source is covered rather than each one having to remember to
+    // poke the Explorer.
+    let selection_generation = selection_sync
+        .as_ref()
+        .map(|s| s.0.read().generation())
+        .unwrap_or(0);
+    if selection_generation != last_rebuild_frame.1 {
+        last_rebuild_frame.1 = selection_generation;
+        explorer_state.needs_immediate_sync = true;
+    }
+
     // Minimum frames between churn-driven rebuilds. At 60fps x2 fixed steps the
     // tree rebuilds at most about 4 Hz under continuous streaming instead of
     // every step; parts still appear/disappear within ~250ms, and any USER
@@ -17692,14 +18022,14 @@ fn sync_unified_explorer_to_slint(
         *rebuild_requested = false;
     } else if frame <= 5 {
         // initial-load grace window: always rebuild
-    } else if *rebuild_requested && frame.saturating_sub(*last_rebuild_frame) >= COALESCE_FRAMES {
+    } else if *rebuild_requested && frame.saturating_sub(last_rebuild_frame.0) >= COALESCE_FRAMES {
         *rebuild_requested = false;
     } else if perf.as_ref().map(|p| !p.should_throttle(30)).unwrap_or(false) {
         // periodic safety tick: keeps the tree fresh if a signal was missed
     } else {
         return;
     }
-    *last_rebuild_frame = frame;
+    last_rebuild_frame.0 = frame;
     let Some(slint_context) = slint_context else {
         warn!("🌲 [diag] tree rebuild: bailed — no slint_context this frame, rebuild dropped entirely");
         return;
@@ -20233,14 +20563,36 @@ fn sync_properties_to_slint(
             }
 
             // -- Physics section --
-            add_prop("Physics", "Anchored", toml_def.properties.anchored.to_string(), "bool", true);
-            add_prop("Physics", "CanCollide", toml_def.properties.can_collide.to_string(), "bool", true);
-            add_prop("Physics", "Locked", toml_def.properties.locked.to_string(), "bool", true);
+            // Read these from the LIVE component, falling back to the TOML —
+            // the same precedence `live_size` above uses, and for the same
+            // reason: the ECS holds the state the rest of the engine acts on
+            // this frame, while the TOML is where it lands afterwards.
+            //
+            // Reading TOML-first made a toggle look like it had failed. The
+            // click mutates `BasePart` immediately, but the row repopulates
+            // from disk, so until the write had landed AND been re-read the
+            // checkbox showed the OLD value — it snapped back to false the
+            // instant it was clicked. Anything that sets the flag without going
+            // through the panel (the Lock paint tool, Alt+L, MCP, Rune) was
+            // invisible here for the same reason.
+            let live_bp = base_parts.get(selected_entity).ok();
+            let anchored = live_bp.map(|bp| bp.anchored)
+                .unwrap_or(toml_def.properties.anchored);
+            let can_collide = live_bp.map(|bp| bp.can_collide)
+                .unwrap_or(toml_def.properties.can_collide);
+            let locked = live_bp.map(|bp| bp.locked)
+                .unwrap_or(toml_def.properties.locked);
+            add_prop("Physics", "Anchored", anchored.to_string(), "bool", true);
+            add_prop("Physics", "CanCollide", can_collide.to_string(), "bool", true);
+            add_prop("Physics", "Locked", locked.to_string(), "bool", true);
             // The destructibility gate. Off means the part can never dent or
             // crack; on reveals the Material section below, whose values are
             // already implied by `Material` above and only need touching to
             // describe something the presets do not cover.
-            add_prop("Physics", "Destructible", toml_def.properties.destructible.to_string(), "bool", true);
+            // Live-first for the same reason as the three above.
+            let destructible = live_bp.map(|bp| bp.destructible)
+                .unwrap_or(toml_def.properties.destructible);
+            add_prop("Physics", "Destructible", destructible.to_string(), "bool", true);
 
             // NOTE: Tags + Attributes are NO LONGER emitted here. They were
             // previously read from disk TOML inside this non-UI-only branch,
@@ -20648,18 +21000,26 @@ fn sync_properties_to_slint(
     // new plugin section is predictable without being required to
     // edit this list.
     const ROBLOX_CATEGORY_ORDER: &[&str] = &[
+        // The first five are ordered by how often a builder reaches for them
+        // after clicking something — what it looks like, what it is called,
+        // where it sits, how it behaves, then its custom data. The rest keep
+        // their previous order below.
+        //
+        // Each Roblox synonym stays adjacent to its Eustress name (Data with
+        // Metadata, Part with Transform, Behavior with Physics) so a class using
+        // either naming lands in the same slot.
         "Appearance",       // Color, Material, Reflectance, Transparency, CastShadow
-        "Attachments",      // Attachment-specific
-        "Attributes",       // custom key-value
-        "Behavior",         // Roblox name — synonym of our "Physics"
-        "Physics",          // Anchored, CanCollide, Locked (Eustress legacy name)
-        "Camera",           // camera-specific
         "Data",             // Roblox name — synonym of our "Metadata"
         "Metadata",         // ClassName, Name, Archivable (Eustress legacy name)
-        "Derived",          // computed / read-only props
-        "Shape",            // Part shape (Block / Ball / Cylinder / …)
         "Part",             // Roblox-style Position/Rotation/Size container
         "Transform",        // Eustress name — Position, Rotation, Scale
+        "Behavior",         // Roblox name — synonym of our "Physics"
+        "Physics",          // Anchored, CanCollide, Locked (Eustress legacy name)
+        "Attributes",       // custom key-value
+        "Attachments",      // Attachment-specific
+        "Camera",           // camera-specific
+        "Derived",          // computed / read-only props
+        "Shape",            // Part shape (Block / Ball / Cylinder / …)
         "Asset",            // mesh reference
         "Surface",          // BasePart surface types (Smooth / Weld / …)
         "Goals",            // AI goal hierarchy

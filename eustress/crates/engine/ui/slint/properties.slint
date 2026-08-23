@@ -1741,6 +1741,31 @@ component ColorRow inherits Rectangle {
     in-out property <float> g-val: 128;
     in-out property <float> b-val: 128;
 
+    // ── Hex helpers ─────────────────────────────────────────────────────
+    // Slint has no integer formatting, so the two nibbles are spelled out.
+    // Kept here rather than pushed from Rust so the field tracks the sliders
+    // live, without a round-trip on every drag frame.
+    pure function hex-nibble(v: int) -> string {
+        v == 0  ? "0" : v == 1  ? "1" : v == 2  ? "2" : v == 3  ? "3" :
+        v == 4  ? "4" : v == 5  ? "5" : v == 6  ? "6" : v == 7  ? "7" :
+        v == 8  ? "8" : v == 9  ? "9" : v == 10 ? "A" : v == 11 ? "B" :
+        v == 12 ? "C" : v == 13 ? "D" : v == 14 ? "E" : "F"
+    }
+    pure function hex-byte(v: float) -> string {
+        hex-nibble(Math.floor(Math.clamp(Math.round(v), 0, 255) / 16))
+            + hex-nibble(Math.mod(Math.clamp(Math.round(v), 0, 255), 16))
+    }
+    // `#RRGGBB` for the current channel values.
+    out property <string> hex-text:
+        "#" + root.hex-byte(root.r-val) + root.hex-byte(root.g-val) + root.hex-byte(root.b-val);
+
+    // Commit the current channel triple through the normal property pipeline.
+    function commit-rgb() {
+        root.value-changed(
+            Math.round(root.r-val) + ", " + Math.round(root.g-val) + ", " + Math.round(root.b-val)
+        );
+    }
+
     height: 28px;
     border-radius: 2px;
 
@@ -1840,8 +1865,11 @@ component ColorRow inherits Rectangle {
     color-picker-popup := PopupWindow {
         x: 140px;
         y: parent.height;
-        width: 260px;
-        height: 200px;
+        // Wider so the typed channel fields and the hex field are comfortable;
+        // taller by one row (hex) plus the extra height the LineEdits take over
+        // the flat Text readouts they replaced.
+        width: 300px;
+        height: 262px;
 
         Rectangle {
             width: 100%;
@@ -1899,16 +1927,24 @@ component ColorRow inherits Rectangle {
                         value: root.r-val;
                         changed(v) => {
                             root.r-val = v;
-                            root.value-changed(Math.round(root.r-val) + ", " + Math.round(root.g-val) + ", " + Math.round(root.b-val));
+                            root.commit-rgb();
                         }
                     }
-                    Text {
-                        text: Math.round(root.r-val);
-                        width: 30px;
-                        color: Theme.text-primary;
+                    // Typed entry for this channel. `to-float()` yields 0 for
+                    // junk, so the clamp keeps a stray keystroke in range rather
+                    // than writing a nonsense channel. Committing on `accepted`
+                    // (Enter / focus-out) instead of `edited` means a half-typed
+                    // "2" on the way to "250" does not repaint the part.
+                    r-edit := LineEdit {
+                        width: 44px;
                         font-size: 11px;
                         horizontal-alignment: right;
-                        vertical-alignment: center;
+                        text: Math.round(root.r-val);
+                        accepted(t) => {
+                            root.r-val = Math.clamp(t.to-float(), 0, 255);
+                            root.commit-rgb();
+                        }
+                        edited(t) => { root.focus-changed(true); }
                     }
                 }
 
@@ -1930,16 +1966,24 @@ component ColorRow inherits Rectangle {
                         value: root.g-val;
                         changed(v) => {
                             root.g-val = v;
-                            root.value-changed(Math.round(root.r-val) + ", " + Math.round(root.g-val) + ", " + Math.round(root.b-val));
+                            root.commit-rgb();
                         }
                     }
-                    Text {
-                        text: Math.round(root.g-val);
-                        width: 30px;
-                        color: Theme.text-primary;
+                    // Typed entry for this channel. `to-float()` yields 0 for
+                    // junk, so the clamp keeps a stray keystroke in range rather
+                    // than writing a nonsense channel. Committing on `accepted`
+                    // (Enter / focus-out) instead of `edited` means a half-typed
+                    // "2" on the way to "250" does not repaint the part.
+                    g-edit := LineEdit {
+                        width: 44px;
                         font-size: 11px;
                         horizontal-alignment: right;
-                        vertical-alignment: center;
+                        text: Math.round(root.g-val);
+                        accepted(t) => {
+                            root.g-val = Math.clamp(t.to-float(), 0, 255);
+                            root.commit-rgb();
+                        }
+                        edited(t) => { root.focus-changed(true); }
                     }
                 }
 
@@ -1961,16 +2005,50 @@ component ColorRow inherits Rectangle {
                         value: root.b-val;
                         changed(v) => {
                             root.b-val = v;
-                            root.value-changed(Math.round(root.r-val) + ", " + Math.round(root.g-val) + ", " + Math.round(root.b-val));
+                            root.commit-rgb();
                         }
                     }
-                    Text {
-                        text: Math.round(root.b-val);
-                        width: 30px;
-                        color: Theme.text-primary;
+                    // Typed entry for this channel. `to-float()` yields 0 for
+                    // junk, so the clamp keeps a stray keystroke in range rather
+                    // than writing a nonsense channel. Committing on `accepted`
+                    // (Enter / focus-out) instead of `edited` means a half-typed
+                    // "2" on the way to "250" does not repaint the part.
+                    b-edit := LineEdit {
+                        width: 44px;
                         font-size: 11px;
                         horizontal-alignment: right;
+                        text: Math.round(root.b-val);
+                        accepted(t) => {
+                            root.b-val = Math.clamp(t.to-float(), 0, 255);
+                            root.commit-rgb();
+                        }
+                        edited(t) => { root.focus-changed(true); }
+                    }
+                }
+
+                // ── Hex row ──
+                // Accepts `#RRGGBB`, `RRGGBB`, and the 3-digit shorthand. The
+                // raw text goes straight to Rust, which owns colour parsing for
+                // every entry path, so Slint never has to hex-decode.
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: "Hex";
+                        width: 24px;
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        font-weight: 700;
                         vertical-alignment: center;
+                    }
+                    hex-edit := LineEdit {
+                        horizontal-stretch: 1;
+                        font-size: 11px;
+                        text: root.hex-text;
+                        placeholder-text: "#RRGGBB";
+                        accepted(t) => {
+                            root.value-changed(t);
+                        }
+                        edited(t) => { root.focus-changed(true); }
                     }
                 }
 
@@ -2091,8 +2169,14 @@ component BrickColorRow inherits Rectangle {
     brick-color-popup := PopupWindow {
         x: 140px;
         y: parent.height;
+        // Wide enough for the 286px honeycomb plus the 12px padding either
+        // side, with a little breathing room.
         width: 330px;
-        height: 372px;
+        // Each step gets the height its own content needs, so neither is
+        // cramped nor padded with dead space:
+        //   step 1  12 + 20 title + 4 + (7 rows x 42) + (6 gaps x 4) + 12 = 366
+        //   step 2  12 + 24 back  + 6 + 247 honeycomb + 12               = 301
+        height: root.active-wheel-id == "" ? 366px : 301px;
         // Slint defaults to `close-on-click`, which dismisses the popup on ANY
         // click inside it — so picking a wheel closed the picker instead of
         // drilling into that wheel. The drill is a two-step flow inside ONE
@@ -2234,9 +2318,22 @@ component BrickColorRow inherits Rectangle {
                     // pushed from Rust; we render only the active one via a
                     // guarded `for` per wheel. Cells carry their own
                     // precomputed (x, y) offset inside the 286×264 box.
+                    // Outer host stretches to the popup's content width; `hive`
+                    // is the exact honeycomb bounds, centred inside it.
+                    //
+                    // The box was declared 286x264, but the 127 cells span
+                    // x 0..264 and y 0..228, and a cell is 22x19 — so the real
+                    // content is 286 x 247. The extra 17px of height was dead
+                    // space that pushed the wheel visibly high in the frame.
                     Rectangle {
+                        height: 247px;
+                        background: transparent;
+
+                        hive := Rectangle {
                         width: 286px;
-                        height: 264px;
+                        height: 247px;
+                        x: (parent.width - self.width) / 2;
+                        y: 0;
                         background: transparent;
 
                         if root.active-wheel-id == "aether": Rectangle {
@@ -2336,6 +2433,7 @@ component BrickColorRow inherits Rectangle {
                                     brick-color-popup.close();
                                 }
                             }
+                        }
                         }
                     }
                 }

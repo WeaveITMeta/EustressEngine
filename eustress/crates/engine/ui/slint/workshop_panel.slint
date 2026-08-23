@@ -31,7 +31,13 @@ export struct ChatTable {
     headers: [string],
     cells: [string],
     columns: int,
-    rows: int,
+    // Explicit index models: 0..rows-1 and 0..columns-1, filled by Rust.
+    //
+    // Slint iterates a model, and while newer versions also accept a bare
+    // integer as one, nothing else in this codebase relies on that. Two small
+    // arrays cost almost nothing and remove the question entirely.
+    row-indices: [int],
+    col-indices: [int],
 }
 
 // One renderable run of a message: prose or a table, in order.
@@ -103,6 +109,12 @@ export struct PipelineStepData {
 component ChatBubble inherits Rectangle {
     in property <string> role: "system";
     in property <string> content: "";
+    // Rendered runs of the message (prose / tables). `ChatMessage` carries
+    // this and the body below iterates `root.blocks`, but the property was
+    // never declared here — so every .slint rebuild failed with
+    // "Element 'Rectangle' does not have a property 'blocks'". Defaults to
+    // empty so a message with no parsed blocks falls back to `content`.
+    in property <[ChatBlock]> blocks: [];
     in property <string> timestamp: "";
     in property <string> mcp-endpoint: "";
     in property <string> mcp-method: "";
@@ -344,6 +356,24 @@ component ChatBubble inherits Rectangle {
                             border-radius: 3px;
                             background: Theme.background-secondary;
 
+                            // Columns line up because every cell declares
+                            // `min-width: 0` and an equal `horizontal-stretch`.
+                            //
+                            // Stretch ALONE is not enough: Slint first gives
+                            // each Text its content-derived minimum width and
+                            // only shares out what is left over, so a row
+                            // holding "919 Wh/kg" and a row holding "98%"
+                            // resolve different boundaries and the columns
+                            // visibly stagger. Zeroing min-width removes the
+                            // content term, so each row splits its width into
+                            // N equal shares and every row agrees.
+                            //
+                            // Deriving an explicit cell width from this
+                            // Rectangle's own width is the tempting fix and is
+                            // a Slint binding loop: the container is sized by
+                            // its content, so width -> cell-w -> cell width ->
+                            // layoutinfo-h -> width. The compiler rejects it.
+
                             VerticalLayout {
                                 padding: 1px;
                                 spacing: 0px;
@@ -352,34 +382,47 @@ component ChatBubble inherits Rectangle {
                                 Rectangle {
                                     background: Theme.background-tertiary;
                                     HorizontalLayout {
-                                        padding: 6px;
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        padding-top: 6px;
+                                        padding-bottom: 6px;
                                         spacing: 10px;
                                         for h in block.table.headers: Text {
                                             text: h;
                                             horizontal-stretch: 1;
+                                            min-width: 0px;
                                             color: Theme.text-secondary;
                                             font-size: 10.5px;
                                             font-weight: 700;
                                             wrap: word-wrap;
+                                            vertical-alignment: center;
                                         }
                                     }
                                 }
 
                                 // Body. `r` and `c` are integer models, so the
                                 // flat cell list is addressed as r * columns + c.
-                                for r in block.table.rows: Rectangle {
+                                for r in block.table.row-indices: Rectangle {
                                     background: mod(r, 2) == 1
                                         ? Theme.background-tertiary.with-alpha(0.35)
                                         : transparent;
                                     HorizontalLayout {
-                                        padding: 6px;
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        padding-top: 5px;
+                                        padding-bottom: 5px;
                                         spacing: 10px;
-                                        for c in block.table.columns: Text {
+                                        for c in block.table.col-indices: Text {
                                             text: block.table.cells[r * block.table.columns + c];
                                             horizontal-stretch: 1;
+                                            min-width: 0px;
                                             color: Theme.text-primary;
                                             font-size: 11px;
                                             wrap: word-wrap;
+                                            // Centred so a wrapped two-line cell
+                                            // keeps its single-line neighbours on
+                                            // the same visual band.
+                                            vertical-alignment: center;
                                         }
                                     }
                                 }
@@ -1412,6 +1455,7 @@ export component WorkshopPanel inherits Rectangle {
                 for msg in root.messages: ChatBubble {
                     role: msg.role;
                     content: msg.content;
+                    blocks: msg.blocks;
                     timestamp: msg.timestamp;
                     mcp-endpoint: msg.mcp-endpoint;
                     mcp-method: msg.mcp-method;
