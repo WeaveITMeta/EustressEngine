@@ -142,15 +142,41 @@ function minimumAgeFor(iso2) {
   return Math.max(MIN_AGE_FINANCE, j?.age_of_majority || 0);
 }
 
+/// The calendar date on which someone born on `dob` reaches `minAge`.
+///
+/// Returned to the applicant so a block reads as "not yet" with a date rather
+/// than a flat refusal, and so support can answer "when?" without doing the
+/// arithmetic by hand.
+function eligibleAtFrom(dob, minAge) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec((dob || '').trim());
+  if (!m) return null;
+  return `${Number(m[1]) + minAge}-${m[2]}-${m[3]}`;
+}
+
 /// Gate for any money-touching action (linking a payout account, cashing out).
 ///
-/// Requires a COMPLETED KYC verification whose age check passed against the
-/// document's own date of birth. A self-entered birthday is never sufficient:
-/// `user.birthday` is an unverified claim, so it is deliberately not consulted.
+/// An applicant who already passed KYC forwards straight through to Stripe.
+/// Re-verification is never demanded from someone already verified: the
+/// documents are in R2 and the outcome is on the record, so asking again would
+/// be pure friction.
 ///
-/// Returns `{ ok: true, kyc }` or `{ ok: false, status, error, reason }`.
-async function requireVerifiedAdult(userId, env) {
-  const raw = await env.KYC_STATUS.get(`kyc-${userId}-front`);
+/// Being under age is a NOT-YET, not a verdict. The resolved date of birth is
+/// cached, and the age is recomputed on every call, so an account blocked at 16
+/// becomes eligible on its 18th birthday with nobody doing anything. Caching
+/// "underage" as a decision would lock the account out permanently.
+///
+/// The date of birth is resolved by strength of evidence:
+///   1. `extracted_dob` — read off the document. Always wins when present.
+///   2. `age_dob` — previously resolved and pinned to the record, so a later
+///      edit to a self-declared birthday cannot move the bar.
+///   3. `user.birthday` — declared at registration. Used for accounts verified
+///      under the older flow, which never captured a document DOB.
+///
+/// Returns `{ ok: true, kyc }` or `{ ok: false, status, error, reason, code }`,
+/// with `eligible_at` present when the block is only a matter of time.
+async function requireVerifiedAdult(userId, user, env) {
+  const key = `kyc-${userId}-front`;
+  const raw = await env.KYC_STATUS.get(key);
   if (!raw) {
     return {
       ok: false, status: 403,
@@ -174,20 +200,69 @@ async function requireVerifiedAdult(userId, env) {
     };
   }
 
-  // Records written before age verification existed have no age fields. Treat
-  // them as unproven rather than grandfathering them past the gate.
-  if (kyc.age_verified !== true) {
+  // Once an adult, always an adult: this one is safe to cache permanently.
+  if (kyc.age_verified === true) return { ok: true, kyc };
+
+  const minAge = minimumAgeFor(kyc.iso2 || 'XX');
+  const dob = kyc.extracted_dob || kyc.age_dob || user?.birthday || '';
+  const source = kyc.extracted_dob ? 'document'
+    : (kyc.age_dob ? kyc.age_source || 'pinned' : (user?.birthday ? 'declared' : null));
+  const age = ageFromDob(dob);
+
+  if (age === null) {
     return {
       ok: false, status: 403,
       error: 'Age verification required',
-      reason: kyc.age_status === 'underage'
-        ? `You must be at least ${kyc.minimum_age || MIN_AGE_FINANCE} to use payout features.`
-        : 'Your age could not be confirmed from your identity document. Please re-verify.',
-      code: kyc.age_status === 'underage' ? 'underage' : 'age_unverified',
+      reason: 'We could not confirm your date of birth. Please contact support@eustress.dev.',
+      code: 'age_unverified',
     };
   }
 
-  return { ok: true, kyc };
+  if (age < minAge) {
+    const eligibleAt = eligibleAtFrom(dob, minAge);
+
+    // Pin the date of birth, NOT the verdict, so the account re-evaluates on
+    // every attempt and clears itself once the applicant is old enough.
+    if (kyc.age_dob !== dob || kyc.age_status !== 'pending_age') {
+      await env.KYC_STATUS.put(key, JSON.stringify({
+        ...kyc,
+        age_verified: false,
+        age_status: 'pending_age',
+        age_dob: dob,
+        age_source: source,
+        minimum_age: minAge,
+        eligible_at: eligibleAt,
+        age_checked_at: new Date().toISOString(),
+      }), { expirationTtl: 86400 * 365 * 7 });
+    }
+
+    return {
+      ok: false, status: 403,
+      error: 'Payouts open at ' + minAge,
+      reason: eligibleAt
+        ? `Your account is verified. Payout features unlock on ${eligibleAt}, when you turn ${minAge}.`
+        : `You must be at least ${minAge} to use payout features.`,
+      code: 'underage',
+      eligible_at: eligibleAt,
+      minimum_age: minAge,
+    };
+  }
+
+  // Old enough. Cache the pass so later calls take the fast path, and keep the
+  // evidence source on the record so an auditor can see what it rested on.
+  const resolved = {
+    ...kyc,
+    age_verified: true,
+    age_status: 'verified',
+    age_dob: dob,
+    age_source: source,
+    document_age: age,
+    minimum_age: minAge,
+    age_resolved_at: new Date().toISOString(),
+  };
+  await env.KYC_STATUS.put(key, JSON.stringify(resolved), { expirationTtl: 86400 * 365 * 7 });
+
+  return { ok: true, kyc: resolved };
 }
 
 /// Whole years elapsed from `dob` (YYYY-MM-DD) to now, in UTC.
@@ -1629,6 +1704,33 @@ function sniffFileType(buf) {
   return null;
 }
 
+/// Pull the assistant's text out of an xAI response.
+///
+/// The shape is not guaranteed to be `output[0].content[0].text`: a reasoning
+/// model puts a reasoning item first, so indexing position 0 yields nothing and
+/// the caller sees an empty string that looks exactly like a refusal. Scan every
+/// output item instead, and fall back to the chat-completions shape so a change
+/// of endpoint does not silently return blank.
+function extractGrokText(data) {
+  if (typeof data?.output_text === 'string' && data.output_text.trim())
+    return data.output_text;
+
+  for (const item of (Array.isArray(data?.output) ? data.output : [])) {
+    for (const c of (Array.isArray(item?.content) ? item.content : [])) {
+      if (typeof c?.text === 'string' && c.text.trim()) return c.text;
+    }
+  }
+
+  const msg = data?.choices?.[0]?.message?.content;
+  if (typeof msg === 'string' && msg.trim()) return msg;
+
+  // Nothing matched. Log the shape (keys only, never the content, which can
+  // carry identity data) so a future format change is diagnosable.
+  console.error('xAI: could not extract text; output item types:',
+    JSON.stringify((data?.output || []).map(i => i?.type)));
+  return '';
+}
+
 /// Base64-encode an ArrayBuffer without blowing the call stack.
 ///
 /// `btoa(String.fromCharCode(...new Uint8Array(buf)))` spreads every byte as a
@@ -1775,22 +1877,29 @@ Screening rules:
     if (!resp.ok) {
       const errText = await resp.text();
       console.error('Grok KYC error:', resp.status, errText);
+      // Fail CLOSED. An upstream error means the document was never actually
+      // checked, and "not checked" must never be recorded as "approved".
       return {
-        doc_decision: 'APPROVE', screening_decision: 'APPROVE',
-        reason: 'Verification service error — approved on upload',
-        extracted_name: claimedName, risk_score: 0, screening_flags: [], confidence: 0,
+        doc_decision: 'DENY', screening_decision: 'REVIEW',
+        doc_reason: `Verification service returned ${resp.status}`,
+        reason: 'Verification service error', extracted_name: '', extracted_dob: '',
+        risk_score: 0, screening_flags: ['verification_error'], confidence: 0,
+        requires_manual_review: true,
       };
     }
 
     const data = await resp.json();
-    const responseText = data.output?.[0]?.content?.[0]?.text || data.output_text || '';
+    const responseText = extractGrokText(data);
 
     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
+      // Fail CLOSED for the same reason: an unreadable verdict is not a pass.
       return {
-        doc_decision: 'APPROVE', screening_decision: 'APPROVE',
-        reason: 'Could not parse response — approved on upload',
-        extracted_name: claimedName, risk_score: 0, screening_flags: [], confidence: 0,
+        doc_decision: 'DENY', screening_decision: 'REVIEW',
+        doc_reason: 'Verification response could not be parsed',
+        reason: 'Could not parse verification response', extracted_name: '', extracted_dob: '',
+        risk_score: 0, screening_flags: ['unparseable_response'], confidence: 0,
+        requires_manual_review: true,
       };
     }
 
@@ -1816,10 +1925,15 @@ Screening rules:
     };
   } catch (e) {
     console.error('Grok KYC exception:', e);
+    // Fail CLOSED. A thrown exception means verification did not complete, so
+    // the applicant goes to manual review rather than through the gate.
     return {
-      doc_decision: 'APPROVE', screening_decision: 'APPROVE',
-      reason: `Verification error: ${e.message} — approved on upload`,
-      extracted_name: claimedName, risk_score: 0, screening_flags: [], confidence: 0,
+      doc_decision: 'DENY', screening_decision: 'REVIEW',
+      doc_reason: 'Verification did not complete',
+      reason: `Verification error: ${e.message}`,
+      extracted_name: '', extracted_dob: '',
+      risk_score: 0, screening_flags: ['verification_exception'], confidence: 0,
+      requires_manual_review: true,
     };
   }
 }
@@ -1970,11 +2084,25 @@ async function handleCosign(request, env, cors) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function handleHealth(env, cors) {
+  // Configuration is reported as booleans and lengths, never as values.
+  //
+  // This detail exists because a missing key produced no visible symptom: KYC
+  // quietly rubber-stamped applicants when verification failed open, and
+  // quietly denies them now that it fails closed. Neither state surfaced
+  // anywhere, so make it observable.
+  const present = v => typeof v === 'string' && v.trim().length > 0;
   return json({
     status: 'ok',
     service: 'eustress-api',
     fork_id: env.FORK_ID || 'eustress.dev',
     timestamp: new Date().toISOString(),
+    model: GROK_MODEL,
+    integrations: {
+      grok: { configured: present(env.GROK_API_KEY), key_length: (env.GROK_API_KEY || '').length },
+      stripe: { configured: present(env.STRIPE_SECRET_KEY) },
+      email: { configured: !!env.EMAIL },
+      kyc_bucket: { configured: !!env.KYC_BUCKET },
+    },
   }, 200, cors);
 }
 
@@ -2106,7 +2234,9 @@ async function handleCommunitySearch(request, env, cors) {
         return json({ users: results, query, ai_suggestion: grokResults }, 200, cors);
       }
     } catch (e) {
-      // Grok unavailable — return empty results
+      // Log it. Swallowing this made a failing xAI integration indistinguishable
+      // from a search that simply found nothing.
+      console.error('xAI search threw:', e?.name, e?.message);
     }
   }
 
@@ -2118,9 +2248,14 @@ async function searchWithGrok(query, apiKey) {
     input: `The user is searching for "${query}" on the Eustress Engine community platform. Eustress is a Rust-based simulation and data platform with a Bliss currency. Suggest what they might be looking for: a username, a simulation, a feature, or a concept. Reply in 1-2 short sentences only.`,
   }, apiKey);
 
-  if (!resp.ok) return null;
+  // Log upstream failures. Swallowing them silently hid a broken model id and
+  // an expired key behind an ordinary-looking empty search result.
+  if (!resp.ok) {
+    console.error('xAI search failed:', resp.status, (await resp.text()).slice(0, 300));
+    return null;
+  }
   const data = await resp.json();
-  return data.output?.[0]?.content?.[0]?.text || data.output_text || null;
+  return extractGrokText(data) || null;
 }
 
 async function handleCommunityLeaderboard(env, cors) {
@@ -2456,7 +2591,7 @@ Rules:
     }
 
     const data = await resp.json();
-    const responseText = data.output?.[0]?.content?.[0]?.text || data.output_text || '';
+    const responseText = extractGrokText(data);
 
     // Parse JSON from response
     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
@@ -3391,7 +3526,7 @@ async function handleStripeConnectOnboard(request, env, cors) {
   // Money gate: verified identity AND a document-confirmed age at or above the
   // jurisdiction minimum. This is the point where a person becomes able to
   // receive real USD, so it is the point that must not admit a minor.
-  const gate = await requireVerifiedAdult(userId, env);
+  const gate = await requireVerifiedAdult(userId, user, env);
   if (!gate.ok)
     return json({ error: gate.error, reason: gate.reason, code: gate.code }, gate.status, cors);
 
