@@ -18,7 +18,9 @@
 use bevy::prelude::*;
 use eustress_common::realism::laws::electrochemistry as echem;
 use eustress_common::realism::constants;
-use eustress_common::realism::particles::components::{ElectrochemicalState, ThermodynamicState};
+use eustress_common::realism::particles::components::{
+    ElectrochemicalState, ThermodynamicState, DEFAULT_CRACK_K,
+};
 use eustress_common::simulation::SimulationClock;
 
 use crate::play_mode::PlayModeState;
@@ -67,6 +69,14 @@ fn publish_echem_to_sim_values(
         ("battery.c_rate", echem.c_rate as f64),
         ("battery.dendrite_risk", echem.dendrite_risk as f64),
         ("battery.capacity_retention", echem.capacity_retention as f64),
+        // Retention with no attribution cannot tell you which lever to pull, so
+        // each fade channel is published separately. Whichever of these three is
+        // largest is the mechanism that is actually killing the cell, and the
+        // others are noise until it is fixed.
+        ("battery.fade_lithium", echem.lithium_fade()),
+        ("battery.fade_cathode", echem.crack_damage),
+        ("battery.fade_calendar", echem.calendar_fade()),
+        ("battery.calendar_hours", echem.calendar_hours_equiv),
         ("battery.cycle_count", echem.cycle_count as f64),
         ("battery.heat_generation", echem.heat_generation as f64),
         ("battery.temperature_c", temp_c as f64),
@@ -472,24 +482,115 @@ fn electrochemical_tick(
             // is the shape metal-anode cells actually show. The exponent is an
             // assumption; the branch sweep is what tests it.
             let f_depth = depth.powf(0.8);
-            // Rougher deposit at higher plating current density.
-            let f_rate = (plating_density.max(1e-6) / j_crit.max(1e-6))
-                .max(0.05)
-                .powf(0.5);
             // Arrhenius on the parasitic reaction, referenced to 25 °C.
             let f_temp = ((temperature - 298.15) / 20.0).exp().clamp(0.2, 20.0);
-            // Pressure suppresses the voids that form on stripping.
-            let f_press = (2.0_f32 / pressure).powf(0.5);
-            let loss_frac = (1.0 - ce_ref) * f_depth * f_rate * f_temp * f_press;
+
+            // ── Coulombic loss, derived rather than fitted ──
+            //
+            // Interphase forms on the real surface of the deposit, so the
+            // lithium it consumes is charged PER UNIT AREA, while the charge
+            // cycled is area times areal capacity:
+            //
+            //     1 - CE = R * delta * rho_Li * F / (M_Li * q)
+            //
+            // Two consequences neither a fitted efficiency nor the separate
+            // rate and pressure factors this replaces could express. Loss goes
+            // as 1/q, so a THICKER electrode is intrinsically longer-lived,
+            // which is the opposite of how areal capacity had been treated
+            // everywhere else in this design. And roughness R, not efficiency,
+            // is the thing pressure and plating current actually act on: they
+            // are inside R here rather than multiplying alongside it, so the
+            // model no longer counts the same physics twice.
+            let one_minus_ce = if echem_state.sei_thickness_nm > 0.0 {
+                const RHO_LI: f32 = 534.0;      // kg/m3
+                const M_LI: f32 = 6.941e-3;     // kg/mol
+                const FARADAY: f32 = 96485.33;  // C/mol
+                // Areal capacity, mAh/cm2, from the cell's own geometry.
+                let q_areal = (echem_state.capacity_ah * 0.1
+                    / electrode_area.max(1e-6)).max(0.1);
+                let k = if echem_state.roughness_k > 0.0 {
+                    echem_state.roughness_k
+                } else {
+                    // Calibrated so 2 MPa at the plating limit reproduces the
+                    // 0.995 the branch sweeps were measured against.
+                    105.7
+                };
+                let j_ratio = (plating_density / j_crit.max(1e-6)).clamp(0.0, 2.0);
+                let roughness =
+                    1.0 + k * j_ratio.powf(1.5) * (2.0 / pressure).powf(1.5);
+                let delta_m = echem_state.sei_thickness_nm * 1e-9;
+                roughness * delta_m * RHO_LI * FARADAY / (M_LI * q_areal * 3.6e4)
+            } else {
+                1.0 - ce_ref
+            };
+            let loss_frac = one_minus_ce * f_depth * f_temp;
             // Widen before accumulating, not after: the increment is around
             // 1e-11 of nominal per substep and would vanish into an f32 total.
             echem_state.li_inventory_lost +=
                 (loss_frac * (charge_delta_ah.abs() / effective_capacity)) as f64;
 
-            let usable = (echem_state.li_inventory_lost
-                - echem_state.li_reservoir_frac as f64)
-                .max(0.0);
-            echem_state.capacity_retention = (1.0 - usable as f32).clamp(0.01, 1.0);
+            // Cathode fatigue: the second, independent way this cell dies.
+            //
+            // Li2S <-> S swings the cathode volume by roughly 80 % every cycle.
+            // The composite cracks, particles lose contact with the carbon
+            // network, and that capacity is gone whether or not any lithium was
+            // consumed. The metal reservoir above does nothing about it — a
+            // reservoir replaces lost lithium, not a fractured cathode — so
+            // this is the mechanism that can end a cell the reservoir sweep
+            // says should still be healthy.
+            //
+            // Coffin-Manson fatigue: damage per cycle goes as strain^m, and the
+            // strain here is the excursion depth. Integrating over a full cycle
+            // (dQ = 2 * depth * Q) recovers k * depth^2.5 per cycle, so the
+            // per-unit-charge form carries half the coefficient.
+            let crack_k = if echem_state.crack_k > 0.0 {
+                echem_state.crack_k
+            } else {
+                DEFAULT_CRACK_K
+            };
+            echem_state.crack_damage += (crack_k
+                * depth.powf(1.5)
+                * (charge_delta_ah.abs() / effective_capacity))
+                as f64;
+        }
+
+        // ── 8b. Calendar fade, and the three-mechanism retention ──
+        //
+        // Cycle fade is consumed by moving charge. Calendar fade is consumed by
+        // sitting still, because the interphase keeps growing on a cell that is
+        // merely parked at a state of charge and a temperature. Until this
+        // existed a simulated cell left alone aged not at all, so every
+        // ten-year figure the engine produced was really a cycle-life figure
+        // wearing a calendar label. A passenger car does a few hundred cycles a
+        // year against three and a half thousand days parked; for that duty
+        // this term is expected to dominate the one above it.
+        //
+        // Note the scope: this runs on EVERY substep, not only when charge is
+        // moving. That is the whole point of it.
+        {
+            // Interphase growth is diffusion-limited, hence sqrt(t).
+            // Accumulating WEIGHTED hours rather than weighting the result is
+            // what lets a varying temperature and state of charge integrate
+            // correctly instead of being sampled at whatever the last substep
+            // happened to be.
+            //
+            // A fully charged metal anode is the most reactive state the cell
+            // ever occupies, which is why storage state of charge is a design
+            // variable and not a detail: parking a pack at 40 % rather than
+            // 100 % costs nothing in hardware.
+            let soc_weight = 0.25 + 1.75 * echem_state.soc.clamp(0.0, 1.0).powi(2);
+            let arrhenius = ((temperature - 298.15) / 20.0).exp().clamp(0.2, 20.0);
+            echem_state.calendar_hours_equiv +=
+                (dt / 3600.0 * soc_weight * arrhenius) as f64;
+
+            // Three mechanisms, and the earliest one wins. Only lithium loss is
+            // buffered by the reservoir; neither cracking nor calendar fade is
+            // a lithium-inventory problem, so neither is covered by carrying
+            // more metal.
+            let retention = (1.0 - echem_state.lithium_fade())
+                * (1.0 - echem_state.crack_damage)
+                * (1.0 - echem_state.calendar_fade());
+            echem_state.capacity_retention = (retention as f32).clamp(0.01, 1.0);
         }
         } // end substep
     }

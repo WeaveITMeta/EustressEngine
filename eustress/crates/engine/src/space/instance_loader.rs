@@ -1274,6 +1274,24 @@ pub struct TomlElectrochemicalState {
     /// Stack pressure, MPa. 0.0 keeps 2.0.
     #[serde(default)]
     pub stack_pressure_mpa: f32,
+    /// Lithium consumed forming interphase per cycle on a smooth deposit, nm.
+    /// Set this and coulombic loss is DERIVED from roughness, areal capacity
+    /// and stack pressure instead of taken from a fitted efficiency.
+    /// 0.0 falls back to `coulombic_efficiency_ref`.
+    #[serde(default)]
+    pub sei_thickness_nm: f32,
+    /// Roughness prefactor. 0.0 keeps the value calibrated so that 2 MPa at the
+    /// plating limit reproduces the measured 0.995.
+    #[serde(default)]
+    pub roughness_k: f32,
+    /// Calendar fade coefficient: capacity lost per sqrt of equivalent hours
+    /// at rest. 0.0 keeps ~2 %/yr at 25 C and half charge.
+    #[serde(default)]
+    pub calendar_k: f32,
+    /// Cathode fatigue coefficient: structural damage per cycle at unit depth.
+    /// 0.0 keeps ~20 % loss over 1000 full-depth cycles.
+    #[serde(default)]
+    pub crack_k: f32,
 }
 
 fn default_voltage() -> f32 { 2.23 }
@@ -1301,6 +1319,12 @@ impl TomlElectrochemicalState {
             coulombic_efficiency_ref: self.coulombic_efficiency_ref,
             li_reservoir_frac: self.li_reservoir_frac,
             stack_pressure_mpa: self.stack_pressure_mpa,
+            sei_thickness_nm: self.sei_thickness_nm,
+            roughness_k: self.roughness_k,
+            calendar_k: self.calendar_k,
+            calendar_hours_equiv: 0.0,
+            crack_k: self.crack_k,
+            crack_damage: 0.0,
             li_inventory_lost: 0.0,
             soc_turn: 1.0,
             excursion_depth: 0.0,

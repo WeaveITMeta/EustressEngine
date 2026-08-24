@@ -591,6 +591,57 @@ pub struct ElectrochemicalState {
     /// Stack pressure (MPa). Higher pressure suppresses the voids that form on
     /// stripping. 0.0 keeps a 2.0 MPa default.
     pub stack_pressure_mpa: f32,
+    /// Lithium consumed forming interphase per cycle, on a SMOOTH deposit (nm).
+    ///
+    /// With this set, coulombic loss is derived rather than asserted:
+    ///
+    ///     1 - CE = R * delta * rho_Li * F / (M_Li * q)
+    ///
+    /// where R is the roughness of the deposit and q the areal capacity. That
+    /// expression is worth more than the constant it replaces, because it says
+    /// two things a fitted efficiency cannot. Loss is charged per unit AREA
+    /// while charge is stored per area times thickness, so a THICKER electrode
+    /// is intrinsically longer-lived. And an efficiency of 0.995 at
+    /// 11.5 mAh/cm2 implies 279 nm of interphase per cycle on smooth metal,
+    /// which is not physical: it is only physical at roughly a hundred times
+    /// the geometric area, so that number was never a material property. It was
+    /// a description of dendrites.
+    ///
+    /// 0.0 falls back to `coulombic_efficiency_ref`.
+    pub sei_thickness_nm: f32,
+    /// Roughness prefactor: how dendritic the deposit becomes as plating
+    /// current rises and stack pressure falls. 0.0 keeps a value calibrated so
+    /// that 2 MPa at the plating limit reproduces the measured 0.995.
+    pub roughness_k: f32,
+
+    // ── The two failure modes that are not lithium inventory ───────────
+    // Until these existed the tick modelled exactly ONE way for a cell to die,
+    // so every lifetime figure it produced was the answer to "how long until
+    // the metal runs out" rather than "how long until the cell stops working".
+    // A cell has more than one way to fail and the earliest one wins.
+    /// Calendar fade coefficient: fraction of capacity lost per square root of
+    /// equivalent hours at rest.
+    ///
+    /// Cycle fade is consumed by moving charge; calendar fade is consumed by
+    /// sitting still, because the interphase keeps growing on a cell that is
+    /// merely parked. A car does a few hundred cycles a year against three and
+    /// a half thousand days of parking, so for any ten-year claim this term is
+    /// likely to dominate the one above it. 0.0 keeps a default calibrated to
+    /// roughly 2 % per year at 25 C and half charge.
+    pub calendar_k: f32,
+    /// Accumulated Arrhenius- and state-of-charge-weighted hours.
+    pub calendar_hours_equiv: f64,
+    /// Cathode fatigue coefficient: structural damage per cycle at unit depth.
+    ///
+    /// Li2S to S is roughly an 80 % volume change, every cycle. The composite
+    /// cracks, particles lose contact with the carbon network, and that
+    /// capacity is gone whether or not any lithium was consumed. For a
+    /// lithium-sulfur cell this is a strong candidate for the mechanism that
+    /// actually sets life, and no reservoir protects against it: a metal
+    /// reservoir replaces lost lithium and does nothing for a cracked cathode.
+    pub crack_k: f32,
+    /// Accumulated cathode damage, 0 to 1.
+    pub crack_damage: f64,
     /// Running total of metal lost to interphase, as a fraction of nominal.
     ///
     /// f64, and it has to be. This accumulates one small increment per SUBSTEP,
@@ -645,11 +696,46 @@ impl Default for ElectrochemicalState {
             li_inventory_lost: 0.0,
             soc_turn: 1.0,
             excursion_depth: 0.0,
+            sei_thickness_nm: 0.0,
+            roughness_k: 0.0,
+            calendar_k: 0.0,
+            calendar_hours_equiv: 0.0,
+            crack_k: 0.0,
+            crack_damage: 0.0,
         }
     }
 }
 
+/// Default calendar fade coefficient: about 2 % of capacity per year at 25 °C
+/// and half charge, i.e. `0.02 / sqrt(8760 h)`.
+pub const DEFAULT_CALENDAR_K: f32 = 2.14e-4;
+
+/// Default cathode fatigue coefficient: about 20 % structural loss over 1000
+/// full-depth cycles, where an unreinforced sulfur composite sits.
+pub const DEFAULT_CRACK_K: f32 = 1.75e-4;
+
 impl ElectrochemicalState {
+    /// Capacity fraction lost to lithium inventory, net of the reservoir.
+    ///
+    /// One of three independent fade channels, and the only one the metal
+    /// reservoir buffers — which is exactly why the other two are tracked
+    /// apart from it rather than folded into a single retention number. A
+    /// retention figure with no attribution cannot tell you which lever to
+    /// pull next.
+    pub fn lithium_fade(&self) -> f64 {
+        (self.li_inventory_lost - self.li_reservoir_frac as f64).max(0.0)
+    }
+
+    /// Capacity fraction lost to calendar ageing, from accumulated weighted hours.
+    pub fn calendar_fade(&self) -> f64 {
+        let k = if self.calendar_k > 0.0 {
+            self.calendar_k
+        } else {
+            DEFAULT_CALENDAR_K
+        };
+        k as f64 * self.calendar_hours_equiv.sqrt()
+    }
+
     /// V-Cell Na-S defaults (202.5 Ah, 2.23 V standard)
     pub fn vcell_na_s() -> Self {
         Self {
@@ -679,6 +765,12 @@ impl ElectrochemicalState {
             li_inventory_lost: 0.0,
             soc_turn: 1.0,
             excursion_depth: 0.0,
+            sei_thickness_nm: 0.0,
+            roughness_k: 0.0,
+            calendar_k: 0.0,
+            calendar_hours_equiv: 0.0,
+            crack_k: 0.0,
+            crack_damage: 0.0,
         }
     }
 }
