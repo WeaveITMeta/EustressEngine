@@ -31,8 +31,20 @@
     --color-text-secondary: #8b949e;
     --color-text-muted: #6e7681;
     
-    --color-accent: #a0a8b0;
-    --color-accent-hover: #c0c8d0;
+    /* Eustress accent. Canonical value, not a derived one: this is
+       `accent-eustress` from crates/engine/ui/slint/theme.slint:178, so the
+       website and the engine UI use the same green.
+       #3cba54 on --color-bg-primary is 7.52:1 (AA body, AAA large).
+       `accent-green-bright` (#00e676) is the engine's bright variant, used
+       here for hover and glow only. */
+    --color-eustress-green: #3cba54;
+    --color-eustress-green-hover: #00e676;
+    --color-eustress-green-dim: rgba(60, 186, 84, 0.14);
+    --color-eustress-green-glow: rgba(0, 230, 118, 0.18);
+
+    --color-accent: var(--color-eustress-green);
+    --color-accent-hover: var(--color-eustress-green-hover);
+    --color-steel-accent: #a0a8b0;
     --color-steel: #8090a0;
     --color-steel-light: #b0bcc8;
     --color-steel-dark: #505860;
@@ -21741,4 +21753,695 @@ a.experience-card {
     color: #fca5a5;
     font-size: var(--text-sm);
     margin: var(--space-xs) 0 0;
+}
+
+/* ==========================================================================
+   LANDING PAGE REDESIGN
+   ==========================================================================
+   Targeted evolution of the hero and its supporting strips. Copy, section
+   order, and routes are unchanged; this replaces the patterns that made the
+   page read as templated.
+
+   Appended last so it wins over the older hero rules. */
+
+/* --------------------------------------------------------------------------
+   Hero brand mark
+   Replaces `.studio-preview`, a fake application window with mock traffic
+   light buttons. That pattern advertised a product that does not exist. This
+   shows the real mark, lit by the brand accent.
+   -------------------------------------------------------------------------- */
+
+.hero-mark {
+    position: relative;
+    display: grid;
+    place-items: center;
+    aspect-ratio: 1;
+    width: min(100%, 420px);
+    margin-inline: auto;
+}
+
+/* The glow is the accent hue at low alpha. It is a separate, aria-hidden
+   layer so it can animate without touching the mark itself. */
+.hero-mark-glow {
+    position: absolute;
+    inset: 8%;
+    border-radius: 50%;
+    background:
+        radial-gradient(circle at 50% 50%,
+            var(--color-eustress-green-dim) 0%,
+            rgba(60, 186, 84, 0.06) 42%,
+            transparent 68%);
+    filter: blur(28px);
+    /* Motivated motion: a slow breath signals a live runtime rather than a
+       static logo. One element, transform and opacity only. */
+    animation: mark-breathe 7s ease-in-out infinite;
+    will-change: transform, opacity;
+}
+
+.hero-mark-gear {
+    position: relative;
+    z-index: 1;
+    width: 62%;
+    height: auto;
+    display: block;
+    /* Tint the drop shadow to the accent instead of pure black. */
+    filter: drop-shadow(0 18px 48px var(--color-eustress-green-glow));
+}
+
+@keyframes mark-breathe {
+    0%, 100% { transform: scale(1);    opacity: 0.85; }
+    50%      { transform: scale(1.06); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .hero-mark-glow { animation: none; opacity: 0.92; }
+}
+
+/* --------------------------------------------------------------------------
+   Metric strip
+   The three platform numbers used to sit inside the hero, which pushed it to
+   five stacked elements. They are real proof, so they keep their prominence
+   but as their own band directly beneath the hero.
+   -------------------------------------------------------------------------- */
+
+.metric-strip {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    max-width: 720px;
+    margin: var(--space-2xl) auto 0;
+    padding: 0 var(--space-md);
+}
+
+.metric {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: var(--space-md) var(--space-sm);
+    position: relative;
+}
+
+/* Hairline separators drawn between cells only, not around every one. */
+.metric + .metric::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 22%;
+    bottom: 22%;
+    width: 1px;
+    background: var(--color-border);
+}
+
+.metric-value {
+    font-family: var(--font-mono);
+    font-size: clamp(1.5rem, 3.4vw, 2.1rem);
+    font-weight: 600;
+    line-height: 1;
+    color: var(--color-text-primary);
+    letter-spacing: -0.02em;
+}
+
+.metric-label {
+    font-size: var(--text-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+}
+
+@media (max-width: 768px) {
+    .metric-strip { margin-top: var(--space-xl); }
+    .metric-value { font-size: 1.35rem; }
+}
+
+/* --------------------------------------------------------------------------
+   Accent application
+   One accent, used identically everywhere. --color-accent now resolves to
+   Eustress Green, so these rules pick it up automatically.
+   -------------------------------------------------------------------------- */
+
+.headline-accent,
+.cta-accent {
+    color: var(--color-eustress-green);
+}
+
+/* Primary CTA: solid accent with dark ink. 10.4:1, comfortably past AA. */
+.btn-primary-steel {
+    background: var(--color-eustress-green);
+    color: var(--color-bg-primary);
+    border: 1px solid var(--color-eustress-green);
+    font-weight: 650;
+    transition: background 0.18s ease, transform 0.12s ease, box-shadow 0.18s ease;
+}
+
+.btn-primary-steel:hover {
+    background: var(--color-eustress-green-hover);
+    border-color: var(--color-eustress-green-hover);
+    box-shadow: 0 8px 26px rgba(0, 230, 118, 0.24);
+}
+
+/* Tactile press, per the interactive-states rule. */
+.btn-primary-steel:active { transform: translateY(1px); }
+
+.btn-secondary-steel {
+    border: 1px solid var(--color-border);
+    color: var(--color-text-primary);
+    background: transparent;
+    transition: border-color 0.18s ease, background 0.18s ease, transform 0.12s ease;
+}
+
+.btn-secondary-steel:hover {
+    border-color: var(--color-eustress-green);
+    background: var(--color-eustress-green-dim);
+}
+
+.btn-secondary-steel:active { transform: translateY(1px); }
+
+/* Keyboard focus must be visible against a dark background. */
+.btn-primary-steel:focus-visible,
+.btn-secondary-steel:focus-visible {
+    outline: 2px solid var(--color-eustress-green);
+    outline-offset: 3px;
+}
+
+/* The hero background orbs were a neutral grey wash. Tie one to the accent so
+   the page has a single colour story instead of a grey field with a green
+   button dropped into it. */
+.hero-industrial .glow-orb.glow-1 {
+    background: radial-gradient(circle, rgba(60, 186, 84, 0.10) 0%, transparent 70%);
+}
+
+/* --------------------------------------------------------------------------
+   Section entrances
+   Motivated motion: content arrives as it becomes relevant, which builds
+   hierarchy on a long page. Transform and opacity only, and it collapses to
+   nothing under reduced motion.
+   -------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: no-preference) {
+    .hero-text > h1,
+    .hero-text > p,
+    .hero-buttons,
+    .metric-strip {
+        animation: rise-in 0.62s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    .hero-text > h1   { animation-delay: 0.02s; }
+    .hero-text > p    { animation-delay: 0.10s; }
+    .hero-buttons     { animation-delay: 0.18s; }
+    .metric-strip     { animation-delay: 0.26s; }
+    .hero-visual-new  { animation: rise-in 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.12s both; }
+}
+
+@keyframes rise-in {
+    from { opacity: 0; transform: translateY(18px); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* --------------------------------------------------------------------------
+   Landing page redesign, corrections found by rendering the page
+   -------------------------------------------------------------------------- */
+
+/* `.headline-accent` paints itself with a steel gradient and sets
+   -webkit-text-fill-color: transparent, which beats a plain `color`. Restate
+   the gradient in the brand hue so the accent word actually reads as green
+   while keeping the metallic sheen the wordmark already had. */
+.hero-headline .headline-accent,
+.cta-headline .cta-accent {
+    background: linear-gradient(135deg,
+        var(--color-eustress-green) 0%,
+        #7ee39a 50%,
+        var(--color-eustress-green) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: var(--color-eustress-green);   /* fallback where background-clip is unsupported */
+}
+
+/* A later, unrelated `.btn-icon` rule (a 40x40 boxed icon button for another
+   surface) was giving the hero CTA arrow its own bordered tile. Inside a hero
+   button the arrow is a glyph, not a control. */
+.hero-buttons .btn-icon {
+    width: auto;
+    height: auto;
+    background: none;
+    border: 0;
+    border-radius: 0;
+    cursor: inherit;
+    font-size: 1.05em;
+    line-height: 1;
+    margin-left: 2px;
+}
+
+.hero-buttons .btn-icon:hover { background: none; }
+
+/* The mark was sizing the hero row, leaving a dead band between the CTAs and
+   the metric strip. Bringing it down closes the gap without shrinking its
+   presence, since it still anchors the right half of the composition. */
+.hero-mark { width: min(100%, 340px); }
+
+@media (max-width: 900px) {
+    .hero-mark { width: min(72%, 260px); }
+}
+
+/* ==========================================================================
+   LANDING PAGE, BELOW THE FOLD
+   ==========================================================================
+   The hero was rebuilt first. Everything under it was static, uniformly grey,
+   and gave the comparison tables no focal point. This pass adds motivated
+   entrance motion, applies the one accent consistently, and breaks the two
+   three-equal-card rows. Markup and copy are unchanged. */
+
+/* --------------------------------------------------------------------------
+   Section entrances
+   Storytelling motion: each band arrives as it becomes relevant, which gives a
+   long page a sense of progression instead of one flat wall.
+
+   Uses CSS scroll-driven animation rather than a scroll listener. Wrapped in
+   @supports so browsers without it simply render the content in place: the
+   default state is VISIBLE, so an unsupported browser can never hide a section.
+   -------------------------------------------------------------------------- */
+
+@supports (animation-timeline: view()) {
+    @media (prefers-reduced-motion: no-preference) {
+        .comparison-section .section-header,
+        .comparison-section .comparison-table-wrap,
+        .comparison-section .verdict-card,
+        .showcase-industrial .showcase-card,
+        .testimonials-industrial .section-header,
+        .github-section .github-content,
+        .cta-industrial .cta-inner,
+        .power-section .section-header {
+            animation: section-rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+            animation-timeline: view();
+            animation-range: entry 0% cover 24%;
+        }
+
+        /* Cards in a row arrive in sequence rather than as a block. */
+        .showcase-industrial .showcase-card:nth-child(2) { animation-delay: 0.05s; }
+        .showcase-industrial .showcase-card:nth-child(3) { animation-delay: 0.10s; }
+        .showcase-industrial .showcase-card:nth-child(4) { animation-delay: 0.15s; }
+    }
+}
+
+@keyframes section-rise {
+    from { opacity: 0; transform: translateY(22px); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* --------------------------------------------------------------------------
+   Comparison tables
+   The point of the section is one column. Nothing marked it, so the reader had
+   to find Eustress by reading the header. Tint the column instead.
+   -------------------------------------------------------------------------- */
+
+.comparison-table th.engine-col.eustress {
+    color: var(--color-eustress-green);
+    border-bottom: 2px solid var(--color-eustress-green);
+    background: var(--color-eustress-green-dim);
+}
+
+/* Carry the tint down the whole column, not just its header. */
+.comparison-table td:nth-child(2) {
+    background: rgba(60, 186, 84, 0.055);
+    border-left: 1px solid rgba(60, 186, 84, 0.22);
+    border-right: 1px solid rgba(60, 186, 84, 0.22);
+    font-weight: 560;
+    color: var(--color-text-primary);
+}
+
+/* Row hover makes a 14-row table scannable across its width. */
+.comparison-table tbody tr {
+    transition: background 0.14s ease;
+}
+
+.comparison-table tbody tr:hover {
+    background: rgba(255, 255, 255, 0.028);
+}
+
+/* The check and cross marks carry the verdict, so give them colour instead of
+   leaving them the same grey as the body text. */
+.comparison-table td { color: var(--color-text-secondary); }
+
+/* --------------------------------------------------------------------------
+   Verdict row
+   Three identical cards side by side is the most recognisable AI layout there
+   is. The first verdict is the strongest claim, so let it lead and let the
+   other two sit beside it. No markup change: this is grid placement only.
+   -------------------------------------------------------------------------- */
+
+@media (min-width: 900px) {
+    .verdict-grid,
+    .comparison-verdict {
+        display: grid;
+        grid-template-columns: 1.35fr 1fr 1fr;
+        gap: var(--space-lg);
+        align-items: stretch;
+    }
+}
+
+.verdict-card {
+    position: relative;
+    padding: var(--space-lg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    background: rgba(22, 27, 34, 0.55);
+    transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.verdict-card:hover {
+    border-color: rgba(60, 186, 84, 0.4);
+    transform: translateY(-2px);
+}
+
+/* A hairline of accent along the top edge, only on the lead card, so the eye
+   has somewhere to start. */
+@media (min-width: 900px) {
+    .verdict-card:first-child {
+        border-top: 2px solid var(--color-eustress-green);
+    }
+}
+
+.verdict-card h3 {
+    color: var(--color-text-primary);
+    margin-bottom: var(--space-sm);
+}
+
+/* --------------------------------------------------------------------------
+   Section headings
+   One accent, used the same way everywhere: the small label above a heading.
+   -------------------------------------------------------------------------- */
+
+.section-tag {
+    color: var(--color-eustress-green);
+    border: 1px solid rgba(60, 186, 84, 0.28);
+    background: var(--color-eustress-green-dim);
+    border-radius: var(--radius-full);
+    padding: 4px 12px;
+    display: inline-block;
+}
+
+/* --------------------------------------------------------------------------
+   Cards, shared behaviour
+   Lift on hover with an accent edge, so the whole page responds the same way
+   rather than each section inventing its own interaction.
+   -------------------------------------------------------------------------- */
+
+.showcase-card,
+.doc-card {
+    transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.showcase-card:hover,
+.doc-card:hover {
+    border-color: rgba(60, 186, 84, 0.38);
+    transform: translateY(-3px);
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.34);
+}
+
+/* --------------------------------------------------------------------------
+   GitHub band
+   This is the section asking for contribution, so it is the one place besides
+   the hero that earns the accent at full strength.
+   -------------------------------------------------------------------------- */
+
+.github-section .btn-primary-steel {
+    background: var(--color-eustress-green);
+    color: var(--color-bg-primary);
+}
+
+.github-section {
+    border-top: 1px solid var(--color-border);
+    border-bottom: 1px solid var(--color-border);
+}
+
+/* --------------------------------------------------------------------------
+   Closing CTA
+   -------------------------------------------------------------------------- */
+
+.cta-industrial {
+    position: relative;
+    overflow: hidden;
+}
+
+/* A single soft accent wash behind the closing call, tying the end of the page
+   back to the hero. */
+.cta-industrial::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at 50% 120%,
+        rgba(60, 186, 84, 0.10) 0%, transparent 62%);
+    pointer-events: none;
+}
+
+.cta-industrial > * { position: relative; z-index: 1; }
+
+/* --------------------------------------------------------------------------
+   Focus visibility across the page
+   -------------------------------------------------------------------------- */
+
+.comparison-table a:focus-visible,
+.showcase-card:focus-visible,
+.doc-card:focus-visible,
+.github-section a:focus-visible,
+.cta-industrial a:focus-visible {
+    outline: 2px solid var(--color-eustress-green);
+    outline-offset: 3px;
+}
+
+@media (max-width: 899px) {
+    .verdict-card:first-child { border-top: 1px solid var(--color-border); }
+}
+
+/* Color Consistency Lock: the comparison subtitles were cyan (#00bcd4), a
+   second accent competing with the brand green two lines below them. One
+   accent per page. */
+.comparison-section .comparison-subtitle {
+    color: var(--color-eustress-green);
+}
+
+/* Table verdict marks: give the check and cross meaning through colour so a
+   14-row table can be scanned without reading every cell. */
+.comparison-table td .yes,
+.comparison-table td .check { color: var(--color-eustress-green); }
+
+/* The contributor ladder used cyan (#00bcd4) for its step numbers and arrows,
+   a third accent sharing the section with the green CTA directly below it.
+   One accent per page, applied the same way everywhere. */
+.github-section .ladder-num {
+    background: var(--color-eustress-green);
+    color: var(--color-bg-primary);
+}
+
+.github-section .ladder-arrow {
+    color: var(--color-eustress-green);
+}
+
+.github-section .ladder-step {
+    border-color: rgba(60, 186, 84, 0.28);
+}
+
+/* Final two cyan holdouts on the landing page: the GitHub chips and the
+   active tab in the "What's Inside" panel. Both sat inside sections whose
+   other elements are already green. */
+.github-section .github-chip {
+    border-color: rgba(60, 186, 84, 0.4);
+    color: var(--color-eustress-green);
+    background: var(--color-eustress-green-dim);
+}
+
+.tabs-bar .tab-btn.active {
+    background: var(--color-eustress-green-dim);
+    border-color: var(--color-eustress-green);
+    color: var(--color-eustress-green);
+}
+
+/* --------------------------------------------------------------------------
+   Verdict cards, text fitting
+   --------------------------------------------------------------------------
+   Three problems compounded here:
+     1. `text-align: center` on a narrow column wraps at four or five words a
+        line with a ragged edge on both sides, which is the hardest possible
+        shape to read.
+     2. The earlier 1.35fr lead column gave the most width to the card with the
+        LEAST copy, so one card sat half empty while the others crowded.
+     3. The cards were top-aligned in a stretched row, leaving the short one
+        with a large void beneath its text.
+   Equal columns, left-aligned text, and content distributed down the card. */
+
+.comparison-verdict {
+    grid-template-columns: repeat(3, 1fr);
+    align-items: stretch;
+}
+
+.verdict-card {
+    display: flex;
+    flex-direction: column;
+    /* Left-aligned: a ragged right edge alone is far easier to track than a
+       ragged edge on both sides. */
+    text-align: left;
+    padding: var(--space-lg) var(--space-lg) var(--space-xl);
+}
+
+.verdict-card h3 {
+    font-size: 1.05rem;
+    line-height: 1.3;
+    margin: 0 0 var(--space-sm);
+    /* Keep every heading on one line so the three bodies start at the same
+       height, even when one title is longer than the others. */
+    white-space: nowrap;
+}
+
+.verdict-card p {
+    margin: 0;
+    /* Slightly tighter measure and looser leading: the columns are narrow, so
+       the line height has to carry the readability. */
+    font-size: 0.94rem;
+    line-height: 1.65;
+    color: var(--color-text-secondary);
+    /* Avoid a single word stranded on the last line. */
+    text-wrap: pretty;
+    hyphens: none;
+}
+
+/* Below the three-column breakpoint the cards are full width, so the headings
+   no longer need to be held on one line. */
+@media (max-width: 899px) {
+    .verdict-card h3 { white-space: normal; }
+    .verdict-card { padding: var(--space-lg); }
+}
+
+/* At the narrowest desktop widths a long heading would otherwise overflow its
+   nowrap box, so step the size down rather than let it clip. */
+@media (min-width: 900px) and (max-width: 1200px) {
+    .verdict-card h3 { font-size: 0.98rem; }
+    .verdict-card p  { font-size: 0.9rem; }
+}
+
+/* --------------------------------------------------------------------------
+   Hero render
+   --------------------------------------------------------------------------
+   A real capture of the engine viewport: a photographed bicycle reconstructed
+   as a Gaussian splat, running at 30 FPS. This replaces the brand mark, which
+   in turn replaced a fake application window. The page now shows the product
+   doing the thing it claims to do.
+
+   Framed as a plain panel, deliberately without mock browser or window chrome:
+   the image is already a screenshot, so drawing fake chrome around it would
+   put a window inside a window. */
+
+.hero-render {
+    position: relative;
+    margin: 0;
+    width: min(100%, 620px);
+    margin-inline: auto;
+    border-radius: var(--radius-lg);
+}
+
+.hero-render-glow {
+    position: absolute;
+    inset: -12% -8%;
+    border-radius: 50%;
+    background: radial-gradient(ellipse at 50% 50%,
+        var(--color-eustress-green-dim) 0%,
+        rgba(60, 186, 84, 0.05) 45%,
+        transparent 70%);
+    filter: blur(34px);
+    z-index: 0;
+    pointer-events: none;
+}
+
+.hero-render-img {
+    position: relative;
+    z-index: 1;
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: var(--radius-lg);
+    border: 1px solid rgba(60, 186, 84, 0.22);
+    /* Tinted rather than pure black, so the panel sits in the page instead of
+       punching a hole in it. */
+    box-shadow:
+        0 24px 60px rgba(0, 0, 0, 0.45),
+        0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+}
+
+@media (max-width: 900px) {
+    .hero-render { width: 100%; }
+    .hero-render-glow { inset: -8% -4%; filter: blur(24px); }
+}
+
+/* Reserve the aspect ratio so the image cannot shift layout while it loads
+   (CLS), since it is the largest element above the fold. */
+.hero-render-img { aspect-ratio: 843 / 462; object-fit: cover; }
+
+/* An older rule hid the hero visual on phones, which made sense when it was a
+   fake application window taking vertical space for nothing. Now that it is a
+   real capture of the engine, it is the strongest thing on the page and phone
+   visitors were the only ones not seeing it. At 375px the 1.82 aspect lands
+   around 200px tall, which the fold absorbs comfortably. */
+@media (max-width: 900px) {
+    .hero-industrial .hero-visual-new {
+        display: block;
+        margin-top: var(--space-lg);
+    }
+    .hero-render { width: 100%; }
+}
+
+/* --------------------------------------------------------------------------
+   Hero: the Studio capture
+   --------------------------------------------------------------------------
+   This is the whole editor, not just the viewport: ribbon, scene explorer,
+   properties, and the render together. That is the point. It shows a working
+   tool rather than a pretty output, and the photoreal splat in the middle of
+   it does the persuading.
+
+   A wide screenshot needs width. Held inside the 620px text-column grid its
+   interface type lands around 3px and turns to mush, so the panel breaks out
+   of the container and bleeds toward the right edge of the viewport. */
+
+.hero-render {
+    width: auto;
+    max-width: none;
+    margin-inline: 0;
+}
+
+@media (min-width: 1100px) {
+    .hero-industrial .hero-visual-new {
+        /* Break the right edge of the container so the capture gets roughly
+           50% more width than the column would otherwise allow. */
+        margin-right: calc(50% - 50vw + var(--space-lg));
+    }
+    .hero-render-img {
+        /* Squared off on the bleeding edge: a rounded corner floating against
+           the viewport edge reads as a mistake. */
+        border-top-right-radius: 0;
+        border-bottom-right-radius: 0;
+        border-right: 0;
+    }
+}
+
+/* Match the Studio capture's intrinsic ratio so nothing shifts while it loads. */
+.hero-render-img {
+    aspect-ratio: 1333 / 714;
+    object-fit: cover;
+    object-position: left center;
+}
+
+@media (max-width: 1099px) {
+    .hero-industrial .hero-visual-new { margin-right: 0; }
+    .hero-render-img {
+        border-radius: var(--radius-lg);
+        border-right: 1px solid rgba(60, 186, 84, 0.22);
+    }
+}
+
+/* On a phone the full interface is unreadable at any size, so show the part
+   that carries the message: the viewport itself, cropped from the same file. */
+@media (max-width: 700px) {
+    .hero-render-img {
+        aspect-ratio: 16 / 10;
+        object-fit: cover;
+        /* Frames the viewport region of the capture rather than the panels. */
+        object-position: 62% center;
+    }
 }

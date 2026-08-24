@@ -25,11 +25,9 @@ pub fn HomePage() -> impl IntoView {
 
                 <div class="hero-main">
                     <div class="hero-text">
-                        <div class="beta-tag">
-                            <span class="tag-dot"></span>
-                            "SIMULATION & DATA PLATFORM · PUBLIC ALPHA"
-                        </div>
-
+                        // No status badge and no decorative dot. A version label is not
+                        // the first thing a visitor needs, and the hero is held to
+                        // headline, subtext, and CTAs so the value proposition lands.
                         <h1 class="hero-headline">
                             "The Future of"<br/>
                             <span class="headline-accent">"Creation"</span>
@@ -41,24 +39,6 @@ pub fn HomePage() -> impl IntoView {
                             " Zero compromises."
                         </p>
 
-                        // Stats - real platform metrics (FPS stays)
-                        <div class="stats-bar">
-                            <div class="stat">
-                                <span class="stat-value">"10M+"</span>
-                                <span class="stat-label">"Entities"</span>
-                            </div>
-                            <div class="stat-sep"></div>
-                            <div class="stat">
-                                <span class="stat-value">"1 yr/s"</span>
-                                <span class="stat-label">"Sim Speed"</span>
-                            </div>
-                            <div class="stat-sep"></div>
-                            <div class="stat">
-                                <span class="stat-value">"60+"</span>
-                                <span class="stat-label">"FPS"</span>
-                            </div>
-                        </div>
-
                         <div class="hero-buttons">
                             <a href="/login" class="btn-primary-steel">
                                 "Start Building"
@@ -67,31 +47,45 @@ pub fn HomePage() -> impl IntoView {
                             <a href="/gallery" class="btn-secondary-steel">
                                 "Explore"
                             </a>
-                            <a href="/about" class="btn-secondary-steel">
-                                "About"
-                            </a>
                         </div>
                     </div>
 
+                    // The brand mark itself, lit by the accent. The previous version
+                    // framed it inside a fake application window with mock traffic
+                    // light buttons, showing a product that does not exist instead
+                    // of the one that does.
                     <div class="hero-visual-new">
-                        <div class="studio-preview">
-                            <div class="preview-header">
-                                <div class="header-dots">
-                                    <span class="dot red"></span>
-                                    <span class="dot yellow"></span>
-                                    <span class="dot green"></span>
-                                </div>
-                                <span class="header-title">"Eustress"</span>
-                            </div>
-                            <div class="preview-body">
-                                <div class="preview-scene">
-                                    <div class="scene-floor"></div>
-                                    <img src="/assets/icons/eustress-gear.svg" alt="Eustress" class="scene-gear" />
-                                </div>
-                            </div>
-                        </div>
+                        <figure class="hero-render">
+                            <div class="hero-render-glow" aria-hidden="true"></div>
+                            <img
+                                src="/assets/hero-studio.png"
+                                alt="The Eustress Studio editor: a photographed bicycle reconstructed as a Gaussian splat, rendering live in the viewport alongside the scene explorer and properties panels"
+                                class="hero-render-img"
+                                width="1333"
+                                height="714"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </figure>
                     </div>
                 </div>
+
+                    // Real platform metrics, given their own strip so the hero
+                    // stays a single message rather than a spec sheet.
+                    <div class="metric-strip">
+                        <div class="metric">
+                            <span class="metric-value">"10M+"</span>
+                            <span class="metric-label">"Entities"</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value">"1 yr/s"</span>
+                            <span class="metric-label">"Sim Speed"</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value">"60+"</span>
+                            <span class="metric-label">"FPS"</span>
+                        </div>
+                    </div>
 
                 <div class="platform-bar">
                     <div class="platform-bar-inner">
@@ -310,15 +304,15 @@ pub fn HomePage() -> impl IntoView {
 
                 <div class="comparison-verdict">
                     <div class="verdict-card">
-                        <h3>"🔬 Best for fidelity"</h3>
+                        <h3>"Best for fidelity"</h3>
                         <p>"Game-grade 3D meets real physics and real data. The simulation does not cheat, and it still runs at interactive FPS."</p>
                     </div>
                     <div class="verdict-card">
-                        <h3>"🔓 Best for ownership"</h3>
-                        <p>"PolyForm Shield means no platform tax, no royalty, and no roadmap you do not control. Fork it, ship what you build, keep the work. The one thing it blocks is a competitor reselling the engine itself."</p>
+                        <h3>"Best for ownership"</h3>
+                        <p>"PolyForm Shield means no platform tax, no royalty, and a roadmap you control. Fork it, ship it, keep the work. The one limit is reselling the engine itself."</p>
                     </div>
                     <div class="verdict-card">
-                        <h3>"🤖 Best AI Native Work"</h3>
+                        <h3>"Best for AI-native work"</h3>
                         <p>"Drive the live engine over MCP. An agent can build a scene, run a year of consequences, and read back the result."</p>
                     </div>
                 </div>
