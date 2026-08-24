@@ -1,0 +1,502 @@
+# Eustress Mode — "Public Sector".
+#
+# The SELL side of federal contracting and grants: a small contractor, grant
+# writer, or nonprofit answering a solicitation. Its counterpart is the
+# `government` mode's `procurement` discipline, which models the BUYER issuing
+# one. Same domain, opposite seats, and they are deliberately separate modes:
+# Government is a public analysis seat that signs and files nothing, while this
+# is a commercial seat that exists to win the work. Folding a vendor capture
+# desk into Government would compromise that charter and would read as an
+# attack line the first time anyone noticed.
+#
+# Three rules govern every tool set below.
+#
+#   1. THE ENGINE DRAFTS; A HUMAN FILES. Nothing here submits a bid, signs a
+#      certification, or transmits to SAM.gov or Grants.gov. Both APIs are
+#      read-only on this path and there is no write path to add by accident.
+#
+#   2. EVERY DISCIPLINE CARRIES A FALSIFIER — at least one tool able to return
+#      a result unfavourable to its own operator. Capture has the no-bid
+#      recommender and the calibration harness; Proposal has the compliance-gap
+#      report; Contracts has the cost-growth analyzer. A capture tool that only
+#      ever encourages the bid is a lead generator for whoever sold it.
+#
+#   3. OWN DATA IS FAIR GAME; OTHER PARTIES ARE AGGREGATE ONLY. The firm's own
+#      UEI, personnel, and past performance are inputs. Competitors appear
+#      through public award records only, never as profiled individuals.
+#
+# Unlike every mode shipped before it, a meaningful share of these buttons are
+# LIVE rather than declared intentions: the ingest, screening, scoring,
+# compliance-matrix, draft, deal-room, and audit paths all run
+# (`crates/engine/src/capture/`). The rest follow the same honest-placeholder
+# posture as the other modes — a declared button is a declared intention, and
+# clicking one says so and counts the click as a vote.
+#
+# Canonical design doc: docs/architecture/GOV_CAPTURE_PIPELINE.md
+
+[mode]
+id = "publicsector"
+name = "Public Sector"
+icon = "handshake"
+# Deep teal — distinct from Government's institutional stone (#A3A2A5),
+# Business's red (#C4281C), and the editor's selection cyan (#00bcd4).
+color = "#0E7C6B"
+version = "1.0"
+author = "Eustress"
+
+[ribbon]
+# Record work with a spatial payoff: `data` for the Connector and Dataset
+# substrate, `mindspace` for the 3D deal room, `test` for win-rate calibration
+# runs. No geometry tabs — nothing here models a shape.
+tabs = ["home", "data", "mindspace", "test"]
+
+[layout]
+preset = "Wide Panels"
+
+[theme]
+accent = "#0E7C6B"
+
+# Public Sector is NOT directly selectable in the Modes dropdown — it expands to
+# its submenu and a discipline must be chosen (see ribbon.slint's
+# mode-row-touch handler). Disciplines render in the default grey.
+[[submodes]]
+id = "capture"
+name = "Capture"
+icon = "binoculars"
+
+[[submodes]]
+id = "proposal"
+name = "Proposal"
+icon = "scroll"
+
+[[submodes]]
+id = "grants"
+name = "Grants"
+icon = "certificate"
+
+[[submodes]]
+id = "contracts"
+name = "Contracts"
+icon = "stamp"
+
+[[submodes]]
+id = "compliance"
+name = "Compliance"
+icon = "shield"
+
+# ---- 1. Capture -----------------------------------------------------------
+# The business-development seat: ingest the public feeds, screen against the
+# firm's own registrations, rank what survives, and stand inside the result.
+# The falsifiers live here — a no-bid recommender and a calibration harness
+# that scores the ranking against outcomes that already happened.
+
+[[submode_tabs]]
+submode = "capture"
+id = "cap-sources"
+name = "Sources"
+color = "#0E7C6B"
+  [[submode_tabs.sections]]
+  name = "Feeds"
+  tools = ["pcap:add_sam_source", "pcap:add_grants_source", "pcap:sync_now", "pcap:source_status"]
+  [[submode_tabs.sections]]
+  name = "Filters"
+  tools = ["pcap:naics_filter_editor", "pcap:set_aside_filter", "pcap:agency_filter", "pcap:keyword_filter"]
+  [[submode_tabs.sections]]
+  name = "Credentials"
+  tools = ["pcap:api_key_status", "pcap:quota_monitor", "pcap:fetch_log"]
+
+[[submode_tabs]]
+submode = "capture"
+id = "cap-screening"
+name = "Screening"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Firm Profile"
+  tools = ["pcap:capability_statement", "pcap:naics_registrations", "pcap:certification_ledger", "pcap:capacity_limits"]
+  [[submode_tabs.sections]]
+  name = "Gates"
+  tools = ["pcap:screen_pipeline", "pcap:eligibility_checker", "pcap:deadline_monitor", "pcap:capacity_screener"]
+  # The report that tells a firm which single registration or certification
+  # would unlock the most pipeline — more useful than the pass list alone.
+  [[submode_tabs.sections]]
+  name = "Rejection Analysis"
+  tools = ["pcap:rejection_report", "pcap:unlock_opportunity_analyzer", "pcap:unknown_field_report"]
+
+[[submode_tabs]]
+submode = "capture"
+id = "cap-fit"
+name = "Fit"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Scoring"
+  tools = ["pcap:score_pipeline", "pcap:criterion_weights", "pcap:score_explainer", "pcap:rank_viewer"]
+  # Falsifiers. Both can return an answer the operator does not want.
+  [[submode_tabs.sections]]
+  name = "Bid Decision"
+  tools = ["pcap:no_bid_report", "pcap:bid_cost_estimator", "pcap:win_probability_notes"]
+  [[submode_tabs.sections]]
+  name = "Calibration"
+  tools = ["pcap:calibrate_model", "pcap:outcome_recorder", "pcap:precision_recall_chart"]
+
+[[submode_tabs]]
+submode = "capture"
+id = "cap-pipeline"
+name = "Pipeline"
+color = "#a78bfa"
+  [[submode_tabs.sections]]
+  name = "Stages"
+  tools = ["pcap:stage_board", "pcap:advance_stage", "pcap:stale_notice_sweep", "pcap:amendment_watch"]
+  [[submode_tabs.sections]]
+  name = "Teaming"
+  tools = ["pcap:partner_gap_matcher", "pcap:teaming_agreement_tracker", "pcap:subcontract_plan_notes"]
+  [[submode_tabs.sections]]
+  name = "Records"
+  tools = ["pcap:capture_record_index", "pcap:open_capture_folder", "pcap:export_pipeline_csv"]
+
+[[submode_tabs]]
+submode = "capture"
+id = "cap-dealroom"
+name = "Deal Room"
+color = "#4ade80"
+  # The ranked pipeline as a space you walk: X is days to deadline, Y is fit
+  # score, and the bid/watch/no-bid call is a lane you stand in.
+  [[submode_tabs.sections]]
+  name = "Build"
+  tools = ["pcap:build_deal_room", "pcap:refresh_deal_room", "pcap:clear_deal_room"]
+  [[submode_tabs.sections]]
+  name = "Layout"
+  tools = ["pcap:lane_layout", "pcap:axis_encoding", "pcap:node_scale_rules"]
+  [[submode_tabs.sections]]
+  name = "Walkthrough"
+  tools = ["pcap:tour_closing_soon", "pcap:focus_top_ranked", "pcap:deal_room_legend"]
+
+# ---- 2. Proposal ----------------------------------------------------------
+# The writing seat. Every requirement in the solicitation becomes a row, every
+# row gets a section, and the rows nothing answers are shown rather than
+# hidden. The gap report is this discipline's falsifier.
+
+[[submode_tabs]]
+submode = "proposal"
+id = "prp-requirements"
+name = "Requirements"
+color = "#0E7C6B"
+  [[submode_tabs.sections]]
+  name = "Extract"
+  tools = ["pprp:extract_requirements", "pprp:import_attachment", "pprp:attachment_status", "pprp:requirement_browser"]
+  [[submode_tabs.sections]]
+  name = "Classify"
+  tools = ["pprp:modal_strength_filter", "pprp:actor_filter", "pprp:section_grouping"]
+  [[submode_tabs.sections]]
+  name = "Sections L and M"
+  tools = ["pprp:instructions_parser", "pprp:evaluation_factor_parser", "pprp:page_limit_tracker"]
+
+[[submode_tabs]]
+submode = "proposal"
+id = "prp-compliance"
+name = "Compliance"
+color = "#f87171"
+  [[submode_tabs.sections]]
+  name = "Matrix"
+  tools = ["pprp:compliance_matrix", "pprp:export_matrix_csv", "pprp:matrix_coverage_chart"]
+  # The falsifier: what the firm cannot answer today.
+  [[submode_tabs.sections]]
+  name = "Gaps"
+  tools = ["pprp:gap_report", "pprp:gap_assignment", "pprp:gap_to_no_bid_escalation"]
+  [[submode_tabs.sections]]
+  name = "Traceability"
+  tools = ["pprp:citation_checker", "pprp:uncited_claim_finder", "pprp:cross_reference_map"]
+
+[[submode_tabs]]
+submode = "proposal"
+id = "prp-outline"
+name = "Outline"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Structure"
+  tools = ["pprp:response_outline", "pprp:section_allocator", "pprp:volume_planner"]
+  [[submode_tabs.sections]]
+  name = "Capability Library"
+  tools = ["pprp:capability_library", "pprp:past_performance_library", "pprp:resume_library"]
+  [[submode_tabs.sections]]
+  name = "Readiness"
+  tools = ["pprp:writable_section_report", "pprp:blocked_section_report", "pprp:page_budget_allocator"]
+
+[[submode_tabs]]
+submode = "proposal"
+id = "prp-drafting"
+name = "Drafting"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Draft"
+  tools = ["pprp:draft_response", "pprp:open_draft", "pprp:regenerate_section"]
+  [[submode_tabs.sections]]
+  name = "Evidence"
+  tools = ["pprp:insert_past_performance", "pprp:insert_key_personnel", "pprp:insert_metric"]
+  [[submode_tabs.sections]]
+  name = "Voice"
+  tools = ["pprp:tone_check", "pprp:jargon_scrub", "pprp:active_voice_pass"]
+
+[[submode_tabs]]
+submode = "proposal"
+id = "prp-review"
+name = "Review"
+color = "#a78bfa"
+  [[submode_tabs.sections]]
+  name = "Colour Teams"
+  tools = ["pprp:pink_team_checklist", "pprp:red_team_checklist", "pprp:gold_team_checklist"]
+  [[submode_tabs.sections]]
+  name = "Responsiveness"
+  tools = ["pprp:responsiveness_check", "pprp:format_compliance_check", "pprp:submission_checklist"]
+  [[submode_tabs.sections]]
+  name = "Package"
+  tools = ["pprp:assemble_package", "pprp:package_manifest", "pprp:final_read_log"]
+
+# ---- 3. Grants ------------------------------------------------------------
+# A grant is not a contract. 2 CFR 200 governs instead of the FAR, the
+# narrative sections differ, the budget carries an indirect rate, and
+# eligibility turns on organization type rather than a set-aside code. Folding
+# this into Proposal would produce a template that fits neither.
+
+[[submode_tabs]]
+submode = "grants"
+id = "grt-announcements"
+name = "Announcements"
+color = "#0E7C6B"
+  [[submode_tabs.sections]]
+  name = "Feed"
+  tools = ["pgrt:browse_announcements", "pgrt:fetch_full_announcement", "pgrt:forecast_watch"]
+  [[submode_tabs.sections]]
+  name = "Filters"
+  tools = ["pgrt:aln_filter", "pgrt:funding_category_filter", "pgrt:applicant_type_filter"]
+  [[submode_tabs.sections]]
+  name = "Deadlines"
+  tools = ["pgrt:close_date_monitor", "pgrt:letter_of_intent_tracker", "pgrt:cycle_calendar"]
+
+[[submode_tabs]]
+submode = "grants"
+id = "grt-eligibility"
+name = "Eligibility"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Applicant"
+  tools = ["pgrt:organization_profile", "pgrt:applicant_type_checker", "pgrt:sam_registration_status"]
+  [[submode_tabs.sections]]
+  name = "Program"
+  tools = ["pgrt:eligibility_parser", "pgrt:cost_share_calculator", "pgrt:service_area_checker"]
+  [[submode_tabs.sections]]
+  name = "Screening"
+  tools = ["pgrt:screen_announcements", "pgrt:ineligibility_report", "pgrt:priority_area_matcher"]
+
+[[submode_tabs]]
+submode = "grants"
+id = "grt-narrative"
+name = "Narrative"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Sections"
+  tools = ["pgrt:narrative_outline", "pgrt:project_abstract", "pgrt:statement_of_need"]
+  [[submode_tabs.sections]]
+  name = "Design"
+  tools = ["pgrt:logic_model_builder", "pgrt:goals_and_objectives", "pgrt:workplan_timeline"]
+  [[submode_tabs.sections]]
+  name = "Evidence"
+  tools = ["pgrt:need_data_sourcer", "pgrt:evaluation_plan", "pgrt:outcome_measure_picker"]
+
+[[submode_tabs]]
+submode = "grants"
+id = "grt-budget"
+name = "Budget"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Build"
+  tools = ["pgrt:budget_builder", "pgrt:personnel_calculator", "pgrt:fringe_calculator"]
+  [[submode_tabs.sections]]
+  name = "Indirect"
+  tools = ["pgrt:indirect_rate_applier", "pgrt:de_minimis_checker", "pgrt:modified_total_direct_cost"]
+  # A budget narrative that does not tie to the workplan is the most common
+  # reason a technically sound application is scored down.
+  [[submode_tabs.sections]]
+  name = "Narrative"
+  tools = ["pgrt:budget_narrative", "pgrt:activity_cost_linker", "pgrt:budget_workplan_reconciler"]
+
+[[submode_tabs]]
+submode = "grants"
+id = "grt-assurances"
+name = "Assurances"
+color = "#f87171"
+  [[submode_tabs.sections]]
+  name = "Forms"
+  tools = ["pgrt:sf424_checklist", "pgrt:assurance_form_tracker", "pgrt:certification_checklist"]
+  [[submode_tabs.sections]]
+  name = "Attachments"
+  tools = ["pgrt:attachment_checklist", "pgrt:letter_of_support_tracker", "pgrt:indirect_agreement_upload"]
+  [[submode_tabs.sections]]
+  name = "Submission Prep"
+  tools = ["pgrt:submission_checklist", "pgrt:workspace_readiness", "pgrt:final_package_review"]
+
+# ---- 4. Contracts ---------------------------------------------------------
+# After the award. The seat that decides whether a won contract is profitable,
+# and the one small firms most often have no tooling for at all. The
+# cost-growth analyzer is the falsifier: it can tell an operator the work they
+# fought for is losing money.
+
+[[submode_tabs]]
+submode = "contracts"
+id = "con-award"
+name = "Award"
+color = "#0E7C6B"
+  [[submode_tabs.sections]]
+  name = "Record"
+  tools = ["pcon:award_register", "pcon:contract_type_notes", "pcon:period_of_performance"]
+  [[submode_tabs.sections]]
+  name = "Structure"
+  tools = ["pcon:clin_builder", "pcon:option_year_tracker", "pcon:ceiling_tracker"]
+  [[submode_tabs.sections]]
+  name = "Kickoff"
+  tools = ["pcon:kickoff_checklist", "pcon:deliverable_schedule", "pcon:key_personnel_letters"]
+
+[[submode_tabs]]
+submode = "contracts"
+id = "con-performance"
+name = "Performance"
+color = "#4ade80"
+  [[submode_tabs.sections]]
+  name = "Delivery"
+  tools = ["pcon:deliverable_tracker", "pcon:milestone_monitor", "pcon:acceptance_log"]
+  [[submode_tabs.sections]]
+  name = "Service Levels"
+  tools = ["pcon:sla_tracker", "pcon:quality_plan", "pcon:corrective_action_log"]
+  [[submode_tabs.sections]]
+  name = "Assessment"
+  tools = ["pcon:cpars_preparation", "pcon:self_assessment_notes", "pcon:reference_builder"]
+
+[[submode_tabs]]
+submode = "contracts"
+id = "con-invoicing"
+name = "Invoicing"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Billing"
+  tools = ["pcon:invoice_builder", "pcon:invoice_schedule", "pcon:payment_tracker"]
+  [[submode_tabs.sections]]
+  name = "Cost"
+  tools = ["pcon:burn_rate_monitor", "pcon:funding_remaining", "pcon:limitation_of_funds_alert"]
+  # Falsifier: an honest read here can conclude the contract is unprofitable.
+  [[submode_tabs.sections]]
+  name = "Margin"
+  tools = ["pcon:cost_growth_analyzer", "pcon:effective_rate_calculator", "pcon:break_even_monitor"]
+
+[[submode_tabs]]
+submode = "contracts"
+id = "con-mods"
+name = "Modifications"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Changes"
+  tools = ["pcon:modification_log", "pcon:scope_change_analyzer", "pcon:equitable_adjustment_notes"]
+  [[submode_tabs.sections]]
+  name = "Options"
+  tools = ["pcon:option_exercise_tracker", "pcon:escalation_calculator", "pcon:extension_request_log"]
+  [[submode_tabs.sections]]
+  name = "Risk"
+  tools = ["pcon:unpriced_work_alert", "pcon:constructive_change_watch", "pcon:claim_notes"]
+
+[[submode_tabs]]
+submode = "contracts"
+id = "con-closeout"
+name = "Closeout"
+color = "#a78bfa"
+  [[submode_tabs.sections]]
+  name = "Completion"
+  tools = ["pcon:closeout_checklist", "pcon:final_invoice_prep", "pcon:property_disposition"]
+  [[submode_tabs.sections]]
+  name = "Records"
+  tools = ["pcon:record_retention_plan", "pcon:contract_file_index", "pcon:lessons_learned_log"]
+  [[submode_tabs.sections]]
+  name = "Recompete"
+  tools = ["pcon:recompete_calendar", "pcon:incumbent_position_notes", "pcon:transition_plan"]
+
+# ---- 5. Compliance --------------------------------------------------------
+# Registration and representation: the paperwork that decides whether a bid is
+# even accepted. Also the home of the audit trail, because "prove how you
+# decided" is a compliance question before it is anything else.
+
+[[submode_tabs]]
+submode = "compliance"
+id = "cmp-registration"
+name = "Registration"
+color = "#0E7C6B"
+  [[submode_tabs.sections]]
+  name = "Entity"
+  tools = ["pcmp:entity_registration_status", "pcmp:uei_record", "pcmp:cage_code_record"]
+  [[submode_tabs.sections]]
+  name = "Renewal"
+  tools = ["pcmp:registration_expiry_monitor", "pcmp:renewal_checklist", "pcmp:poc_register"]
+  [[submode_tabs.sections]]
+  name = "Banking"
+  tools = ["pcmp:remittance_record", "pcmp:tax_identification_record", "pcmp:eft_status"]
+
+[[submode_tabs]]
+submode = "compliance"
+id = "cmp-reps"
+name = "Representations"
+color = "#fbbf24"
+  [[submode_tabs.sections]]
+  name = "Reps and Certs"
+  tools = ["pcmp:reps_and_certs_review", "pcmp:annual_representation_diff", "pcmp:certification_expiry_monitor"]
+  [[submode_tabs.sections]]
+  name = "Socioeconomic"
+  tools = ["pcmp:socioeconomic_status_record", "pcmp:certification_evidence_index", "pcmp:joint_venture_record"]
+  [[submode_tabs.sections]]
+  name = "Exclusions"
+  tools = ["pcmp:exclusion_self_check", "pcmp:responsibility_matters_log", "pcmp:disclosure_log"]
+
+[[submode_tabs]]
+submode = "compliance"
+id = "cmp-flowdowns"
+name = "Flowdowns"
+color = "#f87171"
+  [[submode_tabs.sections]]
+  name = "Clauses"
+  tools = ["pcmp:far_clause_extractor", "pcmp:flowdown_matrix", "pcmp:subcontract_clause_pack"]
+  [[submode_tabs.sections]]
+  name = "Programs"
+  tools = ["pcmp:cybersecurity_requirement_check", "pcmp:labour_standards_check", "pcmp:accessibility_requirement_check"]
+  [[submode_tabs.sections]]
+  name = "Obligations"
+  tools = ["pcmp:recurring_obligation_calendar", "pcmp:reporting_obligation_log", "pcmp:training_obligation_log"]
+
+[[submode_tabs]]
+submode = "compliance"
+id = "cmp-size"
+name = "Size and Status"
+color = "#38bdf8"
+  [[submode_tabs.sections]]
+  name = "Size Standards"
+  tools = ["pcmp:size_standard_lookup", "pcmp:receipts_average_calculator", "pcmp:employee_count_calculator"]
+  [[submode_tabs.sections]]
+  name = "Affiliation"
+  tools = ["pcmp:affiliation_worksheet", "pcmp:ownership_record", "pcmp:control_test_notes"]
+  # Falsifier: outgrowing a size standard removes the set-asides a firm's
+  # whole pipeline depends on, and it is better learned early than at protest.
+  [[submode_tabs.sections]]
+  name = "Trajectory"
+  tools = ["pcmp:size_threshold_forecaster", "pcmp:set_aside_exposure_report", "pcmp:graduation_planner"]
+
+[[submode_tabs]]
+submode = "compliance"
+id = "cmp-audit"
+name = "Audit Trail"
+color = "#a78bfa"
+  # Every capture decision is one folder on disk holding the raw payload, the
+  # screen, the score with its derivation, the matrix, and a Merkle manifest.
+  # An auditor with `cat` and nothing else can reconstruct any decision.
+  [[submode_tabs.sections]]
+  name = "Records"
+  tools = ["pcmp:capture_record_index", "pcmp:open_capture_folder", "pcmp:record_summary"]
+  [[submode_tabs.sections]]
+  name = "Integrity"
+  tools = ["pcmp:verify_audit_trail", "pcmp:manifest_viewer", "pcmp:tamper_report"]
+  [[submode_tabs.sections]]
+  name = "Export"
+  tools = ["pcmp:export_decision_log", "pcmp:export_audit_bundle", "pcmp:retention_policy_notes"]

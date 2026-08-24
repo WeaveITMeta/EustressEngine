@@ -60,11 +60,44 @@ WIRED = {
     "csg:separate": ("Separate", "Split a union", "csg-separate"),
     "terrain:toggle-visibility": ("Terrain", "Toggle terrain visibility", "terrain"),
     "terrain:clear": ("Clear Terrain", "Clear all terrain voxels", "clear"),
+
+    # ── Public Sector: Capture ──────────────────────────────────────────────
+    "pcap:add_sam_source": ("SAM.gov", "Create a SAM.gov opportunities Connector", "link"),
+    "pcap:add_grants_source": ("Grants.gov", "Create a Grants.gov Connector", "link"),
+    "pcap:sync_now": ("Sync Now", "Poll every enabled capture Connector", "satellite"),
+    "pcap:source_status": ("Source Status", "Last fetch result for each Connector", "gauge"),
+    "pcap:api_key_status": ("API Key", "Paste your free SAM.gov API key", "key"),
+    "pcap:capability_statement": ("Capability Statement", "Edit the firm profile screening runs against", "id-card"),
+    "pcap:screen_pipeline": ("Screen", "Run the eligibility gates over fetched notices", "funnel"),
+    "pcap:rejection_report": ("Rejection Report", "Why notices were filtered out, by frequency", "chart-bar"),
+    "pcap:score_pipeline": ("Score", "Rank eligible notices by fit, with per-criterion evidence", "brain"),
+    "pcap:no_bid_report": ("No-Bid Report", "Notices the model advises against, and why", "flag"),
+    "pcap:calibrate_model": ("Calibrate", "Score the ranking against recorded outcomes", "crosshair"),
+    "pcap:capture_record_index": ("Records", "List every capture folder on disk", "list"),
+    "pcap:build_deal_room": ("Build Deal Room", "Lay the ranked pipeline out in 3D", "array-radial"),
+
+    # ── Public Sector: Proposal ─────────────────────────────────────────────
+    "pprp:extract_requirements": ("Extract", "Pull every shall and must from the solicitation", "search"),
+    "pprp:compliance_matrix": ("Compliance Matrix", "Requirement to response section, with gaps shown", "array-grid"),
+    "pprp:gap_report": ("Gap Report", "Requirements nothing on file answers", "flag"),
+    "pprp:export_matrix_csv": ("Export CSV", "Write the compliance matrix as CSV", "export"),
+    "pprp:response_outline": ("Outline", "Build the response skeleton from the matrix", "document"),
+    "pprp:draft_response": ("Draft", "Seed the first draft, every claim cited", "new-file"),
+
+    # ── Public Sector: Compliance ───────────────────────────────────────────
+    "pcmp:capture_record_index": ("Records", "List every capture folder on disk", "list"),
+    "pcmp:verify_audit_trail": ("Verify", "Re-derive every record's Merkle root", "shield"),
 }
 
 # ── Acronyms / proper nouns for label + tooltip casing ───────────────────────
 ACR = {
     "gis": "GIS", "gdt": "GD&T", "bom": "BOM", "vle": "VLE", "pfd": "PFD",
+    # Federal contracting and grants vocabulary.
+    "naics": "NAICS", "uei": "UEI", "cage": "CAGE", "far": "FAR",
+    "clin": "CLIN", "cpars": "CPARS", "aln": "ALN", "sf424": "SF-424",
+    "eft": "EFT", "poc": "POC", "sla": "SLA", "csv": "CSV", "api": "API",
+    "nofo": "NOFO", "cfr": "CFR", "wosb": "WOSB", "sdvosb": "SDVOSB",
+    "hubzone": "HUBZone", "certs": "Certs", "reps": "Reps",
     "pid": "P&ID", "hazop": "HAZOP", "fmea": "FMEA", "capa": "CAPA",
     "icf": "ICF", "soap": "SOAP", "sbar": "SBAR", "isbar": "ISBAR",
     "emar": "eMAR", "moa": "MoA", "pk": "PK", "mtm": "MTM", "sir": "SIR",
@@ -413,6 +446,10 @@ PREFIX_ICON = {
     "gadm": "flowchart", "gclk": "stamp", "gprc": "handshake",
     "gaud": "search", "gpln": "map", "gpwk": "hardhat", "gpsa": "shield",
     "ghhs": "heart-pulse", "gcon": "lifebuoy",
+    # ── Public Sector mode: one prefix per discipline (the SELL side; the
+    #    government `gprc:` prefix is the buyer's seat and stays separate) ──
+    "pcap": "binoculars", "pprp": "scroll", "pgrt": "certificate",
+    "pcon": "stamp", "pcmp": "shield",
 }
 
 

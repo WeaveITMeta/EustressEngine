@@ -471,7 +471,7 @@ sim-orchestration = ["dep:eustress-forge", "world-db"]
 # it. The `data-graph-default` CI guard asserts the leaf IS present in the
 # default graph (inverted from the old off-by-default assertion this
 # comment used to describe).
-data = ["dep:eustress-data", "eustress-data/parquet", "eustress-data/import", "eustress-data/spectral", "dep:eustress-data-store"]
+data = ["dep:eustress-data", "eustress-data/parquet", "eustress-data/import", "eustress-data/spectral", "eustress-data/http", "dep:eustress-data-store"]
 # Gaussian Splatting / radiance-field rendering (GAUSSIAN_SPLATTING_BATTLE_PLAN.md
 # Phase 0). OPT-IN, NOT in `core`/`default`: pulls `eustress-radiance` →
 # `bevy_gaussian_splatting` (GPU splat pipeline). Keep out of the everyday build

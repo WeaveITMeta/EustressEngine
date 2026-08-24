@@ -305,6 +305,13 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
     #[cfg(feature = "world-db")]
     app.add_plugins(crate::space::world_db_plugin::WorldDbPlugin);
 
+    // Government opportunity capture: polls enabled SAM.gov / Grants.gov
+    // Connectors and files each notice under the Space's `Capture/`. Gated
+    // with `data` because it builds on that leaf's HTTP seam. Inert until a
+    // human enables a Connector, so nothing here polls unasked.
+    #[cfg(feature = "data")]
+    app.add_plugins(crate::capture::CapturePlugin);
+
     // Streaming — in-process EustressStream + TCP stream node + the
     // persistent SimStreamWriter connection.
     #[cfg(feature = "streaming")]

@@ -58,6 +58,11 @@ pub mod tool_metadata;
 pub mod usage_telemetry;
 pub mod undo;
 pub mod camera_controller;
+// Government opportunity capture (SAM.gov + Grants.gov). Gated with the
+// `data` feature because it builds on `eustress_data`'s HTTP seam and
+// Connector materialization rather than carrying a second copy of either.
+#[cfg(feature = "data")]
+pub mod capture;
 // Off-screen AI camera (marker/state/plugin). Also declared in main.rs; mirror
 // it here so the LIBRARY compile of `play_mode` can resolve
 // `crate::ai_camera::AiCamera` (gap-3 Play→Edit camera-disable filter). Its only

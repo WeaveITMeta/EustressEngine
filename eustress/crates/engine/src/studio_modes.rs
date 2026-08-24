@@ -34,7 +34,7 @@ pub const KNOWN_TAB_IDS: &[&str] = &[
 /// Must stay in sync with `mode-icon()` in `ribbon.slint`.
 pub const KNOWN_ICON_IDS: &[&str] = &[
     "gear", "gavel", "gamepad", "bridge", "scales", "factory", "mortarboard", "briefcase",
-    "health", "military", "capitol",
+    "health", "military", "capitol", "handshake",
 ];
 
 /// The five panel-Layout preset names (see `dock_layout.slint`). A mode names
@@ -490,6 +490,7 @@ pub fn load_builtin_modes() -> Vec<ModeManifest> {
         (include_str!("../modes/health.toml"), "health"),
         (include_str!("../modes/military.toml"), "military"),
         (include_str!("../modes/government.toml"), "government"),
+        (include_str!("../modes/publicsector.toml"), "publicsector"),
     ] {
         match parse_mode_toml(text, true) {
             Ok(m) => out.push(m),
@@ -715,6 +716,107 @@ mod tests {
     }
 
     #[test]
+    fn publicsector_mode_shape() {
+        let modes = load_builtin_modes();
+        let ps = modes.iter().find(|m| m.id == "publicsector").expect("publicsector parses");
+
+        assert_eq!(ps.icon, "handshake");
+        assert!(
+            KNOWN_ICON_IDS.contains(&ps.icon.as_str()),
+            "the mode icon must be allowlisted or it silently falls back to a gear"
+        );
+        assert!(ps.tabs.len() < KNOWN_TAB_IDS.len(), "public sector is a tab subset");
+        assert!(
+            ps.tabs.contains(&"mindspace".to_string()),
+            "the 3D deal room needs the MindSpace tab, and ribbon tabs are mode-level              (SubmodeMeta has none) so losing it here removes it from every discipline"
+        );
+        assert!(ps.tabs.contains(&"data".to_string()), "Connectors and Datasets live on Data");
+
+        // Commercial seat, but still ungated: role gating waits on real
+        // identity-backed roles, not an env var. Same posture as Government.
+        assert_eq!(ps.required_role, None, "the mode is open");
+        assert_eq!(ps.submodes.len(), 5, "five disciplines, one per real job title");
+        for sm in &ps.submodes {
+            assert_eq!(sm.required_role, None, "discipline '{}' must stay ungated", sm.id);
+            assert_eq!(sm.color, None, "discipline '{}' renders default grey", sm.id);
+            let icon = sm.icon.as_deref().unwrap_or_default();
+            assert!(
+                crate::tool_metadata::TOOL_ICON_IDS.contains(&icon),
+                "discipline '{}' glyph '{icon}' is not allowlisted",
+                sm.id
+            );
+        }
+
+        // Every discipline carries its own tab set. `effective_custom_tabs`
+        // OVERRIDES rather than merges, so a discipline that declared none
+        // would fall back to the mode-level tabs and silently lose its tools.
+        for sm in &ps.submodes {
+            let tabs = ps.effective_custom_tabs(&sm.id);
+            assert_eq!(tabs.len(), 5, "discipline '{}' should have five tabs", sm.id);
+            let mut ids: Vec<&str> = tabs.iter().map(|t| t.id.as_str()).collect();
+            let before = ids.len();
+            ids.sort_unstable();
+            ids.dedup();
+            assert_eq!(before, ids.len(), "discipline '{}' has a duplicate tab id", sm.id);
+        }
+
+        // The disciplines genuinely differ; they are not one tab set relabelled.
+        let capture: Vec<&str> =
+            ps.effective_custom_tabs("capture").iter().map(|t| t.id.as_str()).collect();
+        let contracts: Vec<&str> =
+            ps.effective_custom_tabs("contracts").iter().map(|t| t.id.as_str()).collect();
+        assert_ne!(capture, contracts, "Capture and Contracts must not share a tab set");
+
+        // The mode is only honest if the falsification surface actually ships:
+        // a capture tool that cannot recommend against a bid is a lead
+        // generator for whoever sold it.
+        let capture_tools: Vec<&str> = ps
+            .effective_custom_tabs("capture")
+            .iter()
+            .flat_map(|t| t.sections.iter())
+            .flat_map(|sec| sec.tools.iter())
+            .map(String::as_str)
+            .collect();
+        assert!(
+            capture_tools.contains(&"pcap:no_bid_report"),
+            "Capture must carry the no-bid recommender"
+        );
+        assert!(
+            capture_tools.contains(&"pcap:calibrate_model"),
+            "Capture must carry the calibration harness"
+        );
+
+        let proposal_tools: Vec<&str> = ps
+            .effective_custom_tabs("proposal")
+            .iter()
+            .flat_map(|t| t.sections.iter())
+            .flat_map(|sec| sec.tools.iter())
+            .map(String::as_str)
+            .collect();
+        assert!(
+            proposal_tools.contains(&"pprp:gap_report"),
+            "Proposal must carry the compliance-gap report"
+        );
+
+        // Nothing in this mode may look like it files on the user's behalf.
+        // The whole surface is drafting; a human submits.
+        let every_tool: Vec<String> = ps
+            .submodes
+            .iter()
+            .flat_map(|sm| ps.effective_custom_tabs(&sm.id))
+            .flat_map(|t| t.sections.clone())
+            .flat_map(|sec| sec.tools.clone())
+            .collect();
+        for id in &every_tool {
+            let leaf = id.rsplit(':').next().unwrap_or(id);
+            assert!(
+                !leaf.starts_with("submit_") && !leaf.starts_with("file_") && !leaf.starts_with("sign_"),
+                "'{id}' reads as though it files on the user's behalf; the engine drafts                  and a human files"
+            );
+        }
+    }
+
+    #[test]
     fn builtins_parse() {
         let modes = load_builtin_modes();
         // Assert the exact SET, not a count: a bare number says "11 != 10" when
@@ -727,6 +829,7 @@ mod tests {
             vec![
                 "gaming", "student", "business", "legal", "ai", "civil",
                 "engineering", "justice", "health", "military", "government",
+                "publicsector",
             ],
             "every built-in manifest must parse, in dropdown order"
         );

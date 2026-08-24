@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<mask id="kb"><rect x="0" y="0" width="24" height="24" fill="white"/><circle cx="17.6" cy="17.6" r="6.1" fill="black"/></mask>
+<g mask="url(#kb)"><g transform="scale(0.82)"><rect x="5" y="8" width="14" height="10" rx="2" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="12" y1="8" x2="12" y2="4.5" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <circle cx="12" cy="3.5" r="1" fill="#d4d4d4" stroke="none"/>
+  <circle cx="9" cy="12.5" r="1" fill="#d4d4d4" stroke="none"/>
+  <circle cx="15" cy="12.5" r="1" fill="#d4d4d4" stroke="none"/>
+  <line x1="9.5" y1="15.5" x2="14.5" y2="15.5" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="2.5" y1="12" x2="5" y2="12" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <line x1="19" y1="12" x2="21.5" y2="12" stroke="#d4d4d4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></g></g>
+<circle cx="17.6" cy="17.6" r="4.5" stroke="#d4d4d4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+<path d="M15.5 15.9h4.2M15.5 17.6h4.2M15.5 19.3h2.6" stroke="#d4d4d4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
