@@ -5,6 +5,7 @@
 
 import { VerticalBox, HorizontalBox, ScrollView, TextEdit } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { CompletionPopup, CompletionItem } from "completion_popup.slint";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared structs used by EustressTextEdit and the outer ScriptEditor. Defined
@@ -64,7 +65,7 @@ export struct DiagnosticSpan {
 // ─────────────────────────────────────────────────────────────────────────────
 component EustressTextEdit inherits Rectangle {
     in-out property <string> text;
-    in property <length> font-size;
+    in property <length> font-size: 13px;
     in property <string> font-family;
     in property <TextWrap> wrap: word-wrap;
     in property <bool> read-only: false;
@@ -89,8 +90,8 @@ component EustressTextEdit inherits Rectangle {
     callback edited(text: string);
     callback key-pressed(event: KeyEvent) -> EventResult;
     /// Fired when the user picks "Go to Definition". `line` and `column`
-    /// are 1-based and derived from the right-click position via monospace
-    /// math (CHAR_WIDTH = 7.8px, LINE_HEIGHT = 18px). Rust resolves the
+    /// are 1-based and derived from the right-click position via the
+    /// measured glyph grid (`char-advance` / `line-height`). Rust resolves the
     /// symbol at that cursor position via the analyzer's SymbolIndex.
     callback go-to-definition(int, int);
     /// Fired when the user picks "Find References". Same coord convention.
@@ -107,14 +108,90 @@ component EustressTextEdit inherits Rectangle {
     public function copy() { text-input.copy(); }
     public function paste() { text-input.paste(); }
 
+    /// Scroll so `line` (1-based) sits at the top of the viewport, clamped to
+    /// the document. Used by Go-to-Definition, which previously resolved the
+    /// symbol and reported it but had no way to actually move the view — the
+    /// `script-scroll-to-line` property it set was declared in `main.slint`
+    /// and read by nobody.
+    public function scroll-to-line(line: int) {
+        flick.viewport-y = max(
+            min(0px, -(flick.viewport-height - flick.height)),
+            -(line - 1) * root.line-height,
+        );
+    }
+
     forward-focus: text-input;
+
+    // ── Measured font metrics ────────────────────────────────────────────
+    //
+    // Everything that overlays the text — the syntax-highlight spans, the
+    // diagnostic squiggles, the line-number gutter, the caret line/column
+    // readout — has to agree with the glyph grid the `TextInput` actually
+    // renders on. That grid was previously ASSUMED: `CHAR_WIDTH = 7.8px` and
+    // an 18px line height, hardcoded in two Rust constants and a dozen Slint
+    // expressions. Consolas at 13px advances ~7.15px, so every overlay drifted
+    // right by ~9% of the column — about a quarter of a character by column 10,
+    // a full character by column 40.
+    //
+    // Measure instead of assume. These probes render the editor's real font at
+    // its real size; Slint reports the shaped width, so the advance is correct
+    // for whatever font actually resolves on this machine — including the
+    // fallback when Consolas is absent.
+    //
+    // They live inside a 0x0 clipping Rectangle rather than being marked
+    // `visible: false`. A child keeps its own natural `preferred-width`
+    // regardless of the parent's size, so the measurement stays real, while
+    // the clip guarantees nothing is painted — no dependence on whether an
+    // invisible element still participates in measurement.
+    //
+    // Consumers outside this component read `char-advance` / `line-height`
+    // rather than re-deriving them, so the grid has exactly one definition.
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 0px;
+        height: 0px;
+        clip: true;
+
+        metric-probe := Text {
+            // 64 glyphs, so per-glyph rounding error is divided by 64.
+            text: "0000000000000000000000000000000000000000000000000000000000000000";
+            font-size: root.font-size;
+            font-family: root.font-family;
+            wrap: no-wrap;
+        }
+        line-probe := Text {
+            text: "0";
+            font-size: root.font-size;
+            font-family: root.font-family;
+            wrap: no-wrap;
+        }
+    }
+
+    /// Horizontal advance of one monospace glyph, measured from the live font.
+    /// Floored at 1px: the probes report 0 for a frame during initial layout,
+    /// and the caret math divides by this.
+    out property <length> char-advance: max(1px, metric-probe.preferred-width / 64);
+    /// Height of one rendered line, measured from the live font. Same floor,
+    /// same reason.
+    out property <length> line-height: max(1px, line-probe.preferred-height);
+    /// Left padding the `TextInput` applies before the first glyph. Overlays
+    /// add this so column 0 lands on the first character rather than the edge.
+    out property <length> text-inset-x: 12px;
+    /// Top padding before the first baseline row.
+    out property <length> text-inset-y: 5px;
 
     // Tracks the last known caret line/col (1-based) so F12 / Shift+F12
     // can dispatch Go-to-Def / Find-Refs without needing pixel coords
     // from a right-click. Updated by `cursor-position-changed` on the
     // inner TextInput.
-    property <int> caret-line: 1;
-    property <int> caret-col: 1;
+    out property <int> caret-line: 1;
+    out property <int> caret-col: 1;
+
+    /// Fired whenever the caret moves, with 1-based (line, column). The host
+    /// uses it to recompute completions against the identifier under the
+    /// cursor.
+    callback caret-moved(int, int);
 
     // Slint's `ContextMenuArea` owns the right-click hook AND the popup
     // rendering; the popup's width is floored by the active style's
@@ -186,15 +263,18 @@ component EustressTextEdit inherits Rectangle {
                 height: parent.height;
                 background: transparent;
 
+                // `span.x` is a COLUMN index, not a pixel offset — the
+                // pixel conversion happens here, against the measured advance,
+                // so Rust never has to guess the font metrics.
                 for span in root.token-spans: Text {
-                    x: span.x * 1px + 12px;
-                    y: span.line * 18px + 5px;
+                    x: span.x * root.char-advance + root.text-inset-x;
+                    y: span.line * root.line-height + root.text-inset-y;
                     text: span.text;
                     color: rgba(span.r, span.g, span.b, 1.0);
-                    font-size: 13px;
-                    font-family: "Consolas";
+                    font-size: root.font-size;
+                    font-family: root.font-family;
                     font-weight: span.bold ? 700 : 400;
-                    height: 18px;
+                    height: root.line-height;
                     wrap: no-wrap;
                 }
             }
@@ -211,7 +291,16 @@ component EustressTextEdit inherits Rectangle {
                 wrap <=> root.wrap;
                 font-size <=> root.font-size;
                 font-family <=> root.font-family;
-                color <=> root.foreground;
+                // The syntax-highlight overlay is drawn BELOW this TextInput
+                // (it has to be, so the caret and selection stay on top), so
+                // the input's own glyphs sit directly over the coloured ones
+                // and hide them completely. Painting the input's text opaque
+                // therefore switched highlighting off entirely — the editor
+                // rendered flat single-colour text and the overlay was never
+                // visible at all. Go transparent whenever spans are available
+                // and let the overlay BE the text; the caret, selection
+                // highlight, and all input handling are unaffected.
+                color: root.has-token-spans ? transparent : root.foreground;
                 text <=> root.text;
                 read-only <=> root.read-only;
                 page-height: flick.height;
@@ -222,8 +311,9 @@ component EustressTextEdit inherits Rectangle {
                 // Track caret via pixel position → 1-based line/col.
                 // Monospace math: line = y/18 + 1, col = x/7.8 + 1.
                 cursor-position-changed(pos) => {
-                    root.caret-line = (pos.y / 18px) + 1;
-                    root.caret-col = max(1, (pos.x / 7.8px) + 1);
+                    root.caret-line = (pos.y / root.line-height) + 1;
+                    root.caret-col = max(1, (pos.x / root.char-advance) + 1);
+                    root.caret-moved(root.caret-line, root.caret-col);
                 }
 
                 // F12 = Go to Definition, Shift+F12 = Find References.
@@ -240,6 +330,87 @@ component EustressTextEdit inherits Rectangle {
                         return accept;
                     }
                     root.key-pressed(event)
+                }
+            }
+        }
+    }
+
+    // ── Vertical scrollbar ───────────────────────────────────────────────
+    //
+    // The editor is a bare `Flickable`, which scrolls but draws no bar, so a
+    // long script gave the reader no indication of document length or where
+    // they were in it. std-widgets' `ScrollView` is not an option here (see
+    // the note on the Flickable): it paints fluent's opaque background over
+    // the syntax-highlight overlay.
+    //
+    // Overlays the right edge rather than insetting the text, the way VS Code
+    // does — insetting would reflow every line the moment the document grows
+    // past one page. Rendered after the ContextMenuArea so it sits above the
+    // text, and only instantiated when the content actually overflows, so a
+    // short file keeps the full width clickable for text selection.
+    //
+    // `viewport-y` is <= 0 and grows negative downward, hence the negations.
+
+    // Total scrollable distance, and the track distance the thumb may travel
+    // across. Both floored at 1px so the ratios below can never divide by zero
+    // mid-relayout. Declared on the component root rather than on the bar so
+    // they survive the bar being instantiated and dropped as content changes.
+    property <length> vbar-scroll-range: max(1px, flick.viewport-height - flick.height);
+    property <length> vbar-thumb-height: max(28px, self.height * (flick.height / flick.viewport-height));
+    property <length> vbar-track-range: max(1px, self.height - self.vbar-thumb-height);
+
+    if flick.viewport-height > flick.height: Rectangle {
+        x: parent.width - 12px;
+        y: 0px;
+        width: 12px;
+        height: parent.height;
+        background: transparent;
+
+        track-area := TouchArea {
+            // Click the empty track to page, matching every native scrollbar.
+            // Dragging is handled by the thumb's own TouchArea, which takes
+            // priority over this one wherever the two overlap.
+            clicked => {
+                if (self.mouse-y < thumb.y) {
+                    flick.viewport-y = min(0px, flick.viewport-y + flick.height);
+                } else if (self.mouse-y > thumb.y + thumb.height) {
+                    flick.viewport-y = max(-root.vbar-scroll-range, flick.viewport-y - flick.height);
+                }
+            }
+        }
+
+        thumb := Rectangle {
+            x: 2px;
+            y: root.vbar-track-range * (-flick.viewport-y / root.vbar-scroll-range);
+            width: parent.width - 4px;
+            height: root.vbar-thumb-height;
+            border-radius: self.width / 2;
+            // Neutral greys rather than the accent: a scrollbar should read as
+            // chrome, and `accent-eustress` differs per theme.
+            background: thumb-area.pressed      ? Theme.text-primary
+                      : thumb-area.has-hover
+                        || track-area.has-hover ? Theme.text-secondary
+                      :                           Theme.text-disabled;
+
+            thumb-area := TouchArea {
+                // Viewport offset at the moment the drag began. Deltas are
+                // measured against this rather than accumulated per-move, so
+                // the thumb cannot drift away from the cursor over a long drag.
+                property <length> origin;
+
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down) {
+                        self.origin = flick.viewport-y;
+                    }
+                }
+
+                moved => {
+                    if (self.pressed) {
+                        flick.viewport-y = max(-root.vbar-scroll-range, min(0px,
+                            self.origin
+                            - (self.mouse-y - self.pressed-y)
+                              * (root.vbar-scroll-range / root.vbar-track-range)));
+                    }
                 }
             }
         }
@@ -350,10 +521,10 @@ export component ScriptEditor inherits Rectangle {
     // Pre-computed line number string pushed from Rust (e.g. "1\n2\n3\n...N").
     // Kept for backwards compatibility with any other consumers; the gutter
     // itself now uses `line-numbers-array` so each digit sits on the same
-    // 18px grid as the token-span overlay (no font-metric drift).
+    // measured glyph grid as the token-span overlay (no font-metric drift).
     in property <string> line-numbers-text: "1";
     // One entry per source line, e.g. ["1", "2", "3", ...]. The gutter
-    // renders one Text per entry at `y: idx * 18px + 5px`, locking
+    // renders one Text per entry at `y: idx * line-height + inset`, locking
     // alignment to the code overlay.
     in property <[string]> line-numbers-array: ["1"];
     // Set to true by Rust after loading new tab content; resets editor scroll to line 1.
@@ -380,6 +551,43 @@ export component ScriptEditor inherits Rectangle {
     callback on-toggle-mode(int);   // Toggle summary/code for tab at index
     callback on-go-to-definition(int, int);   // line, col (1-based)
     callback on-find-references(int, int);    // line, col (1-based)
+
+    // ── Code completion ──────────────────────────────────────────────────
+    //
+    // The host owns the state. Slint renders the list and forwards intent;
+    // it never decides what matches or what "accept" inserts. That keeps the
+    // filtering, the insertion text, and the caret placement in one place in
+    // Rust, where the analyzer already lives.
+    in property <[CompletionItem]> completion-items: [];
+    in property <int> completion-selected: 0;
+    in property <string> completion-prefix: "";
+    /// Caret position the popup anchors to, 1-based. Set by the host from the
+    /// same caret event that triggered the completion request, so the popup
+    /// cannot drift from the text it is completing.
+    in property <int> completion-line: 1;
+    in property <int> completion-col: 1;
+
+    callback on-completion-accept(int);   // index to insert
+    callback on-completion-move(int);     // -1 up, +1 down, -10/+10 page
+    callback on-completion-dismiss();
+    callback on-completion-request();     // Ctrl+Space
+    callback on-caret-moved(int, int);    // line, col (1-based)
+
+    // ── Signature help ───────────────────────────────────────────────────
+    //
+    // Shown while the caret sits inside a call's argument list. Empty label
+    // means "not in a call" — again no separate visible flag to desync.
+    // `analyzer::signature_help_at` resolves the callee and the active
+    // parameter index; the host renders both into these strings.
+    in property <string> signature-label: "";
+    in property <string> signature-active-param: "";
+
+    /// Scroll request from Go-to-Definition, 1-based. Reset to 0 once applied.
+    in-out property <int> scroll-to-line: 0;
+    /// Caret placement request as a byte offset, applied then reset to -1.
+    /// Completion uses it to land the cursor inside the inserted call's
+    /// parentheses.
+    in-out property <int> caret-to-offset: -1;
 
     // Derived: active tab mode ("summary" | "code" | "markdown" | "")
     //
@@ -686,14 +894,17 @@ export component ScriptEditor inherits Rectangle {
                     Flickable {
                         interactive: false;
                         x: 0px; y: 0px; width: 100%; height: 100%;
-                        viewport-height: max(self.height, root.line-numbers-array.length * 18px + 10px);
+                        // Row pitch comes from the editor's measured line
+                        // height, so gutter numbers stay welded to their lines
+                        // whatever font actually resolves.
+                        viewport-height: max(self.height, root.line-numbers-array.length * summary-edit.line-height + 10px);
                         viewport-y: summary-edit.scroll-y;
 
                         for num[idx] in root.line-numbers-array: Text {
                             x: 0px;
-                            y: idx * 18px + 5px;
+                            y: idx * summary-edit.line-height + summary-edit.text-inset-y;
                             width: parent.width - 10px;
-                            height: 18px;
+                            height: summary-edit.line-height;
                             text: num;
                             color: Theme.text-secondary;
                             font-size: 13px;
@@ -770,7 +981,7 @@ export component ScriptEditor inherits Rectangle {
                     code-gutter-flick := Flickable {
                         interactive: false;
                         x: 0px; y: 0px; width: 100%; height: 100%;
-                        viewport-height: max(self.height, root.line-numbers-array.length * 18px + 10px);
+                        viewport-height: max(self.height, root.line-numbers-array.length * editor-area.line-height + 10px);
                         viewport-y: editor-area.scroll-y;
 
                         // Colored accent strips — 3px left-edge, one per line
@@ -780,9 +991,9 @@ export component ScriptEditor inherits Rectangle {
 
                             for hl[idx] in root.highlight-lines: Rectangle {
                                 x: 0;
-                                y: idx * 18px + 5px;
+                                y: idx * editor-area.line-height + editor-area.text-inset-y;
                                 width: 3px;
-                                height: 18px;
+                                height: editor-area.line-height;
                                 background: rgba(hl.r, hl.g, hl.b, 0.55);
                             }
                         }
@@ -790,9 +1001,9 @@ export component ScriptEditor inherits Rectangle {
                         // Line number text
                         for num[idx] in root.line-numbers-array: Text {
                             x: 0px;
-                            y: idx * 18px + 5px;
+                            y: idx * editor-area.line-height + editor-area.text-inset-y;
                             width: parent.width - 10px;
-                            height: 18px;
+                            height: editor-area.line-height;
                             text: num;
                             color: Theme.text-secondary;
                             font-size: 13px;
@@ -827,16 +1038,19 @@ export component ScriptEditor inherits Rectangle {
                     // Same translation trick as the token-span overlay above:
                     // `+ editor-area.scroll-x/y` keeps the squiggle locked to
                     // its underlying text as the user scrolls.
+                    // `x_start` / `x_end` are COLUMN indices; the pixel
+                    // conversion happens here against the measured advance,
+                    // matching the token-span overlay exactly.
                     for diag in root.diagnostic-spans: Rectangle {
-                        x: diag.x_start * 1px + 12px + editor-area.scroll-x;
-                        y: diag.line * 18px + 5px + editor-area.scroll-y;
-                        width: max(4px, (diag.x_end - diag.x_start) * 1px);
-                        height: 18px;
+                        x: diag.x_start * editor-area.char-advance + editor-area.text-inset-x + editor-area.scroll-x;
+                        y: diag.line * editor-area.line-height + editor-area.text-inset-y + editor-area.scroll-y;
+                        width: max(4px, (diag.x_end - diag.x_start) * editor-area.char-advance);
+                        height: editor-area.line-height;
 
                         // Underline bar (at the bottom of the hovered area).
                         Rectangle {
                             x: 0px;
-                            y: 16px;
+                            y: parent.height - 2px;
                             width: parent.width;
                             height: 2px;
                             background: diag.severity == "error"   ? Theme.output-error
@@ -915,6 +1129,124 @@ export component ScriptEditor inherits Rectangle {
                         find-references(line, col) => {
                             root.on-find-references(line, col);
                         }
+                        caret-moved(line, col) => {
+                            root.on-caret-moved(line, col);
+                        }
+
+                        // Completion keys. Intercepted ONLY while the popup is
+                        // open, so with no popup every key behaves exactly as
+                        // it did before — Tab still inserts a tab, Enter still
+                        // breaks the line.
+                        key-pressed(event) => {
+                            if (event.text == Key.Space && event.modifiers.control) {
+                                root.on-completion-request();
+                                return accept;
+                            }
+                            if (root.completion-items.length > 0) {
+                                if (event.text == Key.Tab || event.text == Key.Return) {
+                                    root.on-completion-accept(root.completion-selected);
+                                    return accept;
+                                }
+                                if (event.text == Key.UpArrow) {
+                                    root.on-completion-move(-1);
+                                    return accept;
+                                }
+                                if (event.text == Key.DownArrow) {
+                                    root.on-completion-move(1);
+                                    return accept;
+                                }
+                                if (event.text == Key.PageUp) {
+                                    root.on-completion-move(-10);
+                                    return accept;
+                                }
+                                if (event.text == Key.PageDown) {
+                                    root.on-completion-move(10);
+                                    return accept;
+                                }
+                                if (event.text == Key.Escape) {
+                                    root.on-completion-dismiss();
+                                    return accept;
+                                }
+                            }
+                            reject
+                        }
+                    }
+
+                    // Completion popup, anchored one line BELOW the caret so
+                    // it never covers the text being typed. Uses the editor's
+                    // measured glyph grid, and adds the scroll offsets so it
+                    // tracks the caret when the document is scrolled.
+                    //
+                    // Flips above the caret when there is not enough room
+                    // below, and is clamped to the left edge so a caret near
+                    // the right margin does not push it off-screen.
+                    if root.completion-items.length > 0: Rectangle {
+                        property <length> caret-x: (root.completion-col - 1) * editor-area.char-advance
+                            + editor-area.text-inset-x + editor-area.scroll-x;
+                        property <length> caret-y: (root.completion-line - 1) * editor-area.line-height
+                            + editor-area.text-inset-y + editor-area.scroll-y;
+                        property <bool> flip-up: self.caret-y + editor-area.line-height + popup.height > parent.height;
+
+                        x: min(max(0px, self.caret-x), max(0px, parent.width - popup.width));
+                        y: self.flip-up
+                            ? max(0px, self.caret-y - popup.height)
+                            : self.caret-y + editor-area.line-height;
+                        width: popup.width;
+                        height: popup.height;
+
+                        popup := CompletionPopup {
+                            items: root.completion-items;
+                            selected-index: root.completion-selected;
+                            prefix: root.completion-prefix;
+                            on-select(idx) => { root.on-completion-accept(idx); }
+                        }
+                    }
+
+                    // Signature hint. Sits one line ABOVE the caret; the
+                    // completion popup sits below it, so both can be visible
+                    // at once without overlapping.
+                    if root.signature-label != "": Rectangle {
+                        property <length> caret-x: (root.completion-col - 1) * editor-area.char-advance
+                            + editor-area.text-inset-x + editor-area.scroll-x;
+                        property <length> caret-y: (root.completion-line - 1) * editor-area.line-height
+                            + editor-area.text-inset-y + editor-area.scroll-y;
+
+                        x: min(max(0px, self.caret-x), max(0px, parent.width - self.width));
+                        y: max(0px, self.caret-y - self.height - 2px);
+                        width: sig-row.preferred-width + 16px;
+                        height: sig-row.preferred-height + 8px;
+                        background: Theme.panel-background;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+                        drop-shadow-blur: 10px;
+                        drop-shadow-color: Theme.shadow-color;
+
+                        sig-row := HorizontalLayout {
+                            x: 8px;
+                            y: 4px;
+                            spacing: 8px;
+
+                            Text {
+                                text: root.signature-label;
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                                font-family: "Consolas";
+                                vertical-alignment: center;
+                            }
+
+                            // The parameter the caret is currently on, called
+                            // out because the label alone does not say which
+                            // argument you are typing.
+                            if root.signature-active-param != "": Text {
+                                text: root.signature-active-param;
+                                color: Theme.accent-eustress;
+                                font-size: 11px;
+                                font-family: "Consolas";
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
 
                     // Invisible sentinel: scroll-to-top-trigger
@@ -923,6 +1255,26 @@ export component ScriptEditor inherits Rectangle {
                         init => {
                             editor-area.set-selection-offsets(0, 0);
                             root.scroll-to-top-trigger = false;
+                        }
+                    }
+
+                    // Go-to-Definition jump. Same sentinel convention as
+                    // scroll-to-top-trigger: the host sets a line, this applies
+                    // it once and clears the request.
+                    if root.scroll-to-line > 0: TouchArea {
+                        width: 0px; height: 0px;
+                        init => {
+                            editor-area.scroll-to-line(root.scroll-to-line);
+                            root.scroll-to-line = 0;
+                        }
+                    }
+
+                    // Caret placement after a completion insert.
+                    if root.caret-to-offset >= 0: TouchArea {
+                        width: 0px; height: 0px;
+                        init => {
+                            editor-area.set-selection-offsets(root.caret-to-offset, root.caret-to-offset);
+                            root.caret-to-offset = -1;
                         }
                     }
                 }

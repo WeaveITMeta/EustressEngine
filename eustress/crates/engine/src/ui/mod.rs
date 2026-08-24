@@ -319,6 +319,42 @@ pub struct StudioState {
     pub pending_reorder: Option<(i32, i32)>,
     pub script_editor_content: String,
     pub script_content_dirty: bool,
+
+    // ── Code completion ──────────────────────────────────────────────
+    //
+    // Host-owned popup state. `script_editor::analyzer::complete()` has
+    // existed since the analyzer landed but had no UI; these carry its
+    // output to Slint and track the selection between frames.
+    /// Current match list. Empty means the popup is closed — there is no
+    /// separate `visible` flag to fall out of sync with the contents.
+    pub completion_items: Vec<crate::script_editor::Completion>,
+    /// Index into `completion_items`. Clamped on every mutation.
+    pub completion_selected: usize,
+    /// Identifier text the list is filtered on, shown in the popup footer.
+    pub completion_prefix: String,
+    /// Byte offset where `completion_prefix` starts. Accepting an item
+    /// replaces `[completion_prefix_start, caret)` with the insertion.
+    pub completion_prefix_start: u32,
+    /// Caret the popup is anchored to, 1-based.
+    pub completion_line: i32,
+    pub completion_col: i32,
+    /// Set to true when the model changes, so the Slint sync runs only on
+    /// change rather than rebuilding a model every frame.
+    pub completion_dirty: bool,
+    /// Suppresses re-opening until the caret moves onto a fresh prefix.
+    /// Escape sets it; typing another identifier character clears it.
+    pub completion_dismissed: bool,
+    /// Caret byte offset to apply after an insert, consumed by Slint.
+    pub pending_caret_offset: Option<u32>,
+
+    // ── Signature help ───────────────────────────────────────────────
+    /// Rendered signature of the call the caret is inside, empty when the
+    /// caret is not in an argument list.
+    pub signature_label: String,
+    /// The parameter the caret is currently on, called out separately
+    /// because the label alone does not say which argument you are typing.
+    pub signature_active_param: String,
+    pub signature_dirty: bool,
     // HighlightLine is a Slint-generated type — use opaque Vec to avoid
     // mod.rs depending on slint::include_modules!(). Cast in slint_ui.rs.
     pub script_highlight_lines: Vec<slint_ui::SlintHighlightLine>,
@@ -407,6 +443,18 @@ impl Default for StudioState {
             pending_reorder: None,
             script_editor_content: String::new(),
             script_content_dirty: false,
+            completion_items: Vec::new(),
+            completion_selected: 0,
+            completion_prefix: String::new(),
+            completion_prefix_start: 0,
+            completion_line: 1,
+            completion_col: 1,
+            completion_dirty: false,
+            completion_dismissed: false,
+            pending_caret_offset: None,
+            signature_label: String::new(),
+            signature_active_param: String::new(),
+            signature_dirty: false,
             script_highlight_lines: Vec::new(),
             pending_web_navigate: None,
             pending_web_back: false,

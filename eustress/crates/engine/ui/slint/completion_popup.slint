@@ -1,0 +1,206 @@
+// ============================================================================
+// Code Completion Popup
+// ============================================================================
+//
+// Anchored under the caret in the script editor. The host (Rust) owns all the
+// state — which items match, which one is selected — and this component only
+// renders it and reports clicks. Keyboard navigation is intercepted by
+// `EustressTextEdit.key-pressed` and routed through the host too, so exactly
+// one place decides what Up/Down/Tab/Enter/Escape mean.
+//
+// The item list comes from `script_editor::analyzer::complete()`, which merges
+// Rune keywords, symbols defined in the current file, and the Eustress API
+// catalog (auto-derived from every `#[rune::function]` in the engine, with
+// real parameter names and types).
+
+import { Theme } from "theme.slint";
+
+// ─ Data struct ──────────────────────────────────────────────────────────────
+
+export struct CompletionItem {
+    /// The identifier inserted on accept.
+    label: string,
+    /// Dim right-hand text — a rendered signature for functions
+    /// ("fn get_sim_value(key: String) -> f64"), empty for plain identifiers.
+    detail: string,
+    /// "keyword" | "function" | "type" | "variable". Drives the glyph + colour
+    /// so the kind is readable at a glance without reading the detail.
+    kind: string,
+}
+
+// ─ Popup ────────────────────────────────────────────────────────────────────
+
+export component CompletionPopup inherits Rectangle {
+    in property <[CompletionItem]> items: [];
+    in property <int> selected-index: 0;
+    /// Identifier text typed so far. Rendered in the footer so the user can
+    /// see what the list is filtered against.
+    in property <string> prefix: "";
+
+    /// Fired when a row is clicked. The host accepts that index.
+    callback on-select(int);
+
+    // Row geometry. Kept as properties so the height calculation below and the
+    // scroll-follow maths cannot drift apart.
+    property <length> row-height: 22px;
+    property <int> max-visible-rows: 10;
+    property <length> list-height: min(
+        root.items.length * root.row-height,
+        root.max-visible-rows * root.row-height,
+    );
+
+    width: 420px;
+    height: root.items.length > 0 ? root.list-height + 22px : 0px;
+    visible: root.items.length > 0;
+    background: Theme.panel-background;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    drop-shadow-blur: 14px;
+    drop-shadow-color: Theme.shadow-color;
+    drop-shadow-offset-y: 3px;
+    clip: true;
+
+    // Swallow wheel events so scrolling the list never falls through to the
+    // editor's Flickable (which would scroll the document out from under the
+    // popup) or to the 3D viewport behind it.
+    TouchArea {
+        scroll-event(event) => { accept }
+    }
+
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+
+        Rectangle {
+            height: root.list-height;
+            clip: true;
+
+            // Scroll-follow: keep the selected row inside the visible window
+            // without a ScrollView. Selection is host-driven and can jump by
+            // more than one row (page keys, filtering), so the offset is
+            // derived from the index rather than nudged incrementally.
+            //
+            // Above the window -> scroll so the row is the first visible one.
+            // Below -> scroll so it is the last. Otherwise leave it alone, so
+            // moving within the window does not shift the list under the eye.
+            property <int> first-visible: max(0, min(
+                root.selected-index - root.max-visible-rows + 1,
+                root.items.length - root.max-visible-rows,
+            ));
+
+            VerticalLayout {
+                y: -parent.first-visible * root.row-height;
+                padding: 0px;
+                spacing: 0px;
+
+                for item[idx] in root.items: Rectangle {
+                    height: root.row-height;
+                    background: idx == root.selected-index
+                        ? Theme.accent-eustress
+                        : (row-touch.has-hover ? Theme.explorer-item-hover : transparent);
+
+                    row-touch := TouchArea {
+                        clicked => { root.on-select(idx); }
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 6px;
+
+                        // Kind glyph. Single character so the label column
+                        // starts at a fixed x for every row.
+                        Text {
+                            width: 12px;
+                            text: item.kind == "keyword"  ? "K"
+                                : item.kind == "function" ? "ƒ"
+                                : item.kind == "type"     ? "T"
+                                :                           "v";
+                            color: idx == root.selected-index
+                                ? Theme.text-primary
+                                : (item.kind == "keyword"  ? Theme.accent-yellow
+                                 : item.kind == "function" ? Theme.accent-blue
+                                 : item.kind == "type"     ? Theme.accent-purple
+                                 :                           Theme.text-secondary);
+                            font-size: 11px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+
+                        Text {
+                            text: item.label;
+                            color: idx == root.selected-index
+                                ? Theme.text-primary
+                                : Theme.text-primary;
+                            font-size: 12px;
+                            font-family: "Consolas";
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        // Signature. Elides rather than wrapping so a long
+                        // parameter list cannot change the row height and
+                        // break the fixed-pitch scroll maths above.
+                        Text {
+                            horizontal-stretch: 1;
+                            text: item.detail;
+                            color: idx == root.selected-index
+                                ? Theme.text-secondary
+                                : Theme.text-disabled;
+                            font-size: 11px;
+                            font-family: "Consolas";
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Footer: what we are filtering on, how many matched, and the keys.
+        Rectangle {
+            height: 22px;
+            background: Theme.header-background;
+
+            Rectangle {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 1px;
+                background: Theme.border-color;
+            }
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 8px;
+
+                Text {
+                    text: root.prefix.is-empty ? "all" : root.prefix;
+                    color: Theme.text-secondary;
+                    font-size: 10px;
+                    font-family: "Consolas";
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.items.length + (root.items.length == 1 ? " match" : " matches");
+                    color: Theme.text-disabled;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: "Tab insert · ↑↓ move · Esc close";
+                    color: Theme.text-disabled;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

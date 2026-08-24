@@ -258,7 +258,13 @@ pub struct HighlightLine {
 #[derive(Debug, Clone)]
 pub struct TokenSpanData {
     pub line: i32,
-    pub x: f32,       // pixel x offset (monospace char_width * col)
+    /// COLUMN index of the token's first character, not a pixel offset. The
+    /// view multiplies this by its own measured glyph advance — see
+    /// `EustressTextEdit.char-advance` in `script_editor.slint`. Emitting a
+    /// pixel offset here meant Rust had to know the font metrics, and the
+    /// constant it used (7.8px for Consolas 13px, actual ~7.15px) drifted the
+    /// overlay right by ~9% of a column — a full character by column 40.
+    pub x: f32,
     pub text: String,
     pub r: f32,
     pub g: f32,
@@ -266,11 +272,9 @@ pub struct TokenSpanData {
     pub bold: bool,
 }
 
-/// Monospace character width at 13px Consolas (measured).
-const CHAR_WIDTH: f32 = 7.8;
-
 /// Convert `highlight_source` into a flat list of positioned token spans.
-/// Each token gets a pixel x-offset computed from its character column.
+/// Each token carries its character COLUMN; the view converts to pixels
+/// using its own measured glyph advance.
 /// Used for true per-token syntax highlighting in the Slint code editor.
 pub fn highlight_to_token_spans(source: &str, language: &str) -> Vec<TokenSpanData> {
     let is_markdown = language.eq_ignore_ascii_case("Markdown");
@@ -280,7 +284,7 @@ pub fn highlight_to_token_spans(source: &str, language: &str) -> Vec<TokenSpanDa
         .flat_map(|(line_idx, spans)| {
             let mut col: f32 = 0.0;
             spans.into_iter().map(move |s| {
-                let x = col * CHAR_WIDTH;
+                let x = col;
                 // Advance by CHARACTER count, not byte length — otherwise
                 // multi-byte UTF-8 (em-dash `—`, `≥`, etc.) over-advances the
                 // monospace column and shifts every following token rightward.
