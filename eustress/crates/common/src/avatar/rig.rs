@@ -40,7 +40,7 @@ use bevy::prelude::*;
 // ordinary lib build succeeded. Importing from `tracing` (what `bevy_log`
 // re-exports anyway) makes the module build under every feature combination.
 // An explicit import also shadows the glob, so there is no ambiguity.
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 // Bevy 0.19 replaced the old `bevy_scene` glTF scene with `WorldAsset`;
 // `WorldInstanceReady` is the "graph is fully spawned" trigger.
 use bevy::world_serialization::WorldInstanceReady;

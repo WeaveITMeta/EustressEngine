@@ -48,7 +48,7 @@ use bevy::prelude::*;
 // ordinary lib build succeeded. Importing from `tracing` (what `bevy_log`
 // re-exports anyway) makes the module build under every feature combination.
 // An explicit import also shadows the glob, so there is no ambiguity.
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 use std::collections::HashMap;
 
 use super::rig::{canonical_bone_key, AvatarRig, HumanoidBone};
