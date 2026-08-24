@@ -15,6 +15,7 @@ import { AssetManager, AssetNode } from "asset_manager.slint";
 import { Collaboration } from "collaboration.slint";
 import { SoulPanel, SoulScriptData } from "soul_panel.slint";
 import { ScriptEditor, ScriptTab, CenterTab, HighlightLine, TokenSpan, DiagnosticSpan } from "script_editor.slint";
+import { CompletionItem } from "completion_popup.slint";
 import { ProblemsPanel, ProblemItem } from "problems_panel.slint";
 import { WebBrowser } from "web_browser.slint";
 import { Notifications, NotificationData } from "notifications.slint";
@@ -67,6 +68,7 @@ import { AddAttributeDialog } from "add_attribute_dialog.slint";
 import { RenameTagDialog } from "rename_tag_dialog.slint";
 import { EditLabelDialog } from "edit_label_dialog.slint";
 import { FeedbackDialog } from "feedback_dialog.slint";
+import { ApiKeyDialog } from "api_key_dialog.slint";
 import { ExitConfirmationDialog } from "exit_confirmation.slint";
 import { SyncDomainDialog } from "sync_domain.slint";
 import { WorkshopPanel, ChatMessage, PipelineStepData, ConversationSummary, MentionItemData } from "workshop_panel.slint";
@@ -271,6 +273,16 @@ export component StudioWindow inherits Window {
     in-out property <bool> show-feedback-dialog: false;
     in-out property <string> feedback-about-tool: "";
     in-out property <string> feedback-text: "";
+    // API key dialog — Public Sector ▸ Capture ▸ Sources ▸ API Key. The value
+    // never rides in a Space; only the credential NAME does.
+    in-out property <bool> show-api-key-dialog: false;
+    in-out property <string> api-key-name: "SAM_API_KEY";
+    in-out property <string> api-key-status: "";
+    in-out property <bool> api-key-present: false;
+    in-out property <bool> api-key-from-environment: false;
+    in-out property <string> api-key-text: "";
+    callback api-key-save(string, string);
+    callback api-key-remove(string);
     callback feedback-send(string, string);
     in-out property <string> new-space-name: "";
     // Add/Edit Attribute modal (Roblox-style custom attributes)
@@ -918,6 +930,23 @@ export component StudioWindow inherits Window {
     in property <[HighlightLine]> script-highlight-lines: [];
     in property <[TokenSpan]> script-token-spans: [];
     in property <[DiagnosticSpan]> script-diagnostic-spans: [];
+
+    // ── Code completion ──────────────────────────────────────────────────
+    // Host-owned; see `ScriptEditor.completion-*` for the contract.
+    in property <[CompletionItem]> script-completion-items: [];
+    in property <int> script-completion-selected: 0;
+    in property <string> script-completion-prefix: "";
+    in property <int> script-completion-line: 1;
+    in property <int> script-completion-col: 1;
+    in-out property <int> script-caret-to-offset: -1;
+    in property <string> script-signature-label: "";
+    in property <string> script-signature-active-param: "";
+
+    callback script-completion-accept(int);
+    callback script-completion-move(int);
+    callback script-completion-dismiss();
+    callback script-completion-request();
+    callback script-caret-moved(int, int);
     // Set by Rust when go-to-definition / problem-jump wants the editor to
     // scroll to a specific line. One-shot: Slint resets to 0 after applying.
     in-out property <int> script-scroll-to-line: 0;
@@ -2770,6 +2799,21 @@ export component StudioWindow inherits Window {
                         token-spans: root.script-token-spans;
                         has-token-spans: root.script-token-spans.length > 0;
                         diagnostic-spans: root.script-diagnostic-spans;
+                        completion-items: root.script-completion-items;
+                        completion-selected: root.script-completion-selected;
+                        completion-prefix: root.script-completion-prefix;
+                        completion-line: root.script-completion-line;
+                        completion-col: root.script-completion-col;
+                        signature-label: root.script-signature-label;
+                        signature-active-param: root.script-signature-active-param;
+                        scroll-to-line <=> root.script-scroll-to-line;
+                        caret-to-offset <=> root.script-caret-to-offset;
+
+                        on-completion-accept(idx) => { root.script-completion-accept(idx); }
+                        on-completion-move(delta) => { root.script-completion-move(delta); }
+                        on-completion-dismiss() => { root.script-completion-dismiss(); }
+                        on-completion-request() => { root.script-completion-request(); }
+                        on-caret-moved(line, col) => { root.script-caret-moved(line, col); }
 
                         on-tab-selected(idx) => {
                             root.center-active-tab = idx + 1;
@@ -4065,6 +4109,30 @@ export component StudioWindow inherits Window {
     }
 
     // New Space dialog — Step 2: get space name (after universe is created)
+    if root.show-api-key-dialog: ApiKeyDialog {
+        key-name: root.api-key-name;
+        status-line: root.api-key-status;
+        present: root.api-key-present;
+        from-environment: root.api-key-from-environment;
+        key-text <=> root.api-key-text;
+        save(name, value) => {
+            root.show-api-key-dialog = false;
+            root.api-key-save(name, value);
+            // Cleared on the way out so a pasted secret does not sit in a UI
+            // property for the rest of the session.
+            root.api-key-text = "";
+        }
+        remove(name) => {
+            root.show-api-key-dialog = false;
+            root.api-key-remove(name);
+            root.api-key-text = "";
+        }
+        cancel => {
+            root.show-api-key-dialog = false;
+            root.api-key-text = "";
+        }
+    }
+
     if root.show-feedback-dialog: FeedbackDialog {
         about-tool: root.feedback-about-tool;
         feedback-text <=> root.feedback-text;
