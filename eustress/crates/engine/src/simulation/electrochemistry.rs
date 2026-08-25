@@ -19,7 +19,9 @@ use bevy::prelude::*;
 use eustress_common::realism::laws::electrochemistry as echem;
 use eustress_common::realism::constants;
 use eustress_common::realism::particles::components::{
-    ElectrochemicalState, ThermodynamicState, DEFAULT_CRACK_K,
+    ElectrochemicalState, ThermodynamicState, CREEP_EXPONENT, DEFAULT_CRACK_K,
+    DEFAULT_CREEP_K, DEFAULT_CREEP_THRESHOLD_MPA, DEFAULT_RESISTANCE_EA_EV,
+    KB_EV_PER_K,
 };
 use eustress_common::simulation::SimulationClock;
 
@@ -77,6 +79,9 @@ fn publish_echem_to_sim_values(
         ("battery.fade_cathode", echem.crack_damage),
         ("battery.fade_calendar", echem.calendar_fade()),
         ("battery.calendar_hours", echem.calendar_hours_equiv),
+        ("battery.fade_creep", echem.creep_strain.min(1.0)),
+        ("battery.resistance_ohm", echem.resistance_effective as f64),
+        ("battery.ambient_c", (echem.ambient_temperature_k - 273.15) as f64),
         ("battery.cycle_count", echem.cycle_count as f64),
         ("battery.heat_generation", echem.heat_generation as f64),
         ("battery.temperature_c", temp_c as f64),
@@ -290,8 +295,29 @@ fn electrochemical_tick(
         }
 
         // ── 3. Overpotentials ──
+        //
+        // Resistance is temperature dependent, and treating it as a constant is
+        // what made the low-temperature envelope unsimulatable. A solid
+        // electrolyte conducts by thermally activated hopping, so conductivity
+        // goes as exp(-Ea/kT) and resistance as its inverse. At -55 C this is a
+        // factor of ~150 against the 25 C value, which is the difference
+        // between a cell that is slow and a cell the model thinks is fine.
+        //
+        // The same term does double duty: the raised resistance is also what
+        // dissipates I^2 R into the cell, so a cold cell heats itself and the
+        // ceiling rises as it does. Both halves fall out of one line.
+        let ea = if echem_state.resistance_activation_ev > 0.0 {
+            echem_state.resistance_activation_ev
+        } else {
+            DEFAULT_RESISTANCE_EA_EV
+        };
+        let r_eff = echem_state.internal_resistance
+            * ((ea / KB_EV_PER_K) * (1.0 / temperature - 1.0 / 298.15)).exp();
+
+        echem_state.resistance_effective = r_eff;
+
         // Ohmic (IR drop)
-        let eta_ohmic = echem::ohmic_overpotential(current, echem_state.internal_resistance);
+        let eta_ohmic = echem::ohmic_overpotential(current, r_eff);
 
         // Charge-transfer (Butler-Volmer symmetric approximation)
         // Exchange current density ~50 A/m² for Na-S at 25°C
@@ -331,7 +357,7 @@ fn electrochemical_tick(
         ).clamp(0.0, 1.0);
 
         // ── 6. Heat generation ──
-        let q_ohmic = echem::ohmic_heat(current, echem_state.internal_resistance);
+        let q_ohmic = echem::ohmic_heat(current, r_eff);
         let q_reaction = echem::reaction_heat(current, eta_ct);
         let entropy_coeff = if echem_state.entropy_coefficient_v_per_k != 0.0 {
             echem_state.entropy_coefficient_v_per_k
@@ -364,7 +390,11 @@ fn electrochemical_tick(
             } else {
                 2.0_f32 // K/W — legacy AlN pad + housing
             };
-            let ambient = 298.15_f32;
+            let ambient = if echem_state.ambient_temperature_k > 0.0 {
+                echem_state.ambient_temperature_k
+            } else {
+                298.15_f32
+            };
 
             // Integrate BOTH terms against the same dt, and solve the cooling
             // term exponentially rather than explicitly: at a large `dt` (the
@@ -583,13 +613,49 @@ fn electrochemical_tick(
             echem_state.calendar_hours_equiv +=
                 (dt / 3600.0 * soc_weight * arrhenius) as f64;
 
-            // Three mechanisms, and the earliest one wins. Only lithium loss is
-            // buffered by the reservoir; neither cracking nor calendar fade is
-            // a lithium-inventory problem, so neither is covered by carrying
-            // more metal.
+            // ── Lithium creep ──
+            //
+            // The ceiling on the best lever in the design. Stack pressure is
+            // worth 6.7x between 2 and 8 MPa, and until this existed the tick
+            // would report a better number at ANY pressure authored, which made
+            // it an advocate for its own biggest lever rather than a test of it.
+            //
+            // Lithium is at 0.66 of its melting point at room temperature, so it
+            // creeps under the very pressure that suppresses dendrites. Past the
+            // threshold the metal extrudes into the separator instead of
+            // densifying, and the cell soft-shorts rather than fading. The
+            // exponent is what matters: at 6.6, a factor of 1.25 in pressure is
+            // a factor of 4.5 in rate, so the knee is sharp and the safe band
+            // has a hard edge rather than a gentle rolloff.
+            let creep_threshold = if echem_state.creep_threshold_mpa > 0.0 {
+                echem_state.creep_threshold_mpa
+            } else {
+                DEFAULT_CREEP_THRESHOLD_MPA
+            };
+            let stack_p = if echem_state.stack_pressure_mpa > 0.0 {
+                echem_state.stack_pressure_mpa
+            } else {
+                2.0
+            };
+            if stack_p > creep_threshold {
+                let ck = if echem_state.creep_k > 0.0 {
+                    echem_state.creep_k
+                } else {
+                    DEFAULT_CREEP_K
+                };
+                let over = (stack_p - creep_threshold) / creep_threshold;
+                let rate = ck * over.powf(CREEP_EXPONENT) * arrhenius;
+                echem_state.creep_strain += (rate * dt / 3600.0) as f64;
+            }
+
+            // Four mechanisms, and the earliest one wins. Only lithium loss is
+            // buffered by the reservoir; cracking, calendar fade and creep are
+            // none of them a lithium-inventory problem, so carrying more metal
+            // covers none of them.
             let retention = (1.0 - echem_state.lithium_fade())
                 * (1.0 - echem_state.crack_damage)
-                * (1.0 - echem_state.calendar_fade());
+                * (1.0 - echem_state.calendar_fade())
+                * (1.0 - echem_state.creep_strain.min(1.0));
             echem_state.capacity_retention = (retention as f32).clamp(0.01, 1.0);
         }
         } // end substep

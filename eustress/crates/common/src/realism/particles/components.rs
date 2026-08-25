@@ -642,6 +642,60 @@ pub struct ElectrochemicalState {
     pub crack_k: f32,
     /// Accumulated cathode damage, 0 to 1.
     pub crack_damage: f64,
+
+    // ── The mechanism that puts a CEILING on the best lever ────────────
+    // Stack pressure is the largest measured lever in this design, worth 6.7x
+    // between 2 and 8 MPa. Without the two fields below the engine has no upper
+    // bound on it and will report a better number at any pressure authored,
+    // which makes the tick an advocate for its own biggest lever rather than a
+    // test of it.
+    //
+    // Lithium melts at 453 K, so at room temperature its homologous temperature
+    // is 0.66 and the metal CREEPS under the very pressure that suppresses
+    // dendrites. Past a threshold the pressure stops densifying the deposit and
+    // starts extruding it into the separator, and the cell dies of a soft short
+    // rather than of fade. That makes this failure qualitatively unlike the
+    // other three: it is not gradual, and no reservoir or duty change avoids it.
+    /// Pressure above which lithium extrudes rather than densifies, MPa.
+    /// 0.0 disables the mechanism entirely.
+    pub creep_threshold_mpa: f32,
+    /// Creep strain per hour at twice the threshold pressure.
+    pub creep_k: f32,
+    /// Accumulated creep strain. At 1.0 the deposit has bridged the separator.
+    pub creep_strain: f64,
+
+    // ── Transport is Arrhenius, and pretending otherwise hides a whole
+    // ── operating regime ──────────────────────────────────────────────
+    // `internal_resistance` was used raw, so the tick behaved as though a cell
+    // at -55 C conducted exactly as well as one at 25 C. That is wrong by more
+    // than two orders of magnitude and it made the entire low-temperature
+    // envelope unsimulatable: the cold "floor" in the specification was a
+    // number somebody stopped quoting at, not a result.
+    //
+    // Solid electrolytes conduct by thermally activated hopping, so
+    // conductivity goes as exp(-Ea/kT) and resistance as its inverse. The same
+    // rise that limits a cold cell also dissipates I^2 R into it, which is why
+    // a cold cell can climb out on its own current.
+    /// Activation energy for ionic conduction, eV. 0.0 keeps the Li6PS5Cl
+    /// value of 0.35, which reproduces roughly one decade per 40 K.
+    pub resistance_activation_ev: f32,
+    /// Resistance actually used by the last tick, after the Arrhenius
+    /// correction. Published so a cold-start run can be watched directly
+    /// rather than inferred from voltage sag.
+    pub resistance_effective: f32,
+
+    /// Ambient temperature the cell exchanges heat with, K.
+    ///
+    /// This was hardcoded at 298.15 with a `.max(ambient)` floor on the cell
+    /// temperature, which meant the tick could not represent a cell below
+    /// 25 C AT ALL. Every low-temperature question the specification asks was
+    /// therefore unanswerable, and the -40 C "floor" it carried was a number
+    /// somebody stopped quoting at rather than a simulated result.
+    ///
+    /// The floor itself is correct physics and stays: a cell with no active
+    /// cooling cannot fall below its surroundings. What was wrong was that the
+    /// surroundings were a constant.
+    pub ambient_temperature_k: f32,
     /// Running total of metal lost to interphase, as a fraction of nominal.
     ///
     /// f64, and it has to be. This accumulates one small increment per SUBSTEP,
@@ -702,6 +756,12 @@ impl Default for ElectrochemicalState {
             calendar_hours_equiv: 0.0,
             crack_k: 0.0,
             crack_damage: 0.0,
+            creep_threshold_mpa: 0.0,
+            creep_k: 0.0,
+            creep_strain: 0.0,
+            resistance_activation_ev: 0.0,
+            resistance_effective: 0.0,
+            ambient_temperature_k: 0.0,
         }
     }
 }
@@ -712,7 +772,34 @@ pub const DEFAULT_CALENDAR_K: f32 = 2.14e-4;
 
 /// Default cathode fatigue coefficient: about 20 % structural loss over 1000
 /// full-depth cycles, where an unreinforced sulfur composite sits.
-pub const DEFAULT_CRACK_K: f32 = 1.75e-4;
+pub const DEFAULT_CRACK_K: f32 = 1.0e-4;
+
+/// Pressure above which lithium creep becomes measurable at room temperature,
+/// MPa. Around 1 MPa in the literature.
+pub const DEFAULT_CREEP_THRESHOLD_MPA: f32 = 1.0;
+
+/// Creep strain per hour at twice the threshold pressure.
+///
+/// The EXPONENT in the creep law (6.6) is from lithium power-law creep and is
+/// the part that matters, because it makes the knee extremely sharp: a factor
+/// of 1.25 in pressure is a factor of 4.5 in rate. This PREFACTOR is not
+/// measured. It is set so the knee falls near 9 MPa, which is just above where
+/// the design currently sits, and that placement is an assumption rather than a
+/// result. Sweeping it is Stage E; measuring it is experiment E1.
+pub const DEFAULT_CREEP_K: f32 = 5.29e-10;
+
+/// Power-law creep exponent for lithium.
+pub const CREEP_EXPONENT: f32 = 6.6;
+
+/// Activation energy for ionic conduction in Li6PS5Cl argyrodite, eV.
+///
+/// 0.35 eV reproduces the specification's own statement of roughly one order
+/// of magnitude per 40 C, and it is the one transport constant here taken from
+/// literature rather than fitted.
+pub const DEFAULT_RESISTANCE_EA_EV: f32 = 0.35;
+
+/// Boltzmann constant in eV/K, for the conduction Arrhenius term.
+pub const KB_EV_PER_K: f32 = 8.617_333e-5;
 
 impl ElectrochemicalState {
     /// Capacity fraction lost to lithium inventory, net of the reservoir.
@@ -771,6 +858,12 @@ impl ElectrochemicalState {
             calendar_hours_equiv: 0.0,
             crack_k: 0.0,
             crack_damage: 0.0,
+            creep_threshold_mpa: 0.0,
+            creep_k: 0.0,
+            creep_strain: 0.0,
+            resistance_activation_ev: 0.0,
+            resistance_effective: 0.0,
+            ambient_temperature_k: 0.0,
         }
     }
 }
