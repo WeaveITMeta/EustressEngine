@@ -69,6 +69,42 @@ pub fn tafel_overpotential(j: f32, j0: f32, alpha: f32, temperature: f32) -> f32
     ((constants::R_F32 * temperature) / (alpha * constants::FARADAY_F32)) * (j / j0).ln()
 }
 
+/// Activation overpotential, from the symmetric Butler-Volmer equation inverted
+/// exactly: `η = (2RT / F) × asinh(j / 2j₀)` (V)
+///
+/// Use this, not `tafel_overpotential`, whenever the current is not known to
+/// be far above the exchange current. Tafel is the high-field limit of this
+/// expression and is only an approximation of it; below j₀ the logarithm goes
+/// negative and reports an overpotential that ASSISTS the reaction, which for a
+/// cell under discharge raises terminal voltage above OCV. A V-Cell at its
+/// design 30 A/m² against a 50 A/m² exchange current took a −26 mV
+/// activation term for exactly that reason, against a modelled OCV span of
+/// 177 mV over the whole state-of-charge range.
+///
+/// The asinh form has both limits built in and needs no branch: it is linear,
+/// η ≈ RT j / (F j₀), when j ≪ j₀, and it becomes Tafel with α = 0.5 when
+/// j ≫ j₀. It is odd in j, so it carries the sign of the current.
+#[inline]
+pub fn butler_volmer_overpotential(j: f32, j0: f32, temperature: f32) -> f32 {
+    if j0 <= 0.0 || temperature <= 0.0 { return 0.0; }
+    let two_rt_f = (2.0 * constants::R_F32 * temperature) / constants::FARADAY_F32;
+    two_rt_f * (j / (2.0 * j0)).asinh()
+}
+
+/// Concentration overpotential: `η = −(RT / nF) × ln(1 − j / j_lim)` (V)
+///
+/// Diverges as the current approaches the limiting current, which is what makes
+/// deliverable capacity fall with rate. Returns the voltage the cell gives up to
+/// transport; the caller subtracts it on discharge and adds it on charge.
+#[inline]
+pub fn concentration_overpotential(j: f32, j_lim: f32, n: f32, temperature: f32) -> f32 {
+    if j_lim <= 0.0 || n <= 0.0 || temperature <= 0.0 { return 0.0; }
+    // Hold short of the singularity: at the limit the cell has simply stopped,
+    // and an infinity here would propagate into voltage and then into energy.
+    let ratio = (j.abs() / j_lim).clamp(0.0, 0.999);
+    -((constants::R_F32 * temperature) / (n * constants::FARADAY_F32)) * (1.0 - ratio).ln()
+}
+
 /// Exchange current density: `j₀ = F k₀ c_ox^α c_red^(1-α)`
 pub fn exchange_current_density(k0: f32, c_ox: f32, c_red: f32, alpha: f32) -> f32 {
     if k0 <= 0.0 || c_ox <= 0.0 || c_red <= 0.0 { return 0.0; }
@@ -163,10 +199,15 @@ pub fn ohmic_heat(current: f32, resistance: f32) -> f32 {
     current * current * resistance
 }
 
-/// Charge-transfer heat: `Q = I |η_ct|` (W)
+/// Charge-transfer heat: `Q = |I| |η_ct|` (W)
+///
+/// Polarisation is irreversible, so it dissipates on charge exactly as it does
+/// on discharge. This read `current * eta_ct.abs()`, which is negative whenever
+/// the sign convention puts charging current below zero, and so had the cell
+/// ABSORBING its own activation losses while being charged.
 #[inline]
 pub fn reaction_heat(current: f32, eta_ct: f32) -> f32 {
-    current * eta_ct.abs()
+    current.abs() * eta_ct.abs()
 }
 
 /// Entropic heat: `Q = -T I (dE/dT)` (W)
@@ -342,6 +383,113 @@ mod tests {
     use super::*;
 
     const EPSILON: f32 = 1e-3;
+
+    // ── Regression tests for four sign and domain errors ──────────────
+    //
+    // Every one of these stood in the tick for months and reached a published
+    // number. None of them was hard to catch; nothing was asserting on them.
+
+    #[test]
+    fn activation_overpotential_never_assists_the_reaction() {
+        // The bug: Tafel below the exchange current returns a NEGATIVE
+        // overpotential, so `terminal_voltage` subtracted a negative and put a
+        // discharging cell above its own open-circuit voltage.
+        let j0 = 50.0;
+        let t = 298.15;
+        for j in [1.0e-3, 0.0654, 1.0, 10.0, 49.0, 50.0, 500.0] {
+            let bv = butler_volmer_overpotential(j, j0, t);
+            assert!(bv >= 0.0, "eta must oppose the current at j={j}, got {bv}");
+        }
+        // The old law is where the sign went wrong, and it still does, because
+        // Tafel IS that equation. This asserts the difference rather than the
+        // absence, so the two stay distinguishable.
+        assert!(tafel_overpotential(0.0654, j0, 0.5, t) < 0.0);
+    }
+
+    #[test]
+    fn butler_volmer_is_linear_below_j0_and_tafel_above() {
+        let j0 = 50.0;
+        let t = 298.15;
+        // Low field: eta -> RT j / (F j0), so halving j halves eta.
+        let a = butler_volmer_overpotential(0.5, j0, t);
+        let b = butler_volmer_overpotential(1.0, j0, t);
+        assert!((b / a - 2.0).abs() < 0.01, "expected linear, got {}", b / a);
+        // High field: converges on Tafel with alpha = 0.5.
+        let hi = 5000.0;
+        let bv = butler_volmer_overpotential(hi, j0, t);
+        let tf = tafel_overpotential(hi, j0, 0.5, t);
+        assert!((bv - tf).abs() < 0.005, "bv {bv} vs tafel {tf}");
+    }
+
+    #[test]
+    fn butler_volmer_is_odd_in_current() {
+        let t = 298.15;
+        let p = butler_volmer_overpotential(30.0, 50.0, t);
+        let n = butler_volmer_overpotential(-30.0, 50.0, t);
+        assert!((p + n).abs() < 1e-6, "eta must change sign with the current");
+    }
+
+    #[test]
+    fn cold_cell_gets_no_free_voltage() {
+        // The V-Cell at -55 C, seeded at 1.0 A over 15.2856 m2. The old law
+        // handed it 250 mV, which is 37 % of the servo's headroom above its
+        // 1.60 V floor. Every cold-start figure was measured on that.
+        let j = 1.0 / 15.2856;
+        let t = 218.15;
+        let gift = -tafel_overpotential(j, 50.0, 0.5, t);
+        assert!(gift > 0.24 && gift < 0.26, "expected ~250 mV artefact, got {gift}");
+        assert!(butler_volmer_overpotential(j, 50.0, t) < 1.0e-3);
+    }
+
+    #[test]
+    fn polarisation_dissipates_on_both_legs() {
+        // The bug: `current * eta_ct.abs()` goes negative when the sign
+        // convention puts charging current below zero, so the cell absorbed its
+        // own activation losses while being charged.
+        let eta = 0.05;
+        assert!(reaction_heat(100.0, eta) > 0.0);
+        assert!(reaction_heat(-100.0, eta) > 0.0, "charge leg must still dissipate");
+        assert_eq!(reaction_heat(100.0, eta), reaction_heat(-100.0, eta));
+    }
+
+    #[test]
+    fn entropic_heat_changes_sign_with_the_current() {
+        // The bug: the tick took `.abs()` of this, forcing it to heat on both
+        // legs. A cell that warms on discharge cools on charge, and temperature
+        // feeds the Nernst term, the calendar clock and the creep rate.
+        let de_dt = -1.1e-4;
+        let discharge = entropic_heat(298.15, 1757.6, de_dt);
+        let charge = entropic_heat(298.15, -1757.6, de_dt);
+        assert!(discharge > 0.0, "discharge must warm the cell");
+        assert!(charge < 0.0, "charge must cool it");
+        assert!((discharge + charge).abs() < 1e-3);
+    }
+
+    #[test]
+    fn total_heat_carries_the_entropic_sign() {
+        // The published tick had to be brought back in line with this function,
+        // which was correct all along and simply was not being called.
+        let de_dt = -1.1e-4;
+        let q_dis = total_heat_generation(1757.6, 9.852e-5, 0.05, 298.15, de_dt);
+        let q_chg = total_heat_generation(-1757.6, 9.852e-5, 0.05, 298.15, de_dt);
+        assert!(q_dis > q_chg, "discharge must generate more heat than charge");
+    }
+
+    #[test]
+    fn capacity_falls_with_rate() {
+        // The bug: no current term anywhere, so a C/10 and a 2C sweep returned
+        // identical amp-hours. The concentration term is what fixes it, and it
+        // has to diverge as the current approaches the limit.
+        let j_lim = 100.0;
+        let t = 298.15;
+        let low = concentration_overpotential(10.0, j_lim, 2.0, t);
+        let high = concentration_overpotential(90.0, j_lim, 2.0, t);
+        assert!(low > 0.0 && high > low, "must rise with current: {low} then {high}");
+        // At the limit it is clamped rather than infinite, so nothing downstream
+        // takes a NaN into the energy integral.
+        let at_limit = concentration_overpotential(1000.0, j_lim, 2.0, t);
+        assert!(at_limit.is_finite() && at_limit > high);
+    }
 
     #[test]
     fn nernst_standard_conditions() {

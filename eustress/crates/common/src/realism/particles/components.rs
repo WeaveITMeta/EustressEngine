@@ -664,6 +664,93 @@ pub struct ElectrochemicalState {
     /// Accumulated creep strain. At 1.0 the deposit has bridged the separator.
     pub creep_strain: f64,
 
+    // Creep was charged against the FULL stack pressure, which is the law for a
+    // billet upset between two platens with its sides free. A plated layer is
+    // not that. It is confined between a rigid collector and a rigid ceramic,
+    // and power-law creep is driven by DEVIATORIC stress, not by the hydrostatic
+    // part. Under oedometric confinement only
+    //
+    //     sigma_eq = (1 - 2 nu) / (1 - nu) * sigma_axial
+    //
+    // is available to drive it: 0.44 of the applied stress for lithium at
+    // nu = 0.36. At an exponent of 6.6 that single factor is 78x on rate, and
+    // the model was charging the cell for all of it.
+    /// Poisson ratio of the plated metal. 0.0 keeps the unconfined reading, so
+    /// every scene authored before this existed is bit-identical; 0.36 is
+    /// lithium and turns the confinement correction on.
+    pub creep_poisson: f32,
+    /// Volume the deposit can creep INTO before it bears on the separator, as a
+    /// fraction of plated thickness. The V-Cell carries 28.7 um of reserve void
+    /// against 72.5 um of lithium, so 0.396 of the strain costs nothing at all.
+    /// 0.0 means every micron of creep is charged from the first hour.
+    pub creep_accommodation_frac: f32,
+    /// Strain already absorbed by that void. Runs up to
+    /// `creep_accommodation_frac` and then stops.
+    pub creep_accommodated: f64,
+    /// Activation energy for creep, eV. 0.0 keeps the shared temperature ramp.
+    ///
+    /// Creep, interphase growth and the parasitic reaction all rode one
+    /// `exp((T - 298.15) / 20)`, which makes their RATIO independent of
+    /// temperature by construction. A cell therefore died of the same mechanism
+    /// at -40 C as at 60 C, and the optimum stack pressure could never move with
+    /// temperature. It must. Lithium self-diffusion is about 0.55 eV.
+    pub creep_activation_ev: f32,
+    /// Activation energy for calendar interphase growth, eV. 0.0 keeps the
+    /// shared ramp. Argyrodite against lithium metal is nearer 0.65.
+    pub calendar_activation_ev: f32,
+
+    // ── The fifth channel: a bridged layer, not a faded one ─────────────
+    // Creep does not merely remove metal from the sandwich, it EXTRUDES it, and
+    // extruded metal goes into the separator. Once a filament spans the film the
+    // layer stops being a layer. This is the mechanism the specification asserts
+    // in prose - "past the knee the cell shorts, it does not fade" - and that
+    // the tick has never been able to represent, because creep entered only as a
+    // smooth capacity multiplier.
+    /// Separator thickness, um. 0.0 disables the bridging channel.
+    pub separator_thickness_um: f32,
+    /// Plated metal thickness at full charge, um. With the separator thickness
+    /// this sets how much extrusion a bridge actually needs.
+    pub plated_thickness_um: f32,
+    /// Fraction of extruded metal that expresses as separator penetration
+    /// rather than as squeeze flow to the free edge. 0.0 falls back to 0.25.
+    pub bridge_chi: f32,
+    /// Weibull shape on penetration fraction. 0.0 falls back to 4.0.
+    pub bridge_weibull_m: f32,
+    /// Penetration fraction at which a layer is expected to have bridged.
+    /// 0.0 falls back to 0.35.
+    pub bridge_scale: f32,
+    /// Layers in a bipolar SERIES stack. 0 means the cell is authored as its
+    /// parallel equivalent and every series-only mechanism is skipped, which is
+    /// what every scene predating this field wants.
+    pub layer_count: u32,
+    /// Expected number of layers carrying a bridge. Fractional on purpose: over
+    /// 569 layers the expectation is the answer, not a drawn integer.
+    pub shorted_layers: f64,
+
+    /// Exponent on stack pressure in the cathode-fatigue term. The creep block
+    /// computes a pressure and the crack block sat next to it ignoring the
+    /// value, which is four single-mechanism models sharing an x-axis rather
+    /// than a coupled one. Negative values make pressure protect the cathode by
+    /// re-closing cracks each cycle. 0.0 keeps the pressure-blind behaviour.
+    pub crack_pressure_exponent: f32,
+    /// How strongly interphase age raises the plating loss rate, as
+    /// `1 + beta * sqrt(hours / 8760)`. The reduced argyrodite interphase is
+    /// patchy and more resistive than the bulk, so it focuses current into the
+    /// remaining low-impedance patches - which is precisely what the roughness
+    /// term describes. Calendar ageing is therefore an INPUT to plating loss,
+    /// not a fourth independent channel. 0.0 keeps them independent.
+    pub calendar_roughness_beta: f32,
+
+    /// Total cell mass, kg. Set it and the tick publishes specific energy from
+    /// the same state that produces the life numbers, so a reservoir that buys
+    /// cycles can never again be free in the mass budget.
+    pub cell_mass_kg: f32,
+    /// Areal capacity the reservoir represents, mAh/cm2, derived each tick.
+    /// An anode-free cell ships with all of its metal as discharged active
+    /// material, so a reservoir is not spare metal lying about: it is extra
+    /// cathode, and it has mass and thickness.
+    pub reservoir_mass_kg: f32,
+
     // ── Transport is Arrhenius, and pretending otherwise hides a whole
     // ── operating regime ──────────────────────────────────────────────
     // `internal_resistance` was used raw, so the tick behaved as though a cell
@@ -762,6 +849,22 @@ impl Default for ElectrochemicalState {
             resistance_activation_ev: 0.0,
             resistance_effective: 0.0,
             ambient_temperature_k: 0.0,
+            creep_poisson: 0.0,
+            creep_accommodation_frac: 0.0,
+            creep_accommodated: 0.0,
+            creep_activation_ev: 0.0,
+            calendar_activation_ev: 0.0,
+            separator_thickness_um: 0.0,
+            plated_thickness_um: 0.0,
+            bridge_chi: 0.0,
+            bridge_weibull_m: 0.0,
+            bridge_scale: 0.0,
+            layer_count: 0,
+            shorted_layers: 0.0,
+            crack_pressure_exponent: 0.0,
+            calendar_roughness_beta: 0.0,
+            cell_mass_kg: 0.0,
+            reservoir_mass_kg: 0.0,
         }
     }
 }
@@ -801,6 +904,46 @@ pub const DEFAULT_RESISTANCE_EA_EV: f32 = 0.35;
 /// Boltzmann constant in eV/K, for the conduction Arrhenius term.
 pub const KB_EV_PER_K: f32 = 8.617_333e-5;
 
+/// Poisson ratio of metallic lithium, for the confinement correction.
+pub const LITHIUM_POISSON: f32 = 0.36;
+
+/// Fraction of extruded metal that penetrates the separator rather than
+/// squeezing out to the free edge. Squeeze flow to a 46 mm edge is slower than
+/// through-thickness flow by roughly (edge / thickness)^2, so most of the
+/// extrusion has nowhere to go but into the film.
+pub const DEFAULT_BRIDGE_CHI: f32 = 0.25;
+
+/// Weibull shape on penetration fraction. Bridging over hundreds of layers is
+/// an extreme-value problem, so the exponent is what sets how abruptly the
+/// population turns over rather than where it turns over.
+pub const DEFAULT_BRIDGE_WEIBULL_M: f32 = 4.0;
+
+/// Penetration fraction at which a layer is expected to have bridged.
+pub const DEFAULT_BRIDGE_SCALE: f32 = 0.35;
+
+/// Activation energy for lithium self-diffusion, eV. Sets how creep scales with
+/// temperature INDEPENDENTLY of the interphase, which is the whole point: while
+/// every mechanism shared one ramp their ratio could not move with temperature,
+/// so neither could the optimum stack pressure.
+pub const LITHIUM_CREEP_EA_EV: f32 = 0.55;
+
+/// Theoretical specific capacity of Li2S, mAh/g: `2F / M` with M = 45.947
+/// g/mol. An anode-free cell carries its whole lithium inventory here, so this
+/// is the exchange rate between a reservoir fraction and grams of cathode.
+pub const LI2S_SPECIFIC_CAPACITY_MAH_PER_G: f32 = 1166.5;
+
+/// Mass of finished cathode per unit mass of Li2S in it. A conversion cathode
+/// is not pure active material: the carbon network and the catholyte that make
+/// the Li2S reachable scale with it, so reserve inventory costs more than the
+/// stoichiometry alone. 1.318 is a Li2S / C / Li6PS5Cl composite at 10 % carbon
+/// on active and 21.8 % catholyte.
+pub const CATHODE_COMPOSITE_FACTOR: f32 = 1.318;
+
+/// Activation energy for interphase growth on lithium metal against a sulfide,
+/// eV. Higher than creep, which is why a hot cell dies of chemistry and a cold
+/// one dies of mechanics.
+pub const DEFAULT_CALENDAR_EA_EV: f32 = 0.65;
+
 impl ElectrochemicalState {
     /// Capacity fraction lost to lithium inventory, net of the reservoir.
     ///
@@ -821,6 +964,38 @@ impl ElectrochemicalState {
             DEFAULT_CALENDAR_K
         };
         k as f64 * self.calendar_hours_equiv.sqrt()
+    }
+
+    /// Capacity fraction lost because whole layers have bridged and stopped
+    /// working, as distinct from every layer working slightly less well.
+    ///
+    /// This is the only one of the five channels that is not a fade. A bridged
+    /// layer in a series stack contributes no voltage, so the loss is simply the
+    /// fraction of layers gone. It is also the only channel invisible at the
+    /// terminals: one layer of 569 moves stack voltage by 0.18 %, which no
+    /// instrument resolves, while the same layer leaking against series current
+    /// is a 0.7 % coulombic deficit against a 0.5 % budget - so a cell dying
+    /// this way is caught by coulometry and never by a voltmeter.
+    pub fn short_fade(&self) -> f64 {
+        if self.layer_count == 0 { return 0.0; }
+        (self.shorted_layers / self.layer_count as f64).clamp(0.0, 1.0)
+    }
+
+    /// Creep strain that has actually reached the separator, net of the void the
+    /// deposit was given to expand into.
+    pub fn creep_effective(&self) -> f64 {
+        (self.creep_strain - self.creep_accommodated).max(0.0)
+    }
+
+    /// Deviatoric fraction of the applied axial stress under oedometric
+    /// confinement: `(1 - 2 nu) / (1 - nu)`.
+    ///
+    /// Returns 1.0 when no Poisson ratio is authored, which is the unconfined
+    /// reading the tick used before this existed.
+    pub fn deviatoric_fraction(&self) -> f32 {
+        let nu = self.creep_poisson;
+        if nu <= 0.0 || nu >= 0.5 { return 1.0; }
+        (1.0 - 2.0 * nu) / (1.0 - nu)
     }
 
     /// V-Cell Na-S defaults (202.5 Ah, 2.23 V standard)
@@ -864,6 +1039,22 @@ impl ElectrochemicalState {
             resistance_activation_ev: 0.0,
             resistance_effective: 0.0,
             ambient_temperature_k: 0.0,
+            creep_poisson: 0.0,
+            creep_accommodation_frac: 0.0,
+            creep_accommodated: 0.0,
+            creep_activation_ev: 0.0,
+            calendar_activation_ev: 0.0,
+            separator_thickness_um: 0.0,
+            plated_thickness_um: 0.0,
+            bridge_chi: 0.0,
+            bridge_weibull_m: 0.0,
+            bridge_scale: 0.0,
+            layer_count: 0,
+            shorted_layers: 0.0,
+            crack_pressure_exponent: 0.0,
+            calendar_roughness_beta: 0.0,
+            cell_mass_kg: 0.0,
+            reservoir_mass_kg: 0.0,
         }
     }
 }

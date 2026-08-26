@@ -521,7 +521,6 @@ mod tests {
         }
     }
 
-    #[test]
     /// The centre cell of the honeycomb — the one the wheel reads outward from.
     fn centre_cell(cells: &[HoneycombCell]) -> &HoneycombCell {
         let cx = (HONEYCOMB_W - CELL_W) * 0.5;

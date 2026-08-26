@@ -1329,6 +1329,54 @@ pub struct TomlElectrochemicalState {
     /// Ambient temperature, K. 0.0 keeps 298.15.
     #[serde(default)]
     pub ambient_temperature_k: f32,
+    /// Poisson ratio of the plated metal. 0.0 drives creep with the full stack
+    /// pressure, as an unconfined billet; 0.36 is lithium and applies the
+    /// oedometric correction, which at an exponent of 6.6 is worth 78x on rate.
+    #[serde(default)]
+    pub creep_poisson: f32,
+    /// Void the deposit can creep into before it bears on the separator, as a
+    /// fraction of plated thickness. 0.0 charges every micron from hour one.
+    #[serde(default)]
+    pub creep_accommodation_frac: f32,
+    /// Activation energy for creep, eV. 0.0 keeps the shared legacy ramp.
+    #[serde(default)]
+    pub creep_activation_ev: f32,
+    /// Activation energy for calendar interphase growth, eV. 0.0 keeps the
+    /// shared legacy ramp.
+    #[serde(default)]
+    pub calendar_activation_ev: f32,
+    /// Separator thickness, um. Enables both the bridging channel and the
+    /// rate-dependent transport limit. 0.0 disables both.
+    #[serde(default)]
+    pub separator_thickness_um: f32,
+    /// Plated metal thickness at full charge, um.
+    #[serde(default)]
+    pub plated_thickness_um: f32,
+    /// Fraction of extruded metal that penetrates the separator. 0.0 keeps 0.25.
+    #[serde(default)]
+    pub bridge_chi: f32,
+    /// Weibull shape on penetration fraction. 0.0 keeps 4.0.
+    #[serde(default)]
+    pub bridge_weibull_m: f32,
+    /// Penetration fraction at which a layer is expected to bridge. 0.0 keeps 0.35.
+    #[serde(default)]
+    pub bridge_scale: f32,
+    /// Layers in a bipolar series stack. 0 models the cell as its parallel
+    /// equivalent and skips every series-only mechanism.
+    #[serde(default)]
+    pub layer_count: u32,
+    /// Exponent on stack pressure in the cathode-fatigue term. Negative means
+    /// pressure protects the cathode. 0.0 keeps it pressure-blind.
+    #[serde(default)]
+    pub crack_pressure_exponent: f32,
+    /// How strongly interphase age raises the plating loss rate. 0.0 keeps
+    /// calendar fade and plating loss independent of one another.
+    #[serde(default)]
+    pub calendar_roughness_beta: f32,
+    /// Total cell mass, kg. Set it and the tick publishes specific energy from
+    /// the same state that produces the life numbers.
+    #[serde(default)]
+    pub cell_mass_kg: f32,
 }
 
 fn default_voltage() -> f32 { 2.23 }
@@ -1368,6 +1416,22 @@ impl TomlElectrochemicalState {
             resistance_activation_ev: self.resistance_activation_ev,
             resistance_effective: 0.0,
             ambient_temperature_k: self.ambient_temperature_k,
+            creep_poisson: self.creep_poisson,
+            creep_accommodation_frac: self.creep_accommodation_frac,
+            creep_accommodated: 0.0,
+            creep_activation_ev: self.creep_activation_ev,
+            calendar_activation_ev: self.calendar_activation_ev,
+            separator_thickness_um: self.separator_thickness_um,
+            plated_thickness_um: self.plated_thickness_um,
+            bridge_chi: self.bridge_chi,
+            bridge_weibull_m: self.bridge_weibull_m,
+            bridge_scale: self.bridge_scale,
+            layer_count: self.layer_count,
+            shorted_layers: 0.0,
+            crack_pressure_exponent: self.crack_pressure_exponent,
+            calendar_roughness_beta: self.calendar_roughness_beta,
+            cell_mass_kg: self.cell_mass_kg,
+            reservoir_mass_kg: 0.0,
             li_inventory_lost: 0.0,
             soc_turn: 1.0,
             excursion_depth: 0.0,
