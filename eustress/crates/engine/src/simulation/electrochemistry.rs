@@ -78,6 +78,14 @@ fn publish_echem_to_sim_values(
         // largest is the mechanism that is actually killing the cell, and the
         // others are noise until it is fixed.
         ("battery.fade_lithium", echem.lithium_fade()),
+        // The SAME quantity before the reservoir subtracts from it. Without
+        // this, a buffered cell cannot measure its own loss rate: fade_lithium
+        // reads exactly 0.0 until the buffer is gone, so establishing the rate
+        // needed a second run with the reservoir zeroed, and the pair could
+        // disagree about geometry without anything saying so. That is how an
+        // 824-cycle figure came to import a rate measured on a different cell.
+        // One run now carries both the rate and the life.
+        ("battery.li_inventory_lost", echem.li_inventory_lost),
         ("battery.fade_cathode", echem.crack_damage),
         ("battery.fade_calendar", echem.calendar_fade()),
         ("battery.calendar_hours", echem.calendar_hours_equiv),
