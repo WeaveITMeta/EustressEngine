@@ -19,7 +19,7 @@ impl ScriptLocation {
             Self::Entity(_) => "Entity",
             Self::Service => "Service",
             Self::Workspace => "Workspace",
-            Self::SoulService => "Soul Service",
+            Self::SoulService => "SoulService",
         }
     }
 }
@@ -66,7 +66,7 @@ impl SystemPromptBuilder {
             ScriptLocation::Entity(_) => "You are a Soul Script assistant for entity scripting.".to_string(),
             ScriptLocation::Service => "You are a Soul Script assistant for service scripting.".to_string(),
             ScriptLocation::Workspace => "You are a Soul Script assistant for workspace scripting.".to_string(),
-            ScriptLocation::SoulService => "You are a Soul Script assistant for Soul Service scripting.".to_string(),
+            ScriptLocation::SoulService => "You are a Soul Script assistant for SoulService scripting.".to_string(),
         }
     }
 }
