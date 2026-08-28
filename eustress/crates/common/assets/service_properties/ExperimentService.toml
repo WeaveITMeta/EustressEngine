@@ -1,0 +1,24 @@
+# ExperimentService Properties
+#
+# Sections and rows render ALPHABETICALLY, not in file order: the panel builder
+# walks a toml::map::Map and toml 0.8 is pulled without preserve_order, so it is
+# a BTreeMap. Rows are named so that ordering still reads correctly.
+#
+# Every row here is readonly. This service is a VIEW over the evidence corpus
+# and the value graph, and a number that can be typed over in a panel is a
+# number that has escaped its provenance. Editing happens in
+# graph/vcell.graph.toml or in a Rune script, both of which git tracks.
+
+[Data]
+Name = { type = "string", value = "ExperimentService", readonly = true }
+ClassName = { type = "string", value = "ExperimentService", readonly = true }
+
+[Corpus]
+Designs = { type = "int", value = 0, readonly = true, description = "How many designs have evidence in this Space." }
+Runs = { type = "int", value = 0, readonly = true, description = "Total runs across every design." }
+Envelopes = { type = "int", value = 0, readonly = true, description = "Evidence records read. Every check and every telemetry sample appends one; nothing is ever overwritten." }
+
+[Integrity]
+Conflicts = { type = "int", value = 0, readonly = true, description = "Keys where two runs report different values for the same check. Not averaged and not resolved by recency: a contradiction is a finding." }
+FreeParameters = { type = "int", value = 0, readonly = true, description = "Coefficients in the wired laws that no experiment has set. Knobs. Compare against the count of reported results before believing any of them." }
+Unfalsifiable = { type = "int", value = 0, readonly = true, description = "Free parameters with no experiment on record that could ever set them. These are the ones that make a model unfalsifiable rather than merely unvalidated." }
