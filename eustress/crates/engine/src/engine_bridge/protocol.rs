@@ -101,6 +101,7 @@ impl BridgeError {
 pub enum MethodName {
     Ping,
     SimRead,
+    HilIngest,
     EcsQuery,
     /// Detailed live scene snapshot — per-entity class / transform / mesh
     /// / material / render+physics flags / parent / on-disk source, plus
@@ -219,6 +220,7 @@ where
     Ok(match s.as_str() {
         "ping" => MethodName::Ping,
         "sim.read" => MethodName::SimRead,
+        "hil.ingest" => MethodName::HilIngest,
         "ecs.query" => MethodName::EcsQuery,
         "ecs.inspect" => MethodName::EcsInspect,
         "tool.equip" => MethodName::ToolEquip,
@@ -1279,6 +1281,91 @@ pub mod handlers {
     ///
     /// Params: `{ "keys": ["battery.voltage", ...] }` — omit `keys`
     /// to get every watchpoint.
+    /// Append hardware samples to a run-scoped, append-only log.
+    ///
+    /// This deliberately does NOT write sim values. The moment a sensor drives
+    /// the simulation, a run stops being reproducible from its committed
+    /// inputs, which is the property the versioned duty profiles exist to
+    /// protect. A bench observes; it does not steer.
+    ///
+    /// ```json
+    /// {"method":"hil.ingest","params":{
+    ///   "run_id":"HIL-2026-11-03-aurbach-e1",
+    ///   "samples":[{"t_mono_s":4821.113,"channel":"cell_voltage","value":2.1408,
+    ///               "unit":"V","instrument":"biologic-vmp3","serial":"0451",
+    ///               "cal_due":"2026-11-01"}]}}
+    /// ```
+    ///
+    /// A sample from an instrument past its calibration date is not a
+    /// measurement, so it is rejected rather than quietly widening an error
+    /// bar. The count of rejects comes back with the accepted count.
+    pub fn hil_ingest(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        use std::io::Write as _;
+
+        let run_id = req.params.get("run_id").and_then(|v| v.as_str()).unwrap_or("");
+        if run_id.is_empty() || !run_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::invalid_params("run_id is required and must be alphanumeric, dash or underscore"),
+            );
+        }
+        let Some(samples) = req.params.get("samples").and_then(|v| v.as_array()) else {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::invalid_params("samples must be an array"),
+            );
+        };
+
+        let Some(root) = world.get_resource::<crate::space::SpaceRoot>() else {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("SpaceRoot not available"),
+            );
+        };
+        let dir = root.0.join(".eustress").join("hil");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return BridgeResponse::error(req.id.clone(), BridgeError::internal(&format!("{e}")));
+        }
+        let path = dir.join(format!("{run_id}.ndjson"));
+
+        let today = req.params.get("today").and_then(|v| v.as_str()).unwrap_or("");
+        let (mut accepted, mut rejected) = (0usize, 0usize);
+        let mut body = String::new();
+        for sm in samples {
+            // An expired calibration invalidates the sample, not the run.
+            let expired = match (sm.get("cal_due").and_then(|v| v.as_str()), today) {
+                (Some(due), t) if !t.is_empty() && !due.is_empty() => due < t,
+                _ => false,
+            };
+            if expired || sm.get("channel").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                rejected += 1;
+                continue;
+            }
+            body.push_str(&sm.to_string());
+            body.push('\n');
+            accepted += 1;
+        }
+
+        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(body.as_bytes()) {
+                    return BridgeResponse::error(req.id.clone(), BridgeError::internal(&format!("{e}")));
+                }
+            }
+            Err(e) => return BridgeResponse::error(req.id.clone(), BridgeError::internal(&format!("{e}"))),
+        }
+
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({
+                "run_id": run_id,
+                "accepted": accepted,
+                "rejected": rejected,
+                "path": path.to_string_lossy(),
+            }),
+        )
+    }
+
     pub fn sim_read(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
         // `SimValuesResource` (HashMap<String, f64>) is the authoritative
         // in-memory store the Rune runtime writes to on each sim tick.

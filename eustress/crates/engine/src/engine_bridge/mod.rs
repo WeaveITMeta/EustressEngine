@@ -574,6 +574,7 @@ fn drain_bridge_requests(world: &mut World) {
         let response = match pending.request.method {
             MethodName::Ping => protocol::handlers::ping(&pending.request),
             MethodName::SimRead => protocol::handlers::sim_read(world, &pending.request),
+            MethodName::HilIngest => protocol::handlers::hil_ingest(world, &pending.request),
             MethodName::EcsQuery => protocol::handlers::ecs_query(world, &pending.request),
             MethodName::EcsInspect => protocol::handlers::ecs_inspect(world, &pending.request),
             MethodName::ToolEquip => protocol::handlers::tool_equip(world, &pending.request),
