@@ -106,6 +106,10 @@ incremental/
 **/deps/*.rlib
 **/deps/*.rmeta
 infrastructure/cloudflare/api/.wrangler/
+# Miniflare local state (R2/KV/D1 emulation) written wherever wrangler is run
+# from, not only under the api worker. SQLite plus its -shm/-wal siblings.
+.wrangler/
+**/.wrangler/
 
 # Local-only: founder/ops planning + one-off recovery tooling.
 # This repo is PUBLIC — these must never be pushed.
