@@ -44,6 +44,10 @@ pub struct FrameTimeTracker {
     since_report: u32,
     /// Hitches (over threshold) counted since the last report.
     hitches: u32,
+    /// Whether the previous scored frame ran in `PowerMode::Active`. Used to
+    /// drop the one transition frame after a mode change, which is long by
+    /// design (the reactive wait) rather than a stall.
+    was_active: bool,
 }
 
 impl Default for FrameTimeTracker {
@@ -62,6 +66,7 @@ impl FrameTimeTracker {
             recent_us: Vec::with_capacity(REPORT_EVERY_FRAMES as usize),
             since_report: 0,
             hitches: 0,
+            was_active: true,
         }
     }
     
@@ -78,8 +83,29 @@ impl FrameTimeTracker {
 }
 
 /// System to track frame times and log stutters with per-system breakdown
-pub fn track_frame_time(mut tracker: ResMut<FrameTimeTracker>) {
+pub fn track_frame_time(
+    mut tracker: ResMut<FrameTimeTracker>,
+    focus: Option<Res<crate::window_focus::WindowFocusState>>,
+) {
     let now = Instant::now();
+
+    // Score ONLY frames rendered while focused + active. Unfocused, idle and
+    // minimized frames are deliberately 30–1000 ms long (the power-saving
+    // reactive waits in `window_focus`), and counting them buried the real
+    // signal: a 10-hour session logged 66,154 "hitches", of which 66,126 were
+    // the throttle working as intended and 28 were genuine stalls. The frame
+    // on which the mode flips back to Active is skipped too — it spans the
+    // last reactive wait.
+    let active = focus
+        .as_deref()
+        .map(|f| matches!(f.power_mode, crate::window_focus::PowerMode::Active))
+        .unwrap_or(true);
+    if !active || !tracker.was_active {
+        tracker.was_active = active;
+        tracker.last_frame = Some(now);
+        tracker.system_times.clear();
+        return;
+    }
     
     if let Some(last) = tracker.last_frame {
         let frame_time = now.duration_since(last);

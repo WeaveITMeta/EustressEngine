@@ -36,6 +36,14 @@ pub enum PowerMode {
     /// Full speed - window focused and user active
     #[default]
     Active,
+    /// Focused, but no input for a couple of seconds and nothing being
+    /// dragged, simulated or driven by a modal tool. The viewport is static,
+    /// so it is redrawn at a modest floor instead of the full Active rate;
+    /// the first mouse movement or key press returns to Active on that same
+    /// frame (the winit `reactive` mode wakes on raw device events). This is
+    /// the difference between an editor that idles at 100 FPS pegging the GPU
+    /// and one that idles at 30.
+    Quiet,
     /// Reduced speed - window unfocused but visible
     Background,
     /// Minimal updates - user idle for extended period
@@ -48,17 +56,19 @@ impl PowerMode {
     /// Get the update interval for this power mode
     pub fn update_interval(&self) -> Duration {
         match self {
-            PowerMode::Active => Duration::ZERO, // Continuous
+            PowerMode::Active => Duration::ZERO, // Continuous (or the Active cap)
+            PowerMode::Quiet => Duration::from_millis(33), // 30 FPS floor
             PowerMode::Background => Duration::from_millis(250), // 4 FPS
             PowerMode::Idle => Duration::from_millis(500), // 2 FPS
             PowerMode::Minimized => Duration::from_millis(1000), // 1 FPS
         }
     }
-    
+
     /// Get display name for UI/logging
     pub fn display_name(&self) -> &'static str {
         match self {
             PowerMode::Active => "Active",
+            PowerMode::Quiet => "Quiet",
             PowerMode::Background => "Background",
             PowerMode::Idle => "Idle",
             PowerMode::Minimized => "Minimized",
@@ -160,6 +170,15 @@ pub struct IdleSettings {
     pub idle_focused_update_ms: u64,
     /// Minimized update rate in milliseconds
     pub minimized_update_ms: u64,
+    /// Seconds without input (while focused) before dropping to `Quiet`.
+    pub quiet_threshold_focused: f32,
+    /// `Quiet` redraw interval in milliseconds (the static-viewport floor).
+    pub quiet_update_ms: u64,
+    /// `Active` redraw interval in milliseconds; `0` = uncapped `Continuous`.
+    /// Defaults to ~120 FPS so a light scene cannot spin the GPU at several
+    /// hundred frames per second for nothing. Input never waits on this — the
+    /// `reactive` mode wakes immediately on any event.
+    pub active_update_ms: u64,
 }
 
 impl Default for IdleSettings {
@@ -178,6 +197,12 @@ impl Default for IdleSettings {
             // after a one-minute pause.
             idle_focused_update_ms: 33,
             minimized_update_ms: 1000,         // 1 FPS when minimized
+            // Env overrides so the trade-off can be re-measured without a
+            // rebuild: EUSTRESS_QUIET_SECS, EUSTRESS_QUIET_FPS, EUSTRESS_MAX_FPS
+            // (0 = uncapped Continuous).
+            quiet_threshold_focused: env_f32("EUSTRESS_QUIET_SECS", 2.0),
+            quiet_update_ms: fps_to_ms(env_f32("EUSTRESS_QUIET_FPS", 30.0)),
+            active_update_ms: fps_to_ms(env_f32("EUSTRESS_MAX_FPS", 120.0)),
         }
     }
 }
@@ -335,8 +360,16 @@ fn detect_user_input(
 fn update_power_mode(
     mut focus_state: ResMut<WindowFocusState>,
     settings: Res<IdleSettings>,
+    // Interactions that must keep the full Active rate even when no fresh
+    // input event arrives this frame: a drag in progress, and a modal tool
+    // mid-operation. (Play mode is handled in `apply_power_settings`, which
+    // forces Continuous while simulating regardless of mode.)
+    select_tool: Option<Res<crate::select_tool::SelectToolState>>,
+    modal_tool: Option<Res<crate::modal_tool::ActiveModalTool>>,
 ) {
     let old_mode = focus_state.power_mode;
+    let interacting = select_tool.as_deref().map(|s| s.dragging).unwrap_or(false)
+        || modal_tool.as_deref().map(|m| m.is_active()).unwrap_or(false);
     
     // Determine new power mode
     let new_mode = if focus_state.minimized {
@@ -357,14 +390,31 @@ fn update_power_mode(
             && focus_state.is_idle_for(Duration::from_secs_f32(settings.idle_threshold_focused)) 
         {
             PowerMode::Idle
+        } else if !interacting
+            && settings.quiet_threshold_focused > 0.0
+            && focus_state.is_idle_for(Duration::from_secs_f32(settings.quiet_threshold_focused))
+        {
+            // Focused but paused: nothing is moving, so redraw at the quiet
+            // floor. The next mouse move or key press resets the idle clock
+            // (`detect_user_input`) and this returns Active the same frame.
+            PowerMode::Quiet
         } else {
             PowerMode::Active
         }
     };
     
-    // Log mode changes
+    // Log mode changes. Active↔Quiet flips on every pause and resume, so it
+    // goes to `debug!`; the focus/idle/minimize transitions stay at `info!`.
     if new_mode != old_mode {
-        info!("⚡ Power mode: {} → {}", old_mode.display_name(), new_mode.display_name());
+        let quiet_flip = matches!(
+            (old_mode, new_mode),
+            (PowerMode::Active, PowerMode::Quiet) | (PowerMode::Quiet, PowerMode::Active)
+        );
+        if quiet_flip {
+            debug!("⚡ Power mode: {} → {}", old_mode.display_name(), new_mode.display_name());
+        } else {
+            info!("⚡ Power mode: {} → {}", old_mode.display_name(), new_mode.display_name());
+        }
         focus_state.power_mode = new_mode;
     }
 }
@@ -412,7 +462,25 @@ fn apply_power_settings(
 
     match focus_state.power_mode {
         PowerMode::Active => {
-            winit_settings.focused_mode = UpdateMode::Continuous;
+            // Capped `reactive` rather than `Continuous`: identical latency
+            // (every event wakes it), but a scene that renders in 2 ms no
+            // longer spins at 500 FPS heating the GPU. 0 restores Continuous.
+            winit_settings.focused_mode = if settings.active_update_ms == 0 {
+                UpdateMode::Continuous
+            } else {
+                UpdateMode::reactive(Duration::from_millis(settings.active_update_ms))
+            };
+            winit_settings.unfocused_mode = UpdateMode::reactive_low_power(
+                Duration::from_millis(settings.background_update_ms)
+            );
+        }
+        PowerMode::Quiet => {
+            // Static viewport, user paused: redraw at the quiet floor. Raw
+            // device events (`reactive`, not `reactive_low_power`) wake it the
+            // instant the mouse moves, and `update_power_mode` flips back to
+            // Active on that same frame.
+            winit_settings.focused_mode =
+                UpdateMode::reactive(Duration::from_millis(settings.quiet_update_ms.max(1)));
             winit_settings.unfocused_mode = UpdateMode::reactive_low_power(
                 Duration::from_millis(settings.background_update_ms)
             );
@@ -483,4 +551,19 @@ pub fn when_not_minimized(focus_state: Res<WindowFocusState>) -> bool {
 /// Run condition: only run when NOT idle
 pub fn when_not_idle(focus_state: Res<WindowFocusState>) -> bool {
     focus_state.power_mode != PowerMode::Idle && focus_state.power_mode != PowerMode::Minimized
+}
+
+/// `f32` env override with a default; non-finite or unparsable values fall
+/// back so a typo can never disable rendering.
+fn env_f32(key: &str, default: f32) -> f32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(default)
+}
+
+/// Frames-per-second → redraw interval in ms; `0` FPS means "uncapped".
+fn fps_to_ms(fps: f32) -> u64 {
+    if fps <= 0.0 { 0 } else { (1000.0 / fps).round().max(1.0) as u64 }
 }
