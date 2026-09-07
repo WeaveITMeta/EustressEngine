@@ -1125,6 +1125,13 @@ pub fn spawn_file_entry(
                         definition.clone(),
                         file_meta.path.clone(),
                     );
+                    // Maps are attached the first time a Part uses this material.
+                    material_registry.defer_textures(
+                        &mat_name,
+                        &definition.textures,
+                        mat_toml_dir,
+                        space_path,
+                    );
                     let e = super::material_loader::spawn_material_entity(
                         commands,
                         file_meta.path.clone(),

@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use eustress_common::classes::Material as PresetMaterial;
+use bevy::asset::RenderAssetUsages;
+use bevy::image::{ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
 
 // ============================================================================
 // MaterialDefinition — the parsed .mat.toml structure
@@ -317,6 +319,7 @@ impl MaterialRegistry {
     pub(crate) fn resolve_part_material(
         &mut self,
         materials: &mut Assets<StandardMaterial>,
+        asset_server: &AssetServer,
         mat_name: &str,
         preset: PresetMaterial,
         base_template: Option<Handle<StandardMaterial>>,
@@ -325,6 +328,19 @@ impl MaterialRegistry {
         reflectance: f32,
         uv_transform: bevy::math::Affine2,
     ) -> Handle<StandardMaterial> {
+        // Attach the library material's texture maps NOW, before anything
+        // below looks at the template. Library materials register WITHOUT
+        // maps (so the ~20 unused ones cost nothing); this first use is the
+        // moment they are needed. It has to happen here rather than in a
+        // later system because the code below (a) decides `textured` from the
+        // template's `base_color_texture` and (b) SNAPSHOTS the template into
+        // an owned per-key material — a hydration after that point would never
+        // reach the parts already built from the snapshot.
+        if let Some(h) = base_template.as_ref() {
+            if let Some(key) = self.name_for_handle(h).map(|s| s.to_string()) {
+                self.hydrate_textures(&key, asset_server, materials);
+            }
+        }
         let alpha = 1.0 - transparency.clamp(0.0, 1.0);
         let reflectance = reflectance.clamp(0.0, 1.0);
         let is_glass = matches!(preset, PresetMaterial::Glass);
@@ -509,39 +525,10 @@ pub fn build_standard_material(
         mat.thickness = th;
     }
 
-    // Load texture maps if referenced
-    let tex = &definition.textures;
-    if !tex.base_color.is_empty() {
-        if let Some(handle) = load_texture(asset_server, mat_toml_dir, &tex.base_color, space_root) {
-            mat.base_color_texture = Some(handle);
-        }
-    }
-    if !tex.normal.is_empty() {
-        if let Some(handle) = load_texture(asset_server, mat_toml_dir, &tex.normal, space_root) {
-            mat.normal_map_texture = Some(handle);
-        }
-    }
-    if !tex.metallic_roughness.is_empty() {
-        if let Some(handle) = load_texture(asset_server, mat_toml_dir, &tex.metallic_roughness, space_root) {
-            mat.metallic_roughness_texture = Some(handle);
-        }
-    }
-    if !tex.emissive.is_empty() {
-        if let Some(handle) = load_texture(asset_server, mat_toml_dir, &tex.emissive, space_root) {
-            mat.emissive_texture = Some(handle);
-        }
-    }
-    if !tex.occlusion.is_empty() {
-        if let Some(handle) = load_texture(asset_server, mat_toml_dir, &tex.occlusion, space_root) {
-            mat.occlusion_texture = Some(handle);
-        }
-    }
-    if !tex.depth.is_empty() {
-        if let Some(handle) = load_texture(asset_server, mat_toml_dir, &tex.depth, space_root) {
-            mat.depth_map = Some(handle);
-        }
-    }
-
+    // Texture maps are NOT loaded here. They are attached lazily by
+    // `MaterialRegistry::hydrate_textures` the first time a Part uses this
+    // material (see `material_sync::hydrate_used_material_textures`), so a
+    // library material nobody has applied costs no VRAM and no RAM.
     mat
 }
 
@@ -558,10 +545,10 @@ fn load_texture(
     if absolute_path.exists() {
         if let Ok(rel) = absolute_path.strip_prefix(space_root) {
             let asset_path = format!("space://{}", rel.to_string_lossy().replace('\\', "/"));
-            return Some(asset_server.load(asset_path));
+            return Some(load_image(asset_server, asset_path, is_srgb));
         } else {
             let asset_path = absolute_path.to_string_lossy().into_owned();
-            return Some(asset_server.load(asset_path));
+            return Some(load_image(asset_server, asset_path, is_srgb));
         }
     }
 
@@ -572,7 +559,7 @@ fn load_texture(
         .join(relative_path);
     if bundled_check.exists() {
         let asset_path = format!("bundled://{}", relative_path.replace('\\', "/"));
-        return Some(asset_server.load(asset_path));
+        return Some(load_image(asset_server, asset_path, is_srgb));
     }
 
     warn!("Texture not found: {:?} (not in space or bundled assets)", absolute_path);
@@ -763,4 +750,163 @@ mod tests {
             MaterialCacheKey::new(c, "Plastic", 0.0, 0.5, None),
         );
     }
+}
+
+// ============================================================================
+// Lazy texture hydration
+// ============================================================================
+
+/// Texture maps recorded at material load time but not yet loaded.
+#[derive(Debug, Clone)]
+pub struct PendingTextures {
+    pub refs: TextureProperties,
+    pub mat_toml_dir: PathBuf,
+    pub space_root: PathBuf,
+}
+
+impl MaterialRegistry {
+    /// Record `refs` for `name` without loading anything. Called wherever a
+    /// material is (re)registered; a re-registration also drops the material
+    /// from `hydrated` so a hot-reloaded `.mat.toml` picks up new maps.
+    pub fn defer_textures(
+        &mut self,
+        name: &str,
+        refs: &TextureProperties,
+        mat_toml_dir: &Path,
+        space_root: &Path,
+    ) {
+        self.hydrated.remove(name);
+        let has_any = !(refs.base_color.is_empty()
+            && refs.normal.is_empty()
+            && refs.metallic_roughness.is_empty()
+            && refs.emissive.is_empty()
+            && refs.occlusion.is_empty()
+            && refs.depth.is_empty());
+        if has_any {
+            self.pending_textures.insert(
+                name.to_string(),
+                PendingTextures {
+                    refs: refs.clone(),
+                    mat_toml_dir: mat_toml_dir.to_path_buf(),
+                    space_root: space_root.to_path_buf(),
+                },
+            );
+        } else {
+            self.pending_textures.remove(name);
+        }
+    }
+
+    /// Name of the registry material behind `handle`, if it is one. Linear in
+    /// the (small) library size; called only on `Added`/`Changed` part
+    /// materials.
+    pub fn name_for_handle(&self, handle: &Handle<StandardMaterial>) -> Option<&str> {
+        self.materials
+            .iter()
+            .find(|(_, h)| h.id() == handle.id())
+            .map(|(n, _)| n.as_str())
+    }
+
+    /// Attach `name`'s texture maps to its `StandardMaterial` if they are
+    /// still pending. Idempotent; a no-op for materials without maps.
+    pub fn hydrate_textures(
+        &mut self,
+        name: &str,
+        asset_server: &AssetServer,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> bool {
+        if self.hydrated.contains(name) {
+            return false;
+        }
+        let Some(pending) = self.pending_textures.get(name).cloned() else {
+            self.hydrated.insert(name.to_string());
+            return false;
+        };
+        let Some(handle) = self.materials.get(name).cloned() else {
+            return false;
+        };
+        let Some(mat) = materials.get_mut(&handle) else {
+            return false; // asset not resident yet — retry on a later frame
+        };
+        attach_material_textures(
+            mat,
+            &pending.refs,
+            asset_server,
+            &pending.mat_toml_dir,
+            &pending.space_root,
+        );
+        self.hydrated.insert(name.to_string());
+        info!("🎨 material '{}': textures attached on first use", name);
+        true
+    }
+}
+
+/// Load `tex`'s maps and attach them to `mat`. Colour maps (base colour,
+/// emissive) are sRGB; every data map (normal, metallic/roughness,
+/// occlusion, depth) is LINEAR. The previous loader used Bevy's default
+/// `is_srgb = true` for all six, which gamma-decoded normal and roughness
+/// data as if it were colour — darker roughness, skewed normals — on every
+/// textured material.
+pub fn attach_material_textures(
+    mat: &mut StandardMaterial,
+    tex: &TextureProperties,
+    asset_server: &AssetServer,
+    mat_toml_dir: &Path,
+    space_root: &Path,
+) {
+    if !tex.base_color.is_empty() {
+        if let Some(h) = load_texture(asset_server, mat_toml_dir, &tex.base_color, space_root, true) {
+            mat.base_color_texture = Some(h);
+        }
+    }
+    if !tex.normal.is_empty() {
+        if let Some(h) = load_texture(asset_server, mat_toml_dir, &tex.normal, space_root, false) {
+            mat.normal_map_texture = Some(h);
+        }
+    }
+    if !tex.metallic_roughness.is_empty() {
+        if let Some(h) = load_texture(asset_server, mat_toml_dir, &tex.metallic_roughness, space_root, false) {
+            mat.metallic_roughness_texture = Some(h);
+        }
+    }
+    if !tex.emissive.is_empty() {
+        if let Some(h) = load_texture(asset_server, mat_toml_dir, &tex.emissive, space_root, true) {
+            mat.emissive_texture = Some(h);
+        }
+    }
+    if !tex.occlusion.is_empty() {
+        if let Some(h) = load_texture(asset_server, mat_toml_dir, &tex.occlusion, space_root, false) {
+            mat.occlusion_texture = Some(h);
+        }
+    }
+    if !tex.depth.is_empty() {
+        if let Some(h) = load_texture(asset_server, mat_toml_dir, &tex.depth, space_root, false) {
+            mat.depth_map = Some(h);
+        }
+    }
+}
+
+/// Load a material texture GPU-only, with the material sampler baked in.
+///
+/// * `asset_usage = RENDER_WORLD`: Bevy's default keeps a full decoded copy of
+///   every image in `Assets<Image>` after upload. For 2048² PBR maps that is
+///   16 MB of RAM per map that nothing ever reads again — it was ~1 GB of the
+///   engine's committed memory on a 130-entity Space.
+/// * The sampler (Repeat, trilinear, 16× anisotropy) is set here rather than
+///   patched afterwards by `material_sync`, because a `RENDER_WORLD`-only image
+///   is not in `Assets<Image>` to be patched.
+fn load_image(asset_server: &AssetServer, asset_path: String, is_srgb: bool) -> Handle<Image> {
+    asset_server.load_with_settings(asset_path, move |s: &mut ImageLoaderSettings| {
+        s.is_srgb = is_srgb;
+        s.asset_usage = RenderAssetUsages::RENDER_WORLD;
+        s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: ImageAddressMode::Repeat,
+            address_mode_v: ImageAddressMode::Repeat,
+            address_mode_w: ImageAddressMode::Repeat,
+            mag_filter: ImageFilterMode::Linear,
+            min_filter: ImageFilterMode::Linear,
+            mipmap_filter: ImageFilterMode::Linear,
+            anisotropy_clamp: 16,
+            ..ImageSamplerDescriptor::linear()
+        });
+    })
 }

@@ -1517,6 +1517,14 @@ fn handle_file_created(
                         definition.clone(),
                         event.path.clone(),
                     );
+                    // Maps attach on first use — a hot-reloaded material drops its
+                    // hydrated state so the NEW maps are picked up.
+                    material_registry.defer_textures(
+                        &mat_name,
+                        &definition.textures,
+                        mat_toml_dir,
+                        space_root,
+                    );
                     let entity = super::material_loader::spawn_material_entity(
                         commands,
                         event.path.clone(),

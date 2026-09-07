@@ -29,6 +29,7 @@ impl Plugin for MaterialSyncPlugin {
                 reapply_materials_on_registry_change,
                 set_material_textures_to_repeat,
                 sync_basepart_to_material,
+                hydrate_used_material_textures,
             ).chain());
     }
 }
@@ -82,8 +83,12 @@ fn set_material_textures_to_repeat(
                     }
                 }
             } else {
-                // Image not loaded yet — can't patch, try again next frame
-                all_patched = false;
+                // Not in `Assets<Image>`: either still loading, or loaded
+                // `RENDER_WORLD`-only by `material_loader::load_image`, which
+                // bakes this exact sampler in at load time. Either way there
+                // is nothing to patch. Treating it as "unpatched, retry" made
+                // this system rescan every material every frame, forever,
+                // once textures stopped being CPU-resident.
                 continue;
             };
             if needs_update {
@@ -187,6 +192,9 @@ fn reapply_materials_on_registry_change(
 fn sync_basepart_to_material(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    // Needed so the registry can attach a library material's texture maps on
+    // first use, BEFORE `resolve_part_material` snapshots the template.
+    asset_server: Res<AssetServer>,
     // R2.1: ResMut (was Res) — `sync` now resolves SHARED, deduplicated material
     // handles via the registry's dedup cache instead of cloning a unique
     // material per entity. A unique handle per entity defeats Bevy's batching
@@ -242,6 +250,7 @@ fn sync_basepart_to_material(
             let uv = compute_uv_transform(basepart, Some(transform.scale));
             let handle = registry.resolve_part_material(
                 &mut materials,
+                &asset_server,
                 &mat_name,
                 basepart.material,
                 base_template,
@@ -371,4 +380,38 @@ fn compute_uv_transform(basepart: &BasePart, transform_scale: Option<Vec3>) -> b
     let u_scale = (dims[0] / TILE_WORLD_SIZE).max(0.1);
     let v_scale = (dims[1] / TILE_WORLD_SIZE).max(0.1);
     bevy::math::Affine2::from_scale(bevy::math::Vec2::new(u_scale, v_scale))
+}
+
+/// Attach a library material's texture maps the first time any Part uses it.
+///
+/// Materials are registered WITHOUT their maps (see
+/// `material_loader::build_standard_material`); this is the other half. It
+/// runs only for parts whose material handle was just added or changed, asks
+/// the registry whether that handle is a library material, and hydrates it
+/// once. A material nobody applies never loads a byte of texture.
+fn hydrate_used_material_textures(
+    asset_server: Res<AssetServer>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut material_registry: Option<ResMut<crate::space::material_loader::MaterialRegistry>>,
+    changed: Query<
+        &MeshMaterial3d<StandardMaterial>,
+        Or<(Added<MeshMaterial3d<StandardMaterial>>, Changed<MeshMaterial3d<StandardMaterial>>)>,
+    >,
+) {
+    let Some(ref mut registry) = material_registry else { return };
+    if changed.is_empty() {
+        return;
+    }
+    // Dedupe per frame: many parts share one handle.
+    let mut seen: std::collections::HashSet<bevy::asset::AssetId<StandardMaterial>> =
+        std::collections::HashSet::new();
+    for mat in &changed {
+        if !seen.insert(mat.0.id()) {
+            continue;
+        }
+        let Some(name) = registry.name_for_handle(&mat.0).map(|s| s.to_string()) else {
+            continue; // a dedup-cache or preset material, not a library one
+        };
+        registry.hydrate_textures(&name, &asset_server, &mut materials);
+    }
 }
