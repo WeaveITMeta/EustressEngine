@@ -1,0 +1,40 @@
+# ExperimentService - the run history of a simulated product, as an object tree.
+#
+# A simulation that reports its result to a terminal cannot be reverse
+# engineered. This service is where a design, its parts, the laws wiring those
+# parts together, and every run over them become instances the Explorer can be
+# opened and inspected in, with properties and a path for each one.
+#
+# The tree it holds:
+#
+#   ExperimentService
+#     <Design>                  a cell revision, e.g. optimum_r100
+#       Parts/                  the objects the design is made of
+#         <Part>                attributes as properties, path-addressable
+#       Laws/                   the wiring: which attribute causes which
+#         <Law>                 independent -> dependent, kind, free parameters
+#       Runs/
+#         <Run>                 one experiment, its profile and its final state
+#
+# Data-driven, like DataService: an unknown service class loads as a Folder-like
+# container in service_loader.rs, so this file adds a service to the Explorer
+# without a Rust enum entry. That is the point. The kernel should not learn the
+# name of a battery.
+#
+# The folder name and class_name must match. Three lookups key off class_name
+# while the Explorer row is built from the disk folder name, and a service whose
+# two disagree resolves to nothing and shows a blank Properties panel.
+
+[service]
+class_name = "ExperimentService"
+icon = "dataservice"
+description = "Designs, their parts, the laws wiring them, and every run over them"
+can_have_children = true
+
+[properties]
+# Container only. A design carries the properties; the service carries none.
+
+[metadata]
+id = "experimentservice-service"
+created = ""
+last_modified = ""

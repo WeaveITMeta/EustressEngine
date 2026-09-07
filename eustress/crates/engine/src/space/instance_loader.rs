@@ -94,7 +94,20 @@ fn default_scene() -> String {
 /// the resulting AABB's min and max. This helper keeps a single floor
 /// (0.1 studs) so the physics world + save round-trip stay sane.
 fn sanitize_size(v: Vec3) -> Vec3 {
-    const MIN: f32 = 0.1;
+    // Guard against a degenerate collider, NOT against small parts.
+    //
+    // This was 0.1, which is a tenth of a METRE, so every dimension under
+    // 100 mm was silently clamped UP to 100 mm. That made precision modelling
+    // impossible: a V-Cell laminate authored at 12 um per separator loaded as
+    // 2,276 overlapping 100 mm slabs, which renders as noise and drops the
+    // frame rate to 2 FPS. Nothing warned, because the clamp is silent and the
+    // entity count is correct.
+    //
+    // What the guard actually has to prevent is Avian asserting on a
+    // zero-extent or NaN AABB (`b.min.cmple(b.max).all()`). A micron satisfies
+    // that as well as a decimetre does. 1 um is below any dimension a real
+    // assembly carries and still keeps every AABB strictly positive.
+    const MIN: f32 = 1.0e-6;
     Vec3::new(
         if v.x.is_finite() { v.x.abs().max(MIN) } else { MIN },
         if v.y.is_finite() { v.y.abs().max(MIN) } else { MIN },
@@ -522,7 +535,16 @@ pub fn sanitize_part_transforms_safety_net(
             // panic, while a zero/NaN axis collapses or NaNs it. Repair any bad
             // axis to `abs().max(MIN)`; valid positive scales are left untouched
             // (no-op), so normal parts are unaffected.
-            const MIN_SCALE: f32 = 1e-3;
+            // 1e-6, not 1e-3. This repair pass runs over spawned entities and
+            // overwrites Transform.scale, so a 1 mm floor here silently undoes
+            // any part authored thinner than that even when the loader got it
+            // right: a 12 um separator loaded with a correct BasePart.size and
+            // a transform repaired to 1 mm, and only the render was wrong.
+            //
+            // The guard is against zero, negative and NaN, which invert or
+            // collapse Avian AABBs. A micron is strictly positive and satisfies
+            // that; a millimetre just forbids precision assemblies.
+            const MIN_SCALE: f32 = 1e-6;
             let scale = t.scale;
             let scale_bad = !scale.is_finite()
                 || scale.x < MIN_SCALE
@@ -1292,6 +1314,69 @@ pub struct TomlElectrochemicalState {
     /// 0.0 keeps ~20 % loss over 1000 full-depth cycles.
     #[serde(default)]
     pub crack_k: f32,
+    /// Pressure above which lithium extrudes rather than densifies, MPa.
+    /// 0.0 keeps the literature value of about 1 MPa.
+    #[serde(default)]
+    pub creep_threshold_mpa: f32,
+    /// Creep strain per hour at twice the threshold. 0.0 keeps a prefactor that
+    /// places the knee near 9 MPa, which is an assumption, not a measurement.
+    #[serde(default)]
+    pub creep_k: f32,
+    /// Activation energy for ionic conduction, eV. 0.0 keeps the Li6PS5Cl
+    /// value of 0.35, about one decade per 40 K.
+    #[serde(default)]
+    pub resistance_activation_ev: f32,
+    /// Ambient temperature, K. 0.0 keeps 298.15.
+    #[serde(default)]
+    pub ambient_temperature_k: f32,
+    /// Poisson ratio of the plated metal. 0.0 drives creep with the full stack
+    /// pressure, as an unconfined billet; 0.36 is lithium and applies the
+    /// oedometric correction, which at an exponent of 6.6 is worth 78x on rate.
+    #[serde(default)]
+    pub creep_poisson: f32,
+    /// Void the deposit can creep into before it bears on the separator, as a
+    /// fraction of plated thickness. 0.0 charges every micron from hour one.
+    #[serde(default)]
+    pub creep_accommodation_frac: f32,
+    /// Activation energy for creep, eV. 0.0 keeps the shared legacy ramp.
+    #[serde(default)]
+    pub creep_activation_ev: f32,
+    /// Activation energy for calendar interphase growth, eV. 0.0 keeps the
+    /// shared legacy ramp.
+    #[serde(default)]
+    pub calendar_activation_ev: f32,
+    /// Separator thickness, um. Enables both the bridging channel and the
+    /// rate-dependent transport limit. 0.0 disables both.
+    #[serde(default)]
+    pub separator_thickness_um: f32,
+    /// Plated metal thickness at full charge, um.
+    #[serde(default)]
+    pub plated_thickness_um: f32,
+    /// Fraction of extruded metal that penetrates the separator. 0.0 keeps 0.25.
+    #[serde(default)]
+    pub bridge_chi: f32,
+    /// Weibull shape on penetration fraction. 0.0 keeps 4.0.
+    #[serde(default)]
+    pub bridge_weibull_m: f32,
+    /// Penetration fraction at which a layer is expected to bridge. 0.0 keeps 0.35.
+    #[serde(default)]
+    pub bridge_scale: f32,
+    /// Layers in a bipolar series stack. 0 models the cell as its parallel
+    /// equivalent and skips every series-only mechanism.
+    #[serde(default)]
+    pub layer_count: u32,
+    /// Exponent on stack pressure in the cathode-fatigue term. Negative means
+    /// pressure protects the cathode. 0.0 keeps it pressure-blind.
+    #[serde(default)]
+    pub crack_pressure_exponent: f32,
+    /// How strongly interphase age raises the plating loss rate. 0.0 keeps
+    /// calendar fade and plating loss independent of one another.
+    #[serde(default)]
+    pub calendar_roughness_beta: f32,
+    /// Total cell mass, kg. Set it and the tick publishes specific energy from
+    /// the same state that produces the life numbers.
+    #[serde(default)]
+    pub cell_mass_kg: f32,
 }
 
 fn default_voltage() -> f32 { 2.23 }
@@ -1325,6 +1410,28 @@ impl TomlElectrochemicalState {
             calendar_hours_equiv: 0.0,
             crack_k: self.crack_k,
             crack_damage: 0.0,
+            creep_threshold_mpa: self.creep_threshold_mpa,
+            creep_k: self.creep_k,
+            creep_strain: 0.0,
+            resistance_activation_ev: self.resistance_activation_ev,
+            resistance_effective: 0.0,
+            ambient_temperature_k: self.ambient_temperature_k,
+            creep_poisson: self.creep_poisson,
+            creep_accommodation_frac: self.creep_accommodation_frac,
+            creep_accommodated: 0.0,
+            creep_activation_ev: self.creep_activation_ev,
+            calendar_activation_ev: self.calendar_activation_ev,
+            separator_thickness_um: self.separator_thickness_um,
+            plated_thickness_um: self.plated_thickness_um,
+            bridge_chi: self.bridge_chi,
+            bridge_weibull_m: self.bridge_weibull_m,
+            bridge_scale: self.bridge_scale,
+            layer_count: self.layer_count,
+            shorted_layers: 0.0,
+            crack_pressure_exponent: self.crack_pressure_exponent,
+            calendar_roughness_beta: self.calendar_roughness_beta,
+            cell_mass_kg: self.cell_mass_kg,
+            reservoir_mass_kg: 0.0,
             li_inventory_lost: 0.0,
             soc_turn: 1.0,
             excursion_depth: 0.0,

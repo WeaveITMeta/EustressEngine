@@ -57,8 +57,8 @@ pub fn space_is_migrated(_space_root: &Path) -> bool {
 /// Service folder names that every new Space receives per EEP_SPECIFICATION.md.
 /// Order matters: Workspace first so the 3D viewport has a target immediately.
 const SERVICE_FOLDERS: &[ServiceFolder] = &[
-    ServiceFolder { name: "Workspace",               class: "Workspace",              icon: "workspace",          description: "3D world objects — Parts, Models, Terrain" },
-    ServiceFolder { name: "Lighting",                class: "Lighting",               icon: "lighting",           description: "Light sources — Sun, Sky, Atmosphere" },
+    ServiceFolder { name: "Workspace",               class: "Workspace",              icon: "workspace",          description: "3D world objects - Parts, Models, Terrain" },
+    ServiceFolder { name: "Lighting",                class: "Lighting",               icon: "lighting",           description: "Light sources - Sun, Sky, Atmosphere" },
     ServiceFolder { name: "Players",                 class: "Players",                icon: "players",            description: "Player instances and character models" },
     ServiceFolder { name: "StarterGui",              class: "StarterGui",             icon: "startergui",         description: "UI templates shown to every player" },
     ServiceFolder { name: "StarterPack",             class: "StarterPack",            icon: "starterpack",        description: "Tools given to players on spawn" },
@@ -69,9 +69,11 @@ const SERVICE_FOLDERS: &[ServiceFolder] = &[
     ServiceFolder { name: "ServerScriptService",     class: "ServerScriptService",    icon: "serverscriptservice",description: "Server-side scripts" },
     ServiceFolder { name: "SoulService",             class: "SoulService",            icon: "soulservice",        description: "Soul and Rune scripts (.soul, .rune files)" },
     ServiceFolder { name: "MaterialService",         class: "MaterialService",        icon: "materialservice",    description: "PBR material definitions (.mat.toml files)" },
-    ServiceFolder { name: "SoundService",            class: "SoundService",           icon: "soundservice",       description: "Audio — Sound effects and music" },
+    ServiceFolder { name: "SoundService",            class: "SoundService",           icon: "soundservice",       description: "Audio - Sound effects and music" },
     ServiceFolder { name: "AdornmentService",        class: "AdornmentService",       icon: "adornmentservice",   description: "Beams, billboards, particles, highlights" },
-    ServiceFolder { name: "DataService",             class: "DataService",            icon: "dataservice",        description: "Data Platform — datasets, series, columns, and runs" },
+    ServiceFolder { name: "DataService",             class: "DataService",            icon: "dataservice",        description: "Data Platform - datasets, series, columns, and runs" },
+    ServiceFolder { name: "Website",                 class: "Website",                 icon: "website",            description: "Values a website reads - References baked into a published manifest" },
+    ServiceFolder { name: "ExperimentService",       class: "ExperimentService",      icon: "dataservice",        description: "Designs, their parts, the laws wiring them, and every run over them" },
     ServiceFolder { name: "Teams",                   class: "Teams",                  icon: "teams",              description: "Team definitions and spawn points" },
     ServiceFolder { name: "Chat",                    class: "Chat",                   icon: "chat",               description: "In-game chat system" },
 ];

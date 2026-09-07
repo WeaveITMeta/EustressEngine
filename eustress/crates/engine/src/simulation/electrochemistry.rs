@@ -19,7 +19,11 @@ use bevy::prelude::*;
 use eustress_common::realism::laws::electrochemistry as echem;
 use eustress_common::realism::constants;
 use eustress_common::realism::particles::components::{
-    ElectrochemicalState, ThermodynamicState, DEFAULT_CRACK_K,
+    ElectrochemicalState, ThermodynamicState, CATHODE_COMPOSITE_FACTOR,
+    CREEP_EXPONENT, DEFAULT_BRIDGE_CHI, DEFAULT_BRIDGE_SCALE,
+    DEFAULT_BRIDGE_WEIBULL_M, DEFAULT_CRACK_K, DEFAULT_CREEP_K,
+    DEFAULT_CREEP_THRESHOLD_MPA, DEFAULT_RESISTANCE_EA_EV, KB_EV_PER_K,
+    LI2S_SPECIFIC_CAPACITY_MAH_PER_G,
 };
 use eustress_common::simulation::SimulationClock;
 
@@ -74,9 +78,56 @@ fn publish_echem_to_sim_values(
         // largest is the mechanism that is actually killing the cell, and the
         // others are noise until it is fixed.
         ("battery.fade_lithium", echem.lithium_fade()),
+        // The SAME quantity before the reservoir subtracts from it. Without
+        // this, a buffered cell cannot measure its own loss rate: fade_lithium
+        // reads exactly 0.0 until the buffer is gone, so establishing the rate
+        // needed a second run with the reservoir zeroed, and the pair could
+        // disagree about geometry without anything saying so. That is how an
+        // 824-cycle figure came to import a rate measured on a different cell.
+        // One run now carries both the rate and the life.
+        ("battery.li_inventory_lost", echem.li_inventory_lost),
         ("battery.fade_cathode", echem.crack_damage),
         ("battery.fade_calendar", echem.calendar_fade()),
         ("battery.calendar_hours", echem.calendar_hours_equiv),
+        ("battery.fade_creep", echem.creep_effective().min(1.0)),
+        // Total creep against the part of it that has actually reached the
+        // separator. The gap between these two is the reserve void doing its job.
+        ("battery.creep_strain_total", echem.creep_strain),
+        // Layers lost outright, which is not a fade and is not visible at the
+        // terminals. Watch this, not voltage.
+        ("battery.fade_short", echem.short_fade()),
+        // Whether ANY mechanism in this model currently penalises stack
+        // pressure. Creep is the only one, and it is the reason the creep term
+        // exists at all: without it the tick reports a better number at every
+        // pressure authored, which makes it an advocate for its own biggest
+        // lever rather than a test of it.
+        //
+        // The confinement correction and the accommodation void together can
+        // drive creep to zero across an entire run - measured 5.16e-6 of strain
+        // over 1,517 h at 5 MPa, against a void that absorbs 0.396 - and at that
+        // point pressure enters only through the roughness term's (2/P)^1.5,
+        // which improves monotonically. The model is an advocate again and looks
+        // exactly the same from the outside.
+        //
+        // So a pressure sweep must read this. At 0.0 the sweep is unbounded and
+        // its optimum is an artefact of wherever the sweep happened to stop.
+        ("battery.pressure_ceiling_active",
+            if echem.creep_effective() > 0.0 { 1.0 } else { 0.0 }),
+        ("battery.shorted_layers", echem.shorted_layers),
+        // What the lithium reservoir costs. Published every tick so a cycle-life
+        // figure and a specific-energy figure can never again be quoted in one
+        // sentence while describing two different cells.
+        ("battery.reservoir_mass_g", (echem.reservoir_mass_kg * 1000.0) as f64),
+        ("battery.specific_energy_wh_kg", {
+            let m = echem.cell_mass_kg + echem.reservoir_mass_kg;
+            if m > 0.0 {
+                (echem.capacity_ah * echem.terminal_voltage / m) as f64
+            } else {
+                0.0
+            }
+        }),
+        ("battery.resistance_ohm", echem.resistance_effective as f64),
+        ("battery.ambient_c", (echem.ambient_temperature_k - 273.15) as f64),
         ("battery.cycle_count", echem.cycle_count as f64),
         ("battery.heat_generation", echem.heat_generation as f64),
         ("battery.temperature_c", temp_c as f64),
@@ -290,8 +341,29 @@ fn electrochemical_tick(
         }
 
         // ── 3. Overpotentials ──
+        //
+        // Resistance is temperature dependent, and treating it as a constant is
+        // what made the low-temperature envelope unsimulatable. A solid
+        // electrolyte conducts by thermally activated hopping, so conductivity
+        // goes as exp(-Ea/kT) and resistance as its inverse. At -55 C this is a
+        // factor of ~150 against the 25 C value, which is the difference
+        // between a cell that is slow and a cell the model thinks is fine.
+        //
+        // The same term does double duty: the raised resistance is also what
+        // dissipates I^2 R into the cell, so a cold cell heats itself and the
+        // ceiling rises as it does. Both halves fall out of one line.
+        let ea = if echem_state.resistance_activation_ev > 0.0 {
+            echem_state.resistance_activation_ev
+        } else {
+            DEFAULT_RESISTANCE_EA_EV
+        };
+        let r_eff = echem_state.internal_resistance
+            * ((ea / KB_EV_PER_K) * (1.0 / temperature - 1.0 / 298.15)).exp();
+
+        echem_state.resistance_effective = r_eff;
+
         // Ohmic (IR drop)
-        let eta_ohmic = echem::ohmic_overpotential(current, echem_state.internal_resistance);
+        let eta_ohmic = echem::ohmic_overpotential(current, r_eff);
 
         // Charge-transfer (Butler-Volmer symmetric approximation)
         // Exchange current density ~50 A/m² for Na-S at 25°C
@@ -307,8 +379,45 @@ fn electrochemical_tick(
             0.03_f32
         };
         let current_density = current / electrode_area;
+        // Tafel is the HIGH-FIELD LIMIT of Butler-Volmer, and this tick was
+        // applying it at every current including those far below the exchange
+        // current. Below j0 the logarithm turns negative and returns an
+        // overpotential that ASSISTS the reaction, so `terminal_voltage`
+        // subtracted a negative and reported a discharging cell ABOVE its own
+        // open-circuit voltage: +26 mV at the V-Cell's design rate, +75 mV at
+        // C/10, against an OCV span of 177 mV across the entire state of
+        // charge. The artefact was comparable to the whole voltage curve.
+        //
+        // The exact inverse of symmetric Butler-Volmer has no such branch and
+        // needs no guard - it is linear below j0 and becomes Tafel above it.
         let eta_ct = if j0 > 0.0 && current_density.abs() > 1e-6 {
-            echem::tafel_overpotential(current_density.abs(), j0, 0.5, temperature)
+            echem::butler_volmer_overpotential(current_density.abs(), j0, temperature)
+        } else {
+            0.0
+        };
+
+        // Transport. A cell whose deliverable capacity does not fall with rate
+        // is not a cell, and this one's did not: `effective_capacity` carried no
+        // current term and the diffusion overpotential was passed as a literal
+        // zero, so a C/10 and a 2C sweep returned identical amp-hours. The
+        // limiting current comes from the separator the cell actually specifies
+        // - thickness and ionic conductivity, both already on the state and
+        // until now both dead - so rate capability is derived rather than
+        // asserted.
+        let j_lim = if echem_state.ionic_conductivity > 0.0
+            && echem_state.separator_thickness_um > 0.0
+        {
+            echem::ionic_limiting_current(
+                echem_state.ionic_conductivity,
+                temperature,
+                echem_state.separator_thickness_um * 1e-6,
+                1.5,
+            )
+        } else {
+            0.0
+        };
+        let eta_conc = if j_lim > 0.0 {
+            echem::concentration_overpotential(current_density, j_lim, 2.0, temperature)
         } else {
             0.0
         };
@@ -316,7 +425,7 @@ fn electrochemical_tick(
         // ── 4. Terminal voltage ──
         let is_discharge = current > 0.0;
         echem_state.terminal_voltage = echem::terminal_voltage(
-            ocv, eta_ohmic, eta_ct, 0.0, // no diffusion overpotential for now
+            ocv, eta_ohmic, eta_ct, eta_conc,
             is_discharge,
         );
 
@@ -331,15 +440,26 @@ fn electrochemical_tick(
         ).clamp(0.0, 1.0);
 
         // ── 6. Heat generation ──
-        let q_ohmic = echem::ohmic_heat(current, echem_state.internal_resistance);
+        let q_ohmic = echem::ohmic_heat(current, r_eff);
         let q_reaction = echem::reaction_heat(current, eta_ct);
         let entropy_coeff = if echem_state.entropy_coefficient_v_per_k != 0.0 {
             echem_state.entropy_coefficient_v_per_k
         } else {
             constants::na_s::ENTROPY_COEFFICIENT
         };
+        // Entropic heat is REVERSIBLE and changes sign with the current: a cell
+        // that warms on discharge cools on charge. Taking `.abs()` forced it to
+        // heat on both legs, which at the V-Cell's design current is a 157 W
+        // error on the charge leg and, at its 0.6 K/W path, a steady-state
+        // temperature wrong by tens of kelvin. Temperature feeds the Nernst
+        // term, the cycling weight, the calendar clock and the creep rate, so
+        // one `.abs()` reached all four fade channels.
+        //
+        // `reaction_heat` had the mirror-image bug - it went NEGATIVE on charge
+        // where polarisation must always dissipate - so the two errors partly
+        // cancelled and neither showed up in a temperature trace.
         let q_entropic = echem::entropic_heat(temperature, current, entropy_coeff);
-        echem_state.heat_generation = q_ohmic + q_reaction + q_entropic.abs();
+        echem_state.heat_generation = q_ohmic + q_reaction + q_entropic;
 
         // ── 7. Thermal coupling ──
         if let Some(ref mut thermo_state) = thermo {
@@ -364,7 +484,11 @@ fn electrochemical_tick(
             } else {
                 2.0_f32 // K/W — legacy AlN pad + housing
             };
-            let ambient = 298.15_f32;
+            let ambient = if echem_state.ambient_temperature_k > 0.0 {
+                echem_state.ambient_temperature_k
+            } else {
+                298.15_f32
+            };
 
             // Integrate BOTH terms against the same dt, and solve the cooling
             // term exponentially rather than explicitly: at a large `dt` (the
@@ -377,7 +501,13 @@ fn electrochemical_tick(
             let decay = (-dt / tau).exp();
             thermo_state.temperature =
                 t_steady + (thermo_state.temperature - t_steady) * decay;
-            thermo_state.temperature = thermo_state.temperature.max(ambient);
+            // No floor at ambient any more. With the entropic term carrying its
+            // real sign a charging cell genuinely absorbs heat and can sit
+            // BELOW its surroundings; clamping that away was only safe while
+            // the sign bug above guaranteed every term heated. Keep a floor at
+            // absolute zero so a pathological authored coefficient cannot take
+            // the state negative and poison the Arrhenius exponents.
+            thermo_state.temperature = thermo_state.temperature.max(1.0);
         }
 
         // ── 8. Dendrite risk (Monroe-Newman model) ──
@@ -523,7 +653,20 @@ fn electrochemical_tick(
             } else {
                 1.0 - ce_ref
             };
-            let loss_frac = one_minus_ce * f_depth * f_temp;
+            // Calendar ageing is not a fourth independent channel, it is an INPUT
+            // to this one. The reduced argyrodite interphase is patchy and more
+            // resistive than the bulk it replaces, so it focuses plating current
+            // into the low-impedance patches that remain - which is exactly the
+            // phenomenon the roughness term describes. A cell that has sat for a
+            // year plates worse than a new one, and until this existed the model
+            // let the two mechanisms add without either knowing about the other.
+            let age_factor = if echem_state.calendar_roughness_beta > 0.0 {
+                1.0 + echem_state.calendar_roughness_beta
+                    * (echem_state.calendar_hours_equiv as f32 / 8760.0).sqrt()
+            } else {
+                1.0
+            };
+            let loss_frac = one_minus_ce * f_depth * f_temp * age_factor;
             // Widen before accumulating, not after: the increment is around
             // 1e-11 of nominal per substep and would vanish into an f32 total.
             echem_state.li_inventory_lost +=
@@ -548,7 +691,21 @@ fn electrochemical_tick(
             } else {
                 DEFAULT_CRACK_K
             };
+            // Stack pressure holds the composite in compression through a 68 %
+            // volume swing and re-closes cracks each cycle, so the crack rate
+            // depends on it. The creep block computes a pressure a few dozen
+            // lines below and this term ignored the value entirely, which makes
+            // the model four single-mechanism models sharing an x-axis rather
+            // than one coupled model. A negative exponent makes pressure protect
+            // the cathode; a positive one makes it fracture particles directly.
+            // The sign is a real open question and is authored, not assumed.
+            let crack_p_factor = if echem_state.crack_pressure_exponent != 0.0 {
+                (pressure / 2.0).powf(echem_state.crack_pressure_exponent)
+            } else {
+                1.0
+            };
             echem_state.crack_damage += (crack_k
+                * crack_p_factor
                 * depth.powf(1.5)
                 * (charge_delta_ah.abs() / effective_capacity))
                 as f64;
@@ -579,18 +736,165 @@ fn electrochemical_tick(
             // variable and not a detail: parking a pack at 40 % rather than
             // 100 % costs nothing in hardware.
             let soc_weight = 0.25 + 1.75 * echem_state.soc.clamp(0.0, 1.0).powi(2);
-            let arrhenius = ((temperature - 298.15) / 20.0).exp().clamp(0.2, 20.0);
-            echem_state.calendar_hours_equiv +=
-                (dt / 3600.0 * soc_weight * arrhenius) as f64;
 
-            // Three mechanisms, and the earliest one wins. Only lithium loss is
-            // buffered by the reservoir; neither cracking nor calendar fade is
-            // a lithium-inventory problem, so neither is covered by carrying
-            // more metal.
+            // One `exp((T - 298.15) / 20)` used to drive creep, interphase
+            // growth AND the parasitic reaction. Sharing a ramp makes the
+            // mechanisms' RATIO temperature-invariant by construction, so a cell
+            // died of the same thing at -40 C as at 60 C and the optimum stack
+            // pressure could never move with temperature. It must: lithium
+            // diffuses at about 0.55 eV and the interphase grows at about 0.65,
+            // so a hot cell dies of chemistry and a cold one of mechanics. The
+            // shared ramp is also 37 kJ/mol, roughly 0.38 eV, which is not
+            // either of them.
+            //
+            // A mechanism with no authored activation energy keeps the legacy
+            // ramp exactly, so nothing already measured moves.
+            let legacy_ramp = ((temperature - 298.15) / 20.0).exp().clamp(0.2, 20.0);
+            let arrhenius_for = |ea: f32| -> f32 {
+                if ea <= 0.0 { return legacy_ramp; }
+                ((ea / KB_EV_PER_K) * (1.0 / 298.15 - 1.0 / temperature))
+                    .exp()
+                    .clamp(1.0e-4, 1.0e4)
+            };
+            let calendar_arrhenius = arrhenius_for(echem_state.calendar_activation_ev);
+            let creep_arrhenius = arrhenius_for(echem_state.creep_activation_ev);
+
+            echem_state.calendar_hours_equiv +=
+                (dt / 3600.0 * soc_weight * calendar_arrhenius) as f64;
+
+            // ── Lithium creep ──
+            //
+            // The ceiling on the best lever in the design. Stack pressure is
+            // worth 6.7x between 2 and 8 MPa, and until this existed the tick
+            // would report a better number at ANY pressure authored, which made
+            // it an advocate for its own biggest lever rather than a test of it.
+            //
+            // Lithium is at 0.66 of its melting point at room temperature, so it
+            // creeps under the very pressure that suppresses dendrites. Past the
+            // threshold the metal extrudes into the separator instead of
+            // densifying, and the cell soft-shorts rather than fading. The
+            // exponent is what matters: at 6.6, a factor of 1.25 in pressure is
+            // a factor of 4.5 in rate, so the knee is sharp and the safe band
+            // has a hard edge rather than a gentle rolloff.
+            let creep_threshold = if echem_state.creep_threshold_mpa > 0.0 {
+                echem_state.creep_threshold_mpa
+            } else {
+                DEFAULT_CREEP_THRESHOLD_MPA
+            };
+            let stack_p = if echem_state.stack_pressure_mpa > 0.0 {
+                echem_state.stack_pressure_mpa
+            } else {
+                2.0
+            };
+            //
+            // Two corrections, both of which the unconfined law got wrong in
+            // the same direction.
+            //
+            // Power-law creep is driven by DEVIATORIC stress. The full stack
+            // pressure is the right driver for a billet upset between platens
+            // with its sides free; a plated layer is confined between a rigid
+            // collector and a rigid ceramic, where only
+            // (1 - 2nu)/(1 - nu) = 0.44 of the axial stress is deviatoric. At an
+            // exponent of 6.6 that factor alone is 78x on rate.
+            //
+            // And the deposit is given somewhere to go before it presses on
+            // anything: the V-Cell's 28.7 um reserve void against 72.5 um of
+            // lithium means the first 0.396 of strain is free. Charging it from
+            // the first hour treats a design feature as a defect.
+            let p_drive = stack_p * echem_state.deviatoric_fraction();
+            if p_drive > creep_threshold {
+                let ck = if echem_state.creep_k > 0.0 {
+                    echem_state.creep_k
+                } else {
+                    DEFAULT_CREEP_K
+                };
+                let over = (p_drive - creep_threshold) / creep_threshold;
+                let rate = ck * over.powf(CREEP_EXPONENT) * creep_arrhenius;
+                let d_strain = (rate * dt / 3600.0) as f64;
+                echem_state.creep_strain += d_strain;
+
+                let void_cap = echem_state.creep_accommodation_frac as f64;
+                if echem_state.creep_accommodated < void_cap {
+                    echem_state.creep_accommodated =
+                        (echem_state.creep_accommodated + d_strain).min(void_cap);
+                }
+            }
+
+            // ── The fifth channel: bridging ──
+            //
+            // Extruded metal has to be somewhere, and squeeze flow to a 46 mm
+            // free edge is slower than through-thickness flow by roughly
+            // (edge / thickness)^2, so most of it goes into the separator. Once
+            // a filament spans the film that layer stops contributing voltage.
+            //
+            // This is charged as layers LOST, not as capacity faded, because
+            // that is what it is. It is also the one channel a voltmeter can
+            // never see: one bridged layer of 569 moves stack voltage by 0.18 %.
+            if echem_state.layer_count > 0
+                && echem_state.separator_thickness_um > 0.0
+                && echem_state.plated_thickness_um > 0.0
+            {
+                let chi = if echem_state.bridge_chi > 0.0 {
+                    echem_state.bridge_chi
+                } else {
+                    DEFAULT_BRIDGE_CHI
+                };
+                let shape = if echem_state.bridge_weibull_m > 0.0 {
+                    echem_state.bridge_weibull_m
+                } else {
+                    DEFAULT_BRIDGE_WEIBULL_M
+                };
+                let scale = if echem_state.bridge_scale > 0.0 {
+                    echem_state.bridge_scale
+                } else {
+                    DEFAULT_BRIDGE_SCALE
+                };
+                let extruded_um =
+                    echem_state.creep_effective() as f32 * echem_state.plated_thickness_um;
+                let penetration =
+                    (chi * extruded_um / echem_state.separator_thickness_um).clamp(0.0, 1.0);
+                // Weibull over the layer population. Over hundreds of layers the
+                // expectation IS the answer, so this stays fractional rather
+                // than drawing an integer per layer per substep.
+                let bridged_frac =
+                    1.0 - (-(penetration / scale).powf(shape)).exp();
+                echem_state.shorted_layers =
+                    (echem_state.layer_count as f64 * bridged_frac as f64)
+                        .max(echem_state.shorted_layers);
+            }
+
+            // Four mechanisms, and the earliest one wins. Only lithium loss is
+            // buffered by the reservoir; cracking, calendar fade and creep are
+            // none of them a lithium-inventory problem, so carrying more metal
+            // covers none of them.
             let retention = (1.0 - echem_state.lithium_fade())
                 * (1.0 - echem_state.crack_damage)
-                * (1.0 - echem_state.calendar_fade());
+                * (1.0 - echem_state.calendar_fade())
+                * (1.0 - echem_state.creep_effective().min(1.0))
+                * (1.0 - echem_state.short_fade());
             echem_state.capacity_retention = (retention as f32).clamp(0.01, 1.0);
+
+            // ── What the reservoir costs ──
+            //
+            // `li_reservoir_frac` buffers lithium loss and so buys cycles, and
+            // it did so for free: nothing in the model charged a gram or a
+            // micron for it, so the cycle-life sweep and the mass budget ended
+            // up describing two different cells that were quoted in the same
+            // sentence. An anode-free cell ships fully discharged with all of
+            // its metal held as Li2S, so a reservoir is not spare metal lying
+            // about - it is extra cathode, and extra cathode has mass and
+            // thickness. This charges for it every tick so the two numbers can
+            // never diverge again.
+            if echem_state.li_reservoir_frac > 0.0 && echem_state.capacity_ah > 0.0 {
+                let reserve_mah = echem_state.li_reservoir_frac
+                    * echem_state.capacity_ah
+                    * 1000.0;
+                let li2s_g = reserve_mah / LI2S_SPECIFIC_CAPACITY_MAH_PER_G;
+                echem_state.reservoir_mass_kg =
+                    li2s_g * CATHODE_COMPOSITE_FACTOR / 1000.0;
+            } else {
+                echem_state.reservoir_mass_kg = 0.0;
+            }
         }
         } // end substep
     }

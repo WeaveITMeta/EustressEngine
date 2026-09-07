@@ -212,7 +212,7 @@ impl GlobalSoulSettings {
 }
 
 // ============================================================================
-// Per-Space Soul Service Settings (UI-editable, saved with scene)
+// Per-Space SoulService Settings (UI-editable, saved with scene)
 // ============================================================================
 
 /// Default telemetry to enabled (opt-out)

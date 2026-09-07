@@ -633,7 +633,32 @@ fn handle_file_modified(
             // Doing the work there (not inline) keeps this system free
             // of RuneRuntimeState / LuauRuntimeState / module-registry
             // params and avoids Bevy query-borrow conflicts.
-            if let Some(entity) = registry.get_entity(&event.path) {
+            // Two ways a script entity gets into the registry, and only one of
+            // them registers the source file.
+            //
+            // A bare `foo.rune` sitting in a service is registered under its own
+            // path, so the lookup below finds it. A FOLDER-based script -
+            // `vcell_cycle_driver/_instance.toml` plus
+            // `vcell_cycle_driver/vcell_cycle_driver.rune` - registers only the
+            // `_instance.toml`, because that is the entity's definition. The
+            // `.rune` beside it was never registered, so this lookup missed and
+            // every edit to a folder-based script was silently discarded: the
+            // file changed on disk, the ECS kept the source it booted with, and
+            // the next play recompiled the stale text. The byte count even
+            // matches in the log, so nothing looks wrong.
+            //
+            // That cost a V-Cell run: a driver edited from a cold-soak servo to
+            // a cycling duty kept running the cold servo, reported the cold
+            // start complete against a 25 C cell, and stopped the run before it
+            // started. Fall back to the sibling `_instance.toml` so a folder
+            // script reloads like a bare one.
+            let entity = registry.get_entity(&event.path).or_else(|| {
+                event.path.parent()
+                    .map(|p| p.join("_instance.toml"))
+                    .filter(|p| p.exists())
+                    .and_then(|p| registry.get_entity(&p))
+            });
+            if let Some(entity) = entity {
                 if let Ok(mut script_data) = soul_scripts.get_mut(entity) {
                     match std::fs::read_to_string(&event.path) {
                         Ok(new_source) => {
