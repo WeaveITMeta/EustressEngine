@@ -1,10 +1,23 @@
 name: CI
 
+# MANUAL ONLY. Actions are reserved for releases: a `v*` tag runs
+# `release.yml`, which builds the three platforms and their installers. An
+# ordinary push to main deliberately runs nothing.
+#
+# This workflow stays here because its jobs are still worth running on demand,
+# but none of them compiles the workspace (the data-graph job is `cargo tree`,
+# which is metadata-only), so running it on every push bought no build
+# confidence and reported a red main for a month on advisory churn alone.
+#
+# Run it when you want it:
+#     gh workflow run ci.yml --ref main
+# To restore automatic checks, put back:
+#     push:
+#       branches: [ main, develop ]
+#     pull_request:
+#       branches: [ main, develop ]
 on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main, develop ]
+  workflow_dispatch:
 
 # NOTE (2026-06-09): this workflow previously targeted `eustress_demo/` and
 # `eustress-svelte/`, which no longer exist in the repository. Every job that
