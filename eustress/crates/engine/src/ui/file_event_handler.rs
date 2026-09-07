@@ -543,6 +543,38 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
         return;
     }
 
+    // Bake the Website manifest, if this Space has a Website service.
+    //
+    // Here and not in the upload thread: resolution reads the LIVE datamodel,
+    // and the thread captures only owned values so it has no World. Here and
+    // BEFORE the listing is created: a failed reference has to fail the whole
+    // publish, and a listing pointing at a Universe whose numbers did not
+    // resolve is worse than no listing at all.
+    //
+    // Ok(None) means the Space has no Website service, which is every existing
+    // Space. That path costs one failed file read and changes nothing.
+    let pending_manifest = match crate::website::bake_from_world(world, &space_root, &universe_root) {
+        Ok(pending) => pending,
+        Err(e) => {
+            // The message names the reference, the source it could not resolve,
+            // and the nearest candidates, so it is a fix rather than a ticket.
+            if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+                n.error(format!("Publish stopped: {}", e));
+            }
+            tracing::error!("website manifest bake failed: {}", e);
+            return;
+        }
+    };
+
+    if let Some(ref pending) = pending_manifest {
+        tracing::info!(
+            "Website manifest baked: namespace '{}', schema v{}, {} value(s)",
+            pending.namespace(),
+            pending.schema_version(),
+            pending.value_count(),
+        );
+    }
+
     // Auto-capture thumbnail from viewport if none exists
     capture_thumbnail_from_viewport(world, &universe_root);
 
@@ -565,7 +597,7 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
         let result = if request.space_only {
             execute_space_upload(&space_root_clone, &universe_root, &request, &token, &progress_for_thread)
         } else {
-            execute_publish_upload(&universe_root, &request, &token, &progress_for_thread)
+            execute_publish_upload(&universe_root, &request, &token, &progress_for_thread, pending_manifest)
         };
         match result {
             Ok(sim_id) => {
@@ -703,6 +735,7 @@ fn execute_publish_upload(
     request: &PublishRequest,
     token: &str,
     progress: &ProgressHandle,
+    pending_manifest: Option<crate::website::PendingManifest>,
 ) -> Result<String, String> {
     // Step 1: Package the entire Universe into a .pak (tar + zstd)
     set_progress(progress, "Packaging Universe...", 5.0);
@@ -822,6 +855,48 @@ fn execute_publish_upload(
             .map_err(|e| format!("Multipart complete failed: {}", e))?;
 
         tracing::info!("Universe .pak uploaded (multipart, {} parts)", parts.len());
+    }
+
+    // ── Website manifest ────────────────────────────────────────────────────
+    // After the .pak, because the manifest describes a publish that has to
+    // exist first, and its publish_hash is the hash of that .pak.
+    if let Some(pending) = pending_manifest {
+        set_progress(progress, "Publishing website manifest...", 88.0);
+
+        let baked = pending.finalize(&sim_id, &pak_hash);
+        let body = baked
+            .manifest_json()
+            .map_err(|e| format!("Website manifest serialize failed: {}", e))?;
+
+        let resp = ureq::put(&format!(
+            "{}/api/simulations/{}/website-manifest",
+            PUBLISH_API, sim_id
+        ))
+            .set("Authorization", &format!("Bearer {}", token))
+            .set("Content-Type", "application/json")
+            .send_string(&body);
+
+        match resp {
+            Ok(r) => {
+                let detail: serde_json::Value = r.into_json().unwrap_or_default();
+                tracing::info!(
+                    "Website manifest published: namespace '{}', {} value(s), key {}",
+                    baked.namespace(),
+                    baked.manifest().values.len(),
+                    detail["key_required"].as_bool().unwrap_or(false),
+                );
+            }
+            Err(e) => {
+                // Fail the publish. A .pak whose manifest did not upload leaves
+                // every consumer serving the PREVIOUS numbers while the Space
+                // says otherwise, which is the drift this feature exists to end.
+                return Err(format!(
+                    "Website manifest upload failed for namespace '{}': {}",
+                    baked.namespace(),
+                    e
+                ));
+            }
+        }
     }
 
     set_progress(progress, "Uploading thumbnail...", 90.0);

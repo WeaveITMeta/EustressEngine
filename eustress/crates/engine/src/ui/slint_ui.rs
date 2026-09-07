@@ -360,6 +360,9 @@ pub enum SlintAction {
     OpenNode(i32, String),        // (id, node_type) — double-click to open
     RenameNode(i32, String, String), // (id, new_name, node_type)
     ReparentNode(i32, i32),       // (source_id, target_id) — drag-and-drop reparent
+    /// Universe panel right-click -> Copy Path. Carries the Space's
+    /// absolute path, already resolved by `UniverseRegistry`.
+    CopySpacePath(String),
     AddService,                   // (+) button — open add-service dialog
     ExpandAll,                    // Expand all tree nodes in explorer
     CollapseAll,                  // Collapse all tree nodes in explorer
@@ -2447,6 +2450,9 @@ fn setup_slint_overlay(world: &mut World) {
     // Universe browser
     let q = queue.clone();
     ui.on_space_selected(move |path| q.push(SlintAction::OpenSpacePath(path.to_string())));
+
+    let q = queue.clone();
+    ui.on_copy_space_path(move |path| q.push(SlintAction::CopySpacePath(path.to_string())));
 
     // Store queue as Bevy resource
     world.insert_resource(queue);
@@ -4587,6 +4593,57 @@ fn attribute_from_type_and_value(
 
 /// Extracted from `drain_slint_actions` to keep that function's stack frame small.
 #[inline(never)]
+/// Universe panel -> right-click a Space -> Copy Path.
+///
+/// `UniverseRegistry::scan` builds every Space path by walking
+/// `workspace_root()`, which is absolute, so the string arriving from Slint is
+/// already the absolute path and is copied verbatim. Reporting through
+/// `OutputConsole` as well as the log so the user gets confirmation in the UI
+/// that the clipboard actually took it.
+fn do_copy_space_path(path: &str, res: &mut DrainResources) {
+    if path.is_empty() {
+        warn!("Copy Path: empty path from Universe panel");
+        if let Some(ref mut out) = res.output {
+            out.warn("Copy Path: no path on that Space row".to_string());
+        }
+        return;
+    }
+
+    #[cfg(feature = "clipboard")]
+    {
+        use arboard::Clipboard;
+        match Clipboard::new() {
+            Ok(mut clipboard) => match clipboard.set_text(path.to_string()) {
+                Ok(_) => {
+                    info!("Copied Space path to clipboard: {}", path);
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Copied path: {}", path));
+                    }
+                }
+                Err(e) => {
+                    warn!("Copy Path: clipboard write failed: {}", e);
+                    if let Some(ref mut out) = res.output {
+                        out.error(format!("Copy Path failed: {}", e));
+                    }
+                }
+            },
+            Err(e) => {
+                warn!("Copy Path: clipboard unavailable: {}", e);
+                if let Some(ref mut out) = res.output {
+                    out.error(format!("Clipboard unavailable: {}", e));
+                }
+            }
+        }
+    }
+    #[cfg(not(feature = "clipboard"))]
+    {
+        info!("Clipboard feature not enabled; would copy Space path: {}", path);
+        if let Some(ref mut out) = res.output {
+            out.warn("Clipboard support is not enabled in this build".to_string());
+        }
+    }
+}
+
 fn do_reparent_node(
     source_id: i32,
     target_id: i32,
@@ -8183,6 +8240,10 @@ fn drain_slint_actions(
             
             SlintAction::ReparentNode(source_id, target_id) => {
                 do_reparent_node(source_id, target_id, &mut queries, &mut res, &mut commands);
+            }
+
+            SlintAction::CopySpacePath(path) => {
+                do_copy_space_path(&path, &mut res);
             }
 
             SlintAction::AddService => {

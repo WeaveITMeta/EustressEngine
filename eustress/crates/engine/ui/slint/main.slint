@@ -163,6 +163,7 @@ export component StudioWindow inherits Window {
 
     // Callback: user selected a Space from the browser
     callback space-selected(string);
+    callback copy-space-path(string);
 
     // HUD visibility (toggle all Eustress Engine UI, keep Bevy UI)
     in-out property <bool> show-hud: true;
@@ -1818,6 +1819,7 @@ export component StudioWindow inherits Window {
                             universe-items: root.universe-items;
                             active-space-path: root.active-space-path;
                             space-selected(path) => { root.space-selected(path); }
+                            copy-space-path(path) => { root.copy-space-path(path); }
                         }
 
                         if root.left-tab-index == 4: TerrainEditor {

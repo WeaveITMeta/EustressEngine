@@ -29,6 +29,10 @@ export component UniverseBrowser inherits Rectangle {
 
     // Output: user clicked a Space entry
     callback space-selected(/* path */ string);
+    // Output: right-click -> Copy Path. `SpaceItem.path` is already
+    // absolute (the registry builds it from `workspace_root()`), so the
+    // handler copies it verbatim rather than re-resolving it.
+    callback copy-space-path(/* path */ string);
 
     background: Theme.panel-background;
     min-width: 200px;
@@ -127,31 +131,60 @@ export component UniverseBrowser inherits Rectangle {
                             background: space.is-active ? Theme.explorer-item-selected :
                                         space-touch.has-hover ? Theme.explorer-item-hover : transparent;
 
-                            space-touch := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.space-selected(space.path); }
-                            }
+                            // ContextMenuArea WRAPS the row rather than sitting
+                            // beside it. It derives its hit area from the content
+                            // it contains — the same reason `script_editor.slint`
+                            // puts its Flickable inside one — so a
+                            // ContextMenuArea holding only a `Menu` would have
+                            // zero size and never see the right-click. Explicit
+                            // full-row geometry keeps the target the whole row and
+                            // not just the text's preferred width.
+                            ContextMenuArea {
+                                x: 0px;
+                                y: 0px;
+                                width: parent.width;
+                                height: parent.height;
 
-                            HorizontalLayout {
-                                padding-left: 30px;
-                                spacing: 6px;
-                                alignment: start;
-
-                                // Space icon — hexagon
-                                Text {
-                                    text: "⬡";
-                                    color: space.is-active ? Theme.accent-blue : Theme.text-secondary;
-                                    font-size: 10px;
-                                    vertical-alignment: center;
-                                    width: 14px;
+                                Menu {
+                                    MenuItem {
+                                        title: "Copy Path";
+                                        icon: @image-url("../../assets/icons/ui/copy.svg");
+                                        activated => { root.copy-space-path(space.path); }
+                                    }
                                 }
 
-                                Text {
-                                    text: space.name;
-                                    color: space.is-active ? #ffffff : Theme.text-primary;  // theme-exempt: white brightens active-row text; no white-text token exists
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                    overflow: elide;
+                                // Left-click select + hover stay INSIDE the menu
+                                // area so one element owns the whole row: the
+                                // TouchArea takes the left button, the
+                                // ContextMenuArea takes the right. Layering them
+                                // as siblings instead would leave whichever sits
+                                // on top swallowing the other's button.
+                                space-touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.space-selected(space.path); }
+                                }
+
+                                HorizontalLayout {
+                                    padding-left: 30px;
+                                    spacing: 6px;
+                                    alignment: start;
+
+                                    // Space icon — hexagon
+                                    Text {
+                                        text: "⬡";
+                                        color: space.is-active ? Theme.accent-blue : Theme.text-secondary;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                        width: 14px;
+                                    }
+
+                                    Text {
+                                        text: space.name;
+                                        color: space.is-active ? #ffffff : Theme.text-primary;  // theme-exempt: white brightens active-row text; no white-text token exists
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
                                 }
                             }
                         }
