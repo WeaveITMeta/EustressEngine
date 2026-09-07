@@ -61,6 +61,9 @@ out/
 
 # Logs
 *.log
+# Engine stderr captures from the measurement rig. `*.log` above does not
+# match these: the extension is `.err`, not `.log`.
+*.log.err
 logs/
 
 # Temporary files
