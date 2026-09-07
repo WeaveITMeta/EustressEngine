@@ -14,6 +14,7 @@ pub mod footer;
 pub mod nav;
 pub mod bliss_kpi;
 pub mod qr;
+pub mod tilt;
 
 pub use layout::Layout;
 pub use common::{Button, ButtonVariant, Card, LoadingSpinner, InlineLoader, ErrorDisplay};
@@ -22,3 +23,4 @@ pub use footer::Footer;
 pub use nav::CentralNav;
 pub use bliss_kpi::BlissKpiModal;
 pub use qr::QrCodeSvg;
+pub use tilt::{on_tilt_move, on_tilt_leave};

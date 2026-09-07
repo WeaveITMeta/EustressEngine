@@ -22422,7 +22422,7 @@ a.experience-card {
 
 /* Match the Studio capture's intrinsic ratio so nothing shifts while it loads. */
 .hero-render-img {
-    aspect-ratio: 1333 / 714;
+    aspect-ratio: 1334 / 714;
     object-fit: cover;
     object-position: left center;
 }
@@ -22444,4 +22444,194 @@ a.experience-card {
         /* Frames the viewport region of the capture rather than the panels. */
         object-position: 62% center;
     }
+}
+
+/* --------------------------------------------------------------------------
+   Hero: Studio capture, corrected framing
+   --------------------------------------------------------------------------
+   The earlier edge-bleed pushed the panel 314px past the right of a 1600px
+   viewport, cutting roughly a third of the capture including the properties
+   panel. Since the whole point is showing the Studio interface, clipping a
+   third of it defeats the exercise.
+
+   No bleed. Instead the visual column takes the larger share of the split, so
+   the entire capture is visible at the biggest size the fold allows. The copy
+   still has a comfortable measure at 40%. */
+
+@media (min-width: 1100px) {
+    .hero-industrial .hero-main {
+        grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
+        align-items: center;
+    }
+    /* Cancel the bleed from the previous rule. */
+    .hero-industrial .hero-visual-new { margin-right: 0; }
+
+    .hero-render-img {
+        border-radius: var(--radius-lg);
+        border: 1px solid rgba(60, 186, 84, 0.22);
+    }
+}
+
+/* Show the capture whole. `cover` was cropping it to fill the box; the frame
+   should follow the image, not the reverse. */
+.hero-render-img {
+    object-fit: contain;
+    object-position: center;
+    width: 100%;
+    height: auto;
+    aspect-ratio: auto;
+}
+
+/* The headline can afford to step down slightly now that the copy column is
+   narrower, so it keeps to two lines instead of three. */
+@media (min-width: 1100px) and (max-width: 1500px) {
+    .hero-industrial .hero-headline { font-size: clamp(2.6rem, 4.4vw, 3.6rem); }
+}
+
+/* Phones: the interface is unreadable at this width no matter what, so show
+   the viewport region of the capture, which is the part that persuades. */
+@media (max-width: 700px) {
+    .hero-render-img {
+        aspect-ratio: 16 / 10;
+        object-fit: cover;
+        object-position: 62% center;
+    }
+}
+
+/* --------------------------------------------------------------------------
+   Solid-accent buttons: keep the label readable on hover
+   --------------------------------------------------------------------------
+   The global `a:hover { color: var(--color-accent-hover) }` rule turned every
+   link's hover text into the bright accent. On a button whose BACKGROUND is
+   that same accent, text and background became the identical colour and the
+   label vanished into a blank green slab.
+
+   The collision only appeared once the accent token changed from steel to
+   green, which is exactly the kind of breakage a global token swap causes.
+   Any button filled with the accent restates its ink explicitly, in every
+   state, so no ancestor rule can take the label away. */
+.btn-primary-steel,
+.btn-primary-steel:hover,
+.btn-primary-steel:focus,
+.btn-primary-steel:focus-visible,
+.btn-primary-steel:active,
+.btn-primary-steel:visited {
+    color: var(--color-bg-primary);
+    -webkit-text-fill-color: var(--color-bg-primary);
+}
+
+.btn-primary-steel:hover .btn-icon,
+.btn-primary-steel:focus-visible .btn-icon,
+.btn-primary-steel .btn-icon {
+    color: var(--color-bg-primary);
+    -webkit-text-fill-color: var(--color-bg-primary);
+}
+
+/* Ghost buttons sit on the page background, so their hover ink must be the
+   accent, not the page colour. Stated here so the pair stays symmetrical. */
+.btn-secondary-steel,
+.btn-secondary-steel:hover,
+.btn-secondary-steel:focus-visible {
+    color: var(--color-text-primary);
+    -webkit-text-fill-color: var(--color-text-primary);
+}
+
+/* --------------------------------------------------------------------------
+   Hero render: pointer tilt
+   --------------------------------------------------------------------------
+   The panel leans toward the cursor. The Rust handlers in components::tilt
+   write --tilt-rx / --tilt-ry / --tilt-lift straight onto the node, so nothing
+   passes through the reactive system and no re-render happens per frame.
+
+   Only `transform` animates, which keeps the whole effect on the compositor.
+   The transition applies at rest as well as in motion, so releasing the
+   pointer eases the panel back instead of snapping. */
+
+.hero-render {
+    --tilt-rx: 0deg;
+    --tilt-ry: 0deg;
+    --tilt-lift: 0px;
+    /* Perspective on the element itself rather than the parent, so the tilt
+       reads the same regardless of where the panel sits in the layout. */
+    transform: perspective(1100px)
+               rotateX(var(--tilt-rx))
+               rotateY(var(--tilt-ry))
+               translateZ(var(--tilt-lift));
+    transform-style: preserve-3d;
+    transition: transform 320ms cubic-bezier(0.16, 1, 0.3, 1);
+    will-change: transform;
+}
+
+/* While the pointer is over it, follow quickly. The slower easing above then
+   takes over on release. */
+.hero-render:hover {
+    transition: transform 90ms linear;
+}
+
+/* The glow sits behind the panel and shares its 3D space, so it tracks the
+   lean instead of staying flat and detaching from the frame. */
+.hero-render-glow {
+    transform: translateZ(-40px) scale(1.04);
+}
+
+/* Lift the shadow slightly as the panel comes forward, which is what sells the
+   depth more than the rotation itself. */
+.hero-render:hover .hero-render-img {
+    box-shadow:
+        0 34px 80px rgba(0, 0, 0, 0.55),
+        0 0 0 1px rgba(60, 186, 84, 0.16) inset;
+}
+
+.hero-render-img {
+    transition: box-shadow 320ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Reduced motion: the Rust handler already returns early, so the properties
+   never change. Neutralising the transition here removes the easing too, and
+   the panel is simply flat and still. */
+@media (prefers-reduced-motion: reduce) {
+    .hero-render,
+    .hero-render:hover {
+        transform: none;
+        transition: none;
+    }
+    .hero-render-glow { transform: none; }
+}
+
+/* Touch devices have no hovering pointer, and a tilt that only fires on tap
+   is noise. Keep it flat. */
+@media (hover: none) {
+    .hero-render { transform: none; }
+}
+
+/* --------------------------------------------------------------------------
+   Hero status pill
+   --------------------------------------------------------------------------
+   Its dot was still hard-coded to #4ade80, a green from before the canonical
+   accent was established, so it sat a shade off from everything else on the
+   page. Both the dot and the frame now come from the token.
+   The dot is a real status indicator here (the platform IS in public alpha),
+   which is the case where a coloured dot carries meaning rather than decoration. */
+
+.hero-industrial .beta-tag {
+    border-color: rgba(60, 186, 84, 0.32);
+    background: var(--color-eustress-green-dim);
+}
+
+.hero-industrial .tag-dot {
+    background: var(--color-eustress-green);
+    box-shadow: 0 0 0 3px rgba(60, 186, 84, 0.16);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .hero-industrial .tag-dot { animation: none; }
+}
+
+/* Three actions again. Keep them on one row at desktop and let them wrap
+   cleanly on narrow widths rather than squeezing. */
+.hero-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+    align-items: center;
 }

@@ -402,6 +402,11 @@ pub fn LearnPage() -> impl IntoView {
                         <h3>"Publishing"</h3>
                         <p>"Deploy your place and reach players worldwide"</p>
                     </a>
+                    <a href="/docs/website" class="doc-card">
+                        <img src="/assets/icons/web.svg" alt="Website Service" class="doc-icon" />
+                        <h3>"Website Service"</h3>
+                        <p>"Mark values as References, publish once, and every number on your site updates from one fetch"</p>
+                    </a>
                     <a href="/docs/earning" class="doc-card">
                         <img src="/assets/icons/trending.svg" alt="Earning" class="doc-icon" />
                         <h3>"Earning"</h3>

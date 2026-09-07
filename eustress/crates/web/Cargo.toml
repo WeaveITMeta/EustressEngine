@@ -35,6 +35,12 @@ web-sys = { version = "0.3", features = [
     "Window",
     "Document",
     "Element",
+    # Pointer-driven tilt on the hero render (see components::tilt)
+    "MouseEvent",
+    "MediaQueryList",
+    "CssStyleDeclaration",
+    "DomRect",
+    "HtmlImageElement",
     "HtmlElement",
     "HtmlCanvasElement",
     "HtmlInputElement",

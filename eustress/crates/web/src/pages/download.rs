@@ -12,7 +12,7 @@ use crate::components::{CentralNav, Footer};
 // Main Component
 // -----------------------------------------------------------------------------
 
-/// Download page - auth-gated, fetches version info from releases.eustress.dev/latest.json.
+/// Download page - auth-gated, fetches version info from downloads.eustress.dev/latest.json.
 #[component]
 pub fn DownloadPage() -> impl IntoView {
     let app_state = expect_context::<crate::state::AppState>();
@@ -21,16 +21,16 @@ pub fn DownloadPage() -> impl IntoView {
     let version = RwSignal::new("...".to_string());
     let release_date = RwSignal::new(String::new());
     let changelog = RwSignal::new(String::new());
-    let win_url = RwSignal::new("https://releases.eustress.dev/latest/eustress-engine-windows-x64.zip".to_string());
+    let win_url = RwSignal::new("https://downloads.eustress.dev/latest/windows-x64".to_string());
     let win_size = RwSignal::new("~85 MB".to_string());
-    let mac_url = RwSignal::new("https://releases.eustress.dev/latest/eustress-engine-macos-arm64.dmg".to_string());
+    let mac_url = RwSignal::new("https://downloads.eustress.dev/latest/macos-arm64".to_string());
     let mac_size = RwSignal::new("~82 MB".to_string());
-    let linux_url = RwSignal::new("https://releases.eustress.dev/latest/eustress-engine-linux-x64.tar.gz".to_string());
+    let linux_url = RwSignal::new("https://downloads.eustress.dev/latest/linux-x64".to_string());
     let linux_size = RwSignal::new("~80 MB".to_string());
 
     // Fetch latest.json on mount
     wasm_bindgen_futures::spawn_local(async move {
-        if let Ok(resp) = gloo_net::http::Request::get("https://releases.eustress.dev/latest.json")
+        if let Ok(resp) = gloo_net::http::Request::get("https://downloads.eustress.dev/latest.json")
             .send().await
         {
             if let Ok(data) = resp.json::<serde_json::Value>().await {

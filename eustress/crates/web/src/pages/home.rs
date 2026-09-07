@@ -4,7 +4,7 @@
 // =============================================================================
 
 use leptos::prelude::*;
-use crate::components::{CentralNav, Footer};
+use crate::components::{CentralNav, Footer, on_tilt_leave, on_tilt_move};
 
 /// Public landing page - simulation & data platform.
 #[component]
@@ -25,9 +25,11 @@ pub fn HomePage() -> impl IntoView {
 
                 <div class="hero-main">
                     <div class="hero-text">
-                        // No status badge and no decorative dot. A version label is not
-                        // the first thing a visitor needs, and the hero is held to
-                        // headline, subtext, and CTAs so the value proposition lands.
+                        <div class="beta-tag">
+                            <span class="tag-dot"></span>
+                            "SIMULATION & DATA PLATFORM · PUBLIC ALPHA"
+                        </div>
+
                         <h1 class="hero-headline">
                             "The Future of"<br/>
                             <span class="headline-accent">"Creation"</span>
@@ -36,7 +38,8 @@ pub fn HomePage() -> impl IntoView {
                         <p class="hero-description">
                             "Build anything at the speed of thought. "
                             <strong>"100% Rust."</strong>
-                            " Zero compromises."
+                            <br/>
+                            "Zero compromises."
                         </p>
 
                         <div class="hero-buttons">
@@ -47,6 +50,9 @@ pub fn HomePage() -> impl IntoView {
                             <a href="/gallery" class="btn-secondary-steel">
                                 "Explore"
                             </a>
+                            <a href="/about" class="btn-secondary-steel">
+                                "About"
+                            </a>
                         </div>
                     </div>
 
@@ -55,13 +61,17 @@ pub fn HomePage() -> impl IntoView {
                     // light buttons, showing a product that does not exist instead
                     // of the one that does.
                     <div class="hero-visual-new">
-                        <figure class="hero-render">
+                        <figure
+                            class="hero-render"
+                            on:mousemove=move |ev| on_tilt_move(&ev)
+                            on:mouseleave=move |ev| on_tilt_leave(&ev)
+                        >
                             <div class="hero-render-glow" aria-hidden="true"></div>
                             <img
-                                src="/assets/hero-studio.png"
+                                src="/assets/hero-render.png"
                                 alt="The Eustress Studio editor: a photographed bicycle reconstructed as a Gaussian splat, rendering live in the viewport alongside the scene explorer and properties panels"
                                 class="hero-render-img"
-                                width="1333"
+                                width="1334"
                                 height="714"
                                 fetchpriority="high"
                                 decoding="async"
@@ -339,7 +349,7 @@ pub fn HomePage() -> impl IntoView {
                         <div class="card-info">
                             <span class="info-tag">"DIGITAL TWIN"</span>
                             <h4>"V-Cell Battery"</h4>
-                            <p>"Na-S solid-state cell, aged 10,000 charge cycles in seconds"</p>
+                            <p>"Anode-free lithium-sulfur, 569 bipolar layers in one can: 1,223 V and 1,032 Wh/kg, aged 699 cycles in seconds"</p>
                         </div>
                     </div>
                     <div class="showcase-card">

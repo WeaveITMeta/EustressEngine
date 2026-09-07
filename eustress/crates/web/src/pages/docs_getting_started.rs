@@ -381,7 +381,7 @@ pub fn DocsGettingStartedPage() -> impl IntoView {
 winget install Eustress.Engine
 
 # Or download the installer directly
-Invoke-WebRequest -Uri https://releases.eustress.dev/latest/EustressEngine-Setup.exe -OutFile EustressEngine-Setup.exe
+Invoke-WebRequest -Uri https://downloads.eustress.dev/latest/windows-x64-installer -OutFile EustressEngine-Setup.exe
 Start-Process .\EustressEngine-Setup.exe -Wait"#}</code></pre>
                             </div>
 
@@ -393,7 +393,7 @@ Start-Process .\EustressEngine-Setup.exe -Wait"#}</code></pre>
 brew install eustress-engine
 
 # Or download the .dmg
-curl -fLO https://releases.eustress.dev/latest/eustress-engine-macos-arm64.dmg
+curl -fLJO https://downloads.eustress.dev/latest/macos-arm64
 open eustress-engine-macos-arm64.dmg"#}</code></pre>
                             </div>
 
@@ -402,7 +402,7 @@ open eustress-engine-macos-arm64.dmg"#}</code></pre>
                                     <span class="code-lang">"Linux (Terminal)"</span>
                                 </div>
                                 <pre><code class="language-bash">{r#"# Download the portable tarball, then verify the SHA-256 from the release notes
-curl -fLO https://releases.eustress.dev/latest/eustress-engine-linux-x64.tar.gz
+curl -fLJO https://downloads.eustress.dev/latest/linux-x64
 tar -xzf eustress-engine-linux-x64.tar.gz
 ./eustress-engine/eustress-engine
 
