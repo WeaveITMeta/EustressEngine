@@ -1,7 +1,7 @@
 [material]
 name = "Silver"
 preset = "Silver"
-description = "Polished silver — highly reflective cool-white metal"
+description = "Polished silver - highly reflective cool-white metal"
 
 [pbr]
 base_color = [0.753, 0.753, 0.753, 1.0]

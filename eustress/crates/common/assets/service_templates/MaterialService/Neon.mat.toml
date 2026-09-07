@@ -1,7 +1,7 @@
 [material]
 name = "Neon"
 preset = "Neon"
-description = "Self-illuminating neon — no textures"
+description = "Self-illuminating neon - no textures"
 
 [pbr]
 base_color = [1.0, 1.0, 1.0, 1.0]

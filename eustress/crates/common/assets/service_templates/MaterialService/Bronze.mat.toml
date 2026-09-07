@@ -1,7 +1,7 @@
 [material]
 name = "Bronze"
 preset = "Bronze"
-description = "Polished bronze — warm copper-gold metallic alloy"
+description = "Polished bronze - warm copper-gold metallic alloy"
 
 [pbr]
 base_color = [0.804, 0.498, 0.196, 1.0]
