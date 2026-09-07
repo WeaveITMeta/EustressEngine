@@ -52,6 +52,10 @@ pub mod representation;
 pub mod arch_instance;
 #[cfg(feature = "world-db")]
 pub mod auto_convert;
+/// Phase 0 — bake `tree` entities into Morton-keyed `entities` cores so
+/// the streaming gate counts them and residency engages.
+#[cfg(feature = "world-db")]
+pub mod bake_cores;
 #[cfg(feature = "world-db")]
 pub mod world_db_binary;
 #[cfg(feature = "world-db")]

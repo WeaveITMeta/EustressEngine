@@ -1348,29 +1348,26 @@ pub fn spawn_directory_entry(
     //     the partition residency streams — never drop them).
     // `STREAM_DB_PARTS` is only set during the initial load of a qualifying
     // Space and reset on settle, so paste / hot-reload always spawn normally.
-    if STREAM_DB_PARTS.load(std::sync::atomic::Ordering::Relaxed)
-        && !dir_meta.children.iter().any(|c| c.file_type == FileType::Directory)
-        && super::representation::representation_for(&format!("{:?}", class_name), None)
-            == super::representation::Representation::BinaryEcs
-        // Part-subclasses (SpawnLocation/Seat/VehicleSeat) render via the
-        // widened Part arm + attach their subclass component; never let the
-        // streaming-primary skip drop them on large imports.
-        && !matches!(
-            class_name,
-            eustress_common::classes::ClassName::SpawnLocation
-                | eustress_common::classes::ClassName::Seat
-                | eustress_common::classes::ClassName::VehicleSeat
-        )
-    {
+    if STREAM_DB_PARTS.load(std::sync::atomic::Ordering::Relaxed) {
+        let has_children = dir_meta
+            .children
+            .iter()
+            .any(|c| c.file_type == FileType::Directory);
         let has_custom_mesh = source.exists(&instance_toml_rel)
             && src_read_string(source, space_path, &instance_toml_path)
                 .ok()
-                .map(|s| {
-                    let l = s.to_ascii_lowercase();
-                    l.contains("mesh") || l.contains(".glb") || l.contains(".obj")
-                })
+                .map(|s| super::representation::toml_mentions_custom_mesh(&s))
                 .unwrap_or(false);
-        if !has_custom_mesh {
+        // Shared with `bake_cores`: this skip and that conversion are two
+        // halves of one invariant (exactly one loader owns each entity), so
+        // they must consult the SAME function. Kept as separate predicates
+        // they drift, and the drift is silent — a mismatch either spawns the
+        // entity twice or loses it entirely.
+        if super::representation::streams_from_db(
+            &format!("{:?}", class_name),
+            has_children,
+            has_custom_mesh,
+        ) {
             return; // residency streams this bare part from the DB
         }
     }

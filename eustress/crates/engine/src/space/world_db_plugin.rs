@@ -503,6 +503,22 @@ fn open_world_db_on_space_change(
                 }
             }
 
+            // ── Phase 0 — bake `tree` entities into Morton `entities` cores.
+            //
+            // MUST run here: after the reconcile (so the tree is current) and
+            // BEFORE `world_db_binary::load_binary_ecs_instances` makes the
+            // streaming decision. That decision reads
+            // `count_instance_cores_capped`, which counts the `entities`
+            // partition — so a Space whose entities live only in `tree` counts
+            // ~0, is classified SMALL, and eagerly spawns everything instead of
+            // streaming. Measured on a 1.34M-entity Space: ~4.4 ms/entity and a
+            // ~98 minute projected load, with residency idle throughout.
+            //
+            // One-time per Space (marker file under `.eustress/`), additive
+            // (never deletes a tree row), so a partial run still leaves the
+            // Space loadable through the existing path and re-bakes next open.
+            super::bake_cores::bake_once(&space_root.0, db.as_ref());
+
             // ── Wave 9.C — voxel-chunk reconcile on open ─────────────
             // The Roblox importer writes decoded terrain to
             // `Workspace/Terrain/voxel_chunks/chunk_<cx>_<cy>_<cz>.bin`

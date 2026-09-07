@@ -543,6 +543,34 @@ pub trait WorldDb: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    /// The most recent `limit` mutations, oldest-first (same order as
+    /// [`WorldDb::iter_mutations`]).
+    ///
+    /// Separate from `iter_mutations` because "the tail" must not be built by
+    /// materialising the whole log. The obvious form — read everything, keep
+    /// the last few — is O(log) in BOTH time and memory, so displaying 50 rows
+    /// on a Space with a long edit history loads that entire history into
+    /// RAM. A backend that tracks a sequence high-water mark should override
+    /// this and scan only the last `limit` keys.
+    ///
+    /// The default is that quadratic-feeling fallback, kept so a test backend
+    /// without a sequence counter still answers correctly.
+    fn tail_mutations(&self, limit: usize) -> Result<Vec<(u64, Vec<u8>)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let all = self.iter_mutations(0, u64::MAX)?;
+        let start = all.len().saturating_sub(limit);
+        Ok(all[start..].to_vec())
+    }
+
+    /// Next sequence the log will assign, i.e. one past the highest recorded.
+    /// `0` on a backend without an op-log. Lets a caller bound a tail scan
+    /// without reading any records.
+    fn mutation_high_water(&self) -> u64 {
+        0
+    }
+
     // ── UUID-keyed primary store — IDENTITY.md Wave 2.1 ──────────────
     //
     // The `entities_uuid` partition keys each entity's `ArchInstanceCore`

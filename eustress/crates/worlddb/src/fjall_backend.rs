@@ -890,6 +890,31 @@ impl WorldDb for FjallWorldDb {
         Ok(out)
     }
 
+    fn mutation_high_water(&self) -> u64 {
+        self.mutation_seq.load(Ordering::SeqCst)
+    }
+
+    fn tail_mutations(&self, limit: usize) -> Result<Vec<(u64, Vec<u8>)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        // Bound the scan by the high-water mark instead of reading the log and
+        // discarding most of it. The sequence is dense and append-only, so
+        // `[hw - limit, hw)` is exactly the tail; a range scan over that costs
+        // O(limit) rather than O(log).
+        //
+        // Deriving the window from the counter rather than reverse-iterating
+        // keeps this on the same `range` call `iter_mutations` already uses, so
+        // it needs nothing from the backend beyond what is proven to work.
+        let hw = self.mutation_seq.load(Ordering::SeqCst);
+        if hw == 0 {
+            return Ok(Vec::new());
+        }
+        let lo = hw.saturating_sub(limit as u64);
+        // `hw` is the NEXT seq to assign, so the last recorded one is hw - 1.
+        self.iter_mutations(lo, hw.saturating_sub(1))
+    }
+
     // ── IDENTITY.md Wave 2.1 ─────────────────────────────────────────
 
     fn put_entity_core_by_uuid(&self, uuid: &[u8; 16], core_bytes: &[u8]) -> Result<()> {

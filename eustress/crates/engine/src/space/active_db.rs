@@ -106,6 +106,97 @@ mod imp {
             .unwrap_or(0)
     }
 
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Causal context: who is acting, and which transaction they are in
+    // ─────────────────────────────────────────────────────────────────────────────
+    //
+    // The op-log schema always carried `actor` and `tx_id`; nothing populated them
+    // meaningfully. Every producer passed a `System`/`User` placeholder and a
+    // hardcoded `tx_id: 0`, so the log could record WHAT changed but never who
+    // caused it or which changes belonged together.
+    //
+    // Rather than thread an actor through every call site, the acting agent is
+    // ambient and scoped. An entry point that knows the actor (an MCP tool, the
+    // bridge, a script host, the importer) opens a scope; every mutation recorded
+    // underneath it is attributed and shares one transaction id. Producers stay
+    // unchanged.
+    //
+    // Process-global rather than thread-local on purpose: the engine records
+    // mutations from Bevy systems on the main thread AND from background workers
+    // servicing the same request, and a thread-local would lose attribution at
+    // exactly that boundary.
+
+    /// Ambient actor for mutations recorded without a more specific one.
+    static CURRENT_ACTOR: std::sync::RwLock<Option<eustress_worlddb::MutationActor>> =
+        std::sync::RwLock::new(None);
+
+    /// Transaction id shared by every mutation inside the innermost open scope.
+    /// `0` means "no scope" — each mutation then gets a fresh id of its own, so a
+    /// standalone edit is still distinguishable rather than sharing tx 0 with
+    /// everything else.
+    static CURRENT_TX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Monotonic source of transaction ids. Starts at 1 so `0` stays the "none"
+    /// sentinel.
+    static NEXT_TX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+    /// The actor to attribute an otherwise-unattributed mutation to.
+    pub fn current_actor() -> eustress_worlddb::MutationActor {
+        CURRENT_ACTOR
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or(eustress_worlddb::MutationActor::System)
+    }
+
+    /// The transaction id for a mutation recorded right now.
+    pub fn current_tx() -> u64 {
+        let scoped = CURRENT_TX.load(std::sync::atomic::Ordering::SeqCst);
+        if scoped != 0 {
+            return scoped;
+        }
+        NEXT_TX.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Restores the previous actor/transaction when dropped, so a scope cannot
+    /// leak its attribution into unrelated work that runs afterwards — including
+    /// on an early return or a panic unwinding through it.
+    pub struct ActorScope {
+        prev_actor: Option<eustress_worlddb::MutationActor>,
+        prev_tx: u64,
+    }
+
+    impl Drop for ActorScope {
+        fn drop(&mut self) {
+            if let Ok(mut g) = CURRENT_ACTOR.write() {
+                *g = self.prev_actor.take();
+            }
+            CURRENT_TX.store(self.prev_tx, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Attribute every mutation recorded while the returned guard lives to
+    /// `actor`, under one shared transaction id.
+    ///
+    /// ```ignore
+    /// let _scope = active_db::acting_as(MutationActor::Mcp("create_entity".into()));
+    /// // every mutation here is attributed and shares one tx
+    /// ```
+    #[must_use = "attribution ends when the guard drops; binding to `_` ends it immediately"]
+    pub fn acting_as(actor: eustress_worlddb::MutationActor) -> ActorScope {
+        let prev_actor = CURRENT_ACTOR.read().ok().and_then(|g| g.clone());
+        let prev_tx = CURRENT_TX.load(std::sync::atomic::Ordering::SeqCst);
+        let tx = NEXT_TX.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut g) = CURRENT_ACTOR.write() {
+            *g = Some(actor);
+        }
+        CURRENT_TX.store(tx, std::sync::atomic::Ordering::SeqCst);
+        ActorScope {
+            prev_actor,
+            prev_tx,
+        }
+    }
+
     /// Append one SEMANTIC mutation to the causal op-log (Phase 1, Way 8).
     /// Best-effort: a failure here NEVER fails the create/delete that already
     /// committed. Called ONLY from the semantic create/delete sites — never the
@@ -121,8 +212,25 @@ mod imp {
         rel: &str,
         after: Option<&[u8]>,
     ) {
+        // Real transaction id, and the ambient actor when the caller did not
+        // name a more specific one.
+        //
+        // `tx_id` was hardcoded to 0, so every record claimed to belong to the
+        // same transaction and nothing could be grouped or causally linked.
+        // It now comes from the tx context: mutations made inside one logical
+        // operation share an id, and a standalone mutation gets its own.
+        //
+        // `actor` was a `System`/`User` placeholder at every call site, so the
+        // log could not answer "which agent did this". Call sites that know
+        // better still win; `System` is treated as "unspecified" and defers to
+        // whatever scope is active — so an MCP tool that opens an actor scope
+        // attributes every write underneath it without touching the producers.
+        let actor = match actor {
+            eustress_worlddb::MutationActor::System => current_actor(),
+            named => named,
+        };
         let rec = eustress_worlddb::MutationRecord {
-            tx_id: 0,
+            tx_id: current_tx(),
             ts_nanos: now_nanos(),
             actor,
             op,
@@ -620,10 +728,12 @@ mod imp {
         let Some(a) = g.as_ref() else {
             return Vec::new();
         };
-        let all = a.db.iter_mutations(0, u64::MAX).unwrap_or_default();
-        let start = all.len().saturating_sub(limit);
-        all[start..]
-            .iter()
+        // Bounded: `tail_mutations` scans only the last `limit` sequences.
+        // This used to be `iter_mutations(0, u64::MAX)` followed by a slice,
+        // which loaded the ENTIRE mutation history into memory to display a
+        // handful of rows.
+        let tail = a.db.tail_mutations(limit).unwrap_or_default();
+        tail.iter()
             .filter_map(|(seq, bytes)| {
                 eustress_worlddb::decode_mutation(bytes)
                     .ok()
@@ -1030,6 +1140,30 @@ mod imp {
     use crate::space::instance_loader::InstanceDefinition;
 
     pub fn clear() {}
+
+    // Causal-context parity with the `world-db` module, so a caller that opens
+    // an actor scope (an MCP tool, the bridge) compiles in BOTH builds. There
+    // is no op-log without the feature, so the scope is inert rather than
+    // absent — an inert guard is preferable to `#[cfg]` at every call site.
+    pub struct ActorScope;
+
+    pub fn current_actor() -> eustress_worlddb::MutationActor {
+        eustress_worlddb::MutationActor::System
+    }
+
+    pub fn current_tx() -> u64 {
+        0
+    }
+
+    #[must_use = "the scope ends when this guard drops"]
+    pub fn acting_as(_actor: eustress_worlddb::MutationActor) -> ActorScope {
+        ActorScope
+    }
+
+    /// No op-log in this build.
+    pub fn tail_mutations(_limit: usize) -> Vec<eustress_worlddb::MutationView> {
+        Vec::new()
+    }
     pub fn is_active() -> bool {
         false
     }

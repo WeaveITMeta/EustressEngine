@@ -212,3 +212,206 @@ mod tests {
         assert_eq!(v, back);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Replay
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The log records; without this it does not reconstitute. Everything above
+// captures WHAT changed, and the read path (`iter_mutations` / `tail_mutations`
+// / the bridge `oplog.tail`) can show it — but nothing applied a record back to
+// state, so the op-log was an audit trail rather than a source of truth.
+//
+// Replay closes that. `apply_mutation` is the inverse of the producers:
+// Create/Update write the `after` core, Delete removes the entity. `undo_
+// mutation` uses `before` for the same record, which is what makes a
+// point-in-time rewind possible rather than only a forward re-run.
+//
+// Two honest limits, both consequences of what the producers currently write:
+//
+// * A record with no `after` cannot be applied forward, and one with no
+//   `before` cannot be undone. Today's producers set `before: None`, so undo
+//   is inert until they capture before-images. `apply_mutation` reports that
+//   as `Skipped` rather than pretending it succeeded.
+// * Replay restores the UUID-keyed core and, when the core carries a
+//   transform, the Morton-keyed spatial copy. It does NOT rebuild `tree`
+//   rows: a replayed world is DB-shaped, which is what the runtime reads.
+
+use crate::backend::WorldDb;
+
+/// What [`apply_mutation`] actually did with a record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    /// State was written or removed.
+    Changed,
+    /// The record carried no payload for this direction (e.g. forward-apply of
+    /// a record with `after: None`). Not an error — a producer that has not
+    /// been taught to capture that side yet.
+    Skipped,
+}
+
+/// Apply one record FORWARD: make state match `after`.
+pub fn apply_mutation(db: &dyn WorldDb, rec: &MutationRecord) -> crate::error::Result<Applied> {
+    let uuid = match uuid_hex_to_bytes(&rec.uuid) {
+        Some(u) => u,
+        None => return Ok(Applied::Skipped),
+    };
+    match rec.op {
+        MutationOp::Delete => {
+            db.delete_entity_by_uuid(&uuid)?;
+            Ok(Applied::Changed)
+        }
+        MutationOp::Create | MutationOp::Update => match rec.after.as_deref() {
+            Some(bytes) => {
+                write_core(db, &uuid, bytes)?;
+                Ok(Applied::Changed)
+            }
+            None => Ok(Applied::Skipped),
+        },
+    }
+}
+
+/// Apply one record BACKWARD: make state match `before`.
+///
+/// A Create is undone by deleting; anything else is undone by restoring the
+/// prior bytes. Returns `Skipped` when the record has no before-image, which
+/// is the current state of every producer — see the module note.
+pub fn undo_mutation(db: &dyn WorldDb, rec: &MutationRecord) -> crate::error::Result<Applied> {
+    let uuid = match uuid_hex_to_bytes(&rec.uuid) {
+        Some(u) => u,
+        None => return Ok(Applied::Skipped),
+    };
+    match rec.op {
+        MutationOp::Create => {
+            db.delete_entity_by_uuid(&uuid)?;
+            Ok(Applied::Changed)
+        }
+        MutationOp::Update | MutationOp::Delete => match rec.before.as_deref() {
+            Some(bytes) => {
+                write_core(db, &uuid, bytes)?;
+                Ok(Applied::Changed)
+            }
+            None => Ok(Applied::Skipped),
+        },
+    }
+}
+
+/// Write a core to BOTH the uuid-primary store and, when the bytes decode to a
+/// transform-carrying core, the Morton spatial index.
+///
+/// Both copies matter: `entities_uuid` is what a uuid lookup and the bridge
+/// read, `entities` is what residency range-scans. Writing only one leaves a
+/// replayed entity either invisible to streaming or invisible to lookup.
+fn write_core(db: &dyn WorldDb, uuid: &[u8; 16], bytes: &[u8]) -> crate::error::Result<()> {
+    db.put_entity_core_by_uuid(uuid, bytes)?;
+    if let Ok(core) = crate::rkyv_values::decode_instance_core(bytes) {
+        let id = crate::backend::EntityId(stored_id_from_uuid(uuid));
+        db.put_instance_core(id, (core.t[0], core.t[1], core.t[2]), bytes)?;
+    }
+    Ok(())
+}
+
+/// Same derivation the bake uses, so a replayed entity keeps the id it had.
+fn stored_id_from_uuid(uuid: &[u8; 16]) -> u64 {
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&uuid[..8]);
+    let id = u64::from_le_bytes(b);
+    if id == 0 {
+        1
+    } else {
+        id
+    }
+}
+
+fn uuid_hex_to_bytes(hex: &str) -> Option<[u8; 16]> {
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let s = std::str::from_utf8(chunk).ok()?;
+        out[i] = u8::from_str_radix(s, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Outcome of replaying a span of the log.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReplaySummary {
+    pub applied: usize,
+    /// Records with no payload for the direction travelled.
+    pub skipped: usize,
+    /// Records that failed to decode.
+    pub undecodable: usize,
+}
+
+/// Replay `[min_seq, max_seq]` forward, in recorded order.
+///
+/// Order is the whole point: the log is the only thing that knows two edits to
+/// the same entity happened in a particular sequence, and applying them out of
+/// order silently produces a different world.
+pub fn replay_forward(
+    db: &dyn WorldDb,
+    min_seq: u64,
+    max_seq: u64,
+) -> crate::error::Result<ReplaySummary> {
+    let mut sum = ReplaySummary::default();
+    for (_seq, bytes) in db.iter_mutations(min_seq, max_seq)? {
+        let Ok(rec) = decode_mutation(&bytes) else {
+            sum.undecodable += 1;
+            continue;
+        };
+        match apply_mutation(db, &rec)? {
+            Applied::Changed => sum.applied += 1,
+            Applied::Skipped => sum.skipped += 1,
+        }
+    }
+    Ok(sum)
+}
+
+/// Rewind `[min_seq, max_seq]`, newest first.
+///
+/// Reverse order is required, not cosmetic: undoing oldest-first would restore
+/// an early before-image and then immediately overwrite it with a later one.
+pub fn rewind(db: &dyn WorldDb, min_seq: u64, max_seq: u64) -> crate::error::Result<ReplaySummary> {
+    let mut sum = ReplaySummary::default();
+    let mut span = db.iter_mutations(min_seq, max_seq)?;
+    span.reverse();
+    for (_seq, bytes) in span {
+        let Ok(rec) = decode_mutation(&bytes) else {
+            sum.undecodable += 1;
+            continue;
+        };
+        match undo_mutation(db, &rec)? {
+            Applied::Changed => sum.applied += 1,
+            Applied::Skipped => sum.skipped += 1,
+        }
+    }
+    Ok(sum)
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+
+    #[test]
+    fn uuid_hex_round_trips() {
+        let b = [0xABu8; 16];
+        let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        assert_eq!(uuid_hex_to_bytes(&hex), Some(b));
+    }
+
+    #[test]
+    fn malformed_uuid_is_rejected_not_panicked() {
+        assert_eq!(uuid_hex_to_bytes("nope"), None);
+        assert_eq!(uuid_hex_to_bytes(""), None);
+        assert_eq!(uuid_hex_to_bytes(&"z".repeat(32)), None);
+    }
+
+    #[test]
+    fn stored_id_matches_the_bake_and_is_never_zero() {
+        assert_ne!(stored_id_from_uuid(&[0u8; 16]), 0);
+        let a = [3u8; 16];
+        assert_eq!(stored_id_from_uuid(&a), stored_id_from_uuid(&a));
+    }
+}

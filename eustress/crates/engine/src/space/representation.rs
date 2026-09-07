@@ -226,3 +226,93 @@ mod tests {
         );
     }
 }
+
+/// THE single test for "this entity is owned by the binary-ECS / streaming
+/// tier, not by the filesystem tree loader".
+///
+/// Two halves depend on this being one function rather than two agreeing
+/// predicates:
+///
+/// * `file_loader`'s streaming-primary gate SKIPS spawning a tree entity when
+///   this is true, because residency will stream it from the `entities`
+///   partition.
+/// * `bake_cores` CONVERTS a tree entity into a core when this is true.
+///
+/// Written separately, they drift — and the drift is silent in both
+/// directions. If the bake converts something the loader still spawns, the
+/// entity exists TWICE (the double-load that previously pinned huge imports
+/// at ~2 FPS). If the loader skips something the bake did not convert, the
+/// entity vanishes. Neither shows up as an error; both show up as a wrong
+/// world.
+///
+/// `has_children`: a parent must stay folder-form. A core has no tree entry
+/// and no hierarchy — `spawn_binary_core` parents every core flat under
+/// Workspace — so converting a parent strands its descendants.
+///
+/// `has_custom_mesh`: a binary core cannot carry a resolvable mesh path.
+///
+/// The Part subclasses are excluded deliberately: `SpawnLocation`, `Seat` and
+/// `VehicleSeat` render through the widened Part arm and attach a subclass
+/// component, and the streaming path drops that, so they must keep loading
+/// from the tree.
+/// Whether an instance's raw TOML text references a custom mesh.
+///
+/// Deliberately a TEXT scan rather than a parsed-field check: a mesh path can
+/// appear in `[asset].mesh`, in `[properties.extras]`, or in a section the
+/// `InstanceDefinition` parser does not model, and a binary core cannot carry
+/// any of them. Over-matching is the safe direction — a false positive keeps
+/// an entity in the tree, a false negative converts one the loader still
+/// spawns and creates it twice.
+///
+/// Shared so `file_loader` and `bake_cores` cannot answer this differently.
+pub fn toml_mentions_custom_mesh(text: &str) -> bool {
+    let l = text.to_ascii_lowercase();
+    l.contains("mesh") || l.contains(".glb") || l.contains(".obj")
+}
+
+pub fn streams_from_db(class_name: &str, has_children: bool, has_custom_mesh: bool) -> bool {
+    if has_children || has_custom_mesh {
+        return false;
+    }
+    if matches!(class_name, "SpawnLocation" | "Seat" | "VehicleSeat") {
+        return false;
+    }
+    representation_for(class_name, None) == Representation::BinaryEcs
+}
+
+#[cfg(test)]
+mod streams_from_db_tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_part_streams() {
+        assert!(streams_from_db("Part", false, false));
+    }
+
+    #[test]
+    fn a_parent_never_streams() {
+        assert!(!streams_from_db("Part", true, false));
+    }
+
+    #[test]
+    fn a_custom_mesh_never_streams() {
+        assert!(!streams_from_db("Part", false, true));
+    }
+
+    #[test]
+    fn part_subclasses_never_stream() {
+        // The regression this whole function exists to prevent: these are
+        // BinaryEcs by representation, so a naive check would convert them
+        // while `file_loader` still spawns them — one object, twice.
+        for c in ["SpawnLocation", "Seat", "VehicleSeat"] {
+            assert!(!streams_from_db(c, false, false), "{c} must not stream");
+        }
+    }
+
+    #[test]
+    fn file_natured_classes_never_stream() {
+        for c in ["SoulScript", "ScreenGui", "TextLabel", "Atmosphere", "Sky"] {
+            assert!(!streams_from_db(c, false, false), "{c} must not stream");
+        }
+    }
+}
