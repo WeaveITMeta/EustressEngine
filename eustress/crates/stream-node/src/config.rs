@@ -1,8 +1,23 @@
+use std::net::{IpAddr, Ipv4Addr};
+
 use eustress_stream::StreamConfig;
 
 /// Configuration for a single EustressStream network node.
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
+    /// Interface to bind every listener to (TCP, QUIC, REST).
+    ///
+    /// Defaults to `127.0.0.1` — **loopback only**. A node carries no
+    /// authentication of any kind: every connected peer may publish into any
+    /// topic ring and subscribe to any other, including `scene_deltas` (live
+    /// scene contents) and `agent_commands`. Binding a wildcard address hands
+    /// that to anything that can route to the host, so exposing a node beyond
+    /// loopback has to be a deliberate act, not a default.
+    ///
+    /// Override with [`NodeConfig::with_bind_addr`], or with
+    /// [`NodeConfig::bind_all`] once a trusted network boundary (VPN, firewall,
+    /// authenticating reverse proxy) is actually in front of it.
+    pub bind_addr: IpAddr,
     /// TCP port to listen on. Default: 33000.
     pub port: u16,
     /// Upper bound of the auto-increment port range. Default: 49151.
@@ -28,6 +43,7 @@ pub struct NodeConfig {
 impl Default for NodeConfig {
     fn default() -> Self {
         Self {
+            bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: 33000,
             port_range_max: 49151,
             auto_increment: true,
@@ -43,6 +59,27 @@ impl Default for NodeConfig {
 }
 
 impl NodeConfig {
+    /// Bind every listener to `addr` instead of loopback.
+    pub fn with_bind_addr(mut self, addr: IpAddr) -> Self {
+        self.bind_addr = addr;
+        self
+    }
+
+    /// Bind to all interfaces (`0.0.0.0`).
+    ///
+    /// The node is unauthenticated, so this exposes publish and subscribe on
+    /// every topic to anything that can reach the host. Only call this behind a
+    /// trusted network boundary.
+    pub fn bind_all(mut self) -> Self {
+        self.bind_addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        self
+    }
+
+    /// True when [`Self::bind_addr`] is reachable from off-host.
+    pub fn is_externally_bound(&self) -> bool {
+        !self.bind_addr.is_loopback()
+    }
+
     pub fn with_port(mut self, port: u16) -> Self {
         self.port = port;
         self

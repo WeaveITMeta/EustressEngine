@@ -16,6 +16,8 @@
 //! EUSTRESS_PORT=33000 EUSTRESS_CLUSTER_SIZE=5 eustress-stream-node --cluster
 //! ```
 
+use std::net::IpAddr;
+
 use clap::Parser;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
@@ -35,6 +37,14 @@ use eustress_stream_node::{ForgeCluster, NodeConfig, StreamNode};
     long_about = None,
 )]
 struct Args {
+    /// Interface to bind to. Defaults to loopback.
+    ///
+    /// The node is UNAUTHENTICATED: any peer that connects may publish into
+    /// any topic ring and subscribe to any other. Pass `--bind 0.0.0.0` only
+    /// behind a trusted network boundary.
+    #[arg(long, env = "EUSTRESS_BIND", default_value = "127.0.0.1")]
+    bind: IpAddr,
+
     /// TCP port to listen on (auto-increments if occupied).
     #[arg(long, env = "EUSTRESS_PORT", default_value_t = 33000)]
     port: u16,
@@ -100,6 +110,7 @@ async fn run_single(args: &Args) {
         .with_ring_capacity(args.ring_cap);
 
     let config = NodeConfig {
+        bind_addr: args.bind,
         port: args.port,
         rest_port: args.rest_port,
         frame_max_bytes: args.frame_max,
@@ -107,6 +118,13 @@ async fn run_single(args: &Args) {
         stream_config,
         ..NodeConfig::default()
     };
+
+    if !args.bind.is_loopback() {
+        tracing::warn!(
+            "Binding {}. This node has NO authentication: any host that can route here may publish into and read every topic.",
+            args.bind
+        );
+    }
 
     let node = match StreamNode::start(config).await {
         Ok(n) => n,
@@ -122,7 +140,7 @@ async fn run_single(args: &Args) {
         node.start_rest();
         let rest_port = node.listen_addr().port() + 10000;
         let effective_rest = args.rest_port.unwrap_or(rest_port);
-        info!("REST/SSE API on http://0.0.0.0:{effective_rest}");
+        info!("REST/SSE API on http://{}:{effective_rest}", args.bind);
         info!("  POST /topics/{{name}}/publish");
         info!("  GET  /topics/{{name}}/stream   (SSE live feed)");
         info!("  GET  /topics/{{name}}/replay   (ring buffer replay)");
@@ -141,6 +159,7 @@ async fn run_cluster(args: &Args) {
         .with_ring_capacity(args.ring_cap);
 
     let base_config = NodeConfig {
+        bind_addr: args.bind,
         rest_port: args.rest_port,
         frame_max_bytes: args.frame_max,
         connection_channel_capacity: args.conn_cap,

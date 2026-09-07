@@ -139,7 +139,7 @@ impl QuicNode {
         let (cert_der, key_der) = generate_self_signed("eustress-node");
         let server_cfg = server_config(cert_der.clone(), key_der);
 
-        let addr: SocketAddr = format!("0.0.0.0:{}", config.port).parse().unwrap();
+        let addr = SocketAddr::new(config.bind_addr, config.port);
         let endpoint = Endpoint::server(server_cfg, addr)
             .map_err(|e| NodeError::Io(std::io::Error::other(e.to_string())))?;
         let listen_addr = endpoint.local_addr()

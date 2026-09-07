@@ -47,7 +47,7 @@
 //! | N-1  | 33000+N| 43000+N|
 
 use bevy::prelude::*;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use eustress_common::change_queue::ChangeQueue;
@@ -62,6 +62,14 @@ use eustress_stream_node::{NodeConfig, NodeServer};
 /// Insert before the plugin runs to override defaults.
 #[derive(Resource, Debug, Clone)]
 pub struct StreamNodeConfig {
+    /// Interface every node binds. Default: `127.0.0.1`.
+    ///
+    /// The node authenticates nobody: any peer that connects may publish into
+    /// any topic ring and subscribe to any other, including `scene_deltas`
+    /// (live scene contents) and `agent_commands`. Loopback keeps that on the
+    /// machine. Overriding it exposes the Space to anything that can route
+    /// here, so only do so behind a trusted network boundary.
+    pub bind_addr: IpAddr,
     /// Base TCP port. Nodes occupy `base_port..base_port + cluster_nodes`.
     /// Default: 33000.
     pub base_port: u16,
@@ -78,6 +86,7 @@ pub struct StreamNodeConfig {
 impl Default for StreamNodeConfig {
     fn default() -> Self {
         Self {
+            bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
             base_port: 33000,
             cluster_nodes: 1,
             rest: true,
@@ -238,6 +247,7 @@ fn start_stream_nodes(
                 };
 
                 let node_config = NodeConfig {
+                    bind_addr: cfg.bind_addr,
                     port,
                     rest_port,
                     max_connections: cfg.max_connections,
@@ -270,6 +280,13 @@ fn start_stream_nodes(
     if nodes.is_empty() {
         warn!("StreamNodePlugin: no nodes started — remote pub/sub unavailable.");
         return;
+    }
+
+    if !config.bind_addr.is_loopback() {
+        warn!(
+            "StreamNodePlugin: bound to {} — the node is UNAUTHENTICATED. Any              host that can route here may publish into and read every topic,              including scene_deltas and agent_commands.",
+            config.bind_addr
+        );
     }
 
     info!(

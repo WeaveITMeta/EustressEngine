@@ -14,7 +14,7 @@ bevy = { workspace = true, features = ["serialize"] }
 lightyear = { workspace = true }
 
 # Physics: Avian 0.4 (Bevy 0.17 compatible) - DISABLED until Bevy 0.19 support
-# avian3d = { workspace = true, optional = true }
+avian3d = { workspace = true, optional = true }
 
 # P2P & CRDTs for Persistent Distributed Worlds
 loro = { workspace = true, optional = true }
@@ -45,7 +45,7 @@ eustress-common = { path = ".." }
 default = ["server", "client"]
 server = []
 client = []
-# physics = ["avian3d"]
+physics = ["avian3d"]
 p2p = ["loro", "bevy_quinnet", "quinn"]  # Persistent Distributed Worlds
 
 [dev-dependencies]

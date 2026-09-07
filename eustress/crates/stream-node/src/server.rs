@@ -88,7 +88,7 @@ async fn bind_with_auto_increment(config: &NodeConfig) -> Result<TcpListener, No
     let mut port = config.port;
 
     loop {
-        let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
+        let addr = SocketAddr::new(config.bind_addr, port);
         match TcpListener::bind(addr).await {
             Ok(listener) => return Ok(listener),
             Err(e) if is_addr_in_use(&e) && config.auto_increment && port < config.port_range_max => {

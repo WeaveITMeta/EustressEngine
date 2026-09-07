@@ -30,7 +30,13 @@ pub struct StreamConfig {
     pub compression_level: i32,
 
     /// Maximum number of subscriber callbacks per topic.
-    /// Extra registrations beyond this limit are silently dropped.
+    ///
+    /// Registrations past this limit are REFUSED, not queued and not dropped:
+    /// `Topic::subscribe` returns `None` and `EustressStream::subscribe*`
+    /// returns `StreamError::SubscriberLimit`. Callers must handle that;
+    /// discarding the returned `SubscriberId` without ever unsubscribing burns
+    /// a slot for the life of the process and eventually locks every later
+    /// subscriber out of the topic, including the engine's own.
     pub max_subscribers: usize,
 }
 
