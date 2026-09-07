@@ -30,20 +30,27 @@ The binary is `eustress-server` (Linux/macOS) or `eustress-server.exe` (Windows)
   --name "My Eustress Server"
 ```
 
-The server also starts a **Stream Node** on port 33000 for AI agents and tooling.
-
 ### 3. Port forward on your router
 
-Open **two ports** on your home router and point them to your machine's local IP:
+Open **one port** on your home router and point it to your machine's local IP:
 
-| Service | Protocol | Port  | Purpose                            |
-|---------|----------|-------|------------------------------------|
-| Play    | UDP/QUIC | 7777  | Player connections, entity sync    |
-| Stream  | TCP      | 33000 | AI agents, remote CLI, dashboards  |
-| REST    | TCP      | 43000 | Browser dashboard, health check    |
+| Service | Protocol | Port  | Purpose                         |
+|---------|----------|-------|---------------------------------|
+| Play    | UDP/QUIC | 7777  | Player connections, entity sync |
 
 > **How to find your local IP:** Run `ipconfig` (Windows) or `ip addr` (Linux/macOS).
 > Look for your LAN IP, typically `192.168.x.x` or `10.0.x.x`.
+
+> **Forward only the play port.** The Stream Node (TCP 33000, REST 43000) is a
+> local tooling channel for AI agents and dashboards, and it authenticates
+> nobody: any peer that connects may publish into any topic and read every
+> other, including live scene contents. It binds `127.0.0.1` so that stays on
+> the machine. Do not port-forward it. To reach it from another machine, tunnel
+> over SSH or a VPN rather than exposing the port:
+>
+> ```bash
+> ssh -N -L 33000:127.0.0.1:33000 -L 43000:127.0.0.1:43000 you@your-server
+> ```
 
 ### 4. Find your public IP
 
@@ -88,9 +95,10 @@ scene       = "worlds/main.eustress"
 
 [stream]
 enabled     = true
+bind        = "127.0.0.1"  # loopback only; the node is unauthenticated
 tcp_port    = 33000
 rest_port   = 43000
-nodes       = 1        # increase for >622 K msg/s fan-out (see scaling below)
+nodes       = 1            # increase for >622 K msg/s fan-out (see scaling below)
 
 [security]
 password    = ""       # leave empty for open server
