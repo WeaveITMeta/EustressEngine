@@ -452,6 +452,31 @@ fn radial_shade(wheel: Wheel, rgb: [u8; 3], t: f32) -> [u8; 3] {
 /// The name of the [`BASE_PALETTE`] swatch nearest to `rgb` by squared RGB
 /// distance. Drives the BrickColor field's displayed value (a swatch name like
 /// `"Seraph Blue"`) instead of a raw `"r, g, b"` triple.
+/// Name to show for `rgb`, preferring the ACTIVE wheel's own lexicon.
+///
+/// A wheel pick applies `radial_shade(transform_color(wheel, base))`, so the
+/// resulting colour is NOT a `BASE_PALETTE` entry. Naming it with
+/// `nearest_base_name` alone therefore always answered with a Stone name from a
+/// different namespace — picking "Seraphic" on Aether reported "Clover Field",
+/// because Seraphic sits on the rank-121 cell (`BASE_PALETTE[0]`, a dark green)
+/// and the nearest curated green is Clover Field.
+///
+/// Searching the active wheel for an EXACT match first makes a pick round-trip
+/// its own name: apply and display run the same transform, so the bytes match
+/// exactly. Anything not produced by that wheel (a typed RGB, an imported
+/// colour) still falls through to the nearest curated base name.
+pub fn display_name_for_wheel(wheel: Option<Wheel>, rgb: [u8; 3]) -> String {
+    if let Some(w) = wheel {
+        if let Some(cell) = wheel_honeycomb(w)
+            .into_iter()
+            .find(|c| [c.r, c.g, c.b] == rgb)
+        {
+            return cell.name;
+        }
+    }
+    nearest_base_name(rgb).to_string()
+}
+
 pub fn nearest_base_name(rgb: [u8; 3]) -> &'static str {
     let mut best = BASE_PALETTE[0].name;
     let mut best_d = i32::MAX;
