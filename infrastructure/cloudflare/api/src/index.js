@@ -663,6 +663,15 @@ export default {
     const cors = corsHeaders(request);
 
     if (request.method === 'OPTIONS') {
+      // The manifest routes are read by sites we do not run, so their preflight
+      // answers `*` instead of the ALLOWED_ORIGINS allowlist. This carve-out has
+      // to live here rather than in the handler: the short-circuit runs before
+      // route dispatch, and the custom X-Eustress-Key header guarantees a
+      // preflight, so without it the browser rejects the request before the
+      // handler is ever reached.
+      if (isWebsiteManifestPath(url.pathname)) {
+        return new Response(null, { status: 204, headers: manifestCorsHeaders() });
+      }
       return new Response(null, { status: 204, headers: cors });
     }
 
@@ -837,12 +846,29 @@ export default {
         return handleUploadSingleSpace(request, url.pathname.split('/')[3], url.pathname.split('/')[5], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/thumbnail$/) && request.method === 'PUT')
         return handleUploadThumbnail(request, url.pathname.split('/')[3], env, cors);
+      // Read side of the thumbnail, ported from the retired eustress-simulations
+      // worker. Without it nothing served thumbnails/{id}/thumb.{ext} at all.
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/thumbnail$/) && request.method === 'GET')
+        return handleGetThumbnail(url.pathname.split('/')[3], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/download$/) && request.method === 'GET')
         return handleDownloadPak(request, url.pathname.split('/')[3], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/play$/) && request.method === 'POST')
         return handlePlaySimulation(request, url.pathname.split('/')[3], env, cors);
+      // Website manifest upload. Its own object and its own route, so a publish
+      // can never overwrite the listing record the marketplace reads.
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/website-manifest$/) && request.method === 'PUT')
+        return handlePutWebsiteManifest(request, url.pathname.split('/')[3], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+$/) && request.method === 'GET')
         return handleGetSimulation(url.pathname.split('/').pop(), env, cors);
+
+      // Website manifest reads. Singular `/api/simulation/` on purpose: the
+      // segment may be a namespace rather than a UUID, and a namespace spelled
+      // in hex ("decade", "beef") would otherwise be swallowed by the
+      // `/api/simulations/[a-f0-9-]+` route above. Both forms end in /manifest.
+      if (url.pathname.match(/^\/api\/simulation\/[^/]+\/latest\/manifest$/) && request.method === 'GET')
+        return handleGetWebsiteManifest(request, url, decodeURIComponent(url.pathname.split('/')[3]), env);
+      if (url.pathname.match(/^\/api\/simulation\/[^/]+\/manifest$/) && request.method === 'GET')
+        return handleGetWebsiteManifest(request, url, decodeURIComponent(url.pathname.split('/')[3]), env);
 
       // Accounting
       if (url.pathname === '/api/accounting/dashboard' && request.method === 'GET')
@@ -4230,8 +4256,10 @@ async function handleUploadThumbnail(request, simId, env, cors) {
     customMetadata: { simId, authorId: auth },
   });
 
-  // Build public thumbnail URL
-  const thumbnailUrl = `https://simulations.eustress.dev/${r2Key}`;
+  // Public thumbnail URL. This was simulations.eustress.dev, a host that never
+  // had a DNS record, so every record published before now carries a dead link.
+  // liveThumbnailUrl rewrites those on read rather than migrating KV.
+  const thumbnailUrl = `${new URL(request.url).origin}/api/simulations/${simId}/thumbnail`;
   sim.thumbnail_url = thumbnailUrl;
   sim.updated_at = new Date().toISOString();
   await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
@@ -4267,7 +4295,7 @@ async function handleUserProjects(request, url, env, cors) {
           id: sim.id || simId,
           name: sim.name || 'Untitled',
           description: sim.description || null,
-          thumbnail_url: sim.thumbnail_url || null,
+          thumbnail_url: liveThumbnailUrl(sim),
           status: 'published',
           genre: sim.genre || 'All',
           max_players: sim.max_players || 10,
@@ -4302,7 +4330,11 @@ async function handleListSimulations(env, cors) {
       if (key.name.startsWith('simCount:')) continue;
       const data = await env.SOCIAL.get(key.name);
       if (data) {
-        try { sims.push(JSON.parse(data)); } catch (_) {}
+        try {
+          const sim = JSON.parse(data);
+          sim.thumbnail_url = liveThumbnailUrl(sim);
+          sims.push(sim);
+        } catch (_) {}
       }
     }
 
@@ -4316,7 +4348,9 @@ async function handleListSimulations(env, cors) {
 async function handleGetSimulation(simId, env, cors) {
   const data = await env.SOCIAL.get(`sim:${simId}`);
   if (!data) return json({ error: 'Simulation not found' }, 404, cors);
-  return json(JSON.parse(data), 200, cors);
+  const sim = JSON.parse(data);
+  sim.thumbnail_url = liveThumbnailUrl(sim);
+  return json(sim, 200, cors);
 }
 
 // Play a simulation — returns server connection info
@@ -4415,11 +4449,622 @@ async function handlePlaySimulation(request, simId, env, cors) {
         '--sim-id', simId,
       ],
       r2_key: sim.r2_key || null,
-      pak_url: sim.r2_key ? `https://simulations.eustress.dev/${sim.r2_key}` : null,
+      // Was simulations.eustress.dev, whose DNS never resolved, so any server
+      // that followed this URL failed to resolve it. handleDownloadPak is the
+      // route that actually streams the object.
+      pak_url: sim.r2_key ? `${new URL(request.url).origin}/api/simulations/${simId}/download` : null,
     },
     simulation: { id: sim.id, name: sim.name, description: sim.description },
   }, 200, cors);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WEBSITE MANIFEST - the numbers a Space owns, baked at publish
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A Space is the source of truth for its own figures. An author marks values as
+// References in a Website service; publish bakes them into ONE small JSON
+// document, and a website fetches that document once to update every number it
+// shows. Twenty-five values cost one request, and a twenty-sixth costs nothing.
+//
+// This object is deliberately NOT the simulation listing. The listing lives in
+// KV under `sim:{id}` and drives the marketplace; the manifest is a separate R2
+// object at `universes/{id}/website-manifest.json`. Writing one must never
+// touch the other, because overwriting the listing takes the Space out of the
+// gallery.
+//
+// Specifications:
+//   EustressEngine/docs/design/WEBSITE_SERVICE.md   engine and worker side
+//   Voltec/docs/WEBSITE_MANIFEST_API.md             consumer side
+
+// Manifests are scalars and labels, not payload. Twenty-five references bake to
+// roughly 4 KB, so a megabyte is already three orders of magnitude of headroom
+// and anything past it is a mistake worth refusing.
+const WEBSITE_MANIFEST_MAX_BYTES = 1024 * 1024;
+
+// A namespace is the stable handle a website hardcodes. It must not be
+// UUID-shaped: the read route decides between "simulation id" and "namespace"
+// by shape, so a UUID-shaped namespace would be unreachable. Enforced at write
+// time rather than guessed at read time.
+const WEBSITE_NAMESPACE_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function websiteManifestKey(simId) {
+  return `universes/${simId}/website-manifest.json`;
+}
+
+// CORS for the manifest routes only. These are the one part of this API meant
+// to be read by sites we do not run, so the allowlist in corsHeaders() cannot
+// apply: a browser on voltec.dev would be handed
+// `Access-Control-Allow-Origin: https://eustress.dev` and refuse the response.
+//
+// Stating the tension plainly, because the auth key below is easy to misread as
+// privacy: an `Access-Control-Allow-Origin` of `*` combined with a key that a
+// public website sends from browser JavaScript, in a header or a query string,
+// is NOT confidentiality. Any page may request this manifest, and any visitor
+// who opens devtools reads the key straight out of the network tab. What the
+// key genuinely buys is revocable attribution and abuse control: you can see
+// which consumer is calling, a Cloudflare rate-limiting rule can key on the
+// X-Eustress-Key header, and rotating the key cuts a consumer off on the next
+// request. Real confidentiality would need a server-side proxy holding a secret
+// the browser never sees, or short-lived signed tokens. This is neither.
+// Nothing belongs in a Reference that the author would not put on a public page.
+function manifestCorsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, If-None-Match, X-Eustress-Key',
+    // Cross-origin JavaScript cannot read ETag unless it is exposed. The browser
+    // revalidates on its own, but a build-time baker wants the hash it just saw.
+    'Access-Control-Expose-Headers': 'ETag',
+    'Access-Control-Max-Age': '86400',
+  };
+}
+
+// Matches both read forms, used by the OPTIONS short-circuit so a preflight is
+// answered with `*` before route dispatch ever runs.
+function isWebsiteManifestPath(pathname) {
+  return /^\/api\/simulation\/[^/]+(\/latest)?\/manifest$/.test(pathname);
+}
+
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return hexEncode(new Uint8Array(digest));
+}
+
+// Keys are stored as a SHA-256 digest and never in the clear, so a leaked
+// bucket listing yields nothing a caller can present. The digest lives in the
+// object's customMetadata rather than in the manifest body, because the body is
+// the thing every consumer downloads.
+async function hashWebsiteKey(raw) {
+  return `sha256:${await sha256Hex(raw)}`;
+}
+
+// Constant time over the full width of both inputs. Comparing digests instead
+// of raw keys already makes a timing leak useless, since SHA-256 does not
+// invert, but an early-exit compare is the kind of detail that gets copied into
+// a place where it does matter.
+function timingSafeEqual(a, b) {
+  const enc = new TextEncoder();
+  const ab = enc.encode(typeof a === 'string' ? a : '');
+  const bb = enc.encode(typeof b === 'string' ? b : '');
+  const len = Math.max(ab.length, bb.length);
+  let diff = ab.length ^ bb.length;
+  for (let i = 0; i < len; i++)
+    diff |= (i < ab.length ? ab[i] : 0) ^ (i < bb.length ? bb[i] : 0);
+  return diff === 0;
+}
+
+// If-None-Match may carry a list, a weak validator, or `*`. `*` means "if any
+// representation exists", and we only reach this once one does.
+function etagMatches(header, publishHash) {
+  if (!header || !publishHash) return false;
+  const want = `"${publishHash}"`;
+  return header.split(',').some(t => {
+    const tag = t.trim().replace(/^W\//, '');
+    return tag === '*' || tag === want;
+  });
+}
+
+// Consumers pin with the full `sha256:...` value, but stripping the prefix is
+// the obvious thing to try, and a 404 for a hash that is in fact current would
+// be baffling. Normalize both sides.
+function normalizeHash(h) {
+  return typeof h === 'string' ? h.trim().replace(/^sha256:/i, '').toLowerCase() : '';
+}
+
+// A rejection must never stick in a shared cache: a rotated key has to take
+// effect on the next request, not after a max-age expires.
+function manifestError(status, code, message, extra, cors) {
+  return new Response(JSON.stringify({ error: code, message, ...extra }), {
+    status,
+    headers: {
+      ...cors,
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'strict-origin-when-cross-origin',
+    },
+  });
+}
+
+// Returns a Response to send instead, or null when the caller may proceed.
+
+// Per-key rate limit for manifest reads.
+//
+// Shape of the real traffic, which is what sets the number:
+//   browsers      one fetch per visitor per 5 minutes (max-age=300), and the
+//                 edge cache absorbs nearly all of it before the Worker runs
+//   build bake    N namespaces fetched back to back at deploy, a genuine burst
+//   revalidation  conditional If-None-Match, answered 304, almost free
+//
+// 120 per minute clears 1,200 manifests in ten minutes, so a site with many
+// hundreds of products refreshes well inside that window, while remaining far
+// below anything a real site reaches through cache.
+//
+// WHY the native binding and not a KV counter: Workers KV permits ONE WRITE PER
+// SECOND TO THE SAME KEY. A counter incremented on every request writes to one
+// key at exactly the request rate, so a 120/minute burst is 2 writes per second
+// to that key and the counter is throttled by the very traffic it exists to
+// measure. It would then undercount and under-enforce, which is the worst
+// outcome: a limiter that looks present and is not. KV get-then-put is also a
+// read-modify-write race across isolates. The native limiter is purpose built,
+// and Cloudflare names API keys as the intended key.
+//
+// Honest about its granularity: the limit is PER CLOUDFLARE LOCATION and
+// eventually consistent, so global throughput for one key can exceed the number
+// when traffic is spread across colos. That is the right trade for cost control
+// and abuse damping. It is not an accounting system and must never be presented
+// as a quota anyone is billed against.
+const MANIFEST_RATE_PER_MIN = 120;
+
+async function checkManifestRate(env, identity) {
+  // Absent binding means local dev or a stale deploy. Fail OPEN and say so:
+  // silently dropping the limit is worse than a limit that is visibly absent,
+  // and refusing every read because a limiter is missing would take the feature
+  // down over a throttle.
+  if (!env.MANIFEST_RATE_LIMITER) return { limited: false, enforced: false };
+
+  const { success } = await env.MANIFEST_RATE_LIMITER.limit({ key: identity });
+  return { limited: !success, enforced: true };
+}
+
+async function checkWebsiteKey(request, url, storedHash, namespace, cors, previousHash = null, overlapUntil = null) {
+  // No stored key means the author published without one, so the manifest is
+  // open. Refusing every caller over a key that was never issued would brick
+  // the manifest rather than protect it. The PUT response reports key_required
+  // so the publishing UI can tell the author which of the two they chose.
+  if (!storedHash) return null;
+
+  // Header first. The query parameter exists for consumers that cannot set
+  // headers, such as a no-code embed or a CMS URL field, and it costs something
+  // real: a key in a query string lands in access logs, Referer headers and
+  // browser history. It is accepted because the key is not a secret, not
+  // because query strings are a safe place for secrets.
+  const presented = request.headers.get('X-Eustress-Key') || url.searchParams.get('key');
+
+  if (!presented)
+    return manifestError(401, 'auth_key_required',
+      'This manifest requires an auth key. Send it as the request header X-Eustress-Key, or as the query parameter ?key=. The key is set in the Website service Properties of the Space that publishes this manifest, so ask that author for the current value. The key identifies a consumer, lets a rate limit apply per consumer, and can be revoked by rotation. It does not make the manifest private.',
+      { namespace }, cors);
+
+  const presentedHash = await hashWebsiteKey(presented);
+
+  // The rotated-out key keeps working until the window closes. Both branches
+  // run a full-width compare so the accepted and rejected paths cost the same.
+  const overlapOpen = !!(previousHash && overlapUntil && Date.now() < Date.parse(overlapUntil));
+  const matchesCurrent = timingSafeEqual(presentedHash, storedHash);
+  const matchesPrevious = overlapOpen && timingSafeEqual(presentedHash, previousHash);
+
+  if (!matchesCurrent && !matchesPrevious)
+    return manifestError(401, 'auth_key_invalid',
+      'The auth key presented does not match the key this manifest was published with. If the key was rotated, take the current value from the Website service Properties of the publishing Space and update any page that hardcodes it.',
+      { namespace }, cors);
+
+  return null;
+}
+
+// Namespace to simulation id.
+//
+// R2 has no secondary index, so resolving a namespace by listing `universes/`
+// would be O(objects) on every page load. The smallest mechanism that works is
+// a KV pointer written by the same PUT that stores the manifest, mirroring the
+// existing `sim-author:` index idiom:
+//
+//   website-ns:{namespace}  -> { sim_id, owner_id, claimed_at, ... }
+//   website-ns-of:{sim_id}  -> namespace
+//
+// The reverse key exists so a rename releases the old namespace instead of
+// leaking it forever. Note the propagation caveat: a KV write reaches every
+// edge within about a minute, so a namespace claimed seconds ago can still 404
+// elsewhere in the world. Harmless against a 300 second max-age, but a publish
+// UI must not present the namespace URL as instantly live.
+//
+// R2 customMetadata, not this pointer, is authoritative for the ETag and the
+// key. The copies stored alongside are for answering "which Space does vcell
+// point at", and are never read into a caching or auth decision.
+async function resolveManifestTarget(segment, env) {
+  if (UUID_RE.test(segment)) return { simId: segment, namespace: null };
+
+  const ns = segment.toLowerCase();
+  if (!WEBSITE_NAMESPACE_RE.test(ns))
+    return { failure: { status: 400, code: 'bad_namespace', message: 'A namespace is 1 to 64 characters of lowercase letters, digits, hyphen or underscore, starting with a letter or digit.', namespace: segment } };
+
+  const raw = await env.SOCIAL.get(`website-ns:${ns}`);
+  if (!raw)
+    return { failure: { status: 404, code: 'namespace_not_found', message: `No Space publishes a website manifest under the namespace "${ns}". Check the namespace in the publishing Space's Website service, or fetch by simulation id instead.`, namespace: ns } };
+
+  let simId = null;
+  try { simId = JSON.parse(raw).sim_id; } catch (_) {}
+
+  // The pointer's sim_id becomes an R2 key, so its shape is checked here rather
+  // than trusted. Only handlePutWebsiteManifest writes these records and its
+  // route already constrains the id, but a value that reaches a storage path
+  // should be validated where it is used, not where it was last written.
+  if (typeof simId !== 'string' || !UUID_RE.test(simId))
+    return { failure: { status: 500, code: 'namespace_index_corrupt', message: `The index entry for namespace "${ns}" does not name a valid simulation. Republish the Space to rewrite it.`, namespace: ns } };
+
+  return { simId, namespace: ns };
+}
+
+// GET /api/simulation/{id}/manifest
+// GET /api/simulation/{namespace}/latest/manifest
+//
+// `{id}` is a simulation UUID or a namespace. `{namespace}/latest` is the
+// documented form; a bare namespace resolves identically, because a consumer
+// who drops `/latest` should get their manifest rather than a 404 they cannot
+// explain. The routes live on the singular `/api/simulation/` prefix and always
+// end in `/manifest`, so they cannot collide with `/api/simulations/{id}` no
+// matter what a namespace happens to spell.
+async function handleGetWebsiteManifest(request, url, segment, env) {
+  const cors = manifestCorsHeaders();
+
+  const target = await resolveManifestTarget(segment, env);
+  if (target.failure) {
+    const f = target.failure;
+    return manifestError(f.status, f.code, f.message, { namespace: f.namespace }, cors);
+  }
+
+  const objectKey = websiteManifestKey(target.simId);
+  const inm = request.headers.get('If-None-Match');
+
+  // A conditional request only needs metadata to answer, so HEAD first when the
+  // caller offered a validator and fall through to a full GET only if it does
+  // not match. Worst case is HEAD plus GET, which is exactly the case where a
+  // whole body is being sent anyway.
+  let object = null;
+  let meta = null;
+  if (inm) {
+    meta = await env.SCENES.head(objectKey);
+  } else {
+    object = await env.SCENES.get(objectKey);
+    meta = object;
+  }
+
+  if (!meta)
+    return manifestError(404, 'manifest_not_found',
+      `No website manifest is published for ${target.namespace ? `namespace "${target.namespace}"` : `simulation ${target.simId}`}. Add a Website service to the Space and publish it.`,
+      { namespace: target.namespace, sim_id: target.simId }, cors);
+
+  const storedHash = meta.customMetadata?.publishHash || null;
+  const storedKeyHash = meta.customMetadata?.websiteKeyHash || null;
+  const prevKeyHash = meta.customMetadata?.websiteKeyPreviousHash || null;
+  const keyOverlapUntil = meta.customMetadata?.websiteKeyOverlapUntil || null;
+  const namespace = target.namespace || meta.customMetadata?.namespace || null;
+
+  // The key gate runs before anything is served, a 304 included, so a caller
+  // without the key cannot poll the ETag to learn when a publish happened.
+  const denied = await checkWebsiteKey(
+    request, url, storedKeyHash, namespace, cors, prevKeyHash, keyOverlapUntil);
+  if (denied) return denied;
+
+  // Limit per KEY, not per IP. A build runs from one CI address while browsers
+  // arrive from thousands, so an IP limit throttles the build and misses the
+  // abuse. An unkeyed open manifest falls back to the namespace, which at least
+  // bounds one manifest rather than the whole worker.
+  const rateIdentity = storedKeyHash
+    ? `k:${storedKeyHash.slice(-32)}`
+    : `n:${namespace || target.simId}`;
+  const rate = await checkManifestRate(env, rateIdentity);
+  if (rate.limited) {
+    return new Response(JSON.stringify({
+      error: 'rate_limited',
+      message: `Rate limit reached for this key: ${MANIFEST_RATE_PER_MIN} manifest requests per minute. Conditional requests answered 304 are cheaper than full downloads, so send If-None-Match rather than a cache-busting query string.`,
+      retry_after_seconds: 60,
+    }), {
+      status: 429,
+      headers: {
+        'Content-Type': 'application/json',
+        'Retry-After': '60',
+        'Cache-Control': 'no-store',
+        ...manifestCorsHeaders(),
+      },
+    });
+  }
+
+  const etag = storedHash ? `"${storedHash}"` : undefined;
+  const pinned = url.searchParams.get('v');
+
+  // A pinned response promises one exact state for a year, so serving a
+  // different state under that promise is worse than refusing: the consumer
+  // pinned precisely because it must not drift.
+  if (pinned !== null && normalizeHash(pinned) !== normalizeHash(storedHash))
+    return manifestError(404, 'pinned_hash_not_available',
+      'The pinned publish_hash is not the state this manifest currently holds. A pinned URL is immutable by contract, so a different state is refused rather than served. Drop ?v= to follow the current manifest, or pin again to the current hash.',
+      { namespace, requested: pinned, current: storedHash }, cors);
+
+  const cacheControl = pinned !== null
+    ? 'public, max-age=31536000, immutable'
+    : 'public, max-age=300, stale-while-revalidate=86400';
+
+  // `public` plus authentication by request header is a cache-poisoning shape
+  // unless the cache keys on that header, so Vary names it. The manifest is not
+  // confidential, but a shared cache handing a keyed 200 to a keyless caller
+  // would quietly make the key decorative.
+  const served = {
+    ...cors,
+    'Cache-Control': cacheControl,
+    'Vary': 'X-Eustress-Key',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    ...(etag ? { 'ETag': etag } : {}),
+  };
+
+  if (inm && etagMatches(inm, storedHash))
+    return new Response(null, { status: 304, headers: served });
+
+  if (!object) object = await env.SCENES.get(objectKey);
+  if (!object)
+    return manifestError(404, 'manifest_not_found',
+      'The manifest was removed between the metadata read and the body read. Retry.',
+      { namespace, sim_id: target.simId }, cors);
+
+  return new Response(object.body, {
+    headers: { ...served, 'Content-Type': 'application/json' },
+  });
+}
+
+// PUT /api/simulations/{id}/website-manifest
+//
+// The engine uploads here at publish, after the bake and alongside the .pak.
+// Authenticated and owner-checked like every other upload route. It writes ONE
+// R2 object plus the namespace index, and touches no listing record.
+async function handlePutWebsiteManifest(request, simId, env, cors) {
+  const auth = await verifyAuth(request, env);
+  if (!auth) return json({ error: 'Unauthorized' }, 401, cors);
+
+  const simData = await env.SOCIAL.get(`sim:${simId}`);
+  if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
+  const sim = JSON.parse(simData);
+  if (sim.author_id !== auth) return json({ error: 'Not your simulation' }, 403, cors);
+
+  const raw = await request.text();
+  const rawBytes = new TextEncoder().encode(raw).length;
+  if (rawBytes > WEBSITE_MANIFEST_MAX_BYTES)
+    return json({ error: `Manifest too large (max ${WEBSITE_MANIFEST_MAX_BYTES} bytes, got ${rawBytes})` }, 413, cors);
+
+  let manifest;
+  try { manifest = JSON.parse(raw); }
+  catch (e) { return json({ error: `Manifest is not valid JSON: ${e.message}` }, 400, cors); }
+
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest))
+    return json({ error: 'Manifest must be a JSON object' }, 400, cors);
+
+  const namespace = typeof manifest.namespace === 'string' ? manifest.namespace.toLowerCase() : '';
+  if (!WEBSITE_NAMESPACE_RE.test(namespace))
+    return json({ error: 'namespace required: 1 to 64 characters of lowercase letters, digits, hyphen or underscore, starting with a letter or digit' }, 400, cors);
+  if (UUID_RE.test(namespace))
+    return json({ error: 'namespace must not be UUID-shaped: the read route tells a simulation id from a namespace by shape, so a UUID-shaped namespace would be unreachable' }, 400, cors);
+
+  if (!manifest.values || typeof manifest.values !== 'object' || Array.isArray(manifest.values))
+    return json({ error: 'values required (an object of baked references)' }, 400, cors);
+
+  // The engine already computes a publish hash and already skips uploads when
+  // it is unchanged, so that is the ETag rather than something invented here.
+  const publishHash = typeof manifest.publish_hash === 'string' ? manifest.publish_hash.trim() : '';
+  if (!publishHash)
+    return json({ error: 'publish_hash required (it becomes the ETag consumers revalidate against)' }, 400, cors);
+
+  // Key material must never reach the served body, where every consumer could
+  // grind it offline. Strip the field names an author might plausibly have
+  // used, and report what was removed rather than silently rewriting their
+  // document. Top level only: a reference legitimately named "key" lives under
+  // `values` and is untouched.
+  const stripped = [];
+  for (const field of ['auth_key', 'key', 'key_hash', 'api_key', 'secret', 'token']) {
+    if (field in manifest) { delete manifest[field]; stripped.push(field); }
+  }
+
+  const objectKey = websiteManifestKey(simId);
+  const existing = await env.SCENES.head(objectKey);
+  const previousKeyHash = existing?.customMetadata?.websiteKeyHash || null;
+
+  // Three ways the key can move, and the default is the safe one.
+  //   X-Eustress-Key        raw key, hashed here and discarded
+  //   X-Eustress-Key-Hash   "sha256:<64 hex>", for a publisher that prefers the
+  //                         raw key never leave the author's machine
+  //   X-Eustress-Key-Clear  "true", the only way to make a keyed manifest open
+  // Absent all three the existing key is preserved, because a routine
+  // republish must not silently un-protect a manifest. The engine sends
+  // X-Eustress-Key-Clear when the Properties key field is empty; that is the
+  // contract, and preserve-on-absent is the fallback for every other caller.
+  let keyHash = previousKeyHash;
+  // Default 30 days, matching what the Properties panel and both specs promise.
+  // 0 means cut over immediately, which is the right choice for a key believed
+  // to be compromised: a grace window is a convenience, not something to force
+  // on an author who needs the old key dead now.
+  const overlapDaysRaw = (request.headers.get('X-Eustress-Key-Overlap-Days') || '').trim();
+  const overlapDays = /^\d+$/.test(overlapDaysRaw) ? Math.min(parseInt(overlapDaysRaw, 10), 365) : 30;
+  let rotatedOutHash = existing?.customMetadata?.websiteKeyPreviousHash || null;
+  let overlapUntil = existing?.customMetadata?.websiteKeyOverlapUntil || null;
+  const clearKey = (request.headers.get('X-Eustress-Key-Clear') || '').trim().toLowerCase() === 'true';
+  const rawKey = request.headers.get('X-Eustress-Key');
+  const preHashedKey = request.headers.get('X-Eustress-Key-Hash');
+
+  if (clearKey) {
+    keyHash = null;
+  } else if (rawKey) {
+    // A guessable key defeats revocation as surely as no key at all, since
+    // anyone can simply present the guess again after a rotation.
+    if (rawKey.trim().length < 16)
+      return json({ error: 'Auth key must be at least 16 characters' }, 400, cors);
+    keyHash = await hashWebsiteKey(rawKey.trim());
+  } else if (preHashedKey) {
+    if (!/^sha256:[0-9a-f]{64}$/.test(preHashedKey.trim()))
+      return json({ error: 'X-Eustress-Key-Hash must be "sha256:" followed by 64 lowercase hex characters' }, 400, cors);
+    keyHash = preHashedKey.trim();
+  }
+
+  // The namespace claim is the one genuine security property in this design.
+  // Without it any authenticated author could point their own Space at someone
+  // else's namespace and rewrite the numbers on that person's website.
+  let claimedAt = new Date().toISOString();
+  const claimRaw = await env.SOCIAL.get(`website-ns:${namespace}`);
+  if (claimRaw) {
+    let claim = null;
+    try { claim = JSON.parse(claimRaw); } catch (_) {}
+    // Fail closed. A record without an owner is not evidence of consent.
+    if (!claim || claim.owner_id !== auth)
+      return json({
+        error: 'Namespace already claimed',
+        message: `The namespace "${namespace}" is published by another author. Choose a different namespace in the Website service.`,
+      }, 409, cors);
+    claimedAt = claim.claimed_at || claimedAt;
+  }
+
+  const body = JSON.stringify(manifest);
+  const bodyDigest = await sha256Hex(body);
+
+  // The failure this whole feature exists to prevent is a website confidently
+  // showing a stale number. Content that changed under an unchanged
+  // publish_hash produces exactly that: every consumer holding the old ETag
+  // gets a 304 forever, and every pinned consumer caches the old state for a
+  // year. Refuse, and say what to do about it.
+  if (existing
+      && existing.customMetadata?.publishHash === publishHash
+      && existing.customMetadata?.bodyDigest
+      && existing.customMetadata.bodyDigest !== bodyDigest)
+    return json({
+      error: 'publish_hash unchanged but manifest content changed',
+      message: 'Consumers revalidate against publish_hash, so republishing different values under the same hash would serve them the previous state until their cache expires. Bump publish_hash and upload again.',
+      publish_hash: publishHash,
+    }, 409, cors);
+
+  // Rotation bookkeeping, after keyHash is final. Only an actual CHANGE opens a
+  // window: a republish with the same key must not keep extending it, or the
+  // outgoing key never dies. Clearing the key closes the window immediately,
+  // because "open to everyone" and "the old key still works" are different
+  // states and conflating them would leave a revoked key alive on an open
+  // manifest.
+  if (clearKey) {
+    rotatedOutHash = null;
+    overlapUntil = null;
+  } else if (previousKeyHash && keyHash && keyHash !== previousKeyHash) {
+    rotatedOutHash = previousKeyHash;
+    overlapUntil = overlapDays > 0
+      ? new Date(Date.now() + overlapDays * 86400000).toISOString()
+      : null;
+  }
+
+  await env.SCENES.put(objectKey, body, {
+    httpMetadata: { contentType: 'application/json' },
+    customMetadata: {
+      simId,
+      namespace,
+      authorId: auth,
+      publishHash,
+      bodyDigest,
+      updatedAt: new Date().toISOString(),
+      ...(manifest.schema_version !== undefined ? { schemaVersion: String(manifest.schema_version) } : {}),
+      // Authoritative for the read path. An R2 put replaces customMetadata
+      // wholesale, which is why previousKeyHash is carried forward above.
+      ...(keyHash ? { websiteKeyHash: keyHash } : {}),
+      // Rotation grace. When the key CHANGES, the outgoing hash keeps working
+      // until overlapUntil. Without this, rotation 401s every consumer the
+      // instant the author clicks the button, which makes the one lever the
+      // key provides too dangerous to pull on a live site. Carried forward
+      // unchanged on a routine republish so the window does not creep.
+      ...(rotatedOutHash ? { websiteKeyPreviousHash: rotatedOutHash } : {}),
+      ...(overlapUntil ? { websiteKeyOverlapUntil: overlapUntil } : {}),
+    },
+  });
+
+  const now = new Date().toISOString();
+  await env.SOCIAL.put(`website-ns:${namespace}`, JSON.stringify({
+    sim_id: simId,
+    owner_id: auth,
+    claimed_at: claimedAt,
+    updated_at: now,
+    // Informational only. See resolveManifestTarget: R2 customMetadata is
+    // authoritative, so these can never be read into an auth or ETag decision.
+    publish_hash: publishHash,
+    schema_version: manifest.schema_version ?? null,
+  }));
+
+  // A rename must release the old namespace, or the author can never reuse it.
+  const previousNs = await env.SOCIAL.get(`website-ns-of:${simId}`);
+  if (previousNs && previousNs !== namespace) {
+    const prevClaim = await env.SOCIAL.get(`website-ns:${previousNs}`);
+    try {
+      if (prevClaim && JSON.parse(prevClaim).sim_id === simId)
+        await env.SOCIAL.delete(`website-ns:${previousNs}`);
+    } catch (_) {}
+  }
+  await env.SOCIAL.put(`website-ns-of:${simId}`, namespace);
+
+  const origin = new URL(request.url).origin;
+  return json({
+    ok: true,
+    sim_id: simId,
+    namespace,
+    publish_hash: publishHash,
+    schema_version: manifest.schema_version ?? null,
+    // The publishing UI reports this back to the author, so "I set a key" and
+    // "this manifest is open" can never be confused for each other.
+    key_required: !!keyHash,
+    key_rotated: !!keyHash && keyHash !== previousKeyHash,
+    key_cleared: clearKey && !!previousKeyHash,
+    stripped_fields: stripped,
+    size_bytes: new TextEncoder().encode(body).length,
+    manifest_url: `${origin}/api/simulation/${namespace}/latest/manifest`,
+    manifest_url_by_id: `${origin}/api/simulation/${simId}/manifest`,
+    pinned_url: `${origin}/api/simulation/${namespace}/latest/manifest?v=${encodeURIComponent(publishHash)}`,
+  }, 200, cors);
+}
+
+// GET /api/simulations/{id}/thumbnail
+//
+// Ported from the retired eustress-simulations worker, which read
+// `{id}/thumbnail.webp` - a key namespace nothing ever wrote. The live key is
+// the one handleUploadThumbnail writes. webp is tried first because that is
+// what the engine uploads, so the common case is a single R2 read.
+async function handleGetThumbnail(simId, env, cors) {
+  for (const ext of ['webp', 'png', 'jpg']) {
+    const object = await env.SCENES.get(`thumbnails/${simId}/thumb.${ext}`);
+    if (!object) continue;
+    return new Response(object.body, {
+      headers: {
+        ...cors,
+        'Content-Type': object.httpMetadata?.contentType || `image/${ext === 'jpg' ? 'jpeg' : ext}`,
+        'Cache-Control': 'public, max-age=3600',
+      },
+    });
+  }
+  return json({ error: 'Thumbnail not found' }, 404, cors);
+}
+
+// Thumbnails published before the eustress-simulations retirement carry
+// `https://simulations.eustress.dev/thumbnails/{id}/thumb.ext`, a host whose
+// DNS never resolved. Rewriting on read repairs every historical gallery card
+// without a KV migration pass. The production host is hardcoded because the
+// callers are list handlers that do not carry the request.
+function liveThumbnailUrl(sim) {
+  const u = sim?.thumbnail_url;
+  if (!u) return null;
+  if (!u.startsWith('https://simulations.eustress.dev/')) return u;
+  return sim.id ? `https://api.eustress.dev/api/simulations/${sim.id}/thumbnail` : null;
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ACCOUNTING — Revenue dashboard, cost tracking, automated flow
@@ -5274,8 +5919,12 @@ function corsHeaders(request) {
   return {
     'Access-Control-Allow-Origin': allow,
     'Vary': 'Origin',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-ID-Type',
+    // PUT is listed because four upload routes use it. Their callers today are
+    // ureq/reqwest and send no Origin, so this changed nothing in practice, but
+    // the first browser upload would have failed preflight for no visible
+    // reason. DELETE stays off the list until a route needs it.
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-ID-Type, If-None-Match, X-Eustress-Key',
     'Access-Control-Max-Age': '86400',
   };
 }
