@@ -27,7 +27,7 @@
 
 [service]
 class_name = "ExperimentService"
-icon = "dataservice"
+icon = "experimentservice"
 description = "Designs, their parts, the laws wiring them, and every run over them"
 can_have_children = true
 

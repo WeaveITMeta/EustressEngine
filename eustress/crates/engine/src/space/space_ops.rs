@@ -73,7 +73,7 @@ const SERVICE_FOLDERS: &[ServiceFolder] = &[
     ServiceFolder { name: "AdornmentService",        class: "AdornmentService",       icon: "adornmentservice",   description: "Beams, billboards, particles, highlights" },
     ServiceFolder { name: "DataService",             class: "DataService",            icon: "dataservice",        description: "Data Platform - datasets, series, columns, and runs" },
     ServiceFolder { name: "Website",                 class: "Website",                 icon: "website",            description: "Values a website reads - References baked into a published manifest" },
-    ServiceFolder { name: "ExperimentService",       class: "ExperimentService",      icon: "dataservice",        description: "Designs, their parts, the laws wiring them, and every run over them" },
+    ServiceFolder { name: "ExperimentService",       class: "ExperimentService",      icon: "experimentservice", description: "Designs, their parts, the laws wiring them, and every run over them" },
     ServiceFolder { name: "Teams",                   class: "Teams",                  icon: "teams",              description: "Team definitions and spawn points" },
     ServiceFolder { name: "Chat",                    class: "Chat",                   icon: "chat",               description: "In-game chat system" },
 ];
