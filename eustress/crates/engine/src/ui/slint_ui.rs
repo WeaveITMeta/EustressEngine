@@ -2033,6 +2033,14 @@ fn setup_slint_overlay(world: &mut World) {
     // Help icon — open /learn URL (tabbed viewer or system browser per settings)
     let q = queue.clone();
     ui.on_open_learn_url(move |url| q.push(SlintAction::OpenLearnUrl(url.to_string())));
+    // The ribbon's Help menu (Documentation, Tutorials, Discord, …) fires
+    // `open-url`. It was declared in ribbon.slint, forwarded by main.slint,
+    // and then never registered here — an unconnected Slint callback is a
+    // silent no-op, so every one of those items did nothing. Routed into
+    // `OpenLearnUrl` rather than a second handler so the honour-the-
+    // `help_opens_in_tab`-setting behaviour stays in one place.
+    let q = queue.clone();
+    ui.on_open_url(move |url| q.push(SlintAction::OpenLearnUrl(url.to_string())));
 
     // Help icon settings changed from Settings dialog — push action so StudioState updates
     let q = queue.clone();
@@ -3011,9 +3019,9 @@ fn sync_gui_elements_to_slint(
             // Try to load image from the asset path
             let img_path = std::path::PathBuf::from(&e.image_path);
             if img_path.exists() {
-                match slint::Image::load_from_path(&img_path) {
-                    Ok(img) => (true, img),
-                    Err(_) => (false, slint::Image::default()),
+                match cached_image(&img_path) {
+                    Some(img) => (true, img),
+                    None => (false, slint::Image::default()),
                 }
             } else {
                 (false, slint::Image::default())
@@ -4572,8 +4580,12 @@ fn attribute_from_type_and_value(
         "Vector3" => A::Vector3(bevy::math::Vec3::new(f(0), f(1), f(2))),
         // Colors accept "r, g, b" — 0–1 floats, or 0–255 ints (auto-detected).
         "Color3" | "Color" => {
-            let scale = if floats.iter().any(|c| *c > 1.0) { 1.0 / 255.0 } else { 1.0 };
-            let c = bevy::prelude::Color::srgb(f(0) * scale, f(1) * scale, f(2) * scale);
+            // Form-based parse (see `parse_color_srgb01`). The magnitude guess
+            // this replaced read `1,0,0` as normalized floats and produced pure
+            // red where the user meant near-black.
+            let [r, g, b, _a] =
+                parse_color_srgb01(t).unwrap_or([f(0), f(1), f(2), 1.0]);
+            let c = bevy::prelude::Color::srgb(r, g, b);
             if type_name == "Color3" { A::Color3(c) } else { A::Color(c) }
         }
         "BrickColor" => A::BrickColor(t.parse::<u32>().unwrap_or(0)),
@@ -8963,22 +8975,22 @@ fn drain_slint_actions(
                                 // Parsing lives on the Rust side because every
                                 // colour entry route already funnels through this
                                 // arm — Slint never has to hex-decode.
-                                let parts: Vec<f32> = match parse_hex_color(&val) {
-                                    Some([r, g, b]) => vec![r as f32, g as f32, b as f32],
-                                    None => val.split(',')
-                                        .filter_map(|s| parse_finite(s.trim()))
-                                        .collect(),
+                                // Numeric form goes through the SHARED parser.
+                                // This arm carried its OWN copy of the
+                                // magnitude guess (`is_u8 = r > 1.0 || ..`), so
+                                // the two colour entry routes could disagree
+                                // about the very same text.
+                                let parsed = match parse_hex_color(&val) {
+                                    Some([r, g, b]) => Some([
+                                        r as f32 / 255.0,
+                                        g as f32 / 255.0,
+                                        b as f32 / 255.0,
+                                        1.0,
+                                    ]),
+                                    None => parse_color_srgb01(&val),
                                 };
-                                if parts.len() >= 3 {
-                                    let (r, g, b) = (parts[0], parts[1], parts[2]);
-                                    let a = parts.get(3).copied().unwrap_or(255.0);
-                                    // Auto-detect 0-255 vs 0-1 format
-                                    let is_u8 = r > 1.0 || g > 1.0 || b > 1.0;
-                                    if is_u8 {
-                                        bp.color = Color::srgba(r / 255.0, g / 255.0, b / 255.0, a / 255.0);
-                                    } else {
-                                        bp.color = Color::srgba(r, g, b, parts.get(3).copied().unwrap_or(1.0));
-                                    }
+                                if let Some([r, g, b, a]) = parsed {
+                                    bp.color = Color::srgba(r, g, b, a);
                                 }
                                 // Invalid input (< 3 valid numbers) is silently ignored
                             }
@@ -15630,7 +15642,7 @@ fn sync_workshop_to_slint(
             attachment: msg
                 .image_path
                 .as_ref()
-                .and_then(|p| slint::Image::load_from_path(p).ok())
+                .and_then(|p| cached_image(p))
                 .unwrap_or_default(),
             has_attachment: msg
                 .image_path
@@ -19138,7 +19150,7 @@ fn sync_unified_explorer_to_slint(
                     
                     let entry_icon = {
                         let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(load_file_icon(if *is_dir { "folder" } else { extension }));
-                        slint::Image::load_from_path(&icon_path).unwrap_or_default()
+                        cached_image(&icon_path).unwrap_or_default()
                     };
                     tree_nodes.push(TreeNode {
                         id: entry_id,
@@ -19190,7 +19202,7 @@ fn sync_unified_explorer_to_slint(
                                 
                                 let sub_icon = {
                                     let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(load_file_icon(sub_ext));
-                                    slint::Image::load_from_path(&icon_path).unwrap_or_default()
+                                    cached_image(&icon_path).unwrap_or_default()
                                 };
                                 tree_nodes.push(TreeNode {
                                     id: sub_id,
@@ -19822,11 +19834,13 @@ fn make_service_node(
 
 /// Load icon for a service by name (from assets/icons/{name}.svg)
 fn load_service_icon(name: &str) -> slint::Image {
+    // Per service node, per Explorer push — cached for the same reason as
+    // `load_class_icon` (an SVG rasterise per row per push was the freeze).
     let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("assets")
         .join("icons")
         .join(format!("{}.svg", name));
-    slint::Image::load_from_path(&icon_path).unwrap_or_default()
+    cached_image(&icon_path).unwrap_or_default()
 }
 
 /// Convert a `MentionEntry` (Rust side) into the Slint `MentionItemData`
@@ -19976,7 +19990,7 @@ fn build_file_tree_nodes(
                 .join("assets").join("icons").join("folders")
                 .join(format!("{}.svg", folder_icon_name))
         };
-        let icon = slint::Image::load_from_path(&icon_path).unwrap_or_default();
+        let icon = cached_image(&icon_path).unwrap_or_default();
         
         nodes.push(TreeNode {
             id: path_hash,
@@ -20050,7 +20064,7 @@ fn build_file_tree_nodes(
             .join("icons")
             .join("filetypes")
             .join(format!("{}.svg", file_icon_name));
-        let icon = slint::Image::load_from_path(&icon_path).unwrap_or_default();
+        let icon = cached_image(&icon_path).unwrap_or_default();
         
         nodes.push(TreeNode {
             id: path_hash,
@@ -20466,13 +20480,49 @@ fn filter_property_rows(rows: Vec<PropertyData>, query: &str) -> Vec<PropertyDat
 /// Push a Properties row model, applying the panel's filter first.
 ///
 /// Every builder that produces rows — entity, Dataset, file, service, DB
-/// placeholder — pushes through here, so a new one inherits the filter for free
-/// instead of quietly bypassing it. (The no-selection path still pushes an
-/// empty model directly; there is nothing to filter.) The query is read straight
-/// off the Slint property rather than threaded through every signature.
+/// placeholder, and the empty no-selection model — pushes through here, so a new
+/// one inherits both the filter and the content gate for free instead of quietly
+/// bypassing them. The query is read straight off the Slint property rather than
+/// threaded through every signature.
 fn push_property_rows(ui: &StudioWindow, rows: Vec<PropertyData>) {
+    use std::hash::{Hash, Hasher};
+
     let query = ui.get_property_search_query().to_string();
     let rows = filter_property_rows(rows, &query);
+
+    // Content gate, same shape as the Explorer's `last_tree_hash`.
+    //
+    // Replacing the model rebuilds every row and re-binds each LineEdit's
+    // `text: root.value`, which fights the caret of whatever field the user is
+    // typing in. This system runs every frame, so an unchanged panel was
+    // re-pushed continuously. Hashing the visible content and pushing only on a
+    // real change makes the panel quiet while idle.
+    //
+    // Thread-local rather than a resource because Slint's UI state is NonSend
+    // and every caller of this function is already on that one thread.
+    thread_local! {
+        static LAST_ROWS_HASH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    query.hash(&mut hasher);
+    rows.len().hash(&mut hasher);
+    for r in &rows {
+        r.name.as_str().hash(&mut hasher);
+        r.value.as_str().hash(&mut hasher);
+        r.property_type.as_str().hash(&mut hasher);
+        r.category.as_str().hash(&mut hasher);
+        r.editable.hash(&mut hasher);
+        r.is_header.hash(&mut hasher);
+        r.section_collapsed.hash(&mut hasher);
+    }
+    let new_hash = hasher.finish();
+
+    if LAST_ROWS_HASH.with(|h| h.get()) == new_hash {
+        return;
+    }
+    LAST_ROWS_HASH.with(|h| h.set(new_hash));
+
     ui.set_entity_properties(slint::ModelRc::from(std::rc::Rc::new(
         slint::VecModel::from(rows),
     )));
@@ -20488,6 +20538,9 @@ fn sync_properties_to_slint(
     base_parts: Query<&eustress_common::classes::BasePart>,
     instance_files: Query<&crate::space::instance_loader::InstanceFile>,
     service_components: Query<&crate::space::service_loader::ServiceComponent>,
+    // Which colour wheel the BrickColor picker is showing. Needed so a swatch
+    // reports its OWN lexicon name instead of the nearest Stone name.
+    active_wheel: Option<Res<eustress_common::color_wheels::ActiveColorWheel>>,
     // UI class components split across two ParamSets — Bevy's ParamSet
     // caps at 8 members and we now surface 10 UI classes (BillboardGui /
     // ScreenGui / SurfaceGui joined the flat 2D classes when 3D UI
@@ -20617,9 +20670,13 @@ fn sync_properties_to_slint(
             ui.set_selected_count(0);
             ui.set_selected_class(slint::SharedString::default());
             ui.set_selected_icon(slint::Image::default());
-            let empty: Vec<PropertyData> = Vec::new();
-            let model_rc = std::rc::Rc::new(slint::VecModel::from(empty));
-            ui.set_entity_properties(slint::ModelRc::from(model_rc));
+            // Route through the same funnel as every other push. This used to
+            // set the model directly ("nothing to filter"), but the content gate
+            // in `push_property_rows` remembers the last pushed hash, and a push
+            // behind its back leaves that memory stale: select a part, deselect,
+            // reselect the SAME part, and the gate would hash-match and leave the
+            // panel empty.
+            push_property_rows(ui, Vec::new());
             return;
         }
     };
@@ -21001,10 +21058,29 @@ fn sync_properties_to_slint(
                 }
             } else {
             // -- Properties section (BasePart / non-UI) --
+            // LIVE ECS colour, not the on-disk TOML. This read
+            // `toml_def.properties.color` — whatever was last flushed to disk —
+            // so typing in the Color field recoloured the part immediately while
+            // the Color and BrickColor rows kept showing the stale value until
+            // the writer caught up. That is the reported "part colour changes but
+            // BrickColor does not". `base_parts` is already a parameter of this
+            // system; the live value was sitting right here unused. TOML remains
+            // the fallback for an entity with no BasePart.
+            let live_rgb: [f32; 3] = base_parts
+                .get(selected_entity)
+                .map(|bp| {
+                    let c = bp.color.to_srgba();
+                    [c.red, c.green, c.blue]
+                })
+                .unwrap_or([
+                    toml_def.properties.color[0],
+                    toml_def.properties.color[1],
+                    toml_def.properties.color[2],
+                ]);
             let color_rgb = format!("{}, {}, {}",
-                (toml_def.properties.color[0] * 255.0).round() as u8,
-                (toml_def.properties.color[1] * 255.0).round() as u8,
-                (toml_def.properties.color[2] * 255.0).round() as u8);
+                (live_rgb[0] * 255.0).round() as u8,
+                (live_rgb[1] * 255.0).round() as u8,
+                (live_rgb[2] * 255.0).round() as u8);
             add_prop("Appearance", "Color", color_rgb.clone(), "color", true);
             // BrickColor — the 7-wheel hexagon picker. Mirrors the part's
             // current RGB for the preview swatch; a wheel pick reroutes to the
@@ -21596,7 +21672,14 @@ fn sync_properties_to_slint(
                 // the part's color changes.
                 let display_value: String = if prop_type == "brickcolor" {
                     let [r, g, b] = parse_color_rgb_u8(&value).unwrap_or([128, 128, 128]);
-                    eustress_common::color_wheels::nearest_base_name([r, g, b]).to_string()
+                    // Ask the ACTIVE wheel first so a pick round-trips its own
+                    // name; `nearest_base_name` alone could only ever answer
+                    // with a Stone name, which is why picking "Seraphic"
+                    // reported "Clover Field".
+                    eustress_common::color_wheels::display_name_for_wheel(
+                        active_wheel.as_ref().and_then(|w| w.0),
+                        [r, g, b],
+                    )
                 } else {
                     value.clone()
                 };
@@ -22828,6 +22911,49 @@ fn parse_color_rgb_string(value: &str) -> Option<slint::Color> {
     Some(slint::Color::from_rgb_u8(r, g, b))
 }
 
+/// Parse an `"r, g, b"`/`"r, g, b, a"` string into sRGB components in
+/// `0.0..=1.0`, deciding the scale by FORM rather than by magnitude.
+///
+/// Two call sites previously guessed with `any(|c| c > 1.0)` / `r > 1.0 || ..`,
+/// which silently misreads every triad whose components are all <= 1: `1,0,0`
+/// became pure red instead of near-black and `0,1,1` became bright cyan. The
+/// magnitude of a colour cannot tell you its encoding — `1,0,0` is perfectly
+/// valid in both. The written form can: the panel renders integers, so integers
+/// mean 0-255, and a decimal point means the caller is speaking 0..1 floats.
+///
+/// Returns `None` for fewer than three finite numbers, which callers treat as
+/// "not a colour yet" and ignore.
+pub(crate) fn parse_color_srgb01(value: &str) -> Option<[f32; 4]> {
+    let cleaned: String = value
+        .chars()
+        .filter(|c| !matches!(c, '(' | ')' | '[' | ']'))
+        .collect();
+    let parts: Vec<&str> = cleaned
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let float_form = parts.iter().take(4).any(|s| s.contains('.'));
+    let nums: Vec<f32> = parts
+        .iter()
+        .take(4)
+        .filter_map(|s| s.parse::<f32>().ok().filter(|v| v.is_finite()))
+        .collect();
+    if nums.len() < 3 {
+        return None;
+    }
+
+    let denom = if float_form { 1.0 } else { 255.0 };
+    let default_a = if float_form { 1.0 } else { 255.0 };
+    let a = nums.get(3).copied().unwrap_or(default_a);
+    let c = |v: f32| (v / denom).clamp(0.0, 1.0);
+    Some([c(nums[0]), c(nums[1]), c(nums[2]), c(a)])
+}
+
 /// Parse an `"r, g, b"` string (optionally wrapped in brackets/parens) into a
 /// clamped `[u8; 3]`. Shared by the swatch-color and BrickColor-name paths.
 fn parse_color_rgb_u8(value: &str) -> Option<[u8; 3]> {
@@ -23991,7 +24117,7 @@ fn asset_icon(asset_type: &str) -> slint::Image {
         .join("assets")
         .join("icons")
         .join(format!("{}.svg", icon_name));
-    slint::Image::load_from_path(&icon_path).unwrap_or_default()
+    cached_image(&icon_path).unwrap_or_default()
 }
 
 /// Scan a directory recursively and collect asset files as (relative_path, full_path, size)
@@ -24758,12 +24884,33 @@ fn sync_radial_media_menu_to_slint(
 
 /// Load an SVG icon as a slint::Image from the assets/icons directory
 fn load_class_icon(class_name: &eustress_common::classes::ClassName) -> slint::Image {
+    // PERF — this is the Explorer click-freeze. It ran for EVERY tree node on
+    // EVERY push, and each call read an SVG from disk, parsed it and
+    // rasterised it. A push of only 24–57 nodes measured 0.5–3.4 s on the
+    // main thread in a real editing session (10 of the 18 real ≥300 ms
+    // hitches in that session followed this sync; the rest followed the click
+    // that triggers it). There are a few dozen distinct class icons, so cache
+    // per icon file. `slint::Image` is `!Send` (Slint is single-threaded and
+    // this sync runs on the UI thread), hence a thread-local rather than a
+    // global.
+    thread_local! {
+        static CLASS_ICON_CACHE: std::cell::RefCell<
+            std::collections::HashMap<&'static str, slint::Image>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
     let filename = class_name_to_icon_filename(class_name);
-    let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("icons")
-        .join(format!("{}.svg", filename));
-    slint::Image::load_from_path(&icon_path).unwrap_or_default()
+    CLASS_ICON_CACHE.with(|cache| {
+        if let Some(img) = cache.borrow().get(filename) {
+            return img.clone();
+        }
+        let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("icons")
+            .join(format!("{}.svg", filename));
+        let img = slint::Image::load_from_path(&icon_path).unwrap_or_default();
+        cache.borrow_mut().insert(filename, img.clone());
+        img
+    })
 }
 
 /// Push the current Soul API key + its computed validity status to Slint so
@@ -25599,4 +25746,28 @@ mod time_of_day_tests {
         assert_eq!(format_clock_hm(slider_to_clock_hours(-1.0)), "23:00");
         assert!(clock_hours_to_slider(-3.0) >= DAY_SLIDER_MIN);
     }
+}
+
+/// Load a Slint image from disk ONCE per path and hand out clones after.
+///
+/// Every `slint::Image::load_from_path` in a per-push or per-sync path is a
+/// disk read + decode (+ SVG rasterise) on the UI thread, repeated for every
+/// row on every push. That was the Explorer click-freeze (see
+/// `load_class_icon`); the same pattern existed for service icons, file and
+/// folder icons, asset icons and GUI-element images. `slint::Image` is
+/// `!Send`, so the cache is thread-local to the UI thread.
+fn cached_image(path: &std::path::Path) -> Option<slint::Image> {
+    thread_local! {
+        static IMAGE_CACHE: std::cell::RefCell<
+            std::collections::HashMap<std::path::PathBuf, Option<slint::Image>>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    IMAGE_CACHE.with(|cache| {
+        if let Some(hit) = cache.borrow().get(path) {
+            return hit.clone();
+        }
+        let loaded = slint::Image::load_from_path(path).ok();
+        cache.borrow_mut().insert(path.to_path_buf(), loaded.clone());
+        loaded
+    })
 }

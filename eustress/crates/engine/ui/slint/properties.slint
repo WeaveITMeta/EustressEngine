@@ -580,9 +580,19 @@ component PropRow inherits Rectangle {
 
     // Fire focus-changed immediately on click-in / tab-out so the
     // Delete key doesn't delete the selected part while the user is
-    // typing (relying on the `edited(text)` callback below missed
-    // the pre-first-keystroke window).
-    changed has-focus => { root.focus-changed(self.has-focus); }
+    // typing (the `edited(text)` callback below reports focus too, but
+    // only once a first keystroke has landed).
+    //
+    // This is also where a value COMMITS on focus-loss. `edited` no longer
+    // commits per keystroke, so leaving the field is one of the two ways an
+    // edit lands (the other is Enter, via `accepted`). Guarded on an actual
+    // difference so tabbing through untouched rows sprays no no-op writes.
+    changed has-focus => {
+        root.focus-changed(self.has-focus);
+        if (!self.has-focus && input-edit.text != root.value) {
+            root.value-changed(input-edit.text);
+        }
+    }
 
     callback value-changed(string);
     callback open-learn-url(string);
@@ -642,16 +652,20 @@ component PropRow inherits Rectangle {
                 height: 100%;
                 enabled: root.editable;
                 text: root.value;
-                // Fire `value-changed` on EVERY keystroke so the ECS
-                // component (and therefore the renderer) updates live
-                // as the user types. The drain handler writes TOML on
-                // each call too — small files, sub-millisecond writes,
-                // the recently-written debounce prevents reload loops.
-                // Enter (accepted) re-fires for parity but is a no-op
-                // since each keystroke already committed the same value.
+                // Report focus only — do NOT commit per keystroke.
+                //
+                // Committing on every keystroke wrote the part's TOML and
+                // rebuilt the whole property model once per character, and the
+                // rebuild re-bound this LineEdit's `text` mid-typing, which is
+                // what made the panel feel unresponsive. It also applied
+                // meaningless intermediates: typing "0,120,215" set the part to
+                // 0,120,2 (a green) on the way through.
+                //
+                // Commit now happens on Enter (`accepted`, below) and on
+                // focus-loss (`changed has-focus` on the row), which is the
+                // same contract the rest of the panel's fields already use.
                 edited(text) => {
                     root.focus-changed(true);
-                    root.value-changed(self.text);
                 }
                 accepted(text) => {
                     root.value-changed(self.text);
