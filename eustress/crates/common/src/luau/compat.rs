@@ -120,6 +120,18 @@ impl ClassMapping {
             // Constraints
             "WeldConstraint" => Some("WeldConstraint"),
             "Motor6D" => Some("Motor6D"),
+            // Legacy surface joints. Studio's join tool and every pre-2016
+            // build emit these instead of the modern constraints, and they are
+            // STRUCTURAL — dropping them lets an imported assembly fall apart
+            // the moment physics runs. `ManualWeld`/`Snap`/`Glue` are all rigid
+            // welds carrying the same Part0/Part1 + C0/C1 payload as `Weld`;
+            // the `Rotate*` family are hinges, motor-driven in the P/V variants.
+            "ManualWeld" => Some("Weld"),
+            "Snap" => Some("Weld"),
+            "Glue" => Some("Weld"),
+            "Rotate" => Some("HingeConstraint"),
+            "RotateP" => Some("Motor"),
+            "RotateV" => Some("VelocityMotor"),
             "Attachment" => Some("Attachment"),
             "HingeConstraint" => Some("HingeConstraint"),
             // Modern constraints & movers (Wave 6.B)
