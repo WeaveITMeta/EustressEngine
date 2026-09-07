@@ -8,19 +8,24 @@ name = "eustress-downloads"
 main = "download-worker.js"
 compatibility_date = "2024-01-01"
 
-# Custom domains.
+# One host. `downloads.eustress.dev` is this worker, backed by the
+# `eustress-downloads` R2 bucket, with the gate applied PER ROUTE.
 #
-# `downloads.eustress.dev` is this worker: an auth-gated (JWT) PLAYER download
-# channel backed by the `eustress-downloads` R2 bucket.
+# There used to be a second host, `releases.eustress.dev`, for one real reason:
+# the shipped updater fetches the manifest and the artifact it names WITHOUT an
+# Authorization header, so routing it at a uniformly JWT-gated worker would 401
+# every auto-update in the field. That reasoning was correct; the remedy was
+# not. The second host was never added to DNS and its bucket was never created,
+# so seven release runs uploaded into nothing and no client could ever update.
 #
-# `releases.eustress.dev` is deliberately NOT routed here. The shipped engine
-# updater (`updater.rs`) fetches `https://releases.eustress.dev/latest.json` and
-# the artifact it names WITHOUT any Authorization header, so routing it through
-# this JWT-gated worker would 401 every auto-update in the field. Instead,
-# `releases.eustress.dev` must be a PUBLIC R2 custom domain attached directly to
-# the `eustress-releases` bucket (Cloudflare dashboard -> R2 -> eustress-releases
-# -> Settings -> Public access -> Custom domain). See RELEASE.md and the security
-# runbook. Do NOT re-add a `releases.eustress.dev` route to this worker.
+# Per-route gating gets the same property from one name:
+#   public   /latest.json, /latest/<platform>, /vX.Y.Z/<file>
+#   JWT      /api/releases/download
+# The gated route stays for the website's sign-in flow, where it buys
+# attribution and per-user analytics rather than secrecy. The build is free
+# through either path.
+#
+# Do not recreate `releases.eustress.dev`.
 routes = [
     { pattern = "downloads.eustress.dev/*", zone_name = "eustress.dev" },
 ]

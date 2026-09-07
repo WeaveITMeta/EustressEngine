@@ -12,7 +12,7 @@ embarrassing if missing · **[NICE]** genuinely optional for an alpha.
 
 ## 1 · Distribution
 
-- [ ] **[BLOCKER] `releases.eustress.dev` R2 bucket provisioned** and the
+- [ ] **[BLOCKER] `downloads.eustress.dev` R2 bucket provisioned** and the
   updater manifest uploaded. The updater + installer + CI pipeline are already
   fixed and compiled; this is the last infrastructure step between a build and
   a downloadable link.

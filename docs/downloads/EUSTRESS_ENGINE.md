@@ -54,7 +54,7 @@ See [UPDATE.md](UPDATE.md) for full update system documentation.
 
 Current version: **Help → About Eustress Engine**
 
-Latest version: fetched from `releases.eustress.dev/latest.json`
+Latest version: fetched from `downloads.eustress.dev/latest.json`
 
 ## Building from Source
 

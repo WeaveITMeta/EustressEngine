@@ -3,7 +3,7 @@
 //! Checks for new versions on startup, downloads updates, and restarts.
 //!
 //! Flow:
-//! 1. Startup: fetch https://releases.eustress.dev/latest.json
+//! 1. Startup: fetch https://downloads.eustress.dev/latest.json
 //! 2. Compare against compiled-in CARGO_PKG_VERSION
 //! 3. If newer: set update_available flag → Slint shows button
 //! 4. User clicks → download platform binary → verify SHA-256 → replace → restart
@@ -11,7 +11,7 @@
 use bevy::prelude::*;
 use std::sync::{Arc, Mutex};
 
-const MANIFEST_URL: &str = "https://releases.eustress.dev/latest.json";
+const MANIFEST_URL: &str = "https://downloads.eustress.dev/latest.json";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Bevy resource tracking update state
@@ -251,7 +251,7 @@ fn download_and_verify(
     // Only ever fetch the update from the official release host over HTTPS, and
     // never follow redirects — otherwise a hostile manifest `url` could aim the
     // auto-installer at an arbitrary origin (or bounce through one).
-    const RELEASE_PREFIX: &str = "https://releases.eustress.dev/";
+    const RELEASE_PREFIX: &str = "https://downloads.eustress.dev/";
     if !url.starts_with(RELEASE_PREFIX) {
         return Err(format!(
             "Refusing update: artifact URL {url:?} is not under {RELEASE_PREFIX}"

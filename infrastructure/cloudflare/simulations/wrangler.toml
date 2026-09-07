@@ -1,32 +1,44 @@
 # =============================================================================
-# Eustress Simulations Worker Configuration
+# RETIRED - DO NOT DEPLOY. See README.md in this directory.
 # =============================================================================
-# Deploy: cd infrastructure/cloudflare/simulations && wrangler deploy
+# This worker is superseded by eustress-api (infrastructure/cloudflare/api),
+# served on api.eustress.dev. It was deployed on 2 April 2026 to
+# simulations.eustress.dev, a hostname that never had a DNS record, so it was
+# never reachable and nothing ever called it.
+#
+# The route bindings below are commented out on purpose. Uncommenting them and
+# deploying would put a second worker on the same bucket (eustress-simulations)
+# with a different idea of its key layout, reading `{id}/manifest.json` keys
+# that nothing has ever written.
+#
+# `wrangler deploy` in this directory now fails on the missing `name` field,
+# which is the intended outcome: a config that cannot deploy by accident.
 # =============================================================================
 
-name = "eustress-simulations"
-main = "simulations-worker.js"
-compatibility_date = "2026-04-01"
+# name = "eustress-simulations"
+# main = "simulations-worker.js"
+# compatibility_date = "2026-04-01"
 
-# Custom domain
-routes = [{ pattern = "simulations.eustress.dev/*", zone_name = "eustress.dev" }]
+# Custom domain. simulations.eustress.dev never resolved.
+# routes = [{ pattern = "simulations.eustress.dev/*", zone_name = "eustress.dev" }]
 
-# R2 bucket binding for simulations
-[[r2_buckets]]
-binding = "SIMULATIONS"
-bucket_name = "eustress-simulations"
+# R2 bucket binding. The same bucket eustress-api binds as SCENES, which is why
+# two workers disagreeing about its layout was a problem waiting to happen.
+# [[r2_buckets]]
+# binding = "SIMULATIONS"
+# bucket_name = "eustress-simulations"
 
-[vars]
-ENVIRONMENT = "production"
-BACKEND_API_URL = "https://api.eustress.dev"
+# [vars]
+# ENVIRONMENT = "production"
+# BACKEND_API_URL = "https://api.eustress.dev"
 
 # Secrets (set via wrangler secret put)
 # JWT_SECRET - For validating auth tokens
 
-[env.dev]
-name = "eustress-simulations-dev"
-routes = [{ pattern = "simulations-dev.eustress.dev/*", zone_name = "eustress.dev" }]
+# [env.dev]
+# name = "eustress-simulations-dev"
+# routes = [{ pattern = "simulations-dev.eustress.dev/*", zone_name = "eustress.dev" }]
 
-[env.dev.vars]
-ENVIRONMENT = "development"
-BACKEND_API_URL = "http://localhost:7777"
+# [env.dev.vars]
+# ENVIRONMENT = "development"
+# BACKEND_API_URL = "http://localhost:7777"

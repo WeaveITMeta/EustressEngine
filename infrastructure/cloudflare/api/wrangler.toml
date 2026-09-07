@@ -39,7 +39,7 @@ id = "276638d8157344589cd2a82d4f1865bb"
 binding = "PAYOUTS"
 id = "c1d7016c782641aeba8662e2fa08b28b"
 
-# Engine usage telemetry — anonymous tool-click aggregates + feedback
+# Engine usage telemetry - anonymous tool-click aggregates + feedback
 # comments (see handleTelemetryUsage/Comment/Summary in src/index.js).
 [[kv_namespaces]]
 binding = "TELEMETRY"
@@ -65,22 +65,63 @@ id = "44abf849a950492c8699a3fd3b7e3c27"
 binding = "KYC_BUCKET"
 bucket_name = "eustress-kyc-documents"
 
-# R2 bucket for published scene .pak files and thumbnails
+# R2 bucket for published Universes, Spaces, thumbnails and Website manifests.
+#
+# This is the ONLY worker that touches this bucket. eustress-simulations bound
+# the same bucket as SIMULATIONS under a different key layout and was retired
+# without ever being reachable; see infrastructure/cloudflare/simulations/README.md.
+#
+#   universes/{id}/universe.pak            published Universe package
+#   universes/{id}/spaces/{name}.pak       a single published Space
+#   universes/{id}/website-manifest.json   the Website manifest, plus its
+#                                          publish hash and auth-key digest in
+#                                          customMetadata
+#   thumbnails/{id}/thumb.{ext}            gallery thumbnail
+#   ledger-backups/{date}.json             nightly ledger snapshot
+#
+# The simulation listing record is NOT here. It lives in KV as SOCIAL:sim:{id},
+# and the Website manifest is deliberately a separate object so a publish can
+# never overwrite the record that puts a Space in the marketplace.
 [[r2_buckets]]
 binding = "SCENES"
 bucket_name = "eustress-simulations"
 
-# Secrets (set via wrangler secret put):
-# JWT_SECRET            — persistent JWT signing key
-# GROK_API_KEY          — xAI Grok API key for AI-enhanced search
-# STRIPE_SECRET_KEY     — Stripe secret key for payments + Connect
-# STRIPE_WEBHOOK_SECRET — Stripe webhook signing secret
+# Rate limiter for website manifest reads, keyed on the consumer's auth key.
+#
+# The native binding rather than a KV counter: KV allows ONE WRITE PER SECOND to
+# the same key, so a counter incremented on every request throttles itself at
+# exactly the rate it exists to measure, then undercounts and under-enforces.
+# A limiter that looks present and is not is the worst of the options.
+#
+# 120 per 60s clears well over a thousand manifests in ten minutes, which covers
+# a large catalogue refreshing at deploy. The limit is per Cloudflare location
+# and eventually consistent: cost control and abuse damping, not an accounting
+# system, and never a quota anyone is billed against.
+[[ratelimits]]
+name = "MANIFEST_RATE_LIMITER"
+namespace_id = "2001"
 
-# Daily payout cron — runs at UTC midnight
+  [ratelimits.simple]
+  limit = 120
+  period = 60
+
+# Namespace index for Website manifests lives in the SOCIAL namespace above:
+#   website-ns:{namespace}  -> { sim_id, owner_id, claimed_at, ... }
+#   website-ns-of:{sim_id}  -> namespace
+# It exists because R2 has no secondary index, and it is what lets a website
+# hardcode {namespace}/latest instead of a UUID that changes on every publish.
+
+# Secrets (set via wrangler secret put):
+# JWT_SECRET            - persistent JWT signing key
+# GROK_API_KEY          - xAI Grok API key for AI-enhanced search
+# STRIPE_SECRET_KEY     - Stripe secret key for payments + Connect
+# STRIPE_WEBHOOK_SECRET - Stripe webhook signing secret
+
+# Daily payout cron - runs at UTC midnight
 [triggers]
 crons = ["0 0 * * *"]
 
-# Email Workers — send identity backup emails from identity@eustress.dev
+# Email Workers - send identity backup emails from identity@eustress.dev
 # Requires Email Routing enabled on eustress.dev in Cloudflare dashboard
 [[send_email]]
 name = "EMAIL"

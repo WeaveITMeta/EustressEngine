@@ -3,7 +3,7 @@
 // =============================================================================
 // Deploy: wrangler deploy
 // Bindings required:
-//   - RELEASES: R2 bucket (eustress-releases)
+//   - DOWNLOADS: R2 bucket (eustress-downloads)
 //   - ANALYTICS: Analytics Engine dataset
 //   - JWT_SECRET: Secret (same as auth worker uses to sign JWTs)
 // =============================================================================
@@ -19,20 +19,77 @@ export default {
     }
 
     try {
-      // Public: latest.json manifest (no auth needed — engine updater reads this).
+      // Public: latest.json manifest.
       //
-      // `/latest.json` is the path the shipped engine asks for: updater.rs
-      // compiles `https://releases.eustress.dev/latest.json` in as a constant,
-      // so it is fixed in every copy already in the field and cannot be changed
-      // by shipping a new build — the only mechanism that would deliver that
-      // build is the updater itself. The server therefore answers to the name
-      // the client already calls. The other two spellings are kept because
-      // downloads.eustress.dev has served them since 2025-12.
+      // updater.rs compiles this URL in as a constant, so it is fixed in every
+      // copy already in the field and cannot be changed by shipping a new
+      // build: the only mechanism that would deliver that build is the updater
+      // itself. The other two spellings are kept because downloads.eustress.dev
+      // has served them since 2025-12.
       if (path === '/latest.json' || path === '/api/releases/latest' || path === '/api/latest') {
         return handleLatest(env, cors);
       }
 
-      // Auth-gated: download release artifact
+      // Public: a permanent URL per platform, redirecting to the current
+      // version. Docs and the download page can hardcode these and stay
+      // correct across releases, which is what stops a version number being
+      // retyped into a curl command that goes stale the next time we ship.
+      //
+      // Platform names are the keys of latest.json, so this cannot drift from
+      // what the build actually produced.
+      const latest = path.match(/^\/latest\/([a-z0-9-]+)$/);
+      if (latest) {
+        const manifestObj = await env.DOWNLOADS.get('latest.json');
+        if (!manifestObj) {
+          return jsonResponse({ error: 'No releases available' }, 404, cors);
+        }
+        const manifest = await manifestObj.json();
+        const entry = manifest.platforms?.[latest[1]];
+        if (!entry) {
+          return jsonResponse({
+            error: `Platform '${latest[1]}' not found`,
+            available: Object.keys(manifest.platforms || {}),
+          }, 404, cors);
+        }
+        // 302, never 301: the target moves on every release, and a permanent
+        // redirect would be cached by clients that then never see a new one.
+        return new Response(null, {
+          status: 302,
+          headers: {
+            Location: `/v${manifest.version}/${entry.file}`,
+            'Cache-Control': 'public, max-age=60',
+            ...cors,
+          },
+        });
+      }
+
+      // Public: release artifacts, addressed by version and filename.
+      //
+      // The updater cannot hold a credential, so the bytes it fetches have to
+      // be reachable without one. The gate below stays for the website's
+      // sign-in-to-download flow, which buys attribution and per-user
+      // analytics rather than secrecy: the build is free either way.
+      //
+      // The pattern is the whole boundary. It admits only vX.Y.Z/filename, so
+      // no other key in the bucket is reachable through this route.
+      const artifact = path.match(/^\/(v\d+\.\d+\.\d+)\/([A-Za-z0-9._-]+)$/);
+      if (artifact && request.method === 'GET') {
+        const object = await env.DOWNLOADS.get(`${artifact[1]}/${artifact[2]}`);
+        if (!object) return jsonResponse({ error: 'Not found' }, 404, cors);
+        return new Response(object.body, {
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Disposition': `attachment; filename="${artifact[2]}"`,
+            // A version path never changes content, so this is cacheable
+            // forever and a repeat download costs the origin nothing.
+            'Cache-Control': 'public, max-age=31536000, immutable',
+            'ETag': object.httpEtag,
+            ...cors,
+          },
+        });
+      }
+
+      // Auth-gated: the website's download flow.
       if (path === '/api/releases/download') {
         return handleDownload(request, env, ctx, cors);
       }
@@ -107,7 +164,7 @@ async function handleDownload(request, env, ctx, cors) {
   }
 
   // Extract R2 key from the URL
-  // URL format: https://releases.eustress.dev/v0.3.5/eustress-engine-v0.3.5-windows-x64.zip
+  // URL format: https://downloads.eustress.dev/v0.3.5/eustress-engine-v0.3.5-windows-x64.zip
   const downloadUrl = new URL(platformData.url);
   const r2Key = downloadUrl.pathname.replace(/^\//, ''); // Remove leading slash
 

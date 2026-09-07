@@ -1,174 +1,213 @@
 name: Release
 
+# Tag v* -> build three platforms -> installers -> SHA-256 checksums
+# -> latest.json -> R2 -> GitHub Release.
+#
+# ONE destination, named once. Artifacts live in the `eustress-downloads`
+# bucket and are served by the `eustress-downloads` Worker at
+# downloads.eustress.dev. The older `eustress-releases` bucket and
+# releases.eustress.dev subdomain were a parallel naming that never existed
+# in Cloudflare; uploads went to a bucket that was never created, which is
+# why no release has ever published.
+#
+# Required repository secrets:
+#   CLOUDFLARE_API_TOKEN   scoped to Object Read & Write on eustress-downloads
+#   CLOUDFLARE_ACCOUNT_ID
+# Optional, and the workflow says so when absent:
+#   WINDOWS_CERT_PFX / WINDOWS_CERT_PASSWORD   Authenticode signing
+
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (without the leading v)"
+        required: true
+
+permissions:
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
-  # Speed up CI compilation
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
   CARGO_PROFILE_RELEASE_LTO: thin
+  # The destination, in one place. Changing where releases live is one edit.
+  R2_BUCKET: eustress-downloads
+  DOWNLOAD_BASE: https://downloads.eustress.dev
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────
-  # Gate: the tagged commit must actually be on Core. release.yml triggers
-  # on any `v*` tag push, but RELEASE.md's whole promotion model (manual
-  # pre-release checklist → fast-forward Core → tag) assumes releases only
-  # ever ship from Core. This makes that assumption enforced, not just
-  # documented.
+  # Version and gating.
+  #
+  # The version is derived once and passed down, so a tag, the crate, the
+  # installer and latest.json cannot disagree.
   # ─────────────────────────────────────────────────────────────────────
-  verify-core:
-    name: Verify tag is reachable from Core
+  version:
+    name: Resolve version and verify the tag
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Fetch Core
-        run: git fetch origin Core:refs/remotes/origin/Core
-
-      - name: Assert tagged commit is on Core
+      - id: v
         run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # RELEASE.md's promotion model (pre-release checklist -> fast-forward
+      # Core -> tag) assumes releases only ever ship from Core. A tag pushed
+      # to any other branch is refused here rather than silently shipped.
+      - name: Assert tagged commit is on Core
+        if: github.event_name == 'push'
+        run: |
+          git fetch origin Core:refs/remotes/origin/Core
           if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/Core; then
-            echo "::error::Tag ${GITHUB_REF_NAME} (commit ${GITHUB_SHA}) is not reachable from origin/Core. Releases must be tagged on Core (see RELEASE.md) — a tag pushed to main or any other branch is refused here rather than silently shipped to users."
+            echo "::error::Tag ${GITHUB_REF_NAME} (commit ${GITHUB_SHA}) is not reachable from origin/Core. Releases must be tagged on Core, see RELEASE.md."
             exit 1
           fi
           echo "OK: ${GITHUB_SHA} is on Core."
+
+      # The updater compares the manifest version against the compiled-in
+      # CARGO_PKG_VERSION. If the crate and the tag disagree, a shipped
+      # v0.3.x binary reports whatever Cargo.toml says, is_newer() never
+      # converges, and every client re-downloads the same build on every
+      # launch. That drift is invisible at build time and only visible to
+      # users, so it is caught here.
+      - name: Assert crate version matches the tag
+        run: |
+          WANT="${{ steps.v.outputs.version }}"
+          HAVE=$(grep -m1 '^version' eustress/crates/engine/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$WANT" != "$HAVE" ]; then
+            echo "::error::This release is ${WANT}, but eustress/crates/engine/Cargo.toml says ${HAVE}. Bump the crate version to match before tagging, or the shipped binary reports ${HAVE} to the updater and loops."
+            exit 1
+          fi
+          echo "OK: crate version ${HAVE} matches."
 
   # ─────────────────────────────────────────────────────────────────────
   # Windows x64
   # ─────────────────────────────────────────────────────────────────────
   build-windows:
-    needs: verify-core
+    needs: version
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: false
-
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            eustress/target
-          key: windows-cargo-${{ hashFiles('eustress/Cargo.lock') }}
+          workspaces: eustress
 
       - name: Build
         working-directory: eustress
         run: cargo build --release --package eustress-engine
 
-      - name: Smoke test (best-effort startup check)
+      - name: Smoke test
         shell: pwsh
         run: |
-          # Catches an immediate startup panic/crash (missing DLL, unwrap-on-
-          # None, config parse failure) before a broken binary ever gets
-          # packaged. NOT a rendering-correctness test: windows-latest has no
-          # real GPU, so wgpu may fall back to a software adapter or fail to
-          # find one — a graceful exit for that reason isn't distinguished
-          # from success here. Treat this as a floor, not a full guarantee.
+          # Catches an immediate startup panic (missing DLL, unwrap-on-None,
+          # config parse failure) before a broken binary is packaged. NOT a
+          # rendering test: windows-latest has no real GPU, so a graceful exit
+          # for lack of an adapter is not distinguished from success. A floor,
+          # not a guarantee.
           $exe = "eustress\target\release\eustress-engine.exe"
           $p = Start-Process -FilePath $exe -PassThru
           Start-Sleep -Seconds 8
           if ($p.HasExited) {
-            Write-Error "eustress-engine.exe exited within 8s of startup (exit code $($p.ExitCode)) — treating as a startup crash."
+            Write-Error "eustress-engine.exe exited within 8s (exit $($p.ExitCode)) - treating as a startup crash."
             exit 1
           }
           Stop-Process -Id $p.Id -Force
-          Write-Output "OK: process was still running after 8s (no immediate startup crash)."
+          Write-Output "OK: still running after 8s."
+
+      - name: Sign the binary
+        shell: pwsh
+        run: |
+          if (-not "${{ secrets.WINDOWS_CERT_PFX }}") {
+            Write-Warning "WINDOWS_CERT_PFX not set - shipping UNSIGNED. Users will see a SmartScreen warning."
+            exit 0
+          }
+          $pfx = "$env:RUNNER_TEMP\cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String("${{ secrets.WINDOWS_CERT_PFX }}"))
+          & "C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe" sign `
+            /f $pfx /p "${{ secrets.WINDOWS_CERT_PASSWORD }}" `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            eustress\target\release\eustress-engine.exe
+          Remove-Item $pfx -Force
 
       - name: Package
         shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          VERSION=${GITHUB_REF_NAME}
-          mkdir -p dist
-          cp eustress/target/release/eustress-engine.exe dist/
-          cp -r eustress/crates/engine/assets dist/assets
-          cd dist
-          7z a ../eustress-engine-${VERSION}-windows-x64.zip *
+          mkdir -p stage dist
+          cp eustress/target/release/eustress-engine.exe stage/
+          cp -r eustress/crates/engine/assets stage/assets
+          (cd stage && 7z a "../dist/eustress-engine-v${VERSION}-windows-x64.zip" *)
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-x64
-          path: eustress-engine-*-windows-x64.zip
-
-      - name: Build installer (Inno Setup)
+      - name: Build installer
         shell: pwsh
         run: |
-          $Version = "${env:GITHUB_REF_NAME}" -replace '^v',''
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
-            /DMyAppVersion=$Version `
+            "/DMyAppVersion=${{ needs.version.outputs.version }}" `
             installer\windows\eustress-engine.iss
+          Copy-Item dist\windows\EustressEngine-Setup.exe dist\ -Force
 
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-installer
-          path: dist/windows/EustressEngine-Setup.exe
+          name: windows
+          path: dist/*
 
   # ─────────────────────────────────────────────────────────────────────
-  # macOS ARM64 (Apple Silicon)
+  # macOS ARM64
   # ─────────────────────────────────────────────────────────────────────
   build-macos-arm64:
-    needs: verify-core
+    needs: version
     runs-on: macos-14
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: false
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            eustress/target
-          key: macos-arm64-cargo-${{ hashFiles('eustress/Cargo.lock') }}
+          workspaces: eustress
 
       - name: Build
         working-directory: eustress
         run: cargo build --release --package eustress-engine --target aarch64-apple-darwin
 
-      - name: Smoke test (best-effort startup check)
-        shell: bash
+      - name: Smoke test
         run: |
-          # See the Windows job's smoke-test step for the same caveat: this
-          # catches an immediate startup panic, not rendering correctness
-          # (though macos-14 runners do have real Metal/GPU support, unlike
-          # the Linux/Windows hosted runners).
           eustress/target/aarch64-apple-darwin/release/eustress-engine &
           PID=$!
           sleep 8
           if ! kill -0 "$PID" 2>/dev/null; then
             wait "$PID"; STATUS=$?
-            echo "::error::eustress-engine exited within 8s of startup (exit code $STATUS) — treating as a startup crash."
+            echo "::error::eustress-engine exited within 8s (exit $STATUS) - treating as a startup crash."
             exit 1
           fi
           kill "$PID"
-          echo "OK: process was still running after 8s (no immediate startup crash)."
+          echo "OK: still running after 8s."
 
       - name: Package DMG
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          VERSION=${GITHUB_REF_NAME}
           APP="Eustress Engine.app"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" dist
           cp eustress/target/aarch64-apple-darwin/release/eustress-engine "$APP/Contents/MacOS/"
           cp -r eustress/crates/engine/assets "$APP/Contents/Resources/assets"
           cp eustress/crates/engine/assets/icon.png "$APP/Contents/Resources/AppIcon.png"
-          cat > "$APP/Contents/Info.plist" << 'PLIST'
+          cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -177,49 +216,63 @@ jobs:
             <key>CFBundleExecutable</key><string>eustress-engine</string>
             <key>CFBundleIdentifier</key><string>dev.eustress.engine</string>
             <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
             <key>CFBundleIconFile</key><string>AppIcon</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict>
           </plist>
           PLIST
           hdiutil create -volname "Eustress Engine" -srcfolder "$APP" -ov -format UDZO \
-            "eustress-engine-${VERSION}-macos-arm64.dmg"
+            "dist/eustress-engine-v${VERSION}-macos-arm64.dmg"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-arm64
-          path: eustress-engine-*-macos-arm64.dmg
+          name: macos
+          path: dist/*
 
   # ─────────────────────────────────────────────────────────────────────
   # Linux x64
+  #
+  # v0.3.6 died here with exit 143 after "the runner has received a
+  # shutdown signal", 34 minutes in, with nothing but warnings in the log.
+  # That is hosted-runner eviction, not a compile error: the job ran out of
+  # memory or disk while linking. Windows and macOS both went green on that
+  # same run and only publish never fired, because it needs all three.
+  # So this job trades build time for headroom.
   # ─────────────────────────────────────────────────────────────────────
   build-linux:
-    needs: verify-core
-    runs-on: ubuntu-latest
+    needs: version
+    runs-on: ubuntu-22.04 # oldest supported glibc, so the binary runs widely
     timeout-minutes: 90
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: false
+
+      # ~25 GB of preinstalled toolchains this build never touches. A release
+      # Bevy target directory plus the cargo registry does not comfortably fit
+      # in what is left without this.
+      - name: Reclaim runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get clean
+          df -h /
 
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: eustress
 
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
             libvulkan-dev libx11-dev libxi-dev libxcursor-dev \
             imagemagick mold clang xvfb
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            eustress/target
-          key: linux-cargo-${{ hashFiles('eustress/Cargo.lock') }}
 
       - name: Build
         working-directory: eustress
@@ -228,163 +281,170 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
-      - name: Smoke test (best-effort startup check)
-        shell: bash
+      - name: Smoke test
         run: |
-          # See the Windows job's smoke-test step for the same caveat: this
-          # catches an immediate startup panic, not rendering correctness.
-          # ubuntu-latest has no real GPU; xvfb gives it a display to attach
-          # to so window/surface creation doesn't hard-fail purely for lack
-          # of one — a software rasterizer fallback still exercises real
-          # engine startup code, unlike running with no display at all.
+          # xvfb gives it a display so surface creation does not hard-fail
+          # purely for lack of one. A software rasterizer fallback still
+          # exercises real startup code, unlike running with no display.
           xvfb-run --auto-servernum eustress/target/release/eustress-engine &
           PID=$!
           sleep 8
           if ! kill -0 "$PID" 2>/dev/null; then
             wait "$PID"; STATUS=$?
-            echo "::error::eustress-engine exited within 8s of startup (exit code $STATUS) — treating as a startup crash."
+            echo "::error::eustress-engine exited within 8s (exit $STATUS) - treating as a startup crash."
             exit 1
           fi
           kill "$PID" 2>/dev/null || true
-          echo "OK: process was still running after 8s (no immediate startup crash)."
-
-      - name: Generate icons
-        run: bash eustress/crates/engine/assets/linux/generate-icons.sh
+          echo "OK: still running after 8s."
 
       - name: Package
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          VERSION=${GITHUB_REF_NAME}
-          mkdir -p dist/icons
-          cp eustress/target/release/eustress-engine dist/
-          cp -r eustress/crates/engine/assets dist/assets
-          cp eustress/crates/engine/assets/linux/eustress-engine.desktop dist/
-          cp eustress/crates/engine/assets/linux/install.sh dist/
-          cp eustress/crates/engine/assets/linux/icons/*.png dist/icons/
-          chmod +x dist/install.sh dist/eustress-engine
-          tar czf "eustress-engine-${VERSION}-linux-x64.tar.gz" -C dist .
+          bash eustress/crates/engine/assets/linux/generate-icons.sh
+          mkdir -p stage/icons dist
+          cp eustress/target/release/eustress-engine stage/
+          cp -r eustress/crates/engine/assets stage/assets
+          cp eustress/crates/engine/assets/linux/eustress-engine.desktop stage/
+          cp eustress/crates/engine/assets/linux/install.sh stage/
+          cp eustress/crates/engine/assets/linux/icons/*.png stage/icons/
+          chmod +x stage/install.sh stage/eustress-engine
+          tar czf "dist/eustress-engine-v${VERSION}-linux-x64.tar.gz" -C stage .
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-x64
-          path: eustress-engine-*-linux-x64.tar.gz
+          name: linux
+          path: dist/*
 
   # ─────────────────────────────────────────────────────────────────────
-  # Upload to R2 + Create GitHub Release
+  # Publish
   # ─────────────────────────────────────────────────────────────────────
   publish:
-    needs: [build-windows, build-macos-arm64, build-linux]
+    needs: [version, build-windows, build-macos-arm64, build-linux]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
-          merge-multiple: true
+          path: artifacts
+      - run: mkdir -p dist && find artifacts -type f -exec mv {} dist/ \; && ls -la dist
 
       - name: Compute checksums
+        working-directory: dist
         run: |
-          sha256sum eustress-engine-*.zip eustress-engine-*.dmg eustress-engine-*.tar.gz EustressEngine-Setup.exe > checksums.txt
+          sha256sum * > checksums.txt
           cat checksums.txt
 
-      - name: Generate latest.json
+      - name: Build latest.json
+        working-directory: dist
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          DOWNLOAD_BASE: ${{ env.DOWNLOAD_BASE }}
         run: |
-          VERSION=${GITHUB_REF_NAME}
-          DATE=$(date -u +%Y-%m-%d)
+          sha()  { grep " $1\$" checksums.txt | awk '{print $1}'; }
+          size() { stat -c%s "$1"; }
 
-          WIN_SHA=$(grep windows-x64.zip checksums.txt | awk '{print $1}')
-          WIN_SIZE=$(stat -c%s eustress-engine-*-windows-x64.zip)
+          WIN=$(ls eustress-engine-*-windows-x64.zip 2>/dev/null | head -1)
+          SETUP=$(ls EustressEngine-Setup.exe 2>/dev/null | head -1)
+          MAC=$(ls eustress-engine-*-macos-arm64.dmg 2>/dev/null | head -1)
+          LIN=$(ls eustress-engine-*-linux-x64.tar.gz 2>/dev/null | head -1)
 
-          MAC_SHA=$(grep macos-arm64.dmg checksums.txt | awk '{print $1}')
-          MAC_SIZE=$(stat -c%s eustress-engine-*-macos-arm64.dmg)
+          BASE="${DOWNLOAD_BASE}/v${VERSION}"
 
-          LIN_SHA=$(grep linux-x64.tar.gz checksums.txt | awk '{print $1}')
-          LIN_SIZE=$(stat -c%s eustress-engine-*-linux-x64.tar.gz)
-
-          SETUP_SHA=$(grep EustressEngine-Setup.exe checksums.txt | awk '{print $1}')
-          SETUP_SIZE=$(stat -c%s EustressEngine-Setup.exe)
-
-          BASE="https://releases.eustress.dev/${VERSION}"
-
-          cat > latest.json << MANIFEST
+          cat > latest.json <<JSON
           {
-            "version": "${VERSION#v}",
-            "date": "${DATE}",
+            "version": "${VERSION}",
+            "date": "$(date -u +%Y-%m-%d)",
             "channel": "stable",
-            "min_version": "0.1.0",
-            "changelog_url": "https://eustress.dev/changelog#${VERSION}",
-            "changelog": "See https://github.com/WeaveITMeta/EustressEngine/releases/tag/${VERSION}",
+            "changelog_url": "https://github.com/WeaveITMeta/EustressEngine/releases/tag/v${VERSION}",
             "platforms": {
-              "windows-x64": {
-                "url": "${BASE}/eustress-engine-${VERSION}-windows-x64.zip",
-                "sha256": "${WIN_SHA}",
-                "size_bytes": ${WIN_SIZE},
-                "installer": false
-              },
-              "macos-arm64": {
-                "url": "${BASE}/eustress-engine-${VERSION}-macos-arm64.dmg",
-                "sha256": "${MAC_SHA}",
-                "size_bytes": ${MAC_SIZE},
-                "installer": true
-              },
-              "linux-x64": {
-                "url": "${BASE}/eustress-engine-${VERSION}-linux-x64.tar.gz",
-                "sha256": "${LIN_SHA}",
-                "size_bytes": ${LIN_SIZE},
-                "installer": false
-              },
-              "windows-x64-installer": {
-                "url": "${BASE}/EustressEngine-Setup.exe",
-                "sha256": "${SETUP_SHA}",
-                "size_bytes": ${SETUP_SIZE},
-                "installer": true
-              }
+              "windows-x64":           { "file": "${WIN}",   "url": "${BASE}/${WIN}",   "sha256": "$(sha "$WIN")",   "size_bytes": $(size "$WIN"),   "installer": false },
+              "windows-x64-installer": { "file": "${SETUP}", "url": "${BASE}/${SETUP}", "sha256": "$(sha "$SETUP")", "size_bytes": $(size "$SETUP"), "installer": true },
+              "macos-arm64":           { "file": "${MAC}",   "url": "${BASE}/${MAC}",   "sha256": "$(sha "$MAC")",   "size_bytes": $(size "$MAC"),   "installer": true },
+              "linux-x64":             { "file": "${LIN}",   "url": "${BASE}/${LIN}",   "sha256": "$(sha "$LIN")",   "size_bytes": $(size "$LIN"),   "installer": false }
             }
           }
-          MANIFEST
-
-          echo "Generated latest.json:"
+          JSON
           cat latest.json
 
-      - name: Upload to Cloudflare R2
+          # Fail loudly rather than publishing a manifest with a missing
+          # artifact or an empty checksum. A manifest that parses but points
+          # at nothing is worse than no manifest: the updater trusts it.
+          node -e '
+            const m = require("./latest.json");
+            for (const [k, v] of Object.entries(m.platforms)) {
+              if (!v.file || !v.sha256 || !v.size_bytes) {
+                console.error(`::error::${k} is missing its artifact, checksum or size`);
+                process.exit(1);
+              }
+            }
+            console.log("manifest complete:", Object.keys(m.platforms).join(", "));
+          '
+
+      - name: Upload to R2
+        working-directory: dist
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_KEY }}
-          AWS_DEFAULT_REGION: auto
-          AWS_ENDPOINT_URL: https://${{ secrets.CF_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VERSION: ${{ needs.version.outputs.version }}
+          BUCKET: ${{ env.R2_BUCKET }}
         run: |
-          VERSION=${GITHUB_REF_NAME}
-          pip install awscli
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN is not set. Artifacts will be attached to the GitHub Release, but downloads.eustress.dev will not serve them."
+            exit 1
+          fi
 
-          # Upload artifacts
-          aws s3 cp eustress-engine-${VERSION}-windows-x64.zip \
-            s3://eustress-releases/${VERSION}/eustress-engine-${VERSION}-windows-x64.zip
+          # wrangler, not the S3 API: one credential shape for every
+          # Cloudflare interaction in this repo, and --remote so a typo
+          # cannot quietly write to local simulated storage instead.
+          for f in *; do
+            [ "$f" = "latest.json" ] && continue
+            echo "uploading $f"
+            npx --yes wrangler@4 r2 object put "${BUCKET}/v${VERSION}/${f}" \
+              --file "$f" --remote
+          done
 
-          aws s3 cp eustress-engine-${VERSION}-macos-arm64.dmg \
-            s3://eustress-releases/${VERSION}/eustress-engine-${VERSION}-macos-arm64.dmg
+          # The stable path the updater and the website both poll. Short
+          # cache: a release must be visible in minutes, not in an hour.
+          npx --yes wrangler@4 r2 object put "${BUCKET}/latest.json" \
+            --file latest.json --remote \
+            --content-type application/json \
+            --cache-control "public, max-age=60"
 
-          aws s3 cp eustress-engine-${VERSION}-linux-x64.tar.gz \
-            s3://eustress-releases/${VERSION}/eustress-engine-${VERSION}-linux-x64.tar.gz
+      - name: Verify the release is actually served
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # Uploading is not the same as being reachable. This is the step
+          # that would have caught a bucket nobody had created.
+          URL="${DOWNLOAD_BASE}/latest.json"
+          for i in 1 2 3 4 5; do
+            SERVED=$(curl -fsS "$URL" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d).version)}catch{console.log("")}})' || true)
+            if [ "$SERVED" = "$VERSION" ]; then
+              echo "OK: ${URL} serves ${SERVED}"
+              exit 0
+            fi
+            echo "attempt ${i}: served '${SERVED}', want '${VERSION}' - retrying"
+            sleep 10
+          done
+          echo "::error::${URL} is not serving ${VERSION}. The upload reported success, so check the Worker route and the bucket binding."
+          exit 1
 
-          aws s3 cp EustressEngine-Setup.exe \
-            s3://eustress-releases/${VERSION}/EustressEngine-Setup.exe
-
-          # Upload manifest (short cache for quick propagation)
-          aws s3 cp latest.json s3://eustress-releases/latest.json \
-            --cache-control "max-age=300"
-
-          # Upload checksums
-          aws s3 cp checksums.txt s3://eustress-releases/${VERSION}/checksums.txt
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            eustress-engine-*-windows-x64.zip
-            eustress-engine-*-macos-arm64.dmg
-            eustress-engine-*-linux-x64.tar.gz
-            EustressEngine-Setup.exe
-            checksums.txt
-            latest.json
+          files: dist/*
           generate_release_notes: true
+          body: |
+            ## Verify your download
+
+            Every artifact is built from this tag by GitHub Actions and
+            published with a SHA-256 checksum.
+
+            ```
+            # Windows (PowerShell)
+            Get-FileHash .\EustressEngine-Setup.exe -Algorithm SHA256
+
+            # macOS / Linux
+            shasum -a 256 eustress-engine-*.tar.gz
+            ```
+
+            Compare against `checksums.txt` in this release.

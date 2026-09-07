@@ -111,12 +111,16 @@ Triggered by `v*` tag push on any branch (typically Core):
    - Linux x64 → `.tar.gz` with executable + `install.sh` + desktop file
 2. **Compute SHA-256 checksums** for each artifact
 3. **Generate `latest.json`** — download manifest consumed by the in-app updater and the website download page
-4. **Upload to Cloudflare R2** at `s3://eustress-releases/${VERSION}/`, exposed publicly at:
-   - `https://releases.eustress.dev/v0.3.7/eustress-engine-v0.3.7-windows-x64.zip`
-   - `https://releases.eustress.dev/v0.3.7/eustress-engine-v0.3.7-macos-arm64.dmg`
-   - `https://releases.eustress.dev/v0.3.7/eustress-engine-v0.3.7-linux-x64.tar.gz`
-   - `https://releases.eustress.dev/latest.json` (manifest, 5-minute cache)
-5. **Create a GitHub Release** with auto-generated notes from commits since the last tag, artifacts attached
+4. **Upload to Cloudflare R2** into `eustress-downloads/v${VERSION}/` using
+   `wrangler r2 object put --remote`, served at:
+   - `https://downloads.eustress.dev/v0.3.7/eustress-engine-v0.3.7-windows-x64.zip`
+   - `https://downloads.eustress.dev/v0.3.7/eustress-engine-v0.3.7-macos-arm64.dmg`
+   - `https://downloads.eustress.dev/v0.3.7/eustress-engine-v0.3.7-linux-x64.tar.gz`
+   - `https://downloads.eustress.dev/latest.json` (manifest, 60-second cache)
+5. **Fetch back what it just published**, failing if the served version is not
+   the one built. Uploading is not the same as being reachable, and that gap is
+   what hid a missing bucket through seven release attempts.
+6. **Create a GitHub Release** with auto-generated notes from commits since the last tag, artifacts attached
 
 ### Typical wall-clock time
 
@@ -166,9 +170,9 @@ To pull a broken release:
    git push --delete origin v0.3.7
    ```
 2. **Delete the GitHub Release** from the [releases page](https://github.com/WeaveITMeta/EustressEngine/releases). (The release artifacts are auto-created by CI but not auto-cleaned on tag delete.)
-3. **Remove the R2 objects** via the Cloudflare dashboard, or:
+3. **Remove the R2 objects** via the Cloudflare dashboard, or one at a time:
    ```bash
-   aws s3 rm s3://eustress-releases/v0.3.7/ --recursive --endpoint-url https://<ACCT>.r2.cloudflarestorage.com
+   npx wrangler r2 object delete eustress-downloads/v0.3.7/<file> --remote
    ```
 4. **Revert `latest.json`** by re-tagging the prior known-good version. CI overwrites `latest.json` on every release, so re-tagging `v0.3.6-rollback` pointing at the old commit (or just re-running the previous tag's workflow) restores the old manifest.
 
@@ -182,15 +186,26 @@ Required GitHub Actions secrets (set in repo settings → Secrets and variables 
 
 | Secret | Purpose |
 |---|---|
-| `R2_ACCESS_KEY` | Cloudflare R2 access key ID |
-| `R2_SECRET_KEY` | Cloudflare R2 secret access key |
-| `CF_ACCOUNT_ID` | Cloudflare account ID (in R2 endpoint URL) |
+| `CLOUDFLARE_API_TOKEN` | Scoped to Object Read & Write on `eustress-downloads` only. Deliberately not account-wide: it can write one bucket and cannot list the others. |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
 
-DNS for `releases.eustress.dev` must CNAME to the R2 public bucket URL. Verify with:
+Optional. The workflow warns rather than failing when these are absent, so an
+unsigned build is a visible choice instead of a silent one:
+
+| Secret | Purpose |
+|---|---|
+| `WINDOWS_CERT_PFX` / `WINDOWS_CERT_PASSWORD` | Authenticode signing. Without it, users hit SmartScreen. |
+
+No DNS work is required. `downloads.eustress.dev` already routes to the
+`eustress-downloads` Worker, which fronts the bucket of the same name. Verify
+with:
 
 ```bash
-curl -I https://releases.eustress.dev/latest.json
+curl -I https://downloads.eustress.dev/latest.json
 ```
+
+A `404 {"error":"No releases available"}` before the first release is the
+correct answer: it means the Worker answered.
 
 ---
 

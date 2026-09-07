@@ -36,7 +36,7 @@ facts each make a public launch impossible on their own:
 |---|---|---|---|
 | **Distribution** | No CI job builds the Player; installer is Studio-only | Every download button 404s | L |
 | | Release pipeline 7/7 failed; zero Releases published | Nothing to download even for Studio | M |
-| | `releases.eustress.dev` is NXDOMAIN; updater manifest URL dead | Shipped copies can never update | S |
+| | `downloads.eustress.dev` is NXDOMAIN; updater manifest URL dead | Shipped copies can never update | S |
 | | Nothing is code-signed | **SAC already blocks the binary on the dev machine** — public Windows users hit the same wall | M |
 | | Asset root is a dev-checkout relative path; CI never copies `common/assets` | An installed build finds no character, no textures | S |
 | **Content** | No download/unpack/load path in the Player | Nothing published can ever be played | XL |
