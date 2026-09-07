@@ -312,16 +312,25 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
     #[cfg(feature = "data")]
     app.add_plugins(crate::capture::CapturePlugin);
 
-    // Streaming — in-process EustressStream + TCP stream node + the
-    // persistent SimStreamWriter connection.
+    // Streaming — in-process EustressStream (ring buffers inside this process,
+    // no socket) plus the persistent SimStreamWriter connection.
     #[cfg(feature = "streaming")]
     {
         app.add_plugins(eustress_common::change_queue::StreamingPlugin);
         app.add_systems(Startup, setup_sim_stream_writer);
-        // Cross-process pub/sub over TCP (port advertised via
-        // `<universe>/.eustress/engine.stream.port`).
-        app.add_plugins(crate::stream_node_plugin::StreamNodePlugin::default());
     }
+
+    // Cross-process pub/sub over TCP (port advertised via
+    // `<universe>/.eustress/engine.stream.port`).
+    //
+    // Opt-in via `--features stream-node`, NOT part of `core`. The node
+    // authenticates nobody: any peer that connects may publish into any topic
+    // ring and subscribe to any other — `scene_deltas` carries live scene
+    // contents and `agent_commands` is the inbound command path. A default
+    // build must not open that, so the socket only exists when someone asks
+    // for it, and binds loopback even then.
+    #[cfg(feature = "stream-node")]
+    app.add_plugins(crate::stream_node_plugin::StreamNodePlugin::default());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

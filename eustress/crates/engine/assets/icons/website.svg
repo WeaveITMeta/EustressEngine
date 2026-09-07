@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- Website: a browser frame with an address bar, holding one headline figure the manifest feeds -->
+  <rect x="1.5" y="2.9" width="13" height="10.2" rx="1.5" fill="none" stroke="#5CA8FF" stroke-width="1.1"/>
+  <path d="M1.5 6 H14.5" stroke="#5CA8FF" stroke-width="1"/>
+  <!-- address bar, not traffic-light dots, so this reads as a site rather than an app window -->
+  <rect x="3.3" y="3.75" width="8" height="1.4" rx="0.7" fill="#5CA8FF"/>
+  <!-- the value the Space owns, in the accent green nothing else in this set uses -->
+  <rect x="3.3" y="7.5" width="7.2" height="2.1" rx="1.05" fill="#35D07A"/>
+  <rect x="3.3" y="10.5" width="4.4" height="1.2" rx="0.6" fill="#3B82F6"/>
+</svg>

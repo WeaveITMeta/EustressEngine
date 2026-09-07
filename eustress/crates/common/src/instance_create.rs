@@ -293,6 +293,16 @@ pub fn create_instance(
     let folder_name = unique_entity_name(dest_dir, preferred);
     let folder_path = dest_dir.join(&folder_name);
 
+    // If the requested name had to be altered to be representable on disk
+    // (`A: B` sanitized, an over-long name truncated, a collision suffixed),
+    // keep the ORIGINAL as the display name so the Explorer still shows what
+    // the author actually typed. Callers that set `display_name` themselves
+    // (the Roblox importer does) already carry the truth and are left alone.
+    let mut overrides = overrides;
+    if overrides.display_name.is_none() && folder_name != preferred {
+        overrides.display_name = Some(preferred.to_string());
+    }
+
     if has_template {
         copy_template_recursive(&template_root, &folder_path).map_err(|e| CreateError::Io {
             what: format!("copy template {} → {}", template_root.display(), folder_path.display()),
@@ -611,15 +621,82 @@ pub fn entity_name_is_available(dir: &Path, name: &str) -> bool {
 /// Pick a unique folder name in `dir`, starting from `base` and
 /// appending a 4-hex-digit suffix on collision. Identical behaviour to
 /// the engine's `unique_entity_name` (it now re-exports from here).
+/// Characters Windows forbids in a path component, plus the separators every
+/// platform reserves. Roblox `Name`s carry none of these restrictions, so an
+/// instance called `Governance Features: Introduce voting` is perfectly legal
+/// there and simply unrepresentable as a directory here.
+const FORBIDDEN_NAME_CHARS: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+
+/// Windows reserved device names. A directory called `CON` or `COM1` cannot be
+/// created even though every character in it is individually legal.
+const RESERVED_DEVICE_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Longest folder name we emit. A single path component may be 255 characters,
+/// but entities nest arbitrarily deep and the FULL path still has to fit, so
+/// cap well short of the component limit to leave room for descendants.
+const MAX_ENTITY_NAME_LEN: usize = 96;
+
+/// Make `raw` usable as one filesystem path component without throwing the
+/// name away.
+///
+/// Roblox instance names are free-form text; directory names are not. Asking
+/// the OS for a folder called `Governance Features: Introduce voting` fails on
+/// Windows with `os error 267`, and a caller that treats that as fatal loses
+/// the entire subtree. Sanitizing keeps the node instead — the ORIGINAL name
+/// survives in `[metadata] name` (what the Explorer displays), so the only
+/// thing that changes is the on-disk spelling.
+pub fn sanitize_entity_name(raw: &str) -> String {
+    // Forbidden and control characters become '-'.
+    let replaced: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_control() || FORBIDDEN_NAME_CHARS.contains(&c) {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+
+    // Cap the length on a CHAR boundary — never split a UTF-8 sequence.
+    let capped: String = replaced.chars().take(MAX_ENTITY_NAME_LEN).collect();
+
+    // Windows silently strips trailing dots and spaces, which would desync the
+    // name we think we wrote from the one that lands on disk.
+    let trimmed = capped.trim().trim_end_matches(['.', ' ']).trim();
+
+    // `.` and `..` are traversal, not names.
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return "Entity".to_string();
+    }
+
+    let mut out = trimmed.to_string();
+
+    // A reserved device name is rejected whole-cloth, with or without an
+    // extension — `NUL` and `NUL.txt` both fail.
+    let stem = out.split('.').next().unwrap_or("").to_ascii_uppercase();
+    if RESERVED_DEVICE_NAMES.contains(&stem.as_str()) {
+        out.push('-');
+    }
+
+    out
+}
+
 pub fn unique_entity_name(dir: &Path, base: &str) -> String {
-    let base = if is_eep_reserved_name(base) {
+    // Sanitize FIRST. A Roblox name containing `:` or `/` must become a real
+    // folder rather than an `os error 267` that silently drops the node.
+    let sanitized = sanitize_entity_name(base);
+    let base: &str = if is_eep_reserved_name(&sanitized) {
         tracing::warn!(
             "unique_entity_name: caller passed reserved name {:?} — substituting 'Entity'",
             base
         );
         "Entity"
     } else {
-        base
+        &sanitized
     };
     if entity_name_is_available(dir, base) {
         return base.to_string();
@@ -862,6 +939,119 @@ mod apply_overrides_tests {
             .and_then(|v| v.as_str())
             .unwrap();
         assert!(is_valid_uuid(u2) && u2 != "NOT-VALID", "invalid override → fresh mint");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::*;
+
+    /// The exact shape that silently dropped ~10,000 nodes across a 36-place
+    /// Roblox import: a colon in the instance name made the directory name
+    /// invalid (`os error 267`), and the whole node went with it.
+    #[test]
+    fn colon_name_becomes_creatable() {
+        let raw = "Governance Features: Introduce decision-making power";
+        let out = sanitize_entity_name(raw);
+        assert!(!out.contains(':'), "colon must not survive: {out}");
+        assert!(out.starts_with("Governance Features- Introduce"), "{out}");
+    }
+
+    #[test]
+    fn every_forbidden_char_is_replaced() {
+        let out = sanitize_entity_name(r#"a<b>c:d"e/f\g|h?i*j"#);
+        for c in ['<', '>', ':', '"', '/', '\\', '|', '?', '*'] {
+            assert!(!out.contains(c), "{c:?} survived in {out}");
+        }
+        // Content is preserved, not discarded.
+        for c in ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'] {
+            assert!(out.contains(c), "{c:?} was lost from {out}");
+        }
+    }
+
+    #[test]
+    fn control_chars_and_newlines_are_replaced() {
+        let out = sanitize_entity_name("line\nbreak\ttab\0nul");
+        assert!(!out.chars().any(|c| c.is_control()), "{out}");
+    }
+
+    /// Windows silently strips trailing dots/spaces, so a name ending in one
+    /// would not match the folder that actually appears on disk.
+    #[test]
+    fn trailing_dots_and_spaces_are_trimmed() {
+        assert_eq!(sanitize_entity_name("Part.  "), "Part");
+        assert_eq!(sanitize_entity_name("  Part  "), "Part");
+        assert_eq!(sanitize_entity_name("Part..."), "Part");
+    }
+
+    #[test]
+    fn reserved_device_names_are_escaped() {
+        // Bare, lowercase, and with an extension — the OS rejects all three.
+        assert_ne!(sanitize_entity_name("CON").to_ascii_uppercase(), "CON");
+        assert_ne!(sanitize_entity_name("nul").to_ascii_uppercase(), "NUL");
+        assert_ne!(sanitize_entity_name("COM1.txt").to_ascii_uppercase(), "COM1.TXT");
+        // A name that merely CONTAINS a device name is fine.
+        assert_eq!(sanitize_entity_name("CONtainer"), "CONtainer");
+    }
+
+    #[test]
+    fn traversal_and_empty_names_get_a_fallback() {
+        assert_eq!(sanitize_entity_name(""), "Entity");
+        assert_eq!(sanitize_entity_name("   "), "Entity");
+        assert_eq!(sanitize_entity_name("."), "Entity");
+        assert_eq!(sanitize_entity_name(".."), "Entity");
+        // A name made ENTIRELY of forbidden characters keeps its shape
+        // (`///` -> `---`) rather than collapsing to the generic fallback:
+        // it is a perfectly creatable folder, and it stays distinguishable
+        // from a genuinely empty name. The only hard requirement is that
+        // what comes out is non-empty and creatable.
+        let out = sanitize_entity_name("///");
+        assert!(!out.is_empty());
+        assert!(!out.contains('/'), "{out}");
+    }
+
+    #[test]
+    fn long_names_are_capped_on_a_char_boundary() {
+        // Multi-byte chars: a naive byte truncation would panic or corrupt.
+        let raw = "é".repeat(500);
+        let out = sanitize_entity_name(&raw);
+        assert!(out.chars().count() <= MAX_ENTITY_NAME_LEN, "{}", out.chars().count());
+        assert!(out.chars().all(|c| c == 'é'), "truncation split a UTF-8 sequence");
+    }
+
+    #[test]
+    fn ordinary_names_are_untouched() {
+        for name in ["Part", "My Model", "Baseplate", "Wheel_FL", "Rock.001"] {
+            assert_eq!(sanitize_entity_name(name), name, "{name} should pass through");
+        }
+    }
+
+    /// The end-to-end guarantee: a name the OS would reject now produces a
+    /// real folder, and the TRUE name survives in `[metadata] name`.
+    #[test]
+    fn create_instance_survives_an_unsafe_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "eustress_sanitize_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let raw = "Governance: voting/power?";
+        let created = create_instance(&dir, "Part", Some(raw), InstanceOverrides::default())
+            .expect("an unsafe name must not fail creation");
+
+        assert!(created.folder_path.is_dir(), "folder was not created");
+        let toml = std::fs::read_to_string(&created.toml_path).unwrap();
+        assert!(
+            toml.contains(raw),
+            "the original name must survive in metadata: {toml}"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

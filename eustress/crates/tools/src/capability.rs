@@ -195,7 +195,13 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "set_active_universe"
         | "set_next_launch_universe"
         | "promote_entity"
+        // Website service authoring writes TOML inside the Space.
+        | "website_setup"
+        | "website_add_reference"
         | "demote_entity" => Write,
+
+        // Removing a Reference deletes an instance folder.
+        "website_remove_reference" => Destructive,
 
         // --- Read: observation only -------------------------------------
         "query_entities"
@@ -258,6 +264,8 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "scene_overview"
         | "partition_scene"
         | "inspect_scene"
+        | "website_status"
+        | "website_manifest_url"
         | "sim_bindings"
         | "oplog_tail"
         | "sim_step"

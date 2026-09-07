@@ -58,6 +58,7 @@ pub mod shell_tools;
 pub mod simulation_tools;
 pub mod spatial_tools;
 pub mod universe_tools;
+pub mod website_tools;
 
 /// Build a `ToolRegistry` preloaded with every tool this crate ships.
 ///
@@ -67,6 +68,15 @@ pub mod universe_tools;
 /// the engine registers those on top of this baseline.
 pub fn register_all_tools(registry: &mut ToolRegistry) {
     // Entity manipulation.
+    // Website service authoring. File tools, not bridge tools: setting up a
+    // Website service is writing TOML, and requiring a live engine would defeat
+    // the case these exist for.
+    registry.register(website_tools::WebsiteStatusTool);
+    registry.register(website_tools::WebsiteSetupTool);
+    registry.register(website_tools::WebsiteAddReferenceTool);
+    registry.register(website_tools::WebsiteRemoveReferenceTool);
+    registry.register(website_tools::WebsiteManifestUrlTool);
+
     registry.register(entity_tools::CreateEntityTool);
     registry.register(entity_tools::InsertGaussianSplatsTool);
     registry.register(entity_tools::QueryEntitiesTool);

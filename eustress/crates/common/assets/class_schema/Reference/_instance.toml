@@ -1,0 +1,100 @@
+# Reference - Website: one value a website reads. An author marks something in
+# the Explorer as a Reference, and publish resolves every Reference in the
+# Website service into one manifest at universes/{id}/website-manifest.json
+# (WEBSITE_SERVICE.md sections 2.2 and 3). Non-visual, modeled on Folder like
+# Dataset, Series and Connector.
+#
+# This class needs a ClassName::Reference variant in common/src/classes.rs.
+# ClassName::from_str has no catch-all arm, so a class folder without its
+# variant trips the startup validator and file_loader dispatches every instance
+# of it as a Folder.
+#
+# WHY the config lives in [attributes] rather than [properties]: it follows
+# Connector and ExportTarget, the two classes this one is a sibling of, and
+# [attributes] is what the Properties panel renders as editable rows with a type
+# badge, a change-type gear, a delete, and a "+" on the section header. That "+"
+# is what lets an author add a field the baker later learns to read, with no
+# schema change in between.
+#
+# WHY all five kinds' fields ship present-and-empty rather than only the ones
+# the selected kind uses: a field that must be set but is invisible is a trap,
+# and the sharpest one here is run_label, which the spec makes mandatory for a
+# sim reference and which an author would otherwise have to know to add by hand.
+# The baker ignores a field that does not apply to the selected kind, so an
+# unused row is inert rather than wrong. Panel rows sort A to Z within the
+# section, so the grouping below is for whoever reads the file, not the panel.
+
+[metadata]
+class_name = "Reference"
+archivable = true
+
+[attributes]
+# instance | sim | count | measure | expr - which of the five resolvers runs.
+# Five, because the numbers a site quotes come from five different places. A
+# page saying "2,341 parts" and "300 x 100 x 100 mm" is reading the tree, not a
+# scalar, and handling only scalars solves half the problem.
+kind = "instance"
+
+# What `kind` resolves against. The grammar changes per kind:
+#   instance  <path>#<section>.<field>, path relative to the Space root, dotted
+#             fields indexing into TOML tables. Resolved against the LIVE
+#             datamodel rather than the file, so a value the engine computed or
+#             reconciled is the one that gets baked. For example
+#             Workspace/V-Cell/V1/Core/Enclosure#material.custom.wh_per_kg
+#   sim       a published simulation value, e.g. battery.capacity_retention
+#   count     a path glob, e.g. Workspace/V-Cell/V1/Assembly/**
+#   measure   a measure over a subtree, e.g. bbox:Workspace/V-Cell/V1/Assembly,
+#             resolved against the same tree the viewport draws, which is what
+#             makes the drawing and the datasheet agreeing a property of the
+#             system rather than something somebody checks
+#   expr      arithmetic over other reference keys in this namespace, e.g.
+#             energy_wh / pack_mass_kg. Evaluation is a directed acyclic graph;
+#             a cycle fails the publish and names the loop.
+source = ""
+
+# The name this value takes in the manifest, and therefore in a consumer's
+# data-eus={namespace}:{key}. Empty means the instance name is used, which is
+# the common case. Set it only when the manifest name should differ from the
+# name in the Explorer.
+key = ""
+
+# Human-readable caption. The manifest carries it so a site renders the caption
+# the author wrote instead of keeping a second copy that can drift.
+label = ""
+
+# Unit as it should read on the page: Wh/kg, cycles, mm. The manifest carries it
+# as its own field so a consumer can bind the number and the unit to separate
+# elements.
+unit = ""
+
+# Rust format spec applied at bake time, e.g. {:.0}. The manifest emits both the
+# typed `value` and the formatted `display`, so a consumer never reimplements
+# this rounding and never parses a formatted string back into a number. Empty
+# renders the value at its natural precision.
+format = ""
+
+# derived | simulated | measured - where the number came from, which is separate
+# from what it is. Deliberately empty so a new Reference fails the publish until
+# the author states it: the rule this whole feature exists to enforce is that a
+# figure without its basis is not a figure, and a default here would let the
+# least considered answer become the most common one.
+basis = ""
+
+# kind = sim only. Which run the number came from. The publish FAILS when a sim
+# reference leaves this empty, because a number lifted from whatever happened to
+# be in memory is how a figure ends up on a website with no way to reproduce it.
+run_label = ""
+
+# kind = sim only. Which point of that run to read:
+# final | min | max | mean | at_cycle:<n>. Unlike run_label this one carries a
+# default, because "final" is both the safe reading and the spec's own example.
+at = "final"
+
+# kind = count only. Narrows the glob, e.g. class_name = Part. Empty counts
+# every entity the glob matches.
+filter = ""
+
+# kind = measure only. Which measure to take: x | y | z | volume | surface. No
+# default, because which one a datasheet quotes is not guessable, so an empty
+# axis on a measure reference fails the publish.
+axis = ""

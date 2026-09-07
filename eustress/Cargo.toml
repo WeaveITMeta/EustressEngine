@@ -192,10 +192,17 @@ gpu-allocator = { path = ".patches/gpu-allocator-fresh" }
 fjall = { path = "vendor/fjall" }
 lsm-tree = { path = "vendor/lsm-tree" }
 
+# codegen-units was 8. The Slint UI compiles to a single generated file of
+# over a million lines, and at 8 units rustc averaged 1.1 busy threads across a
+# 241-minute release build: 16,066 CPU seconds spread over four hours of wall
+# clock on a 255 GB machine that was never short of memory. The build was
+# serialised, not starved. 32 units gives the generated code somewhere to
+# parallelise; the codegen-quality cost is small and falls on UI code rather
+# than on the simulation tick.
 [profile.release]
 opt-level = 3
 lto = false
-codegen-units = 8
+codegen-units = 32
 strip = true
 
 

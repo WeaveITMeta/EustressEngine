@@ -1,0 +1,83 @@
+# Website Service Properties
+# The panel an author sees. The store it reads and writes is the Space's own
+# Website/_service.toml, scaffolded from service_templates/Website.
+#
+# Sections and rows render in ALPHABETICAL order, not file order: the panel
+# builder walks a toml::map::Map, and toml 0.8 is pulled without preserve_order,
+# so that map is a BTreeMap. These sections therefore appear as Access, Data,
+# Description, Publishing whatever order they are written in here. Rows are
+# named so that ordering reads acceptably, which is why the destructive action
+# in [Access] sorts last.
+#
+# READ and WRITE resolve the store key differently, and the difference matters
+# when naming a row. Reading honours an explicit `source`; writing ignores it and
+# re-derives the key from the row name with a naive per-capital snake_caser. So
+# an EDITABLE row must be named such that to_snake_case(RowName) equals its store
+# key, and `source` is used below only on readonly rows whose display name is
+# shorter than the field they show.
+
+[Data]
+Name = { type = "string", value = "Website", readonly = true }
+ClassName = { type = "string", value = "Website", readonly = true }
+
+[Publishing]
+Namespace = { type = "string", value = "", description = "The identifier the manifest is published under, and the name a consumer writes in data-eus={namespace}:{key}. Publish fails while this is empty rather than publishing under a blank namespace." }
+SchemaVersion = { type = "int", value = 1, description = "Bump this when the MEANING of a key changes rather than its value, so a rename is a breaking change a consumer opts into. Issuing or rotating a key never bumps it." }
+
+# RotateKey is an ACTION wearing the only affordance this grammar has.
+#
+# The panel dispatches ten widget types and none of them is a button. The two
+# button affordances in properties.slint are hardcoded, gated on
+# category == "Attributes" and on is_attribute, and neither is reachable from a
+# service schema. `type = "enum"` is no help either: `options` is read on the
+# instance path and ignored on the service path, so an enum row degrades to a
+# plain text field.
+#
+# The closest existing type is a bool the write path intercepts, a pattern
+# already in the codebase: CAD feature deletion is a "delete" pseudo-property
+# that fires when its raw value is "true", alongside the "Var." and "Tree." key
+# prefixes.
+#
+# WHAT THE UI LAYER MUST ADD, in the service property write match in slint_ui.rs
+# (the match on key.as_str() that already carries "Icon", "Description",
+# "ClockTime" and "ApiKey"), as a new arm placed BEFORE the catch-all:
+#
+#   "RotateKey" | "rotate_key" if val == "true" => {
+#     1. mint a new key and register it with the api.eustress.dev worker
+#     2. move the outgoing key_id into previous_key_id and keep that key valid
+#        for key_overlap_days, so a site still running it stays up
+#     3. write key_id and key_preview from the new key; stamp key_rotated_at
+#        with RFC 3339 UTC, and key_created_at only while it is still empty
+#     4. show the raw key ONCE in a reveal dialog modelled on
+#        api_key_dialog.slint, which already has the masking and the
+#        "copy it before you close this" flow
+#     5. write rotate_key back to false, so the row is a momentary action
+#        rather than a switch that latches on
+#     6. set changed = true so the service persists
+#   }
+#
+# Skip that arm and the generic path stores true, the toggle sticks on forever,
+# and no key is ever minted. The row would look like it worked.
+#
+# AccessEnforced needs a second, smaller guard in the same place: refuse to set
+# it true while key_id is empty, and say why. Enforcing against a key that was
+# never issued locks out the author along with every consumer.
+#
+# Note what is NOT here: the raw key. It is shown once at mint time and is never
+# written into the Space, because Website/_service.toml ships inside the
+# published .pak and would be downloadable by anyone. Full reasoning is in the
+# service template.
+
+[Access]
+AccessEnforced = { type = "bool", value = false, description = "When on, the worker serves the manifest only to a request carrying a valid key. Issue a key first: enforcing against a key that was never issued locks out every consumer including you." }
+KeyCreated = { type = "string", source = "key_created_at", value = "", readonly = true, description = "When the first key for this Space was issued, in UTC." }
+KeyId = { type = "string", value = "", readonly = true, description = "Short stable handle for the current key, such as wk_3f8a12. This is the name that appears in request and rate-limit logs, so it is what you use when talking about a consumer. Empty until you mint a key." }
+KeyOverlapDays = { type = "int", value = 30, description = "How long the previous key keeps working after a rotation, in whole days. Set it to cover your slowest consumer's redeploy, so rotating is a migration instead of an outage." }
+KeyPreview = { type = "string", value = "", readonly = true, description = "First and last few characters of the current key, so you can eyeball-match the value your site is sending. The full key is shown once when it is minted and is never stored in the Space, because this file ships inside the published .pak." }
+KeyRotated = { type = "string", source = "key_rotated_at", value = "", readonly = true, description = "When the key was last rotated, in UTC. Empty until the first rotation." }
+PreviousKeyId = { type = "string", value = "", readonly = true, description = "The key that rotation replaced. It keeps working for KeyOverlapDays so a site still running it stays up. Empty when no rotation is in flight." }
+RotateKey = { type = "bool", value = false, description = "Turn this on to mint a new key. The engine shows the new key once so you can copy it, keeps the previous key working for KeyOverlapDays, then switches this back off. Rotating is how you cut off a consumer." }
+
+[Description]
+Description = { type = "string", value = "Website holds the References a site reads. On publish they bake into one manifest at universes/{id}/website-manifest.json, and a site fetches that single document to update every value it shows.", readonly = true }
+KeyVisibility = { type = "string", value = "The manifest key is revocable attribution and rate limiting rather than secrecy: a website sends it from browser JavaScript, so anyone who opens devtools can read it.", readonly = true }

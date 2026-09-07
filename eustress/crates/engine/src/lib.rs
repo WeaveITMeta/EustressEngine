@@ -194,6 +194,10 @@ pub mod spawners;
 pub mod physics;         // Wave 6.B — mover runtime systems (MoversPlugin)
 pub mod interaction;     // Wave 6.D — interaction runtime systems (InteractionPlugin)
 pub mod txt_to_toml_watcher;
+// Network exposure of the in-process stream. Gated on `stream-node` (opt-in,
+// not in `core`) because the node is unauthenticated — see the feature comment
+// in Cargo.toml.
+#[cfg(feature = "stream-node")]
 pub mod stream_node_plugin;
 pub mod updater;
 pub mod simulation;
@@ -228,6 +232,9 @@ pub mod photoreal;
 // Free-camera Space↔Space teleport, driven by `[attributes]` on ordinary
 // instances — no new class, no revival of the dead `scene::PortalData`.
 pub mod portal;
+// Website service: resolves References against the live datamodel and bakes the
+// published manifest a customer site reads. See docs/design/WEBSITE_SERVICE.md.
+pub mod website;
 pub mod soul_script_migration;
 
 // SimWriterResource must live in the lib so scenarios/plugin.rs and viga/pipeline.rs

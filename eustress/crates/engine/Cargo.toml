@@ -1,6 +1,6 @@
 [package]
 name = "eustress-engine"
-version = "0.1.0"
+version = "0.3.6"
 description = "EustressEngine - Desktop 3D Editor"
 authors = ["EustressEngine Contributors"]
 edition = "2021"
@@ -77,7 +77,7 @@ arboard = { version = "3", optional = true }
 # Workspace members
 eustress-common = { path = "../common", features = ["physics", "realism", "realism-scripting", "luau", "gui"] }
 eustress-bliss = { path = "../bliss" }
-eustress-stream-node = { path = "../stream-node" }
+eustress-stream-node = { path = "../stream-node", optional = true }
 # Parametric BRep + Studio Boolean (Drafting tab CSG)
 eustress-cad = { path = "../cad" }
 # Shared tool registry — single source of truth for MCP tool
@@ -405,8 +405,24 @@ core = [
 realism-scripting = []
 # Wry webview support (Windows/macOS/Linux)
 webview = ["wry"]
-# EustressStream streaming: scene deltas, simulation results, iteration history, Rune audit trail
+# EustressStream streaming: scene deltas, simulation results, iteration history, Rune audit trail.
+# IN-PROCESS ONLY — ring buffers inside the engine, no socket, no process
+# boundary crossed. Safe in the default tier.
 streaming = ["eustress-common/streaming"]
+
+# StreamNode — exposes the in-process stream on a TCP socket (plus REST/SSE on
+# port+10000) so sibling processes can subscribe and publish.
+#
+# DELIBERATELY NOT IN `core`. The node has no authentication: every connected
+# peer may publish into any topic ring and subscribe to any other, including
+# `scene_deltas` (live scene contents) and `agent_commands`. A default
+# `cargo build` must not open that surface, so this is opt-in:
+#
+#     cargo run --features stream-node
+#
+# Even when enabled it binds 127.0.0.1 (see `NodeConfig::bind_addr`); reaching
+# it from another host additionally requires an explicit `bind_all()`.
+stream-node = ["streaming", "dep:eustress-stream-node"]
 # Toast notifications (bottom-right stack + Settings tab)
 notifications = []
 # Soul Panel — script audit view with Rune/Luau split
