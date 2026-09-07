@@ -321,6 +321,14 @@ fn build_fetcher(eustress_root: &Path) -> Option<Arc<dyn AssetFetcher>> {
                 chain.push(Arc::new(NetworkFetcher::with_cookie(tok)));
             }
             _ => {
+                // Say this UP FRONT. Roblox gates most asset downloads behind a
+                // cookie, so without one every mesh/texture/sound 401s — a past
+                // 36-place run logged 62,598 of them and imported almost no
+                // media. Learning that from the report afterwards is too late.
+                println!(
+                    "  WARNING: EUSTRESS_ROBLOSECURITY is not set — gated assets will fail                      with HTTP 401 and meshes/textures/sounds will be MISSING.
+                                Set it to a .ROBLOSECURITY cookie to import media."
+                );
                 chain.push(Arc::new(NetworkFetcher::new()));
             }
         }

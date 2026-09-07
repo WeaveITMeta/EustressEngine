@@ -50,6 +50,27 @@ pub fn roblox_to_eustress_class(rbx_class: &str) -> Option<ClassName> {
 mod tests {
     use super::*;
 
+    /// Legacy surface joints are STRUCTURAL — a 36-place import dropped 7,091
+    /// of them (4,556 ManualWeld + 2,328 Snap + 200 Rotate* + 7 Glue), which
+    /// lets every welded assembly fall apart once physics runs.
+    #[test]
+    fn legacy_surface_joints_are_mapped() {
+        for (rbx, expect) in [
+            ("ManualWeld", ClassName::Weld),
+            ("Snap", ClassName::Weld),
+            ("Glue", ClassName::Weld),
+            ("Rotate", ClassName::HingeConstraint),
+            ("RotateP", ClassName::Motor),
+            ("RotateV", ClassName::VelocityMotor),
+        ] {
+            assert_eq!(
+                roblox_to_eustress_class(rbx),
+                Some(expect),
+                "{rbx} must not be dropped"
+            );
+        }
+    }
+
     #[test]
     fn maps_basic_parts() {
         assert_eq!(roblox_to_eustress_class("Part"), Some(ClassName::Part));

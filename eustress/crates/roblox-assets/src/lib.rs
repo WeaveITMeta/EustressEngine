@@ -69,6 +69,9 @@ pub struct NetworkFetcher {
     /// `.ROBLOSECURITY` token, if the integrator supplied one. Treated as
     /// a secret — never written to logs or errors.
     cookie: Option<String>,
+    /// Consecutive authentication rejections (HTTP 401/403) seen so far.
+    /// Reset by any success.
+    auth_failures: std::sync::atomic::AtomicU32,
 }
 
 impl NetworkFetcher {
@@ -79,6 +82,7 @@ impl NetworkFetcher {
                 .user_agent("Eustress-RobloxImport/0.1 (+https://eustress.dev)")
                 .build(),
             cookie: None,
+            auth_failures: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -102,8 +106,24 @@ impl Default for NetworkFetcher {
     }
 }
 
+/// Consecutive 401/403 responses after which the fetcher stops calling the
+/// network at all.
+///
+/// Roblox gates most asset downloads behind a `.ROBLOSECURITY` cookie. Without
+/// one EVERY fetch returns 401 — one 36-place import logged **62,598** of them,
+/// each a full network round-trip, which dominated the run's wall time and
+/// buried the genuine failures. The situation never recovers on its own (a
+/// missing cookie stays missing), so once it is unmistakable, stop asking.
+const AUTH_FAILURE_TRIP: u32 = 32;
+
 impl AssetFetcher for NetworkFetcher {
     fn fetch(&self, asset_id: u64) -> Result<Vec<u8>, String> {
+        use std::sync::atomic::Ordering;
+        if self.auth_failures.load(Ordering::Relaxed) >= AUTH_FAILURE_TRIP {
+            return Err(format!(
+                "rbxassetid://{asset_id} skipped — {AUTH_FAILURE_TRIP} consecutive auth                  rejections; Roblox requires a .ROBLOSECURITY cookie for these assets.                  Set EUSTRESS_ROBLOSECURITY and re-run to fetch them."
+            ));
+        }
         let url = Self::url_for(asset_id);
         // Build the request. Attach the cookie only if present; the header
         // value (the secret) is intentionally never logged.
@@ -113,9 +133,19 @@ impl AssetFetcher for NetworkFetcher {
         }
         tracing::debug!(asset_id, "roblox-assets: fetching asset over network");
 
-        let resp = req
-            .call()
-            .map_err(|e| format!("network fetch rbxassetid://{asset_id} failed: {}", describe_ureq(e)))?;
+        let resp = req.call().map_err(|e| {
+            // Track auth rejections so a missing cookie trips the breaker
+            // instead of repeating a guaranteed failure thousands of times.
+            if matches!(&e, ureq::Error::Status(401 | 403, _)) {
+                let n = self.auth_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                if n == AUTH_FAILURE_TRIP {
+                    tracing::warn!(
+                        "roblox-assets: {AUTH_FAILURE_TRIP} consecutive auth rejections —                          halting network asset fetches. Set EUSTRESS_ROBLOSECURITY                          (a .ROBLOSECURITY cookie) and re-run to import meshes/textures."
+                    );
+                }
+            }
+            format!("network fetch rbxassetid://{asset_id} failed: {}", describe_ureq(e))
+        })?;
 
         // Read the body with a hard cap.
         let mut reader = resp.into_reader().take(MAX_ASSET_BYTES as u64 + 1);
@@ -130,6 +160,8 @@ impl AssetFetcher for NetworkFetcher {
         if bytes.is_empty() {
             return Err(format!("rbxassetid://{asset_id} returned no bytes"));
         }
+        // A success proves the credential situation is fine; clear the streak.
+        self.auth_failures.store(0, Ordering::Relaxed);
         tracing::debug!(asset_id, len = bytes.len(), "roblox-assets: fetched");
         Ok(bytes)
     }

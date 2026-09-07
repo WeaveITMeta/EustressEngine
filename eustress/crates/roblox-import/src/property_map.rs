@@ -1333,7 +1333,11 @@ fn try_character_property(bag: &mut PropertyBag, target_class: ClassName, key: &
 /// Refs -> early-return false so apply_variant's Ref arm collects them.
 fn try_constraint_property(bag: &mut PropertyBag, target_class: ClassName, key: &str, variant: &Variant) -> bool {
     use ClassName::*;
-    let is_joint = matches!(target_class, WeldConstraint | Motor6D | HingeConstraint | DistanceConstraint | SpringConstraint | RopeConstraint | PrismaticConstraint | BallSocketConstraint);
+    // `Weld`/`Motor`/`VelocityMotor` are the LEGACY surface joints
+    // (Roblox `ManualWeld`/`Snap`/`Glue`/`Rotate*`). They carry the same
+    // Part0/Part1 + C0/C1 payload as the modern constraints, so they have to
+    // be in this list or the class survives the import with no parts attached.
+    let is_joint = matches!(target_class, WeldConstraint | Motor6D | HingeConstraint | DistanceConstraint | SpringConstraint | RopeConstraint | PrismaticConstraint | BallSocketConstraint | Weld | Motor | VelocityMotor);
     let is_attachment = matches!(target_class, Attachment);
     if !is_joint && !is_attachment {
         return false;
@@ -1399,7 +1403,7 @@ fn try_constraint_property(bag: &mut PropertyBag, target_class: ClassName, key: 
             _ => {}
         }
     }
-    if matches!(target_class, Motor6D | WeldConstraint) {
+    if matches!(target_class, Motor6D | WeldConstraint | Weld | Motor | VelocityMotor) {
         match key {
             "C0" => { if let Variant::CFrame(cf) = variant { put_section(bag, "constraint", "c0", f32_triple(cf.position.x, cf.position.y, cf.position.z)); return true; } }
             "C1" => { if let Variant::CFrame(cf) = variant { put_section(bag, "constraint", "c1", f32_triple(cf.position.x, cf.position.y, cf.position.z)); return true; } }

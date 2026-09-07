@@ -403,6 +403,11 @@ fn placeholder(parsed: &AssetReference, raw_uri: &str, extra_reason: Option<Stri
             u
         )),
         AssetReference::Other(u) => Some(format!("unknown asset URI scheme: {}", u)),
+        // An EMPTY plain path is not a failure — it is the normal "no asset
+        // assigned" state of `TextureId`/`MeshId` on an ordinary part. Warning
+        // on it produced 20,618 entries in one 36-place import (a quarter of
+        // all warnings), burying the real fetch failures.
+        AssetReference::Plain(p) if p.trim().is_empty() => None,
         AssetReference::Plain(p) => Some(format!(
             "plain path '{}' kept as placeholder — no AssetFetcher integration",
             p
