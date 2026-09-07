@@ -17,9 +17,6 @@ yanked = "warn"
 # incompatible semver lines our direct deps cannot reach, or no fix exists).
 # Each entry should be re-checked when its parent dependency line is bumped.
 ignore = [
-    # rsa "Marvin Attack" timing sidechannel — NO fixed release exists
-    # (rsa caps at 0.9.x); pulled via sqlx-mysql <- sqlx 0.8 <- eustress-backend.
-    "RUSTSEC-2023-0071",
     # protobuf 2.x uncontrolled recursion — fix only in 3.7.2; pulled via
     # prometheus 0.13 <- eustress-server.
     "RUSTSEC-2024-0437",
@@ -33,15 +30,25 @@ ignore = [
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
-    # glib 0.18 unsound iterator — fix in 0.20 (whole gtk3 binding line);
-    # gtk3 is a transitive windowing/dialog dep, upgrade tracked upstream.
-    "RUSTSEC-2024-0429",
-    # lru 0.12 unsound IterMut — fix in 0.16.3; direct dep in
-    # eustress-common (bump candidate) + aws-sdk-s3 transitive.
-    "RUSTSEC-2026-0002",
-    # rand 0.7 unsound fill on small slices — no 0.7 fix; via
-    # phf_generator 0.8 <- phf_codegen 0.8 (build-time codegen only).
-    "RUSTSEC-2026-0097",
+    # lru 0.16 — LruCache::pop() is not panic-safe (use-after-free if a key's
+    # Drop panics). Fix is 0.18.2+, reachable only if aws-sdk-s3 bumps: the
+    # single copy left in the tree is lru 0.16.4 <- aws-sdk-s3 1.137 <-
+    # eustress-common's optional `s3` feature. The unused direct `lru = "0.12"`
+    # that also carried RUSTSEC-2026-0002 was removed outright rather than
+    # ignored; 0002 no longer matches because 0.16.4 is past its 0.16.3 fix.
+    "RUSTSEC-2026-0253",
+    # quick-xml <0.41 — quadratic duplicate-attribute scan (0194) and
+    # unbounded namespace-declaration allocation in NsReader (0195). Both are
+    # DoS-on-hostile-XML, and neither copy in the tree parses untrusted input
+    # on our behalf:
+    #   0.22 via vtkio 0.6.3 (newest) <- truck-meshalgo, the CAD kernel's
+    #        VTK mesh reader — same unfixable chain as RUSTSEC-2026-0041;
+    #   0.39 via wayland-scanner <- smithay-client-toolkit <- winit <- bevy,
+    #        a build-time protocol-XML generator on the Linux windowing path.
+    # Re-check when truck-meshalgo drops vtkio 0.6, or when a bevy bump
+    # carries a newer winit/wayland stack.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 [bans]
