@@ -152,7 +152,13 @@ fn clamped_canvas_size(raw_w_px: f32, raw_h_px: f32) -> (u32, u32, f32) {
 /// demand up to `atlas.max_dim / TILE_H`, so the larger ceiling is only
 /// allocated when a dense scene actually needs it; normal (non-dense)
 /// scenes pay nothing extra for the higher cap.
-const INITIAL_ATLAS_ROWS: u32 = 8;
+// One row (16384×192×4 = 12.6 MB) instead of eight (100.7 MB). The atlas keeps
+// THREE copies of its pixels — the GPU texture, `Image.data` (the upload
+// source) and `BillboardAtlas.cpu_buf` (the compositing buffer) — so the old
+// initial size cost ~300 MB of RAM+VRAM on a Space with no billboards at all.
+// `try_grow` doubles rows on demand (1→2→…→64), and 64 rows was already the
+// practical ceiling from 8 (128 rows overshoots `max_dim`), so nothing is lost.
+const INITIAL_ATLAS_ROWS: u32 = 1;
 /// ASPIRATIONAL ceiling on atlas dimension in pixels — the actual enforced
 /// limit is `BillboardAtlas.max_dim` (runtime, computed once in
 /// `init_billboard_atlas` as `min(MAX_ATLAS_DIM, device.limits().max_texture_dimension_2d)`).
