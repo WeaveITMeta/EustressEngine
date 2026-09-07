@@ -175,6 +175,8 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "cad_add_sketch_entity"
         | "cad_add_constraint"
         | "cad_dimension"
+        | "cad_offset_sketch"
+        | "cad_publish_part"
         // Engine-registered Workshop tools that mutate state or write
         // files — see the Read-bucket note above for why they were
         // missing entirely.
@@ -237,6 +239,7 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "cad_measure"
         | "cad_list_templates"
         | "cad_solve_sketch"
+        | "cad_list_sources"
         // Mode-specific Workshop tools. These are registered by the
         // ENGINE (engine/src/workshop/mod.rs) on top of this crate's
         // baseline, so they are advertised to callers and to the

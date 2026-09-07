@@ -692,6 +692,11 @@ fn evaluate_feature_into_body(
         }
         Pattern { kind, features, count, spacing, direction, axis, angle, combine } => {
             let combine = *combine;
+            // Resolve the count through the same variable/expression
+            // path every other algorithmic parameter uses, so
+            // `count = "hole_count"` works exactly like
+            // `spacing = "pitch"`.
+            let count = count.resolve(vars)?;
             // A subtractive pattern replicates the source feature's
             // TOOL, not its result. Patterning a Hole's result would
             // mean stamping copies of an already-drilled plate; what
@@ -714,7 +719,7 @@ fn evaluate_feature_into_body(
                         Some(s) => resolve_length_meters(s, vars)?,
                         None => 1.0,
                     };
-                    pattern_linear(&source, dir, step, *count)
+                    pattern_linear(&source, dir, step, count)
                 }
                 crate::PatternKind::Circular => {
                     let axis_ref = axis.as_deref().unwrap_or("y");
@@ -723,7 +728,7 @@ fn evaluate_feature_into_body(
                         Some(a) => resolve_angle_radians(a, vars)?,
                         None    => TAU,
                     };
-                    pattern_circular(&source, origin, axis_dir, total, *count)
+                    pattern_circular(&source, origin, axis_dir, total, count)
                 }
                 crate::PatternKind::Path => {
                     return Err(CadError::NotImplemented(
@@ -1616,13 +1621,6 @@ fn parse_sketch_ref(s: &str) -> CadResult<(String, String)> {
     Ok((sk.to_string(), ent.to_string()))
 }
 
-fn first_sketch_point(sk: &Sketch) -> Option<[f64; 2]> {
-    sk.entities.iter().find_map(|e| match e {
-        SketchEntity::Point { p } => Some(*p),
-        _ => None,
-    })
-}
-
 /// Resolve an entity spec like `"point-2"` against a sketch.
 ///
 /// The index used to be parsed and then thrown away, so every
@@ -1701,10 +1699,19 @@ fn reflection_matrix(origin: Point3, normal: Vector3) -> Matrix4 {
 }
 
 fn resolve_length_meters(s: &str, vars: &HashMap<String, String>) -> CadResult<f64> {
-    let q = crate::feature_tree::resolve_quantity(s, vars)
-        .ok_or_else(|| CadError::EvalFailed {
+    // `resolve_quantity_explained`, not `resolve_quantity`: every
+    // algorithmic parameter now resolves through one rule chain
+    // (literal, then variable, then expression), so every one of them
+    // should fail with the same vocabulary. The `Option` variant throws
+    // the reason away, which was survivable when a value could only be
+    // a literal or a variable name and wrong meant misspelt. An
+    // expression has many more ways to be wrong (an unknown name nested
+    // inside it, unbalanced parentheses, adding a length to a scalar),
+    // and "could not resolve 'wall * 2'" names none of them.
+    let q = crate::feature_tree::resolve_quantity_explained(s, vars)
+        .map_err(|why| CadError::EvalFailed {
             feature: "length lookup".into(),
-            reason: format!("could not resolve '{}' as a Quantity", s),
+            reason: format!("could not resolve '{s}': {why}"),
         })?;
     match q.unit {
         crate::Unit::Length(_) => Ok(q.to_si()),
@@ -1737,10 +1744,10 @@ fn resolve_length_meters(s: &str, vars: &HashMap<String, String>) -> CadResult<f
 }
 
 fn resolve_angle_radians(s: &str, vars: &HashMap<String, String>) -> CadResult<f64> {
-    let q = crate::feature_tree::resolve_quantity(s, vars)
-        .ok_or_else(|| CadError::EvalFailed {
+    let q = crate::feature_tree::resolve_quantity_explained(s, vars)
+        .map_err(|why| CadError::EvalFailed {
             feature: "angle lookup".into(),
-            reason: format!("could not resolve '{}' as a Quantity", s),
+            reason: format!("could not resolve '{s}': {why}"),
         })?;
     match q.unit {
         crate::Unit::Angle(_) => Ok(q.to_si()),
@@ -1976,12 +1983,3 @@ fn count_missing_faces<P, C, S: Clone>(
         .count()
 }
 
-fn index_sketches(tree: &FeatureTree) -> HashMap<String, &Sketch> {
-    let mut out = HashMap::new();
-    for entry in &tree.entries {
-        if let FeatureEntry::Sketch { name, body } = entry {
-            out.insert(name.clone(), body);
-        }
-    }
-    out
-}

@@ -82,6 +82,10 @@ impl ToolHandler for CadCreatePartTool {
                     "parent": {
                         "type": "string",
                         "description": "Path relative to Workspace/ for nesting under a Model"
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Library id (see cad_list_sources). Makes the new part a PLACEMENT of that shared definition instead of an independent copy: its geometry is owned by the library entry, edits to it are refused, and editing the definition restates every placement at once. Ignores `template`."
                     }
                 },
                 "required": []
@@ -109,6 +113,44 @@ impl ToolHandler for CadCreatePartTool {
             .unwrap_or("")
             .trim()
             .to_string();
+        let source = input
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        // A placement takes its geometry from the library, so the
+        // template is not consulted at all. Resolved first, and loudly,
+        // because silently building a plate when the caller asked for a
+        // placement of `bracket_m6` is the substitution bug this tool
+        // already had once.
+        let mut sourced: Option<(String, String)> = None;
+        if !source.is_empty() {
+            if !eustress_cad::is_valid_library_id(&source) {
+                return err(
+                    "cad_create_part",
+                    format!(
+                        "'{source}' is not a valid library id: one path segment, \
+                         letters/digits/_-. only"
+                    ),
+                );
+            }
+            let lib = cad_library_dir(ctx).join(&source).join("features.toml");
+            match std::fs::read_to_string(&lib) {
+                Ok(toml) => sourced = Some((source.clone(), toml)),
+                Err(e) => {
+                    return err(
+                        "cad_create_part",
+                        format!(
+                            "no library part '{source}' ({e}). Published parts: [{}]. \
+                             Publish one with cad_publish_part.",
+                            library_ids(ctx).join(", ")
+                        ),
+                    )
+                }
+            }
+        }
 
         // Resolve against the SAME list `cad_list_templates` reads, so
         // the two can never disagree again.
@@ -129,24 +171,33 @@ impl ToolHandler for CadCreatePartTool {
             "shell" | "shelled" => "shelled_box",
             other => other,
         };
-        let features = match eustress_cad::templates::all()
-            .iter()
-            .find(|(n, _)| *n == canonical)
-        {
-            Some((_, toml)) => *toml,
-            None => {
-                let known: Vec<&str> = eustress_cad::templates::all()
-                    .iter()
-                    .map(|(n, _)| *n)
-                    .collect();
-                return err(
-                    "cad_create_part",
-                    format!(
-                        "unknown template '{template}' — available: {}. \
-                         (Call cad_list_templates for each one's variables.)",
-                        known.join(", ")
-                    ),
-                );
+        // A placement's geometry comes from the library, so the
+        // template argument is not consulted at all on that path. It
+        // must not be able to fail the call either: refusing to place
+        // `bracket_m6` because the caller left `template` at some stale
+        // value would be the substitution bug inverted.
+        let features: &str = if sourced.is_some() {
+            ""
+        } else {
+            match eustress_cad::templates::all()
+                .iter()
+                .find(|(n, _)| *n == canonical)
+            {
+                Some((_, toml)) => *toml,
+                None => {
+                    let known: Vec<&str> = eustress_cad::templates::all()
+                        .iter()
+                        .map(|(n, _)| *n)
+                        .collect();
+                    return err(
+                        "cad_create_part",
+                        format!(
+                            "unknown template '{template}': available are {}. \
+                             (Call cad_list_templates for each one's variables.)",
+                            known.join(", ")
+                        ),
+                    );
+                }
             }
         };
         // Report what was actually built, not what was requested.
@@ -205,28 +256,86 @@ scene = "Scene0"
 "#,
             pos[0], pos[1], pos[2]
         );
+        // `[attributes]` already round-trips through the instance loader,
+        // so the placement edge needs no new serialization to survive a
+        // save and reload.
+        let instance_toml = match sourced {
+            Some((ref id, _)) => {
+                format!("{instance_toml}\n[attributes]\ncad_source = \"{id}\"\n")
+            }
+            None => instance_toml,
+        };
 
         let toml_path = instance_dir.join("_instance.toml");
         let features_path = instance_dir.join("features.toml");
         if let Err(e) = std::fs::write(&toml_path, instance_toml) {
             return err("cad_create_part", format!("write instance: {e}"));
         }
-        if let Err(e) = std::fs::write(&features_path, features) {
+        // A placement still gets a local copy of the tree, so it renders
+        // before the first library sync rather than sitting invisible for
+        // half a second. The library overwrites it from then on.
+        let body: &str = match sourced {
+            Some((_, ref toml)) => toml.as_str(),
+            None => features,
+        };
+        if let Err(e) = std::fs::write(&features_path, body) {
             return err("cad_create_part", format!("write features: {e}"));
         }
 
-        ok(
-            "cad_create_part",
-            format!("Created CadPart '{folder}' ({template}) at {}", instance_dir.display()),
-            serde_json::json!({
-                "ok": true,
-                "name": folder,
-                "template": template,
-                "path": instance_dir.to_string_lossy(),
-                "features": features_path.to_string_lossy(),
-            }),
-        )
+        let (summary, kind) = match sourced {
+            Some((ref id, _)) => (
+                format!(
+                    "Placed CadPart '{folder}' sourced from library part '{id}' at {}",
+                    instance_dir.display()
+                ),
+                serde_json::json!({ "sourced_from": id }),
+            ),
+            None => (
+                format!(
+                    "Created CadPart '{folder}' ({template}) at {}",
+                    instance_dir.display()
+                ),
+                serde_json::json!({ "template": template }),
+            ),
+        };
+        let mut data = serde_json::json!({
+            "ok": true,
+            "name": folder,
+            "path": instance_dir.to_string_lossy(),
+            "features": features_path.to_string_lossy(),
+        });
+        merge_state(&mut data, kind);
+        ok("cad_create_part", summary, data)
     }
+}
+
+/// Where shared CAD definitions live.
+///
+/// Universe-level, beside the primitive GLBs the instance loader already
+/// reads from `.eustress/assets/parts/`. A part library scoped to one
+/// Space is a folder, not a library: the point of publishing a bracket is
+/// that every Space in the Universe can place it.
+fn cad_library_dir(ctx: &ToolContext) -> std::path::PathBuf {
+    ctx.universe_root
+        .join(".eustress")
+        .join("assets")
+        .join("cad")
+}
+
+/// Published library ids, sorted. Empty when nothing is published yet,
+/// which is a legitimate state and not an error.
+fn library_ids(ctx: &ToolContext) -> Vec<String> {
+    let dir = cad_library_dir(ctx);
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.path().join("features.toml").is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    out.sort();
+    out
 }
 
 pub struct CadSetVariableTool;
@@ -615,6 +724,12 @@ fn mesh_json(mesh: Option<&EvalMesh>, weld_eps: f64) -> serde_json::Value {
         "nonmanifold_edges": topo.nonmanifold_edges,
         "degenerate_triangles": topo.degenerate_triangles,
         "winding_inverted": mp.signed_volume < 0.0,
+        // Decides the physical footprint: a convex body's collider is an
+        // exact single hull, anything else needs a convex decomposition.
+        // Reported because "why is my collider a compound" is otherwise
+        // unanswerable from the tool surface.
+        "is_convex": topo.is_convex(),
+        "reflex_edges": topo.reflex_edges,
     })
 }
 
@@ -1564,7 +1679,7 @@ impl ToolHandler for CadAddFeatureTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "cad_add_feature",
-            description: "Append or insert a feature into a CadPart's tree. op = extrude | revolve | hole | mirror | pattern | boolean | split | sweep | fillet | chamfer | shell (loft is rejected: not implemented). Op-specific fields pass through to the kernel — extrude: sketch, depth, end_condition, combine, both_sides; hole: sketch_point, diameter, depth; pattern: pattern_kind, features, count, spacing/direction/axis/angle; boolean: target, boolean_op; mirror: plane, features; split: plane. Lengths and angles MUST be unit strings (\"20 mm\", \"90 deg\") or variable names. Returns the re-evaluated validity state so the edit's soundness is visible immediately.",
+            description: "Append or insert a feature into a CadPart's tree. op = extrude | revolve | hole | mirror | pattern | boolean | split | sweep | fillet | chamfer | shell (loft is rejected: not implemented). Op-specific fields pass through to the kernel — extrude: sketch, depth, end_condition, combine, both_sides; hole: sketch_point, diameter, depth; pattern: pattern_kind, features, count, spacing/direction/axis/angle; boolean: target, boolean_op; mirror: plane, features; split: plane. Lengths and angles MUST be unit strings (\"20 mm\", \"90 deg\") or variable names. Every algorithmic parameter takes a rule, not just a value: count, spacing, angle, depth and diameter all accept a variable name or an arithmetic expression (\"pitch * 2\", \"rows * cols\", \"width/2 - wall\"), so one variable edit restates the whole pattern. Returns the re-evaluated validity state so the edit's soundness is visible immediately.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1585,7 +1700,7 @@ impl ToolHandler for CadAddFeatureTool {
                     "plane": { "type": "string", "description": "mirror/split: plane reference" },
                     "features": { "type": "array", "items": { "type": "string" }, "description": "mirror/pattern: feature names to operate on" },
                     "pattern_kind": { "type": "string", "description": "linear | circular | path | sketch" },
-                    "count": { "type": "integer" },
+                    "count": { "type": ["integer", "string"], "description": "pattern: how many instances. A whole number, or a variable/expression string (\"hole_count\", \"rows * cols\"), so the repetition itself is a rule rather than a baked constant." },
                     "spacing": { "type": "string", "description": "pattern: unit string or variable" },
                     "direction": { "type": "array", "items": { "type": "number" }, "description": "pattern linear: [x,y,z]" },
                     "target": { "type": "string", "description": "boolean: name of the feature whose body is the operand" },
@@ -2659,6 +2774,429 @@ impl ToolHandler for CadSolveSketchTool {
                 "path": path.to_string_lossy(),
                 "sketches": reports,
                 "fully_constrained": unconstrained.is_empty(),
+            }),
+        )
+    }
+}
+
+// ── cad_offset_sketch ────────────────────────────────────────────────
+
+pub struct CadOffsetSketchTool;
+
+impl ToolHandler for CadOffsetSketchTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "cad_offset_sketch",
+            description: "Create a new sketch whose profile is an existing sketch's profile moved perpendicular to itself by a distance. NEGATIVE shrinks it (inward), POSITIVE grows it (outward), whichever way the source happened to be wound. Offset is the rule underneath wall thickness, hollow shells, clearance fits, seal grooves and tolerance bands: to hollow a prismatic part, offset its profile inward by the wall thickness, extrude that, and subtract it. The distance is a unit string, a variable, or an expression (\"-2 mm\", \"-wall\", \"-(wall + clearance)\"), so the wall stays parametric and one variable edit rethickens the part. An offset that would collapse, invert or self-intersect the profile is refused here, naming the distance, rather than handed to the boolean kernel to fail later for reasons that look unrelated.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path":     { "type": "string", "description": "CadPart folder or features.toml, Space-relative" },
+                    "sketch":   { "type": "string", "description": "Name of the sketch to offset" },
+                    "distance": { "type": "string", "description": "Length with a unit, a variable, or an expression. Negative goes inward." },
+                    "name":     { "type": "string", "description": "Name for the new sketch; defaults to <sketch>_Offset" },
+                    "index":    { "type": "integer", "description": "Insert position; appends when omitted. The sketch must appear BEFORE the feature that names it." }
+                },
+                "required": ["path", "sketch", "distance"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &["workshop.tool.cad_offset_sketch"],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        const TOOL: &str = "cad_offset_sketch";
+        let path_s = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let src_name = input
+            .get("sketch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let distance_expr = input
+            .get("distance")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if src_name.is_empty() {
+            return err(TOOL, "sketch required");
+        }
+        if distance_expr.is_empty() {
+            return err(TOOL, "distance required, e.g. \"-2 mm\" to go inward");
+        }
+
+        let (path, mut tree, before_vol) = match load_tree_for_edit(ctx, path_s, TOOL) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+
+        // Resolved through the same variable/expression path every other
+        // algorithmic parameter uses, so a wall thickness is a rule and
+        // not a baked number.
+        let d = match eustress_cad::feature_tree::resolve_quantity_explained(
+            &distance_expr,
+            &tree.variables,
+        ) {
+            Ok(q) => match q.unit {
+                eustress_cad::Unit::Length(_) => q.to_si(),
+                eustress_cad::Unit::Scalar => {
+                    return err(
+                        TOOL,
+                        format!(
+                            "distance '{distance_expr}' has no unit. Write a length such as \
+                             \"-2 mm\" or \"-0.002 m\"; a bare number would be the silent \
+                             1000x error the unit system exists to prevent."
+                        ),
+                    )
+                }
+                other => {
+                    return err(
+                        TOOL,
+                        format!("distance '{distance_expr}' is {other:?}, expected a length"),
+                    )
+                }
+            },
+            Err(why) => {
+                return err(
+                    TOOL,
+                    format!("distance '{distance_expr}' does not resolve: {why}"),
+                )
+            }
+        };
+
+        let Some(si) = find_sketch_index(&tree, &src_name) else {
+            let sketches: Vec<String> = tree
+                .entries
+                .iter()
+                .filter(|e| entry_kind(e).0 == "sketch")
+                .map(|e| entry_kind(e).1)
+                .collect();
+            return err(
+                TOOL,
+                format!(
+                    "no sketch named '{src_name}'. Sketches in this tree: [{}]",
+                    sketches.join(", ")
+                ),
+            );
+        };
+
+        let Some(src) = sketch_at_mut(&mut tree, si) else {
+            return err(TOOL, format!("entry {si} is not a sketch"));
+        };
+        let plane = src.plane.clone();
+        let source = src.clone();
+        let entities = match eustress_cad::offset_sketch_entities(&source, d) {
+            Ok(ents) => ents,
+            Err(e) => return err(TOOL, format!("offset failed: {e}")),
+        };
+
+        let new_name = match input.get("name").and_then(|v| v.as_str()) {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => format!("{src_name}_Offset"),
+        };
+        if entry_names(&tree).contains(&new_name) {
+            return err(TOOL, format!("an entry named '{new_name}' already exists in this tree"));
+        }
+
+        let n_ents = entities.len();
+        let entry = eustress_cad::FeatureEntry::Sketch {
+            name: new_name.clone(),
+            body: eustress_cad::Sketch {
+                plane: plane.clone(),
+                entities,
+                dimensions: Vec::new(),
+                constraints: Vec::new(),
+            },
+        };
+        let at = match input.get("index").and_then(|v| v.as_u64()) {
+            Some(i) => (i as usize).min(tree.entries.len()),
+            None => tree.entries.len(),
+        };
+        tree.entries.insert(at, entry);
+
+        let state = match commit_sketch_edit(&path, &tree, TOOL, "offset_sketch", before_vol) {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        let mut data = serde_json::json!({
+            "ok": true,
+            "path": path.to_string_lossy(),
+            "source_sketch": src_name,
+            "created": {
+                "name": new_name,
+                "plane": plane,
+                "index": at,
+                "entities": n_ents,
+                "distance_m": d,
+                "distance_expr": distance_expr,
+            },
+            "entries": entry_names(&tree),
+            "next": if d < 0.0 {
+                "Extrude this inward profile with combine = \"subtract\" to hollow the part."
+            } else {
+                "Extrude this outward profile for a boss or a clearance body."
+            },
+        });
+        merge_state(&mut data, state);
+        ok(
+            TOOL,
+            format!(
+                "Offset sketch '{new_name}' from '{src_name}' by {distance_expr} ({d:.6} m), \
+                 {n_ents} entit{} at index {at}",
+                if n_ents == 1 { "y" } else { "ies" }
+            ),
+            data,
+        )
+    }
+}
+
+// ── cad_publish_part ─────────────────────────────────────────────────
+
+pub struct CadPublishPartTool;
+
+impl ToolHandler for CadPublishPartTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "cad_publish_part",
+            description: "Publish a CadPart's feature tree into the Universe's shared library under an id, so it can be PLACED many times instead of copied. A placement (cad_create_part with `source`) does not own its geometry: editing the published definition restates every placement of it at once, and edits to a placement are refused. Refuses to publish a tree that does not evaluate, because a definition that produces no body would fail identically at every placement and report the failure at each one as if it were local.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path":      { "type": "string", "description": "CadPart folder or features.toml to publish, Space-relative" },
+                    "id":        { "type": "string", "description": "Library id: one path segment, letters/digits/_-. only (e.g. bracket_m6)" },
+                    "overwrite": { "type": "boolean", "description": "Replace an existing definition. Defaults false; overwriting restates every placement of it." }
+                },
+                "required": ["path", "id"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &["workshop.tool.cad_publish_part"],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        const TOOL: &str = "cad_publish_part";
+        let path_s = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let id = input
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let overwrite = input
+            .get("overwrite")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !eustress_cad::is_valid_library_id(&id) {
+            return err(
+                TOOL,
+                format!(
+                    "'{id}' is not a valid library id: one path segment, \
+                     letters/digits/_-. only, 128 chars max"
+                ),
+            );
+        }
+
+        let (path, src) = match read_features(ctx, path_s, TOOL) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let tree = match eustress_cad::parse_tree(&src) {
+            Ok(t) => t,
+            Err(e) => return err(TOOL, format!("parse {}: {e}", path.display())),
+        };
+
+        // A definition is published once and read many times, so the
+        // check happens here rather than at every placement.
+        let eval = match eustress_cad::evaluate_tree(&tree) {
+            Ok(o) => o,
+            Err(e) => {
+                return err(
+                    TOOL,
+                    format!(
+                        "not published: this tree does not evaluate ({e}). Every placement \
+                         would report the same failure as if it were its own."
+                    ),
+                )
+            }
+        };
+        let broken: Vec<&str> = eval
+            .entry_status
+            .iter()
+            .filter(|s| !s.ok)
+            .map(|s| s.name.as_str())
+            .collect();
+        if !broken.is_empty() {
+            return err(
+                TOOL,
+                format!(
+                    "not published: {} feature(s) failed to evaluate: {}. \
+                     Fix them before publishing, or every placement inherits the fault.",
+                    broken.len(),
+                    broken.join(", ")
+                ),
+            );
+        }
+        let tris = eval
+            .mesh
+            .as_ref()
+            .map(|m| m.indices.len() / 3)
+            .unwrap_or(0);
+        if tris == 0 {
+            return err(
+                TOOL,
+                "not published: the tree evaluates but produces no geometry".to_string(),
+            );
+        }
+
+        let dir = cad_library_dir(ctx).join(&id);
+        let target = dir.join("features.toml");
+        let existed = target.is_file();
+        if existed && !overwrite {
+            return err(
+                TOOL,
+                format!(
+                    "library part '{id}' already exists. Pass overwrite: true to replace it, \
+                     which restates every placement of it."
+                ),
+            );
+        }
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return err(TOOL, format!("mkdir {}: {e}", dir.display()));
+        }
+        if let Err(e) = std::fs::write(&target, &src) {
+            return err(TOOL, format!("write {}: {e}", target.display()));
+        }
+
+        let verb = if existed { "Replaced" } else { "Published" };
+        ok(
+            TOOL,
+            format!(
+                "{verb} library part '{id}' from {} ({tris} tris, {} entries)",
+                path.display(),
+                tree.entries.len()
+            ),
+            serde_json::json!({
+                "ok": true,
+                "id": id,
+                "replaced": existed,
+                "source_path": path.to_string_lossy(),
+                "library_path": target.to_string_lossy(),
+                "entries": tree.entries.len(),
+                "triangles": tris,
+                "library": library_ids(ctx),
+                "next": format!(
+                    "Place it with cad_create_part {{ name, source: \"{id}\" }}. \
+                     Every placement re-reads this definition, so edit it here, not there."
+                ),
+            }),
+        )
+    }
+}
+
+// ── cad_list_sources ─────────────────────────────────────────────────
+
+pub struct CadListSourcesTool;
+
+impl ToolHandler for CadListSourcesTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "cad_list_sources",
+            description: "List the Universe's shared CAD library: every published definition, its variables, its feature entries, and whether it still evaluates. These ids are what cad_create_part's `source` argument accepts. Read-only.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "evaluate": {
+                        "type": "boolean",
+                        "description": "Evaluate each definition and report triangle count and validity. Defaults true.",
+                        "default": true
+                    }
+                },
+                "required": []
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &["workshop.tool.cad_list_sources"],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        const TOOL: &str = "cad_list_sources";
+        let want_eval = input
+            .get("evaluate")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let dir = cad_library_dir(ctx);
+        let ids = library_ids(ctx);
+        let mut rows = Vec::new();
+        for id in &ids {
+            let path = dir.join(id).join("features.toml");
+            let mut row = serde_json::json!({
+                "id": id,
+                "path": path.to_string_lossy(),
+            });
+            match std::fs::read_to_string(&path).ok().and_then(|s| {
+                eustress_cad::parse_tree(&s).ok()
+            }) {
+                Some(tree) => {
+                    row["entries"] = serde_json::Value::Array(
+                        tree.entries.iter().map(|e| entry_kind(e).1.into()).collect(),
+                    );
+                    row["variables"] = serde_json::Value::Object(
+                        tree.variables
+                            .iter()
+                            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                            .collect(),
+                    );
+                    if want_eval {
+                        match eustress_cad::evaluate_tree(&tree) {
+                            Ok(out) => {
+                                let tris =
+                                    out.mesh.as_ref().map(|m| m.indices.len() / 3).unwrap_or(0);
+                                row["evaluates"] = true.into();
+                                row["triangles"] = tris.into();
+                                // A published definition that stopped
+                                // evaluating is worse than a broken local
+                                // part: every placement of it is broken
+                                // too, and none of them can be fixed
+                                // where the failure appears.
+                                row["broken_features"] = serde_json::Value::Array(
+                                    out.entry_status
+                                        .iter()
+                                        .filter(|s| !s.ok)
+                                        .map(|s| s.name.clone().into())
+                                        .collect(),
+                                );
+                            }
+                            Err(e) => {
+                                row["evaluates"] = false.into();
+                                row["eval_error"] = e.to_string().into();
+                            }
+                        }
+                    }
+                }
+                None => {
+                    row["error"] = "unreadable or unparseable".into();
+                }
+            }
+            rows.push(row);
+        }
+
+        let summary = if rows.is_empty() {
+            "no published CAD definitions in this Universe".to_string()
+        } else {
+            format!("{} published definition(s): {}", rows.len(), ids.join(", "))
+        };
+        ok(
+            TOOL,
+            summary,
+            serde_json::json!({
+                "ok": true,
+                "library_dir": dir.to_string_lossy(),
+                "definitions": rows,
             }),
         )
     }

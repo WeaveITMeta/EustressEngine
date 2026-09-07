@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::{CadError, CadResult};
+
 /// A feature operation. Each variant serializes with `op = "<name>"`
 /// so TOML stays compact.
 ///
@@ -131,7 +133,7 @@ pub enum Feature {
         #[serde(rename = "pattern_kind")]
         kind: PatternKind,
         features: Vec<String>,
-        count: u32,
+        count: CountSpec,
         /// For linear: direction + spacing. For circular: axis + angle.
         /// Stored as strings so variable refs work (`"length"`, `"180 deg"`).
         #[serde(default)]
@@ -227,6 +229,83 @@ pub enum EndCondition {
     ToSurface,    // up to a named face reference
     MidPlane,     // extrude half each direction from sketch plane
     UpToNext,     // stop at the next body encountered
+}
+
+/// How many instances a pattern makes: a literal, or a rule.
+///
+/// Every other algorithmic parameter on a feature is a string resolved
+/// through the variable/expression path (`spacing = "pitch"`,
+/// `angle = "sweep/2"`, `depth = "height"`). `count` alone was a raw
+/// `u32`, so the one quantity that decides how much repetition happens
+/// could not be driven by a rule: you could parameterise the SPACING
+/// of a hole array but not the NUMBER of holes, which is the parameter
+/// anyone actually wants to vary.
+///
+/// Untagged, so `count = 4` and `count = "hole_count"` both parse and
+/// every existing tree keeps working unchanged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CountSpec {
+    /// A literal, e.g. `count = 4`.
+    Fixed(u32),
+    /// A variable name or expression, e.g. `count = "rows * cols"`.
+    Expr(String),
+}
+
+impl Default for CountSpec {
+    fn default() -> Self {
+        CountSpec::Fixed(1)
+    }
+}
+
+impl CountSpec {
+    /// Resolve to an instance count.
+    ///
+    /// A count is dimensionless by nature, so a value carrying a unit
+    /// (`"10 mm"`) is a mistake worth naming rather than truncating.
+    pub fn resolve(&self, vars: &std::collections::HashMap<String, String>) -> CadResult<u32> {
+        match self {
+            CountSpec::Fixed(n) => Ok(*n),
+            CountSpec::Expr(src) => {
+                let q = crate::feature_tree::resolve_quantity_explained(src, vars).map_err(|e| {
+                    CadError::EvalFailed {
+                        feature: "Pattern".into(),
+                        reason: format!("count '{src}' does not resolve: {e}"),
+                    }
+                })?;
+                if !matches!(q.unit, crate::Unit::Scalar) {
+                    return Err(CadError::EvalFailed {
+                        feature: "Pattern".into(),
+                        reason: format!(
+                            "count '{src}' resolved to {:?}, but a count is a plain number. \
+                             Drop the unit",
+                            q.unit
+                        ),
+                    });
+                }
+                let v = q.value;
+                if !v.is_finite() || v < 0.0 {
+                    return Err(CadError::EvalFailed {
+                        feature: "Pattern".into(),
+                        reason: format!("count '{src}' resolved to {v}, which is not a count"),
+                    });
+                }
+                // Tolerate the float arithmetic that produced it: an
+                // expression like "12/4" lands on 2.9999999999999996.
+                let rounded = v.round();
+                if (v - rounded).abs() > 1.0e-6 {
+                    return Err(CadError::EvalFailed {
+                        feature: "Pattern".into(),
+                        reason: format!(
+                            "count '{src}' resolved to {v}, which is not a whole number of \
+                             instances"
+                        ),
+                    });
+                }
+                Ok(rounded as u32)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

@@ -45,14 +45,69 @@ use crate::selection_sync::SelectionSyncManager;
 pub struct CadPart {
     /// Feature-tree TOML (source of truth). Edit this → regenerate.
     pub tree_toml: String,
+    /// Library entry this tree is SOURCED from, when the instance is a
+    /// placement rather than the owner of its own geometry.
+    ///
+    /// `None` is the original behaviour: the tree belongs to this
+    /// instance and lives in its own folder. `Some(id)` means the tree
+    /// is a copy of `<universe>/.eustress/assets/cad/<id>/features.toml`,
+    /// refreshed by [`sync_cad_from_library`], and edits here are
+    /// refused rather than written, because the next sync would discard
+    /// them. That is the same rule
+    /// `ParameterBinding::value_is_read_only` applies to a sourced key,
+    /// for the same reason.
+    pub source: Option<String>,
 }
 
 impl CadPart {
     pub fn new(tree_toml: impl Into<String>) -> Self {
         Self {
             tree_toml: tree_toml.into(),
+            source: None,
         }
     }
+
+    /// A placement of the shared library definition `id`.
+    pub fn sourced(tree_toml: impl Into<String>, id: impl Into<String>) -> Self {
+        Self {
+            tree_toml: tree_toml.into(),
+            source: Some(id.into()),
+        }
+    }
+}
+
+/// Instance attribute naming the library definition a CadPart is placed
+/// from. An attribute rather than a component field on disk because
+/// `[attributes]` already round-trips through `_instance.toml`, so the
+/// edge survives save/load with no new serialization.
+pub const CAD_SOURCE_ATTRIBUTE: &str = "cad_source";
+
+/// Shared CAD definitions live under the Universe, not the Space: a part
+/// library that stops at the Space boundary is a folder, not a library.
+///
+/// Found by walking up for the directory that holds `Spaces/`, rather
+/// than by counting path components, so both the standard and the legacy
+/// flat layouts resolve.
+pub fn cad_library_dir(inside: &std::path::Path) -> Option<std::path::PathBuf> {
+    for a in inside.ancestors() {
+        if a.join("Spaces").is_dir() || a.join("spaces").is_dir() {
+            return Some(a.join(".eustress").join("assets").join("cad"));
+        }
+    }
+    None
+}
+
+/// A library id is one path segment. Anything else is a traversal
+/// attempt or a typo that would write outside the library.
+pub fn is_valid_cad_source_id(id: &str) -> bool {
+    eustress_cad::is_valid_library_id(id)
+}
+
+fn cad_library_tree(inside: &std::path::Path, id: &str) -> Option<std::path::PathBuf> {
+    if !is_valid_cad_source_id(id) {
+        return None;
+    }
+    Some(cad_library_dir(inside)?.join(id).join("features.toml"))
 }
 
 /// Last evaluation outcome — updated by regenerate, never triggers it.
@@ -199,6 +254,9 @@ impl Plugin for CadPlugin {
                         std::time::Duration::from_millis(500),
                     )),
                     sync_cad_features_from_disk.run_if(bevy::time::common_conditions::on_timer(
+                        std::time::Duration::from_millis(500),
+                    )),
+                    sync_cad_from_library.run_if(bevy::time::common_conditions::on_timer(
                         std::time::Duration::from_millis(500),
                     )),
                     handle_cad_insert,
@@ -348,7 +406,11 @@ pub fn list_secondary_variables(tree_toml: &str) -> Vec<(String, String)> {
 fn attach_cad_from_features_toml(
     mut commands: Commands,
     query: Query<
-        (Entity, &crate::space::instance_loader::InstanceFile),
+        (
+            Entity,
+            &crate::space::instance_loader::InstanceFile,
+            Option<&Attributes>,
+        ),
         (
             Added<crate::space::instance_loader::InstanceFile>,
             Without<CadPart>,
@@ -356,10 +418,54 @@ fn attach_cad_from_features_toml(
         ),
     >,
 ) {
-    for (entity, inst) in query.iter() {
+    for (entity, inst, attrs) in query.iter() {
         let Some(parent) = inst.toml_path.parent() else {
             continue;
         };
+
+        // A named source wins over a local features.toml. An instance
+        // that declares itself a placement of a library part but also
+        // carries its own tree is ambiguous, and resolving that toward
+        // the local copy would make the library silently ineffective.
+        let source = attrs
+            .and_then(|a| a.get(CAD_SOURCE_ATTRIBUTE))
+            .and_then(|v| match v {
+                eustress_common::attributes::AttributeValue::String(s) => Some(s.trim()),
+                _ => None,
+            })
+            .filter(|s| !s.is_empty());
+        if let Some(id) = source {
+            match cad_library_tree(&inst.toml_path, id) {
+                Some(lib) => match std::fs::read_to_string(&lib) {
+                    Ok(toml) => {
+                        info!("📐 Attaching CadPart sourced from library '{id}'");
+                        commands.entity(entity).insert(CadPart::sourced(toml, id));
+                        continue;
+                    }
+                    Err(e) => {
+                        // Do NOT fall through to the local tree. A
+                        // placement whose definition is missing must
+                        // read as broken, not as whatever happens to be
+                        // in its folder.
+                        warn!("📐 CadPart source '{id}' unreadable ({e}); leaving it unresolved");
+                        commands.entity(entity).insert(CadPartStatus {
+                            ok: false,
+                            message: format!("sourced from '{id}', which is missing: {e}"),
+                        });
+                        continue;
+                    }
+                },
+                None => {
+                    warn!("📐 CadPart source '{id}' is not a valid library id");
+                    commands.entity(entity).insert(CadPartStatus {
+                        ok: false,
+                        message: format!("'{id}' is not a valid library id"),
+                    });
+                    continue;
+                }
+            }
+        }
+
         let features_path = parent.join("features.toml");
         if !features_path.is_file() {
             continue;
@@ -370,11 +476,37 @@ fn attach_cad_from_features_toml(
                     "📐 Attaching CadPart from {:?}",
                     features_path
                 );
-                commands.entity(entity).insert(CadPart { tree_toml: toml });
+                commands.entity(entity).insert(CadPart::new(toml));
             }
             Err(e) => {
                 warn!("📐 Failed to read {:?}: {e}", features_path);
             }
+        }
+    }
+}
+
+/// Pull every sourced instance's tree from the shared definition.
+///
+/// This is the propagation half of the edge: one writer (the library
+/// file), N readers. Editing the definition restates every placement of
+/// it, which is the whole point of sourcing and the reason an
+/// interference check has a set of instances to iterate over at all.
+fn sync_cad_from_library(
+    mut query: Query<(&mut CadPart, &crate::space::instance_loader::InstanceFile)>,
+) {
+    for (mut cad, inst) in query.iter_mut() {
+        let Some(id) = cad.source.clone() else {
+            continue;
+        };
+        let Some(lib) = cad_library_tree(&inst.toml_path, &id) else {
+            continue;
+        };
+        let Ok(src) = std::fs::read_to_string(&lib) else {
+            continue;
+        };
+        if src != cad.tree_toml {
+            cad.tree_toml = src;
+            info!("📐 CadPart re-sourced from library '{id}'");
         }
     }
 }
@@ -385,8 +517,16 @@ fn attach_cad_from_features_toml(
 /// the user's edit "undoes itself" with no explanation.
 fn write_features_toml(
     inst_file: Option<&crate::space::instance_loader::InstanceFile>,
+    source: Option<&str>,
     toml: &str,
 ) -> Result<(), String> {
+    // Belt to the handlers' braces. A future caller that forgets the
+    // guard gets a refusal rather than a write the library poll erases.
+    if let Some(id) = source {
+        return Err(format!(
+            "this part is sourced from library part '{id}'; edit the library definition instead"
+        ));
+    }
     let Some(parent) = inst_file.and_then(|i| i.toml_path.parent()) else {
         // No disk backing (pure in-memory part) — nothing to persist.
         return Ok(());
@@ -405,6 +545,13 @@ fn sync_cad_features_from_disk(
     )>,
 ) {
     for (mut cad, inst) in query.iter_mut() {
+        // The library owns a sourced instance's tree. Both polls running
+        // on the same entity would alternate between two files every
+        // 500 ms, and the part would appear to flicker between two
+        // shapes for reasons nothing on screen could explain.
+        if cad.source.is_some() {
+            continue;
+        }
         let Some(parent) = inst.toml_path.parent() else {
             continue;
         };
@@ -591,7 +738,7 @@ fn spawn_cad_entity(
         Part {
             shape: PartType::Block,
         },
-        CadPart { tree_toml },
+        CadPart::new(tree_toml),
         CadPartStatus {
             ok: true,
             message: status,
@@ -921,6 +1068,21 @@ fn handle_cad_add_constraint(
         let Ok((mut cad, inst_file)) = query.get_mut(event.entity) else {
             continue;
         };
+
+        // A sourced instance does not own its geometry: the next library
+        // sync would overwrite anything written here, so the edit is
+        // refused where it can still be explained rather than silently
+        // undone half a second later.
+        if let Some(src) = cad.source.clone() {
+            if let Some(ref mut n) = notifications {
+                n.warning(format!(
+                    "This part is sourced from library part '{src}', which owns its geometry. \
+                     Edit the library definition to change every placement, or detach this \
+                     instance to give it a tree of its own."
+                ));
+            }
+            continue;
+        }
         let mut tree = match parse_tree(&cad.tree_toml) {
             Ok(t) => t,
             Err(e) => {
@@ -978,7 +1140,7 @@ fn handle_cad_add_constraint(
         }
         match tree_to_toml(&tree) {
             Ok(s) => {
-                if let Err(e) = write_features_toml(inst_file, &s) {
+                if let Err(e) = write_features_toml(inst_file, cad.source.as_deref(), &s) {
                     if let Some(ref mut n) = notifications {
                         n.warning(format!("Add constraint: {e}"));
                     }
@@ -1024,6 +1186,21 @@ fn handle_cad_solve_sketch(
             }
             continue;
         };
+
+        // A sourced instance does not own its geometry: the next library
+        // sync would overwrite anything written here, so the edit is
+        // refused where it can still be explained rather than silently
+        // undone half a second later.
+        if let Some(src) = cad.source.clone() {
+            if let Some(ref mut n) = notifications {
+                n.warning(format!(
+                    "This part is sourced from library part '{src}', which owns its geometry. \
+                     Edit the library definition to change every placement, or detach this \
+                     instance to give it a tree of its own."
+                ));
+            }
+            continue;
+        }
         let mut tree = match parse_tree(&cad.tree_toml) {
             Ok(t) => t,
             Err(e) => {
@@ -1050,7 +1227,7 @@ fn handle_cad_solve_sketch(
         }
         match tree_to_toml(&tree) {
             Ok(s) => {
-                if let Err(e) = write_features_toml(inst_file, &s) {
+                if let Err(e) = write_features_toml(inst_file, cad.source.as_deref(), &s) {
                     if let Some(ref mut n) = notifications {
                         n.warning(format!("Solve: {e}"));
                     }
@@ -1096,6 +1273,21 @@ fn handle_cad_tree_ops(
         let Ok((mut cad, inst_file)) = query.get_mut(event.entity) else {
             continue;
         };
+
+        // A sourced instance does not own its geometry: the next library
+        // sync would overwrite anything written here, so the edit is
+        // refused where it can still be explained rather than silently
+        // undone half a second later.
+        if let Some(src) = cad.source.clone() {
+            if let Some(ref mut n) = notifications {
+                n.warning(format!(
+                    "This part is sourced from library part '{src}', which owns its geometry. \
+                     Edit the library definition to change every placement, or detach this \
+                     instance to give it a tree of its own."
+                ));
+            }
+            continue;
+        }
         let mut tree = match parse_tree(&cad.tree_toml) {
             Ok(t) => t,
             Err(e) => {
@@ -1147,7 +1339,7 @@ fn handle_cad_tree_ops(
         }
         match tree_to_toml(&tree) {
             Ok(s) => {
-                if let Err(e) = write_features_toml(inst_file, &s) {
+                if let Err(e) = write_features_toml(inst_file, cad.source.as_deref(), &s) {
                     if let Some(ref mut n) = notifications {
                         n.warning(format!("Tree op: {e}"));
                     }
@@ -1205,6 +1397,21 @@ fn handle_cad_set_variable(
             }
             continue;
         };
+
+        // A sourced instance does not own its geometry: the next library
+        // sync would overwrite anything written here, so the edit is
+        // refused where it can still be explained rather than silently
+        // undone half a second later.
+        if let Some(src) = cad.source.clone() {
+            if let Some(ref mut n) = notifications {
+                n.warning(format!(
+                    "This part is sourced from library part '{src}', which owns its geometry. \
+                     Edit the library definition to change every placement, or detach this \
+                     instance to give it a tree of its own."
+                ));
+            }
+            continue;
+        }
         match set_variable_in_toml(&cad.tree_toml, &event.name, &event.value) {
             Ok(new_toml) => {
                 edits
@@ -1272,6 +1479,171 @@ fn set_variable_in_toml(toml_src: &str, name: &str, value: &str) -> Result<Strin
 // Regenerate
 // ============================================================================
 
+/// Above this triangle count a body takes the convex hull instead of a
+/// decomposition, and says so.
+///
+/// V-HACD voxelises before it clips, so its cost tracks the mesh, and
+/// this system runs on `Changed<CadPart>` which fires on every frame of
+/// a variable-slider drag. A part dense enough to stall that drag gets
+/// the cheap collider and a status line admitting it, because a Studio
+/// that freezes for a second per frame is not a Studio.
+const DECOMPOSITION_TRIANGLE_BUDGET: usize = 20_000;
+
+/// What a CAD body's collider actually is, so the status line can say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColliderFidelity {
+    /// Exact: the body is convex, so its hull IS the body.
+    Hull,
+    /// A concave body wearing its convex hull, because decomposition was
+    /// unavailable. Fills every notch and pocket, so it over-claims.
+    HullApprox,
+    /// Exact to V-HACD's concavity tolerance, in `n` convex pieces.
+    Decomposition(usize),
+    /// Decomposed, but the piece count could not be read back.
+    DecompositionOpaque,
+    /// The body's bounding box. Claims volume the body does not occupy.
+    BoundingBox,
+}
+
+impl ColliderFidelity {
+    fn label(self) -> String {
+        match self {
+            ColliderFidelity::Hull => "collider: convex hull (exact)".into(),
+            ColliderFidelity::HullApprox => {
+                "collider: convex hull (APPROXIMATE, fills the part's own concavities)".into()
+            }
+            ColliderFidelity::Decomposition(n) => {
+                format!("collider: convex decomposition ({n} pieces)")
+            }
+            ColliderFidelity::DecompositionOpaque => "collider: convex decomposition".into(),
+            ColliderFidelity::BoundingBox => {
+                "collider: BOUNDING BOX (approximate, claims volume the part does not fill)".into()
+            }
+        }
+    }
+    fn is_approximate(self) -> bool {
+        matches!(
+            self,
+            ColliderFidelity::BoundingBox | ColliderFidelity::HullApprox
+        )
+    }
+}
+
+/// Build the physical footprint of a regenerated CAD body.
+///
+/// This used to be `Collider::cuboid` of the mesh bounds, unconditionally.
+/// Every CAD part in the engine therefore collided as a box: an L-bracket
+/// filled its own notch, a plate blocked its own bolt hole, and anything
+/// asking physics where a part actually is got the answer "somewhere in
+/// this box". Interference between parts cannot be answered on top of
+/// that, and neither can a character standing on a shelled body.
+///
+/// Three tiers, in descending honesty:
+///
+/// 1. **Convex** bodies (a plate, a box, a cylinder, most primitives) get
+///    a single hull. It is exact, it is one shape, and it is cheaper than
+///    what a decomposition would build for them anyway.
+/// 2. Everything else gets a **convex decomposition**. This is the tier
+///    the notch and the pocket need.
+/// 3. If either fails, or the mesh is too dense to decompose inside a
+///    frame, fall back to the **bounding box** and report the fallback.
+///    A silent downgrade here is the original bug wearing a new coat: the
+///    collider would still be a box, and nothing would say so.
+///
+/// `center` is subtracted because the render mesh is recentred on the
+/// entity origin before upload, and a collider in a different frame from
+/// its mesh is worse than no collider at all.
+fn cad_collider(
+    eval: &EvalMesh,
+    topo: &eustress_cad::TopoReport,
+    center: Vec3,
+    half: Vec3,
+) -> (Collider, ColliderFidelity) {
+    let bbox = || {
+        Collider::cuboid(
+            half.x.max(0.001),
+            half.y.max(0.001),
+            half.z.max(0.001),
+        )
+    };
+    let verts: Vec<Vec3> = eval
+        .positions
+        .iter()
+        .map(|p| Vec3::new(p[0], p[1], p[2]) - center)
+        .collect();
+    if verts.len() < 4 || eval.indices.len() < 3 {
+        return (bbox(), ColliderFidelity::BoundingBox);
+    }
+    let tris = eval.indices.len() / 3;
+
+    // A convex body's hull is the body. No decomposition to run, and no
+    // approximation to disclose.
+    if topo.is_convex() {
+        if let Some(c) = Collider::convex_hull(verts.clone()) {
+            return (c, ColliderFidelity::Hull);
+        }
+    }
+
+    if tris > DECOMPOSITION_TRIANGLE_BUDGET {
+        warn!(
+            "📐 CadPart mesh has {tris} triangles, over the {DECOMPOSITION_TRIANGLE_BUDGET} \
+             budget for convex decomposition; falling back to the convex hull"
+        );
+        if let Some(c) = Collider::convex_hull(verts) {
+            return (c, ColliderFidelity::HullApprox);
+        }
+        return (bbox(), ColliderFidelity::BoundingBox);
+    }
+
+    // V-HACD wants a closed surface. Handing it one with holes produces a
+    // decomposition of something that is not the part, which is a worse
+    // lie than the box because it looks precise.
+    if !topo.is_manifold() {
+        warn!(
+            "📐 CadPart mesh is not manifold ({} boundary / {} non-manifold edges); \
+             falling back to the bounding-box collider",
+            topo.boundary_edges, topo.nonmanifold_edges
+        );
+        return (bbox(), ColliderFidelity::BoundingBox);
+    }
+
+    let indices: Vec<[u32; 3]> = eval
+        .indices
+        .chunks_exact(3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+
+    // V-HACD is reached through parry, which panics on input it cannot
+    // voxelise rather than returning an error. This system runs inside
+    // the editor's frame loop, so an unguarded panic on one odd part
+    // takes the whole Studio down with it. Same guard, and the same
+    // reason, as the boolean kernel's.
+    let hull_verts = verts.clone();
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Collider::convex_decomposition(verts, indices)
+    }));
+    match built {
+        Ok(c) => {
+            let pieces = c.shape().as_compound().map(|comp| comp.shapes().len());
+            let how = match pieces {
+                Some(n) => ColliderFidelity::Decomposition(n),
+                None => ColliderFidelity::DecompositionOpaque,
+            };
+            (c, how)
+        }
+        Err(_) => {
+            warn!(
+                "📐 convex decomposition panicked on a {tris}-triangle CadPart mesh; \
+                 falling back to the convex hull"
+            );
+            match Collider::convex_hull(hull_verts) {
+                Some(c) => (c, ColliderFidelity::HullApprox),
+                None => (bbox(), ColliderFidelity::BoundingBox),
+            }
+        }
+    }
+}
+
 fn regenerate_cad_parts(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -1335,24 +1707,40 @@ fn regenerate_cad_parts(
             tf.scale = Vec3::ONE;
         }
         let half = size * 0.5;
+        let mut fidelity = None;
         if wants_collider {
+            let tol = tree
+                .metadata
+                .mesh_tolerance
+                .unwrap_or(eustress_cad::DEFAULT_MESH_TOLERANCE);
+            let topo = eustress_cad::topology(&eval_mesh, tol);
+            let (shape, how) = cad_collider(&eval_mesh, &topo, center_local, half);
+            fidelity = Some(how);
             if let Some(mut col) = collider {
-                *col = Collider::cuboid(half.x.max(0.001), half.y.max(0.001), half.z.max(0.001));
+                *col = shape;
             } else {
-                commands.entity(entity).insert(Collider::cuboid(
-                    half.x.max(0.001),
-                    half.y.max(0.001),
-                    half.z.max(0.001),
-                ));
+                commands.entity(entity).insert(shape);
             }
         } else if collider.is_some() {
             commands.entity(entity).remove::<Collider>();
         }
 
+        let mut message = format_status(&out.entry_status, true);
+        if let Some(f) = fidelity {
+            message.push_str("; ");
+            message.push_str(&f.label());
+        }
         commands.entity(entity).insert(CadPartStatus {
+            // An approximate collider is not an evaluation failure, so the
+            // tree still reports ok; the message carries the caveat. A
+            // caller that needs the distinction reads the label rather
+            // than inferring geometry soundness from a bool.
             ok: true,
-            message: format_status(&out.entry_status, true),
+            message,
         });
+        if fidelity.is_some_and(|f| f.is_approximate()) {
+            warn!("📐 CadPart {:?} fell back to a bounding-box collider", entity);
+        }
         debug!("📐 CadPart regenerated {:?}", entity);
     }
 }
@@ -1596,4 +1984,96 @@ fn translate_mesh(mut mesh: Mesh, offset: Vec3) -> Mesh {
         }
     }
     mesh
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod collider_tests {
+    use super::*;
+
+    /// Evaluate a shipped template all the way to a mesh, so the collider
+    /// tier is decided by the same chain the Studio uses rather than by a
+    /// hand-built mesh that happens to agree with it.
+    fn template_mesh(name: &str) -> EvalMesh {
+        let (_, toml) = eustress_cad::templates::all()
+            .iter()
+            .find(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("no template '{name}'"));
+        let tree = parse_tree(toml).unwrap_or_else(|e| panic!("{name} parse: {e}"));
+        let out = evaluate_tree(&tree).unwrap_or_else(|e| panic!("{name} eval: {e}"));
+        out.mesh
+            .filter(|m| !m.indices.is_empty())
+            .unwrap_or_else(|| panic!("{name} produced no mesh"))
+    }
+
+    fn build(mesh: &EvalMesh) -> ColliderFidelity {
+        let topo = eustress_cad::topology(mesh, eustress_cad::DEFAULT_MESH_TOLERANCE);
+        let (min, max) = mesh_bounds(mesh);
+        let center = (min + max) * 0.5;
+        let half = (max - min).max(Vec3::splat(0.01)) * 0.5;
+        cad_collider(mesh, &topo, center, half).1
+    }
+
+    #[test]
+    fn a_convex_template_gets_an_exact_hull() {
+        // A box IS its own convex hull, so there is nothing to decompose
+        // and nothing to disclose.
+        assert_eq!(build(&template_mesh("box")), ColliderFidelity::Hull);
+        assert_eq!(build(&template_mesh("plate")), ColliderFidelity::Hull);
+    }
+
+    #[test]
+    fn a_notched_template_gets_a_decomposition() {
+        // The whole point. An L-bracket's hull fills its own notch, so a
+        // hull here would report the bracket as occupying space it does
+        // not, which is exactly what the bounding box used to do.
+        let how = build(&template_mesh("l_bracket"));
+        assert!(
+            matches!(
+                how,
+                ColliderFidelity::Decomposition(_) | ColliderFidelity::DecompositionOpaque
+            ),
+            "l_bracket got {how:?}, expected a decomposition"
+        );
+        assert!(!how.is_approximate(), "a decomposition is not approximate");
+    }
+
+    #[test]
+    fn a_pocketed_template_is_not_convex() {
+        // A through-hole is concavity the hull cannot express either.
+        let mesh = template_mesh("plate_hole");
+        let topo = eustress_cad::topology(&mesh, eustress_cad::DEFAULT_MESH_TOLERANCE);
+        assert!(
+            !topo.is_convex(),
+            "plate_hole read as convex ({} reflex edges)",
+            topo.reflex_edges
+        );
+        assert!(!matches!(build(&mesh), ColliderFidelity::Hull));
+    }
+
+    #[test]
+    fn an_empty_mesh_falls_back_and_says_so() {
+        let mesh = EvalMesh::default();
+        let topo = eustress_cad::topology(&mesh, eustress_cad::DEFAULT_MESH_TOLERANCE);
+        let how = cad_collider(&mesh, &topo, Vec3::ZERO, Vec3::splat(0.05)).1;
+        assert_eq!(how, ColliderFidelity::BoundingBox);
+        // The status line has to carry the caveat, or this is the old
+        // silent box wearing a new name.
+        assert!(how.is_approximate());
+        assert!(how.label().contains("BOUNDING BOX"));
+    }
+
+    #[test]
+    fn library_ids_reject_traversal() {
+        assert!(is_valid_cad_source_id("bracket_m6"));
+        assert!(is_valid_cad_source_id("v1.2-part"));
+        assert!(!is_valid_cad_source_id(""));
+        assert!(!is_valid_cad_source_id(".."));
+        assert!(!is_valid_cad_source_id("../../etc/passwd"));
+        assert!(!is_valid_cad_source_id("nested/id"));
+        assert!(!is_valid_cad_source_id("back\\slash"));
+    }
 }

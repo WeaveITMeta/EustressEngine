@@ -127,6 +127,14 @@ pub struct TopoReport {
     /// Edges used by three or more triangles.
     pub nonmanifold_edges: usize,
     pub degenerate_triangles: usize,
+    /// Manifold edges whose dihedral turns the surface inward.
+    ///
+    /// Zero on a closed manifold means the solid IS its own convex hull,
+    /// which is what decides whether a physics collider can be a single
+    /// hull (exact, cheap) or has to be a convex decomposition
+    /// (expensive, and the only honest option for an L-bracket or
+    /// anything with a pocket).
+    pub reflex_edges: usize,
 }
 
 impl TopoReport {
@@ -137,6 +145,67 @@ impl TopoReport {
     /// Closed *and* every edge used by exactly two triangles.
     pub fn is_manifold(&self) -> bool {
         self.boundary_edges == 0 && self.nonmanifold_edges == 0
+    }
+    /// The solid equals its own convex hull.
+    ///
+    /// Requires manifoldness first: convexity is a statement about every
+    /// dihedral, and a mesh with holes in it has dihedrals that were
+    /// never measured. Reporting an open shell as convex would send a
+    /// caller down the cheap collider path on the strength of edges that
+    /// do not exist.
+    pub fn is_convex(&self) -> bool {
+        self.is_manifold() && self.reflex_edges == 0
+    }
+}
+
+/// Is the manifold edge shared by `faces` reflex (the surface turning
+/// inward across it)?
+///
+/// Tested by planes rather than by the angle between normals: each face's
+/// opposite vertex must lie on or behind the other face's plane. That is
+/// the same predicate a convex-hull check applies to every vertex, but
+/// restricted to the one pair that can disagree across this edge, which
+/// makes the whole census O(edges) instead of O(faces x vertices).
+///
+/// `flip` inverts the normals for an inside-out winding, and a degenerate
+/// face is reported as NOT reflex: a sliver's normal is noise, and
+/// treating noise as evidence of concavity would push every part with one
+/// bad triangle onto the expensive collider path.
+fn edge_is_reflex(
+    mesh: &EvalMesh,
+    welded: &[u32],
+    key: (u32, u32),
+    faces: [usize; 2],
+    flip: bool,
+    eps: f64,
+) -> bool {
+    let vert = |i: u32| -> [f64; 3] {
+        let v = mesh.positions[i as usize];
+        [v[0] as f64, v[1] as f64, v[2] as f64]
+    };
+    // Signed distance from face `fb`'s opposite vertex to face `fa`'s plane.
+    let plane_side = |fa: usize, fb: usize| -> Option<f64> {
+        let ta = &mesh.indices[fa * 3..fa * 3 + 3];
+        let tb = &mesh.indices[fb * 3..fb * 3 + 3];
+        let (a, b, c) = tri(mesh, ta);
+        let n = cross(sub(b, a), sub(c, a));
+        let nl = len(n);
+        if nl < 1.0e-20 {
+            return None;
+        }
+        let n = mul(n, if flip { -1.0 / nl } else { 1.0 / nl });
+        let opp = tb
+            .iter()
+            .copied()
+            .find(|i| {
+                let w = welded[*i as usize];
+                w != key.0 && w != key.1
+            })?;
+        Some(dot(n, sub(vert(opp), a)))
+    };
+    match (plane_side(faces[0], faces[1]), plane_side(faces[1], faces[0])) {
+        (Some(d0), Some(d1)) => d0 > eps || d1 > eps,
+        _ => false,
     }
 }
 
@@ -168,14 +237,24 @@ pub fn topology(mesh: &EvalMesh, weld_eps: f64) -> TopoReport {
 
     // Sliver threshold scales with the model, so a millimetre part and a
     // ten-metre part aren't judged against the same absolute area.
-    let diag = {
-        let mp = mass_properties(mesh);
-        len(mp.size()).max(1.0e-9)
-    };
+    let mp = mass_properties(mesh);
+    let diag = len(mp.size()).max(1.0e-9);
     let area_eps = (diag * 1.0e-7).powi(2);
+    // An inside-out body has inward face normals, so every dihedral reads
+    // as its own opposite. The sign of the enclosed volume is what says
+    // which way "out" is.
+    let flip = mp.signed_volume < 0.0;
+    // Tolerance for "on the plane". Scaled to the model so a coplanar
+    // pair on a ten-metre part is not judged by a millimetre part's
+    // yardstick; tessellation of a curved surface lands vertices this
+    // close to their neighbours' planes routinely.
+    let convex_eps = diag * 1.0e-6;
 
-    let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
-    for t in mesh.indices.chunks_exact(3) {
+    // Value is (triangles sharing this edge, the first two of them). Only
+    // the first two are kept: an edge with three or more is non-manifold
+    // and is reported as such rather than measured for convexity.
+    let mut edges: HashMap<(u32, u32), (u32, [usize; 2])> = HashMap::new();
+    for (ti, t) in mesh.indices.chunks_exact(3).enumerate() {
         let (wa, wb, wc) = (
             welded[t[0] as usize],
             welded[t[1] as usize],
@@ -194,13 +273,21 @@ pub fn topology(mesh: &EvalMesh, weld_eps: f64) -> TopoReport {
                 continue;
             }
             let key = if u < w { (u, w) } else { (w, u) };
-            *edges.entry(key).or_insert(0) += 1;
+            let slot = edges.entry(key).or_insert((0, [0usize; 2]));
+            if slot.0 < 2 {
+                slot.1[slot.0 as usize] = ti;
+            }
+            slot.0 += 1;
         }
     }
-    for count in edges.values() {
+    for (key, (count, faces)) in edges.iter() {
         match count {
             1 => r.boundary_edges += 1,
-            2 => {}
+            2 => {
+                if edge_is_reflex(mesh, &welded, *key, *faces, flip, convex_eps) {
+                    r.reflex_edges += 1;
+                }
+            }
             _ => r.nonmanifold_edges += 1,
         }
     }
@@ -527,5 +614,88 @@ mod tests {
         // An empty mesh has no boundary, but it is not a solid either —
         // callers gate on triangle count, not on is_watertight alone.
         assert!(t.is_watertight());
+    }
+
+    /// Prism over an L-shaped profile: the one shape whose collider
+    /// cannot be a hull without lying about the notch.
+    ///
+    /// Profile (counter-clockwise, reflex at p3):
+    /// ```text
+    ///   p5(0,2) ── p4(1,2)
+    ///     |          |
+    ///     |      p3(1,1) ── p2(2,1)
+    ///     |                    |
+    ///   p0(0,0) ──────────── p1(2,0)
+    /// ```
+    fn l_prism(h: f64) -> EvalMesh {
+        let prof = [(0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (1.0, 1.0), (1.0, 2.0), (0.0, 2.0)];
+        let mut pos: Vec<[f32; 3]> = Vec::with_capacity(12);
+        for z in [-h, h] {
+            for (x, y) in prof {
+                pos.push([x as f32, y as f32, z as f32]);
+            }
+        }
+        let mut idx: Vec<u32> = Vec::new();
+        // Caps, fanned from p0. A fan is a valid triangulation of THIS
+        // polygon (every diagonal from p0 stays inside the L); it is not
+        // valid for concave polygons in general.
+        for k in 1..5u32 {
+            idx.extend_from_slice(&[0, k + 1, k]); // -Z, wound outward
+            idx.extend_from_slice(&[6, 6 + k, 6 + k + 1]); // +Z
+        }
+        // Sides.
+        for i in 0..6u32 {
+            let j = (i + 1) % 6;
+            idx.extend_from_slice(&[i, j, j + 6]);
+            idx.extend_from_slice(&[i, j + 6, i + 6]);
+        }
+        EvalMesh { positions: pos, normals: vec![], uvs: vec![], indices: idx }
+    }
+
+    #[test]
+    fn a_box_has_no_reflex_edges() {
+        // Strict: a false positive here would push every plate and every
+        // cylinder onto the expensive collider path for nothing.
+        let t = topology(&unit_box(0.100, 0.060, 0.010), 1.0e-6);
+        assert!(t.is_manifold(), "box should be manifold: {t:?}");
+        assert_eq!(t.reflex_edges, 0, "box read as concave: {t:?}");
+        assert!(t.is_convex());
+    }
+
+    #[test]
+    fn convexity_survives_inverted_winding() {
+        // Inside-out winding flips every normal, so a dihedral read
+        // without accounting for it reports the exact opposite verdict.
+        let mut m = unit_box(0.05, 0.05, 0.05);
+        for t in m.indices.chunks_exact_mut(3) {
+            t.swap(1, 2);
+        }
+        let t = topology(&m, 1.0e-6);
+        assert!(mass_properties(&m).signed_volume < 0.0, "winding did not invert");
+        assert_eq!(t.reflex_edges, 0, "inverted box read as concave: {t:?}");
+        assert!(t.is_convex());
+    }
+
+    #[test]
+    fn an_l_prism_is_not_convex() {
+        let m = l_prism(0.5);
+        let t = topology(&m, 1.0e-6);
+        assert!(t.is_manifold(), "L prism should be closed: {t:?}");
+        assert!(t.reflex_edges >= 1, "notch not detected: {t:?}");
+        assert!(!t.is_convex());
+        // The profile encloses 3 units of area over a height of 1.
+        let v = mass_properties(&m).volume();
+        assert!((v - 3.0).abs() < 1.0e-3, "volume {v}, expected 3.0");
+    }
+
+    #[test]
+    fn an_open_shell_is_never_reported_convex() {
+        // Drop a face. Convexity is a claim about every dihedral, and the
+        // ones bordering the hole were never measured.
+        let mut m = unit_box(0.05, 0.05, 0.05);
+        m.indices.truncate(m.indices.len() - 6);
+        let t = topology(&m, 1.0e-6);
+        assert!(!t.is_manifold());
+        assert!(!t.is_convex(), "open shell claimed convex: {t:?}");
     }
 }

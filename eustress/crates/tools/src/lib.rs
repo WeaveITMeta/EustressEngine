@@ -112,6 +112,9 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(cad_tools::CadAddConstraintTool);
     registry.register(cad_tools::CadDimensionTool);
     registry.register(cad_tools::CadSolveSketchTool);
+    registry.register(cad_tools::CadOffsetSketchTool);
+    registry.register(cad_tools::CadPublishPartTool);
+    registry.register(cad_tools::CadListSourcesTool);
 
     // File I/O.
     registry.register(file_tools::ReadFileTool);

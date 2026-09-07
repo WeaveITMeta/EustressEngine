@@ -47,6 +47,7 @@
 
 pub mod quantity;
 pub mod expr;
+pub mod offset;
 pub mod feature_tree;
 pub mod sketch;
 pub mod feature;
@@ -66,7 +67,7 @@ pub use feature::{
     // Enum types the evaluator addresses as `crate::PatternKind`,
     // `crate::BooleanOp`, etc. These have to be at the crate root
     // or the `eval.rs` match arms fail to resolve them.
-    PatternKind, BooleanOp, EndCondition,
+    PatternKind, BooleanOp, EndCondition, CountSpec,
 };
 // Re-export for engine CSG consumers (already in feature:: above).
 pub use error::{CadError, CadResult};
@@ -81,6 +82,25 @@ pub use parts_csg::{boolean_oriented_solids, OrientedShape, OrientedSolid};
 pub use measure::{mass_properties, min_distance, topology, MassProps, TopoReport};
 pub use export_glb::{encode_glb, write_glb};
 pub use solver::{apply_solve, solve_or_err, solve_sketch, SolveReport, SolveStatus};
+pub use offset::{offset_closed_polyline, offset_sketch_entities};
+
+/// Is `id` usable as a shared-library entry name?
+///
+/// A library id is exactly one path segment. It is joined onto the
+/// Universe's `.eustress/assets/cad/` directory by both the engine (from
+/// an instance attribute) and the tool surface (from an agent argument),
+/// and neither of those inputs is trusted, so the check lives here in
+/// the one crate both of them already depend on rather than as two
+/// copies that can drift apart.
+pub fn is_valid_library_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id != "."
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
 
 /// Parse a feature tree from a TOML string. This is the primary entry
 /// point — feature trees live as TOML documents in the WorldDb tree

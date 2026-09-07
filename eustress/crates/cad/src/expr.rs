@@ -2,8 +2,8 @@
 //!
 //! A feature-tree value used to be one of two things: a literal
 //! quantity (`"50 mm"`) or a bare variable name (`"length"`). That
-//! forces whoever authors the tree — increasingly a model, not a
-//! person — to pre-compute every coordinate. Wanting a hole centred
+//! forces whoever authors the tree (increasingly a model, not a
+//! person) to pre-compute every coordinate. Wanting a hole centred
 //! between two edges meant writing `0.04` and hoping the plate never
 //! changed size. Nothing recorded WHY it was 0.04, so nothing could
 //! keep it correct when `length` moved.
@@ -14,7 +14,7 @@
 //! ## Unit algebra
 //!
 //! [`Quantity`] can represent a length, an angle, a mass, a force, or
-//! a dimensionless scalar — and notably NOT an area. That absence is
+//! a dimensionless scalar, and notably NOT an area. That absence is
 //! load-bearing: `length * width` has no representable result, so it
 //! is rejected rather than silently reinterpreted. The rules are the
 //! ones dimensional analysis gives:
@@ -32,7 +32,7 @@
 //!
 //! Arithmetic happens in SI (metres, radians, kilograms, newtons), so
 //! `"1 m + 500 mm"` is 1.5 m. The authored unit of the inputs is not
-//! preserved through arithmetic — the result carries the SI base unit
+//! preserved through arithmetic: the result carries the SI base unit
 //! for its dimension, which is what every consumer converts to anyway.
 //!
 //! ## Why this is a fallback, not a replacement
@@ -41,7 +41,7 @@
 //! first, then a variable lookup, and only then reaches this module.
 //! Every value that resolved before still resolves the same way by the
 //! same path, so no existing tree changes meaning. Only strings that
-//! were previously errors — the ones containing operators — newly
+//! were previously errors (the ones containing operators) newly
 //! become meaningful.
 
 use std::collections::HashMap;
@@ -185,7 +185,7 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, String> {
             }
             other => {
                 return Err(format!(
-                    "unexpected character '{other}' — expressions use + - * / ( ) with numbers, \
+                    "unexpected character '{other}'. Expressions use + - * / ( ) with numbers, \
                      units and variable names"
                 ))
             }
@@ -231,7 +231,7 @@ impl<'a> Parser<'a> {
             // exactly the 1000x error the unit system exists to stop.
             if lhs.dim != rhs.dim {
                 return Err(format!(
-                    "cannot {} {} and {} — both sides of '{}' must have the same dimension \
+                    "cannot {} {} and {}: both sides of '{}' must have the same dimension \
                      (did you forget a unit, e.g. '10 mm' instead of '10'?)",
                     if op == '+' { "add" } else { "subtract" },
                     lhs.dim.name(),
@@ -264,7 +264,7 @@ impl<'a> Parser<'a> {
                     (d, Dim::Scalar) => Val { si: lhs.si * rhs.si, dim: d },
                     (a, b) => {
                         return Err(format!(
-                            "cannot multiply {} by {} — the result has no representable unit \
+                            "cannot multiply {} by {}: the result has no representable unit \
                              (there is no area or volume unit); multiply by a plain number instead",
                             a.name(),
                             b.name()
@@ -280,7 +280,7 @@ impl<'a> Parser<'a> {
                         (a, b) if a == b => Val { si: lhs.si / rhs.si, dim: Dim::Scalar },
                         (a, b) => {
                             return Err(format!(
-                                "cannot divide {} by {} — dividing unlike dimensions has no \
+                                "cannot divide {} by {}: dividing unlike dimensions has no \
                                  representable unit",
                                 a.name(),
                                 b.name()
@@ -331,7 +331,7 @@ impl<'a> Parser<'a> {
             Some(Tok::Ident(name)) => {
                 if self.depth >= MAX_DEPTH {
                     return Err(format!(
-                        "variable nesting too deep at '{name}' — check for a reference cycle"
+                        "variable nesting too deep at '{name}': check for a reference cycle"
                     ));
                 }
                 let Some(raw) = self.vars.get(&name) else {
@@ -340,9 +340,9 @@ impl<'a> Parser<'a> {
                     return Err(format!(
                         "unknown variable '{name}'{}",
                         if known.is_empty() {
-                            " — this tree declares no variables".to_string()
+                            "; this tree declares no variables".to_string()
                         } else {
-                            format!(" — declared variables are: {}", known.join(", "))
+                            format!("; declared variables are: {}", known.join(", "))
                         }
                     ));
                 };
@@ -355,7 +355,7 @@ impl<'a> Parser<'a> {
                 let v = self.expr()?;
                 match self.next() {
                     Some(Tok::RParen) => Ok(v),
-                    _ => Err("unbalanced parentheses — missing ')'".to_string()),
+                    _ => Err("unbalanced parentheses: missing ')'".to_string()),
                 }
             }
             Some(t) => Err(format!("unexpected {t:?} where a value was expected")),
@@ -368,7 +368,7 @@ impl<'a> Parser<'a> {
 ///
 /// Returns the result in the SI base unit for its dimension. Callers
 /// that only accept a length should check `unit` and reject anything
-/// else — a caller asking for a depth and receiving a scalar means the
+/// else. A caller asking for a depth and receiving a scalar means the
 /// author wrote a bare number somewhere.
 pub fn eval(src: &str, vars: &HashMap<String, String>) -> Result<Quantity, String> {
     eval_depth(src, vars, 0)
@@ -376,7 +376,7 @@ pub fn eval(src: &str, vars: &HashMap<String, String>) -> Result<Quantity, Strin
 
 fn eval_depth(src: &str, vars: &HashMap<String, String>, depth: u8) -> Result<Quantity, String> {
     if depth > MAX_DEPTH {
-        return Err("variable nesting too deep — check for a reference cycle".to_string());
+        return Err("variable nesting too deep: check for a reference cycle".to_string());
     }
     // A plain literal or a bare variable name never reaches the parser
     // in normal operation (resolve_quantity tries those first), but
@@ -400,7 +400,7 @@ fn eval_depth(src: &str, vars: &HashMap<String, String>, depth: u8) -> Result<Qu
 }
 
 /// True when the string looks like an expression rather than a literal
-/// or a bare name — i.e. it contains an operator or a parenthesis.
+/// or a bare name, i.e. it contains an operator or a parenthesis.
 /// Used to decide whether a failed resolution is worth reporting as an
 /// expression error rather than an unknown-variable error.
 pub fn looks_like_expression(s: &str) -> bool {
