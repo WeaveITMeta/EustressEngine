@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- Runs: a recorded trace against an axis, with the endpoint marked. It is
+       deliberately not the flask that marks the service: the service is the
+       experiment, a Run is one execution of it and what it left behind. -->
+  <path d="M2.4 2.0v11.4h11.3" stroke="#3B82F6" stroke-width="0.85"
+        stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <g stroke="#2C5C86" stroke-width="0.45" opacity="0.6">
+    <line x1="2.4" y1="6.4" x2="13.7" y2="6.4"/>
+    <line x1="2.4" y1="9.9" x2="13.7" y2="9.9"/>
+  </g>
+  <!-- the run itself: fading capacity, which is what every V-Cell run records -->
+  <path d="M3.6 4.3c2.5 0.5 4.3 1.4 6.0 3.1 1.1 1.1 1.8 2.6 2.4 4.5"
+        stroke="#35D07A" stroke-width="1.1" fill="none" stroke-linecap="round"/>
+  <circle cx="12.0" cy="11.9" r="1.05" fill="#FF5A5A"/>
+</svg>

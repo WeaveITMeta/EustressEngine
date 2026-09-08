@@ -285,6 +285,12 @@ pub enum ClassName {
     Dataset,
     Series,
     Column,
+    /// ExperimentService section: the objects a design is made of.
+    Parts,
+    /// ExperimentService section: which attribute causes which, and how.
+    Laws,
+    /// ExperimentService section: one execution of an experiment.
+    Runs,
     Run,
     // Procurement — non-visual data nouns modelled on the Data Platform ones
     // above: Folder-like containers whose fields live in `[attributes]`, so the
@@ -611,6 +617,9 @@ impl ClassName {
             ClassName::Dataset => "Dataset",
             ClassName::Series => "Series",
             ClassName::Column => "Column",
+            ClassName::Parts => "Parts",
+            ClassName::Laws => "Laws",
+            ClassName::Runs => "Runs",
             ClassName::Run => "Run",
             ClassName::Manufacturer => "Manufacturer",
             ClassName::PurchaseOrder => "PurchaseOrder",
@@ -896,6 +905,9 @@ impl ClassName {
             "Dataset" => Ok(ClassName::Dataset),
             "Series" => Ok(ClassName::Series),
             "Column" => Ok(ClassName::Column),
+            "Parts" => Ok(ClassName::Parts),
+            "Laws" => Ok(ClassName::Laws),
+            "Runs" => Ok(ClassName::Runs),
             "Run" => Ok(ClassName::Run),
             "Manufacturer" => Ok(ClassName::Manufacturer),
             "PurchaseOrder" => Ok(ClassName::PurchaseOrder),

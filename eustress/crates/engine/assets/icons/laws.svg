@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- Laws: two independent inputs converging on one dependent output. The
+       arrowheads carry the whole meaning of the section, which is causation
+       with a direction, not correlation. -->
+  <circle cx="3.0" cy="3.4" r="1.5" fill="#1A4670" stroke="#5CA8FF" stroke-width="0.75"/>
+  <circle cx="3.0" cy="12.6" r="1.5" fill="#1A4670" stroke="#5CA8FF" stroke-width="0.75"/>
+  <circle cx="12.9" cy="8.0" r="1.9" fill="#0B3D2E" stroke="#35D07A" stroke-width="0.85"/>
+  <g stroke="#3B82F6" stroke-width="0.85" fill="none" stroke-linecap="round">
+    <path d="M4.4 4.2C6.6 5.2 8.2 6.2 10.4 7.3"/>
+    <path d="M4.4 11.8C6.6 10.8 8.2 9.8 10.4 8.7"/>
+  </g>
+  <!-- arrowheads: the direction is the point -->
+  <path d="M10.9 7.55l-1.5-0.55 0.35 1.15z" fill="#3B82F6"/>
+  <path d="M10.9 8.45l-1.5 0.55 0.35-1.15z" fill="#3B82F6"/>
+</svg>

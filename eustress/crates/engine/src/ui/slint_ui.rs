@@ -6854,22 +6854,30 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::SoulApiKeySaved => {
-                // Pull both typed keys out of Slint and commit them. The
+                // Pull every typed key out of Slint and commit them. The
                 // Anthropic key goes to both the space-level and global Soul
                 // Settings resources so Workshop + Soul panels observe it
-                // immediately; the xAI key is global-only (no per-space
-                // override — see GlobalSoulSettings::global_xai_api_key).
-                // Both persist to disk in the same save so the Settings
-                // dialog's single Save button covers both providers.
+                // immediately; the xAI and OpenAI keys are global-only (no
+                // per-space override — see
+                // GlobalSoulSettings::global_xai_api_key). All persist in the
+                // same save, so the dialog's single Save button covers every
+                // provider.
+                //
+                // Every field read here MUST also be populated when the dialog
+                // opens (see the loader's note): this handler writes all of
+                // them unconditionally, so a field that was never loaded is
+                // written back as "" and silently wipes a stored key.
                 if let Some(ui) = ui {
                     let key: String = ui.get_soul_api_key().to_string().trim().to_string();
                     let xai_key: String = ui.get_soul_xai_api_key().to_string().trim().to_string();
+                    let openai_key: String = ui.get_soul_openai_api_key().to_string().trim().to_string();
                     if let Some(ref mut ss) = res.soul_settings {
                         ss.claude_api_key = key.clone();
                     }
                     if let Some(ref mut gs) = res.global_soul_settings {
                         gs.global_api_key = key.clone();
                         gs.global_xai_api_key = xai_key.clone();
+                        gs.global_openai_api_key = openai_key.clone();
                         if let Err(e) = gs.save() {
                             if let Some(ref mut out) = res.output {
                                 out.warn(format!("Soul: failed to persist API key: {}", e));
@@ -15559,6 +15567,67 @@ fn publish_output_logs(
     queue.stream.producer("log/output").send_bytes(bytes::Bytes::from(payload));
 }
 
+/// Build the model picker's rows from the active catalog and push them to
+/// Slint.
+///
+/// Everything the menu shows beyond the name is resolved here rather than in
+/// `.slint`: prices are formatted, provider groups are flattened into a
+/// `section-start` flag, and each row is told whether its BYOK key is actually
+/// set. Slint has no float formatting and no grouping construct, so doing it
+/// there would mean arithmetic spread through the layout; doing it here keeps
+/// one obvious place where a row is described.
+///
+/// `key-missing` is why the row carries settings state at all. A user can pick
+/// any model in the list, but only the providers whose key they have entered
+/// will run — surfacing that at the moment of choosing is far kinder than an
+/// error after the first message fails to send.
+fn push_model_picker_rows(
+    ui: &StudioWindow,
+    global_settings: Option<&crate::soul::GlobalSoulSettings>,
+) {
+    use crate::soul::WorkshopModel;
+
+    /// `3.0` reads as "$3" and `2.5` as "$2.50" — a trailing `.00` on every
+    /// row is noise, and a price is never quoted to more than cents.
+    fn format_price(usd: f64) -> String {
+        if (usd.fract() * 100.0).round() == 0.0 {
+            format!("${}", usd.round() as i64)
+        } else {
+            format!("${usd:.2}")
+        }
+    }
+
+    let mut rows: Vec<WorkshopModelEntry> = Vec::new();
+    let mut previous_provider: Option<crate::soul::Provider> = None;
+
+    for model in WorkshopModel::all() {
+        let provider = model.provider();
+        let section_start = previous_provider != Some(provider);
+        previous_provider = Some(provider);
+
+        rows.push(WorkshopModelEntry {
+            name: model.display_name().into(),
+            provider: provider.label().into(),
+            tagline: model.tagline().into(),
+            price: format!(
+                "{} / {} per Mtok",
+                format_price(model.input_price_per_mtok()),
+                format_price(model.output_price_per_mtok())
+            )
+            .into(),
+            section_start,
+            key_missing: global_settings
+                .map(|g| g.key_for_provider(provider).is_none())
+                .unwrap_or(true),
+        });
+    }
+
+    let provider_count = rows.iter().filter(|r| r.section_start).count() as i32;
+    ui.set_workshop_model_provider_count(provider_count);
+    let model = std::rc::Rc::new(slint::VecModel::from(rows));
+    ui.set_workshop_available_models(slint::ModelRc::from(model));
+}
+
 /// Syncs IdeationPipeline state to the Workshop Panel Slint properties.
 /// Sync Workshop panel state directly to the Slint UI.
 ///
@@ -15575,13 +15644,18 @@ fn sync_workshop_to_slint(
     pipeline: Option<Res<crate::workshop::IdeationPipeline>>,
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
     space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
+    mut models_pushed: Local<bool>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let Some(pipeline) = pipeline else { return };
 
     let soul_changed = global_settings.as_ref().map(|g| g.is_changed()).unwrap_or(false)
         || space_settings.as_ref().map(|s| s.is_changed()).unwrap_or(false);
-    if !pipeline.is_changed() && !soul_changed { return; }
+    // The model rows have to reach Slint at least once even if nothing ever
+    // changes, because `main.slint` binds the picker straight to them: without
+    // this first push the menu would render empty on a session where the user
+    // never touched Soul settings.
+    if !pipeline.is_changed() && !soul_changed && *models_pushed { return; }
 
     let api_key_valid = match (&global_settings, &space_settings) {
         (Some(global), Some(space)) => !space.effective_api_key(global).is_empty(),
@@ -15595,6 +15669,8 @@ fn sync_workshop_to_slint(
         .map(|g| g.effective_workshop_model().display_name())
         .unwrap_or_else(|| crate::soul::WorkshopModel::default().display_name());
     ui.set_workshop_active_model_name(model_name.into());
+    push_model_picker_rows(ui, global_settings.as_deref());
+    *models_pushed = true;
     ui.set_workshop_gauntlet_enabled(
         global_settings.as_ref().map(|g| g.workshop_gauntlet).unwrap_or(false),
     );
@@ -19726,8 +19802,17 @@ fn generate_code_summary(api_key: &str, script_name: &str, code: &str) -> String
         script_name, code
     );
 
+    // Cheapest Anthropic model in the catalog rather than a pinned id, so this
+    // stops going stale on its own. Deliberately NOT `WorkshopModel::default()`:
+    // this posts directly to api.anthropic.com, and the catalog's default is
+    // free to become an xAI or OpenAI model, which would send that vendor's id
+    // to Anthropic and 404 every summary.
+    let summary_model = crate::soul::WorkshopModel::cheapest_for(crate::soul::Provider::Anthropic)
+        .map(|m| m.api_id())
+        .unwrap_or("claude-sonnet-5");
+
     let body = serde_json::json!({
-        "model": "claude-sonnet-4-6-20250514",
+        "model": summary_model,
         "max_tokens": 1024,
         "messages": [{ "role": "user", "content": prompt }]
     });
@@ -24010,6 +24095,9 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
         ClassName::PurchaseOrder => "purchaseorder",
         ClassName::PurchaseOrderLine => "purchaseorderline",
         ClassName::Column => "column",
+        ClassName::Parts => "parts",
+        ClassName::Laws => "laws",
+        ClassName::Runs => "runs",
         ClassName::Connector => "connector",
         // Workshop folder uses wrench icon (not a ClassName but handled via name match below)
         _ => "instance",
@@ -24952,6 +25040,8 @@ fn sync_soul_api_key_to_slint(
         // 400 "Incorrect API key provided" from api.x.ai on a key the user
         // had definitely entered: it had been blanked by a later Save.
         ui.set_soul_xai_api_key(global.global_xai_api_key.clone().into());
+        // Same contract for OpenAI, and for the same reason.
+        ui.set_soul_openai_api_key(global.global_openai_api_key.clone().into());
     }
     ui.set_soul_api_key_valid(!effective_key.is_empty());
     ui.set_soul_api_key_status(status.into());
