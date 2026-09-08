@@ -334,11 +334,63 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
             reconciled += 1;
         }
     }
+    // Phase 4 — PRUNE. Everything above is additive: a .toml that CHANGED or is
+    // NEW gets written into the tree, and a .toml that was DELETED on disk was
+    // simply never visited, so its tree entry survived forever. That is how a
+    // regenerated DataService left 52 stale Column nodes and two copies of a
+    // series that no longer existed: the Explorer spawns from the tree, the tree
+    // still held them, and deleting the directory could not reach them.
+    //
+    // Three guards, because a wrong prune is destructive in a way a missed
+    // reconcile is not:
+    //
+    //   1. Only .toml keys are considered. Binary caches, voxel chunks and
+    //      instance cores are not disk-backed this way and are never touched.
+    //   2. A key is pruned only when its PARENT DIRECTORY EXISTS and the file
+    //      within it does not. If the whole directory is gone the subtree is
+    //      left alone, so an unmounted drive, a half-finished sync or a Space
+    //      opened from the wrong root cannot wipe the tree. That case is
+    //      counted and reported instead of acted on.
+    //   3. The #bin sibling goes with its .toml, the same pairing the write
+    //      path above maintains.
+    let mut pruned = 0usize;
+    let mut skipped_missing_dir = 0usize;
+    if let Ok(keys) = db.iter_tree_keys() {
+        let candidates: Vec<String> = keys
+            .filter_map(|k| k.ok())
+            .filter(|k| k.ends_with(".toml"))
+            .collect();
+        for rel in candidates {
+            let disk = space_root.join(&rel);
+            if disk.exists() {
+                continue;
+            }
+            match disk.parent() {
+                Some(dir) if !dir.exists() => {
+                    skipped_missing_dir += 1;
+                }
+                _ => {
+                    if db.delete_file(&rel).is_ok() {
+                        let _ = db.delete_file(&format!("{rel}#bin"));
+                        pruned += 1;
+                    }
+                }
+            }
+        }
+    }
+    if pruned > 0 || skipped_missing_dir > 0 {
+        info!(
+            target: "eustress_engine::world_db",
+            "disk to tree reconcile pruned {} entries whose file was deleted on disk; left {} alone because the parent directory is missing entirely",
+            pruned, skipped_missing_dir
+        );
+    }
+
     // Stamp the marker (best-effort) so the next open can mtime-skip unchanged
     // files. A write failure just means the next open does a full pass.
     let _ = std::fs::create_dir_all(space_root.join(".eustress"));
     let _ = std::fs::write(&marker, now_secs.to_string());
-    reconciled
+    reconciled + pruned
 }
 
 /// Open / re-open the WorldDb whenever `SpaceRoot` changes (on
