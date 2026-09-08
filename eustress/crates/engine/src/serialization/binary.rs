@@ -743,6 +743,13 @@ impl ClassId {
             ClassName::Dataset => ClassId::Folder,
             ClassName::Series => ClassId::Folder,
             ClassName::Column => ClassId::Folder,
+            // ExperimentService sections. Like their Data Platform siblings
+            // above they carry no geometry, so the legacy binary scene tag is
+            // Folder; primary persistence is the Fjall entities partition plus
+            // TOML, not this path.
+            ClassName::Parts => ClassId::Folder,
+            ClassName::Laws => ClassId::Folder,
+            ClassName::Runs => ClassId::Folder,
             ClassName::Run => ClassId::Folder,
             ClassName::Connector => ClassId::Folder,
             ClassName::Domain => ClassId::Folder,
