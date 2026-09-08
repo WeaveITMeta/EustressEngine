@@ -1,20 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
-  <!-- ExperimentService: a flask holding a measured trace.
-       It shared dataservice.svg and the two were indistinguishable in the
-       Explorer. They hold different things: DataService is series and tables,
-       this is the RUNS that produced them, with the parts and laws behind
-       each. The flask says "experiment", the rising trace says "measured",
-       and the palette matches dataservice so they still read as siblings. -->
-  <!-- neck -->
-  <path d="M6.4 2.2v3.1L3.3 11.4a2.1 2.1 0 0 0 1.8 3.2h5.8a2.1 2.1 0 0 0 1.8-3.2L9.6 5.3V2.2"
-        stroke="#5CA8FF" stroke-width="0.95" stroke-linejoin="round"/>
-  <path d="M5.6 2.2h4.8" stroke="#5CA8FF" stroke-width="0.95" stroke-linecap="round"/>
-  <!-- contents, so it reads as a flask in use rather than empty glass -->
-  <path d="M4.15 10.6h7.7l1.05 2.1a2.1 2.1 0 0 1-1.8 1.9H4.9a2.1 2.1 0 0 1-1.8-1.9z"
-        fill="#13314F"/>
-  <!-- the run: a trace rising through the contents, in the DataService greens
-       and reds so the family reads at a glance -->
-  <path d="M4.7 13.3l1.9-2.1 1.5 1.2 1.4-1.6 1.6 1.1"
-        stroke="#35D07A" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="11.1" cy="11.9" r="0.85" fill="#FF5A5A"/>
+  <!-- ExperimentService: information "i" inside atomic orbits on three axes.
+       This was the DataService icon; it moved here because the orbits read as a
+       thing under investigation rather than as a table, and DataService now
+       carries stacked plates with a trend, which is what it actually holds. -->
+  <g transform="translate(8 8)" fill="none" stroke-width="0.85">
+    <ellipse rx="7" ry="2.8" stroke="#FF5A5A" transform="rotate(0)"/>
+    <ellipse rx="7" ry="2.8" stroke="#35D07A" transform="rotate(60)"/>
+    <ellipse rx="7" ry="2.8" stroke="#3B82F6" transform="rotate(120)"/>
+    <circle r="0.95" fill="#FF5A5A" cx="7" cy="0" transform="rotate(0)"/>
+    <circle r="0.95" fill="#35D07A" cx="7" cy="0" transform="rotate(60)"/>
+    <circle r="0.95" fill="#3B82F6" cx="7" cy="0" transform="rotate(120)"/>
+  </g>
+  <!-- nucleus backing so the "i" reads over the crossing orbits -->
+  <circle cx="8" cy="8" r="3" fill="#0E1726"/>
+  <!-- the information "i", in blue -->
+  <circle cx="8" cy="6.3" r="0.95" fill="#5CA8FF"/>
+  <rect x="7.25" y="7.7" width="1.5" height="3.4" rx="0.75" fill="#5CA8FF"/>
 </svg>
