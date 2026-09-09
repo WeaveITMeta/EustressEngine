@@ -1441,14 +1441,28 @@ fn sync_billboard_properties(
 /// suppresses the player's own head label without needing a separate
 /// per-player hide flag.
 fn cull_billboards_by_distance(
-    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
     mut billboards: Query<
         (&BillboardGuiMarker, &GlobalTransform, &mut Visibility),
         With<crate::billboard_pipeline::Billboard>,
     >,
 ) {
-    let Some(cam) = cameras.iter().next() else { return };
-    let cam_pos = cam.translation();
+    // Must be the PRIMARY (order-0) camera — the same one the allocator, the
+    // recycler and the renderer already resolve. `iter().next()` took whichever
+    // `Camera3d` the query happened to yield first, and this world holds three
+    // others that never move with the player: the order:-1 off-screen
+    // `AiCamera` and the order:100 / order:300 Slint overlay cameras. Culling
+    // against a stationary camera pins every billboard's `Visibility` to
+    // whatever it was when the space loaded, so walking up to a far label never
+    // reveals it and walking away never hides it — `max_distance` looks broken
+    // when it is in fact being measured from the wrong point.
+    let Some(cam_pos) = cameras
+        .iter()
+        .find(|(_, c)| c.order == 0)
+        .map(|(gt, _)| gt.translation())
+    else {
+        return;
+    };
 
     for (marker, global_tf, mut vis) in &mut billboards {
         if !marker.visible {
@@ -3366,4 +3380,111 @@ fn init_billboard_atlas(world: &mut World) {
         create_atlas_image(&mut images, INITIAL_ATLAS_ROWS, cols)
     };
     world.insert_non_send_resource(BillboardAtlas::new(texture, INITIAL_ATLAS_ROWS, cols, max_dim));
+}
+
+#[cfg(test)]
+mod cull_distance_tests {
+    use super::*;
+    use crate::billboard_pipeline::Billboard;
+
+    /// Build a world holding a MOVING primary camera (`order == 0`) and a
+    /// STATIONARY decoy (`order == -1`, standing in for the off-screen
+    /// `AiCamera`; the Slint overlays at order 100/300 behave the same way).
+    ///
+    /// The decoy is spawned FIRST and parked right on top of the billboard, so
+    /// an implementation that resolves the camera with `iter().next()` measures
+    /// a distance of ~0 and reports every label visible forever. That spawn
+    /// order is the entire point of these tests — it is what makes them fail
+    /// against the old code.
+    fn world_with(primary: Vec3, billboard_at: Vec3, max_distance: f32) -> (World, Entity) {
+        let mut world = World::new();
+
+        world.spawn((
+            Camera3d::default(),
+            Camera { order: -1, ..default() },
+            GlobalTransform::from_translation(billboard_at),
+        ));
+        let primary_cam = world
+            .spawn((
+                Camera3d::default(),
+                Camera { order: 0, ..default() },
+                GlobalTransform::from_translation(primary),
+            ))
+            .id();
+
+        let billboard = world
+            .spawn((
+                Billboard,
+                BillboardGuiMarker { max_distance, visible: true, ..default() },
+                GlobalTransform::from_translation(billboard_at),
+                Visibility::Visible,
+            ))
+            .id();
+
+        world.insert_resource(PrimaryCam(primary_cam));
+        (world, billboard)
+    }
+
+    #[derive(Resource)]
+    struct PrimaryCam(Entity);
+
+    fn run(world: &mut World) {
+        let mut schedule = Schedule::default();
+        schedule.add_systems(cull_billboards_by_distance);
+        schedule.run(world);
+    }
+
+    fn move_primary(world: &mut World, to: Vec3) {
+        let cam = world.resource::<PrimaryCam>().0;
+        *world.get_mut::<GlobalTransform>(cam).unwrap() = GlobalTransform::from_translation(to);
+    }
+
+    fn visibility(world: &World, e: Entity) -> Visibility {
+        *world.get::<Visibility>(e).unwrap()
+    }
+
+    /// A label beyond `max_distance` of the PRIMARY camera hides — even though
+    /// the decoy camera is sitting right on it.
+    #[test]
+    fn far_from_primary_camera_hides_despite_nearby_secondary_camera() {
+        let (mut world, bb) = world_with(Vec3::ZERO, Vec3::new(0.0, 0.0, 400.0), 300.0);
+        run(&mut world);
+        assert_eq!(visibility(&world, bb), Visibility::Hidden);
+    }
+
+    /// The behaviour the bug report was about: walking TOWARD a far label must
+    /// reveal it, and walking away must hide it again. Culling is re-evaluated
+    /// every frame against wherever the primary camera now is.
+    #[test]
+    fn visibility_tracks_the_primary_camera_as_it_moves() {
+        let bb_at = Vec3::new(0.0, 0.0, 400.0);
+        let (mut world, bb) = world_with(Vec3::ZERO, bb_at, 300.0);
+
+        run(&mut world);
+        assert_eq!(visibility(&world, bb), Visibility::Hidden, "starts out of range");
+
+        // Walk to within 100 units of the label.
+        move_primary(&mut world, Vec3::new(0.0, 0.0, 300.0));
+        run(&mut world);
+        assert_eq!(visibility(&world, bb), Visibility::Visible, "approaching reveals it");
+
+        // Walk back out past the 300-unit limit.
+        move_primary(&mut world, Vec3::ZERO);
+        run(&mut world);
+        assert_eq!(visibility(&world, bb), Visibility::Hidden, "retreating hides it again");
+    }
+
+    /// `distance_lower_limit` keeps working off the primary camera too.
+    #[test]
+    fn lower_limit_hides_when_primary_camera_is_too_close() {
+        let (mut world, bb) = world_with(Vec3::ZERO, Vec3::new(0.0, 0.0, 5.0), 0.0);
+        world.get_mut::<BillboardGuiMarker>(bb).unwrap().distance_lower_limit = 20.0;
+
+        run(&mut world);
+        assert_eq!(visibility(&world, bb), Visibility::Hidden, "inside the lower limit");
+
+        move_primary(&mut world, Vec3::new(0.0, 0.0, -100.0));
+        run(&mut world);
+        assert_eq!(visibility(&world, bb), Visibility::Visible, "backing off clears it");
+    }
 }
