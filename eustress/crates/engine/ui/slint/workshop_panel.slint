@@ -102,6 +102,26 @@ export struct PipelineStepData {
     artifact-count: int,    // Number of files generated in this step
 }
 
+// One row of the model picker.
+//
+// The list is no longer a hardcoded array of names: it comes from the model
+// catalog (`soul::workshop_model`), which the API worker recompiles nightly,
+// so a model released this week appears here without a rebuild.
+//
+// Everything except `name` is presentation the Rust side has already resolved.
+// `price` arrives preformatted and `section-start` is precomputed rather than
+// derived here, because Slint has no grouping construct and no float
+// formatting — doing it in Rust keeps one obvious place where a row is
+// described, instead of arithmetic scattered through the layout.
+export struct WorkshopModelEntry {
+    name: string,           // "Sonnet 5" — also the id passed back to Rust
+    provider: string,       // "Anthropic" — section header text
+    tagline: string,        // one short line on what this model is for
+    price: string,          // "$3 / $15 per Mtok", already formatted
+    section-start: bool,    // first row of its provider group: draw the header
+    key-missing: bool,      // selectable, but its BYOK key is not set yet
+}
+
 // ============================================================================
 // 2. ChatBubble — renders a single conversation message
 // ============================================================================
@@ -443,6 +463,12 @@ component ChatBubble inherits Rectangle {
                     }
 
                     HorizontalLayout {
+                        // Centre the 12px child in the 24px row. A HorizontalLayout does
+                        // NOT centre a fixed-height child: lower_layout pins it at
+                        // y = padding.top and leaves its height alone, so with no vertical
+                        // padding it sat flush against the top with 12px of dead space below.
+                        padding-top: 6px;
+                        padding-bottom: 6px;
                         padding-left: 8px;
                         padding-right: 8px;
                         spacing: 4px;
@@ -763,8 +789,21 @@ export component WorkshopPanel inherits Rectangle {
     in-out property <string> active-model-name: "Sonnet 5";
     // Fires when the user picks a different model from the dropdown.
     callback on-model-changed(string);
-    // Available model names — one global list, not mode-specific.
-    in property <[string]> available-models: ["Sonnet 5", "Opus 5", "Fable 5", "Grok 4.6"];
+    // Available models — one global list, not mode-specific. Rust fills this
+    // from the model catalog; the default below is the compiled-in seed, so
+    // the .slint previews on its own and a catalog fetch that never lands
+    // still shows a full picker.
+    in property <[WorkshopModelEntry]> available-models: [
+        { name: "Sonnet 5", provider: "Anthropic", tagline: "Balanced speed and depth. The everyday driver.", price: "$3 / $15 per Mtok", section-start: true, key-missing: false },
+        { name: "Opus 5", provider: "Anthropic", tagline: "Deeper reasoning for work that has to be right.", price: "$5 / $25 per Mtok", section-start: false, key-missing: false },
+        { name: "Fable 5.1", provider: "Anthropic", tagline: "Always-on thinking. The advisor on hard calls.", price: "$10 / $50 per Mtok", section-start: false, key-missing: false },
+        { name: "Grok 4.6", provider: "xAI", tagline: "Fast and cheap, with live search built in.", price: "$2 / $6 per Mtok", section-start: true, key-missing: false },
+        { name: "GPT-6 Astra", provider: "OpenAI", tagline: "OpenAI flagship. Long context, agentic reasoning.", price: "$10 / $50 per Mtok", section-start: true, key-missing: false },
+    ];
+    // How many provider groups the list above spans. Passed in rather than
+    // derived because the popup's height has to be known before the rows are
+    // laid out, and Slint cannot fold over a model to count the groups.
+    in property <int> model-provider-count: 3;
 
     // ── Gauntlet toggle ──────────────────────────────────────────────────
     // AAA verify-loop mode. Off by default: it deliberately spends extra
@@ -1499,6 +1538,12 @@ export component WorkshopPanel inherits Rectangle {
                     }
 
                     HorizontalLayout {
+                        // Centre the 14px child in the 28px row. A HorizontalLayout does
+                        // NOT centre a fixed-height child: lower_layout pins it at
+                        // y = padding.top and leaves its height alone, so with no vertical
+                        // padding it sat flush against the top with 14px of dead space below.
+                        padding-top: 7px;
+                        padding-bottom: 7px;
                         alignment: center;
                         spacing: 6px;
 
@@ -1670,12 +1715,15 @@ export component WorkshopPanel inherits Rectangle {
 
                         model-popup := PopupWindow {
                             x: 0px;
-                            // Same derivation as the mode popup above — the
-                            // model list is shorter so it never hit the clip,
-                            // but the latent bug was identical.
-                            y: -(root.available-models.length * 24px + 8px) - 4px;
-                            width: 160px;
-                            height: root.available-models.length * 24px + 8px;
+                            // Same derivation as the mode popup above — a
+                            // popup taller than the space above the toolbar
+                            // gets clipped, so the height is computed rather
+                            // than guessed. A row is 46px (name, tagline, and
+                            // price); a provider header adds 22px to the first
+                            // row of its group.
+                            y: -(root.available-models.length * 46px + root.model-provider-count * 22px + 8px) - 4px;
+                            width: 292px;
+                            height: root.available-models.length * 46px + root.model-provider-count * 22px + 8px;
 
                             Rectangle {
                                 background: Theme.background-secondary;
@@ -1689,26 +1737,106 @@ export component WorkshopPanel inherits Rectangle {
                                     padding: 4px;
                                     spacing: 0px;
 
-                                    for m in root.available-models: Rectangle {
-                                        height: 24px;
-                                        border-radius: 4px;
-                                        background: mm-touch.has-hover ? Theme.accent-blue.with-alpha(0.13) : transparent;
+                                    for m in root.available-models: VerticalLayout {
+                                        spacing: 0px;
 
-                                        mm-touch := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => {
-                                                root.active-model-name = m;
-                                                root.on-model-changed(m);
-                                                model-popup.close();
+                                        // Provider header. Drawn only on the
+                                        // first row of each group, so the list
+                                        // reads as three short sections rather
+                                        // than one undifferentiated column.
+                                        if m.section-start: Rectangle {
+                                            height: 22px;
+                                            Text {
+                                                x: 8px;
+                                                text: m.provider;
+                                                color: Theme.text-secondary;
+                                                font-size: 9px;
+                                                letter-spacing: 0.6px;
+                                                vertical-alignment: center;
                                             }
                                         }
 
-                                        Text {
-                                            x: 8px;
-                                            text: m;
-                                            color: m == root.active-model-name ? Theme.accent-blue : Theme.text-primary;
-                                            font-size: 11px;
-                                            vertical-alignment: center;
+                                        Rectangle {
+                                            height: 46px;
+                                            border-radius: 4px;
+                                            background: m.name == root.active-model-name
+                                                ? Theme.accent-blue.with-alpha(0.13)
+                                                : (mm-touch.has-hover ? Theme.background-tertiary : transparent);
+
+                                            mm-touch := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => {
+                                                    root.active-model-name = m.name;
+                                                    root.on-model-changed(m.name);
+                                                    model-popup.close();
+                                                }
+                                            }
+
+                                            // Selected marker. A left bar
+                                            // rather than a checkmark column:
+                                            // it reads at a glance and costs
+                                            // no horizontal room on rows that
+                                            // already carry three fields.
+                                            if m.name == root.active-model-name: Rectangle {
+                                                x: 0px;
+                                                y: 8px;
+                                                width: 2px;
+                                                height: 30px;
+                                                background: Theme.accent-blue;
+                                                border-radius: 1px;
+                                            }
+
+                                            VerticalLayout {
+                                                x: 10px;
+                                                y: 6px;
+                                                width: parent.width - 20px;
+                                                spacing: 2px;
+
+                                                HorizontalLayout {
+                                                    spacing: 6px;
+
+                                                    Text {
+                                                        text: m.name;
+                                                        color: m.name == root.active-model-name
+                                                            ? Theme.accent-blue
+                                                            : Theme.text-primary;
+                                                        font-size: 11px;
+                                                        font-weight: 600;
+                                                        vertical-alignment: center;
+                                                    }
+
+                                                    // Says the model is
+                                                    // selectable but will not
+                                                    // run yet. Shown here, at
+                                                    // the moment of choosing,
+                                                    // rather than as an error
+                                                    // after the first message
+                                                    // fails to send.
+                                                    if m.key-missing: Text {
+                                                        text: "needs key";
+                                                        color: #f0a022;
+                                                        font-size: 9px;
+                                                        vertical-alignment: center;
+                                                    }
+
+                                                    Rectangle { horizontal-stretch: 1; }
+
+                                                    Text {
+                                                        text: m.price;
+                                                        color: Theme.text-secondary;
+                                                        font-size: 9px;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+
+                                                Text {
+                                                    text: m.tagline;
+                                                    color: Theme.text-secondary;
+                                                    font-size: 9px;
+                                                    overflow: elide;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
                                         }
                                     }
                                 }

@@ -88,7 +88,7 @@ impl XaiClient {
 }
 
 /// `ClaudeTool` (Anthropic `input_schema`) → OpenAI function-tool shape.
-fn claude_tools_to_openai(tools: &[ClaudeTool]) -> Vec<Value> {
+pub(crate) fn claude_tools_to_openai(tools: &[ClaudeTool]) -> Vec<Value> {
     tools
         .iter()
         .map(|t| {

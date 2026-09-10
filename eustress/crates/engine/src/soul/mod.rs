@@ -20,7 +20,9 @@ pub mod validator;
 pub mod audit_log;
 pub mod claude_client;
 pub mod xai_client;
+pub mod openai_client;
 pub mod workshop_model;
+pub mod model_catalog;
 pub mod hot_compile;
 pub mod build_pipeline;
 pub mod scope;
@@ -46,7 +48,8 @@ pub use codegen::*;
 pub use validator::*;
 pub use claude_client::{ClaudeClient, ClaudeError, GenerationResult};
 pub use xai_client::{XaiClient, XaiConfig};
-pub use workshop_model::{Provider, WorkshopModel};
+pub use openai_client::{OpenAiClient, OpenAiConfig};
+pub use workshop_model::{Catalog, ModelSpec, Provider, WorkshopModel};
 pub use hot_compile::{HotCompiler, HotCompileConfig, CompileResult, HotCompilePlugin};
 pub use build_pipeline::{SoulBuildPipeline, BuildStage, BuildRequest, PipelineResult, SoulBuildPipelinePlugin, TriggerBuildEvent, CommandBarBuildEvent, CommandBarBuildState, CommandBarResult};
 pub use scope::{ScriptLocation, ScriptScope, AvailableEvents, SystemPromptBuilder};
@@ -87,6 +90,11 @@ pub struct GlobalSoulSettings {
     /// no per-space override in v1.
     #[serde(default)]
     pub global_xai_api_key: String,
+    /// Global OpenAI API key. Sibling to the two above, and global-only for
+    /// the same reason: the model picker is a global preference, so the key it
+    /// spends has no per-space meaning.
+    #[serde(default)]
+    pub global_openai_api_key: String,
     /// Whether Workshop's Gauntlet (AAA verify-loop) mode is on. Defaults to
     /// OFF — it deliberately spends extra tokens per artifact, so it must be
     /// an explicit opt-in, never a silent default.
@@ -120,6 +128,7 @@ impl Default for GlobalSoulSettings {
             use_global_for_new_spaces: true,
             workshop_model: default_workshop_model(),
             global_xai_api_key: String::new(),
+            global_openai_api_key: String::new(),
             // Opt-in only, per the field's contract.
             workshop_gauntlet: false,
             // Likewise: the tools behind the approval gate are the ones that
@@ -208,6 +217,26 @@ impl GlobalSoulSettings {
     pub fn effective_xai_api_key(&self) -> Option<String> {
         let key = self.global_xai_api_key.trim();
         if key.is_empty() { None } else { Some(key.to_string()) }
+    }
+
+    /// Trimmed OpenAI API key, or `None` if unset.
+    pub fn effective_openai_api_key(&self) -> Option<String> {
+        let key = self.global_openai_api_key.trim();
+        if key.is_empty() { None } else { Some(key.to_string()) }
+    }
+
+    /// The BYOK key this model's provider spends, or `None` if that field is
+    /// empty. Centralised so a new provider is one arm here rather than a
+    /// hunt through every call site that needs a key.
+    pub fn key_for_provider(&self, provider: Provider) -> Option<String> {
+        match provider {
+            Provider::Anthropic => {
+                let key = self.global_api_key.trim();
+                if key.is_empty() { None } else { Some(key.to_string()) }
+            }
+            Provider::Xai => self.effective_xai_api_key(),
+            Provider::OpenAi => self.effective_openai_api_key(),
+        }
     }
 }
 
@@ -351,6 +380,13 @@ impl Plugin for EngineSoulPlugin {
         // Add build pipeline plugin (includes Claude integration)
         app.add_plugins(SoulBuildPipelinePlugin);
         
+        // Install the cached model catalog BEFORE anything resolves a model,
+        // and start the background refresh for the next launch. Order matters:
+        // `GlobalSoulSettings::load()` below can fall back to `default()`,
+        // which reads `WorkshopModel::default()` and would otherwise pin the
+        // compiled-in seed for the rest of the session.
+        model_catalog::install_and_refresh();
+
         // Load global Soul settings from disk
         let global_settings = GlobalSoulSettings::load();
         

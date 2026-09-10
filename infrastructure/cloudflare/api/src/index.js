@@ -631,6 +631,7 @@ export default {
       let distribution = null;
       let payout = null;
       let backup = null;
+      let models = null;
       let failed = [];
       try { distribution = await runDailyDistribution(env); }
       catch (e) { failed.push(`distribution: ${e.message}`); console.error('distribution failed:', e); }
@@ -639,6 +640,14 @@ export default {
       // Backup LAST so it captures the state this run produced.
       try { backup = await backupLedger(env); }
       catch (e) { failed.push(`backup: ${e.message}`); console.error('backup failed:', e); }
+
+      // Model catalog refresh. Independent of the ledger work above — it
+      // shares only the schedule — so it runs on its own try/catch and a
+      // failed payout never costs us a day of model currency. It keeps its
+      // own detailed record in MODELS:run:{date}; this is just the summary
+      // line so /api/admin/cron-health shows the whole night at a glance.
+      try { models = await runModelDiscovery(env); }
+      catch (e) { failed.push(`models: ${e.message}`); console.error('model discovery failed:', e); }
 
       // Durable run record. Cron failures used to vanish into console.error
       // with nothing queryable afterwards, so a silently skipped day was
@@ -654,6 +663,9 @@ export default {
         concentration_flag: distribution?.concentration_flag ?? false,
         paid_usd: payout?.total_paid_usd ?? 0,
         backup_key: backup?.key ?? null,
+        models_applied: models?.applied ?? false,
+        models_version: models?.version ?? models?.kept_version ?? null,
+        models_changes: models?.changes ?? [],
       }), { expirationTtl: 86400 * 365 });
     })());
   },
@@ -813,15 +825,33 @@ export default {
       if (url.pathname === '/api/payouts/rate' && request.method === 'GET')
         return handlePayoutRate(env, cors);
 
-      // Ledger transparency (public, read-only) + operational health
+      // Ledger transparency (public, read-only, wildcard CORS) + health.
+      // These three take `publicCors()` so browsers on any origin can audit
+      // them; /api/ledger/me below stays origin-pinned AND bearer-gated.
       if (url.pathname === '/api/ledger/summary' && request.method === 'GET')
-        return handleLedgerSummary(env, cors);
+        return handleLedgerSummary(env, publicCors());
       if (url.pathname.startsWith('/api/ledger/distribution/') && request.method === 'GET')
-        return handleLedgerDistribution(url.pathname.split('/').pop(), env, cors);
+        return handleLedgerDistribution(url.pathname.split('/').pop(), env, publicCors());
+      if (url.pathname.startsWith('/api/ledger/history/') && request.method === 'GET')
+        return handleLedgerHistory(url.pathname.split('/').pop(), env, publicCors());
+      if (url.pathname === '/api/ledger/spend' && request.method === 'POST')
+        return handleLedgerSpend(request, env, cors);
       if (url.pathname === '/api/ledger/me' && request.method === 'GET')
         return handleLedgerMe(request, env, cors);
       if (url.pathname === '/api/admin/cron-health' && request.method === 'GET')
         return handleCronHealth(request, env, cors);
+
+      // Model catalog — the Workshop model picker's list, recompiled daily.
+      // The read is public: it is public model names at public list prices,
+      // and gating it would only push a signed-out engine onto its seed.
+      if (url.pathname === '/api/models/catalog' && request.method === 'GET')
+        return handleModelCatalog(request, env, cors);
+      if (url.pathname === '/api/admin/models' && request.method === 'GET')
+        return handleAdminModelRuns(request, env, cors);
+      if (url.pathname === '/api/admin/models/refresh' && request.method === 'POST')
+        return handleAdminModelRefresh(request, env, cors);
+      if (url.pathname === '/api/admin/models/rollback' && request.method === 'POST')
+        return handleAdminModelRollback(request, env, cors);
 
       // Node heartbeat
       if (url.pathname === '/api/node/heartbeat' && request.method === 'POST')
@@ -2082,6 +2112,11 @@ async function handleCosign(request, env, cors) {
     day.count += 1;
     day.updated_at = new Date().toISOString();
     await env.INVENTORY.put(dayKey, JSON.stringify(day), { expirationTtl: 86400 * 90 });
+    // Running network-wide score for the day — powers the live projection in
+    // the heartbeat. Advisory only; the distribution recomputes from scratch.
+    const dtKey = `daytotal:${today}`;
+    const dtPrev = parseFloat(await env.INVENTORY.get(dtKey) || '0');
+    await env.INVENTORY.put(dtKey, String(dtPrev + score), { expirationTtl: 86400 * 7 });
   }
 
   // Generate co-signature (hash of contribution + user + timestamp)
@@ -3478,8 +3513,17 @@ async function handleStripeWebhook(request, env) {
       }
 
       // Revenue split: 50% treasury, 50% platform
-      const treasuryCut = amount * TREASURY_SPLIT;
-      const platformCut = amount - treasuryCut; // Remaining 50% to Eustress
+      // Storefront/processor fee comes off the top, THEN the 50/50. See
+      // TREASURY_SPLIT: splitting gross would have the platform paying the
+      // app store out of its own half once iOS/Android are live.
+      const channel = session.metadata?.channel || 'web';
+      const fee = channelFee(amount, channel);
+      const net = Math.max(0, amount - fee);
+      const treasuryCut = net * TREASURY_SPLIT;
+      const platformCut = net - treasuryCut;
+      // Track fees so the accounting dashboard can show true take-rate.
+      const feesPrev = parseFloat(await env.PAYOUTS.get('costs:storefront_fees') || '0');
+      await env.PAYOUTS.put('costs:storefront_fees', String(feesPrev + fee));
 
       const currentTreasury = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
       const newTreasuryTotal = currentTreasury + treasuryCut;
@@ -3505,6 +3549,7 @@ async function handleStripeWebhook(request, env) {
       // Record deposit with full revenue breakdown
       await env.PAYOUTS.put(`deposit:${session.id}`, JSON.stringify({
         id: session.id, type: 'ticket_purchase', amount_usd: amount,
+        channel, storefront_fee: fee, net_usd: net,
         treasury_cut: treasuryCut, platform_cut: platformCut,
         tickets_credited: ticketsToCredit, package: pkgKey,
         user_id: userId || 'anonymous', timestamp: new Date().toISOString(),
@@ -3802,7 +3847,32 @@ const TICKET_PACKAGES = {
 
 const DEVELOPER_SHARE = 0.70;
 const PLATFORM_SHARE = 0.30;
+/// Contributor share of NET revenue (after the storefront's cut).
+///
+/// This is deliberately applied to NET, not gross. Taking 50% of gross works
+/// only while Stripe-web is the sole rail; on iOS/Android the storefront takes
+/// ~30% first, so a gross split would leave the platform 20% while
+/// contributors took 50% — the platform would be funding the store out of its
+/// own margin. On net, contributors get 50% of what actually arrives, which
+/// is still ~35% of gross on mobile: comfortably above the ~24.5% a Roblox
+/// creator nets, without making the platform side unsustainable.
 const TREASURY_SPLIT = 0.50;
+
+/// Storefront / processor fee by sales channel, deducted before the split.
+/// `channel` rides in the Stripe session metadata; unknown channels fall back
+/// to web pricing rather than silently assuming zero fees.
+const CHANNEL_FEES = {
+  web:     { rate: 0.029, flat: 0.30 },  // Stripe standard
+  ios:     { rate: 0.30,  flat: 0.0  },  // App Store
+  android: { rate: 0.30,  flat: 0.0  },  // Play Store
+  steam:   { rate: 0.30,  flat: 0.0  },
+};
+
+/// Fee for a gross amount on a channel. Never returns more than the amount.
+function channelFee(amountUsd, channel) {
+  const f = CHANNEL_FEES[channel] || CHANNEL_FEES.web;
+  return Math.min(amountUsd, amountUsd * f.rate + f.flat);
+}
 
 function handleTicketPackages(env, cors) {
   const packages = Object.entries(TICKET_PACKAGES).map(([key, pkg]) => ({
@@ -3896,6 +3966,24 @@ async function handleTicketSpend(request, env, cors) {
     product_id, developer_id, description: `Purchased product ${product_id}`, timestamp: now,
   }), { expirationTtl: 86400 * 365 * 3 });
 
+  // A sale is VERIFIED value: credit the creator BLS contribution score so
+  // the daily distribution pays them for impact, not just for hours logged.
+  if (developer_id && devCut > 0) {
+    const vDay = new Date().toISOString().split('T')[0];
+    const vKey = `contrib:${vDay}:${developer_id}`;
+    const vRaw = await env.INVENTORY.get(vKey);
+    const vRec = vRaw ? JSON.parse(vRaw)
+      : { total_score: 0, by_type: {}, by_seconds: {}, count: 0 };
+    const vScore = devCut * VALUE_SCORE_PER_TICKET;
+    vRec.value_score = (vRec.value_score || 0) + vScore;
+    vRec.by_type.Value = (vRec.by_type.Value || 0) + vScore;
+    vRec.updated_at = new Date().toISOString();
+    await env.INVENTORY.put(vKey, JSON.stringify(vRec), { expirationTtl: 86400 * 90 });
+    const dtKey = `daytotal:${vDay}`;
+    const dtPrev = parseFloat(await env.INVENTORY.get(dtKey) || '0');
+    await env.INVENTORY.put(dtKey, String(dtPrev + vScore), { expirationTtl: 86400 * 7 });
+  }
+
   if (developer_id) {
     await env.INVENTORY.put(`txn:${developer_id}:${Date.now()}`, JSON.stringify({
       id: crypto.randomUUID(), user_id: developer_id, type: 'dev_payout', amount: devCut,
@@ -3981,6 +4069,7 @@ async function handleNodeHeartbeat(request, env, cors) {
   // Return current BLS balance if authenticated (engine polls this)
   let bliss_balance = 0;
   let pending_score = 0;
+  let projected_bls = 0;
   if (user_id) {
     bliss_balance = fromMinor(await ledgerBalanceMinor(env, user_id));
 
@@ -4027,9 +4116,33 @@ async function handleNodeHeartbeat(request, env, cors) {
       const pending = JSON.parse(pendingData);
       pending_score = pending.total_score || 0;
     }
+
+    // Projected BLS for today, so the engine can show earnings GROWING as
+    // work happens instead of only a points number that means nothing to a
+    // person. Same formula the midnight distribution uses:
+    //   emission x min(1, dayTotal/FULL_DAY_SCORE) x (myScore / dayTotal)
+    // `daytotal:` is a cheap running counter maintained by handleCosign; the
+    // real distribution recomputes from the contrib records, so a small drift
+    // here only affects the estimate, never the payout.
+    const dayTotal = Math.max(
+      pending_score,
+      parseFloat(await env.INVENTORY.get(`daytotal:${today}`) || '0')
+    );
+    if (dayTotal > 0 && pending_score > 0) {
+      const supplyMinorNow = parseInt(await env.PAYOUTS.get('bliss:supply_minor') || '0', 10)
+        || toMinor(parseFloat(await env.PAYOUTS.get('bliss:current_supply') || String(BLISS_INITIAL_SUPPLY)));
+      const genesisDate = await env.PAYOUTS.get('bliss:genesis_date');
+      const yrs = genesisDate
+        ? Math.max(0, Math.floor((Date.now() - Date.parse(genesisDate)) / (365 * 86400 * 1000)))
+        : 0;
+      const emissionToday = fromMinor(supplyMinorNow) * blissEmissionRate(yrs) / 365;
+      const util = Math.min(1, dayTotal / FULL_DAY_SCORE);
+      projected_bls = Math.floor(emissionToday * BLISS_UNIT * util * (pending_score / dayTotal)) / BLISS_UNIT;
+    }
   }
 
-  return json({ ok: true, bliss_balance, pending_score }, 200, cors);
+  return json({ ok: true, bliss_balance, pending_score, projected_bls,
+    full_day_score: FULL_DAY_SCORE }, 200, cors);
 }
 
 async function handleNodeStats(env, cors) {
@@ -5287,6 +5400,42 @@ const PRESENCE_MAX_STEP = 150;
 /// Minor units per whole BLS. 2 decimal places.
 const BLISS_UNIT = 100;
 
+/// Contribution score representing ONE FULL DAY of network contribution —
+/// the amount of work that earns the entire daily emission.
+///
+/// Score is weighted minutes (`weight × minutes × node bonus`), so this is
+/// 8 hours at the top weight: 8 × 60 × 3.0 (Development) = 1440.
+///
+/// WHY THIS EXISTS. The pool used to be split purely by SHARE
+/// (`your_score / total_score`), which is the Bitcoin block-reward model: the
+/// only participant collects the whole reward no matter how little they did.
+/// In practice a day with a score of 3.0 — one minute of work — minted the
+/// same ~13,736 BLS as a day with 8x the effort. Effort was decoupled from
+/// reward, which makes "proof of contribution" meaningless at small N.
+///
+/// So the daily emission is a CEILING, not a guarantee. The day mints
+/// `emission × min(1, total_score / FULL_DAY_SCORE)`, and the remainder is
+/// simply never created — supply tracks real contribution instead of the
+/// calendar. Relative split between contributors is unchanged.
+///
+/// TUNING: raising this makes BLS harder to earn; lowering it makes a short
+/// day worth proportionally more. It does not change the long-run supply
+/// ceiling, only how much of each day's allowance is actually minted.
+const FULL_DAY_SCORE = 1440;
+
+/// Contribution score a creator earns per Ticket of verified sales.
+///
+/// This is how Bliss pays for IMPORTANCE rather than time. Effort score is
+/// self-reported minutes; value score is a purchase that actually happened,
+/// so it is server-verified and therefore NOT subject to MAX_DAILY_SCORE —
+/// that cap exists precisely because effort cannot be verified. A creator
+/// whose work people pay for can out-earn one who merely logged hours.
+///
+/// At 0.5, a 1,000-Ticket day (~$11 of sales) is worth 500 score, roughly a
+/// 2.8-hour Development day. Raise it to tilt the economy further toward
+/// outcomes and away from presence.
+const VALUE_SCORE_PER_TICKET = 0.5;
+
 /// Whole-BLS float -> integer minor units. Only for migration and for
 /// converting emission math; never for storing user input.
 function toMinor(bls) {
@@ -5320,6 +5469,74 @@ async function ledgerAppend(env, userId, { amount_minor, kind, ref, ts, id }) {
   const cur = parseInt(await env.PAYOUTS.get(`bal:${userId}`) || '0', 10);
   await env.PAYOUTS.put(`bal:${userId}`, String(cur + amount));
   return true;
+}
+
+/// Spend BLS. Appends a NEGATIVE ledger entry and burns the amount from
+/// circulating supply.
+///
+/// A currency needs a sink. Until this existed the ledger could only ever
+/// credit, so BLS accumulated forever with nothing to do — a scoreboard, not
+/// money. Spending is a first-class ledger operation: it writes the same kind
+/// of append-only entry a credit does (so the audit trail stays complete and
+/// the balance stays derived), and it burns rather than transferring, which
+/// keeps the emission schedule the only source of new BLS.
+///
+/// `purpose` is recorded verbatim so a sink can be added without touching the
+/// ledger again. Idempotent per `ref` — a retried client call cannot
+/// double-spend.
+async function ledgerSpend(env, userId, { amount_minor, purpose, ref }) {
+  const amount = Math.trunc(Number(amount_minor) || 0);
+  if (amount <= 0) return { ok: false, error: 'Amount must be positive' };
+  if (!purpose) return { ok: false, error: 'purpose required' };
+
+  const balance = await ledgerBalanceMinor(env, userId);
+  if (balance < amount) {
+    return { ok: false, error: 'Insufficient balance', balance_minor: balance, required_minor: amount };
+  }
+
+  const id = ref ? `spend-${ref}` : `spend-${crypto.randomUUID()}`;
+  const wrote = await ledgerAppend(env, userId, {
+    amount_minor: -amount,
+    kind: 'spend',
+    ref: purpose,
+    id,
+  });
+  if (!wrote) {
+    return { ok: false, error: 'Duplicate spend reference', balance_minor: balance };
+  }
+
+  // Burned, not transferred — emission stays the only mint.
+  const burned = parseInt(await env.PAYOUTS.get('bliss:burned_minor') || '0', 10);
+  await env.PAYOUTS.put('bliss:burned_minor', String(burned + amount));
+
+  return { ok: true, spent_minor: amount, balance_minor: balance - amount };
+}
+
+async function handleLedgerSpend(request, env, cors) {
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+
+  const body = await request.json().catch(() => ({}));
+  const { amount, purpose, ref } = body;
+  const amountMinor = toMinor(amount);
+  if (!Number.isFinite(amountMinor) || amountMinor <= 0)
+    return json({ error: 'amount must be a positive number of BLS' }, 400, cors);
+
+  const res = await ledgerSpend(env, userId, { amount_minor: amountMinor, purpose, ref });
+  if (!res.ok) {
+    const status = res.error === 'Insufficient balance' ? 402
+      : res.error === 'Duplicate spend reference' ? 409 : 400;
+    return json({
+      error: res.error,
+      balance: res.balance_minor !== undefined ? fromMinor(res.balance_minor) : undefined,
+    }, status, cors);
+  }
+  return json({
+    ok: true,
+    spent: fromMinor(res.spent_minor),
+    balance: fromMinor(res.balance_minor),
+    balance_display: formatBliss(res.balance_minor),
+  }, 200, cors);
 }
 
 /// Sum every entry for a user (authoritative). Uses the checkpoint to avoid
@@ -5412,9 +5629,21 @@ async function handleLedgerSummary(env, cors) {
     : 0;
 
   // Recent distributions so anyone can re-derive today's emission by hand.
-  const list = await env.PAYOUTS.list({ prefix: 'distribution:', limit: 30 });
+  //
+  // NOTE: KV lists lexicographically, so a bare `limit: 30` returned the
+  // THIRTY OLDEST records while calling them "recent" — the newest days were
+  // invisible. Page the whole prefix, then sort descending and trim.
+  const keys = [];
+  let cursor;
+  while (true) {
+    const page = await env.PAYOUTS.list({ prefix: 'distribution:', limit: 1000, cursor });
+    keys.push(...page.keys);
+    if (page.list_complete || !page.cursor || keys.length >= 3650) break;
+    cursor = page.cursor;
+  }
+  keys.sort((a, b) => (a.name < b.name ? 1 : -1)); // newest first
   const recent = [];
-  for (const k of list.keys) {
+  for (const k of keys.slice(0, 60)) {
     const v = await env.PAYOUTS.get(k.name);
     if (!v) continue;
     const r = JSON.parse(v);
@@ -5430,12 +5659,19 @@ async function handleLedgerSummary(env, cors) {
   }
   recent.sort((a, b) => (a.date < b.date ? 1 : -1));
 
+  const burnedMinor = parseInt(await env.PAYOUTS.get('bliss:burned_minor') || '0', 10);
   return json({
     unit: { decimals: 2, minor_per_bls: BLISS_UNIT },
     supply: fromMinor(supplyMinor),
     supply_minor: supplyMinor,
     total_distributed: fromMinor(distributedMinor),
     total_distributed_minor: distributedMinor,
+    // Spending burns rather than transfers, so circulating is what holders
+    // actually still have.
+    total_burned: fromMinor(burnedMinor),
+    circulating: fromMinor(distributedMinor - burnedMinor),
+    effort_full_day_score: FULL_DAY_SCORE,
+    value_score_per_ticket: VALUE_SCORE_PER_TICKET,
     genesis_date: genesis,
     annual_emission_rate: blissEmissionRate(years),
     emission_model: {
@@ -5446,6 +5682,74 @@ async function handleLedgerSummary(env, cors) {
     },
     treasury_usd: parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0'),
     recent_distributions: recent,
+  }, 200, cors);
+}
+
+/// Public daily balance series for one account, derived from its append-only
+/// ledger entries (the authoritative source — includes the migration opening
+/// entry, not just emission credits).
+///
+/// Returns one point per day that had activity, with a running cumulative
+/// balance, so a dashboard can plot wallet growth without authenticating.
+/// Sensitivity is equivalent to the per-day distribution records, which
+/// already publish recipient ids and amounts.
+async function handleLedgerHistory(userId, env, cors) {
+  if (!userId || !/^[A-Za-z0-9_-]{1,128}$/.test(userId))
+    return json({ error: 'Bad user id' }, 400, cors);
+
+  const prefix = `entry:${userId}:`;
+  const byDate = new Map();
+  let cursor;
+  while (true) {
+    const page = await env.PAYOUTS.list({ prefix, limit: 1000, cursor });
+    for (const k of page.keys) {
+      const v = await env.PAYOUTS.get(k.name);
+      if (!v) continue;
+      const e = JSON.parse(v);
+      // Fold the 1970 migration-opening entry into the genesis day so the
+      // chart starts at the real opening balance instead of showing a
+      // 56-year gap.
+      const raw = (e.ts || '').slice(0, 10);
+      const date = raw === '1970-01-01' ? 'opening' : raw;
+      const cur = byDate.get(date) || { minor: 0, kinds: new Set() };
+      cur.minor += Math.trunc(e.amount_minor || 0);
+      cur.kinds.add(e.kind || 'unknown');
+      byDate.set(date, cur);
+    }
+    if (page.list_complete || !page.cursor) break;
+    cursor = page.cursor;
+  }
+
+  // 'opening' must come FIRST so the running total starts at the opening
+  // balance. It does NOT sort there naturally — 'o' (0x6F) is greater than
+  // '2' (0x32), so a plain sort put it last and made every intermediate
+  // cumulative wrong.
+  const dates = [...byDate.keys()].sort((a, b) => {
+    if (a === 'opening') return -1;
+    if (b === 'opening') return 1;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  let cumulative = 0;
+  const series = dates.map((date) => {
+    const { minor, kinds } = byDate.get(date);
+    cumulative += minor;
+    return {
+      date,
+      change: fromMinor(minor),
+      change_minor: minor,
+      cumulative: fromMinor(cumulative),
+      cumulative_minor: cumulative,
+      kinds: [...kinds].sort(),
+    };
+  });
+
+  return json({
+    user_id: userId,
+    unit: { decimals: 2, minor_per_bls: BLISS_UNIT },
+    points: series.length,
+    balance: fromMinor(cumulative),
+    balance_minor: cumulative,
+    series,
   }, 200, cors);
 }
 
@@ -5619,7 +5923,9 @@ async function collectDayScores(env, date) {
       const data = await env.INVENTORY.get(key.name);
       if (!data) continue;
       const rec = JSON.parse(data);
-      const score = rec.total_score || 0;
+      // Effort (capped at cosign time) + verified sales value (uncapped,
+      // because a real purchase needs no fraud ceiling).
+      const score = (rec.total_score || 0) + (rec.value_score || 0);
       if (score <= 0) continue;
       entries.push({ userId: key.name.slice(prefix.length), score });
       totalScore += score;
@@ -5695,11 +6001,19 @@ async function runDailyDistribution(env) {
     record.concentration_flag = entries.length >= 5 && record.top_share > 0.5;
   }
 
+  // Effort gate: mint only the fraction of the day's allowance that the
+  // day's ACTUAL work justifies. Without this, a single contributor collected
+  // the full emission for one minute of activity.
+  const utilization = Math.min(1, totalScore / FULL_DAY_SCORE);
+  record.utilization = utilization;
+  record.full_day_score = FULL_DAY_SCORE;
+  record.emission_ceiling = dailyEmission;
+
   if (totalScore > 0) {
     // Integer minor units throughout. `floor` on each share guarantees the
     // sum of credits never exceeds the pool (leftover dust stays unminted
     // rather than inflating supply).
-    const poolMinor = Math.floor(dailyEmission * BLISS_UNIT);
+    const poolMinor = Math.floor(dailyEmission * BLISS_UNIT * utilization);
     let mintedMinor = 0;
     for (const e of entries) {
       const userData = await env.USERS.get(`user:${e.userId}`);
@@ -5751,6 +6065,556 @@ async function runDailyDistribution(env) {
   await env.PAYOUTS.put(`distribution:${yesterday}`, JSON.stringify(record), { expirationTtl: 86400 * 365 * 5 });
   return record;
 }
+// ═══════════════════════════════════════════════════════════════════════════
+// MODEL CATALOG — the list of models Workshop offers, recompiled daily
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The engine used to hardcode its model list in a Rust enum, so every frontier
+// release needed a code change, a recompile and a shipped build before anyone
+// could pick it. The catalog moves that list into KV: Grok 4.6 recompiles it
+// once a day from live search, the engine fetches it, and a new model reaches
+// users without a release.
+//
+// Grok is the only researcher here. We hold no Anthropic or OpenAI key, so a
+// discovered id is never confirmed against the provider's own /v1/models — and
+// the daily result applies with no human in the loop. The guardrail is
+// therefore structural rather than an existence check:
+//
+//   1. PROVIDER WHITELIST. An entry whose provider is not one of the three in
+//      `MODEL_PROVIDERS` is dropped. Grok cannot introduce a fourth vendor
+//      into a paid code path by writing one into its JSON.
+//   2. SHAPE AND RANGE. Ids, names, prices, token caps and timeouts each have
+//      to parse and sit inside a sane range. A $4,000/MTok "bargain" or a
+//      600-character display name is a malformed run, not a price cut.
+//   3. FLOOR. Every whitelisted provider keeps at least one model, the catalog
+//      still names a default and an advisor that exist in it, and the list
+//      never shrinks below `MIN_CATALOG_SIZE`. A run that would empty a
+//      provider is rejected whole rather than partially applied.
+//   4. LAST GOOD WINS. Rejection leaves `catalog:current` exactly as it was and
+//      records why in `run:{date}`. A bad night is a no-op, never an outage.
+//
+// The engine carries its own compiled-in copy of this same seed, so a machine
+// that has never reached the network still gets a working picker. The catalog
+// widens the list; it is never the only thing standing between a user and a
+// model.
+//
+// KYC is deliberately NOT a consumer of this catalog. `GROK_MODEL` stays a
+// pinned const: identity adjudication should not change model underneath
+// itself on a cron. The pin is surfaced in the catalog as `pinned_kyc_model`
+// so it reads as a decision rather than a forgotten constant.
+//
+// KV (MODELS namespace):
+//   catalog:current          the live catalog — what the engine reads
+//   catalog:snapshot:{date}  one snapshot per applied run, for rollback
+//   run:{date}               run record: applied/rejected, changes, errors
+
+/// The only vendors a catalog entry may name. This is the whitelist the whole
+/// design rests on — everything downstream (which key is required, which
+/// client speaks the wire format) is keyed off it, so an unknown provider is
+/// not merely unsupported, it is unroutable.
+const MODEL_PROVIDERS = Object.freeze({
+  anthropic: 'Anthropic',
+  xai: 'xAI',
+  openai: 'OpenAI',
+});
+
+/// Bumped when the catalog's SHAPE changes, so an older engine can tell "I do
+/// not understand this document" apart from "this document has new models in
+/// it". Engines refuse a schema they were not built for and fall back to their
+/// compiled-in seed.
+const CATALOG_SCHEMA = 1;
+
+/// Sanity bounds. Deliberately generous — these exist to catch a garbled run,
+/// not to encode a pricing opinion that would reject a genuinely expensive
+/// new flagship.
+const MIN_CATALOG_SIZE = 3;
+const MAX_CATALOG_SIZE = 24;
+const MAX_PRICE_PER_MTOK = 500;
+const MODEL_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,63}$/;
+
+/// The starting catalog, and the floor the system falls back to.
+///
+/// Kept byte-for-byte in sync with `WorkshopModel::SEED` in the engine
+/// (crates/engine/src/soul/workshop_model.rs) — the engine ships this exact
+/// list compiled in, so the two must not drift.
+///
+/// Ordered cheapest-first within each provider: the picker renders the array
+/// order, and the cheapest option reading first is the contract.
+const SEED_CATALOG = {
+  schema: CATALOG_SCHEMA,
+  version: 1,
+  updated_at: '2026-09-07T00:00:00Z',
+  source: 'seed',
+  default_model: 'claude-sonnet-5',
+  advisor_model: 'claude-fable-5-1',
+  pinned_kyc_model: GROK_MODEL,
+  // Retired id → the model that replaced it. A user whose settings still hold
+  // a retired id must be UPGRADED, never silently reassigned to the default:
+  // that would move them to another provider, at another price, with no
+  // notice. The engine resolves through this map before it gives up.
+  aliases: {
+    'grok-4.5': 'grok-4.6',
+    'claude-fable-5': 'claude-fable-5-1',
+  },
+  models: [
+    {
+      id: 'claude-sonnet-5',
+      display_name: 'Sonnet 5',
+      provider: 'anthropic',
+      tagline: 'Balanced speed and depth. The everyday driver.',
+      input_price_per_mtok: 3.0,
+      output_price_per_mtok: 15.0,
+      max_tokens: 16384,
+      timeout_secs: 180,
+      vision: true,
+    },
+    {
+      id: 'claude-opus-5',
+      display_name: 'Opus 5',
+      provider: 'anthropic',
+      tagline: 'Deeper reasoning for work that has to be right.',
+      input_price_per_mtok: 5.0,
+      output_price_per_mtok: 25.0,
+      max_tokens: 32000,
+      timeout_secs: 300,
+      vision: true,
+    },
+    {
+      id: 'claude-fable-5-1',
+      display_name: 'Fable 5.1',
+      provider: 'anthropic',
+      tagline: 'Always-on thinking. The advisor on hard calls.',
+      input_price_per_mtok: 10.0,
+      output_price_per_mtok: 50.0,
+      // Fable's thinking is always on and counts toward the same budget, and
+      // a turn can run for minutes — hence the headroom on both numbers.
+      max_tokens: 32000,
+      timeout_secs: 360,
+      vision: true,
+    },
+    {
+      id: 'grok-4.6',
+      display_name: 'Grok 4.6',
+      provider: 'xai',
+      tagline: 'Fast and cheap, with live search built in.',
+      input_price_per_mtok: 2.0,
+      output_price_per_mtok: 6.0,
+      max_tokens: 16384,
+      timeout_secs: 180,
+      vision: true,
+    },
+    {
+      id: 'gpt-6-astra',
+      display_name: 'GPT-6 Astra',
+      provider: 'openai',
+      tagline: 'OpenAI flagship. Long context, agentic reasoning.',
+      input_price_per_mtok: 10.0,
+      output_price_per_mtok: 50.0,
+      max_tokens: 32000,
+      timeout_secs: 300,
+      vision: true,
+    },
+  ],
+};
+
+/// Ask Grok 4.6, with live search on, for the current best model per vendor.
+///
+/// The prompt asks for the FLAGSHIP AND THE WORKHORSE rather than "every model
+/// you can find": a picker with thirty entries is worse than one with six, and
+/// the value of this job is currency, not breadth.
+function buildCatalogPrompt(current) {
+  const vendors = Object.entries(MODEL_PROVIDERS)
+    .map(([id, label]) => `  - ${label} (use provider id "${id}")`)
+    .join('\n');
+
+  return `You are compiling the model picker for a professional 3D engine's built-in AI assistant.
+Today is ${new Date().toISOString().split('T')[0]}. Use live search — your training data is stale by definition here.
+
+Return the CURRENT, GENERALLY AVAILABLE text models from EXACTLY these vendors:
+${vendors}
+
+Per vendor return between 1 and 3 models: the current flagship, the balanced
+workhorse, and (only if it genuinely exists) a fast/cheap tier. Do NOT list
+deprecated models, previews, research previews, dated snapshot aliases, embedding
+models, image models, or audio models. Prefer the stable id a customer would put
+in an API "model" field.
+
+This is the catalog in production right now:
+${JSON.stringify({ models: current.models.map(m => ({ id: m.id, provider: m.provider, display_name: m.display_name, input_price_per_mtok: m.input_price_per_mtok, output_price_per_mtok: m.output_price_per_mtok })) }, null, 2)}
+
+Rules:
+- If a model above is still current, KEEP its id and display_name byte-identical.
+- If a model above has been superseded, list the replacement AND record the old
+  id in "aliases" mapping old id -> new id, so existing users get upgraded.
+- Prices are USD per MILLION tokens, standard tier, no batch or cached discount.
+  If you cannot verify a price, keep the price already in the catalog.
+- "display_name" is what a user sees in a dropdown: short and human, like
+  "Sonnet 5" or "GPT-6 Astra". Never the raw api id. Max 32 characters.
+- "tagline" is one short sentence, max 60 characters, saying what the model is
+  FOR — the tradeoff a user picks it on. No marketing adjectives.
+- "default_model" should be the best all-round value for everyday agentic work.
+- "advisor_model" should be the strongest reasoning model available — it is
+  consulted on hard architecture calls, not used for every turn.
+- "max_tokens" is a per-request output cap: 16384 for standard models, 32000
+  for reasoning models whose thinking shares the budget.
+- "timeout_secs" between 180 and 360, higher for slower reasoning models.
+
+Reply with ONLY a JSON object, no prose and no code fence:
+{
+  "default_model": "<id>",
+  "advisor_model": "<id>",
+  "aliases": { "<retired id>": "<replacement id>" },
+  "models": [
+    {
+      "id": "<api id>",
+      "display_name": "<short label>",
+      "provider": "anthropic|xai|openai",
+      "tagline": "<one short sentence>",
+      "input_price_per_mtok": <number>,
+      "output_price_per_mtok": <number>,
+      "max_tokens": <integer>,
+      "timeout_secs": <integer>,
+      "vision": <boolean>
+    }
+  ]
+}`;
+}
+
+/// Structural validation. Returns `{ ok, catalog, errors, dropped }`.
+///
+/// Every rejection reason is collected rather than thrown on first sight, so a
+/// run record says everything that was wrong with a bad night instead of only
+/// the first thing.
+function validateCatalog(raw, previous) {
+  const errors = [];
+  const dropped = [];
+
+  if (!raw || typeof raw !== 'object') {
+    return { ok: false, errors: ['response was not a JSON object'], dropped };
+  }
+  if (!Array.isArray(raw.models)) {
+    return { ok: false, errors: ['response had no models array'], dropped };
+  }
+  if (raw.models.length > MAX_CATALOG_SIZE) {
+    return { ok: false, errors: [`${raw.models.length} models exceeds the ${MAX_CATALOG_SIZE} cap`], dropped };
+  }
+
+  const seen = new Set();
+  const models = [];
+
+  for (const m of raw.models) {
+    const id = typeof m?.id === 'string' ? m.id.trim() : '';
+    const label = id || '(unnamed entry)';
+
+    if (!MODEL_ID_RE.test(id)) { dropped.push(`${label}: malformed id`); continue; }
+    if (seen.has(id)) { dropped.push(`${label}: duplicate id`); continue; }
+    // THE whitelist check. Everything downstream keys off provider, so an
+    // unrecognised vendor is unroutable, not merely unsupported.
+    if (!Object.hasOwn(MODEL_PROVIDERS, m?.provider)) {
+      dropped.push(`${label}: provider "${m?.provider}" is not whitelisted`);
+      continue;
+    }
+
+    const name = typeof m?.display_name === 'string' ? m.display_name.trim() : '';
+    if (!name || name.length > 32) { dropped.push(`${label}: display_name missing or too long`); continue; }
+
+    const inPrice = Number(m?.input_price_per_mtok);
+    const outPrice = Number(m?.output_price_per_mtok);
+    if (!Number.isFinite(inPrice) || inPrice <= 0 || inPrice > MAX_PRICE_PER_MTOK) {
+      dropped.push(`${label}: input price ${m?.input_price_per_mtok} out of range`);
+      continue;
+    }
+    if (!Number.isFinite(outPrice) || outPrice <= 0 || outPrice > MAX_PRICE_PER_MTOK) {
+      dropped.push(`${label}: output price ${m?.output_price_per_mtok} out of range`);
+      continue;
+    }
+
+    const maxTokens = Math.trunc(Number(m?.max_tokens));
+    const timeout = Math.trunc(Number(m?.timeout_secs));
+    if (!Number.isFinite(maxTokens) || maxTokens < 1024 || maxTokens > 200000) {
+      dropped.push(`${label}: max_tokens ${m?.max_tokens} out of range`);
+      continue;
+    }
+    if (!Number.isFinite(timeout) || timeout < 30 || timeout > 900) {
+      dropped.push(`${label}: timeout_secs ${m?.timeout_secs} out of range`);
+      continue;
+    }
+
+    const tagline = typeof m?.tagline === 'string' ? m.tagline.trim().slice(0, 60) : '';
+
+    seen.add(id);
+    models.push({
+      id,
+      display_name: name,
+      provider: m.provider,
+      tagline,
+      input_price_per_mtok: inPrice,
+      output_price_per_mtok: outPrice,
+      max_tokens: maxTokens,
+      timeout_secs: timeout,
+      vision: m?.vision !== false,
+    });
+  }
+
+  if (models.length < MIN_CATALOG_SIZE) {
+    errors.push(`only ${models.length} valid models survived, need ${MIN_CATALOG_SIZE}`);
+  }
+
+  // A run that loses a whole vendor is far more likely to be a bad search than
+  // a vendor exiting the market, and the cost of being wrong is asymmetric:
+  // every user of that vendor silently loses the model they paid to use.
+  for (const [providerId, label] of Object.entries(MODEL_PROVIDERS)) {
+    if (!models.some((m) => m.provider === providerId)) {
+      errors.push(`no ${label} model survived validation`);
+    }
+  }
+
+  // Keep only aliases that point at a model we actually kept, so the map can
+  // never strand a user on an id that resolves to nothing.
+  const aliases = {};
+  for (const [from, to] of Object.entries({ ...previous.aliases, ...(raw.aliases || {}) })) {
+    if (typeof from === 'string' && typeof to === 'string' && seen.has(to) && !seen.has(from)) {
+      aliases[from] = to;
+    }
+  }
+
+  const defaultModel = seen.has(raw.default_model) ? raw.default_model : previous.default_model;
+  const advisorModel = seen.has(raw.advisor_model) ? raw.advisor_model : previous.advisor_model;
+  if (!seen.has(defaultModel)) errors.push(`default_model "${defaultModel}" is not in the catalog`);
+  if (!seen.has(advisorModel)) errors.push(`advisor_model "${advisorModel}" is not in the catalog`);
+
+  if (errors.length) return { ok: false, errors, dropped };
+
+  // Group by the whitelist's own order, cheapest-first inside each vendor, so
+  // the picker's sections are stable run to run rather than reshuffling
+  // whenever Grok returns the same models in a different order.
+  const providerOrder = Object.keys(MODEL_PROVIDERS);
+  models.sort((a, b) =>
+    providerOrder.indexOf(a.provider) - providerOrder.indexOf(b.provider) ||
+    a.input_price_per_mtok - b.input_price_per_mtok ||
+    a.id.localeCompare(b.id));
+
+  return {
+    ok: true,
+    dropped,
+    errors,
+    catalog: {
+      schema: CATALOG_SCHEMA,
+      version: (previous.version || 0) + 1,
+      updated_at: new Date().toISOString(),
+      source: GROK_MODEL,
+      default_model: defaultModel,
+      advisor_model: advisorModel,
+      pinned_kyc_model: GROK_MODEL,
+      aliases,
+      models,
+    },
+  };
+}
+
+/// Human-readable diff between two catalogs, for the run record.
+function diffCatalogs(before, after) {
+  const beforeById = new Map(before.models.map((m) => [m.id, m]));
+  const afterById = new Map(after.models.map((m) => [m.id, m]));
+  const changes = [];
+
+  for (const [id, m] of afterById) {
+    const prev = beforeById.get(id);
+    if (!prev) { changes.push(`added ${id} (${m.display_name}, ${MODEL_PROVIDERS[m.provider]})`); continue; }
+    if (prev.input_price_per_mtok !== m.input_price_per_mtok || prev.output_price_per_mtok !== m.output_price_per_mtok) {
+      changes.push(`repriced ${id}: $${prev.input_price_per_mtok}/$${prev.output_price_per_mtok} -> $${m.input_price_per_mtok}/$${m.output_price_per_mtok}`);
+    }
+    if (prev.display_name !== m.display_name) changes.push(`renamed ${id}: "${prev.display_name}" -> "${m.display_name}"`);
+  }
+  for (const id of beforeById.keys()) {
+    if (!afterById.has(id)) changes.push(`removed ${id}${after.aliases[id] ? ` (users upgraded to ${after.aliases[id]})` : ''}`);
+  }
+  if (before.default_model !== after.default_model) changes.push(`default: ${before.default_model} -> ${after.default_model}`);
+  if (before.advisor_model !== after.advisor_model) changes.push(`advisor: ${before.advisor_model} -> ${after.advisor_model}`);
+
+  return changes;
+}
+
+/// Read the live catalog, falling back to the seed. Never throws: a Workshop
+/// that cannot read KV must still get a usable list.
+async function readCatalog(env) {
+  try {
+    const stored = await env.MODELS?.get('catalog:current');
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      if (parsed?.schema === CATALOG_SCHEMA && Array.isArray(parsed.models) && parsed.models.length) {
+        return parsed;
+      }
+      console.error('model catalog: stored copy unusable, serving seed');
+    }
+  } catch (e) {
+    console.error('model catalog: read failed, serving seed:', e.message);
+  }
+  return SEED_CATALOG;
+}
+
+/// The daily job. Returns the run record; never throws into the cron.
+async function runModelDiscovery(env) {
+  const date = new Date().toISOString().split('T')[0];
+  const previous = await readCatalog(env);
+
+  const record = { ran_at: new Date().toISOString(), applied: false, changes: [], dropped: [], errors: [] };
+
+  if (!env.GROK_API_KEY) {
+    record.errors.push('GROK_API_KEY not configured');
+  } else if (!env.MODELS) {
+    record.errors.push('MODELS KV namespace not bound');
+  } else {
+    try {
+      const resp = await grokFetch({
+        input: [{ role: 'user', content: buildCatalogPrompt(previous) }],
+        // Web search is the entire point: a model released this week is not in
+        // any model's weights, including the weights of the model doing the
+        // searching. This is the server-side tool form — the older
+        // `search_parameters` field was retired on 2026-01-12 and now answers
+        // 410 Gone, which would have made this job fail every night while
+        // looking like a model that simply never found anything new.
+        tools: [{ type: 'web_search' }],
+      }, env.GROK_API_KEY);
+
+      if (!resp.ok) {
+        record.errors.push(`xAI returned ${resp.status}`);
+        console.error('model discovery: xAI error', resp.status, await resp.text());
+      } else {
+        // Strip a ``` fence before looking for the object. The prompt asks
+        // for bare JSON, but a fence is the single most common way a model
+        // ignores that, and a fenced reply is otherwise a perfectly good run
+        // thrown away.
+        const text = extractGrokText(await resp.json()).replace(/```(?:json)?/gi, '');
+        const match = text.match(/\{[\s\S]*\}/);
+        if (!match) {
+          record.errors.push('no JSON object in the response');
+        } else {
+          let parsed = null;
+          try { parsed = JSON.parse(match[0]); }
+          catch (e) { record.errors.push(`response was not valid JSON: ${e.message}`); }
+
+          if (parsed) {
+            const result = validateCatalog(parsed, previous);
+            record.dropped = result.dropped;
+            if (!result.ok) {
+              record.errors.push(...result.errors);
+            } else {
+              record.changes = diffCatalogs(previous, result.catalog);
+              // Write the snapshot BEFORE it goes live, so a catalog that is
+              // serving is always one we can also roll back to.
+              await env.MODELS.put(`catalog:snapshot:${date}`, JSON.stringify(result.catalog), { expirationTtl: 86400 * 365 });
+              await env.MODELS.put('catalog:current', JSON.stringify(result.catalog));
+              record.applied = true;
+              record.version = result.catalog.version;
+              record.model_count = result.catalog.models.length;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      record.errors.push(`discovery threw: ${e.message}`);
+      console.error('model discovery failed:', e);
+    }
+  }
+
+  // A rejected run is the normal safe path, not an incident — but an
+  // unattended job that silently does nothing for a month is, so every run
+  // leaves a record whether it applied or not.
+  if (!record.applied) {
+    record.kept_version = previous.version ?? 0;
+    console.error('model discovery: keeping existing catalog —', record.errors.join('; '));
+  }
+  try { await env.MODELS?.put(`run:${date}`, JSON.stringify(record), { expirationTtl: 86400 * 365 }); }
+  catch (e) { console.error('model discovery: could not record run:', e.message); }
+
+  return record;
+}
+
+/// GET /api/models/catalog — public. The engine reads this on startup.
+///
+/// Unauthenticated on purpose: it is a list of public model names and public
+/// list prices, it carries nothing about the caller, and gating it would mean
+/// a signed-out engine falls back to its compiled-in seed for no benefit.
+async function handleModelCatalog(request, env, cors) {
+  const catalog = await readCatalog(env);
+  return json(catalog, 200, {
+    ...cors,
+    // Refreshed once a day, so an hour of staleness costs nothing and spares
+    // the worker a request per engine launch.
+    'Cache-Control': 'public, max-age=3600',
+  });
+}
+
+/// GET /api/admin/models — run history, so a job that quietly stopped applying
+/// is visible instead of being inferred from the catalog standing still.
+async function handleAdminModelRuns(request, env, cors) {
+  const adminId = await requireAdmin(request, env);
+  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
+
+  const catalog = await readCatalog(env);
+  const list = await env.MODELS?.list({ prefix: 'run:', limit: 30 });
+  const runs = [];
+  for (const k of (list?.keys || [])) {
+    const v = await env.MODELS.get(k.name);
+    if (v) runs.push({ date: k.name.slice('run:'.length), ...JSON.parse(v) });
+  }
+  runs.sort((a, b) => (a.date < b.date ? 1 : -1));
+
+  return json({
+    catalog,
+    runs,
+    last_applied: runs.find((r) => r.applied)?.date || null,
+    providers: MODEL_PROVIDERS,
+  }, 200, cors);
+}
+
+/// POST /api/admin/models/refresh — run discovery now instead of waiting for
+/// midnight. Same code path as the cron, so testing it tests the real job.
+async function handleAdminModelRefresh(request, env, cors) {
+  const adminId = await requireAdmin(request, env);
+  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
+
+  const record = await runModelDiscovery(env);
+  await auditLog(env, 'model_catalog_refresh', adminId, 'catalog:current', {
+    applied: record.applied,
+    changes: record.changes,
+    errors: record.errors,
+  });
+  return json(record, 200, cors);
+}
+
+/// POST /api/admin/models/rollback — restore a dated snapshot.
+///
+/// The daily job applies with no human gate, so the recovery path has to be
+/// one call rather than a hand-written KV write under pressure.
+async function handleAdminModelRollback(request, env, cors) {
+  const adminId = await requireAdmin(request, env);
+  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
+
+  const { date } = await request.json().catch(() => ({}));
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) {
+    return json({ error: 'date must be YYYY-MM-DD' }, 400, cors);
+  }
+
+  const snapshot = await env.MODELS?.get(`catalog:snapshot:${date}`);
+  if (!snapshot) return json({ error: `no snapshot for ${date}` }, 404, cors);
+
+  const parsed = JSON.parse(snapshot);
+  const current = await readCatalog(env);
+  // Roll forward the version rather than back, so "which catalog is newer" is
+  // still answerable by comparing version numbers after a rollback.
+  parsed.version = (current.version || 0) + 1;
+  parsed.updated_at = new Date().toISOString();
+  parsed.source = `rollback:${date}`;
+  await env.MODELS.put('catalog:current', JSON.stringify(parsed));
+
+  await auditLog(env, 'model_catalog_rollback', adminId, `catalog:snapshot:${date}`, {
+    restored_models: parsed.models.map((m) => m.id),
+  });
+  return json({ ok: true, restored_from: date, catalog: parsed }, 200, cors);
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CRON — Daily payout (called by scheduled trigger at UTC midnight)
@@ -5925,6 +6789,26 @@ function corsHeaders(request) {
     // reason. DELETE stays off the list until a route needs it.
     'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-ID-Type, If-None-Match, X-Eustress-Key',
+    'Access-Control-Max-Age': '86400',
+  };
+}
+
+/// CORS for the PUBLIC, UNAUTHENTICATED ledger transparency reads only.
+///
+/// The normal `corsHeaders` pins browsers to https://eustress.dev. These
+/// ledger endpoints are deliberately world-readable ("anyone can verify the
+/// math"), carry no credentials, and expose only aggregate figures plus
+/// opaque account UUIDs and amounts that the per-day distribution records
+/// already publish. Allowing `*` lets dashboards and third-party auditors
+/// read them from a browser.
+///
+/// NEVER use this for an authenticated route — `/api/ledger/me` and every
+/// admin endpoint stay on `corsHeaders` + a bearer check.
+function publicCors() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
     'Access-Control-Max-Age': '86400',
   };
 }

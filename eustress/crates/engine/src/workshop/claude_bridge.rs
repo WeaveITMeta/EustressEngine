@@ -31,6 +31,7 @@ use super::tools::ToolRegistry;
 use eustress_tools::registry::{LuauCreatedEntity, LuauExecutionResult, LuauExecutor};
 use super::modes::ActiveModes;
 use crate::soul::claude_client::{AgenticResponse, ClaudeClient, ClaudeTool};
+use crate::soul::openai_client::{OpenAiClient, OpenAiConfig};
 use crate::soul::{Provider, WorkshopModel, XaiClient, XaiConfig};
 
 // ============================================================================
@@ -185,6 +186,10 @@ pub fn dispatch_chat_request(
         .map(|g| g.effective_workshop_model())
         .unwrap_or_default();
 
+    // Anthropic keeps its per-space override; the other providers are
+    // global-only, so they resolve straight off the global settings. Both
+    // arms report the provider by name, because with three vendors in the
+    // picker "no API key configured" no longer says which field to fill in.
     let api_key = match model.provider() {
         Provider::Anthropic => match (&global_settings, &space_settings) {
             (Some(global), Some(space)) => {
@@ -199,12 +204,13 @@ pub fn dispatch_chat_request(
             }
             _ => return,
         },
-        Provider::Xai => match global_settings.as_ref().and_then(|g| g.effective_xai_api_key()) {
+        provider => match global_settings.as_ref().and_then(|g| g.key_for_provider(provider)) {
             Some(key) => key,
             None => {
-                pipeline.add_error_message(
-                    "No xAI API key configured. Open Soul Settings to add your Grok API key.".to_string()
-                );
+                pipeline.add_error_message(format!(
+                    "No {} API key configured. Open Soul Settings to add it, or pick a different model.",
+                    provider.key_label()
+                ));
                 return;
             }
         },
@@ -260,7 +266,15 @@ pub fn dispatch_chat_request(
     // (consulting itself is degenerate) or no Anthropic key is configured
     // (the advisor always targets Anthropic, regardless of the executor's
     // own provider).
-    let advisor_available = model != WorkshopModel::Fable5
+    //
+    // The advisor is resolved from the catalog rather than named here, so
+    // promoting a new one is a catalog edit. It is additionally required to be
+    // an Anthropic model because `spawn_advisor_call` dispatches through
+    // `ClaudeClient` and gates on the Anthropic key — if a future catalog ever
+    // nominates a non-Anthropic advisor, the tool is quietly withheld rather
+    // than offered and then failing at call time.
+    let advisor_available = !model.is_advisor()
+        && WorkshopModel::advisor().is_some_and(|a| a.provider() == Provider::Anthropic)
         && global_settings.as_ref().zip(space_settings.as_ref())
             .map(|(g, s)| !s.effective_api_key(g).is_empty())
             .unwrap_or(false);
@@ -273,6 +287,7 @@ pub fn dispatch_chat_request(
     // on an Anthropic key for the same reason as the advisor: the judge call
     // always targets Anthropic regardless of which provider is executing.
     let critic_available = gauntlet_state.enabled
+        && WorkshopModel::advisor().is_some_and(|a| a.provider() == Provider::Anthropic)
         && global_settings.as_ref().zip(space_settings.as_ref())
             .map(|(g, s)| !s.effective_api_key(g).is_empty())
             .unwrap_or(false);
@@ -301,6 +316,12 @@ pub fn dispatch_chat_request(
             Provider::Xai => {
                 let config = XaiConfig { api_key: Some(api_key) };
                 XaiClient::new(config)
+                    .call_with_tools(&messages, &tools, Some(&system_prompt), &model)
+                    .map_err(|e| e.to_string())
+            }
+            Provider::OpenAi => {
+                let config = OpenAiConfig { api_key: Some(api_key) };
+                OpenAiClient::new(config)
                     .call_with_tools(&messages, &tools, Some(&system_prompt), &model)
                     .map_err(|e| e.to_string())
             }
@@ -991,8 +1012,13 @@ pub fn poll_agentic_responses(
                         let advisor_key = global_settings.as_ref().zip(space_settings.as_ref())
                             .map(|(g, s)| s.effective_api_key(g))
                             .filter(|k| !k.is_empty());
-                        match advisor_key {
-                            Some(api_key) => spawn_advisor_call(advisor_in_flight, msg_id, api_key, question, context),
+                        // The catalog names the advisor; an absent one means a
+                        // catalog whose `advisor_model` no longer resolves, so
+                        // treat it exactly like a missing key rather than
+                        // panicking on an unwrap.
+                        let advisor = WorkshopModel::advisor();
+                        match advisor_key.zip(advisor) {
+                            Some((api_key, advisor)) => spawn_advisor_call(advisor_in_flight, msg_id, api_key, question, context, advisor),
                             None => {
                                 // Shouldn't normally happen — the tool is omitted
                                 // from `tools` when no key is configured — but
@@ -1124,7 +1150,7 @@ pub fn poll_agentic_responses(
 // 4b. Advisor — async `consult_advisor` dispatch + poll
 // ============================================================================
 
-/// System prompt for the Fable 5 advisor call. Deliberately distinct from
+/// System prompt for the advisor call. Deliberately distinct from
 /// Workshop's own executor prompt (`BASE_SYSTEM_PROMPT`) — the advisor
 /// answers one briefed question, it isn't a Workshop agent itself, and it
 /// gets no tools.
@@ -1134,8 +1160,8 @@ const ADVISOR_SYSTEM_PROMPT: &str = "You are an advisor consulted by another AI 
     weighs your answer against its own and makes the final call regardless; you have no tools and \
     cannot take any action yourself. Be direct and concrete.";
 
-/// Spawn the background thread for one `consult_advisor` call (always
-/// Fable 5, always text-only) and register it so `poll_advisor_responses`
+/// Spawn the background thread for one `consult_advisor` call (the
+/// catalog's nominated advisor, always text-only) and register it so `poll_advisor_responses`
 /// picks up the result. Same `std::thread::spawn` + `Arc<Mutex<Option<...>>>`
 /// shape as `dispatch_chat_request`'s own thread — an LLM call is exactly
 /// the kind of slow operation that shape exists for.
@@ -1145,6 +1171,7 @@ fn spawn_advisor_call(
     api_key: String,
     question: String,
     context: String,
+    advisor: WorkshopModel,
 ) {
     let result_container: Arc<Mutex<Option<Result<String, String>>>> = Arc::new(Mutex::new(None));
     let result_clone = result_container.clone();
@@ -1160,7 +1187,7 @@ fn spawn_advisor_call(
         })];
         // No tools for the advisor — it's advisory only, never executes.
         let result = ClaudeClient::new(config)
-            .call_with_tools(&messages, &[], Some(ADVISOR_SYSTEM_PROMPT), &WorkshopModel::Fable5)
+            .call_with_tools(&messages, &[], Some(ADVISOR_SYSTEM_PROMPT), &advisor)
             .map(|resp| resp.text)
             .map_err(|e| e.to_string());
 
@@ -1217,6 +1244,13 @@ fn spawn_critic_call(
         if evidence.is_empty() { "(none supplied)".to_string() } else { evidence.join("\n") },
     );
 
+    // The Critic judges with the catalog's nominated advisor: scoring an
+    // artifact against a rubric is the same "strongest reasoning available"
+    // role the advisor fills, and pinning a second model here would mean two
+    // places to update every time that changes. Falls back to the default if
+    // the catalog somehow names an advisor that no longer resolves.
+    let critic_model = WorkshopModel::advisor().unwrap_or_default();
+
     let result_container: Arc<Mutex<Option<Result<String, String>>>> = Arc::new(Mutex::new(None));
     let result_clone = result_container.clone();
 
@@ -1229,7 +1263,7 @@ fn spawn_critic_call(
         let system = super::gauntlet::critic_system_prompt();
         // No tools: the Critic scores what it is given and nothing else.
         let result = ClaudeClient::new(config)
-            .call_with_tools(&messages, &[], Some(&system), &WorkshopModel::Fable5)
+            .call_with_tools(&messages, &[], Some(&system), &critic_model)
             .map(|resp| resp.text)
             .map_err(|e| e.to_string());
 

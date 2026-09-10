@@ -49,6 +49,17 @@ id = "750bd5aed0d64667af72534b60ffb97e"
 binding = "WORKSHOP_CONTEXT"
 id = "44abf849a950492c8699a3fd3b7e3c27"
 
+# The Workshop model picker's list, recompiled nightly by Grok 4.6 from live
+# search (see the MODEL CATALOG section in src/index.js). Read publicly at
+# /api/models/catalog; the engine ships the same seed compiled in, so an
+# unbound namespace or an unreachable worker costs currency, never the picker.
+#   catalog:current          the live catalog
+#   catalog:snapshot:{date}  one per applied run, for /api/admin/models/rollback
+#   run:{date}               applied/rejected, with the changes and the reasons
+[[kv_namespaces]]
+binding = "MODELS"
+id = "2f1bbdb3b77744c5829c12b162813cd2"
+
 # Web analytics counters (pageviews + cookieless uniques) feeding /api/admin/stats.
 # The /api/analytics/hit beacon and /api/admin/stats both no-op gracefully until
 # this is bound, so deploys are safe with it commented out. To enable:
