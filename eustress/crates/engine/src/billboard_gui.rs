@@ -1631,6 +1631,18 @@ fn update_and_render_billboards(
     // per-node full scan of every GuiElementDisplay — the 120 ms/frame).
     let mut child_index: Option<GuiChildIndex<'_>> = None;
 
+    // PERF: bound label rasterisation per frame. Every billboard whose label
+    // hash changed — or that was just (re)slotted by
+    // `recycle_offscreen_billboard_slots`, which resets it to unpainted — was
+    // rasterised in the SAME frame it was discovered, with no cap. A camera
+    // move that brings a cluster of labels into slot range therefore did all
+    // of them at once: measured 122–280 ms hitches in a real session,
+    // attributed to the recycle → repaint pair. Spreading the work across
+    // frames costs a label at most a few frames of staleness (they fade in at
+    // the edge of the alloc radius anyway) and keeps the frame bounded.
+    const MAX_LABEL_RASTERS_PER_FRAME: usize = 6;
+    let mut rasters_this_frame: usize = 0;
+
     for (entity, mut handle, tile, bb_tf, marker) in &mut billboards {
         if let Some(cp) = cam_pos {
             if bb_tf.translation().distance_squared(cp) > BILLBOARD_CULL_RADIUS_SQ {
@@ -1699,6 +1711,15 @@ fn update_and_render_billboards(
         if hash == handle.last_label_hash {
             continue;
         }
+        // Over budget for this frame: defer. `painted_at` was stamped above,
+        // and with a non-zero `last_label_hash` that stamp would make the
+        // early-out at the top of the loop skip this label until the NEXT
+        // epoch — so un-stamp it, and the next frame picks it up first.
+        if rasters_this_frame >= MAX_LABEL_RASTERS_PER_FRAME {
+            painted_at.remove(&entity);
+            continue;
+        }
+        rasters_this_frame += 1;
         handle.last_label_hash = hash;
 
         // Render this billboard into a temporary tile-sized pixmap, then
