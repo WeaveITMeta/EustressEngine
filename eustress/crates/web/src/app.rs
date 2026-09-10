@@ -24,6 +24,7 @@ use crate::pages::{
     home::HomePage,
     login::LoginPage,
     bliss::BlissPage,
+    bliss_history::BlissHistoryPage,
     bliss_leaderboard::BlissLeaderboardPage,
     blog::BlogPage,
     blog_indie_studios::BlogIndieStudiosPage,
@@ -256,6 +257,7 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/docs/universes") view=DocsUniversesPage />
                 <Route path=path!("/docs/website") view=DocsWebsitePage />
                 <Route path=path!("/bliss") view=BlissPage />
+                <Route path=path!("/bliss/history") view=BlissHistoryPage />
                 <Route path=path!("/tickets") view=TicketsPage />
                 <Route path=path!("/bliss-leaderboard") view=BlissLeaderboardPage />
                 <Route path=path!("/download") view=DownloadPage />

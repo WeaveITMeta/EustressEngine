@@ -104,12 +104,27 @@ pub fn CentralNav(
                                         <span class="ticket-icon">"🎟"</span>
                                         <span class="ticket-amount">{ticket_display}</span>
                                     </a>
-                                    // Bliss Balance
-                                    <a href="/bliss" class="nav-bliss">
-                                        <img src="/assets/icons/bliss.svg" alt="Bliss" class="bliss-icon" />
-                                        <span class="bliss-amount">{bliss_display}</span>
-                                    </a>
-                                    
+                                    // Bliss balance — the chip still navigates to
+                                    // the overview; hover/focus reveals the menu.
+                                    <div class="nav-bliss-dropdown">
+                                        <a href="/bliss" class="nav-bliss">
+                                            <img src="/assets/icons/bliss.svg" alt="Bliss" class="bliss-icon" />
+                                            <span class="bliss-amount">{bliss_display}</span>
+                                            <img src="/assets/icons/chevron-down.svg" alt=""
+                                                 class="dropdown-chevron bliss-chevron" />
+                                        </a>
+                                        <div class="nav-dropdown-menu nav-bliss-menu">
+                                            <a href="/bliss" class="dropdown-item">
+                                                <img src="/assets/icons/bliss.svg" alt="" />
+                                                "Overview"
+                                            </a>
+                                            <a href="/bliss/history" class="dropdown-item">
+                                                <img src="/assets/icons/trending.svg" alt="" />
+                                                "History"
+                                            </a>
+                                        </div>
+                                    </div>
+
                                     // User Menu with Dropdown
                                     <div class="nav-user-dropdown">
                                         <button class="nav-user-trigger">

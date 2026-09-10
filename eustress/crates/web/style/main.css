@@ -22635,3 +22635,250 @@ a.experience-card {
     gap: var(--space-sm);
     align-items: center;
 }
+
+/* =============================================================================
+   Bliss dropdown (top bar) + Wallet Ledger page
+   ============================================================================= */
+
+/* Mirrors .nav-user-dropdown: hover/focus-within reveals the menu, so it works
+   for pointer and keyboard alike without any JS state. */
+.nav-bliss-dropdown {
+    position: relative;
+}
+
+.nav-bliss-dropdown .bliss-chevron {
+    width: 12px;
+    height: 12px;
+    margin-left: 2px;
+}
+
+.nav-bliss-dropdown:hover .bliss-chevron,
+.nav-bliss-dropdown:focus-within .bliss-chevron {
+    transform: rotate(180deg);
+}
+
+/* The user menu is right-aligned; the Bliss chip sits mid-bar, so its menu
+   hangs from the left edge instead to stay on screen. */
+.nav-bliss-menu {
+    left: 0;
+    right: auto;
+    min-width: 176px;
+}
+
+.nav-bliss-dropdown:hover .nav-bliss-menu,
+.nav-bliss-dropdown:focus-within .nav-bliss-menu {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+}
+
+/* ── Wallet Ledger page ───────────────────────────────────────────────── */
+
+.page-ledger {
+    --bliss-accent: #00bcd4;
+}
+
+.ledger-wrap {
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 108px 24px 72px;
+}
+
+.ledger-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 28px;
+}
+
+.ledger-head h1 {
+    font-size: 30px;
+    margin: 0 0 6px;
+    letter-spacing: -0.01em;
+}
+
+.ledger-sub {
+    margin: 0;
+    max-width: 62ch;
+    color: rgba(200, 214, 220, 0.7);
+    font-size: 14px;
+    line-height: 1.55;
+}
+
+.ledger-back {
+    font-size: 13px;
+    color: var(--bliss-accent);
+    text-decoration: none;
+    border: 1px solid rgba(0, 188, 212, 0.35);
+    border-radius: var(--radius-full, 999px);
+    padding: 7px 14px;
+    white-space: nowrap;
+}
+
+.ledger-back:hover {
+    background: rgba(0, 188, 212, 0.12);
+}
+
+.ledger-hero {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 24px;
+    background: rgba(20, 22, 30, 0.72);
+    border: 1px solid rgba(128, 144, 160, 0.18);
+    border-radius: 14px;
+    padding: 24px 26px;
+    margin-bottom: 16px;
+}
+
+.ledger-label {
+    display: block;
+    font-size: 10.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: rgba(190, 205, 212, 0.55);
+}
+
+.ledger-balance {
+    font-size: clamp(30px, 5vw, 44px);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+    margin-top: 4px;
+}
+
+.ledger-unit {
+    font-size: 0.4em;
+    color: rgba(190, 205, 212, 0.6);
+    margin-left: 0.4em;
+    letter-spacing: 0.05em;
+}
+
+.ledger-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 28px;
+}
+
+.ledger-stat-v {
+    display: block;
+    font-size: 17px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    margin-top: 3px;
+}
+
+.ledger-card {
+    background: rgba(20, 22, 30, 0.72);
+    border: 1px solid rgba(128, 144, 160, 0.18);
+    border-radius: 14px;
+    padding: 20px 22px;
+    margin-bottom: 16px;
+}
+
+.ledger-h2 {
+    font-size: 11.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: rgba(190, 205, 212, 0.55);
+    margin: 0 0 14px;
+    font-weight: 600;
+}
+
+.ledger-chart {
+    display: block;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+}
+
+.ledger-grid {
+    stroke: rgba(128, 144, 160, 0.18);
+    stroke-width: 1;
+}
+
+.ledger-axis {
+    fill: rgba(190, 205, 212, 0.6);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+
+.ledger-line {
+    stroke: var(--bliss-accent);
+    stroke-width: 2;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+}
+
+.ledger-endpoint { fill: var(--bliss-accent); }
+.ledger-endpoint-halo { fill: var(--bliss-accent); opacity: 0.2; }
+
+.ledger-tablewrap { overflow-x: auto; }
+
+.ledger-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13.5px;
+}
+
+.ledger-table th {
+    text-align: left;
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(190, 205, 212, 0.55);
+    font-weight: 600;
+    padding: 0 14px 10px 0;
+    border-bottom: 1px solid rgba(128, 144, 160, 0.18);
+    white-space: nowrap;
+}
+
+.ledger-table td {
+    padding: 10px 14px 10px 0;
+    border-bottom: 1px solid rgba(128, 144, 160, 0.1);
+    white-space: nowrap;
+}
+
+.ledger-table tr:last-child td { border-bottom: 0; }
+.ledger-table .r { text-align: right; padding-right: 0; }
+.ledger-table .num { font-variant-numeric: tabular-nums; }
+
+.ledger-chip {
+    display: inline-block;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 5px;
+    background: rgba(0, 188, 212, 0.14);
+    color: var(--bliss-accent);
+}
+
+.ledger-chip-open {
+    background: transparent;
+    color: rgba(190, 205, 212, 0.7);
+    border: 1px solid rgba(128, 144, 160, 0.25);
+}
+
+.ledger-note,
+.ledger-hint {
+    font-size: 12.5px;
+    color: rgba(190, 205, 212, 0.6);
+    margin: 14px 0 0;
+}
+
+.ledger-signin,
+.ledger-error {
+    text-align: center;
+    padding: 40px 24px;
+}
+
+.ledger-signin .btn { margin-top: 12px; }
+.ledger-empty { color: rgba(190, 205, 212, 0.6); font-size: 13px; }
+
+@media (max-width: 720px) {
+    .ledger-wrap { padding: 92px 16px 56px; }
+    .ledger-stats { gap: 18px; }
+}
