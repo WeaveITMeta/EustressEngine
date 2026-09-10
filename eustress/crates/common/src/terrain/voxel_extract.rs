@@ -359,36 +359,99 @@ pub fn fill_terrain_from_chunk(
     let resolution = config.chunk_resolution as usize; // == CHUNK_EDGE
     // World-Y base of this voxel chunk's cell y==0, in studs.
     let chunk_base_y = cy as f32 * VOXEL_CHUNK_EDGE_STUDS;
+    let chunk_pos = IVec2::new(cx, cz);
 
-    // Build this chunk's `resolution*resolution` height tile (raw studs) and
-    // capture the surface material per column for the splat write.
-    let mut heights = vec![0.0f32; resolution * resolution];
-    // (x, z) → splat bucket of the top surface (None = air column).
-    let mut surface_bucket: Vec<Option<usize>> = vec![None; resolution * resolution];
-
+    // The heightfield is 2.5D but the voxel grid is 3D: MANY chunks stack at
+    // the same `(cx, cz)`, each one addressing this same cache column. Writing
+    // the whole tile unconditionally therefore let the LAST chunk to arrive
+    // win — and since a chunk sitting above the surface is mostly air, whose
+    // columns carry no height at all, it flattened real terrain to y=0.
+    //
+    // So combine instead of overwrite: keep the HIGHEST solid surface, and let
+    // an air column contribute nothing. `already_has_surface` reads the splat
+    // cache — which is one-hot ONLY where some chunk wrote a real surface — so
+    // "has anything been written here yet" needs no sentinel and no separate
+    // init/finalize pass. That also makes the result independent of the order
+    // chunks arrive in, which matters because the store iterates Morton order,
+    // not ascending Y.
     for z in 0..resolution {
         for x in 0..resolution {
-            // The renderer indexes its per-chunk tile as row=z, col=x
-            // (`src_start = row*resolution`, then x within the row) — match it.
-            let tile_idx = z * resolution + x;
-            if let Some((top_y, mat_id)) = column_top_surface(chunk, x, z) {
-                // World-Y of the TOP of the top cell: base + (cell index +1)
-                // cells worth of studs (a cell at y occupies [y, y+1) cells →
-                // its top face is (top_y + 1) cells up). Matches the importer's
-                // 4-stud cell so the surface sits on the cell's top face.
-                let world_top = chunk_base_y + (top_y as f32 + 1.0) * ROBLOX_CELL_STUDS;
-                heights[tile_idx] = world_top;
-                surface_bucket[tile_idx] =
-                    Some(TerrainMaterial::from_u8_or_default(mat_id).splat_bucket());
+            let Some((top_y, mat_id)) = column_top_surface(chunk, x, z) else {
+                continue; // air column — leave any surface below it intact
+            };
+            // World-Y of the TOP of the top cell: base + (cell index + 1)
+            // cells worth of studs (a cell at y occupies [y, y+1) cells → its
+            // top face is (top_y + 1) cells up). Matches the importer's 4-stud
+            // cell so the surface sits on the cell's top face.
+            let world_top = chunk_base_y + (top_y as f32 + 1.0) * ROBLOX_CELL_STUDS;
+            let Some(px) = cache_pixel(data, config, chunk_pos, x, z) else {
+                continue; // outside the sized cache
+            };
+            if already_has_surface(data, px) && data.height_cache[px] >= world_top {
+                continue; // a higher surface is already recorded here
             }
+            data.height_cache[px] = world_top;
+            set_splat_pixel(
+                data,
+                px,
+                TerrainMaterial::from_u8_or_default(mat_id).splat_bucket(),
+            );
         }
     }
 
-    let chunk_pos = IVec2::new(cx, cz);
-    super::toml_loader::write_chunk_to_cache(data, config, chunk_pos, &heights);
-    write_splat_to_cache(data, config, chunk_pos, &surface_bucket);
     data.splat_dirty = true;
     chunk_pos
+}
+
+/// Linear `height_cache` index for one voxel column, or `None` when it falls
+/// outside the sized cache.
+///
+/// Mirrors `toml_loader::write_chunk_to_cache`'s addressing. Uses checked
+/// conversion rather than `as usize`, so a chunk left of the cache origin is
+/// skipped instead of wrapping to a huge index.
+fn cache_pixel(
+    data: &TerrainData,
+    config: &TerrainConfig,
+    chunk_pos: IVec2,
+    x: usize,
+    z: usize,
+) -> Option<usize> {
+    let resolution = config.chunk_resolution as usize;
+    let cache_width = data.cache_width as usize;
+    let ox = usize::try_from(chunk_pos.x + config.chunks_x as i32).ok()?;
+    let oz = usize::try_from(chunk_pos.y + config.chunks_z as i32).ok()?;
+    let px_x = ox * resolution + x;
+    let px_z = oz * resolution + z;
+    if px_x >= cache_width || px_z >= data.cache_height as usize {
+        return None;
+    }
+    let idx = px_z * cache_width + px_x;
+    (idx < data.height_cache.len()).then_some(idx)
+}
+
+/// Whether any chunk has already written a real surface at this pixel.
+///
+/// The splat cache is one-hot per surface column and all-zero everywhere else,
+/// so a non-zero pixel is an exact record of "a surface was written here" —
+/// which is what lets the height combine distinguish "unset" from a genuine
+/// height of 0.0, and from legitimately NEGATIVE terrain heights.
+fn already_has_surface(data: &TerrainData, px: usize) -> bool {
+    let base = px * SPLAT_CHANNELS;
+    data.splat_cache
+        .get(base..base + SPLAT_CHANNELS)
+        .is_some_and(|w| w.iter().any(|&v| v != 0.0))
+}
+
+/// One-hot the surface bucket at a pixel, clearing the other channels.
+fn set_splat_pixel(data: &mut TerrainData, px: usize, bucket: usize) {
+    let base = px * SPLAT_CHANNELS;
+    if bucket >= SPLAT_CHANNELS || base + SPLAT_CHANNELS > data.splat_cache.len() {
+        return;
+    }
+    for c in 0..SPLAT_CHANNELS {
+        data.splat_cache[base + c] = 0.0;
+    }
+    data.splat_cache[base + bucket] = 1.0;
 }
 
 /// Size `splat_cache` to `cache_width * cache_height * SPLAT_CHANNELS` if it
@@ -402,44 +465,6 @@ fn ensure_splat_sized(data: &mut TerrainData) {
     }
 }
 
-/// Write one chunk's per-column surface-material splat buckets into the
-/// global `splat_cache`, using the SAME chunk→cache offset math as
-/// [`super::toml_loader::write_chunk_to_cache`] (so heights and splat align
-/// pixel-for-pixel). Each column with a surface gets weight 1.0 in its
-/// bucket channel; air columns are skipped (left at 0).
-fn write_splat_to_cache(
-    data: &mut TerrainData,
-    config: &TerrainConfig,
-    chunk_pos: IVec2,
-    surface_bucket: &[Option<usize>],
-) {
-    let resolution = config.chunk_resolution as usize;
-    let cache_width = data.cache_width as usize;
-    let half_x = config.chunks_x as i32;
-    let half_z = config.chunks_z as i32;
-    let offset_x = ((chunk_pos.x + half_x) as usize) * resolution;
-    let offset_z = ((chunk_pos.y + half_z) as usize) * resolution;
-
-    for row in 0..resolution {
-        for col in 0..resolution {
-            let src_idx = row * resolution + col;
-            let Some(bucket) = surface_bucket.get(src_idx).copied().flatten() else {
-                continue;
-            };
-            let px_x = offset_x + col;
-            let px_z = offset_z + row;
-            let base = (px_z * cache_width + px_x) * SPLAT_CHANNELS;
-            if bucket < SPLAT_CHANNELS && base + SPLAT_CHANNELS <= data.splat_cache.len() {
-                // One-hot the surface bucket (clear the other channels first
-                // in case this pixel was written by an adjacent chunk's edge).
-                for c in 0..SPLAT_CHANNELS {
-                    data.splat_cache[base + c] = 0.0;
-                }
-                data.splat_cache[base + bucket] = 1.0;
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tests — runnable via `cargo test -p eustress-common terrain`
@@ -714,5 +739,88 @@ mod tests {
         let off_z = config.chunks_z as usize * res;
         let h = data.height_cache[off_z * cache_width + off_x];
         assert_eq!(h, 132.0, "cy=1 chunk raises surface by one chunk edge (128)");
+    }
+
+    /// Height of column (0,0) of chunk (0,0) in the global cache.
+    fn column_height(data: &TerrainData, config: &TerrainConfig) -> f32 {
+        let res = config.chunk_resolution as usize;
+        let cache_width = data.cache_width as usize;
+        let off_x = config.chunks_x as usize * res;
+        let off_z = config.chunks_z as usize * res;
+        data.height_cache[off_z * cache_width + off_x]
+    }
+
+    /// THE BUG: the heightfield is 2.5D but the voxel grid is 3D, so every
+    /// chunk stacked at the same `(cx, cz)` addressed the same cache column.
+    /// A chunk above the surface is mostly air and carries no height, so
+    /// writing its tile unconditionally erased the real terrain to y=0.
+    #[test]
+    fn air_chunk_above_does_not_erase_the_surface_below() {
+        let config = voxel_terrain_config(1);
+        let mut data = TerrainData::default();
+
+        let mut ground = air_chunk();
+        set_solid(&mut ground, 0, 0, 0, GRASS);
+        fill_terrain_from_chunk(&mut data, &config, 0, 0, 0, &ground);
+        let before = column_height(&data, &config);
+        assert_eq!(before, 4.0, "ground surface");
+
+        // An ENTIRELY air chunk one layer up must contribute nothing.
+        let empty = air_chunk();
+        fill_terrain_from_chunk(&mut data, &config, 0, 1, 0, &empty);
+
+        assert_eq!(
+            column_height(&data, &config),
+            before,
+            "an air chunk above must not flatten the terrain below it"
+        );
+    }
+
+    /// The topmost solid surface wins no matter which order chunks arrive in —
+    /// the store iterates Morton order, not ascending Y.
+    #[test]
+    fn highest_surface_wins_regardless_of_arrival_order() {
+        let config = voxel_terrain_config(1);
+        let mut low = air_chunk();
+        set_solid(&mut low, 0, 0, 0, GRASS);
+        let mut high = air_chunk();
+        set_solid(&mut high, 0, 0, 0, GRASS);
+
+        // low-then-high
+        let mut a = TerrainData::default();
+        fill_terrain_from_chunk(&mut a, &config, 0, 0, 0, &low);
+        fill_terrain_from_chunk(&mut a, &config, 0, 1, 0, &high);
+
+        // high-then-low
+        let mut b = TerrainData::default();
+        fill_terrain_from_chunk(&mut b, &config, 0, 1, 0, &high);
+        fill_terrain_from_chunk(&mut b, &config, 0, 0, 0, &low);
+
+        assert_eq!(column_height(&a, &config), 132.0, "higher chunk wins");
+        assert_eq!(
+            column_height(&a, &config),
+            column_height(&b, &config),
+            "result must not depend on chunk arrival order"
+        );
+    }
+
+    /// Terrain below y=0 is ordinary (Roblox places sit at negative Y all the
+    /// time). A combine that treated the zero-initialised cache as "lowest
+    /// possible" would clamp these columns up to 0.
+    #[test]
+    fn negative_surface_heights_survive_the_combine() {
+        let config = voxel_terrain_config(1);
+        let mut data = TerrainData::default();
+        let mut chunk = air_chunk();
+        set_solid(&mut chunk, 0, 0, 0, GRASS);
+
+        // cy = -2 → base -256; a y=0 cell's top is -256 + 4 = -252.
+        fill_terrain_from_chunk(&mut data, &config, 0, -2, 0, &chunk);
+
+        assert_eq!(
+            column_height(&data, &config),
+            -252.0,
+            "a genuinely negative height must not be clamped to 0"
+        );
     }
 }
