@@ -128,6 +128,13 @@ pub struct MaterialRegistry {
     /// Deduplication cache: share handles for identical visual properties.
     /// Entities with the same color+preset share one GPU material → batched draws.
     dedup_cache: HashMap<MaterialCacheKey, Handle<StandardMaterial>>,
+    /// Texture maps NOT yet loaded, keyed by material name; attached lazily on
+    /// first use by `hydrate_textures` (a Space ships ~22 library materials with
+    /// 2048² PBR sets — the measured scene used ONE; eager loading was ~1 GB of
+    /// VRAM and, with Bevy's default CPU mirror, ~1 GB of RAM for nothing).
+    pending_textures: HashMap<String, PendingTextures>,
+    /// Materials whose maps have been attached.
+    hydrated: std::collections::HashSet<String>,
 }
 
 /// Adaptive color-quantization shift for the dedup key. `0` == lossless
@@ -539,6 +546,7 @@ fn load_texture(
     mat_toml_dir: &Path,
     relative_path: &str,
     space_root: &Path,
+    is_srgb: bool,
 ) -> Option<Handle<Image>> {
     // 1. Try relative to the .mat.toml directory (user space)
     let absolute_path = mat_toml_dir.join(relative_path);
@@ -824,11 +832,11 @@ impl MaterialRegistry {
         let Some(handle) = self.materials.get(name).cloned() else {
             return false;
         };
-        let Some(mat) = materials.get_mut(&handle) else {
+        let Some(mut mat) = materials.get_mut(&handle) else {
             return false; // asset not resident yet — retry on a later frame
         };
         attach_material_textures(
-            mat,
+            &mut *mat,
             &pending.refs,
             asset_server,
             &pending.mat_toml_dir,

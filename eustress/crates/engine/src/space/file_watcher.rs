@@ -45,6 +45,20 @@ struct PendingBurst {
     last_seen: Option<std::time::Instant>,
 }
 
+/// Space path the live [`SpaceFileWatcher`] was built for — the latch for
+/// [`setup_file_watcher`].
+///
+/// A Resource rather than a `Local` because that system is registered in BOTH
+/// `Startup` and `Update` (the Update copy is what follows a runtime Space
+/// switch). Bevy gives every registration its own `Local`, so a `Local` latch
+/// would leave the Update copy unarmed on frame 1 and it would rebuild the
+/// launch Space's watcher immediately — restarting `created_at` and with it the
+/// 5-second grace period that suppresses notify's spurious Modify storm for
+/// pre-existing files. `WorldDbDecision` latches its Startup/Update pair the
+/// same way.
+#[derive(Resource, Default)]
+pub struct WatchedSpace(pub Option<PathBuf>);
+
 /// File watcher resource
 #[derive(Resource)]
 pub struct SpaceFileWatcher {
@@ -417,6 +431,51 @@ pub fn process_file_changes(
     let Some(events) = watcher.poll_settled_events() else {
         return;
     };
+
+    // Drop anything outside the ACTIVE Space root.
+    //
+    // `setup_file_watcher` re-points the watcher on a Space switch, but a burst
+    // collected just before the switch — or an event still queued inside
+    // `notify` when the old watcher is dropped — can surface here afterwards.
+    // That matters because nothing downstream re-checks provenance:
+    // `handle_file_created` resolves the service from the CURRENT `space_root`,
+    // so a stale event does not fail, it silently materialises the outgoing
+    // Space's instance as a real entity in the Space now open. Cheap guard, and
+    // the only place the two paths are both in scope.
+    let space_canonical = space_root.0.canonicalize().ok();
+    let before = events.len();
+    let events: Vec<FileChangeEvent> = events
+        .into_iter()
+        .filter(|e| {
+            if e.path.starts_with(&space_root.0) {
+                return true;
+            }
+            // Fall back to canonical comparison: `notify` may hand back a
+            // verbatim (`\\?\`) or symlink-resolved path that does not share a
+            // textual prefix with the configured root. (A genuine delete cannot
+            // canonicalize — it is already gone — but such a path passes the
+            // prefix test above, so only foreign paths reach here.)
+            match (&space_canonical, e.path.canonicalize().ok()) {
+                (Some(root), Some(p)) => p.starts_with(root),
+                _ => false,
+            }
+        })
+        .collect();
+    if events.len() != before {
+        // Loud enough to diagnose, quiet enough not to spam: this fires once
+        // per burst, and only right after a Space switch. If it ever fires
+        // steadily, the watcher and `SpaceRoot` have diverged and hot-reload is
+        // being suppressed — that is the symptom to search for.
+        info!(
+            "👁 dropped {}/{} watcher event(s) from outside the active Space {:?}",
+            before - events.len(),
+            before,
+            space_root.0
+        );
+    }
+    if events.is_empty() {
+        return;
+    }
 
     // Grace period: ignore Modified events for the first 5 seconds after watcher
     // creation. `notify` fires spurious Modify events for pre-existing files when
@@ -1768,22 +1827,45 @@ fn handle_file_removed(
     }
 }
 
-/// Initialize file watcher on startup
+/// Build the file watcher for the active Space, and REBUILD it whenever the
+/// Space changes.
+///
+/// Registered in both `Startup` and `Update` (latched by [`WatchedSpace`], so
+/// non-switch frames cost one path comparison). The Update copy is the one that
+/// follows a runtime Space switch: `open_space` re-points `SpaceRoot`, the
+/// WorldDb, the `space://` asset root and both registries, but for a long time
+/// nothing re-pointed the watcher — so it kept watching the Space the engine
+/// launched into, and that Space's writes hot-spawned into whichever Space was
+/// open at the time.
 pub fn setup_file_watcher(
     mut commands: Commands,
     space_root: Res<super::SpaceRoot>,
+    mut watching: ResMut<WatchedSpace>,
 ) {
     let space_path = space_root.0.clone();
-    
+
+    // Run once per genuine Space path. A Space switch changes the path and
+    // re-arms this.
+    if watching.0.as_deref() == Some(space_path.as_path()) {
+        return;
+    }
+
     if !space_path.exists() {
         warn!("Space path does not exist, file watcher disabled: {:?}", space_path);
         return;
     }
-    
-    match SpaceFileWatcher::new(space_path) {
+
+    // Stamp BEFORE the build so a failed registration does not retry every
+    // frame (the same reason the WorldDb decision latches up front).
+    watching.0 = Some(space_path.clone());
+
+    match SpaceFileWatcher::new(space_path.clone()) {
         Ok(watcher) => {
+            // Replacing the resource drops the previous watcher — its notify
+            // registration, its channel, and its half-collected burst — which
+            // is the reset `PendingBurst` documents.
             commands.insert_resource(watcher);
-            info!("✅ File watcher initialized");
+            info!("✅ File watcher now watching: {:?}", space_path);
         }
         Err(e) => {
             error!("❌ Failed to initialize file watcher: {}", e);

@@ -3401,6 +3401,9 @@ impl Plugin for SpaceFileLoaderPlugin {
             .init_resource::<super::material_loader::MaterialRegistry>()
             .init_resource::<super::instance_loader::PrimitiveMeshCache>()
             .init_resource::<super::file_watcher::RecentlyWrittenFiles>()
+            // Latch shared by the Startup + Update copies of
+            // `setup_file_watcher` so the watcher is built once per Space.
+            .init_resource::<super::file_watcher::WatchedSpace>()
             .init_resource::<super::space_ops::SpaceRescanNeeded>()
             .init_resource::<DeferredServiceLoader>()
             .init_resource::<LoadInProgress>()
@@ -3453,6 +3456,18 @@ impl Plugin for SpaceFileLoaderPlugin {
                 // are registered first → the watcher's `is_loaded` check skips
                 // the same Create events (no double-spawn).
                 drain_paste_spawn_queue.before(super::file_watcher::process_file_changes),
+                // Re-point the watcher when the Space changes. It is latched
+                // per path, so this is a no-op on every frame that is not a
+                // Space switch. WITHOUT this the Startup copy above is the
+                // only one that ever runs, and the watcher keeps watching the
+                // Space the engine LAUNCHED into for the rest of the session —
+                // so that Space's `_instance.toml` writes hot-spawn into
+                // whichever Space is open now (a splat cloud from Universe A
+                // appearing in the Explorer of Universe B, unrenderable).
+                // Ordered before the consumer so a switch takes effect in the
+                // same frame it happens.
+                super::file_watcher::setup_file_watcher
+                    .before(super::file_watcher::process_file_changes),
                 super::file_watcher::process_file_changes,
                 super::instance_loader::ensure_tags_and_attributes_components,
                 super::instance_loader::ensure_measure_unit,
