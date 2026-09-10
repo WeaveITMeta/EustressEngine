@@ -723,6 +723,29 @@ fn main() {
     // These happen when: window minimized → zero-size surface, GPU driver
     // TDR reset, or display mode change mid-frame. They are transient but
     // Bevy 0.18 panics instead of recovering. We catch them and exit cleanly.
+    // Record EVERY panic in the engine log before anything decides what it
+    // means. The default hook writes only to stderr, which a desktop launch
+    // discards, and the swallow path below then exits silently — so a crash of
+    // that class left the log file ending mid-line with no explanation and no
+    // Windows error report. Chain to the previous hook so the telemetry beacon
+    // and the default backtrace still run.
+    {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "<unknown>".to_string());
+            error!(
+                target: "eustress_engine::crash",
+                location = %location,
+                payload = %panic_payload_str(info.payload()),
+                "PANIC — engine is going down"
+            );
+            previous(info);
+        }));
+    }
+
     let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         app.run();
     }));
@@ -732,31 +755,66 @@ fn main() {
             println!("✅ Eustress Engine closed gracefully");
         }
         Err(payload) => {
-            let msg = payload.downcast_ref::<String>()
-                .map(|s| s.as_str())
-                .or_else(|| payload.downcast_ref::<&str>().copied())
-                .unwrap_or("");
+            let msg = panic_payload_str(&*payload);
 
-            let is_gpu_surface_panic =
-                msg.contains("swap chain")
+            // Resource exhaustion PRESENTS as a graphics error, and the old
+            // heuristic swallowed it: `unrecoverable` and `Buffer`+`invalid`
+            // both match a failed allocation or a device lost to VRAM
+            // pressure. Loading a large imported place is exactly when that
+            // happens, so a real failure exited 0 and looked like a clean
+            // quit. Check for it FIRST and make it loud.
+            let exhaustion = msg.contains("Out of memory")
+                || msg.contains("OutOfMemory")
+                || msg.contains("out of device memory")
+                || msg.contains("OutOfDeviceMemory")
+                || msg.contains("Device is lost")
+                || msg.contains("device is lost")
+                || msg.contains("DeviceLost");
+
+            // Only a TRANSIENT surface loss is safe to swallow: minimizing the
+            // window, a display-mode change, or a driver TDR invalidates the
+            // swap chain for a frame. Deliberately narrow — anything that
+            // merely SOUNDS graphics-y must reach the developer instead.
+            let transient_surface = msg.contains("swap chain")
                 || msg.contains("Acquiring a texture")
-                || msg.contains("unrecoverable")
-                || msg.contains("operation unrecoverable")
-                || (msg.contains("None value")
-                    && (msg.contains("uniform_buffer") || msg.contains("bevy_render")))
-                || msg.contains("Buffer") && msg.contains("invalid");
+                || msg.contains("Surface timed out")
+                || msg.contains("Outdated");
 
-            if is_gpu_surface_panic {
-                // GPU surface was lost (minimized window, driver reset, display change).
-                // This is not a code bug — exit cleanly without a crash dialog.
+            if exhaustion {
+                error!(
+                    target: "eustress_engine::crash",
+                    panic = %msg,
+                    "OUT OF GPU/SYSTEM MEMORY — a real failure, not a surface loss"
+                );
+                eprintln!("❌ Eustress ran out of GPU/system memory — this is a crash, not a clean exit.");
+                eprintln!("   {msg}");
+                std::process::exit(1);
+            }
+
+            if transient_surface {
+                warn!(
+                    target: "eustress_engine::crash",
+                    panic = %msg,
+                    "GPU surface lost (transient) — exiting cleanly"
+                );
                 eprintln!("⚠️  GPU surface lost — exiting cleanly (not a crash).");
                 std::process::exit(0);
-            } else {
-                // Real panic — re-raise so dev gets a proper backtrace.
-                std::panic::resume_unwind(payload);
             }
+
+            // Real panic — re-raise so dev gets a proper backtrace.
+            std::panic::resume_unwind(payload);
         }
     }
+}
+
+/// Best-effort human text for a panic payload (`panic!` produces either a
+/// `String` or a `&'static str`).
+fn panic_payload_str(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<String>()
+        .map(|s| s.as_str())
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("<non-string panic payload>")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
