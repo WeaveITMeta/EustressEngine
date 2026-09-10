@@ -292,6 +292,12 @@ export component PublishDialog inherits Rectangle {
                         Rectangle {
                             height: 28px;
                             HorizontalLayout {
+                                // Centre the 22px child in the 28px row. A HorizontalLayout does
+                                // NOT centre a fixed-height child: lower_layout pins it at
+                                // y = padding.top and leaves its height alone, so with no vertical
+                                // padding it sat flush against the top with 6px of dead space below.
+                                padding-top: 3px;
+                                padding-bottom: 3px;
                                 spacing: 8px;
                                 Text {
                                     width: 110px;
@@ -426,6 +432,13 @@ export component PublishDialog inherits Rectangle {
                     padding-right: 16px;
                     spacing: 10px;
                     alignment: center;
+                    // Centre the 30px buttons in the 48px footer. A HorizontalLayout
+                    // does NOT centre a fixed-height child: lower_layout pins it at
+                    // y = padding.top and leaves its height alone, so with no vertical
+                    // padding the row sat flush against the top with 18px of dead space
+                    // beneath it. That is the uneven gap in the Publish dialog.
+                    padding-top: 9px;
+                    padding-bottom: 9px;
 
                     Rectangle {
                         width: 80px; height: 30px;

@@ -40,6 +40,10 @@ component ShortcutRow inherits Rectangle {
     background: row-touch.has-hover ? Theme.button-hover : transparent;
     border-radius: 3px;
 
+    // ONE source for the badge height. The row padding below centres the badge
+    // by subtracting this from the row height, so the two cannot drift apart.
+    property <length> badge-height: 20px;
+
     row-touch := TouchArea {
         mouse-cursor: pointer;
         clicked => { root.rebind-requested(); }
@@ -48,6 +52,16 @@ component ShortcutRow inherits Rectangle {
     HorizontalLayout {
         padding-left: 12px;
         padding-right: 12px;
+        // Centre the badge in the row.
+        //
+        // A layout child does NOT get Slint's automatic centring: the compiler's
+        // `maybe_center_in_parent` is skipped for `child_of_layout`, so a child
+        // with a fixed cross-axis size sits flush against the top of the row —
+        // here 0px above the badge and 6px below it. Padding the content band
+        // down to the badge's own height centres it, and the label (which has no
+        // fixed height, so it stretches to the band) stays centred with it.
+        padding-top: (root.height - root.badge-height) / 2;
+        padding-bottom: (root.height - root.badge-height) / 2;
 
         Text {
             horizontal-stretch: 1;
@@ -59,7 +73,7 @@ component ShortcutRow inherits Rectangle {
 
         Rectangle {
             width: 140px;
-            height: 20px;
+            height: root.badge-height;
             background: root.capturing ? Theme.button-hover : Theme.background-tertiary;
             border-radius: 3px;
             border-width: 1px;

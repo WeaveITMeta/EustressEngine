@@ -325,6 +325,10 @@ component DropdownItem inherits Rectangle {
     background: item-touch.has-hover && root.enabled ? Theme.button-hover : transparent;
     opacity: root.enabled ? 1.0 : 0.4;
 
+    // ONE source for the icon box, used by both the Image and the row padding
+    // that centres it, so the two cannot drift apart.
+    property <length> icon-size: 16px;
+
     item-touch := TouchArea {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? pointer : default;
@@ -335,12 +339,25 @@ component DropdownItem inherits Rectangle {
         padding-left: 8px;
         padding-right: 10px;
         spacing: 6px;
+        // Centre the icon against its label.
+        //
+        // Layout children are NOT auto-centred (`maybe_center_in_parent` skips
+        // `child_of_layout`), so the fixed-height icon sat flush against the top
+        // of the 24px row with 8px of dead space beneath it — its centre line
+        // 4px above the label's, since the label has no fixed height and so
+        // stretched to the whole row and centred itself. Padding the band down
+        // to the icon's height puts both on the same centre line.
+        padding-top: (root.height - root.icon-size) / 2;
+        padding-bottom: (root.height - root.icon-size) / 2;
 
         Image {
-            width: 16px;
-            height: 16px;
+            width: root.icon-size;
+            height: root.icon-size;
             source: root.icon;
             image-fit: contain;
+            // NOTE: `vertical-alignment` here only aligns the bitmap inside the
+            // Image's own box; it does not position the Image in the row. The
+            // padding above is what centres it.
             vertical-alignment: center;
         }
 
@@ -2270,6 +2287,12 @@ export component Ribbon inherits Rectangle {
             
             // Simulation controls — absolute left
             HorizontalLayout {
+                // Centre the 20px child in the 22px row. A HorizontalLayout does
+                // NOT centre a fixed-height child: lower_layout pins it at
+                // y = padding.top and leaves its height alone, so with no vertical
+                // padding it sat flush against the top with 2px of dead space below.
+                padding-top: 1px;
+                padding-bottom: 1px;
                 x: 6px;
                 y: 1px;
                 width: 142px;
@@ -2368,6 +2391,12 @@ export component Ribbon inherits Rectangle {
             
             // Tab pills — absolute centered in full row width
             tabs-row := HorizontalLayout {
+                // Centre the 20px child in the 22px row. A HorizontalLayout does
+                // NOT centre a fixed-height child: lower_layout pins it at
+                // y = padding.top and leaves its height alone, so with no vertical
+                // padding it sat flush against the top with 2px of dead space below.
+                padding-top: 1px;
+                padding-bottom: 1px;
                 x: (parent.width - self.preferred-width) / 2;
                 y: 1px;
                 width: self.preferred-width;
@@ -3327,6 +3356,12 @@ export component Ribbon inherits Rectangle {
             // matching the built-in tabs' group separators.
             // ════════════════════════════════════════════════════════════
             if !root.ribbon-tab-is-builtin: HorizontalLayout {
+                // Centre the 70px child in the 72px row. A HorizontalLayout does
+                // NOT centre a fixed-height child: lower_layout pins it at
+                // y = padding.top and leaves its height alone, so with no vertical
+                // padding it sat flush against the top with 2px of dead space below.
+                padding-top: 1px;
+                padding-bottom: 1px;
                 padding-left: 6px;
                 padding-right: 6px;
                 spacing: 0px;

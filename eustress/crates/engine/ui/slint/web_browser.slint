@@ -37,6 +37,12 @@ export component WebBrowser inherits Rectangle {
             background: Theme.header-background;
             
             HorizontalLayout {
+                // Centre the 28px child in the 36px row. A HorizontalLayout does
+                // NOT centre a fixed-height child: lower_layout pins it at
+                // y = padding.top and leaves its height alone, so with no vertical
+                // padding it sat flush against the top with 8px of dead space below.
+                padding-top: 4px;
+                padding-bottom: 4px;
                 padding-left: 6px;
                 padding-right: 6px;
                 spacing: 4px;

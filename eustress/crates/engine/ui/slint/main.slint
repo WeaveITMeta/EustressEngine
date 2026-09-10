@@ -71,7 +71,7 @@ import { FeedbackDialog } from "feedback_dialog.slint";
 import { ApiKeyDialog } from "api_key_dialog.slint";
 import { ExitConfirmationDialog } from "exit_confirmation.slint";
 import { SyncDomainDialog } from "sync_domain.slint";
-import { WorkshopPanel, ChatMessage, PipelineStepData, ConversationSummary, MentionItemData } from "workshop_panel.slint";
+import { WorkshopPanel, ChatMessage, PipelineStepData, ConversationSummary, MentionItemData, WorkshopModelEntry } from "workshop_panel.slint";
 import { ApiReferencePanel, ApiEntryData } from "api_reference_panel.slint";
 import { ServicesBrowserPanel, ServiceBrowserEntry, ServicePropertySummary } from "services_browser.slint";
 import { RfqBuilderPanel, PurchaseOrderTrackerPanel, PurchaseOrderRow, PurchaseOrderLineRow, ManufacturerOption } from "procurement.slint";
@@ -378,6 +378,10 @@ export component StudioWindow inherits Window {
     in-out property <string> workshop-active-tool: "";
     in-out property <string> workshop-active-mode-name: "General";
     in-out property <string> workshop-active-model-name: "Sonnet 5";
+    // The model picker's rows, from the nightly catalog. Empty until the host
+    // pushes them, which leaves WorkshopPanel showing its own seed default.
+    in-out property <[WorkshopModelEntry]> workshop-available-models: [];
+    in-out property <int> workshop-model-provider-count: 3;
     in-out property <bool>   workshop-gauntlet-enabled: false;
     // Auto mode: run approval-gated Workshop tools without prompting.
     in-out property <bool>   workshop-auto-enabled: false;
@@ -676,6 +680,7 @@ export component StudioWindow inherits Window {
     // xAI (Grok) key — same save button/callback as the Anthropic key
     // above; both get committed together on "on-save".
     in-out property <string> soul-xai-api-key: "";
+    in-out property <string> soul-openai-api-key: "";
     in-out property <int> soul-rune-count: 0;
     in-out property <int> soul-luau-server-count: 0;
     in-out property <int> soul-luau-client-count: 0;
@@ -3511,6 +3516,13 @@ export component StudioWindow inherits Window {
                             // Model selector
                             active-model-name <=> root.workshop-active-model-name;
                             on-model-changed(m) => { root.workshop-model-changed(m); }
+                            // The host pushes these on startup and whenever
+                            // Soul settings change. It always has a list to
+                            // push: `soul::workshop_model::catalog()` falls
+                            // back to the compiled-in seed, so this is never
+                            // bound to nothing.
+                            available-models <=> root.workshop-available-models;
+                            model-provider-count <=> root.workshop-model-provider-count;
 
                             // Gauntlet (AAA verify-loop) toggle
                             gauntlet-enabled <=> root.workshop-gauntlet-enabled;
@@ -3866,6 +3878,7 @@ export component StudioWindow inherits Window {
         soul-api-key <=> root.soul-api-key;
         soul-api-key-valid: root.soul-api-key-valid;
         soul-xai-api-key <=> root.soul-xai-api-key;
+        soul-openai-api-key <=> root.soul-openai-api-key;
         notifications-enabled <=> root.notifications-enabled;
         usage-telemetry-enabled <=> root.usage-telemetry-enabled;
         notifications-show-dismiss <=> root.notifications-show-dismiss;
@@ -3882,10 +3895,11 @@ export component StudioWindow inherits Window {
         on-help-opens-in-tab-changed(val) => { root.help-opens-in-tab-changed(val); }
         on-notifications-changed => { root.notification-settings-changed(); }
         on-save => {
-            // Commit the typed Anthropic + xAI keys to Bevy so Soul/Workshop
-            // panels stop showing the Configure banner. Settings dialog
-            // already wrote root.soul-api-key / root.soul-xai-api-key via
-            // two-way binding.
+            // Commit the typed Anthropic, xAI and OpenAI keys to Bevy
+            // so Soul/Workshop panels stop showing the Configure banner.
+            // Settings dialog already wrote root.soul-api-key /
+            // root.soul-xai-api-key / root.soul-openai-api-key via two-way
+            // binding.
             root.soul-api-key-saved();
             root.show-settings-dialog = false;
         }

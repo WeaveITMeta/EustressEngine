@@ -1100,6 +1100,13 @@ export component SimulationSettingsDialog inherits Rectangle {
                     padding-right: 16px;
                     spacing: 10px;
                     alignment: end;
+                    // Centre the 32px buttons in the 52px footer. A HorizontalLayout
+                    // does NOT centre a fixed-height child: lower_layout pins it at
+                    // y = padding.top and leaves its height alone, so with no vertical
+                    // padding the row sat flush against the top with 20px of dead space
+                    // beneath it. That is the uneven gap in the Publish dialog.
+                    padding-top: 10px;
+                    padding-bottom: 10px;
 
                     // Save button
                     Rectangle {

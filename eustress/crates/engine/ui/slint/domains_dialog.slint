@@ -387,6 +387,12 @@ export component DomainsDialog inherits Rectangle {
                     if !root.form-open: Rectangle {
                         height: 30px;
                         HorizontalLayout {
+                            // Centre the 24px child in the 30px row. A HorizontalLayout does
+                            // NOT centre a fixed-height child: lower_layout pins it at
+                            // y = padding.top and leaves its height alone, so with no vertical
+                            // padding it sat flush against the top with 6px of dead space below.
+                            padding-top: 3px;
+                            padding-bottom: 3px;
                             alignment: start;
 
                             DomainsButton {

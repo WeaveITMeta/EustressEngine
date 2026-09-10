@@ -145,6 +145,12 @@ export component ForgeConnectDialog inherits Rectangle {
                 Rectangle {
                     height: 28px;
                     HorizontalLayout {
+                        // Centre the 22px child in the 28px row. A HorizontalLayout does
+                        // NOT centre a fixed-height child: lower_layout pins it at
+                        // y = padding.top and leaves its height alone, so with no vertical
+                        // padding it sat flush against the top with 6px of dead space below.
+                        padding-top: 3px;
+                        padding-bottom: 3px;
                         spacing: 8px;
                         Text {
                             width: 100px;
@@ -177,6 +183,12 @@ export component ForgeConnectDialog inherits Rectangle {
                 Rectangle {
                     height: 28px;
                     HorizontalLayout {
+                        // Centre the 22px child in the 28px row. A HorizontalLayout does
+                        // NOT centre a fixed-height child: lower_layout pins it at
+                        // y = padding.top and leaves its height alone, so with no vertical
+                        // padding it sat flush against the top with 6px of dead space below.
+                        padding-top: 3px;
+                        padding-bottom: 3px;
                         spacing: 8px;
                         Text {
                             width: 100px;
