@@ -159,9 +159,34 @@ pub fn offset_closed_polyline(pts: &[[f64; 2]], d: f64) -> CadResult<Vec<[f64; 2
     // loop. Catching it here means the caller gets the distance that was
     // too large, instead of a boolean failing later for reasons that
     // look unrelated.
+    //
+    // Edge direction is the test, NOT enclosed area. Area alone is a
+    // trap: on a symmetric profile every edge crosses to the far side at
+    // the same distance, so the loop turns inside out while its winding,
+    // and therefore the sign of its area, stays exactly as it was. A
+    // 100 mm square offset inward by 60 mm comes back as a tidy 20 mm
+    // square wound counter-clockwise, and an area check waves it
+    // through. Per edge, the answer is unambiguous: if the offset edge
+    // runs opposite to the edge it came from, the offset consumed it.
+    for i in 0..n {
+        let e = offset_lines[i].1;
+        let a = out[i];
+        let b = out[(i + 1) % n];
+        if (b[0] - a[0]) * e[0] + (b[1] - a[1]) * e[1] <= 0.0 {
+            return Err(CadError::EvalFailed {
+                feature: "Offset".into(),
+                reason: format!(
+                    "offset of {d:.6} m consumes the profile: edge {i} is reversed or has \
+                     no length left, so the inward distance exceeds half the narrowest span"
+                ),
+            });
+        }
+    }
+
     // `work` is counter-clockwise, so its area is positive by
     // construction. A non-positive area after offsetting means the loop
-    // collapsed through itself.
+    // collapsed through itself. Kept as a backstop for the asymmetric
+    // cases the per-edge test above does catch, since it costs nothing.
     let new_area2 = signed_area2(&out);
     if new_area2 <= 1.0e-14 {
         return Err(CadError::EvalFailed {
@@ -333,10 +358,41 @@ mod tests {
 
     #[test]
     fn over_shrinking_is_refused_not_inverted() {
-        // Half the span is 0.05; anything past that has no answer.
+        // `sq(0.05)` spans -0.05..0.05, so half the narrowest span is
+        // 0.05 and anything past that has no answer.
+        //
+        // The symmetric case is the one that matters: every edge crosses
+        // to the far side together, so the result stays counter-clockwise
+        // with a positive area and looks, to any area-based check, like a
+        // perfectly good 20 mm square. It is not: it is the profile
+        // turned inside out.
         let e = offset_closed_polyline(&sq(0.05), -0.06).unwrap_err();
         let msg = e.to_string();
-        assert!(msg.contains("collapses") || msg.contains("inverts"), "{msg}");
+        assert!(
+            msg.contains("consumes") || msg.contains("collapses") || msg.contains("inverts"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn shrinking_to_exactly_the_limit_is_refused() {
+        // At d = -0.05 every edge has zero length left. The polygon has
+        // degenerated to a point, and a point is not a profile.
+        assert!(offset_closed_polyline(&sq(0.05), -0.05).is_err());
+    }
+
+    #[test]
+    fn over_shrinking_a_rectangle_is_refused_on_the_short_axis() {
+        // Asymmetric, so the short edges reverse while the long ones
+        // still have length: the failure has to be found per edge, not
+        // from the shape as a whole.
+        let r = vec![[-0.05, -0.01], [0.05, -0.01], [0.05, 0.01], [-0.05, 0.01]];
+        assert!(offset_closed_polyline(&r, -0.02).is_err());
+        // Just inside the limit still works, so the check is not simply
+        // refusing everything.
+        let ok = offset_closed_polyline(&r, -0.005).unwrap();
+        let a = signed_area2(&ok).abs() / 2.0;
+        assert!((a - 0.09 * 0.01).abs() < 1e-9, "area {a}");
     }
 
     #[test]
