@@ -68,12 +68,6 @@ out/
 # Editor/tool backup copies. A `.bak` beside a source file is a working
 # artifact, never the version anything should build from.
 *.bak
-
-# Generated content trees written by the `scripts/build_*.py` authoring
-# scripts (Spaces, splats, manufacturing zips, rendered presentations). The
-# scripts are the source and are tracked; this is their output, thousands of
-# files per run.
-/output/
 logs/
 
 # Temporary files
