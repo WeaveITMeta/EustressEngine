@@ -21,6 +21,7 @@ license = "PolyForm-Shield-1.0.0"
 # =============================================================================
 
 [dependencies]
+eustress-avatar-schema = { path = "../avatar-schema", default-features = false }
 # Leptos - Reactive Rust Framework (CSR mode)
 leptos = { version = "0.7", features = ["csr"] }
 leptos_router = "0.7"

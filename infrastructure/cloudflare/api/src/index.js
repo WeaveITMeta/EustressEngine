@@ -25,6 +25,8 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Model used for document verification, background screening, and search.
+import { handleAvatar } from './avatar.mjs';
+
 const GROK_MODEL = 'grok-4.6';
 
 /// Single entry point for every xAI call.
@@ -697,6 +699,8 @@ export default {
         return handleVerify(request, env, cors);
       if (url.pathname === '/api/auth/me' && request.method === 'GET')
         return handleMe(request, env, cors);
+      if (url.pathname === '/api/avatar' && ['GET', 'PUT'].includes(request.method))
+        return handleAvatar(request, env, cors, verifyAuth, json);
 
       // Identity backup email
       if (url.pathname === '/api/identity/email-backup' && request.method === 'POST')

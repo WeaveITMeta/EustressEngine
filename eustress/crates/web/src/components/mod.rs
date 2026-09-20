@@ -10,6 +10,7 @@
 pub mod layout;
 pub mod common;
 pub mod forms;
+pub mod avatar_customizer;
 pub mod footer;
 pub mod nav;
 pub mod bliss_kpi;
