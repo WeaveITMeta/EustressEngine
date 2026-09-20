@@ -271,6 +271,13 @@ fn main() {
     // --space override; init_resource inside the core is then a no-op).
     app.insert_resource(space::SpaceRoot(args.space.clone()));
 
+    // Report as `headless` in the instance registry
+    // (`<workspace>/.eustress/instances/<pid>.json`) so `eustress instances`
+    // can tell a windowless simulator from an editor window.
+    app.insert_resource(eustress_engine::engine_bridge::BridgeInstanceKind(
+        eustress_bridge_client::InstanceKind::Headless,
+    ));
+
     // The shared core simulation tier — identical to the editor's.
     app_core::add_core_sim_plugins(&mut app, &args.space);
 

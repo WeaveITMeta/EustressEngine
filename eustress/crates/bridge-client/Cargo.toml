@@ -7,8 +7,14 @@ authors = ["EustressEngine Contributors"]
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-# The wire format is JSON-RPC over newline-delimited JSON. No other deps —
-# deliberately std-only (TcpStream, no tokio) so this stays a near-zero-cost
+# The wire format is JSON-RPC over newline-delimited JSON. Deliberately
+# std-only for transport (TcpStream, no tokio) so this stays a near-zero-cost
 # add for any consumer, matching the CLI's and eustress-space's minimal-deps
 # policy.
 serde_json = { workspace = true }
+# `InstanceRecord` — the one shared definition of a running engine instance,
+# written by the engine and read by the CLI/MCP server.
+serde = { workspace = true }
+# OneDrive-safe documents root for the default workspace (mirrors the
+# engine's `space::default_documents_root`).
+dirs = { workspace = true }

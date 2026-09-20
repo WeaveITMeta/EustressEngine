@@ -111,6 +111,11 @@ pub fn call_engine_with_timeout(
     // Eustress workspace root (the engine writes both). This lets a caller
     // find the live engine even when it launched into a DIFFERENT universe
     // than the one it's configured for.
+    //
+    // NOTE: this discovery is per-Universe and therefore single-instance —
+    // two engines open on two Spaces of the SAME Universe overwrite each
+    // other's port file. Anything driving several instances at once must
+    // address them by port instead: see [`call_port`] and [`list_instances`].
     let universe_port = universe_dir.join(".eustress").join("engine.port");
     let global_port = universe_dir
         .parent()
@@ -125,6 +130,41 @@ pub fn call_engine_with_timeout(
             None => return Err(primary_err),
         },
     };
+    round_trip(stream, method, params, reply_timeout)
+}
+
+/// Call one bridge method on an engine instance whose port is already known
+/// — the multi-instance path. Bypasses port-file discovery entirely, so it
+/// is the only unambiguous way to reach ONE specific engine when several
+/// are running (get ports from [`list_instances`]).
+pub fn call_port(port: u16, method: &str, params: Value) -> Result<Value, String> {
+    call_port_with_timeout(port, method, params, DEFAULT_REPLY_TIMEOUT)
+}
+
+/// [`call_port`] with an explicit reply deadline (see
+/// [`call_engine_with_timeout`] for when that matters).
+pub fn call_port_with_timeout(
+    port: u16,
+    method: &str,
+    params: Value,
+    reply_timeout: Duration,
+) -> Result<Value, String> {
+    let addr = format!("127.0.0.1:{port}");
+    let sock_addr: SocketAddr = addr
+        .parse()
+        .map_err(|e| format!("internal: bad bridge address {addr}: {e}"))?;
+    let stream = TcpStream::connect_timeout(&sock_addr, TIMEOUT)
+        .map_err(|e| not_running(&format!("connect {addr} failed: {e}")))?;
+    round_trip(stream, method, params, reply_timeout)
+}
+
+/// One JSON-RPC request/response exchange over an already-connected stream.
+fn round_trip(
+    stream: TcpStream,
+    method: &str,
+    params: Value,
+    reply_timeout: Duration,
+) -> Result<Value, String> {
     stream
         .set_read_timeout(Some(reply_timeout))
         .map_err(|e| format!("internal: set_read_timeout failed: {e}"))?;
@@ -213,4 +253,139 @@ pub fn call_engine_with_timeout(
 /// command).
 pub fn port_file_path(universe_dir: &Path) -> std::path::PathBuf {
     universe_dir.join(".eustress").join("engine.port")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Instance registry — one record per running engine, keyed by PID
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The per-Universe `engine.port` file is a single slot: the last engine to
+// start owns it, and the first to exit deletes it. That is fine for the
+// one-Studio-at-a-time case it was built for, and wrong for an agent that
+// opens several Spaces of one Universe at once. So every engine ALSO writes
+// `<workspace>/.eustress/instances/<pid>.json` — collision-free by
+// construction (a PID is unique among live processes) and enumerable, so an
+// orchestrator can list what is running and drive each one by its own port
+// via [`call_port`]. The engine removes its file on clean exit; a crash
+// leaves a stale one, which [`list_instances`] prunes by pinging.
+
+/// Which shell an instance is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InstanceKind {
+    /// The windowed editor (`eustress-engine`).
+    Editor,
+    /// The windowless simulator (`eustress-headless`).
+    Headless,
+}
+
+impl InstanceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InstanceKind::Editor => "editor",
+            InstanceKind::Headless => "headless",
+        }
+    }
+}
+
+/// A running engine instance, as written to
+/// `<workspace>/.eustress/instances/<pid>.json`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct InstanceRecord {
+    /// OS process id — the file name and the identity.
+    pub pid: u32,
+    /// Bridge TCP port on 127.0.0.1.
+    pub port: u16,
+    pub kind: InstanceKind,
+    /// The Space this instance has open, if a Space is loaded. Updated by
+    /// the engine on every runtime Space switch.
+    #[serde(default)]
+    pub space: Option<std::path::PathBuf>,
+    /// The Universe root of that Space.
+    #[serde(default)]
+    pub universe: Option<std::path::PathBuf>,
+    /// RFC 3339 timestamp of when the bridge came up.
+    pub started_at: String,
+}
+
+/// `<workspace>/.eustress/instances` — the registry directory.
+pub fn instances_dir(workspace_root: &Path) -> std::path::PathBuf {
+    workspace_root.join(".eustress").join("instances")
+}
+
+/// The registry file for one PID.
+pub fn instance_file_path(workspace_root: &Path, pid: u32) -> std::path::PathBuf {
+    instances_dir(workspace_root).join(format!("{pid}.json"))
+}
+
+/// Read one instance record. `Err` on a missing or malformed file.
+pub fn read_instance(path: &Path) -> Result<InstanceRecord, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))
+}
+
+/// Every instance record in the registry, in PID order, WITHOUT checking
+/// whether the processes are still alive. Malformed files are skipped.
+pub fn list_instances_unchecked(workspace_root: &Path) -> Vec<InstanceRecord> {
+    let dir = instances_dir(workspace_root);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<InstanceRecord> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+        .filter_map(|p| read_instance(&p).ok())
+        .collect();
+    out.sort_by_key(|r| r.pid);
+    out
+}
+
+/// Every LIVE instance: reads the registry and pings each recorded port,
+/// deleting the record of any instance that no longer answers (a crashed
+/// engine never gets to remove its own file). This is the call an
+/// orchestrator should make before deciding what to drive.
+pub fn list_instances(workspace_root: &Path) -> Vec<InstanceRecord> {
+    list_instances_unchecked(workspace_root)
+        .into_iter()
+        .filter(|rec| {
+            let alive = call_port(rec.port, "ping", serde_json::json!({})).is_ok();
+            if !alive {
+                let _ = std::fs::remove_file(instance_file_path(workspace_root, rec.pid));
+            }
+            alive
+        })
+        .collect()
+}
+
+/// The default Eustress workspace root (the parent of all Universes; where
+/// the global `engine.port` and the instance registry live).
+///
+/// Resolution: `EUSTRESS_WORKSPACE` env var, else `<Documents>/Eustress`.
+/// On Windows the LOCAL `%USERPROFILE%\Documents` is used in preference to
+/// `dirs::document_dir()`, which on a OneDrive "Known Folder Move" install
+/// resolves to the redirected `OneDrive\Documents` — a folder the engine's
+/// own `space::default_documents_root` deliberately avoids, so this keeps
+/// the CLI and the engine looking in the same place.
+pub fn default_workspace_root() -> std::path::PathBuf {
+    if let Ok(env_path) = std::env::var("EUSTRESS_WORKSPACE") {
+        return std::path::PathBuf::from(env_path);
+    }
+    let documents = {
+        #[cfg(target_os = "windows")]
+        {
+            dirs::home_dir()
+                .map(|h| h.join("Documents"))
+                .filter(|p| p.is_dir())
+                .or_else(dirs::document_dir)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            dirs::document_dir()
+        }
+    };
+    documents
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("Eustress")
 }

@@ -209,6 +209,12 @@ pub enum MethodName {
     /// as rkyv blobs in Fjall. Reads the DB and writes a copy; changes no
     /// entity's representation (that's `entity.promote`).
     DbExportToml,
+    /// Ask this engine instance to exit cleanly. Sends `AppExit` — the
+    /// normal shutdown path, so the port file, instance record, and
+    /// Fjall handle are all released the same way a window close would.
+    /// The orchestrator's `eustress close` verb; the multi-instance
+    /// counterpart of `eustress open`.
+    EngineShutdown,
     Unknown(String),
 }
 
@@ -252,6 +258,7 @@ where
         "data.bindings" => MethodName::DataBindings,
         "data.unbind" => MethodName::DataUnbind,
         "db.export_toml" => MethodName::DbExportToml,
+        "engine.shutdown" => MethodName::EngineShutdown,
         _ => MethodName::Unknown(s),
     })
 }
@@ -263,6 +270,24 @@ where
 pub mod handlers {
     use super::*;
     use bevy::prelude::*;
+
+    /// Exit this engine instance cleanly by writing `AppExit`. Bevy applies
+    /// the exit at the end of the current frame, after this response has
+    /// already been queued to the client — so the caller gets an
+    /// acknowledgement, then the process winds down through the normal
+    /// shutdown path (port file + instance record removed by `Drop`, the
+    /// Fjall handle released). Identical to the user closing the window.
+    pub fn engine_shutdown(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        world.write_message(bevy::app::AppExit::Success);
+        info!("EngineBridge: engine.shutdown received — exiting at end of frame");
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({
+                "shutting_down": true,
+                "pid": std::process::id(),
+            }),
+        )
+    }
 
     /// Trivial health check — lets siblings verify the bridge is alive
     /// without touching any engine state.

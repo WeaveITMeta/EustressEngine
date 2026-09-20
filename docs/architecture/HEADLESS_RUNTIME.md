@@ -236,6 +236,30 @@ The existing `sim replay/best/convergence` history commands stay (they read the 
 - **`--render minimal`** — `MinimalPlugins`, no GPU. Sim, scripts, physics, bridge, op-log all work. `ai_camera.capture` / `viewport.capture` return a clear "no render device in minimal mode" error. Best for CI, containers, headless cloud.
 - **`--render gpu`** — `DefaultPlugins` with `WindowPlugin { primary_window: None, .. }` + `ScheduleRunnerPlugin` (no winit window), keeping `RenderPlugin`. The off-screen [`ai_camera`](../../eustress/crates/engine/src/ai_camera.rs) already renders to an `Image`, never the window — so the **AI keeps its eyes** with no desktop. Requires a usable GPU/adapter (real or software, e.g. `llvmpipe`/WARP) on the box.
 
+### 7.4 Fan-out — many engines at once
+
+An orchestrator that dispatches missions to several Spaces needs several engines at once, and `engine.port` cannot support that: it is **one slot per Universe** — the last engine to start owns it, and the first to exit deletes it. Two engines on two Spaces of the *same* Universe (the normal case — one Universe holds dozens of Spaces) overwrite each other, and the survivor's port file may be deleted by the other's shutdown.
+
+The fix is a second, additive discovery mechanism keyed by something that cannot collide:
+
+- **Instance registry** — every engine (editor and headless) writes `<workspace>/.eustress/instances/<pid>.json` once its bridge is bound: `{pid, port, kind, space, universe, started_at}` ([`InstanceRecord`](../../eustress/crates/bridge-client/src/lib.rs), one shared definition). The engine updates `space`/`universe` on every runtime Space switch and removes the file on clean exit; a crash leaves a stale record, which readers prune by pinging. The record sits beside the global `engine.port`, so the two conventions never disagree about where the workspace is. `engine.port` is untouched — single-instance callers (the MCP server as configured today) keep working.
+- **Direct-port addressing** — [`call_port`](../../eustress/crates/bridge-client/src/lib.rs) bypasses port-file discovery. It is the *only* unambiguous way to reach one engine among several; `call_engine` (by Universe) stays for the single-instance case.
+- **`engine.shutdown`** bridge method — writes `AppExit`, so a close runs the normal shutdown path (port file, instance record, and Fjall handle all released) instead of a kill.
+
+The CLI exposes the lifecycle:
+
+```bash
+eustress open <space> [--play] [--headless] --json   # spawn detached; prints {pid, port, ...} once the bridge is up
+eustress instances [--json]                            # every live engine (pings + prunes dead records)
+eustress bridge --port <N> <cmd>                       # drive ONE specific instance
+eustress bridge --pid <N> <cmd>                        #   (same, looked up in the registry)
+eustress close --pid <N> | --space <dir> | --all [--force]
+```
+
+`open` returns as soon as it can hand back a port; the window stays up. Verified 2026-09-19: two editor windows on two Spaces of `ARC-AGI-3`, distinct ports, each returning its own entity count over `--port`/`--pid`, while the old `engine.port` named only one of them; `close --all` exited both cleanly and emptied the registry.
+
+**Trap:** pass Spaces as plain absolute paths. `canonicalize()` on Windows yields the `\\?\C:\…` verbatim form, which the engine stores verbatim and its Universe resolver does not understand — the record then reports the wrong Universe, and a later `close --space` never matches. The CLI uses `std::path::absolute` throughout for this reason.
+
 ---
 
 ## 8. One-shot batch runner — "spaces as a function"
@@ -268,6 +292,7 @@ This makes a space a pure function: `(space, inputs, ticks) → recording.json +
 | **P5** | `eustress run` batch runner + recording dump + breakpoint exit code | S | **`done`** — landed alongside P4 (`eustress run <space>` wraps `eustress-headless`) |
 | **P6** | `--render gpu` tier (windowless `DefaultPlugins`) for `ai_camera` capture | M | `new` |
 | **P7** | Retire dead `--server` flag; fold `eustress-server` onto `add_core_sim_plugins` (one sim path) or document it as multiplayer-only | S | `extend` |
+| **P8** | Fan-out: per-PID instance registry, `call_port`, `engine.shutdown`, and `eustress open` / `instances` / `close` / `bridge --port` (§7.4) | M | **`done`** — 2026-09-19; verified with two windows on one Universe |
 
 **P1 → P2 → P3** is the spine that delivers "run spaces apart from visualization." With P0 already done, P1 and P2 are both small — P1 is a mechanical plugin split with no TypeId risk, and P2 is pure reorganization (grouping existing `add_plugins` calls, not fixing a bug). P4/P5 make the spine *usable*; P6 is the observation upgrade.
 

@@ -48,6 +48,7 @@
 use bevy::prelude::*;
 use std::sync::Arc;
 
+mod instance_file;
 mod port_file;
 mod protocol;
 mod self_test;
@@ -55,8 +56,10 @@ mod server;
 #[cfg(unix)]
 mod unix_socket_file;
 
+pub use instance_file::BridgeInstanceKind;
 pub use protocol::{BridgeRequest, BridgeResponse, BridgeError, MethodName};
 
+use instance_file::{InstanceFile, SharedInstanceFile};
 use server::PendingRequests;
 use port_file::PortFile;
 #[cfg(unix)]
@@ -384,6 +387,10 @@ pub struct BridgePendingQueue(pub(crate) PendingRequests);
 pub struct EngineBridgeHandle {
     pub port: Option<u16>,
     pub port_file: Option<std::sync::Arc<PortFile>>,
+    /// This process's `<workspace>/.eustress/instances/<pid>.json` record —
+    /// the multi-instance discovery path (see `instance_file` docs). `None`
+    /// if the write failed or the Universe has no parent directory.
+    pub instance_file: Option<SharedInstanceFile>,
     /// The Unix socket transport's pointer file + real (short, temp-dir)
     /// bind path (unix platforms only) — `None` on other platforms or if
     /// the bind failed. See `unix_socket_file` module docs for why this
@@ -407,6 +414,7 @@ fn setup_engine_bridge(
     mut commands: Commands,
     queue: Res<BridgePendingQueue>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
+    instance_kind: Option<Res<BridgeInstanceKind>>,
 ) {
     // Bring up our own multi-thread runtime. Two workers is enough —
     // the bridge's workload is a handful of short-lived request
@@ -470,6 +478,43 @@ fn setup_engine_bridge(
         port_file.display_path()
     );
 
+    // Per-instance registry record — the multi-instance discovery path.
+    // Placed beside the global `engine.port` (workspace root = the parent
+    // of the Universe). `space`/`universe` are best-effort here for the
+    // same reason as the port file and get corrected by
+    // `resync_port_file_to_space` once the Space actually loads.
+    let kind = instance_kind
+        .map(|k| k.0)
+        .unwrap_or(eustress_bridge_client::InstanceKind::Editor);
+    let instance_file = instance_file::workspace_root_for(&universe).and_then(|ws| {
+        match InstanceFile::write(
+            &ws,
+            port,
+            kind,
+            space_root.as_ref().map(|s| s.0.as_path()),
+            Some(&universe),
+        ) {
+            Ok(f) => {
+                info!(
+                    "🔗 Engine Bridge instance record: {} (pid {}, {})",
+                    f.display_path(),
+                    f.record().pid,
+                    kind.as_str()
+                );
+                Some(Arc::new(std::sync::Mutex::new(f)))
+            }
+            Err(e) => {
+                warn!(
+                    "EngineBridge: failed to write instance record under {}: {} — \
+                     this instance is reachable by port but won't appear in `eustress instances`",
+                    ws.display(),
+                    e
+                );
+                None
+            }
+        }
+    });
+
     // Also bind a Unix domain socket, advertised via a pointer file at
     // `<universe>/.eustress/engine.sock` (see `unix_socket_file` docs for
     // why the socket itself lives elsewhere, under the system temp dir).
@@ -516,6 +561,7 @@ fn setup_engine_bridge(
     commands.insert_resource(EngineBridgeHandle {
         port: Some(port),
         port_file: Some(Arc::new(port_file)),
+        instance_file,
         #[cfg(unix)]
         unix_socket: unix_socket.map(Arc::new),
     });
@@ -617,6 +663,7 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::DataBind => protocol::handlers::data_bind(world, &pending.request),
             MethodName::DataBindings => protocol::handlers::data_bindings(world, &pending.request),
             MethodName::DataUnbind => protocol::handlers::data_unbind(world, &pending.request),
+            MethodName::EngineShutdown => protocol::handlers::engine_shutdown(world, &pending.request),
             MethodName::Unknown(ref name) => {
                 // Unknown method — return a JSON-RPC "method not found"
                 // error rather than crashing the handler.
@@ -667,6 +714,19 @@ fn resync_port_file_to_space(
         return;
     };
     let target = universe.join(".eustress").join("engine.port");
+
+    // Keep the instance record's `space`/`universe` current so
+    // `eustress instances` reports what each engine actually has open.
+    // Cheap: a small JSON rewrite, only on a real Space change.
+    if let Some(inst) = handle.instance_file.as_ref() {
+        if let Ok(mut f) = inst.lock() {
+            if f.record().space.as_deref() != Some(space_root.0.as_path()) {
+                if let Err(e) = f.update_space(&space_root.0, &universe) {
+                    warn!("EngineBridge: failed to update instance record: {}", e);
+                }
+            }
+        }
+    }
 
     // Already pointing at the loaded Space's Universe — nothing to do.
     let port_file_current = handle

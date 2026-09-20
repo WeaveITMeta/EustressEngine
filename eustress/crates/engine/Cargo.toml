@@ -75,7 +75,7 @@ path = "src/bin/session-baseline.rs"
 arboard = { version = "3", optional = true }
 
 # Workspace members
-eustress-common = { path = "../common", features = ["physics", "realism", "realism-scripting", "luau", "gui"] }
+eustress-common = { path = "../common", features = ["physics", "realism", "realism-scripting", "luau", "gui", "avatar-profile"] }
 eustress-bliss = { path = "../bliss" }
 eustress-stream-node = { path = "../stream-node", optional = true }
 # Parametric BRep + Studio Boolean (Drafting tab CSG)
@@ -86,6 +86,10 @@ eustress-cad = { path = "../cad" }
 # same crate without the `bevy` feature and treats the registry as a
 # plain struct.
 eustress-tools = { path = "../tools", features = ["bevy"] }
+# `InstanceRecord` — the shared definition of "a running engine instance"
+# the bridge writes to `<workspace>/.eustress/instances/<pid>.json` and the
+# CLI / MCP server read back. One definition, no drift.
+eustress-bridge-client = { path = "../bridge-client" }
 bevy-camera-controller = { path = "../common/bevy-camera-controller" }
 eustress-geo = { path = "../geo" }
 # World-model generative spine (Phases 4-6): candidate schema, closed-form

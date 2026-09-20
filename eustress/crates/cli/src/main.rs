@@ -2,19 +2,28 @@
 //!
 //! ## Table of Contents
 //! - Cli / Commands       — CLAP top-level command tree
-//! - cmd_bridge            — `eustress bridge`  — drive a live engine or eustress-headless over TCP
-//! - cmd_run               — `eustress run`     — one-shot: launch eustress-headless, wait, relay exit code
-//! - cmd_server            — `eustress server`  — start headless dedicated server
-//! - cmd_publish           — `eustress publish` — publish Space to Cloudflare R2
-//! - cmd_sim               — `eustress sim`     — simulation history (in-process ring-buffer replay)
+//! - cmd_open              — `eustress open`      — open a Space in a NEW engine window, return pid + port
+//! - cmd_instances         — `eustress instances` — list running engines (prunes dead records)
+//! - cmd_close             — `eustress close`     — graceful engine.shutdown by pid / space / --all
+//! - cmd_bridge            — `eustress bridge`    — drive a live engine over TCP (--port/--pid to pick one)
+//! - cmd_run               — `eustress run`       — one-shot: launch eustress-headless, wait, relay exit code
+//! - cmd_server            — `eustress server`    — start headless dedicated server
+//! - cmd_publish           — `eustress publish`   — publish Space to Cloudflare R2
+//! - cmd_sim               — `eustress sim`       — simulation history (in-process ring-buffer replay)
 //!
 //! ## Drive surface (HEADLESS_RUNTIME.md §7)
-//! `bridge` and `run` are the CLI half of the headless runtime: `bridge` is a thin
-//! wrapper over `eustress-bridge-client::call_engine` (the same TCP JSON-RPC client
-//! the MCP server uses), so it drives EITHER a windowed `eustress-engine` or a
-//! headless `eustress-headless` process identically — whichever has a live
-//! `<universe>/.eustress/engine.port`. `run` launches `eustress-headless` as a child
-//! process and relays its exit code, for CI / scripted batch use.
+//! `bridge` is a thin wrapper over `eustress-bridge-client` (the same TCP JSON-RPC
+//! client the MCP server uses), so it drives EITHER a windowed `eustress-engine` or
+//! a headless `eustress-headless` process identically. `run` launches
+//! `eustress-headless` as a child and relays its exit code, for CI / batch use.
+//!
+//! ## Fan-out (many engines at once)
+//! `open` / `instances` / `close` are the orchestration primitives: an agent calls
+//! `open` once per Space (windowed or `--headless`), captures each instance's
+//! `port` from the printed record, drives each with `bridge --port <N>`, and tears
+//! them down with `close`. The per-Universe `engine.port` file is a single slot and
+//! cannot tell two instances apart, so multi-instance work MUST address by
+//! `--port`/`--pid`; the registry behind it is `<workspace>/.eustress/instances/`.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -54,12 +63,35 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Open a Space in a NEW engine window (or headless process) and return its pid + port.
+    Open(OpenArgs),
+
+    /// List every running engine instance (editor windows + headless), pruning dead records.
+    Instances(InstancesArgs),
+
+    /// Shut down running engine instance(s) cleanly via engine.shutdown.
+    Close(CloseArgs),
+
     /// Drive a LIVE engine (windowed or eustress-headless) over the TCP bridge.
     Bridge {
         /// Universe root (holds `.eustress/engine.port`). Defaults to the
-        /// current directory.
+        /// current directory. Ignored when --port or --pid targets an
+        /// instance directly.
         #[arg(long)]
         universe: Option<PathBuf>,
+        /// Target a specific instance by its bridge port (from `eustress
+        /// instances` / `eustress open`). Bypasses port-file discovery —
+        /// the only unambiguous way to reach ONE engine when several run.
+        #[arg(long, conflicts_with = "pid")]
+        port: Option<u16>,
+        /// Target a specific instance by process id (looked up in the
+        /// instance registry).
+        #[arg(long)]
+        pid: Option<u32>,
+        /// Workspace root holding `.eustress/instances/` (for --pid lookup).
+        /// Defaults to $EUSTRESS_WORKSPACE, else <Documents>/Eustress.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
         #[command(subcommand)]
         action: BridgeCommands,
     },
@@ -227,6 +259,66 @@ enum EntityCommands {
     },
 }
 
+/// `eustress open <space>` — spawn a NEW engine process on a Space, detached,
+/// and print its instance record (pid, port) once the bridge is up. This is
+/// the primitive an orchestrator uses to fan out: call it N times for N
+/// Spaces, capture each `port`, then drive each with `eustress bridge --port`.
+/// Several instances on Spaces of the SAME Universe are fine — each is
+/// registered by pid, not by the single-slot per-Universe port file.
+#[derive(Args, Debug)]
+struct OpenArgs {
+    /// `.eustress` Space directory to open.
+    space: PathBuf,
+    /// Start straight into Play mode (editor only; passes --play).
+    #[arg(long)]
+    play: bool,
+    /// Open in a windowless eustress-headless process instead of an editor window.
+    #[arg(long)]
+    headless: bool,
+    /// Seconds to wait for the new instance's bridge to come up before
+    /// giving up on reporting its port (the process keeps running either way).
+    #[arg(long, default_value = "45")]
+    wait_secs: u64,
+    /// Workspace root holding `.eustress/instances/`. Defaults to
+    /// $EUSTRESS_WORKSPACE, else <Documents>/Eustress.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+    /// Print only the JSON record (no status line) — for scripts/agents.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct InstancesArgs {
+    /// Workspace root holding `.eustress/instances/`. Defaults to
+    /// $EUSTRESS_WORKSPACE, else <Documents>/Eustress.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+    /// Print only the JSON array — for scripts/agents.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct CloseArgs {
+    /// Close the instance with this pid.
+    #[arg(long, conflicts_with_all = ["space", "all"])]
+    pid: Option<u32>,
+    /// Close every instance that has this Space open.
+    #[arg(long, conflicts_with = "all")]
+    space: Option<PathBuf>,
+    /// Close every running instance.
+    #[arg(long)]
+    all: bool,
+    /// If the graceful engine.shutdown is refused or times out, kill the process.
+    #[arg(long)]
+    force: bool,
+    /// Workspace root holding `.eustress/instances/`. Defaults to
+    /// $EUSTRESS_WORKSPACE, else <Documents>/Eustress.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+}
+
 /// `eustress run <space>` — launch eustress-headless as a child process,
 /// wait for it, relay its exit code. See HEADLESS_RUNTIME.md §8: with
 /// `--ticks`, a Space becomes a pure function `(space, ticks) -> recording.json + exit code`.
@@ -392,7 +484,12 @@ async fn main() -> Result<()> {
         .init();
 
     match cli.command {
-        Commands::Bridge { universe, action } => cmd_bridge(universe, action),
+        Commands::Open(args) => cmd_open(args),
+        Commands::Instances(args) => cmd_instances(args),
+        Commands::Close(args) => cmd_close(args),
+        Commands::Bridge { universe, port, pid, workspace, action } => {
+            cmd_bridge(universe, port, pid, workspace, action)
+        }
         Commands::Run(args) => cmd_run(args).await,
         Commands::Server { action } => cmd_server(action).await,
         Commands::Publish(args) => cmd_publish(args).await,
@@ -415,6 +512,58 @@ fn resolve_universe(explicit: Option<PathBuf>) -> Result<PathBuf> {
         .with_context(|| format!("universe path not found: {}", dir.display()))
 }
 
+/// The workspace root holding `.eustress/instances/`: `--workspace`, else
+/// `$EUSTRESS_WORKSPACE`, else `<Documents>/Eustress` (OneDrive-safe — see
+/// `eustress_bridge_client::default_workspace_root`).
+fn resolve_workspace(explicit: Option<PathBuf>) -> PathBuf {
+    explicit.unwrap_or_else(eustress_bridge_client::default_workspace_root)
+}
+
+/// An existing Space directory as a PLAIN absolute path.
+///
+/// Deliberately not `canonicalize()`: on Windows that yields the
+/// `\\?\C:\...` verbatim form, which the engine passes straight through
+/// into its `SpaceRoot` — and its Universe resolver doesn't understand the
+/// prefix, so the instance record reported the wrong Universe. It also
+/// means the path the engine records and the path a later `close --space`
+/// passes would differ in form and never match. `std::path::absolute`
+/// keeps the ordinary `C:\...` spelling everywhere.
+fn absolute_space_dir(p: &std::path::Path) -> Result<PathBuf> {
+    if !p.is_dir() {
+        anyhow::bail!("Space directory not found: {}", p.display());
+    }
+    std::path::absolute(p).with_context(|| format!("cannot resolve {}", p.display()))
+}
+
+/// Where a bridge call goes. `Universe` is the classic single-instance
+/// discovery through `engine.port`; `Port` is direct, and the only
+/// unambiguous choice when several engines are running.
+enum Target {
+    Universe(PathBuf),
+    Port(u16),
+}
+
+impl Target {
+    fn call(&self, method: &str, params: serde_json::Value) -> std::result::Result<serde_json::Value, String> {
+        match self {
+            Target::Universe(u) => call_engine(u, method, params),
+            Target::Port(p) => eustress_bridge_client::call_port(*p, method, params),
+        }
+    }
+}
+
+/// Find a sibling binary: prefer the one next to this executable (a dev
+/// build puts every bin in the same `target/<profile>/`), else fall back to
+/// the bare name on PATH. Shared by `open`, `run`, and `server`.
+fn sibling_binary(name: &str) -> PathBuf {
+    let file = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.join(&file)))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
 /// Print a bridge result: a colored one-line summary, then the full JSON
 /// pretty-printed (so `eustress bridge ... | jq` composes cleanly).
 fn print_bridge_result(summary: &str, result: &serde_json::Value) {
@@ -427,11 +576,31 @@ fn print_bridge_error(method: &str, err: &str) -> Result<()> {
     anyhow::bail!("bridge call failed");
 }
 
-fn cmd_bridge(universe: Option<PathBuf>, action: BridgeCommands) -> Result<()> {
-    let universe = resolve_universe(universe)?;
+fn cmd_bridge(
+    universe: Option<PathBuf>,
+    port: Option<u16>,
+    pid: Option<u32>,
+    workspace: Option<PathBuf>,
+    action: BridgeCommands,
+) -> Result<()> {
+    let target = if let Some(p) = port {
+        Target::Port(p)
+    } else if let Some(pid) = pid {
+        let ws = resolve_workspace(workspace);
+        let rec = eustress_bridge_client::list_instances_unchecked(&ws)
+            .into_iter()
+            .find(|r| r.pid == pid)
+            .with_context(|| format!(
+                "no instance with pid {pid} in {} — run `eustress instances`",
+                eustress_bridge_client::instances_dir(&ws).display()
+            ))?;
+        Target::Port(rec.port)
+    } else {
+        Target::Universe(resolve_universe(universe)?)
+    };
 
     match action {
-        BridgeCommands::Ping => match call_engine(&universe, "ping", serde_json::json!({})) {
+        BridgeCommands::Ping => match target.call("ping", serde_json::json!({})) {
             Ok(r) => {
                 print_bridge_result("engine bridge is alive", &r);
                 Ok(())
@@ -442,7 +611,7 @@ fn cmd_bridge(universe: Option<PathBuf>, action: BridgeCommands) -> Result<()> {
         BridgeCommands::Call { method, params } => {
             let params: serde_json::Value = serde_json::from_str(&params)
                 .with_context(|| format!("--params is not valid JSON: {params}"))?;
-            match call_engine(&universe, &method, params) {
+            match target.call(&method, params) {
                 Ok(r) => {
                     print_bridge_result(&format!("{method} ok"), &r);
                     Ok(())
@@ -456,7 +625,7 @@ fn cmd_bridge(universe: Option<PathBuf>, action: BridgeCommands) -> Result<()> {
             if let Some(c) = class { params.insert("class".into(), c.into()); }
             params.insert("offset".into(), offset.into());
             params.insert("limit".into(), limit.into());
-            match call_engine(&universe, "ecs.query", serde_json::Value::Object(params)) {
+            match target.call("ecs.query", serde_json::Value::Object(params)) {
                 Ok(r) => {
                     let total = r.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
                     let returned = r.get("returned").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -472,7 +641,7 @@ fn cmd_bridge(universe: Option<PathBuf>, action: BridgeCommands) -> Result<()> {
             if let Some(c) = class { params.insert("class".into(), c.into()); }
             if let Some(n) = name_contains { params.insert("name_contains".into(), n.into()); }
             params.insert("limit".into(), limit.into());
-            match call_engine(&universe, "ecs.inspect", serde_json::Value::Object(params)) {
+            match target.call("ecs.inspect", serde_json::Value::Object(params)) {
                 Ok(r) => {
                     let total = r.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
                     let fps = r.get("fps").and_then(|v| v.as_f64());
@@ -490,7 +659,7 @@ fn cmd_bridge(universe: Option<PathBuf>, action: BridgeCommands) -> Result<()> {
             } else {
                 serde_json::json!({ "keys": keys })
             };
-            match call_engine(&universe, "sim.read", params) {
+            match target.call("sim.read", params) {
                 Ok(r) => {
                     let count = r.as_object().map(|m| m.len()).unwrap_or(0);
                     print_bridge_result(&format!("{count} sim value(s)"), &r);
@@ -501,7 +670,7 @@ fn cmd_bridge(universe: Option<PathBuf>, action: BridgeCommands) -> Result<()> {
         }
 
         BridgeCommands::SimStep { ticks } => {
-            match call_engine(&universe, "sim.step", serde_json::json!({ "ticks": ticks })) {
+            match target.call("sim.step", serde_json::json!({ "ticks": ticks })) {
                 Ok(r) => {
                     let stepped = r.get("stepped").and_then(|v| v.as_u64()).unwrap_or(0);
                     let secs = r.get("sim_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -518,7 +687,7 @@ fn cmd_bridge(universe: Option<PathBuf>, action: BridgeCommands) -> Result<()> {
             if let Some(d) = direction { params.insert("direction".into(), d.into()); }
             if let Some(m) = max_distance { params.insert("max_distance".into(), m.into()); }
             if let Some(m) = max_hits { params.insert("max_hits".into(), m.into()); }
-            match call_engine(&universe, "scene.raycast", serde_json::Value::Object(params)) {
+            match target.call("scene.raycast", serde_json::Value::Object(params)) {
                 Ok(r) => {
                     let n = r.get("hit_count").and_then(|v| v.as_u64()).unwrap_or(0);
                     print_bridge_result(&format!("{n} hit(s)"), &r);
@@ -529,7 +698,7 @@ fn cmd_bridge(universe: Option<PathBuf>, action: BridgeCommands) -> Result<()> {
         }
 
         BridgeCommands::Oplog { limit } => {
-            match call_engine(&universe, "oplog.tail", serde_json::json!({ "limit": limit })) {
+            match target.call("oplog.tail", serde_json::json!({ "limit": limit })) {
                 Ok(r) => {
                     let count = r.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
                     print_bridge_result(&format!("{count} mutation record(s)"), &r);
@@ -539,11 +708,11 @@ fn cmd_bridge(universe: Option<PathBuf>, action: BridgeCommands) -> Result<()> {
             }
         }
 
-        BridgeCommands::Entity { action } => cmd_bridge_entity(&universe, action),
+        BridgeCommands::Entity { action } => cmd_bridge_entity(&target, action),
     }
 }
 
-fn cmd_bridge_entity(universe: &std::path::Path, action: EntityCommands) -> Result<()> {
+fn cmd_bridge_entity(target: &Target, action: EntityCommands) -> Result<()> {
     match action {
         EntityCommands::Create { class, shape, name, position, size, color, material, anchored, can_collide } => {
             let mut params = serde_json::Map::new();
@@ -556,7 +725,7 @@ fn cmd_bridge_entity(universe: &std::path::Path, action: EntityCommands) -> Resu
             if let Some(v) = material { params.insert("material".into(), v.into()); }
             if let Some(v) = anchored { params.insert("anchored".into(), v.into()); }
             if let Some(v) = can_collide { params.insert("can_collide".into(), v.into()); }
-            match call_engine(universe, "entity.create", serde_json::Value::Object(params)) {
+            match target.call("entity.create", serde_json::Value::Object(params)) {
                 Ok(r) => {
                     print_bridge_result("entity created", &r);
                     Ok(())
@@ -568,7 +737,7 @@ fn cmd_bridge_entity(universe: &std::path::Path, action: EntityCommands) -> Resu
             let mut params = serde_json::Map::new();
             if let Some(v) = uuid { params.insert("uuid".into(), v.into()); }
             if let Some(v) = name { params.insert("name".into(), v.into()); }
-            match call_engine(universe, "entity.read", serde_json::Value::Object(params)) {
+            match target.call("entity.read", serde_json::Value::Object(params)) {
                 Ok(r) => {
                     print_bridge_result("entity read", &r);
                     Ok(())
@@ -586,7 +755,7 @@ fn cmd_bridge_entity(universe: &std::path::Path, action: EntityCommands) -> Resu
             if let Some(v) = material { params.insert("material".into(), v.into()); }
             if let Some(v) = anchored { params.insert("anchored".into(), v.into()); }
             if let Some(v) = can_collide { params.insert("can_collide".into(), v.into()); }
-            match call_engine(universe, "entity.update", serde_json::Value::Object(params)) {
+            match target.call("entity.update", serde_json::Value::Object(params)) {
                 Ok(r) => {
                     print_bridge_result("entity updated", &r);
                     Ok(())
@@ -598,7 +767,7 @@ fn cmd_bridge_entity(universe: &std::path::Path, action: EntityCommands) -> Resu
             let mut params = serde_json::Map::new();
             if let Some(v) = uuid { params.insert("uuid".into(), v.into()); }
             if let Some(v) = name { params.insert("name".into(), v.into()); }
-            match call_engine(universe, "entity.delete", serde_json::Value::Object(params)) {
+            match target.call("entity.delete", serde_json::Value::Object(params)) {
                 Ok(r) => {
                     print_bridge_result("entity deleted", &r);
                     Ok(())
@@ -612,7 +781,7 @@ fn cmd_bridge_entity(universe: &std::path::Path, action: EntityCommands) -> Resu
             if let Some(v) = path { params.insert("path".into(), v.into()); }
             if let Some(v) = class { params.insert("class".into(), v.into()); }
             params.insert("limit".into(), limit.into());
-            match call_engine(universe, "entity.find", serde_json::Value::Object(params)) {
+            match target.call("entity.find", serde_json::Value::Object(params)) {
                 Ok(r) => {
                     let total = r.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
                     print_bridge_result(&format!("{total} entities found"), &r);
@@ -625,16 +794,242 @@ fn cmd_bridge_entity(universe: &std::path::Path, action: EntityCommands) -> Resu
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// cmd_open / cmd_instances / cmd_close — multi-instance lifecycle
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Spawn a new engine process on `space`, detached from this CLI, and wait
+/// for its `<workspace>/.eustress/instances/<pid>.json` record to appear so
+/// we can hand the caller a port to drive it on.
+///
+/// Detached on purpose: the engine is a long-lived window, and this command
+/// returns as soon as the bridge is up. The child's stdio is dropped so it
+/// neither ties this terminal up nor dies with it.
+fn cmd_open(args: OpenArgs) -> Result<()> {
+    let space = absolute_space_dir(&args.space)?;
+    let workspace = resolve_workspace(args.workspace);
+
+    let (bin_name, kind) = if args.headless {
+        ("eustress-headless", "headless")
+    } else {
+        ("eustress-engine", "editor")
+    };
+    let bin = sibling_binary(bin_name);
+
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg("--space").arg(&space);
+    if args.play && !args.headless {
+        cmd.arg("--play");
+    }
+    // Headless without a tick limit would autoplay and run forever, which
+    // is exactly what "open" means for it — leave its defaults alone.
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // Own process group on Windows so a Ctrl+C in this terminal doesn't
+    // propagate to the engine windows it spawned.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+
+    let child = cmd.spawn().with_context(|| {
+        format!(
+            "Failed to start {}. Build it with: cargo build -p eustress-engine --bin {bin_name}",
+            bin.display()
+        )
+    })?;
+    let pid = child.id();
+    // Deliberately NOT waited on — the process outlives this command.
+    drop(child);
+
+    if !args.json {
+        println!(
+            "{} Launched {kind} pid {pid} on {} — waiting up to {}s for its bridge…",
+            "▶".cyan().bold(),
+            space.display().to_string().cyan(),
+            args.wait_secs
+        );
+    }
+
+    // Poll for THIS pid's record. The engine writes it only after the bridge
+    // has bound, so its presence means the port is live.
+    let record_path = eustress_bridge_client::instance_file_path(&workspace, pid);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(args.wait_secs);
+    let record = loop {
+        if let Ok(rec) = eustress_bridge_client::read_instance(&record_path) {
+            break Some(rec);
+        }
+        if std::time::Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    };
+
+    match record {
+        Some(rec) => {
+            let json = serde_json::to_value(&rec).unwrap_or_default();
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+            } else {
+                print_bridge_result(
+                    &format!("{kind} pid {} is up on port {}", rec.pid, rec.port),
+                    &json,
+                );
+                println!(
+                    "  drive it with: eustress bridge --port {} <command>   (or --pid {})",
+                    rec.port, rec.pid
+                );
+            }
+            Ok(())
+        }
+        None => {
+            // Not a failure of the launch — the process is running; we just
+            // couldn't confirm its bridge in time (slow first load, huge
+            // Space). Report what we know and a non-zero exit so a script
+            // notices it has no port yet.
+            eprintln!(
+                "{} {kind} pid {pid} launched but no instance record appeared at {} within {}s. \
+                 The engine may still be loading — check `eustress instances` shortly.",
+                "⚠".yellow(),
+                record_path.display(),
+                args.wait_secs
+            );
+            anyhow::bail!("bridge not up in time (pid {pid})");
+        }
+    }
+}
+
+fn cmd_instances(args: InstancesArgs) -> Result<()> {
+    let workspace = resolve_workspace(args.workspace);
+    // `list_instances` pings each record and prunes the dead ones, so what
+    // comes back is what is actually drivable right now.
+    let live = eustress_bridge_client::list_instances(&workspace);
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&live).unwrap_or_default());
+        return Ok(());
+    }
+
+    if live.is_empty() {
+        println!(
+            "{} no running engine instances (registry: {})",
+            "·".dimmed(),
+            eustress_bridge_client::instances_dir(&workspace).display()
+        );
+        return Ok(());
+    }
+
+    println!("{}", format!("{} running instance(s)", live.len()).bold());
+    println!("{}", "─".repeat(78).dimmed());
+    println!("  {:<8} {:<6} {:<9} {}", "PID", "PORT", "KIND", "SPACE");
+    for r in &live {
+        let space = r
+            .space
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(none)".to_string());
+        println!(
+            "  {:<8} {:<6} {:<9} {}",
+            r.pid.to_string().yellow(),
+            r.port.to_string().cyan(),
+            r.kind.as_str(),
+            space.dimmed()
+        );
+    }
+    Ok(())
+}
+
+fn cmd_close(args: CloseArgs) -> Result<()> {
+    let workspace = resolve_workspace(args.workspace);
+    let live = eustress_bridge_client::list_instances(&workspace);
+
+    let want_space = match args.space {
+        Some(s) => Some(absolute_space_dir(&s)?),
+        None => None,
+    };
+
+    let targets: Vec<_> = live
+        .into_iter()
+        .filter(|r| {
+            if args.all {
+                true
+            } else if let Some(pid) = args.pid {
+                r.pid == pid
+            } else if let Some(ws) = &want_space {
+                r.space.as_deref().map(|p| p == ws.as_path()).unwrap_or(false)
+            } else {
+                false
+            }
+        })
+        .collect();
+
+    if targets.is_empty() {
+        if !args.all && args.pid.is_none() && want_space.is_none() {
+            anyhow::bail!("nothing selected — pass --pid <N>, --space <dir>, or --all");
+        }
+        println!("{} no matching running instances", "·".dimmed());
+        return Ok(());
+    }
+
+    let mut failed = 0usize;
+    for r in &targets {
+        match eustress_bridge_client::call_port(r.port, "engine.shutdown", serde_json::json!({})) {
+            Ok(_) => println!(
+                "{} pid {} ({}) shutting down",
+                "✓".green(),
+                r.pid,
+                r.kind.as_str()
+            ),
+            Err(e) if args.force => {
+                eprintln!("{} pid {}: graceful shutdown failed ({e}); killing", "⚠".yellow(), r.pid);
+                if kill_pid(r.pid) {
+                    // The engine never got to remove its own record.
+                    let _ = std::fs::remove_file(eustress_bridge_client::instance_file_path(&workspace, r.pid));
+                    println!("{} pid {} killed", "✓".green(), r.pid);
+                } else {
+                    eprintln!("{} pid {}: kill failed", "✗".red(), r.pid);
+                    failed += 1;
+                }
+            }
+            Err(e) => {
+                eprintln!("{} pid {}: {e} (use --force to kill)", "✗".red(), r.pid);
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 {
+        anyhow::bail!("{failed} instance(s) could not be closed");
+    }
+    Ok(())
+}
+
+/// Best-effort hard kill, for `close --force` when the bridge won't answer.
+fn kill_pid(pid: u32) -> bool {
+    #[cfg(windows)]
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    #[cfg(not(windows))]
+    let status = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    status.map(|s| s.success()).unwrap_or(false)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // cmd_run — one-shot headless batch runner (HEADLESS_RUNTIME.md §8)
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn cmd_run(args: RunArgs) -> Result<()> {
-    let space = args
-        .space
-        .canonicalize()
-        .with_context(|| format!("Space directory not found: {}", args.space.display()))?;
+    let space = absolute_space_dir(&args.space)?;
 
-    let mut cmd = tokio::process::Command::new("eustress-headless");
+    let mut cmd = tokio::process::Command::new(sibling_binary("eustress-headless"));
     cmd.arg("--space").arg(&space);
     cmd.arg("--tick-rate").arg(args.tick_rate.to_string());
     if let Some(n) = args.ticks {
@@ -675,7 +1070,7 @@ async fn cmd_run(args: RunArgs) -> Result<()> {
 async fn cmd_server(action: ServerCommands) -> Result<()> {
     match action {
         ServerCommands::Start { port, max_players, scene, tick_rate } => {
-            let mut cmd = tokio::process::Command::new("eustress-server");
+            let mut cmd = tokio::process::Command::new(sibling_binary("eustress-server"));
             cmd.arg("--port").arg(port.to_string())
                .arg("--max-players").arg(max_players.to_string())
                .arg("--tick-rate").arg(tick_rate.to_string());
