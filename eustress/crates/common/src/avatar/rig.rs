@@ -321,6 +321,9 @@ fn on_scene_ready(
     names: Query<&Name>,
     transforms: Query<&Transform>,
     mut stats: ResMut<RigBindStats>,
+    descriptors: Query<&super::AvatarDescriptor>,
+    mesh_handles: Query<&Mesh3d>,
+    mesh_assets: Option<Res<Assets<Mesh>>>,
 ) {
     // Walk up from the scene root to the character root carrying the marker.
     let mut root = ready.entity;
@@ -334,10 +337,13 @@ fn on_scene_ready(
         }
     }
 
+    let definition = descriptors.get(root).ok().map(|d| d.resolved_rig());
     let mut bones: HashMap<HumanoidBone, Entity> = HashMap::new();
     let mut by_key: HashMap<String, Entity> = HashMap::new();
     let mut lowest_y = f32::INFINITY;
     let mut highest_y = f32::NEG_INFINITY;
+    let mut mesh_lowest_y = f32::INFINITY;
+    let mut mesh_highest_y = f32::NEG_INFINITY;
 
     // Depth-first over the whole spawned graph, composing FULL transforms.
     //
@@ -359,9 +365,25 @@ fn on_scene_ready(
             Err(_) => parent_tf,
         };
         let y = world.translation.y;
+        // Geometry bounds exclude exporter end markers that can sit at the
+        // origin or far outside the body. Custom armor also extends above Head.
+        if let (Ok(handle), Some(assets)) = (mesh_handles.get(e), mesh_assets.as_ref()) {
+            if let Some(mesh) = assets.get(&handle.0) {
+                if let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+                    for position in positions {
+                        let y = world.transform_point(Vec3::from_array(*position)).y;
+                        mesh_lowest_y = mesh_lowest_y.min(y);
+                        mesh_highest_y = mesh_highest_y.max(y);
+                    }
+                }
+            }
+        }
 
         if let Ok(name) = names.get(e) {
-            let key = canonical_bone_key(name.as_str());
+            let key = definition.as_ref()
+                .and_then(|d| d.bone_aliases.iter().find(|(source, _)| source == name.as_str()))
+                .map(|(_, target)| target.clone())
+                .unwrap_or_else(|| canonical_bone_key(name.as_str()));
             if let Some(bone) = HumanoidBone::from_canonical(&key) {
                 // First match wins: the walk reaches the skeleton root before
                 // any duplicate deeper in the graph.
@@ -388,7 +410,9 @@ fn on_scene_ready(
         HumanoidBone::ALL.into_iter().filter(|b| b.is_required() && !bones.contains_key(b)).collect();
 
     // Measure the bind pose rather than assuming 1.83.
-    let measured = if highest_y.is_finite() && lowest_y.is_finite() && highest_y > lowest_y {
+    let measured = if mesh_lowest_y.is_finite() && mesh_highest_y > mesh_lowest_y {
+        mesh_highest_y - mesh_lowest_y
+    } else if highest_y.is_finite() && lowest_y.is_finite() && highest_y > lowest_y {
         highest_y - lowest_y
     } else {
         eustress_avatar_schema::NOMINAL_BIND_HEIGHT_M

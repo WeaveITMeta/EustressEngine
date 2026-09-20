@@ -99,7 +99,14 @@ pub fn retarget_clip_in_place(
     glb_bytes: &[u8],
     clip_file: &str,
 ) -> Result<RetargetReport, String> {
-    let old_to_key = map_target_ids_to_bones(clip, glb_bytes)?;
+    retarget_clip_with_aliases(clip, glb_bytes, clip_file, &[])
+}
+
+pub fn retarget_clip_with_aliases(
+    clip: &mut AnimationClip, glb_bytes: &[u8], clip_file: &str,
+    aliases: &[(String, String)],
+) -> Result<RetargetReport, String> {
+    let old_to_key = map_target_ids_to_bones(clip, glb_bytes, aliases)?;
 
     // Rebuild rather than mutate in place: two source bones could in principle
     // canonicalise onto one target, and merging must be explicit.
@@ -155,6 +162,7 @@ pub fn retarget_clip_in_place(
 fn map_target_ids_to_bones(
     clip: &AnimationClip,
     glb_bytes: &[u8],
+    aliases: &[(String, String)],
 ) -> Result<HashMap<AnimationTargetId, String>, String> {
     let gltf = gltf::Gltf::from_slice(glb_bytes).map_err(|e| format!("parse glTF: {e}"))?;
     let doc = &gltf.document;
@@ -176,7 +184,9 @@ fn map_target_ids_to_bones(
     for anim in doc.animations() {
         for channel in anim.channels() {
             let idx = channel.target().node().index();
-            let key = canonical_bone_key(&names[idx]);
+            let key = aliases.iter().find(|(source, _)| source == &names[idx])
+                .map(|(_, target)| target.clone())
+                .unwrap_or_else(|| canonical_bone_key(&names[idx]));
             if key.is_empty() {
                 continue;
             }

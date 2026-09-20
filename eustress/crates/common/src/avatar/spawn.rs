@@ -237,6 +237,10 @@ fn handle_spawn_avatar(
 ) {
     for req in events.read() {
         let desc = req.descriptor().clone();
+        if let Err(error) = desc.validate() {
+            warn!("avatar: rejected invalid descriptor: {error}");
+            continue;
+        }
 
         // Before the rig binds, metrics use the nominal bind height. They are
         // recomputed in `finalise_metrics_on_bind` from the MEASURED skeleton,
@@ -276,7 +280,7 @@ fn handle_spawn_avatar(
         // Bevy 0.19: glTF scenes load as `WorldAsset`, spawned via
         // `WorldAssetRoot` (the old `Scene`/`SceneRoot` pair is gone).
         let scene: Handle<WorldAsset> =
-            asset_server.load(format!("{}#Scene0", desc.base_body.body_asset()));
+            asset_server.load(format!("{}#Scene0", desc.resolved_rig().body_asset));
         // Mixamo bodies face +Z in their own space; Bevy's forward is -Z. The
         // facing integrator computes yaw for a -Z-forward convention, so
         // without this the character walks backwards relative to where it
@@ -346,12 +350,12 @@ fn insert_physics(commands: &mut Commands, root: Entity, m: &BodyMetrics) {
 fn finalise_metrics_on_bind(
     mut commands: Commands,
     mut q: Query<
-        (Entity, &mut AvatarBody, &AvatarDescriptor, &super::rig::AvatarRig),
+        (Entity, &mut AvatarBody, &AvatarDescriptor, &super::rig::AvatarRig, &AvatarMeshChild),
         (With<SpawnedByAvatarRuntime>, Added<super::rig::AvatarRig>),
     >,
     mut transforms: Query<&mut Transform>,
 ) {
-    for (e, mut body, desc, rig) in q.iter_mut() {
+    for (e, mut body, desc, rig, mesh) in q.iter_mut() {
         if body.metrics_finalised {
             continue;
         }
@@ -366,6 +370,13 @@ fn finalise_metrics_on_bind(
         body.metrics = metrics;
         body.motion = motion;
         body.metrics_finalised = true;
+
+        // Apply the same height/build authoring values used by the collider.
+        // Previously the sliders resized physics while the mesh never changed.
+        if let Ok(mut mesh_transform) = transforms.get_mut(mesh.0) {
+            let width = 1.0 + 0.25 * (desc.morphs.build.get() * 2.0 - 1.0);
+            mesh_transform.scale = Vec3::new(metrics.rig_scale * width, metrics.rig_scale, metrics.rig_scale * width);
+        }
 
         // Resize the capsule and keep the feet on the ground: the root moves
         // by the change in half-extent, otherwise a re-measured body either

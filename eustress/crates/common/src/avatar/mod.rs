@@ -77,9 +77,11 @@ pub mod parity;
 pub mod retarget;
 #[cfg(feature = "physics")]
 pub mod spawn;
+#[cfg(feature = "avatar-profile")]
+pub mod profile;
 
 pub use eustress_avatar_schema::{
-    resolve, AvatarDescriptor, BaseBody, BodyMetrics, BodyMorphs, FaceShape, ItemId,
+    resolve, AvatarDescriptor, AvatarIdentity, RigDefinition, BaseBody, BodyMetrics, BodyMorphs, FaceShape, ItemId,
     MotionOverrides, Norm01, Palette, ResolvedMotion, SlotKind, Srgb8, GRAVITY_MPS2,
     MAX_HEIGHT_M, MIN_HEIGHT_M, NOMINAL_BIND_HEIGHT_M,
 };
@@ -333,6 +335,8 @@ impl Plugin for AvatarRuntimePlugin {
         );
 
         app.add_plugins(rig::RigBindPlugin);
+        #[cfg(feature = "avatar-profile")]
+        app.add_plugins(profile::AvatarProfilePlugin);
 
         #[cfg(feature = "physics")]
         {

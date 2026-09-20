@@ -33,11 +33,12 @@ use super::character_plugin::{CharacterFacing, CharacterPhysics, MovementIntent}
 /// Available character models
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Reflect)]
 pub enum CharacterModel {
-    /// Mixamo X-Bot (masculine, robotic)
+    /// Mixamo X-Bot (feminine silhouette)
     XBot,
-    /// Mixamo Y-Bot (feminine, robotic)
+    /// Mixamo Y-Bot (masculine silhouette)
     #[default]
     YBot,
+    VoltecSupreme,
     /// Custom model (specify path)
     Custom,
 }
@@ -53,6 +54,7 @@ impl CharacterModel {
         match self {
             CharacterModel::XBot => "bundled://characters/x_bot.glb",
             CharacterModel::YBot => "bundled://characters/y_bot.glb",
+            CharacterModel::VoltecSupreme => "bundled://characters/voltec_supreme.glb",
             CharacterModel::Custom => "bundled://characters/custom.glb",
         }
     }
@@ -69,6 +71,7 @@ pub enum CharacterGender {
     #[default]
     Male,
     Female,
+    Robot,
 }
 
 // ============================================================================
@@ -97,6 +100,7 @@ impl CharacterAnimationPaths {
         let prefix = match gender {
             CharacterGender::Male => "male",
             CharacterGender::Female => "female",
+            CharacterGender::Robot => "robot",
         };
         
         // Animations also live in the COMMON crate's assets (`bundled` source);
@@ -140,8 +144,9 @@ impl SkinnedCharacter {
         Self {
             model,
             gender: match model {
-                CharacterModel::XBot => CharacterGender::Male,
-                CharacterModel::YBot => CharacterGender::Female,
+                CharacterModel::XBot => CharacterGender::Female,
+                CharacterModel::YBot => CharacterGender::Male,
+                CharacterModel::VoltecSupreme => CharacterGender::Robot,
                 CharacterModel::Custom => CharacterGender::Male,
             },
             scale: 1.0,

@@ -643,7 +643,8 @@ struct PlayStartResources<'w> {
     /// The ONLY way this crate can create a play character. Bundled here
     /// rather than added as a bare param because `handle_start_play` already
     /// sits at Bevy's 16-`SystemParam` ceiling.
-    spawn_avatar: MessageWriter<'w, eustress_common::avatar::SpawnAvatar>,
+    spawn_avatar: MessageWriter<'w, eustress_common::avatar::profile::SpawnSavedAvatar>,
+    avatar_auth: Option<Res<'w, crate::auth::AuthState>>,
 }
 
 /// Handle start play event - captures full world snapshot and spawns client-like character
@@ -864,12 +865,11 @@ fn handle_start_play(
                 // is what let it default Female/XBot while the Client defaulted
                 // Male/YBot out of "shared" code.
                 //
-                // TODO(P6): load the signed-in user's saved descriptor.
                 res.spawn_avatar.write(
-                    eustress_common::avatar::SpawnAvatar::new(
-                        eustress_common::avatar::AvatarDescriptor::default(),
-                        spawn_pos,
-                    ),
+                    eustress_common::avatar::profile::SpawnSavedAvatar {
+                        token: res.avatar_auth.as_ref().and_then(|a| a.get_token()).map(str::to_owned),
+                        at: spawn_pos,
+                    },
                 );
 
                 // The runtime owns the play camera (order 10 via HostSeams), so

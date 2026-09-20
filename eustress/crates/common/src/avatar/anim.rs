@@ -42,7 +42,7 @@ use bevy::prelude::*;
 use super::rig::AvatarRig;
 use super::spawn::{AvatarBody, AvatarLocomotion};
 use super::{AvatarSystems, SpawnedByAvatarRuntime};
-use eustress_avatar_schema::BaseBody;
+use eustress_avatar_schema::RigDefinition;
 
 /// Authored ground speed of the shipped Mixamo clips, m/s at rate 1.0.
 ///
@@ -74,7 +74,7 @@ pub struct AvatarMotionGraph {
 /// Marks an avatar whose clips are still loading.
 #[derive(Component, Debug)]
 pub struct AvatarClipsLoading {
-    pub body: BaseBody,
+    pub rig: RigDefinition,
     pub idle: Handle<AnimationClip>,
     pub walk: Handle<AnimationClip>,
     pub run: Handle<AnimationClip>,
@@ -327,17 +327,17 @@ fn request_clips_on_bind(
     >,
 ) {
     for (e, desc) in q.iter() {
-        let p = desc.base_body.clip_prefix();
+        let rig = desc.resolved_rig();
         // `#Animation0` is the first clip in each single-clip Mixamo export.
-        let load = |m: &str| -> Handle<AnimationClip> {
-            asset_server.load(format!("bundled://characters/animations/{p}_{m}.glb#Animation0"))
+        let load = |index: usize| -> Handle<AnimationClip> {
+            asset_server.load(format!("{}#Animation0", rig.animations[index]))
         };
         commands.entity(e).insert(AvatarClipsLoading {
-            body: desc.base_body,
-            idle: load("idle"),
-            walk: load("walking"),
-            run: load("running"),
-            jump: load("jump"),
+            idle: load(0),
+            walk: load(1),
+            run: load(2),
+            jump: load(3),
+            rig,
             retargeted: false,
         });
     }
@@ -385,15 +385,10 @@ fn retarget_and_build_graph(
         // Rewrites curve keys from the export's suffixed names onto the
         // canonical space. Without this the clips address bones that do not
         // exist on this body: `x_bot` bound 7 of 65 curves.
-        let prefix = loading.body.clip_prefix();
         let mut clip_root_fix: Option<Quat> = None;
-        for (motion, handle) in [
-            ("idle", &loading.idle),
-            ("walking", &loading.walk),
-            ("running", &loading.run),
-            ("jump", &loading.jump),
-        ] {
-            let rel = format!("characters/animations/{prefix}_{motion}.glb");
+        let mut retargeted = Vec::new();
+        for (index, handle) in all.iter().enumerate() {
+            let rel = loading.rig.animations[index].strip_prefix("bundled://").expect("validated rig");
             let Ok(bytes) = super::retarget::read_bundled_clip(&rel) else {
                 warn!("avatar: cannot read {rel} for retargeting; limbs will not animate");
                 continue;
@@ -404,14 +399,23 @@ fn retarget_and_build_graph(
             if clip_root_fix.is_none() {
                 clip_root_fix = super::retarget::clip_root_rotation(&bytes);
             }
-            if let Some(mut clip) = clips.get_mut(handle) {
-                // `Assets::get_mut` yields an `AssetMut` guard, not a bare
-                // `&mut` — deref through it.
-                if let Err(e) = super::retarget::retarget_clip_in_place(&mut clip, &bytes, &rel) {
+            // AssetServer shares source handles across characters. Retarget a
+            // private copy so a second spawn or custom alias map cannot erase
+            // curves already rewritten by the first character.
+            if let Some(mut clip) = clips.get(handle).cloned() {
+                if let Err(e) = super::retarget::retarget_clip_with_aliases(&mut clip, &bytes, rel, &loading.rig.bone_aliases) {
                     warn!("avatar: retarget {rel} failed: {e}");
+                    continue;
                 }
+                retargeted.push(clip);
             }
         }
+        if retargeted.len() != 4 { continue; }
+        let mut handles = retargeted.into_iter().map(|clip| clips.add(clip));
+        loading.idle = handles.next().unwrap();
+        loading.walk = handles.next().unwrap();
+        loading.run = handles.next().unwrap();
+        loading.jump = handles.next().unwrap();
 
         // Align the body's skeleton root with the frame the clips were
         // authored in.

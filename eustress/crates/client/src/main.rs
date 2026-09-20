@@ -31,7 +31,7 @@ use plugins::{
 };
 use eustress_common::plugins::SkinnedCharacterPlugin;
 use eustress_common::avatar::{
-    AvatarDescriptor, AvatarHost, AvatarRuntimePlugin, SpawnAvatar,
+    AvatarHost, AvatarRuntimePlugin,
 };
 use eustress_common::avatar::control::AvatarEscapePressed;
 use systems::LoadSceneEvent;
@@ -161,12 +161,12 @@ fn main() {
 /// the old code hardcoded `BiologicalSex::Male` on this side and
 /// `BiologicalSex::Female` in Studio, which selected different bodies AND
 /// different animation clip sets in the two shells.
-fn spawn_local_avatar(mut spawn: MessageWriter<SpawnAvatar>) {
-    // TODO(P6): load the signed-in user's saved descriptor from the profile
-    // API instead of the default. Until that route exists, both shells spawn
-    // the identical default — which is itself the parity property we want.
-    let descriptor = AvatarDescriptor::default();
-    spawn.write(SpawnAvatar::new(descriptor, Vec3::new(0.0, 2.0, 8.0)));
+fn spawn_local_avatar(mut spawn: MessageWriter<eustress_common::avatar::profile::SpawnSavedAvatar>) {
+    let token = dirs::data_local_dir()
+        .and_then(|dir| std::fs::read_to_string(dir.join("EustressEngine/auth_token")).ok());
+    spawn.write(eustress_common::avatar::profile::SpawnSavedAvatar {
+        token, at: Vec3::new(0.0, 2.0, 8.0),
+    });
 }
 
 /// The Client's meaning of Escape. `HostSeams` guarantees Studio's differs.

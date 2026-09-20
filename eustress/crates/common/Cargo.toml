@@ -124,6 +124,7 @@ default = ["model-import", "geotiff", "streaming", "units_v1"]
 physics = ["avian3d"]
 # Enable async asset loading (HTTP, IPFS, etc.)
 async-assets = ["tokio", "reqwest"]
+avatar-profile = ["ureq"]
 # Enable S3/MinIO support
 s3 = ["aws-sdk-s3", "aws-config", "async-assets"]
 # Enable 3D model import (GLTF, etc.)

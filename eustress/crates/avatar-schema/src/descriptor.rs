@@ -7,6 +7,7 @@
 //! web side would be the exact class of drift this crate exists to prevent.
 
 use serde::{Deserialize, Serialize};
+use crate::{AvatarIdentity, RigDefinition};
 
 #[cfg(feature = "bevy")]
 use bevy::prelude::Component;
@@ -14,7 +15,8 @@ use bevy::prelude::Component;
 use bevy::reflect::Reflect;
 
 /// Bumped whenever a stored descriptor needs migration.
-pub const AVATAR_SCHEMA_VERSION: u16 = 1;
+pub const AVATAR_SCHEMA_VERSION: u16 = 2;
+fn legacy_schema_version() -> u16 { 1 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Scalars
@@ -131,10 +133,11 @@ impl<'de> Deserialize<'de> for Srgb8 {
 #[serde(rename_all = "snake_case")]
 pub enum BaseBody {
     Feminine,
-    /// Default body: Mixamo X Bot. Both shells spawn this, so the default
+    /// Default body: Mixamo Y Bot. Both shells spawn this, so the default
     /// avatar is identical in Studio Play Mode and the Client.
     #[default]
     Masculine,
+    Robot,
 }
 
 impl BaseBody {
@@ -150,6 +153,7 @@ impl BaseBody {
         match self {
             BaseBody::Feminine => "bundled://characters/x_bot.glb",
             BaseBody::Masculine => "bundled://characters/y_bot.glb",
+            BaseBody::Robot => "bundled://characters/voltec_supreme.glb",
         }
     }
     /// Clip filename prefix: `{prefix}_idle.glb`, `{prefix}_walking.glb`, …
@@ -157,10 +161,11 @@ impl BaseBody {
         match self {
             BaseBody::Feminine => "female",
             BaseBody::Masculine => "male",
+            BaseBody::Robot => "robot",
         }
     }
-    pub const fn all() -> [BaseBody; 2] {
-        [BaseBody::Feminine, BaseBody::Masculine]
+    pub const fn all() -> [BaseBody; 3] {
+        [BaseBody::Feminine, BaseBody::Masculine, BaseBody::Robot]
     }
 }
 
@@ -364,8 +369,13 @@ pub struct MotionOverrides {
 #[cfg_attr(feature = "bevy", derive(Component, Reflect))]
 #[serde(default)]
 pub struct AvatarDescriptor {
+    #[serde(default = "legacy_schema_version")]
     pub schema_version: u16,
     pub base_body: BaseBody,
+    /// A fixed choice. Body proportions never infer or interpolate identity.
+    pub identity: AvatarIdentity,
+    /// None selects the built-in rig for the chosen identity.
+    pub rig: Option<RigDefinition>,
     pub morphs: BodyMorphs,
     pub palette: Palette,
     /// Sorted on write so the content hash is order-independent.
@@ -378,6 +388,8 @@ impl Default for AvatarDescriptor {
         Self {
             schema_version: AVATAR_SCHEMA_VERSION,
             base_body: BaseBody::default(),
+            identity: AvatarIdentity::default(),
+            rig: None,
             morphs: BodyMorphs::default(),
             palette: Palette::default(),
             slots: Vec::new(),
@@ -387,6 +399,48 @@ impl Default for AvatarDescriptor {
 }
 
 impl AvatarDescriptor {
+    pub fn select_identity(&mut self, identity: AvatarIdentity) {
+        self.schema_version = AVATAR_SCHEMA_VERSION;
+        self.identity = identity;
+        self.base_body = match identity {
+            AvatarIdentity::Male => BaseBody::Masculine,
+            AvatarIdentity::Female => BaseBody::Feminine,
+            AvatarIdentity::Robot => BaseBody::Robot,
+        };
+        self.rig = None;
+    }
+
+    /// Version-one descriptors only carried base_body. Preserve their body.
+    pub fn resolved_identity(&self) -> AvatarIdentity {
+        if self.schema_version < 2 {
+            match self.base_body {
+                BaseBody::Feminine => AvatarIdentity::Female,
+                BaseBody::Masculine => AvatarIdentity::Male,
+                BaseBody::Robot => AvatarIdentity::Robot,
+            }
+        } else { self.identity }
+    }
+
+    pub fn resolved_rig(&self) -> RigDefinition {
+        self.rig.clone().unwrap_or_else(|| RigDefinition::builtin(self.resolved_identity()))
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version > AVATAR_SCHEMA_VERSION { return Err("Avatar schema is newer than this engine".into()); }
+        if self.schema_version >= 2 {
+            let expected = match self.identity {
+                AvatarIdentity::Male => BaseBody::Masculine,
+                AvatarIdentity::Female => BaseBody::Feminine,
+                AvatarIdentity::Robot => BaseBody::Robot,
+            };
+            if self.base_body != expected { return Err("Body does not match the selected identity".into()); }
+        }
+        let rig = self.resolved_rig();
+        rig.validate()?;
+        if rig.identity != self.resolved_identity() { return Err("Rig does not match the selected identity".into()); }
+        Ok(())
+    }
+
     pub fn get_slot(&self, k: SlotKind) -> Option<&ItemId> {
         self.slots.iter().find(|(s, _)| *s == k).and_then(|(_, i)| i.as_ref())
     }
@@ -408,6 +462,13 @@ impl AvatarDescriptor {
         let mut h = Fnv1a::new();
         h.u16(self.schema_version);
         h.u8(self.base_body as u8);
+        h.bytes(self.resolved_identity().code().as_bytes());
+        // Length-delimited serialized struct (no maps) includes custom assets
+        // and bone aliases, so changing a rig cannot reuse a stale preview.
+        if let Some(rig) = &self.rig {
+            h.u8(1);
+            h.bytes(serde_json::to_string(rig).expect("rig serialization").as_bytes());
+        } else { h.u8(0); }
         for v in [
             self.morphs.height,
             self.morphs.build,

@@ -28,6 +28,8 @@
 
 pub mod descriptor;
 pub mod metrics;
+pub mod rig;
+pub use rig::{AvatarIdentity, RigDefinition};
 
 pub use descriptor::{
     AvatarDescriptor, AvatarError, BaseBody, BodyMorphs, FaceShape, ItemId, MotionOverrides,
