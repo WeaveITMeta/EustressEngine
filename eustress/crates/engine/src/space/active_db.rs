@@ -316,6 +316,7 @@ mod imp {
                 "BINARY ECS STORE ACTIVE — load_instance_definition / write_instance_definition / load_gui_definition / write_gui_toml now read+write bincode from Fjall (disk only as legacy fallback)"
             );
             *g = Some(Active { db, root });
+            DB_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -331,6 +332,7 @@ mod imp {
                 );
             }
             *g = None;
+            DB_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -764,13 +766,59 @@ mod imp {
     /// Capped count of binary-ECS cores (stops at `cap`). Used to gate
     /// boot-load-all vs streaming. 0 when no DB is active.
     pub fn count_instance_cores_capped(cap: usize) -> usize {
+        // PERF (load time): three call sites ask "is this a big Space?" on
+        // every open — the service scan, the priority spawn and the residency
+        // boot decision — and each one re-scanned the `entities` partition up
+        // to the 100,001-core cap. On a 119K-core Space that is three full
+        // capped scans inside the unguarded gap after `space-open`. Memoise
+        // per installed DB: the generation bumps in `set`/`clear`, so a
+        // Space switch never serves the previous Space's count, and the
+        // answer is stable for the duration of an open (the only thing that
+        // could move it mid-session is the user creating >100K instances by
+        // hand, and the residency decision is boot-time anyway).
+        let gen = DB_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+        if let Ok(m) = COUNT_MEMO.lock() {
+            if let Some((g, c, n)) = *m {
+                if g == gen && c == cap {
+                    return n;
+                }
+            }
+        }
         let Ok(g) = ACTIVE.read() else {
             return 0;
         };
         let Some(a) = g.as_ref() else {
             return 0;
         };
-        a.db.count_instance_cores_capped(cap).unwrap_or(0)
+        let n = a.db.count_instance_cores_capped(cap).unwrap_or(0);
+        drop(g);
+        if let Ok(mut m) = COUNT_MEMO.lock() {
+            *m = Some((gen, cap, n));
+        }
+        n
+    }
+
+    /// The installed DB as a shareable handle, for work that must run OFF the
+    /// main thread (`WorldDb: Send + Sync + 'static`). `None` when no DB is
+    /// active. Holding the `Arc` keeps the backend alive across a Space
+    /// switch until the worker finishes — which is exactly right for a scan
+    /// that must complete against the Space it started on.
+    pub fn db_arc() -> Option<Arc<dyn WorldDb>> {
+        ACTIVE.read().ok().and_then(|g| g.as_ref().map(|a| a.db.clone()))
+    }
+
+    /// Bumped on every `set`/`clear`; keys the capped-count memo.
+    static DB_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    /// `(generation, cap, count)` of the last capped count.
+    static COUNT_MEMO: std::sync::Mutex<Option<(u64, usize, usize)>> = std::sync::Mutex::new(None);
+
+    /// Seed the capped-count memo for the CURRENT generation, so call it
+    /// after `set`. The open worker counts on its own thread; with the seed
+    /// in place the loader's first streaming decision costs the main thread
+    /// nothing.
+    pub fn preseed_count(cap: usize, count: usize) {
+        let gen = DB_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+        *COUNT_MEMO.lock().unwrap_or_else(|e| e.into_inner()) = Some((gen, cap, count));
     }
 
     /// Every distinct class in `class_index` with its entity count, sorted
@@ -1208,6 +1256,10 @@ mod imp {
     pub fn count_instance_cores_capped(_cap: usize) -> usize {
         0
     }
+    pub fn db_arc() -> Option<std::sync::Arc<dyn eustress_worlddb::WorldDb>> {
+        None
+    }
+    pub fn preseed_count(_cap: usize, _count: usize) {}
     pub fn iter_all_classes() -> Vec<(String, usize)> {
         Vec::new()
     }

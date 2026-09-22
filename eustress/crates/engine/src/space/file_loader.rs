@@ -342,54 +342,238 @@ fn collect_readable_rel_paths(
 /// simply omitted from the cache, and `src_read_string` falls through to
 /// the original live read (and original error handling) for it. So this
 /// can only ever speed loading up, never change its result.
-fn prewarm_read_cache(
-    source: &dyn super::space_source::SpaceSource,
+/// Everything the folder-form spawner needs from one `_instance.toml`,
+/// computed once: on the worker pool when the pre-parse is ahead of the
+/// drain, inline otherwise (same function either way). The raw text is not
+/// kept. The class name, UUID and custom-mesh mention are extracted, and the
+/// document is held in the one form its spawn branch consumes: the healed
+/// typed definition for a Part, the GUI definition for a GUI class, and the
+/// plain value for every other class (their branches read raw sections).
+pub(crate) struct ParsedInstance {
+    pub class_name: eustress_common::classes::ClassName,
+    pub uuid: String,
+    pub mentions_custom_mesh: bool,
+    pub value: Option<toml::Value>,
+    pub def: Option<Result<super::instance_loader::InstanceDefinition, String>>,
+    pub gui: Option<Result<super::gui_loader::GuiTomlFile, String>>,
+}
+
+pub(crate) fn parse_instance_text(text: &str) -> ParsedInstance {
+    use eustress_common::classes::ClassName;
+    let value = toml::from_str::<toml::Value>(text).ok();
+    let meta = value
+        .as_ref()
+        .and_then(|v| v.get("metadata").or_else(|| v.get("Metadata")));
+    let class_name = meta
+        .and_then(|m| m.get("class_name").or_else(|| m.get("ClassName")))
+        .and_then(|cn| cn.as_str())
+        .map(|cn| {
+            // Legacy shim: "Script" used to mean the Rune script class
+            // before the Soul/Luau split.
+            let cn_resolved = if cn == "Script" { "SoulScript" } else { cn };
+            ClassName::from_str(cn_resolved).unwrap_or(ClassName::Folder)
+        })
+        .unwrap_or(ClassName::Folder);
+    let uuid = meta
+        .and_then(|m| m.get("uuid").or_else(|| m.get("Uuid")))
+        .and_then(|u| u.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let mentions_custom_mesh = super::representation::toml_mentions_custom_mesh(text);
+
+    let is_gui = matches!(
+        class_name,
+        ClassName::ScreenGui
+            | ClassName::Frame
+            | ClassName::ScrollingFrame
+            | ClassName::BillboardGui
+            | ClassName::TextLabel
+            | ClassName::TextButton
+            | ClassName::TextBox
+            | ClassName::ImageLabel
+            | ClassName::ImageButton
+            | ClassName::ViewportFrame
+    );
+    let (value, def, gui) = if matches!(class_name, ClassName::Part) {
+        let def = match value {
+            Some(v) => super::instance_loader::load_instance_definition_from_value(v),
+            None => Err("unparsable _instance.toml".to_string()),
+        };
+        (None, Some(def), None)
+    } else if is_gui {
+        (value, None, Some(super::gui_loader::load_gui_definition_from_str(text)))
+    } else {
+        (value, None, None)
+    };
+    ParsedInstance { class_name, uuid, mentions_custom_mesh, value, def, gui }
+}
+
+/// `_instance.toml` rel path → parsed record, filled by the pre-parse thread.
+/// Entries are TAKEN by the spawner (each instance spawns once), so the
+/// cache shrinks as the drain proceeds instead of holding the whole Space
+/// until settle.
+static PARSED_CACHE: std::sync::Mutex<Option<HashMap<String, ParsedInstance>>> =
+    std::sync::Mutex::new(None);
+
+/// Bumped whenever the caches are reset (a new load, a settle); a pre-parse
+/// thread that outlives its load stops inserting.
+static PREWARM_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn parsed_cache_take(rel: &str) -> Option<ParsedInstance> {
+    let mut guard = PARSED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_mut().and_then(|m| m.remove(rel))
+}
+
+fn is_instance_marker(rel: &str) -> bool {
+    rel == "_instance.toml" || rel.ends_with("/_instance.toml")
+}
+
+/// Read and parse the Space's text files on the rayon pool, in the
+/// background, while the main thread spawns. `_instance.toml` files land in
+/// [`PARSED_CACHE`] fully parsed (the spawner then does no TOML work at
+/// all); every other text file lands in [`READ_CACHE`]. The drain takes
+/// whatever is ready and reads plus parses the rest inline, so nothing
+/// waits on this thread. The blocking pre-read this replaces held the main
+/// thread for 1.2 to 2.8 s on Super Station, and the parse it now also does
+/// was ~250 µs per entity on the main thread.
+fn prewarm_in_background(
+    source: std::sync::Arc<dyn super::space_source::SpaceSource>,
     space_root: &Path,
     entries: &[FileMetadata],
 ) {
-    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-
     let mut rel_paths: Vec<String> = Vec::new();
     collect_readable_rel_paths(space_root, entries, &mut rel_paths);
     if rel_paths.is_empty() {
         return;
     }
     let total = rel_paths.len();
-
-    let t0 = std::time::Instant::now();
-    // CPU/I-O-bound, no Bevy access: read + UTF-8 decode each path in
-    // parallel, keep only the hits. `read_to_string` already maps a
-    // non-UTF-8 body to an Err, which `.ok()` drops → live re-read later.
-    let pairs: Vec<(String, String)> = rel_paths
-        .par_iter()
-        .filter_map(|rel| {
-            source
-                .read_to_string(rel)
-                .ok()
-                .map(|content| (rel.clone(), content))
-        })
-        .collect();
-
-    let hits = pairs.len();
-    let map: HashMap<String, String> = pairs.into_iter().collect();
+    let gen = PREWARM_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     {
         let mut guard = READ_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = Some(map);
+        *guard = Some(HashMap::new());
     }
-    info!(
-        target: "eustress_engine::world_db",
-        "⚡ Pre-read {}/{} text files across rayon pool in {:?} (parallel read+decode → spawn walk reads from memory)",
-        hits, total, t0.elapsed()
-    );
+    {
+        let mut guard = PARSED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(HashMap::new());
+    }
+
+    let spawned = std::thread::Builder::new()
+        .name("eustress-pre-parse".into())
+        .spawn(move || {
+            use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+            use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+            let t0 = std::time::Instant::now();
+            let parsed_n = AtomicUsize::new(0);
+            let text_n = AtomicUsize::new(0);
+            // Batches keep the lock traffic to one acquisition per ~512
+            // files, and let the drain see files in flights of hundreds
+            // rather than all at the end.
+            let chunks: Vec<&[String]> = rel_paths.chunks(512).collect();
+            chunks.par_iter().for_each(|chunk| {
+                if PREWARM_GEN.load(Relaxed) != gen {
+                    return;
+                }
+                let mut parsed_batch: Vec<(String, ParsedInstance)> = Vec::new();
+                let mut text_batch: Vec<(String, String)> = Vec::new();
+                for rel in chunk.iter() {
+                    let Ok(text) = source.read_to_string(rel) else { continue };
+                    if is_instance_marker(rel) {
+                        parsed_batch.push((rel.clone(), parse_instance_text(&text)));
+                    } else {
+                        text_batch.push((rel.clone(), text));
+                    }
+                }
+                if PREWARM_GEN.load(Relaxed) != gen {
+                    return;
+                }
+                parsed_n.fetch_add(parsed_batch.len(), Relaxed);
+                text_n.fetch_add(text_batch.len(), Relaxed);
+                {
+                    let mut guard = PARSED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(m) = guard.as_mut() {
+                        m.extend(parsed_batch);
+                    }
+                }
+                {
+                    let mut guard = READ_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(m) = guard.as_mut() {
+                        m.extend(text_batch);
+                    }
+                }
+            });
+            info!(
+                target: "eustress_engine::world_db",
+                "⚡ Pre-parse: {} instance files parsed + {} text files read of {} on the rayon pool in {:?} (background; the drain takes what is ready and parses the rest inline)",
+                parsed_n.load(Relaxed), text_n.load(Relaxed), total, t0.elapsed()
+            );
+        });
+    if let Err(e) = spawned {
+        warn!(
+            target: "eustress_engine::world_db",
+            error = %e,
+            "pre-parse thread failed to spawn — the drain reads and parses inline"
+        );
+    }
 }
 
-/// Drop the pre-warmed [`READ_CACHE`]. Called once the synchronous
-/// priority spawn completes so deferred-service frames and hot-reloads
-/// run against live content (and the cache's memory is freed). A no-op
-/// if the cache was never filled.
+/// Drop both load caches and retire any pre-parse thread still filling
+/// them. Called at settle; from then on a cache miss is a live read.
 fn clear_read_cache() {
-    let mut guard = READ_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    PREWARM_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    {
+        let mut guard = READ_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = None;
+    }
+    let mut guard = PARSED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     *guard = None;
+}
+
+/// The cached GUI definition for this instance, or the read plus parse the
+/// branch did before (a cache miss: the priority spawn ahead of the
+/// pre-parse, or a hot reload after settle).
+fn take_gui_def(
+    parsed: &mut Option<ParsedInstance>,
+    source: &dyn super::space_source::SpaceSource,
+    space_root: &Path,
+    instance_toml: &Path,
+) -> Result<super::gui_loader::GuiTomlFile, String> {
+    if let Some(g) = parsed.as_mut().and_then(|p| p.gui.take()) {
+        return g;
+    }
+    src_read_string(source, space_root, instance_toml)
+        .map_err(|e| e.to_string())
+        .and_then(|c| super::gui_loader::load_gui_definition_from_str(&c))
+}
+
+/// The cached typed definition (Parts), or the read plus heal plus parse.
+fn take_instance_def(
+    parsed: &mut Option<ParsedInstance>,
+    source: &dyn super::space_source::SpaceSource,
+    space_root: &Path,
+    instance_toml: &Path,
+) -> Result<super::instance_loader::InstanceDefinition, String> {
+    if let Some(d) = parsed.as_mut().and_then(|p| p.def.take()) {
+        return d;
+    }
+    src_read_string(source, space_root, instance_toml)
+        .map_err(|e| e.to_string())
+        .and_then(|c| super::instance_loader::load_instance_definition_from_str(&c))
+}
+
+/// The cached raw value (classes whose branch reads sections directly), or
+/// the read plus parse.
+fn take_instance_value(
+    parsed: &Option<ParsedInstance>,
+    source: &dyn super::space_source::SpaceSource,
+    space_root: &Path,
+    instance_toml: &Path,
+) -> Option<toml::Value> {
+    if let Some(v) = parsed.as_ref().and_then(|p| p.value.clone()) {
+        return Some(v);
+    }
+    src_read_string(source, space_root, instance_toml)
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
 }
 
 /// Metadata extracted from a file or directory
@@ -644,7 +828,169 @@ fn scan_dir_entries(
 
 /// Scan a Space directory and discover all loadable files and subdirectories.
 /// Returns service directories as Directory entries with their children inline.
-/// 
+/// One node of the in-memory index built by [`build_tree_index`]: children
+/// keyed by leaf name in name order, which is the order `list_dir` returns.
+#[derive(Default)]
+struct TreeIndexNode {
+    children: std::collections::BTreeMap<String, TreeIndexNode>,
+}
+
+/// Which marker files a directory holds, recorded during the index scan so
+/// the spawner can answer "is this a service / terrain export / instance"
+/// without probing the source. On a Fjall source each probe is a point
+/// lookup plus a prefix seek; three per directory came to ~1 ms per entity
+/// in a debug build, most of the un-timed part of every drain frame.
+pub(crate) mod dir_markers {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    pub const INSTANCE: u8 = 1;
+    pub const SERVICE: u8 = 2;
+    pub const TERRAIN: u8 = 4;
+
+    /// Space-relative directory path → marker bits. Only directories that
+    /// hold at least one marker are listed, so an absent entry means
+    /// "unknown, probe" rather than "no markers": a directory created while
+    /// the load is still streaming (hot-create) is never misread.
+    static TABLE: Mutex<Option<HashMap<String, u8>>> = Mutex::new(None);
+
+    pub fn install(table: HashMap<String, u8>) {
+        *TABLE.lock().unwrap_or_else(|e| e.into_inner()) = Some(table);
+    }
+
+    /// Dropped at settle: it is a load-time accelerator, not state.
+    pub fn clear() {
+        *TABLE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    pub fn get(rel_dir: &str) -> Option<u8> {
+        TABLE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|t| t.get(rel_dir).copied())
+    }
+}
+
+/// The whole Space's directory index from ONE ordered pass over the tree
+/// partition's keys. `FjallSource::list` answers each directory with a
+/// prefix scan of that directory's ENTIRE subtree, so the recursive
+/// [`scan_dir_entries`] walk re-visited every key once per ancestor level:
+/// 27 s on Super Station's 113K keys. This pass is O(keys). The same pass
+/// fills the [`dir_markers`] table.
+fn build_tree_index(db: &dyn eustress_worlddb::WorldDb) -> Option<TreeIndexNode> {
+    let t0 = std::time::Instant::now();
+    let mut root = TreeIndexNode::default();
+    let mut markers: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+    let mut keys = 0usize;
+    for key in db.iter_tree_keys().ok()? {
+        let Ok(key) = key else { continue };
+        keys += 1;
+        let mut node = &mut root;
+        for part in key.split('/').filter(|s| !s.is_empty()) {
+            node = node.children.entry(part.to_string()).or_default();
+        }
+        if let Some((parent, leaf)) = key.rsplit_once('/') {
+            let bit = match leaf {
+                "_instance.toml" => dir_markers::INSTANCE,
+                "_service.toml" => dir_markers::SERVICE,
+                "_terrain.toml" => dir_markers::TERRAIN,
+                _ => 0,
+            };
+            if bit != 0 {
+                *markers.entry(parent.to_string()).or_insert(0) |= bit;
+            }
+        }
+    }
+    info!(
+        target: "eustress_engine::world_db",
+        "🗂 Tree index: {} keys in one pass ({:?}), {} marked directories",
+        keys,
+        t0.elapsed(),
+        markers.len()
+    );
+    dir_markers::install(markers);
+    Some(root)
+}
+
+/// [`scan_dir_entries`] over the in-memory index instead of the source:
+/// the same filtering, naming and folder-vs-flat de-dup, with no I/O.
+fn entries_from_index(
+    node: &TreeIndexNode,
+    space_root: &Path,
+    rel_dir: &str,
+    service: &str,
+) -> Vec<FileMetadata> {
+    let mut entries: Vec<FileMetadata> = Vec::new();
+    for (name, child) in &node.children {
+        let rel = if rel_dir.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel_dir}/{name}")
+        };
+        let path = {
+            let mut p = space_root.to_path_buf();
+            for seg in rel.split('/') {
+                if !seg.is_empty() {
+                    p.push(seg);
+                }
+            }
+            p
+        };
+        if name == "_instance.toml" || name == "_service.toml" {
+            continue;
+        }
+        // A key never names a directory on its own; a name with keys below
+        // it is a directory, a leaf key is a file (as `list_dir` infers).
+        if !child.children.is_empty() {
+            if name.starts_with('.') || name == "node_modules" || name == "target" || name == "trash" {
+                continue;
+            }
+            let children = entries_from_index(child, space_root, &rel, service);
+            entries.push(FileMetadata {
+                path,
+                file_type: FileType::Directory,
+                service: service.to_string(),
+                name: name.clone(),
+                size: 0,
+                modified: std::time::SystemTime::UNIX_EPOCH,
+                children,
+            });
+        } else {
+            let Some(file_type) = FileType::from_path(&path) else { continue };
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("Unknown");
+            let name = ["instance.toml", "part.toml", "glb.toml", "model.toml"]
+                .iter()
+                .find_map(|suffix| file_name.strip_suffix(suffix)?.strip_suffix('.'))
+                .unwrap_or_else(|| {
+                    path.file_stem().and_then(|n| n.to_str()).unwrap_or("Unknown")
+                })
+                .to_string();
+            entries.push(FileMetadata {
+                path,
+                file_type,
+                service: service.to_string(),
+                name,
+                size: 0,
+                modified: std::time::SystemTime::UNIX_EPOCH,
+                children: Vec::new(),
+            });
+        }
+    }
+
+    let dir_names: std::collections::HashSet<String> = entries
+        .iter()
+        .filter(|e| e.file_type == FileType::Directory)
+        .map(|e| e.name.clone())
+        .collect();
+    if !dir_names.is_empty() {
+        entries.retain(|e| e.file_type == FileType::Directory || !dir_names.contains(e.name.as_str()));
+    }
+
+    entries
+}
+
+///
 /// Services are discovered from the filesystem by looking for directories
 /// containing `_service.toml` marker files (EEP-compliant, no hardcoding).
 pub fn scan_space_directory(
@@ -653,10 +999,24 @@ pub fn scan_space_directory(
 ) -> Vec<FileMetadata> {
     let mut entries = Vec::new();
 
-    // EEP-compliant service discovery, via the active source (Disk or
-    // Fjall) — no `std::fs` so a migrated world reconstructs the full
-    // service tree straight from the DB.
-    let services = discover_services(source);
+    // DB-backed Space: index the whole tree once, then answer every
+    // directory from memory. Disk Space: the per-directory walk is already
+    // O(entries) and stays as it was.
+    let index = if source.is_fjall() {
+        super::active_db::db_arc().and_then(|db| build_tree_index(db.as_ref()))
+    } else {
+        None
+    };
+
+    // EEP-compliant service discovery: from the index root when there is
+    // one (its marker table answers `_service.toml`; the source-side probe
+    // was a second full scan of every key), otherwise via the active source
+    // (Disk or Fjall) — no `std::fs` either way, so a migrated world
+    // reconstructs the full service tree straight from the DB.
+    let services = match &index {
+        Some(root) => services_from_index(root),
+        None => discover_services(source),
+    };
 
     // LAZY NON-WORKSPACE LOAD (large streaming Spaces only). The non-rendered
     // storage services hold the bulk of a big imported place — Vehicle Simulator
@@ -677,9 +1037,14 @@ pub fn scan_space_directory(
     // own STREAM_DB_PARTS condition instead — an active DB with more than the
     // big-space threshold of binary cores — which IS already true at scan time
     // (the DB is opened at boot, before this runs).
-    const BIG_SPACE_THRESHOLD: usize = 100_000;
     let streaming = super::active_db::is_active()
         && super::active_db::count_instance_cores_capped(BIG_SPACE_THRESHOLD + 1) > BIG_SPACE_THRESHOLD;
+    // Indexed (DB-backed) Space: the same walk the open worker does ahead of
+    // time in `prescan_tree`; this is the path for a Space switch or a disk
+    // fallback where no pre-scan was handed over.
+    if let Some(root) = &index {
+        return scan_from_index(root, space_root, streaming);
+    }
     const EAGER_SERVICES: &[&str] = &["Workspace", "Lighting", "StarterGui"];
 
     for service_name in &services {
@@ -745,6 +1110,112 @@ const KNOWN_SERVICE_NAMES: &[&str] = &[
     "Players", "StarterPack", "StarterPlayer", "ReplicatedStorage",
     "ServerStorage", "ServerScriptService", "SoundService", "Teams", "Chat",
 ];
+
+/// The entry tree the loader spawns from, built ahead of time on the open
+/// worker (see [`prescan_tree`]) so the main thread's first frame does not
+/// pay the 2.3 to 2.6 s index build and conversion.
+pub struct PreScan {
+    /// The Space it was built for; a switch mid-open leaves it unused.
+    pub root: PathBuf,
+    pub entries: Vec<FileMetadata>,
+}
+
+/// Handed from the open worker to `load_space_files_system`.
+#[derive(Resource, Default)]
+pub struct PendingPreScan(pub Option<PreScan>);
+
+/// Build the entry tree for a DB-backed Space off the main thread: the
+/// tree index (which also fills the [`dir_markers`] table), the services,
+/// and the per-service entries. `cores` is the capped instance-core count
+/// the worker already took, which decides the streaming lazy-service rule
+/// exactly as [`scan_space_directory`] does with the installed DB.
+pub fn prescan_tree(
+    db: &dyn eustress_worlddb::WorldDb,
+    space_root: &Path,
+    cores: usize,
+) -> Option<PreScan> {
+    let t0 = std::time::Instant::now();
+    let root = build_tree_index(db)?;
+    let streaming = cores > BIG_SPACE_THRESHOLD;
+    let entries = scan_from_index(&root, space_root, streaming);
+    info!(
+        target: "eustress_engine::world_db",
+        "🗂 Pre-scan on the open worker: {} top-level entries in {:?}",
+        entries.len(),
+        t0.elapsed()
+    );
+    Some(PreScan { root: space_root.to_path_buf(), entries })
+}
+
+/// Mirrors `ResidencyConfig::big_space_threshold`; the streaming decision.
+const BIG_SPACE_THRESHOLD: usize = 100_000;
+
+/// The scan over an in-memory index: services from the index root, each
+/// eager service's subtree converted, lazy services as headers, and the
+/// well-known services filled in as empty headers.
+fn scan_from_index(root: &TreeIndexNode, space_root: &Path, streaming: bool) -> Vec<FileMetadata> {
+    const EAGER_SERVICES: &[&str] = &["Workspace", "Lighting", "StarterGui"];
+    let mut entries: Vec<FileMetadata> = Vec::new();
+    for service_name in services_from_index(root) {
+        let Some(node) = root.children.get(service_name.as_str()) else { continue };
+        let lazy = streaming && !EAGER_SERVICES.contains(&service_name.as_str());
+        let children = if lazy {
+            info!(
+                "⏬ Lazy service (streaming): '{}' header only — subtree not spawned (saves O(N) + render load)",
+                service_name
+            );
+            Vec::new()
+        } else {
+            entries_from_index(node, space_root, &service_name, &service_name)
+        };
+        entries.push(FileMetadata {
+            path: space_root.join(&service_name),
+            file_type: FileType::Directory,
+            service: service_name.clone(),
+            name: service_name,
+            size: 0,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            children,
+        });
+    }
+    for &canonical in KNOWN_SERVICE_NAMES {
+        if entries.iter().any(|e| e.name == canonical) {
+            continue;
+        }
+        entries.push(FileMetadata {
+            path: space_root.join(canonical),
+            file_type: FileType::Directory,
+            service: canonical.to_string(),
+            name: canonical.to_string(),
+            size: 0,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            children: Vec::new(),
+        });
+    }
+    entries
+}
+
+/// [`discover_services`] answered from the tree index: a top-level directory
+/// with a `_service.toml` marker, or a well-known service name.
+fn services_from_index(root: &TreeIndexNode) -> Vec<String> {
+    let mut services: Vec<String> = root
+        .children
+        .iter()
+        .filter(|(_, node)| !node.children.is_empty())
+        .filter(|(name, _)| {
+            dir_markers::get(name).map_or(false, |m| m & dir_markers::SERVICE != 0)
+                || KNOWN_SERVICE_NAMES.contains(&name.as_str())
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    services.sort_by(|a, b| {
+        if a == "Workspace" { std::cmp::Ordering::Less }
+        else if b == "Workspace" { std::cmp::Ordering::Greater }
+        else { a.cmp(b) }
+    });
+    info!("📁 Discovered {} services from the tree index: {:?}", services.len(), services);
+    services
+}
 
 fn discover_services(source: &dyn super::space_source::SpaceSource) -> Vec<String> {
     let mut services = Vec::new();
@@ -863,11 +1334,16 @@ pub fn spawn_file_entry(
                 // migrated/DB-authoritative world spawns instances with
                 // zero disk reads and zero loose-file resurrection.
                 let _ = class_defaults; // schema is the common-crate source of truth now
-                match src_read_string(source, space_path, &file_meta.path)
+                // Stage timers: this is the ~4 ms/entity path that has been
+                // undiagnosed since August. See `toml_spawn_cost`.
+                let t_read = std::time::Instant::now();
+                let parsed = src_read_string(source, space_path, &file_meta.path)
                     .map_err(|e| e.to_string())
-                    .and_then(|c| super::instance_loader::load_instance_definition_from_str(&c))
-                {
+                    .and_then(|c| super::instance_loader::load_instance_definition_from_str(&c));
+                toml_spawn_cost::add(&toml_spawn_cost::READ_PARSE_NS, t_read.elapsed());
+                match parsed {
                     Ok(instance) => {
+                        let t_spawn = std::time::Instant::now();
                         let e = super::instance_loader::spawn_instance(
                             commands,
                             asset_server,
@@ -878,6 +1354,8 @@ pub fn spawn_file_entry(
                             file_meta.path.clone(),
                             instance,
                         );
+                        toml_spawn_cost::add(&toml_spawn_cost::SPAWN_NS, t_spawn.elapsed());
+                        let t_reg = std::time::Instant::now();
                         // Attach LoadedFromFile so the Explorer can classify this
                         // entity by service (Workspace, Lighting, etc.)
                         commands.entity(e).insert(LoadedFromFile {
@@ -886,6 +1364,8 @@ pub fn spawn_file_entry(
                             service: file_meta.service.clone(),
                         });
                         registry.register(file_meta.path.clone(), e, file_meta.clone());
+                        toml_spawn_cost::add(&toml_spawn_cost::REGISTER_NS, t_reg.elapsed());
+                        toml_spawn_cost::COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         e
                     }
                     Err(err) => {
@@ -1237,10 +1717,19 @@ pub fn spawn_directory_entry(
     // the actual terrain mesh entity (which the disk-load / worldgen hydration
     // path spawns separately, see terrain_disk_load.rs). This is asset/export
     // storage exactly like `meshes/`, not a scene-hierarchy instance.
+    // One marker-table lookup answers the three "is there a _terrain /
+    // _service / _instance marker" questions below; the source is probed
+    // only for a directory the scan did not index (see `dir_markers`).
+    let dir_rel = super::space_source::rel_from_root(space_path, &dir_meta.path).unwrap_or_default();
+    let markers = dir_markers::get(&dir_rel);
     let terrain_toml_rel =
         super::space_source::rel_from_root(space_path, &dir_meta.path.join("_terrain.toml"))
             .unwrap_or_default();
-    if source.exists(&terrain_toml_rel) {
+    let has_terrain = match markers {
+        Some(m) => m & dir_markers::TERRAIN != 0,
+        None => source.exists(&terrain_toml_rel),
+    };
+    if has_terrain {
         debug!("Skipping terrain export directory {:?} (asset storage, not an instance)", dir_meta.path);
         return;
     }
@@ -1249,7 +1738,10 @@ pub fn spawn_directory_entry(
     let service_toml_path = dir_meta.path.join("_service.toml");
     let service_toml_rel =
         super::space_source::rel_from_root(space_path, &service_toml_path).unwrap_or_default();
-    let has_service_toml = source.exists(&service_toml_rel);
+    let has_service_toml = match markers {
+        Some(m) => m & dir_markers::SERVICE != 0,
+        None => source.exists(&service_toml_rel),
+    };
     let is_known_service = KNOWN_SERVICE_NAMES.contains(&dir_meta.name.as_str());
     if has_service_toml || is_known_service {
         // Load service definition from _service.toml, or create a default for known services
@@ -1290,8 +1782,24 @@ pub fn spawn_directory_entry(
         registry.register(dir_meta.path.clone(), service_entity, dir_meta.clone());
         info!("🏢 Spawned Service '{}' with {} children", dir_meta.name, dir_meta.children.len());
 
-        // Spawn all children parented to this service
-        for child in &dir_meta.children {
+        // Spawn all children parented to this service, under the same
+        // count + time budget as the folder loop below. A service's DIRECT
+        // children are the widest fan-out in the tree (Super Station:
+        // 10,035 under Workspace). Without this check every one of them
+        // spawned in a single frame: the folder-level budget only tripped
+        // one level down, so each child still paid its own folder spawn
+        // (~4 ms) inside one 42 s frame.
+        for (idx, child) in dir_meta.children.iter().enumerate() {
+            if SPAWN_BUDGET.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) <= 0
+                || spawn_deadline_passed()
+            {
+                super::material_loader::set_dense_material_mode(true);
+                let mut q = SPILL.lock().unwrap_or_else(|e| e.into_inner());
+                for rest in &dir_meta.children[idx..] {
+                    q.push((rest.clone(), Some(service_entity)));
+                }
+                break;
+            }
             match child.file_type {
                 FileType::Directory => {
                     spawn_directory_entry(
@@ -1321,29 +1829,35 @@ pub fn spawn_directory_entry(
     // map lives on the enum itself, so adding a new class means one
     // variant + one from_str arm in `common/classes.rs`, no changes
     // here. Legacy `"Script"` alias routes to `SoulScript`.
+    let t_pre = std::time::Instant::now();
     let instance_toml_path = dir_meta.path.join("_instance.toml");
     let instance_toml_rel = super::space_source::rel_from_root(space_path, &instance_toml_path)
         .unwrap_or_default();
-    let class_name = if source.exists(&instance_toml_rel) {
-        src_read_string(source, space_path, &instance_toml_path)
-            .ok()
-            .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
-            .and_then(|v| {
-                let meta = v.get("metadata").or_else(|| v.get("Metadata"))?;
-                let cn = meta.get("class_name").or_else(|| meta.get("ClassName"))?;
-                cn.as_str().map(|s| s.to_string())
-            })
-            .map(|cn| {
-                // Legacy shim: "Script" used to mean the Rune script
-                // class before the Soul/Luau split.
-                let cn_resolved = if cn == "Script" { "SoulScript" } else { cn.as_str() };
-                eustress_common::classes::ClassName::from_str(cn_resolved)
-                    .unwrap_or(eustress_common::classes::ClassName::Folder)
-            })
-            .unwrap_or(eustress_common::classes::ClassName::Folder)
-    } else {
-        eustress_common::classes::ClassName::Folder
+    // ONE probe, ONE (cached) read and ONE parse of `_instance.toml` for
+    // everything below. The class name, the custom-mesh mention and the
+    // UUID each used to probe, read and parse it again: three TOML parses
+    // per entity on the bulk-load hot path.
+    let has_instance = match markers {
+        Some(m) => m & dir_markers::INSTANCE != 0,
+        None => source.exists(&instance_toml_rel),
     };
+    // One parsed record per `_instance.toml`. The pre-parse thread fills the
+    // cache ahead of the drain; a miss (the priority spawn, a hot reload
+    // after settle) reads and parses inline with the same function. Each
+    // branch below takes the one form it needs from the record.
+    let mut parsed: Option<ParsedInstance> = if has_instance {
+        parsed_cache_take(&instance_toml_rel).or_else(|| {
+            src_read_string(source, space_path, &instance_toml_path)
+                .ok()
+                .map(|text| parse_instance_text(&text))
+        })
+    } else {
+        None
+    };
+    let class_name = parsed
+        .as_ref()
+        .map(|p| p.class_name)
+        .unwrap_or(eustress_common::classes::ClassName::Folder);
 
     // STREAMING-PRIMARY: on the initial load of a large DB-backed Space, the
     // residency manager streams bare parts from the `entities` partition by
@@ -1360,11 +1874,10 @@ pub fn spawn_directory_entry(
             .children
             .iter()
             .any(|c| c.file_type == FileType::Directory);
-        let has_custom_mesh = source.exists(&instance_toml_rel)
-            && src_read_string(source, space_path, &instance_toml_path)
-                .ok()
-                .map(|s| super::representation::toml_mentions_custom_mesh(&s))
-                .unwrap_or(false);
+        let has_custom_mesh = parsed
+            .as_ref()
+            .map(|p| p.mentions_custom_mesh)
+            .unwrap_or(false);
         // Shared with `bake_cores`: this skip and that conversion are two
         // halves of one invariant (exactly one loader owns each entity), so
         // they must consult the SAME function. Kept as separate predicates
@@ -1383,21 +1896,13 @@ pub fn spawn_directory_entry(
     // `Instance` so cross-references resolve by identity (constraints bind
     // their `Part0`/`Attachment0` joint bodies by UUID; Attachment +
     // Folder/Model entities spawned via the fall-through arm need it too).
-    let instance_uuid: String = if source.exists(&instance_toml_rel) {
-        src_read_string(source, space_path, &instance_toml_path)
-            .ok()
-            .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
-            .and_then(|v| {
-                let meta = v.get("metadata").or_else(|| v.get("Metadata"))?;
-                meta.get("uuid")
-                    .or_else(|| meta.get("Uuid"))
-                    .and_then(|u| u.as_str())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
+    let instance_uuid: String = parsed
+        .as_ref()
+        .map(|p| p.uuid.clone())
+        .unwrap_or_default();
+
+    toml_spawn_cost::add(&toml_spawn_cost::READ_PARSE_NS, t_pre.elapsed());
+    let t_spawn = std::time::Instant::now();
 
     // Spawn the Folder / ScreenGui / Frame / Model entity
     let is_screen_gui = matches!(class_name, eustress_common::classes::ClassName::ScreenGui);
@@ -1409,7 +1914,7 @@ pub fn spawn_directory_entry(
     let folder_entity = if is_screen_gui {
         // ScreenGui: fullscreen UI root — read enabled/visible from _instance.toml
         let instance_toml = dir_meta.path.join("_instance.toml");
-        let screen_gui_visible = if let Ok(gui_def) = src_read_string(source, space_path, &instance_toml).map_err(|e| e.to_string()).and_then(|c| super::gui_loader::load_gui_definition_from_str(&c)) {
+        let screen_gui_visible = if let Ok(gui_def) = take_gui_def(&mut parsed, source, space_path, &instance_toml) {
             gui_def.gui.visible
         } else {
             true // default: visible
@@ -1461,7 +1966,7 @@ pub fn spawn_directory_entry(
         // Frame/ScrollingFrame directory — load GUI properties from _instance.toml
         // and attach GuiElementDisplay so it renders through Slint overlay
         let instance_toml = dir_meta.path.join("_instance.toml");
-        let gui_display = if let Ok(gui_def) = src_read_string(source, space_path, &instance_toml).map_err(|e| e.to_string()).and_then(|c| super::gui_loader::load_gui_definition_from_str(&c)) {
+        let gui_display = if let Ok(gui_def) = take_gui_def(&mut parsed, source, space_path, &instance_toml) {
             let class_str = format!("{:?}", class_name).to_lowercase();
             super::gui_loader::gui_display_from_props(&gui_def.gui, gui_def.text.as_ref(), &class_str)
         } else {
@@ -1519,7 +2024,7 @@ pub fn spawn_directory_entry(
         // component after spawn (lives outside the `if let Ok` scope).
         let mut bb_tags: Vec<String> = Vec::new();
 
-        if let Ok(gui_def) = src_read_string(source, space_path, &instance_toml).map_err(|e| e.to_string()).and_then(|c| super::gui_loader::load_gui_definition_from_str(&c)) {
+        if let Ok(gui_def) = take_gui_def(&mut parsed, source, space_path, &instance_toml) {
             bb_tags = gui_def.tags.clone();
             let g = &gui_def.gui;
 
@@ -1655,9 +2160,7 @@ pub fn spawn_directory_entry(
         // integration lands.
         let instance_toml = dir_meta.path.join("_instance.toml");
         let toml_value: Option<toml::Value> =
-            src_read_string(source, space_path, &instance_toml)
-                .ok()
-                .and_then(|s| toml::from_str(&s).ok());
+            take_instance_value(&parsed, source, space_path, &instance_toml);
 
         // Universe-relative asset path stored in `[asset].path`. The
         // engine-runtime path is `<Universe>/<asset_path>`.
@@ -1861,9 +2364,7 @@ pub fn spawn_directory_entry(
         let instance_toml = dir_meta.path.join("_instance.toml");
         // Read the "source" field from _instance.toml to find the script filename,
         // or scan the folder for the first .rune/.luau/.soul file.
-        let source_file = src_read_string(source, space_path, &instance_toml)
-            .ok()
-            .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+        let source_file = take_instance_value(&parsed, source, space_path, &instance_toml)
             .and_then(|v| {
                 use eustress_common::class_schema::get_section_insensitive as get_ci;
                 get_ci(&v, "script")
@@ -1986,12 +2487,8 @@ pub fn spawn_directory_entry(
         // `std::fs` so a Fjall-authoritative world spawns Parts with
         // zero disk reads. `instance_toml` (absolute) is still handed
         // to `spawn_instance` for InstanceFile identity / write-back.
-        let parsed = src_read_string(source, space_path, &instance_toml)
-            .map_err(|e| e.to_string())
-            .and_then(|content| {
-                super::instance_loader::load_instance_definition_from_str(&content)
-            });
-        match parsed {
+        let def = take_instance_def(&mut parsed, source, space_path, &instance_toml);
+        match def {
             Ok(instance_def) => {
                 // spawn_instance attaches InstanceFile internally with the toml_path
                 super::instance_loader::spawn_instance(
@@ -2044,7 +2541,7 @@ pub fn spawn_directory_entry(
         // `spawn_gui_element` resolves the right class without any
         // extra parameter threading here.
         let instance_toml = dir_meta.path.join("_instance.toml");
-        match src_read_string(source, space_path, &instance_toml).map_err(|e| e.to_string()).and_then(|c| super::gui_loader::load_gui_definition_from_str(&c)) {
+        match take_gui_def(&mut parsed, source, space_path, &instance_toml) {
             Ok(gui_def) => {
                 super::gui_loader::spawn_gui_element(commands, &instance_toml, &gui_def)
             }
@@ -2086,9 +2583,7 @@ pub fn spawn_directory_entry(
 
         let instance_toml = dir_meta.path.join("_instance.toml");
         let toml_value: Option<toml::Value> =
-            src_read_string(source, space_path, &instance_toml)
-                .ok()
-                .and_then(|s| toml::from_str(&s).ok());
+            take_instance_value(&parsed, source, space_path, &instance_toml);
 
         // u8 0-255 RGB array (÷255) → [f32;4] alpha 1.0; try int THEN float.
         let rgba4 = |sec: Option<&toml::Value>, key: &str, fallback: [f32; 4]| -> [f32; 4] {
@@ -2314,9 +2809,7 @@ pub fn spawn_directory_entry(
         // and the `[Light]` template section is authored in lumens too.
         let instance_toml = dir_meta.path.join("_instance.toml");
         let toml_value: Option<toml::Value> =
-            src_read_string(source, space_path, &instance_toml)
-                .ok()
-                .and_then(|s| toml::from_str(&s).ok());
+            take_instance_value(&parsed, source, space_path, &instance_toml);
 
         // `[light]` / `[Light]` section (case-insensitive).
         let light_section = toml_value
@@ -2486,6 +2979,8 @@ pub fn spawn_directory_entry(
     if let Some(parent) = parent_entity {
         commands.entity(folder_entity).insert(ChildOf(parent));
     }
+    toml_spawn_cost::add(&toml_spawn_cost::SPAWN_NS, t_spawn.elapsed());
+    let t_reg = std::time::Instant::now();
 
     registry.register(dir_meta.path.clone(), folder_entity, dir_meta.clone());
     // Also index the entity under its `_instance.toml` marker when one
@@ -2496,10 +2991,14 @@ pub fn spawn_directory_entry(
     // no-op'd. Hot-created entities already register under the
     // `_instance.toml` path (see `handle_file_created` Toml branch),
     // so this just brings initial-scan registration into parity.
+    // `instance_src` already answered "is there a marker" through the
+    // source; a `Path::is_file` here was one more disk stat per entity.
     let instance_marker = dir_meta.path.join("_instance.toml");
-    if instance_marker.is_file() {
+    if has_instance {
         registry.register(instance_marker, folder_entity, dir_meta.clone());
     }
+    toml_spawn_cost::add(&toml_spawn_cost::REGISTER_NS, t_reg.elapsed());
+    toml_spawn_cost::COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // DEBUG, not INFO: this fires once per directory ENTITY. At 50k
     // (the benchmark) an INFO here is 50k synchronous stderr writes
     // under a lock — ~3-4ms each ≈ minutes of pure logging that
@@ -2534,7 +3033,13 @@ pub fn spawn_directory_entry(
         // `fetch_sub` returns the value BEFORE decrement, so exactly
         // `budget` children are processed before the first spill; with
         // the `i64::MAX` default (unbudgeted paths) this never trips.
-        if SPAWN_BUDGET.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) <= 0 {
+        // The COUNT budget alone did not bound the frame: at the measured
+        // ~4 ms per TOML entity, the 8192-entity burst was a 36 s freeze on
+        // Super Station. The TIME budget (`spawn_deadline_passed`) is what
+        // actually keeps the window alive — see `load_frame_ms`.
+        if SPAWN_BUDGET.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) <= 0
+            || spawn_deadline_passed()
+        {
             // This subtree is bigger than a whole frame's budget — by
             // definition a dense scene. Engage adaptive material-color
             // quantization so its (potentially all-unique) colors
@@ -2671,6 +3176,7 @@ pub(crate) fn begin_budgeted_load(generation: u64) {
     // the store so `spawn_budget_per_frame()` already returns the burst value.
     LOAD_BURST_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
     SPAWN_BUDGET.store(spawn_budget_per_frame(), std::sync::atomic::Ordering::Relaxed);
+    arm_spawn_deadline();
     // Every fresh load starts assuming a normal-sized scene: lossless
     // material keys (zero visual change). The first frame-budget spill
     // below re-engages dense color quantization for huge scenes only.
@@ -2707,6 +3213,270 @@ pub(crate) fn pending_spill_len() -> usize {
 /// (`Lighting`) still loads instantly even after a huge one spilled.
 pub(crate) fn rearm_priority_budget() {
     SPAWN_BUDGET.store(spawn_budget_per_frame(), std::sync::atomic::Ordering::Relaxed);
+    arm_spawn_deadline();
+}
+
+// ── Time-based spawn budget ──────────────────────────────────────────────
+//
+// The count budget (`SPAWN_BUDGET`) bounds how many entities a frame may
+// spawn; it does not bound how LONG that takes. Measured on Super Station
+// (2026-09-20): the file-loader path costs ~4 ms per TOML entity, so the
+// 8192-entity load burst was a single 36 s frame, the spill drain another
+// 18 s per 4096-batch frame, and the window read "Not Responding" for most
+// of a three-minute open. A per-frame DEADLINE bounds the frame instead:
+// once it passes, the remaining children spill exactly as they do when the
+// count runs out, and the drain re-queues what it did not reach.
+//
+// Total load time is CPU-bound either way; what changes is that the editor
+// keeps rendering, input keeps flowing, the bridge keeps answering and the
+// progress is visible. The slice defaults to 100 ms (≈10 FPS during a heavy
+// load — overhead of roughly one frame's render per slice), tunable without
+// a rebuild via `EUSTRESS_LOAD_FRAME_MS` (`0` = no time budget, count only).
+
+/// Per-frame spawn time slice in milliseconds during a load.
+fn load_frame_ms() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("EUSTRESS_LOAD_FRAME_MS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(100)
+    })
+}
+
+/// Monotonic epoch for the deadline (`Instant` cannot live in an atomic).
+fn spawn_epoch() -> std::time::Instant {
+    static E: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *E.get_or_init(std::time::Instant::now)
+}
+
+/// Deadline as nanoseconds since [`spawn_epoch`]; `u64::MAX` = no deadline.
+static SPAWN_DEADLINE_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Start this frame's spawn slice. Call wherever `SPAWN_BUDGET` is (re)armed.
+/// Spawn slice when the user is focused but has not touched anything for
+/// the quiet threshold (`EUSTRESS_LOAD_FRAME_MS_IDLE`, default 400 ms).
+fn load_frame_ms_idle() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("EUSTRESS_LOAD_FRAME_MS_IDLE")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(400)
+    })
+}
+
+/// Spawn slice when the window is not focused
+/// (`EUSTRESS_LOAD_FRAME_MS_UNFOCUSED`, default 1000 ms).
+fn load_frame_ms_unfocused() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("EUSTRESS_LOAD_FRAME_MS_UNFOCUSED")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(1000)
+    })
+}
+
+/// The slice for this frame, by what the user is doing. The 100 ms default
+/// keeps the editor responsive while someone is working in it; once nobody
+/// has touched it for a couple of seconds, or it is in the background,
+/// responsiveness is worth less than finishing the load, so the slice grows
+/// (the per-frame cost of a 120K-entity scene is ~300-400 ms in a debug
+/// build, so a 100 ms slice was a 20 % duty cycle on Super Station).
+/// `EUSTRESS_LOAD_FRAME_MS=0` disables the time budget in every state.
+fn effective_load_frame_ms() -> u64 {
+    let base = load_frame_ms();
+    if base == 0 {
+        return 0;
+    }
+    match crate::window_focus::user_attention() {
+        // Equal time: while the user works, spend at least as long spawning
+        // as the rest of the frame costs, up to the idle slice. A fixed
+        // 100 ms slice against the 300 ms a 100K-entity scene already costs
+        // per frame was a 25 % duty cycle; this holds it at 50 % or better,
+        // and on a small scene (tens of ms of overhead) stays at the base.
+        crate::window_focus::Attention::Interacting => {
+            let overhead_ms = last_frame_overhead_ms();
+            overhead_ms.clamp(base, load_frame_ms_idle().max(base))
+        }
+        crate::window_focus::Attention::IdleFocused => load_frame_ms_idle().max(base),
+        crate::window_focus::Attention::Unfocused => load_frame_ms_unfocused().max(base),
+    }
+}
+
+/// The previous frame's duration and the spawn slice inside it, recorded by
+/// `drain_pending_spawns`, so the next slice can be sized to the frame's
+/// other work.
+static LAST_FRAME_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LAST_SLICE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn last_frame_overhead_ms() -> u64 {
+    use std::sync::atomic::Ordering::Relaxed;
+    LAST_FRAME_NS
+        .load(Relaxed)
+        .saturating_sub(LAST_SLICE_NS.load(Relaxed))
+        / 1_000_000
+}
+
+pub(crate) fn arm_spawn_deadline() {
+    arm_spawn_deadline_with(effective_load_frame_ms());
+}
+
+/// Arm a slice of exactly `ms` (0 = no time budget), ignoring attention.
+/// The priority spawn uses the base budget: it runs before the first frame
+/// is on screen, where a longer idle slice only delays the first render.
+pub(crate) fn arm_spawn_deadline_with(ms: u64) {
+    let ns = if ms == 0 {
+        u64::MAX
+    } else {
+        spawn_epoch().elapsed().as_nanos() as u64 + ms * 1_000_000
+    };
+    SPAWN_DEADLINE_NS.store(ns, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// True once the current frame's spawn slice is used up.
+#[inline]
+pub(crate) fn spawn_deadline_passed() -> bool {
+    let d = SPAWN_DEADLINE_NS.load(std::sync::atomic::Ordering::Relaxed);
+    d != u64::MAX && spawn_epoch().elapsed().as_nanos() as u64 >= d
+}
+
+/// True from `begin_budgeted_load` until the eager spawn settles: the
+/// window in which spilled entities stream in over frames.
+pub fn bulk_load_active() -> bool {
+    LOAD_BURST_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+        || !SPILL.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+}
+
+/// Run condition for per-frame UI syncs (Explorer, GUI elements, tags,
+/// Soul panel, lighting hydration). Every frame normally. During a bulk
+/// load, once per `UI_SYNC_LOAD_INTERVAL_MS`, and every system that asks in
+/// the same frame gets the same answer. Each of those syncs is change-
+/// driven (tick-based `Added`/`Changed` filters or its own content hash),
+/// so skipped frames batch the work rather than lose it. Measured on Super
+/// Station's drain: the syncs cost ~30 ms per frame themselves, and the
+/// Slint model churn they caused made the overlay repaint every frame at
+/// 59 ms, which together starved the 100 ms spawn slice to a 39 % duty.
+pub fn ui_sync_tick(frames: Res<bevy::diagnostic::FrameCount>) -> bool {
+    ui_sync_tick_for_frame(frames.0 as u64)
+}
+
+/// The same tick for use inside a system body (pass its `FrameCount`).
+pub fn ui_sync_tick_for_frame(frame: u64) -> bool {
+    UI_TICK.fire(frame, 250, 4)
+}
+
+/// A slower tick (2 s, 8 frames) for the syncs whose push replaces a whole
+/// Slint model, the Explorer above all: during a bulk load its tree changes
+/// every frame, and each push re-instantiates every row on the next paint.
+pub fn ui_sync_tick_slow(frames: Res<bevy::diagnostic::FrameCount>) -> bool {
+    UI_TICK_SLOW.fire(frames.0 as u64, 2000, 8)
+}
+
+struct LoadTick {
+    last_fire_ns: std::sync::atomic::AtomicU64,
+    fire_frame: std::sync::atomic::AtomicU64,
+}
+
+static UI_TICK: LoadTick = LoadTick {
+    last_fire_ns: std::sync::atomic::AtomicU64::new(0),
+    fire_frame: std::sync::atomic::AtomicU64::new(u64::MAX),
+};
+static UI_TICK_SLOW: LoadTick = LoadTick {
+    last_fire_ns: std::sync::atomic::AtomicU64::new(0),
+    fire_frame: std::sync::atomic::AtomicU64::new(u64::MAX),
+};
+
+impl LoadTick {
+    /// True every frame outside a bulk load. During one, true once both
+    /// `interval_ms` and `min_frames` have passed since it last fired, and
+    /// the same answer for every caller in a frame. The frame floor is what
+    /// does the work on a large Space: once load frames exceed the interval
+    /// (they were 1 to 2 s on Super Station) a wall-clock tick alone fires
+    /// every frame and throttles nothing.
+    fn fire(&self, frame: u64, interval_ms: u64, min_frames: u64) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        if !bulk_load_active() {
+            return true;
+        }
+        let last_frame = self.fire_frame.load(Relaxed);
+        if last_frame == frame {
+            return true;
+        }
+        let frames_since = if last_frame == u64::MAX {
+            u64::MAX
+        } else {
+            frame.saturating_sub(last_frame)
+        };
+        let now = spawn_epoch().elapsed().as_nanos() as u64;
+        if now.saturating_sub(self.last_fire_ns.load(Relaxed)) >= interval_ms * 1_000_000
+            && frames_since >= min_frames
+        {
+            self.last_fire_ns.store(now, Relaxed);
+            self.fire_frame.store(frame, Relaxed);
+            return true;
+        }
+        false
+    }
+}
+
+/// While a bulk load runs, cap how much virtual time one frame may advance.
+/// After a 700 ms load frame the fixed schedule otherwise replays ~15 fixed
+/// steps to catch up (~13 ms per frame measured on Super Station's drain),
+/// in edit mode where physics is paused and nothing needs them. The
+/// previous cap is restored at settle.
+fn bound_fixed_catchup_during_load(
+    mut virt: ResMut<Time<Virtual>>,
+    mut saved: Local<Option<std::time::Duration>>,
+) {
+    if bulk_load_active() {
+        if saved.is_none() {
+            *saved = Some(virt.max_delta());
+            virt.set_max_delta(std::time::Duration::from_millis(50));
+        }
+    } else if let Some(d) = saved.take() {
+        virt.set_max_delta(d);
+    }
+}
+
+/// Per-stage cost accumulators for the TOML / file-loader spawn path.
+///
+/// The binary-ECS path has had `world_db_binary::spawn_cost` since M0; this
+/// path — the one every loose-TOML Space and every non-Part entity of a
+/// DB Space goes through — had nothing, which is why "~4.4 ms per entity"
+/// stayed a number without a culprit. Three stages, one atomic add each,
+/// summarised once per load at the settle point. Always on: the cost is
+/// three `Instant::now()` pairs per entity.
+pub(crate) mod toml_spawn_cost {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    pub static READ_PARSE_NS: AtomicU64 = AtomicU64::new(0);
+    pub static SPAWN_NS: AtomicU64 = AtomicU64::new(0);
+    pub static REGISTER_NS: AtomicU64 = AtomicU64::new(0);
+    pub static COUNT: AtomicU64 = AtomicU64::new(0);
+
+    #[inline]
+    pub fn add(slot: &AtomicU64, d: std::time::Duration) {
+        slot.fetch_add(d.as_nanos() as u64, Relaxed);
+    }
+
+    pub fn log_summary_and_reset() {
+        let n = COUNT.swap(0, Relaxed);
+        let rp = READ_PARSE_NS.swap(0, Relaxed);
+        let sp = SPAWN_NS.swap(0, Relaxed);
+        let rg = REGISTER_NS.swap(0, Relaxed);
+        if n == 0 {
+            return;
+        }
+        let ms = |ns: u64| ns as f64 / 1e6;
+        let per = |ns: u64| ns as f64 / 1e3 / n as f64;
+        bevy::log::warn!(
+            target: "eustress_engine::load_phase",
+            "TOML-SPAWN-COST: {} entities — read+parse {:.0} ms ({:.0} µs/ea), spawn_instance {:.0} ms ({:.0} µs/ea), register {:.0} ms ({:.0} µs/ea)",
+            n, ms(rp), per(rp), ms(sp), per(sp), ms(rg), per(rg)
+        );
+    }
 }
 
 /// Priority services loaded immediately at startup (the 3D scene).
@@ -2754,20 +3524,26 @@ pub struct DeferredServiceLoader {
 pub struct LoadInProgress {
     pub active: bool,
     pub frames_since_quiescent: u32,
+    /// When the deferred queue was last seen empty with priority done.
+    pub quiescent_since: Option<std::time::Instant>,
 }
 
 impl LoadInProgress {
-    /// Frames the deferred queue must stay empty before declaring the
-    /// load truly settled. Sized to absorb the async mesh-handle
-    /// resolution + BasePart-size sync that runs for several frames
-    /// after the last entity is spawned.
-    pub const QUIESCENT_THRESHOLD: u32 = 60;
+    /// The deferred queue must stay empty for BOTH of these before the load
+    /// is declared settled: enough frames to absorb the async mesh-handle
+    /// resolution + BasePart-size sync that runs after the last spawn, and
+    /// enough wall time that the frame count means the same at any frame
+    /// rate. The old 60-frame rule was sized for 16 ms frames; at the 300 ms
+    /// frames of a large load it was an 18 s wait with write-back gated.
+    pub const QUIESCENT_FRAMES: u32 = 3;
+    pub const QUIESCENT_TIME: std::time::Duration = std::time::Duration::from_secs(1);
 
     /// Mark loading as active. Called by the load entry-points so the
     /// quiescent counter restarts whenever a fresh load begins.
     pub fn begin(&mut self) {
         self.active = true;
         self.frames_since_quiescent = 0;
+        self.quiescent_since = None;
     }
 }
 
@@ -2785,7 +3561,12 @@ pub fn tick_load_in_progress(
     }
     if deferred.priority_done && deferred.pending.is_empty() {
         load.frames_since_quiescent = load.frames_since_quiescent.saturating_add(1);
-        if load.frames_since_quiescent >= LoadInProgress::QUIESCENT_THRESHOLD {
+        let since = *load
+            .quiescent_since
+            .get_or_insert_with(std::time::Instant::now);
+        if load.frames_since_quiescent >= LoadInProgress::QUIESCENT_FRAMES
+            && since.elapsed() >= LoadInProgress::QUIESCENT_TIME
+        {
             load.active = false;
             // Disarm the LOAD BURST: steady-state spawns (paste, hot-create,
             // rescan spill) revert to the conservative per-frame budget so an
@@ -2805,6 +3586,11 @@ pub fn tick_load_in_progress(
             // mark fires. Env-gated on EUSTRESS_PROFILE; silent otherwise.
             #[cfg(feature = "world-db")]
             super::world_db_binary::spawn_cost::log_summary();
+            // Same settle point, TOML/file-loader path (always on — it is
+            // one log line per load).
+            toml_spawn_cost::log_summary_and_reset();
+            dir_markers::clear();
+            clear_read_cache();
             info!(
                 "🟢 Load settled — TOML write-back enabled after {} quiescent frames",
                 load.frames_since_quiescent
@@ -2812,6 +3598,7 @@ pub fn tick_load_in_progress(
         }
     } else {
         load.frames_since_quiescent = 0;
+        load.quiescent_since = None;
     }
 }
 
@@ -2943,7 +3730,11 @@ pub fn load_space_files_system(
     gen: Res<SpaceLoadGeneration>,
     mut load_in_progress: ResMut<LoadInProgress>,
     active_source: Res<super::space_source::ActiveSpaceSource>,
+    mut prescan: ResMut<PendingPreScan>,
 ) {
+    // First statement, so the milestone log shows whether a silent gap
+    // before `scan-begin` is inside this system or in the frame before it.
+    super::load_phase::mark("loader-begin");
     let space_path = &space_root.0;
     let source = active_source.0.clone();
     let source = source.as_ref();
@@ -2975,7 +3766,14 @@ pub fn load_space_files_system(
     // instance folders on disk to repair (they live in
     // `world.fjalldb/`), so this would only be a wasted full-tree
     // `std::fs` walk on every load.
-    if !super::space_ops::space_is_migrated(space_path) {
+    // The reserved-name repair walks EVERY directory of the Space on disk
+    // (7.8 s on Super Station's 114K files, measured with `loader-begin`).
+    // It fixes folder names the disk loader would misread; with the DB
+    // installed as the source the loader spawns from the tree and never
+    // reads those names, so the walk is skipped there. It still runs for a
+    // disk-backed Space, and the header's `migrated_at` gate stays as it is
+    // (this Space's header has none, yet its DB is authoritative).
+    if !super::space_ops::space_is_migrated(space_path) && !super::active_db::is_active() {
         let healed = repair_reserved_name_corruption(space_path);
         if healed > 0 {
             warn!(
@@ -2990,7 +3788,19 @@ pub fn load_space_files_system(
     // lazy storage services emit header-only (file_loader's existing gate).
     super::load_phase::mark("scan-begin");
     let scan_t0 = std::time::Instant::now();
-    let entries = scan_space_directory(source, space_path);
+    // The open worker pre-scans a DB-backed Space while this thread does its
+    // first-frame work; take that when it is for this Space, else scan here.
+    let entries = match prescan.0.take() {
+        Some(p) if p.root == *space_path => {
+            info!(
+                target: "eustress_engine::world_db",
+                "🗂 Entry tree taken from the open worker's pre-scan ({} top-level entries)",
+                p.entries.len()
+            );
+            p.entries
+        }
+        _ => scan_space_directory(source, space_path),
+    };
     info!(
         target: "eustress_engine::world_db",
         "🔍 Discovered {} top-level entries in Space (scan took {:?})",
@@ -3008,10 +3818,10 @@ pub fn load_space_files_system(
     // onto all cores. Spawn/parenting/registry/ordering logic below is
     // unchanged — it now just finds the text already in memory. Cleared
     // after the priority spawn returns (`clear_read_cache`).
-    prewarm_read_cache(source, space_path, &entries);
+    prewarm_in_background(active_source.0.clone(), space_path, &entries);
     // LOAD-PHASE milestone 4: parallel pre-read of eager-service text done
     // (READ_CACHE populated; the spawn walk below reads from memory).
-    super::load_phase::mark("prewarm-complete");
+    super::load_phase::mark("prewarm-started");
 
     let cd_ref = class_defaults.as_deref();
     let mut deferred_entries = Vec::new();
@@ -3023,6 +3833,12 @@ pub fn load_space_files_system(
         q.clear();
     }
     SPILL_GEN.store(gen.0, std::sync::atomic::Ordering::Relaxed);
+    // This IS a bulk load: everything keyed on `bulk_load_active()` (the
+    // UI sync tick, the billboard raster cap, the power-mode hold, the
+    // spawn burst budget) must see it from here until `tick_load_in_progress`
+    // settles. Only the Space-switch path used to raise the flag, so on the
+    // initial open the drain ran with every per-frame throttle disengaged.
+    LOAD_BURST_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
 
     // STREAMING-PRIMARY gate: only skip file-spawning parts when the residency
     // manager will actually stream them — match ITS enable condition (a
@@ -3064,6 +3880,13 @@ pub fn load_space_files_system(
                 format!("spawning service '{}'", entry.name),
             );
             SPAWN_BUDGET.store(spawn_budget_per_frame(), std::sync::atomic::Ordering::Relaxed);
+            // Arm the TIME budget here too. It used to be armed only by
+            // `drain_pending_spawns` in earlier frames, which held while the
+            // loader waited on the reconcile; now that the loader starts in
+            // the first frames, no drain has run yet, the deadline is unset,
+            // and the priority spawn ran to the 8,192 count budget (5.1 s
+            // measured) instead of one slice.
+            arm_spawn_deadline_with(load_frame_ms());
             match entry.file_type {
                 FileType::Directory => {
                     spawn_directory_entry(
@@ -3104,11 +3927,11 @@ pub fn load_space_files_system(
     // mid-load Space switch and discard this queue.
     deferred.generation = gen.0;
 
-    // Priority spawn is done; release the pre-warmed read cache. The
-    // deferred-service frames + frame-budget spill + all hot-reloads run
-    // against live content from here on (a cache miss is a correct live
-    // read, so this is purely about not holding stale text or memory).
-    clear_read_cache();
+    // The pre-read cache stays alive through the drain: every spilled entity
+    // reads its `_instance.toml` from it instead of from the source (one
+    // Fjall point read each, ~100 µs in a debug build, ~11 s over Super
+    // Station's 111K entities). `tick_load_in_progress` drops it at settle;
+    // from then on a cache miss is a correct live read.
 }
 
 /// Queue of freshly-pasted folder ROOTS (absolute paths, normally under
@@ -3318,6 +4141,7 @@ pub fn drain_pending_spawns(
     gen: Res<SpaceLoadGeneration>,
     active_source: Res<super::space_source::ActiveSpaceSource>,
     mut load_in_progress: ResMut<LoadInProgress>,
+    time: Res<Time>,
 ) {
     use std::sync::atomic::Ordering::Relaxed;
 
@@ -3338,6 +4162,10 @@ pub fn drain_pending_spawns(
     // conservative steady-state value for any interactive spill.
     let per_frame = spawn_budget_per_frame();
     SPAWN_BUDGET.store(per_frame, Relaxed);
+    // The previous frame's length feeds the equal-time slice rule.
+    LAST_FRAME_NS.store(time.delta().as_nanos() as u64, Relaxed);
+    arm_spawn_deadline();
+    let t_slice = std::time::Instant::now();
 
     let batch: Vec<(FileMetadata, Option<Entity>)> = {
         let mut q = SPILL.lock().unwrap_or_else(|e| e.into_inner());
@@ -3356,9 +4184,23 @@ pub fn drain_pending_spawns(
     let cd_ref = class_defaults.as_deref();
     let source = active_source.0.clone();
     let source = source.as_ref();
-    let count = batch.len();
-
-    for (meta, parent) in batch {
+    let mut count = 0usize;
+    let mut batch = batch.into_iter();
+    while let Some((meta, parent)) = batch.next() {
+        // Time slice spent: hand everything not yet reached BACK to the
+        // FRONT of the queue (this item first, so order is preserved) and
+        // stop. The count budget alone let one 4096-entity batch hold the
+        // frame for ~18 s on Super Station.
+        if spawn_deadline_passed() {
+            let rest: Vec<(FileMetadata, Option<Entity>)> =
+                std::iter::once((meta, parent)).chain(batch).collect();
+            let n = rest.len();
+            let mut q = SPILL.lock().unwrap_or_else(|e| e.into_inner());
+            q.splice(0..0, rest);
+            debug!("🧩 spawn slice ended — re-queued {n} spilled spawns at the front");
+            break;
+        }
+        count += 1;
         match meta.file_type {
             FileType::Directory => {
                 spawn_directory_entry(
@@ -3377,6 +4219,7 @@ pub fn drain_pending_spawns(
         }
     }
 
+    LAST_SLICE_NS.store(t_slice.elapsed().as_nanos() as u64, Relaxed);
     let remaining = SPILL.lock().unwrap_or_else(|e| e.into_inner()).len();
     warn!(
         target: "eustress_engine::world_db",
@@ -3385,6 +4228,19 @@ pub fn drain_pending_spawns(
         "🧩 Streamed {} spilled spawns ({} remaining). unique_materials is the draw-call batch count — if it's ~50k the render ceiling stands; with dense_quant=true it should be only a few thousand (≈12× fewer draws).",
         count, remaining
     );
+}
+
+/// Run condition: fires exactly once, on its first evaluation, then latches.
+/// Combined with `world_db_open_settled` via a short-circuiting `.and()`, so
+/// that first evaluation is the first frame the Space's DB is installed (or
+/// the disk fallback decided). A `Local` (not a resource) because run
+/// conditions may only take read-only params; `Local` is exempt.
+fn initial_load_once(mut done: Local<bool>) -> bool {
+    if *done {
+        return false;
+    }
+    *done = true;
+    true
 }
 
 /// Plugin for dynamic file loading
@@ -3398,6 +4254,7 @@ impl Plugin for SpaceFileLoaderPlugin {
         app.init_resource::<super::SpaceRoot>()
             .init_resource::<SpaceFileRegistry>()
             .init_resource::<SpaceLoadGeneration>()
+            .init_resource::<PendingPreScan>()
             .init_resource::<super::material_loader::MaterialRegistry>()
             .init_resource::<super::instance_loader::PrimitiveMeshCache>()
             .init_resource::<super::file_watcher::RecentlyWrittenFiles>()
@@ -3445,13 +4302,31 @@ impl Plugin for SpaceFileLoaderPlugin {
                 // enum variant" bugs at startup instead of at
                 // load-a-Part time.
                 eustress_common::class_schema::log_schema_validation,
-                load_space_files_system.after(crate::default_scene::setup_default_scene),
                 super::file_watcher::setup_file_watcher,
             ))
+            // The initial Space load used to be a Startup system, ordered after
+            // the DB open. The open's disk work now runs on a worker across
+            // frames (`world_db_plugin::PendingWorldDbOpen`), so the load waits
+            // for it in Update instead: it runs on the first frame the open is
+            // settled and latches itself off (`initial_load_once`). Same
+            // ordering as before, one frame boundary later.
+            .add_systems(Update,
+                load_space_files_system
+                    // `.and` short-circuits: the once-latch is only consumed
+                    // on a frame where the open has actually settled.
+                    .run_if(
+                        bevy::ecs::schedule::SystemCondition::and_then(
+                            super::world_db_plugin::world_db_open_settled,
+                            initial_load_once,
+                        ),
+                    )
+                    .after(super::world_db_plugin::open_world_db_on_space_change),
+            )
             .add_systems(Update, (
                 load_deferred_services,
                 drain_pending_spawns.after(load_deferred_services),
                 tick_load_in_progress.after(drain_pending_spawns),
+                bound_fixed_catchup_during_load.after(tick_load_in_progress),
                 // Deterministic paste spawn BEFORE the watcher so pasted paths
                 // are registered first → the watcher's `is_loaded` check skips
                 // the same Create events (no double-spawn).

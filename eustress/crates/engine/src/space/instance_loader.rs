@@ -1636,8 +1636,8 @@ pub fn load_instance_definition_with_extras(
     // A long-lived version will be injected as a Bevy Resource once the
     // migration lands; using a local default keeps every legacy caller
     // working without a plumbing change.
-    let registry = eustress_common::class_schema::ClassSchemaRegistry::from_builtin();
-    let healed = eustress_common::class_schema::load_and_heal_instance(toml_path, &registry)
+    let registry = eustress_common::class_schema::ClassSchemaRegistry::builtin();
+    let healed = eustress_common::class_schema::load_and_heal_instance(toml_path, registry)
         .map_err(|e| format!("schema heal {}: {}", toml_path.display(), e))?;
 
     let instance: InstanceDefinition = healed
@@ -1675,11 +1675,26 @@ pub fn load_instance_definition_with_defaults(
 /// schema-heal + template-merge pipeline as the path-based loader so
 /// a Fjall-sourced entity is byte-for-byte equivalent to a
 /// TOML-sourced one.
+/// Typed definition from an already-parsed document (the bulk loader's
+/// pre-parse pool produces the value; this is the only other work left).
+pub fn load_instance_definition_from_value(
+    value: toml::Value,
+) -> Result<InstanceDefinition, String> {
+    let registry = eustress_common::class_schema::ClassSchemaRegistry::builtin();
+    let healed = eustress_common::class_schema::heal_instance_value(value, registry)
+        .map_err(|e| format!("schema heal (from value): {}", e))?;
+    let instance: InstanceDefinition = healed
+        .value
+        .try_into()
+        .map_err(|e: toml::de::Error| format!("deserialize merged (from value): {}", e))?;
+    Ok(instance)
+}
+
 pub fn load_instance_definition_from_str(
     content: &str,
 ) -> Result<InstanceDefinition, String> {
-    let registry = eustress_common::class_schema::ClassSchemaRegistry::from_builtin();
-    let healed = eustress_common::class_schema::heal_instance_from_str(content, &registry)
+    let registry = eustress_common::class_schema::ClassSchemaRegistry::builtin();
+    let healed = eustress_common::class_schema::heal_instance_from_str(content, registry)
         .map_err(|e| format!("schema heal (from str): {}", e))?;
     let instance: InstanceDefinition = healed
         .value
@@ -3411,6 +3426,17 @@ pub fn apply_splat_colliders(
 /// makes it idempotent and prevents a double-spawn if any other path did
 /// materialise the folder. The `.ply` is read straight off disk, so it works
 /// for pre-existing imports with no schema migration.
+/// Result of the off-thread splat discovery: every `_instance.toml` under
+/// `Workspace` whose text carries a `[gaussian_splats]` section, as
+/// `(disk path, text)`, plus the number of instance files inspected.
+#[cfg(feature = "gaussian-splatting")]
+pub struct GsDiscovery {
+    hits: Vec<(std::path::PathBuf, String)>,
+    inspected: usize,
+    /// `"fjall tree"` or `"disk walk"`, for the summary line.
+    source: &'static str,
+}
+
 #[cfg(feature = "gaussian-splatting")]
 pub fn load_disk_gaussian_splats_on_open(
     mut commands: Commands,
@@ -3422,7 +3448,41 @@ pub fn load_disk_gaussian_splats_on_open(
     mut registry: ResMut<super::file_loader::SpaceFileRegistry>,
     space_root: Res<super::SpaceRoot>,
     mut last_space: Local<Option<PathBuf>>,
+    // Discovery in flight for `last_space`, if any. Polled each frame.
+    mut in_flight: Local<Option<std::sync::mpsc::Receiver<GsDiscovery>>>,
 ) {
+    // ── Phase B (main thread): a finished discovery → spawn its hits ─────
+    //
+    // PERF (load time): discovery used to run synchronously inside this
+    // system. On Super Station it walked 106,356 `_instance.toml` files for
+    // 39.4 s on the main thread — and found zero splats. It now runs on a
+    // worker (Phase A below) and this system only polls; the window keeps
+    // rendering and the priority spawn overlaps with the scan instead of
+    // waiting behind it.
+    if let Some(rx) = in_flight.as_ref() {
+        match rx.try_recv() {
+            Ok(found) => {
+                *in_flight = None;
+                spawn_discovered_splats(
+                    found,
+                    &space_root.0,
+                    &mut commands,
+                    &asset_server,
+                    &mut materials,
+                    &mut material_registry,
+                    &mut mesh_cache,
+                    &mut decal_materials,
+                    &mut registry,
+                );
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                *in_flight = None;
+                warn!("🌫️ GS persistence scan: discovery worker vanished without a result");
+            }
+        }
+        return;
+    }
     // Run once per genuine Space open (mirrors the binary boot-load latch).
     if last_space.as_deref() == Some(space_root.0.as_path()) {
         return;
@@ -3448,41 +3508,71 @@ pub fn load_disk_gaussian_splats_on_open(
     }
     *last_space = Some(space_root.0.clone());
 
-    // Best-effort parent: the Workspace service entity if the file loader has
-    // registered it (by `_service.toml` path or by directory path); else spawn
-    // at the root — `tag_splats_for_explorer` still nests the cloud under
-    // Workspace in the Explorer, and rendering needs no parent.
-    let workspace_entity = registry
-        .get_entity(&workspace.join("_service.toml"))
-        .or_else(|| registry.get_entity(&workspace));
+    // ── Phase A (worker thread): discovery ──────────────────────────────
+    //
+    // Two sources, same output. When a Fjall DB is active the `tree`
+    // partition already holds every `_instance.toml`'s bytes (the reconcile
+    // keeps it current), so the scan is ONE sequential pass over the LSM
+    // tree instead of 100K+ directory opens on NTFS. A legacy disk Space
+    // keeps the rayon level-order walk. Either way it runs off the main
+    // thread and the result is polled above.
+    let (tx, rx) = std::sync::mpsc::channel::<GsDiscovery>();
+    let space_root_for_worker = space_root.0.clone();
+    let db = super::active_db::db_arc();
+    let spawned = std::thread::Builder::new()
+        .name("eustress-gs-discovery".into())
+        .spawn(move || {
+            let found = match db {
+                Some(db) => discover_splats_in_tree(db.as_ref(), &space_root_for_worker),
+                None => discover_splats_on_disk(&space_root_for_worker.join("Workspace")),
+            };
+            let _ = tx.send(found);
+        });
+    match spawned {
+        Ok(_) => *in_flight = Some(rx),
+        Err(e) => warn!("🌫️ GS persistence scan: could not spawn discovery worker: {e}"),
+    }
+}
 
-    // Walk the DISK Workspace (GaussianSplats are disk-authoritative). A cheap
-    // substring pre-filter avoids full-parsing every non-splat instance.
-    //
-    // Watchdog: this is a SERIAL walk that `read_to_string`s every
-    // `_instance.toml` under Workspace. On a Space with a large disk tree it
-    // is minutes of main-thread work, so it gets its own guard — the popup
-    // then names the splat scan rather than the enclosing load.
-    let _phase = super::load_phase::scope(
-        "gaussian-splat-scan",
-        format!("scanning {} for splat clouds", workspace.display()),
-    );
-    // Discovery is split from spawning so the expensive half can run off the
-    // serial path. Spawning needs `commands` / `registry` / asset resources,
-    // none of which are usable from a worker thread — but reading and filtering
-    // is pure I/O, and on a large Space that is effectively all of the cost
-    // (a Space with 1.3M `_instance.toml` files pays 1.3M sequential reads to
-    // usually find zero splats).
-    //
-    // Phase A — parallel walk + read + filter. Level-order so rayon can read a
-    // whole directory level at once; `file_type()` avoids the extra stat that
-    // `is_dir()` costs per entry.
+/// Discovery against the Fjall `tree` partition (DB-primary Space).
+#[cfg(feature = "gaussian-splatting")]
+fn discover_splats_in_tree(db: &dyn eustress_worlddb::WorldDb, space_root: &Path) -> GsDiscovery {
+    let mut out = GsDiscovery { hits: Vec::new(), inspected: 0, source: "fjall tree" };
+    let it = match db.iter_tree() {
+        Ok(it) => it,
+        Err(e) => {
+            warn!("🌫️ GS persistence scan: iter_tree failed ({e}); falling back to the disk walk");
+            return discover_splats_on_disk(&space_root.join("Workspace"));
+        }
+    };
+    for entry in it {
+        let Ok((rel, bytes)) = entry else { continue };
+        // Only `Workspace/**/_instance.toml` can hold a splat cloud.
+        if !(rel.starts_with("Workspace/") || rel.starts_with("Workspace\\"))
+            || !rel.ends_with("_instance.toml")
+        {
+            continue;
+        }
+        out.inspected += 1;
+        // Byte-level pre-filter: a `[gaussian_splats]` section is the only
+        // marker, and most Spaces have none.
+        if !bytes.windows(15).any(|w| w == b"gaussian_splats") {
+            continue;
+        }
+        let Ok(content) = String::from_utf8(bytes) else { continue };
+        out.hits.push((space_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)), content));
+    }
+    out
+}
+
+/// Discovery by walking the disk `Workspace` tree (legacy, non-DB Space).
+/// Rayon level-order: a whole directory level is read in parallel, and
+/// `file_type()` avoids the extra stat that `is_dir()` costs per entry.
+#[cfg(feature = "gaussian-splatting")]
+fn discover_splats_on_disk(workspace: &Path) -> GsDiscovery {
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-    let mut found_toml = 0usize;
-    let mut replaced = 0usize;
-    let mut spawned = 0usize;
-    let mut gs_hits: Vec<(std::path::PathBuf, String)> = Vec::new();
-    let mut frontier: Vec<std::path::PathBuf> = vec![workspace];
+    let mut out = GsDiscovery { hits: Vec::new(), inspected: 0, source: "disk walk" };
+    let mut frontier: Vec<std::path::PathBuf> = vec![workspace.to_path_buf()];
     while !frontier.is_empty() {
         struct LevelScan {
             subdirs: Vec<std::path::PathBuf>,
@@ -3492,13 +3582,9 @@ pub fn load_disk_gaussian_splats_on_open(
         let scans: Vec<LevelScan> = frontier
             .par_iter()
             .map(|dir| {
-                let mut out = LevelScan {
-                    subdirs: Vec::new(),
-                    toml_seen: 0,
-                    hits: Vec::new(),
-                };
+                let mut lvl = LevelScan { subdirs: Vec::new(), toml_seen: 0, hits: Vec::new() };
                 let Ok(read_dir) = std::fs::read_dir(dir) else {
-                    return out;
+                    return lvl;
                 };
                 for entry in read_dir.flatten() {
                     let path = entry.path();
@@ -3507,110 +3593,132 @@ pub fn load_disk_gaussian_splats_on_open(
                         .map(|t| t.is_dir())
                         .unwrap_or_else(|_| path.is_dir());
                     if is_dir {
-                        // Skip `.eustress` (trash + world.fjalldb) — only the
+                        // Skip `.eustress` (trash + world.fjalldb): only the
                         // human tree.
                         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                         if !name.starts_with('.') {
-                            out.subdirs.push(path);
+                            lvl.subdirs.push(path);
                         }
                         continue;
                     }
                     if path.file_name().and_then(|n| n.to_str()) != Some("_instance.toml") {
                         continue;
                     }
-                    out.toml_seen += 1;
+                    lvl.toml_seen += 1;
                     let Ok(content) = std::fs::read_to_string(&path) else {
                         continue;
                     };
-                    // Only GaussianSplats carry a `[gaussian_splats]` section.
                     if content.contains("gaussian_splats") {
-                        out.hits.push((path, content));
+                        lvl.hits.push((path, content));
                     }
                 }
-                out
+                lvl
             })
             .collect();
         frontier = Vec::new();
         for scan in scans {
-            found_toml += scan.toml_seen;
-            gs_hits.extend(scan.hits);
+            out.inspected += scan.toml_seen;
+            out.hits.extend(scan.hits);
             frontier.extend(scan.subdirs);
         }
     }
-    let found_gs = gs_hits.len();
+    out
+}
 
-    // Phase B — serial spawn over the hit list, which is empty on almost every
-    // Space. Body is unchanged; only what feeds it moved.
-    {
-        for (path, content) in gs_hits {
-            // In DB-primary mode the file loader DOES spawn this GS folder — but
-            // WITHOUT a cloud: the `[gaussian_splats]` section is lost through the
-            // Fjall core/tree, and the folder-spawn never re-reads it from disk
-            // (confirmed at runtime — the entity is registered, yet no cloud or
-            // collider attaches and nothing renders). Despawn that cloudless husk,
-            // if present, then re-spawn a COMPLETE instance straight from disk
-            // below — which routes through `spawn_instance`'s GaussianSplats arm
-            // and attaches the real radiance-field cloud + collider.
-            if let Some(old) = registry.get_entity(&path) {
-                commands.entity(old).despawn();
-                replaced += 1;
-            }
-            match spawn_instance_from_toml_str(
-                &mut commands,
-                &asset_server,
-                &mut materials,
-                &mut material_registry,
-                &mut mesh_cache,
-                &mut decal_materials,
-                path.clone(),
-                &content,
-            ) {
-                Ok(entity) => {
-                    // Mirror the watcher's post-spawn bookkeeping so the Explorer
-                    // classifies the entity and disk move/delete keep working.
-                    commands.entity(entity).insert(super::file_loader::LoadedFromFile {
+/// Phase B (main thread): spawn every discovered splat cloud. Body unchanged
+/// from the synchronous version; only what feeds it moved to a worker.
+#[cfg(feature = "gaussian-splatting")]
+#[allow(clippy::too_many_arguments)]
+fn spawn_discovered_splats(
+    found: GsDiscovery,
+    space_root: &Path,
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    materials: &mut Assets<StandardMaterial>,
+    material_registry: &mut super::material_loader::MaterialRegistry,
+    mesh_cache: &mut PrimitiveMeshCache,
+    decal_materials: &mut Assets<ForwardDecalMaterial<StandardMaterial>>,
+    registry: &mut super::file_loader::SpaceFileRegistry,
+) {
+    let workspace = space_root.join("Workspace");
+    // Best-effort parent: the Workspace service entity if the file loader has
+    // registered it (by `_service.toml` path or by directory path); else spawn
+    // at the root. `tag_splats_for_explorer` still nests the cloud under
+    // Workspace in the Explorer, and rendering needs no parent.
+    let workspace_entity = registry
+        .get_entity(&workspace.join("_service.toml"))
+        .or_else(|| registry.get_entity(&workspace));
+    let found_gs = found.hits.len();
+    let mut replaced = 0usize;
+    let mut spawned = 0usize;
+    for (path, content) in found.hits {
+        // In DB-primary mode the file loader DOES spawn this GS folder, but
+        // WITHOUT a cloud: the `[gaussian_splats]` section is lost through the
+        // Fjall core/tree, and the folder-spawn never re-reads it from disk
+        // (confirmed at runtime: the entity is registered, yet no cloud or
+        // collider attaches and nothing renders). Despawn that cloudless husk,
+        // if present, then re-spawn a COMPLETE instance straight from the text
+        // below, which routes through `spawn_instance`'s GaussianSplats arm
+        // and attaches the real radiance-field cloud + collider.
+        if let Some(old) = registry.get_entity(&path) {
+            commands.entity(old).despawn();
+            replaced += 1;
+        }
+        match spawn_instance_from_toml_str(
+            commands,
+            asset_server,
+            materials,
+            material_registry,
+            mesh_cache,
+            decal_materials,
+            path.clone(),
+            &content,
+        ) {
+            Ok(entity) => {
+                // Mirror the watcher's post-spawn bookkeeping so the Explorer
+                // classifies the entity and disk move/delete keep working.
+                commands.entity(entity).insert(super::file_loader::LoadedFromFile {
+                    path: path.clone(),
+                    file_type: super::file_loader::FileType::Toml,
+                    service: "Workspace".to_string(),
+                });
+                // Best-effort parent (see above). No parent still renders and
+                // Explorer-nests via `tag_splats_for_explorer`.
+                if let Some(pe) = workspace_entity {
+                    commands.entity(entity).insert(ChildOf(pe));
+                }
+                let name = path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("SplatCloud")
+                    .to_string();
+                registry.register(
+                    path.clone(),
+                    entity,
+                    super::file_loader::FileMetadata {
                         path: path.clone(),
                         file_type: super::file_loader::FileType::Toml,
                         service: "Workspace".to_string(),
-                    });
-                    // Best-effort parent (see above). No parent → still renders +
-                    // Explorer-nests via `tag_splats_for_explorer`.
-                    if let Some(pe) = workspace_entity {
-                        commands.entity(entity).insert(ChildOf(pe));
-                    }
-                    let name = path
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("SplatCloud")
-                        .to_string();
-                    registry.register(
-                        path.clone(),
-                        entity,
-                        super::file_loader::FileMetadata {
-                            path: path.clone(),
-                            file_type: super::file_loader::FileType::Toml,
-                            service: "Workspace".to_string(),
-                            name,
-                            size: 0,
-                            modified: std::time::SystemTime::now(),
-                            children: Vec::new(),
-                        },
-                    );
-                    spawned += 1;
-                    info!("🌫️ GS persistence: re-spawned disk GaussianSplats on open: {:?}", path);
-                }
-                Err(e) => {
-                    warn!("GS persistence: failed to re-spawn disk GaussianSplats {:?}: {}", path, e);
-                }
+                        name,
+                        size: 0,
+                        modified: std::time::SystemTime::now(),
+                        children: Vec::new(),
+                    },
+                );
+                spawned += 1;
+                info!("🌫️ GS persistence: re-spawned disk GaussianSplats on open: {:?}", path);
+            }
+            Err(e) => {
+                warn!("GS persistence: failed to re-spawn disk GaussianSplats {:?}: {}", path, e);
             }
         }
     }
-    // One-shot scan summary (always, even at zero) — the definitive diagnostic
+    // One-shot scan summary (always, even at zero): the definitive diagnostic
     // of what the open-time GS pass saw.
     info!(
-        "🌫️ GS persistence scan: {} _instance.toml, {} gaussian_splats, {} cloudless-replaced, {} spawned (parent={:?})",
-        found_toml, found_gs, replaced, spawned, workspace_entity
+        "🌫️ GS persistence scan ({}): {} _instance.toml, {} gaussian_splats, {} cloudless-replaced, {} spawned (parent={:?})",
+        found.source, found.inspected, found_gs, replaced, spawned, workspace_entity
     );
 }
 

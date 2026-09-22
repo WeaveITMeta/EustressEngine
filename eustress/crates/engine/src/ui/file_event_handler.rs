@@ -322,6 +322,17 @@ fn do_save_space(world: &mut World) {
     space_ops::save_space(world);
     save_terrain_to_disk(world);
 
+    // The title asterisk and the exit prompt count edits since this point.
+    let sequence = world
+        .get_resource::<crate::undo::UndoStack>()
+        .map(|u| u.sequence())
+        .unwrap_or(0);
+    if let Some(mut state) = world.get_resource_mut::<crate::ui::StudioState>() {
+        state.saved_undo_sequence = sequence;
+        state.has_unsaved_changes = false;
+        state.snapshot_status = format!("Snapshot {}", chrono::Local::now().format("%H:%M"));
+    }
+
     // Snapshot the identity on the main thread so the background commit
     // attributes to the logged-in user even if a logout races with the
     // commit.
@@ -578,6 +589,32 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
     // Auto-capture thumbnail from viewport if none exists
     capture_thumbnail_from_viewport(world, &universe_root);
 
+    // Moderation inputs, built here with the World in hand: the dossier the
+    // Gallery's text classifier reads, and the capture orbit its judge looks
+    // at. The orbit runs over the next frames; the upload thread waits on it.
+    let listing = crate::moderation_dossier::DossierListing {
+        name: if request.experience_name.trim().is_empty() {
+            universe_root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".to_string())
+        } else {
+            request.experience_name.trim().to_string()
+        },
+        description: request.description.trim().to_string(),
+        genre: if request.genre.trim().is_empty() { "All".to_string() } else { request.genre.trim().to_string() },
+        is_public: request.is_public,
+        open_source: request.open_source,
+        studio_editable: request.studio_editable,
+    };
+    let dossier = crate::moderation_dossier::build_dossier(world, &universe_root, listing);
+    tracing::info!(
+        "Moderation dossier: {} entities, {} strings, {} scripts, {} capture pose(s)",
+        dossier.digest.entity_count, dossier.strings.len(), dossier.scripts.len(), dossier.captures.planned
+    );
+    let capture_status = crate::moderation_dossier::start_capture_job(
+        world,
+        dossier.captures.poses.clone(),
+        universe_root.join(".eustress").join("moderation"),
+    );
+
     // Setup progress tracking
     let progress = std::sync::Arc::new(std::sync::Mutex::new(PublishProgress {
         stage: "Packaging...".to_string(),
@@ -594,6 +631,7 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
     let is_space_only = request.space_only;
     let space_root_clone = space_root.clone();
     std::thread::spawn(move || {
+        let mut dossier = dossier;
         let result = if request.space_only {
             execute_space_upload(&space_root_clone, &universe_root, &request, &token, &progress_for_thread)
         } else {
@@ -601,11 +639,22 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
         };
         match result {
             Ok(sim_id) => {
+                // The listing exists and the content is stored. Review is a
+                // separate step so a capture that never lands, or an API that
+                // is briefly down, degrades to "review pending" rather than
+                // failing a publish whose bytes are already up.
+                let summary = match submit_for_review(&sim_id, &token, &universe_root, &mut dossier, &capture_status, !request.space_only, &progress_for_thread) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("Review submission incomplete for {}: {}", sim_id, e);
+                        format!("Published {}. Review pending: {}", sim_id, e)
+                    }
+                };
                 let mut p = progress_for_thread.lock().unwrap();
-                p.stage = format!("Published: {}", sim_id);
+                p.stage = summary;
                 p.percent = 100.0;
                 p.complete = true;
-                tracing::info!("Published successfully: {}", sim_id);
+                tracing::info!("Published successfully: {} ({})", sim_id, p.stage);
             }
             Err(e) => {
                 let mut p = progress_for_thread.lock().unwrap();
@@ -770,6 +819,11 @@ fn execute_publish_upload(
         "description": request.description,
         "genre": request.genre,
         "max_players": 10,
+        // The author's intent; the Gallery lists it only once review approves.
+        "is_public": request.is_public,
+        // The chain-facing content id. The API records it but dedups on its
+        // own R2 etag, since this value is ours to assert.
+        "content_root": format!("blake3:{}", pak_hash),
     });
 
     let resp = ureq::post(&format!("{}/api/simulations/publish", PUBLISH_API))
@@ -925,8 +979,125 @@ fn execute_publish_upload(
     let _ = std::fs::create_dir_all(universe_root.join(".eustress"));
     let _ = std::fs::write(&hash_path, &pak_hash);
 
-    set_progress(progress, "Complete", 100.0);
+    set_progress(progress, "Uploaded", 92.0);
     Ok(sim_id)
+}
+
+/// How long the upload thread waits for the capture orbit before submitting
+/// with whatever landed. Generous next to the orbit's own 20 s budget so the
+/// two do not race; a publish that waited this long has something else wrong.
+const CAPTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// Upload the moderation inputs, submit the listing for review, and poll the
+/// outcome briefly so the notification can say what happened. Runs on the
+/// upload thread after the content is stored.
+///
+/// Everything here is best-effort by design: the listing already exists in
+/// `pending`, and the API's nightly sweep resubmits anything left there, so a
+/// failure costs a slower review rather than a failed publish. The one thing
+/// that must not happen is a listing served without a decision, and that is
+/// enforced server-side, not here.
+fn submit_for_review(
+    sim_id: &str,
+    token: &str,
+    universe_root: &Path,
+    dossier: &mut crate::moderation_dossier::Dossier,
+    capture_status: &std::sync::Arc<std::sync::Mutex<crate::moderation_dossier::CaptureStatus>>,
+    // A full publish binds the dossier to the .pak it just hashed; a Space-only
+    // update leaves content_root empty rather than citing the stale Universe hash.
+    bind_content_root: bool,
+    progress: &ProgressHandle,
+) -> Result<String, String> {
+    let auth = format!("Bearer {}", token);
+
+    // Captures: wait for the orbit, then upload what it produced.
+    set_progress(progress, "Capturing review views...", 93.0);
+    let started = std::time::Instant::now();
+    let paths = loop {
+        if let Ok(s) = capture_status.lock() {
+            if s.done {
+                break s.paths.clone();
+            }
+        }
+        if started.elapsed() > CAPTURE_WAIT {
+            tracing::warn!("Capture orbit did not finish within {:?}; submitting without it", CAPTURE_WAIT);
+            break capture_status.lock().map(|s| s.paths.clone()).unwrap_or_default();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    let mut uploaded = 0usize;
+    for (n, path) in paths.iter().enumerate().take(8) {
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        if bytes.is_empty() {
+            continue;
+        }
+        match ureq::put(&format!("{}/api/simulations/{}/captures/{}", PUBLISH_API, sim_id, n))
+            .set("Authorization", &auth)
+            .set("Content-Type", "image/png")
+            .send_bytes(&bytes)
+        {
+            Ok(_) => uploaded += 1,
+            Err(e) => tracing::warn!("Capture {} upload failed: {}", n, e),
+        }
+    }
+    tracing::info!("Review captures uploaded: {}/{}", uploaded, paths.len());
+
+    // Dossier: bind it to the package that was uploaded, then send it.
+    set_progress(progress, "Submitting for review...", 96.0);
+    if bind_content_root && dossier.content_root.is_none() {
+        if let Ok(h) = std::fs::read_to_string(universe_root.join(".eustress").join(".last_publish_hash")) {
+            let h = h.trim();
+            if !h.is_empty() {
+                dossier.content_root = Some(format!("blake3:{}", h));
+            }
+        }
+    }
+    let dossier_json = serde_json::to_string(dossier).map_err(|e| format!("dossier serialize: {}", e))?;
+    let _ = std::fs::write(universe_root.join(".eustress").join("moderation-dossier.json"), &dossier_json);
+    ureq::put(&format!("{}/api/simulations/{}/dossier", PUBLISH_API, sim_id))
+        .set("Authorization", &auth)
+        .set("Content-Type", "application/json")
+        .send_string(&dossier_json)
+        .map_err(|e| format!("dossier upload: {}", e))?;
+
+    ureq::post(&format!("{}/api/simulations/{}/submit", PUBLISH_API, sim_id))
+        .set("Authorization", &auth)
+        .call()
+        .map_err(|e| format!("submit: {}", e))?;
+
+    // Poll briefly. Triage is sub-second; the judge takes a few seconds; the
+    // agent can take longer, and "pending" is an honest answer for that.
+    set_progress(progress, "Under review...", 98.0);
+    let mut last: Option<serde_json::Value> = None;
+    for _ in 0..12 {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let Ok(resp) = ureq::get(&format!("{}/api/simulations/{}/moderation", PUBLISH_API, sim_id))
+            .set("Authorization", &auth)
+            .call()
+        else {
+            continue;
+        };
+        let Ok(body) = resp.into_json::<serde_json::Value>() else { continue };
+        let status = body["status"].as_str().unwrap_or("pending").to_string();
+        last = Some(body);
+        if !matches!(status.as_str(), "pending" | "classifying") {
+            break;
+        }
+    }
+    let body = last.unwrap_or(serde_json::json!({}));
+    let status = body["status"].as_str().unwrap_or("pending");
+    let rating = body["rating"].as_str().unwrap_or("");
+    let edit = body["suggested_edit"].as_str().unwrap_or("");
+    let summary = match status {
+        "approved" if dossier.listing.is_public => format!("Published {}: listed in the Gallery ({})", sim_id, rating),
+        "approved" => format!("Published {}: approved, private", sim_id),
+        "rejected" => format!("Published {}: not listed. {}", sim_id, if edit.is_empty() { "See the review notes in your projects." } else { edit }),
+        "changes_requested" => format!("Published {}: changes requested before listing. {}", sim_id, edit),
+        "held" | "appealed" => format!("Published {}: held for human review", sim_id),
+        "quarantined" => format!("Published {}: under legal review", sim_id),
+        _ => format!("Published {}: review pending", sim_id),
+    };
+    Ok(summary)
 }
 
 /// Publish a single Space incrementally to an already-published Universe.

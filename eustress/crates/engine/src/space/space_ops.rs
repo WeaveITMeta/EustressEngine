@@ -888,6 +888,7 @@ pub struct SpaceRescanNeeded(pub bool);
 /// re-running the file loader system logic directly.
 pub fn apply_space_rescan(
     mut rescan: ResMut<SpaceRescanNeeded>,
+    pending_open: Res<crate::space::world_db_plugin::PendingWorldDbOpen>,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -904,6 +905,13 @@ pub fn apply_space_rescan(
     active_source: Res<crate::space::space_source::ActiveSpaceSource>,
 ) {
     if !rescan.0 { return; }
+    // The Space's DB open now completes on a worker across frames. A rescan
+    // that ran before it settled would read the previous (or disk) source
+    // and load the wrong tree. Leave the request armed; it fires the first
+    // frame the open is settled.
+    if pending_open.0.as_ref().map(|p| !p.installed()).unwrap_or(false) {
+        return;
+    }
     rescan.0 = false;
 
     let space_path = &space_root.0;

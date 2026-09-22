@@ -51,6 +51,273 @@ use super::SpaceRoot;
 #[derive(Resource, Default)]
 pub struct WorldDbHandle(pub Option<Arc<dyn WorldDb>>);
 
+/// A Space open whose disk work (TOML reconcile, core bake, voxel import) is
+/// running on a worker thread. `open_world_db_on_space_change` installs the
+/// DB the frame the worker reports back.
+///
+/// PERF (load time): those three steps ran synchronously inside the open, on
+/// the main thread — 22.2 s of `db-reconcile` on Super Station with the
+/// window frozen, the bridge self-test timing out behind it, and no way to
+/// show progress. Ordering is preserved exactly (nothing reads the DB until
+/// it is installed; the loaders are gated on [`world_db_open_settled`]), the
+/// work is the same, only the thread changed.
+#[derive(Resource, Default)]
+pub struct PendingWorldDbOpen(pub Option<PendingOpen>);
+
+/// What the open worker ("eustress-space-open") sends back, in order.
+pub enum OpenWorkerMsg {
+    /// The DB can be installed: the one-time bake and voxel import are done
+    /// (or were already done). `cores` is the capped instance-core count
+    /// for the streaming decision, and `prescan` the loader's entry tree,
+    /// both taken off the main thread.
+    Ready {
+        cores: usize,
+        prescan: Option<super::file_loader::PreScan>,
+    },
+    /// The disk → tree reconcile finished. `report` lists what it changed
+    /// so the scene already loading can apply it as hot updates.
+    Reconciled(ReconcileReport),
+}
+
+/// What a disk → tree reconcile changed, by Space-relative path.
+#[derive(Default)]
+pub struct ReconcileReport {
+    pub reconciled: usize,
+    /// Files whose disk bytes were newer than the tree's: put into the tree.
+    pub put: Vec<String>,
+    /// Tree entries whose file is gone from disk: pruned.
+    pub removed: Vec<String>,
+}
+
+pub struct PendingOpen {
+    /// The Space this open belongs to; a switch mid-open abandons it.
+    pub root: std::path::PathBuf,
+    pub world_db_dir: std::path::PathBuf,
+    /// Taken at install; `None` once the DB is the active source.
+    pub db: Option<Arc<dyn WorldDb>>,
+    /// Worker → main. `Receiver` is `Send` but not `Sync`; a Bevy resource
+    /// must be both, so it lives behind a `Mutex` (uncontended: only the
+    /// main thread ever polls it).
+    pub rx: std::sync::Mutex<std::sync::mpsc::Receiver<OpenWorkerMsg>>,
+    /// Keeps the `space-open` watchdog phase open until installation.
+    pub _phase: Option<super::load_phase::PhaseGuard>,
+}
+
+impl PendingOpen {
+    /// The DB is installed; only the reconcile report is still to come.
+    pub fn installed(&self) -> bool {
+        self.db.is_none()
+    }
+}
+
+/// Cap the streaming decision counts against (mirrors the file loader's
+/// `BIG_SPACE_THRESHOLD + 1` and `ResidencyConfig::big_space_threshold`).
+const STREAMING_COUNT_CAP: usize = 100_001;
+
+/// Threads for the reconcile's disk walk: a quarter of the machine, at
+/// least two, at most four. It runs behind the loader, so it trades its own
+/// speed for the drain's.
+fn reconcile_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get() / 4)
+        .unwrap_or(2)
+        .clamp(2, 4)
+}
+
+/// Run condition: true when NO Space open is in flight, so a loader may
+/// read the Space through its final source. While an open is pending the
+/// `ActiveSpaceSource` still points at the previous (or disk) source and a
+/// loader that ran would load the wrong thing.
+/// The DB for the current Space is installed as the active source (or there
+/// is no DB open in flight). The reconcile may still be running on its
+/// worker; its result arrives as hot updates, so nothing waits for it.
+pub fn world_db_open_settled(pending: Res<PendingWorldDbOpen>) -> bool {
+    pending.0.as_ref().map(|p| p.installed()).unwrap_or(true)
+}
+
+/// Bake `tree` entities into Morton `entities` cores, then seed the `voxels`
+/// partition from disk chunks. Runs on the open worker, in this order, right
+/// after the reconcile (so the tree is current) and before anything reads
+/// `count_instance_cores_capped` for the streaming decision.
+///
+/// `bake_once` is one-time per Space (marker under `.eustress/`) and additive.
+/// The voxel import is idempotent: a non-empty partition is an O(1) skip; an
+/// empty one with chunk files on disk is seeded; no `voxel_chunks/` dir is a
+/// silent no-op (most Spaces). Both had to complete BEFORE the DB handle is
+/// installed and they still do: `finish_pending_open` runs only after this.
+fn bake_and_import_voxels(space_root: &std::path::Path, db: &dyn WorldDb) {
+    super::bake_cores::bake_once(space_root, db);
+    import_voxels_if_absent(space_root, db);
+}
+
+/// Turn a reconcile report into watcher events for the scene that is
+/// already loading: puts as Modified (re-classified to Created downstream
+/// when no entity is registered for the path), prunes as Removed.
+fn inject_reconcile_changes(
+    space_root: &std::path::Path,
+    report: &ReconcileReport,
+    out: &mut Vec<super::file_watcher::FileChangeEvent>,
+) {
+    use super::file_watcher::{FileChangeEvent, FileChangeType};
+    let mut pushed = 0usize;
+    for (rels, kind) in [
+        (&report.put, FileChangeType::Modified),
+        (&report.removed, FileChangeType::Removed),
+    ] {
+        for rel in rels {
+            let mut path = space_root.to_path_buf();
+            for seg in rel.split('/').filter(|s| !s.is_empty()) {
+                path.push(seg);
+            }
+            let Some(file_type) = super::file_loader::FileType::from_path(&path) else {
+                continue;
+            };
+            let service = rel.split('/').next().unwrap_or("").to_string();
+            out.push(FileChangeEvent { path, file_type, service, change_type: kind });
+            pushed += 1;
+        }
+    }
+    if pushed > 0 {
+        info!(
+            target: "eustress_engine::world_db",
+            put = report.put.len(),
+            removed = report.removed.len(),
+            "reconcile finished behind the loader — {} change(s) handed to the file-change pipeline as hot updates",
+            pushed
+        );
+    }
+}
+
+fn import_voxels_if_absent(space_root: &std::path::Path, db: &dyn WorldDb) {
+    if !db.has_voxel_chunks() {
+        match eustress_worlddb::import::import_voxel_chunks(db, space_root) {
+            Ok(s) if s.chunks_imported > 0 || s.skipped > 0 => {
+                info!(
+                    target: "eustress_engine::world_db",
+                    chunks = s.chunks_imported,
+                    bytes = s.bytes_imported,
+                    skipped = s.skipped,
+                    space = %space_root.display(),
+                    "voxel reconcile: seeded Fjall `voxels` partition from \
+                     Workspace/Terrain/voxel_chunks on open"
+                );
+            }
+            Ok(_) => {
+                // No voxel_chunks dir / empty dir — the common case.
+            }
+            Err(e) => {
+                warn!(
+                    target: "eustress_engine::world_db",
+                    error = %e,
+                    space = %space_root.display(),
+                    "voxel reconcile: disk → `voxels` partition import failed; \
+                     imported terrain will not render this Space"
+                );
+            }
+        }
+    }
+}
+
+/// The install tail of a Space open: subscribe, switch the content source to
+/// Fjall, run the load-vs-render diagnostic count, expose the DataStore and
+/// install the DB into the global funnel. Main thread only.
+fn finish_pending_open(
+    space_root: &std::path::Path,
+    world_db_dir: &std::path::Path,
+    db: Arc<dyn WorldDb>,
+    handle: &mut WorldDbHandle,
+    sub: &mut WorldDbSubscription,
+    active_source: &mut super::space_source::ActiveSpaceSource,
+    datastore: &mut WorldDataStore,
+) {
+    let subscription = db.subscribe(Filter::any());
+    info!(
+        target: "eustress_engine::world_db",
+        dir = %world_db_dir.display(),
+        "WorldDb opened — Space content source = FJALL"
+    );
+    *active_source = super::space_source::ActiveSpaceSource(std::sync::Arc::new(
+        super::space_source::FjallSource::new(db.clone()),
+    ));
+
+    // ── DIAGNOSTIC: prove the load-vs-render pipeline split ──
+    // The scene loader now sources from this Fjall tree. The STREAMING render
+    // pipeline (StreamingPlugin) does a separate `std::fs` scan of the disk
+    // Workspace and never reads this tree. If the tree holds instances that
+    // aren't also on disk (e.g. generator wrote direct-to-Fjall), the scene
+    // loader "loads" them but the streaming grid never gets them, so the
+    // radius gate spawns/renders zero. Count the tree's instance files here so
+    // this line and the streaming scan's "loaded N" line sit side-by-side in
+    // the log and the divergence is unambiguous.
+    match db.iter_tree() {
+        Ok(it) => {
+            let mut total_files = 0usize;
+            let mut instance_files = 0usize;
+            for entry in it {
+                match entry {
+                    Ok((path, _)) => {
+                        total_files += 1;
+                        if path.ends_with("_instance.toml")
+                            || path.ends_with(".part.toml")
+                            || path.ends_with(".instance.toml")
+                            || path.ends_with(".glb.toml")
+                        {
+                            instance_files += 1;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            target: "eustress_engine::world_db",
+                            error = %e,
+                            "iter_tree entry error during diagnostic count"
+                        );
+                    }
+                }
+            }
+            warn!(
+                target: "eustress_engine::world_db",
+                tree_total_files = total_files,
+                tree_instance_files = instance_files,
+                space = %space_root.display(),
+                "FJALL SOURCE ACTIVE: scene loader reads these from the DB. \
+                 The StreamingPlugin render grid does a SEPARATE std::fs \
+                 scan of the disk Workspace and will NOT see Fjall-only \
+                 instances — compare this count against the streaming \
+                 'initial scan loaded N instances' line. A large gap == \
+                 the load-but-no-render bug (rendering pipeline is still \
+                 disk-fed)."
+            );
+        }
+        Err(e) => {
+            warn!(
+                target: "eustress_engine::world_db",
+                error = %e,
+                "iter_tree failed during diagnostic instance count"
+            );
+        }
+    }
+    // Phase 8 (WS-1): expose the Roblox-parity DataStore for this Space to
+    // the script bindings. Same Arc as the handle/source so all three view
+    // one consistent DB.
+    datastore.0 = Some(eustress_worlddb::DataStoreService::new(db.clone()));
+    info!(
+        target: "eustress_engine::world_db",
+        "DataStoreService ready — scripts can now GetDataStore/GetOrderedDataStore"
+    );
+    // Install the DB into the global funnel handle: from here every
+    // `load_instance_definition` / `load_gui_definition` /
+    // `write_instance_definition` call site (the ~25 edit/tool/hot-reload
+    // sites that only carry an absolute path) reads/writes the binary ECS
+    // record in this DB instead of disk TOML.
+    super::active_db::set(db.clone(), space_root.to_path_buf());
+    handle.0 = Some(db);
+    sub.0 = Some(subscription);
+    // LOAD-PHASE milestone 2: Fjall keyspace recovery + auto-convert +
+    // TOML↔DB reconcile are all complete and the DB is installed as the live
+    // funnel/source.
+    super::load_phase::mark("db-recovery-complete");
+}
+
 /// Live subscription to the WorldDb change-stream. Drained each frame
 /// by [`drain_change_stream`] into the public `Events<WorldDbCommit>`.
 #[derive(Resource, Default)]
@@ -124,7 +391,7 @@ const MIRROR_PER_FRAME_BUDGET: usize = 2_048;
 /// files are left alone, so the change-stream and `#bin` caches aren't
 /// churned. Mirrors the out-of-band `reseed-space-subtree` bin, run
 /// automatically. Returns the number of files reconciled.
-fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb) -> usize {
+fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb) -> ReconcileReport {
     // PERF (load time): re-reading every `_instance.toml` on every open is the
     // dominant cost on a large imported Space — Vehicle Simulator's ~161K files
     // are ~57s of pure `std::fs::read` every open, even when nothing changed.
@@ -142,7 +409,7 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
             "disk→tree reconcile SKIPPED (EUSTRESS_SKIP_DISK_SCANS) — closed-engine \
              disk edits will not be ingested for this open"
         );
-        return 0;
+        return ReconcileReport::default();
     }
 
     let marker = space_root.join(".eustress").join("last_reconcile");
@@ -328,12 +595,15 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
     // Phase 3 — funnel the (few) writes back to a single thread so the change-
     // stream order is deterministic and `reconciled` stays exact.
     let mut reconciled = 0usize;
+    let mut put_paths: Vec<String> = Vec::new();
     for (rel, disk_bytes) in &changed {
         if db.put_file(rel, disk_bytes).is_ok() {
             let _ = db.delete_file(&format!("{rel}#bin"));
             reconciled += 1;
+            put_paths.push(rel.clone());
         }
     }
+    let mut removed_paths: Vec<String> = Vec::new();
     // Phase 4 — PRUNE. Everything above is additive: a .toml that CHANGED or is
     // NEW gets written into the tree, and a .toml that was DELETED on disk was
     // simply never visited, so its tree entry survived forever. That is how a
@@ -373,6 +643,7 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
                     if db.delete_file(&rel).is_ok() {
                         let _ = db.delete_file(&format!("{rel}#bin"));
                         pruned += 1;
+                        removed_paths.push(rel);
                     }
                 }
             }
@@ -390,7 +661,11 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
     // files. A write failure just means the next open does a full pass.
     let _ = std::fs::create_dir_all(space_root.join(".eustress"));
     let _ = std::fs::write(&marker, now_secs.to_string());
-    reconciled + pruned
+    ReconcileReport {
+        reconciled: reconciled + pruned,
+        put: put_paths,
+        removed: removed_paths,
+    }
 }
 
 /// Open / re-open the WorldDb whenever `SpaceRoot` changes (on
@@ -403,14 +678,113 @@ fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb)
 ///    sources every subsequent read from Fjall — zero disk reads,
 ///    ECS+DB primary. On any failure, fall back to [`DiskSource`]
 ///    (the engine stays bootable; never a hard stop).
-fn open_world_db_on_space_change(
+pub fn open_world_db_on_space_change(
     space_root: Res<SpaceRoot>,
     mut handle: ResMut<WorldDbHandle>,
     mut sub: ResMut<WorldDbSubscription>,
     mut active_source: ResMut<super::space_source::ActiveSpaceSource>,
     mut decision: ResMut<WorldDbDecision>,
     mut datastore: ResMut<WorldDataStore>,
+    mut pending: ResMut<PendingWorldDbOpen>,
+    mut injected: ResMut<super::file_watcher::InjectedFileChanges>,
+    mut prescan_out: ResMut<super::file_loader::PendingPreScan>,
 ) {
+    // ── An open is in flight: poll it ───────────────────────────────────
+    if let Some(p) = pending.0.as_ref() {
+        if p.root != space_root.0 {
+            // Space switched mid-open. Abandon the pending record (the worker
+            // finishes against its own `Arc` and simply drops it) and fall
+            // through to start the new Space's open below.
+            info!(
+                target: "eustress_engine::world_db",
+                abandoned = %p.root.display(),
+                "Space switched while its open was pending — abandoning"
+            );
+            pending.0 = None;
+        } else {
+            // Poll into a local first so the lock guard (and the shared borrow
+            // of `pending`) is released before `pending.0` is touched below.
+            // `Err(())` = the worker died (a panic inside the reconcile).
+            let outcome: Option<Result<OpenWorkerMsg, ()>> = match p.rx.lock() {
+                Ok(r) => match r.try_recv() {
+                    Ok(msg) => Some(Ok(msg)),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(())),
+                },
+                Err(_) => Some(Err(())),
+            };
+            let Some(outcome) = outcome else {
+                return; // still running
+            };
+            match outcome {
+                Ok(OpenWorkerMsg::Ready { cores, prescan }) => {
+                    let p = pending.0.as_mut().expect("checked above");
+                    if let Some(db) = p.db.take() {
+                        finish_pending_open(
+                            &p.root,
+                            &p.world_db_dir,
+                            db,
+                            &mut handle,
+                            &mut sub,
+                            &mut active_source,
+                            &mut datastore,
+                        );
+                        super::active_db::preseed_count(STREAMING_COUNT_CAP, cores);
+                        prescan_out.0 = prescan;
+                        // `space-open` completes here; the reconcile keeps
+                        // its own `db-reconcile` phase on the worker.
+                        p._phase.take();
+                    }
+                }
+                Ok(OpenWorkerMsg::Reconciled(report)) => {
+                    let p = pending.0.take().expect("checked above");
+                    if let Some(db) = p.db {
+                        // Never expected (the worker sends Ready first), but
+                        // a report without an install must still install.
+                        finish_pending_open(
+                            &p.root,
+                            &p.world_db_dir,
+                            db,
+                            &mut handle,
+                            &mut sub,
+                            &mut active_source,
+                            &mut datastore,
+                        );
+                    }
+                    inject_reconcile_changes(&p.root, &report, &mut injected.0);
+                }
+                Err(()) => {
+                    let p = pending.0.take().expect("checked above");
+                    if let Some(db) = p.db {
+                        // Install the DB anyway: the tree is whatever it was,
+                        // which is the state a failed synchronous reconcile
+                        // would also have left.
+                        warn!(
+                            target: "eustress_engine::world_db",
+                            space = %p.root.display(),
+                            "space-open worker ended without reporting — installing the DB as-is"
+                        );
+                        finish_pending_open(
+                            &p.root,
+                            &p.world_db_dir,
+                            db,
+                            &mut handle,
+                            &mut sub,
+                            &mut active_source,
+                            &mut datastore,
+                        );
+                    } else {
+                        warn!(
+                            target: "eustress_engine::world_db",
+                            space = %p.root.display(),
+                            "space-open worker ended before its reconcile report — closed-engine disk edits, if any, apply on the next open"
+                        );
+                    }
+                }
+            }
+            return;
+        }
+    }
     // Run the open/seed decision exactly once per Space path. The
     // latch (not `handle.0.is_some()`) is the guard: a failed open or
     // failed seed leaves the handle None, and keying off the handle
@@ -533,184 +907,124 @@ fn open_world_db_on_space_change(
                 .map(|h| h.is_migrated())
                 .unwrap_or(false);
             let _ = migrated; // reconcile runs for migrated Spaces too — disk is the ingest surface
+            // ── Off-thread: reconcile → bake → voxel import ─────────────
+            // These three take `&dyn WorldDb` + a path and touch no ECS
+            // state, so they run on a worker in the SAME order they ran
+            // here. The main thread keeps rendering; `open_world_db_on_
+            // space_change` polls `PendingWorldDbOpen` each frame and runs
+            // the install tail (below, in `finish_pending_open`) the frame
+            // the worker reports. Nothing observes the DB before then: the
+            // loaders are gated on `world_db_open_settled`.
             {
-                // The dominant cost on a large imported Space, and the phase
-                // that wedges the main thread when the disk tree is huge — it
-                // walks every `.toml` under the Space root. Guarded separately
-                // from `space-open` so the popup names the reconcile rather
-                // than just "the load".
-                let _phase = super::load_phase::scope(
-                    "db-reconcile",
-                    format!("scanning disk tree under {}", space_root.0.display()),
-                );
-                let n = reconcile_disk_toml_into_tree(&space_root.0, db.as_ref());
-                if n > 0 {
-                    let _ = db.flush();
-                    info!(
-                        target: "eustress_engine::world_db",
-                        reconciled = n,
-                        space = %space_root.0.display(),
-                        "TOML↔DB reconcile: synced changed disk .toml → Fjall tree on open"
-                    );
-                }
-            }
-
-            // ── Phase 0 — bake `tree` entities into Morton `entities` cores.
-            //
-            // MUST run here: after the reconcile (so the tree is current) and
-            // BEFORE `world_db_binary::load_binary_ecs_instances` makes the
-            // streaming decision. That decision reads
-            // `count_instance_cores_capped`, which counts the `entities`
-            // partition — so a Space whose entities live only in `tree` counts
-            // ~0, is classified SMALL, and eagerly spawns everything instead of
-            // streaming. Measured on a 1.34M-entity Space: ~4.4 ms/entity and a
-            // ~98 minute projected load, with residency idle throughout.
-            //
-            // One-time per Space (marker file under `.eustress/`), additive
-            // (never deletes a tree row), so a partial run still leaves the
-            // Space loadable through the existing path and re-bakes next open.
-            super::bake_cores::bake_once(&space_root.0, db.as_ref());
-
-            // ── Wave 9.C — voxel-chunk reconcile on open ─────────────
-            // The Roblox importer writes decoded terrain to
-            // `Workspace/Terrain/voxel_chunks/chunk_<cx>_<cy>_<cz>.bin`
-            // on DISK, but the runtime terrain loader
-            // (`terrain_voxel_load::load_voxel_terrain_on_space_open`)
-            // reads ONLY the Fjall `voxels` partition. Nothing else
-            // copies disk → partition, and a hook inside the one-shot
-            // initial migration would never run for an ALREADY-migrated
-            // Space (Vehicle Simulator: `header.migrated_at` set long
-            // before terrain import existed). So reconcile here, on
-            // EVERY open, for migrated and non-migrated Spaces alike:
-            //   - partition non-empty → O(1) probe, skip instantly
-            //     (idempotent; never re-seeds over live data);
-            //   - partition empty + chunk files on disk → seed it now;
-            //   - no `voxel_chunks/` dir → Ok(default), silent no-op
-            //     (most Spaces have no imported terrain).
-            // This runs synchronously BEFORE `handle.0` is installed
-            // below, and the voxel terrain loader can't act until it
-            // sees that handle — so on the first open after import the
-            // loader is guaranteed to find the partition populated.
-            if !db.has_voxel_chunks() {
-                match eustress_worlddb::import::import_voxel_chunks(db.as_ref(), &space_root.0) {
-                    Ok(s) if s.chunks_imported > 0 || s.skipped > 0 => {
-                        info!(
-                            target: "eustress_engine::world_db",
-                            chunks = s.chunks_imported,
-                            bytes = s.bytes_imported,
-                            skipped = s.skipped,
-                            space = %space_root.0.display(),
-                            "voxel reconcile: seeded Fjall `voxels` partition from \
-                             Workspace/Terrain/voxel_chunks on open"
-                        );
-                    }
+                let (tx, rx) = std::sync::mpsc::channel::<OpenWorkerMsg>();
+                let root = space_root.0.clone();
+                let db_for_worker = db.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("eustress-space-open".into())
+                    .spawn(move || {
+                        let db = db_for_worker.as_ref();
+                        let reconcile = || {
+                            // Guarded separately from `space-open` so the
+                            // log names the reconcile, not just "the load".
+                            let _phase = super::load_phase::scope(
+                                "db-reconcile",
+                                format!("scanning disk tree under {}", root.display()),
+                            );
+                            // On its own small pool: the walk is off the
+                            // critical path now, and on the global pool its
+                            // 114K stats took every core from the drain it
+                            // overlaps (measured 20 s of contention).
+                            let pool = rayon::ThreadPoolBuilder::new()
+                                .num_threads(reconcile_threads())
+                                .thread_name(|i| format!("eustress-reconcile-{i}"))
+                                .build();
+                            let report = match pool {
+                                Ok(pool) => pool.install(|| reconcile_disk_toml_into_tree(&root, db)),
+                                Err(_) => reconcile_disk_toml_into_tree(&root, db),
+                            };
+                            if report.reconciled > 0 {
+                                let _ = db.flush();
+                                info!(
+                                    target: "eustress_engine::world_db",
+                                    reconciled = report.reconciled,
+                                    space = %root.display(),
+                                    "TOML↔DB reconcile: synced changed disk .toml → Fjall tree on open"
+                                );
+                            }
+                            report
+                        };
+                        let cores = |db: &dyn WorldDb| {
+                            db.count_instance_cores_capped(STREAMING_COUNT_CAP).unwrap_or(0)
+                        };
+                        if super::bake_cores::is_baked(&root) {
+                            // Every open after the first: the loader spawns
+                            // from the tree, so it starts now; the reconcile
+                            // (a stat walk of every file on disk, 7 to 15 s on
+                            // Super Station) runs behind it and reports what
+                            // changed, which the scene applies as hot updates.
+                            import_voxels_if_absent(&root, db);
+                            let n = cores(db);
+                            let prescan = super::file_loader::prescan_tree(db, &root, n);
+                            let _ = tx.send(OpenWorkerMsg::Ready { cores: n, prescan });
+                            let _ = tx.send(OpenWorkerMsg::Reconciled(reconcile()));
+                        } else {
+                            // The one open that bakes: the bake must read the
+                            // tree AFTER the disk edits are in it, so the order
+                            // stays reconcile → bake → install, and nothing is
+                            // loading yet that the report could update.
+                            let _report = reconcile();
+                            bake_and_import_voxels(&root, db);
+                            let n = cores(db);
+                            let prescan = super::file_loader::prescan_tree(db, &root, n);
+                            let _ = tx.send(OpenWorkerMsg::Ready { cores: n, prescan });
+                            let _ = tx.send(OpenWorkerMsg::Reconciled(ReconcileReport::default()));
+                        }
+                    });
+                match spawned {
                     Ok(_) => {
-                        // No voxel_chunks dir / empty dir — the common case.
+                        // Move the `space-open` guard into the pending record so
+                        // the phase stays open until installation.
+                        pending.0 = Some(PendingOpen {
+                            root: space_root.0.clone(),
+                            world_db_dir: world_db_dir.clone(),
+                            db: Some(db),
+                            rx: std::sync::Mutex::new(rx),
+                            _phase: Some(_open_phase),
+                        });
+                        return;
                     }
                     Err(e) => {
+                        // Could not get a worker: do the work here, exactly as
+                        // before, rather than leave the Space unopened.
                         warn!(
                             target: "eustress_engine::world_db",
                             error = %e,
-                            space = %space_root.0.display(),
-                            "voxel reconcile: disk → `voxels` partition import failed; \
-                             imported terrain will not render this Space"
+                            "space-open worker failed to spawn — reconciling on the main thread"
                         );
-                    }
-                }
-            }
-
-            let subscription = db.subscribe(Filter::any());
-            info!(
-                target: "eustress_engine::world_db",
-                dir = %world_db_dir.display(),
-                "WorldDb opened — Space content source = FJALL"
-            );
-            *active_source = super::space_source::ActiveSpaceSource(std::sync::Arc::new(
-                super::space_source::FjallSource::new(db.clone()),
-            ));
-
-            // ── DIAGNOSTIC: prove the load-vs-render pipeline split ──
-            // The scene loader now sources from this Fjall tree. The
-            // STREAMING render pipeline (StreamingPlugin) does a
-            // separate `std::fs` scan of the disk Workspace and never
-            // reads this tree. If the tree holds instances that aren't
-            // also on disk (e.g. generator wrote direct-to-Fjall), the
-            // scene loader "loads" them but the streaming grid never
-            // gets them, so the radius gate spawns/renders zero. Count
-            // the tree's instance files here so this line and the
-            // streaming scan's "loaded N" line sit side-by-side in the
-            // log and the divergence is unambiguous.
-            match db.iter_tree() {
-                Ok(it) => {
-                    let mut total_files = 0usize;
-                    let mut instance_files = 0usize;
-                    for entry in it {
-                        match entry {
-                            Ok((path, _)) => {
-                                total_files += 1;
-                                if path.ends_with("_instance.toml")
-                                    || path.ends_with(".part.toml")
-                                    || path.ends_with(".instance.toml")
-                                    || path.ends_with(".glb.toml")
-                                {
-                                    instance_files += 1;
-                                }
-                            }
-                            Err(e) => {
-                                warn!(
-                                    target: "eustress_engine::world_db",
-                                    error = %e,
-                                    "iter_tree entry error during diagnostic count"
-                                );
-                            }
+                        let _phase = super::load_phase::scope(
+                            "db-reconcile",
+                            format!("scanning disk tree under {}", space_root.0.display()),
+                        );
+                        let report = reconcile_disk_toml_into_tree(&space_root.0, db.as_ref());
+                        if report.reconciled > 0 {
+                            let _ = db.flush();
                         }
+                        bake_and_import_voxels(&space_root.0, db.as_ref());
+                        finish_pending_open(
+                            &space_root.0,
+                            &world_db_dir,
+                            db,
+                            &mut handle,
+                            &mut sub,
+                            &mut active_source,
+                            &mut datastore,
+                        );
+                        return;
                     }
-                    warn!(
-                        target: "eustress_engine::world_db",
-                        tree_total_files = total_files,
-                        tree_instance_files = instance_files,
-                        space = %space_root.0.display(),
-                        "FJALL SOURCE ACTIVE: scene loader reads these from the DB. \
-                         The StreamingPlugin render grid does a SEPARATE std::fs \
-                         scan of the disk Workspace and will NOT see Fjall-only \
-                         instances — compare this count against the streaming \
-                         'initial scan loaded N instances' line. A large gap == \
-                         the load-but-no-render bug (rendering pipeline is still \
-                         disk-fed)."
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        target: "eustress_engine::world_db",
-                        error = %e,
-                        "iter_tree failed during diagnostic instance count"
-                    );
                 }
             }
-            // Phase 8 (WS-1): expose the Roblox-parity DataStore for
-            // this Space to the script bindings. Same Arc as the
-            // handle/source so all three view one consistent DB.
-            datastore.0 = Some(eustress_worlddb::DataStoreService::new(db.clone()));
-            info!(
-                target: "eustress_engine::world_db",
-                "DataStoreService ready — scripts can now GetDataStore/GetOrderedDataStore"
-            );
-            // Install the DB into the global funnel handle: from here
-            // every `load_instance_definition` / `load_gui_definition`
-            // / `write_instance_definition` call site (the ~25 edit/
-            // tool/hot-reload sites that only carry an absolute path)
-            // reads/writes the binary ECS record in this DB instead of
-            // disk TOML — the full conversion, with no per-call-site
-            // signature churn.
-            super::active_db::set(db.clone(), space_root.0.clone());
-            handle.0 = Some(db);
-            sub.0 = Some(subscription);
-            // LOAD-PHASE milestone 2: Fjall keyspace recovery + auto-convert
-            // + TOML↔DB reconcile are all complete and the DB is installed
-            // as the live funnel/source. Everything above (backend::open,
-            // convert_space_if_needed, reconcile_disk_toml_into_tree) is the
-            // ~2.3s recovery+reconcile block the analysis called out.
-            super::load_phase::mark("db-recovery-complete");
+            // (bake + voxel import run on the open worker, right after the
+            // reconcile; see `bake_and_import_voxels`.)
         }
         Err(e) => {
             warn!(
@@ -941,6 +1255,8 @@ impl Plugin for WorldDbPlugin {
             .init_resource::<WorldDbSubscription>()
             .init_resource::<WorldDbDecision>()
             .init_resource::<WorldDataStore>()
+            .init_resource::<PendingWorldDbOpen>()
+            .init_resource::<super::file_watcher::InjectedFileChanges>()
             .add_message::<WorldDbCommit>()
             .add_systems(First, drain_change_stream)
             // Open + seed the WorldDb at Startup, BEFORE the loader, so
@@ -951,11 +1267,10 @@ impl Plugin for WorldDbPlugin {
             // the 50k Workspace parts disk-load even on an
             // already-migrated world. The `WorldDbDecision` latch makes
             // the Update copy below a no-op for the same Space path.
-            .add_systems(
-                Startup,
-                open_world_db_on_space_change
-                    .before(crate::space::file_loader::load_space_files_system),
-            )
+            // Startup: kick the open off on frame 0. The initial Space load
+            // now runs in Update, gated on `world_db_open_settled`, so no
+            // Startup ordering against it is needed (or possible).
+            .add_systems(Startup, open_world_db_on_space_change)
             // Update copy handles runtime Space switches (latched per
             // path); `mirror_transform_changes` persists live edits.
             .add_systems(

@@ -150,6 +150,18 @@ impl Default for ClassSchemaRegistry {
 }
 
 impl ClassSchemaRegistry {
+    /// The built-in registry, parsed once per process. `from_builtin` parses
+    /// every embedded class template; the loaders called it per entity, so a
+    /// 106K-entity Space parsed the whole template set 106K times (the bulk
+    /// of its ~5 ms per entity in a debug build). Read-only callers take
+    /// this instead.
+    pub fn builtin() -> &'static ClassSchemaRegistry {
+        static BUILTIN: std::sync::OnceLock<ClassSchemaRegistry> = std::sync::OnceLock::new();
+        BUILTIN.get_or_init(ClassSchemaRegistry::from_builtin)
+    }
+}
+
+impl ClassSchemaRegistry {
     /// Build a registry from the PascalCase templates embedded in this crate
     /// via `include_str!`. No filesystem I/O — the bytes are baked into the
     /// binary so a headless client without an assets/ folder still validates
@@ -571,10 +583,19 @@ pub fn heal_instance_from_str(
     content: &str,
     registry: &ClassSchemaRegistry,
 ) -> Result<HealResult, String> {
-    let mut parsed: toml::Value = content
+    let parsed: toml::Value = content
         .parse()
         .map_err(|e: toml::de::Error| format!("parse instance bytes: {}", e))?;
+    heal_instance_value(parsed, registry)
+}
 
+/// The same heal for a document that is already parsed. The bulk loader
+/// parses each `_instance.toml` once on the worker pool and hands the value
+/// here, so the typed definition costs no second parse.
+pub fn heal_instance_value(
+    mut parsed: toml::Value,
+    registry: &ClassSchemaRegistry,
+) -> Result<HealResult, String> {
     normalise_keys(&mut parsed);
 
     let class_name: Option<String> = parsed

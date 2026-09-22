@@ -278,6 +278,13 @@ pub struct FileChangeEvent {
     pub change_type: FileChangeType,
 }
 
+/// Changes handed to the watcher pipeline by code rather than by `notify`.
+/// The open worker's disk → tree reconcile reports every path it put or
+/// pruned, and those go through the same created / modified / removed
+/// handlers as a live disk edit. Drained by `process_file_changes`.
+#[derive(Resource, Default)]
+pub struct InjectedFileChanges(pub Vec<FileChangeEvent>);
+
 /// Type of file change
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileChangeType {
@@ -336,9 +343,11 @@ pub fn process_file_changes(
     // because their folder path momentarily fails a filesystem stat.
     // Bundled into one tuple param to stay within Bevy's 16-system-param
     // ceiling (this system is already param-dense).
-    ownership_queries: (
+    // Tupled with the reconcile-injected changes: the 16-param ceiling.
+    mut ownership_queries: (
         Query<&bevy::prelude::ChildOf>,
         Query<Entity>,
+        ResMut<InjectedFileChanges>,
     ),
     // Query for Soul scripts
     mut soul_scripts: Query<&mut crate::soul::SoulScriptData>,
@@ -359,6 +368,7 @@ pub fn process_file_changes(
     // Unbundle the ownership-probe queries (tupled to respect the
     // 16-system-param ceiling). Used only by the stale-cleanup sweep below.
     let (child_of_query, alive_entities) = (&ownership_queries.0, &ownership_queries.1);
+    let injected = &mut ownership_queries.2;
 
     // Clean up old entries from recently written files
     recently_written.cleanup();
@@ -428,9 +438,52 @@ pub fn process_file_changes(
     // path can reach us a frame or two BEFORE that path's own `Create`.
     // Buffering to quiescence puts every event for a path in the same batch,
     // which is what the ordering pass below then relies on.
-    let Some(events) = watcher.poll_settled_events() else {
+    let polled = watcher.poll_settled_events();
+    if polled.is_none() && injected.0.is_empty() {
         return;
-    };
+    }
+    let mut events = polled.unwrap_or_default();
+    // Reconcile-injected changes join the batch. The worker reports a put as
+    // Modified; one for a path no entity is registered under (a file created
+    // on disk while the engine was closed) is a Created here.
+    // While the drain is still streaming the Space in, a change whose entity
+    // is not registered yet is most likely one the drain has not reached
+    // (the reconcile finished behind it), not a new file: applying it now
+    // would spawn a second copy (Modified → Created) or miss the delete
+    // (Removed with nothing to remove, then the drain spawns the stale
+    // record). Hold it and look again next frame; once the load has
+    // settled, an unresolved put really is a file created while the engine
+    // was closed, and an unresolved prune has nothing left to do.
+    let loading = super::file_loader::bulk_load_active();
+    let mut held: Vec<FileChangeEvent> = Vec::new();
+    for mut e in injected.0.drain(..) {
+        let entity = registry.get_entity(&e.path).or_else(|| {
+            e.path
+                .parent()
+                .map(|p| p.join("_instance.toml"))
+                .and_then(|p| registry.get_entity(&p))
+        });
+        if entity.is_none() && loading {
+            held.push(e);
+            continue;
+        }
+        if entity.is_none() && e.change_type == FileChangeType::Removed {
+            continue;
+        }
+        if e.change_type == FileChangeType::Modified && entity.is_none() {
+            e.change_type = FileChangeType::Created;
+        }
+        // A handful per open at most; each one is a closed-engine disk edit
+        // reaching the running scene, worth a line.
+        info!(
+            "🔁 reconcile hot update: {:?} {} (entity {:?})",
+            e.change_type,
+            e.path.display(),
+            entity
+        );
+        events.push(e);
+    }
+    injected.0 = held;
 
     // Drop anything outside the ACTIVE Space root.
     //
@@ -970,7 +1023,13 @@ fn handle_file_modified(
                                             }
                                         }
 
-                                        debug!("🔄 Hot-reloaded TOML instance: {:?}", event.path);
+                                        // One line per saved edit (or per reconcile
+                                        // hot update), naming what was applied.
+                                        info!(
+                                            "🔄 Hot-reloaded TOML instance {:?} → name {:?}",
+                                            event.path,
+                                            instance_def.metadata.name
+                                        );
                                     }
                                     Err(e) => {
                                         debug!("Partial-write parse of {:?} deferred: {}", event.path, e);

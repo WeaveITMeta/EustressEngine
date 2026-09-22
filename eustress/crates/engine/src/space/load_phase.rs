@@ -28,20 +28,23 @@
 //! since the previous milestone.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+// (`AtomicBool` still backs the first-render latch below.)
 use std::sync::{Mutex, Once, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Read `EUSTRESS_PROFILE` exactly once; instrumentation is armed iff it is
-/// non-empty. Identical semantics to `crate::profiler::phase_armed` so a
-/// single env var arms both the per-phase frame profiler and these
-/// load-phase milestones.
+/// The load-phase milestones are ALWAYS on.
+///
+/// They used to arm only under `EUSTRESS_PROFILE`, which meant every
+/// ordinary session's rolling log carried the coarse watchdog `PHASE '…'
+/// completed` lines but none of the fine milestones. That left the ~7 s
+/// small-Space open completely unattributed while the data to attribute it
+/// cost one clock read and one atomic store per milestone (six per load)
+/// plus one atomic load per frame for the first-render latch. The env var
+/// no longer gates anything here; `EUSTRESS_PROFILE` still arms the
+/// per-system frame profiler, which is the genuinely expensive one.
+#[inline]
 fn armed() -> bool {
-    static ARMED: OnceLock<bool> = OnceLock::new();
-    *ARMED.get_or_init(|| {
-        std::env::var_os("EUSTRESS_PROFILE")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false)
-    })
+    true
 }
 
 /// The instant the current Space load began. Stamped by [`stamp_open_start`]
@@ -230,19 +233,14 @@ pub fn end(name: &'static str) {
     let Some(entry) = finished else { return };
     let elapsed = entry.started.elapsed();
     if entry.reported {
+        // Log only. A long phase is not an error condition the user needs a
+        // toast or a modal for — the load phases self-report to the rolling
+        // log, which is where they get attributed.
         bevy::log::warn!(
             target: "eustress_engine::load_phase",
-            "PHASE '{}' finally completed after {:.1}s (was reported stuck)",
+            "PHASE '{}' finally completed after {:.1}s (was reported slow)",
             entry.name,
             elapsed.as_secs_f32()
-        );
-        crate::notifications::notify_from_background(
-            crate::notifications::NotificationLevel::Info,
-            format!(
-                "'{}' finished after {:.0}s",
-                entry.name,
-                elapsed.as_secs_f32()
-            ),
         );
     } else if elapsed >= Duration::from_secs(5) {
         bevy::log::info!(
@@ -318,102 +316,32 @@ fn start_watchdog() {
                 if newly_stuck.is_empty() {
                     continue;
                 }
-                // Log + toast every one — cheap, non-modal, and the log is the
-                // record that survives the session.
+                // Log only. This used to raise a queued toast AND a native
+                // modal ("Eustress — load phase still running") for every
+                // phase that crossed the threshold — which, on any large
+                // Space, was every open: the reconcile, the priority spawn
+                // and the splat scan are long by nature, not stuck. A slow
+                // phase is a diagnostics fact for the rolling log (the
+                // completion timings are what attribute it), not an
+                // interruption to click away.
                 for (name, detail, secs) in &newly_stuck {
-                    log_and_toast_stuck(name, detail, *secs);
-                }
-                // One modal, describing everything stuck right now (including
-                // phases reported on an earlier tick and still running).
-                if DIALOG_OPEN
-                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-                {
-                    let all_stuck: Vec<(&'static str, String, f32)> = {
-                        let g = in_flight().lock().unwrap_or_else(|e| e.into_inner());
-                        g.iter()
-                            .filter(|e| e.started.elapsed() >= threshold)
-                            .map(|e| {
-                                (e.name, e.detail.clone(), e.started.elapsed().as_secs_f32())
-                            })
-                            .collect()
-                    };
-                    show_stuck_dialog(all_stuck);
+                    log_slow(name, detail, *secs);
                 }
             });
         if spawned.is_err() {
             bevy::log::warn!(
                 target: "eustress_engine::load_phase",
-                "phase watchdog thread failed to spawn — stuck phases will not be reported"
+                "phase watchdog thread failed to spawn — slow phases will not be reported"
             );
         }
     });
 }
 
-/// True while a watchdog dialog is on screen. Latches the modal so overlapping
-/// phases crossing the threshold on different ticks cannot stack dialogs.
-static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
-
-/// Log + toast one stuck phase. Non-modal, so this is uncapped — every stuck
-/// phase gets a record even though they share a single dialog.
-fn log_and_toast_stuck(name: &str, detail: &str, secs: f32) {
-    // The log is the only surface guaranteed to work while the main thread is
-    // blocked, since this runs on the watchdog thread.
-    bevy::log::error!(
+/// Log one slow phase. Runs on the watchdog thread, so the log is the only
+/// surface that is guaranteed to work while the main thread is busy.
+fn log_slow(name: &str, detail: &str, secs: f32) {
+    bevy::log::warn!(
         target: "eustress_engine::load_phase",
-        "⏳ PHASE '{name}' UNFINISHED after {secs:.0}s — {detail}. \
-         The main thread is still inside this phase; the window may show \
-         'Not Responding' until it completes."
+        "⏳ PHASE '{name}' still running after {secs:.0}s — {detail}"
     );
-    // Queued, so it appears whenever the main thread next pumps. Useless
-    // during a hard block, correct for a merely slow phase.
-    crate::notifications::notify_from_background(
-        crate::notifications::NotificationLevel::Error,
-        format!("'{name}' unfinished after {secs:.0}s — still working"),
-    );
-}
-
-/// Show the single watchdog dialog, describing every phase currently stuck.
-///
-/// Native `rfd` rather than a Slint dialog or a Bevy-side toast: it needs
-/// neither the Bevy schedule nor the Slint event loop, so it is the one
-/// surface that renders while the main thread is blocked — which is exactly
-/// the case worth reporting. Runs on its own thread because `show()` blocks
-/// until dismissed and the watchdog has to keep ticking. Clears [`DIALOG_OPEN`]
-/// on dismissal so a later hang can raise a fresh one.
-fn show_stuck_dialog(stuck: Vec<(&'static str, String, f32)>) {
-    let mut body = if stuck.len() == 1 {
-        String::from("A load phase has been running without finishing:\n\n")
-    } else {
-        format!(
-            "{} load phases have been running without finishing:\n\n",
-            stuck.len()
-        )
-    };
-    for (name, detail, secs) in &stuck {
-        body.push_str(&format!("  • {name} — {secs:.0}s\n      {detail}\n"));
-    }
-    body.push_str(
-        "\nThe engine is still working — this is not a crash. The window may be \
-         unresponsive until these complete.\n\n\
-         Raise or disable the threshold with EUSTRESS_PHASE_WATCHDOG_SECS \
-         (seconds; 0 disables).",
-    );
-
-    let spawned = std::thread::Builder::new()
-        .name("eustress-phase-watchdog-dialog".into())
-        .spawn(move || {
-            rfd::MessageDialog::new()
-                .set_level(rfd::MessageLevel::Warning)
-                .set_title("Eustress — load phase still running")
-                .set_description(&body)
-                .set_buttons(rfd::MessageButtons::Ok)
-                .show();
-            DIALOG_OPEN.store(false, Ordering::SeqCst);
-        });
-    if spawned.is_err() {
-        // Never leave the latch stuck closed — that would silence every later
-        // report for the rest of the session.
-        DIALOG_OPEN.store(false, Ordering::SeqCst);
-    }
 }

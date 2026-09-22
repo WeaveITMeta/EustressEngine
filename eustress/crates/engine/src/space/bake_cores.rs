@@ -350,6 +350,14 @@ pub fn bake_tree_to_cores(space_root: &Path, db: &dyn WorldDb) -> BakeSummary {
 
 /// Run the bake once per Space, before the streaming decision reads the core
 /// count. Cheap no-op on an already-baked Space (one `Path::exists`).
+/// True when this Space already carries the current bake, i.e. `bake_once`
+/// would return at once. The open worker uses it to decide whether the DB
+/// can be installed before the disk reconcile (every open after the first)
+/// or only after it (the one open that actually bakes).
+pub fn is_baked(space_root: &Path) -> bool {
+    baked_version(space_root) == Some(BAKE_VERSION)
+}
+
 pub fn bake_once(space_root: &Path, db: &dyn WorldDb) {
     let prior = baked_version(space_root);
     if prior == Some(BAKE_VERSION) {
