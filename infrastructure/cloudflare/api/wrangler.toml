@@ -87,12 +87,26 @@ bucket_name = "eustress-kyc-documents"
 #   universes/{id}/website-manifest.json   the Website manifest, plus its
 #                                          publish hash and auth-key digest in
 #                                          customMetadata
+#   universes/{id}/moderation/dossier.json the engine-built moderation dossier
+#                                          (text digest of the Space) Jev reads
+#   universes/{id}/moderation/capture-N.{ext}
+#                                          the publish-time capture set the
+#                                          Guardian Policy judge looks at
 #   thumbnails/{id}/thumb.{ext}            gallery thumbnail
 #   ledger-backups/{date}.json             nightly ledger snapshot
 #
 # The simulation listing record is NOT here. It lives in KV as SOCIAL:sim:{id},
 # and the Website manifest is deliberately a separate object so a publish can
 # never overwrite the record that puts a Space in the marketplace.
+#
+# Moderation state lives in KV beside the listing (see src/moderation.mjs):
+#   SOCIAL:modcase:{sim_id}                the case record (signals, Jev
+#                                          answers, judge verdict, history)
+#   SOCIAL:modq:{status}:{sim_id}          queue index per status
+#   SOCIAL:modroot:{author}:{etag}:{size}  dedup: a decided .pak by R2 identity
+#   SOCIAL:modrate:{author}:{date}         publishes per author per day
+#   USERS:publish-frozen:{author}          set by a quarantine, cleared by a
+#                                          human release; blocks new publishes
 [[r2_buckets]]
 binding = "SCENES"
 bucket_name = "eustress-simulations"
@@ -124,9 +138,22 @@ namespace_id = "2001"
 
 # Secrets (set via wrangler secret put):
 # JWT_SECRET            - persistent JWT signing key
-# GROK_API_KEY          - xAI Grok API key for AI-enhanced search
+# GROK_API_KEY          - xAI Grok API key for AI-enhanced search, KYC, and the
+#                         moderation judge + agent
+# JEV_API_KEY           - TypeSafe AI Jev key: the moderation triage classifier
+#                         (docs/architecture/MODERATION_PIPELINE.md). Set with
+#                           npx wrangler secret put JEV_API_KEY
+#                         For `wrangler dev`, put it in a .dev.vars file next to
+#                         this config (gitignored). The engine never holds it:
+#                         classification runs here, on the uploaded artifact.
 # STRIPE_SECRET_KEY     - Stripe secret key for payments + Connect
 # STRIPE_WEBHOOK_SECRET - Stripe webhook signing secret
+
+# Optional Workers AI binding. With it bound and JEV_API_KEY unset, the
+# moderation classifier runs Jev through Workers AI (`typesafe/jev`), billed to
+# this Cloudflare account. The direct key is preferred when both exist.
+# [ai]
+# binding = "AI"
 
 # Daily payout cron - runs at UTC midnight
 [triggers]
@@ -139,3 +166,7 @@ name = "EMAIL"
 
 [vars]
 FORK_ID = "eustress.dev"
+# Optional JSON overriding any key of DEFAULT_THRESHOLDS in src/moderation.mjs,
+# for example '{"hard_hold":0.30,"audit_rate":0.05}'. Unknown keys and
+# non-numeric values are ignored; the defaults are the calibrated baseline.
+# MODERATION_THRESHOLDS = ""

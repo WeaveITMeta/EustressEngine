@@ -151,6 +151,9 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
 
         // --- Network: leaves the machine --------------------------------
         "http_request" | "image_to_code" | "image_to_geometry" | "document_to_code" => Network,
+        // Moderation acts on api.eustress.dev as an admin; the reads are Network
+        // too, since a case record leaves the machine to be read.
+        "moderation_queue" | "moderation_case" | "moderation_act" | "moderation_backfill" => Network,
 
         // --- Write: creates or modifies inside the Space ----------------
         "create_entity"

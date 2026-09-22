@@ -59,6 +59,7 @@ pub mod simulation_tools;
 pub mod spatial_tools;
 pub mod universe_tools;
 pub mod website_tools;
+pub mod moderation_tools;
 
 /// Build a `ToolRegistry` preloaded with every tool this crate ships.
 ///
@@ -76,6 +77,13 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(website_tools::WebsiteAddReferenceTool);
     registry.register(website_tools::WebsiteRemoveReferenceTool);
     registry.register(website_tools::WebsiteManifestUrlTool);
+
+    // Gallery moderation queue, over api.eustress.dev with an admin JWT. Network
+    // tools; inert without EUSTRESS_MODERATOR_TOKEN (see moderation_tools.rs).
+    registry.register(moderation_tools::ModerationQueueTool);
+    registry.register(moderation_tools::ModerationCaseTool);
+    registry.register(moderation_tools::ModerationActTool);
+    registry.register(moderation_tools::ModerationBackfillTool);
 
     registry.register(entity_tools::CreateEntityTool);
     registry.register(entity_tools::InsertGaussianSplatsTool);

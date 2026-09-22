@@ -68,6 +68,9 @@ pub mod capture;
 // `crate::ai_camera::AiCamera` (gap-3 Play→Edit camera-disable filter). Its only
 // crate dependency is `crate::default_scene`, which is already in this lib.
 pub mod ai_camera;
+// Publish-time moderation dossier + capture orbit (reads the World, drives the
+// AI camera). Consumed by api.eustress.dev; see docs/architecture/MODERATION_PIPELINE.md.
+pub mod moderation_dossier;
 pub mod runtime;
 pub mod gizmo_tools;
 pub mod move_tool;

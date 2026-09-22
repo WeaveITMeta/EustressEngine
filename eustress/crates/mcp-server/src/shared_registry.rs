@@ -190,8 +190,28 @@ pub fn build_context(universe: Option<&PathBuf>) -> Option<ToolContext> {
         // set — Read and Write — so an MCP client cannot invoke `run_bash`,
         // `execute_luau`, or `delete_entity`. Raising this is a deliberate
         // act that should follow peer authentication, not precede it.
-        permissions: eustress_tools::Permissions::standard().for_principal("mcp-client"),
+        permissions: mcp_permissions(),
     })
+}
+
+/// The capability grant for an MCP client.
+///
+/// Standard (Read + Write) by default. Network is granted only when the
+/// operator has put a moderator token in this process's environment: that is
+/// the deliberate act the comment above asks for, since the token is an admin
+/// JWT for api.eustress.dev and the moderation tools are inert without it. The
+/// principal name records which grant a denial or an audit line came from.
+fn mcp_permissions() -> eustress_tools::Permissions {
+    let moderator = std::env::var("EUSTRESS_MODERATOR_TOKEN")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if moderator {
+        eustress_tools::Permissions::standard()
+            .grant(eustress_tools::Capability::Network)
+            .for_principal("mcp-moderator")
+    } else {
+        eustress_tools::Permissions::standard().for_principal("mcp-client")
+    }
 }
 
 /// Read the engine's currently-open Space from its persisted editor

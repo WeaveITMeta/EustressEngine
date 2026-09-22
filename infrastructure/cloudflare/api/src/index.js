@@ -26,8 +26,31 @@
 
 /// Model used for document verification, background screening, and search.
 import { handleAvatar } from './avatar.mjs';
+import {
+  handleModerationRoute, sweepModeration, isListable, canServe, publicModeration,
+  POLICY_HASH_ANCHORED, MODERATION_VERSION, POLICY_VERSION,
+} from './moderation.mjs';
+// The Guardian Policy and the moderation playbook, as shipped. Generated from
+// the docs by `npm run sync-policy`; the moderation tests fail when the copy
+// drifts from docs/, and /health reports whether the shipped policy still
+// hashes to the anchor recorded in DECENTRALIZATION_PLAN.md section 5.
+import { GUARDIAN_POLICY_TEXT, MODERATION_PLAYBOOK_TEXT } from './generated/policy_text.mjs';
 
 const GROK_MODEL = 'grok-4.6';
+
+// Everything moderation.mjs needs from this file, injected so the pipeline
+// stays testable without a Worker runtime. The policy hash is computed once
+// per isolate over the text actually shipped, never copied from the doc.
+let shippedPolicyHash = null;
+async function moderationDeps(cors) {
+  if (!shippedPolicyHash) shippedPolicyHash = 'sha256:' + await sha256Hex(GUARDIAN_POLICY_TEXT);
+  if (shippedPolicyHash !== POLICY_HASH_ANCHORED)
+    console.error(`moderation: shipped policy hash ${shippedPolicyHash} differs from the anchored ${POLICY_HASH_ANCHORED}; verdicts cite the shipped hash`);
+  return {
+    verifyAuth, requireAdmin, json, auditLog, grokFetch, extractGrokText, cors,
+    policyText: GUARDIAN_POLICY_TEXT, policyHash: shippedPolicyHash, playbookText: MODERATION_PLAYBOOK_TEXT,
+  };
+}
 
 /// Single entry point for every xAI call.
 ///
@@ -270,6 +293,22 @@ async function requireVerifiedAdult(userId, user, env) {
 /// Whole years elapsed from `dob` (YYYY-MM-DD) to now, in UTC.
 /// Returns null when the date is absent, malformed, or not a real calendar
 /// date. Callers MUST treat null as "age unknown" and refuse, never approve.
+/// The sex marker printed on the identity document, reduced to the closed set
+/// the avatar identity gate can bind to.
+///
+/// Anything outside M, F and X collapses to '' rather than passing through.
+/// The model is asked for the marker verbatim, but a free-text answer ("Male",
+/// "Not stated", a sentence) must read downstream as "no usable marker", not
+/// as a new category. X is preserved so the record is honest about what the
+/// document said, even though the gate cannot bind an avatar to it.
+function normaliseDocumentSex(value) {
+  const v = String(value ?? '').trim().toUpperCase();
+  if (v === 'M' || v === 'MALE') return 'M';
+  if (v === 'F' || v === 'FEMALE') return 'F';
+  if (v === 'X') return 'X';
+  return '';
+}
+
 function ageFromDob(dob) {
   if (typeof dob !== 'string') return null;
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dob.trim());
@@ -651,6 +690,12 @@ export default {
       try { models = await runModelDiscovery(env); }
       catch (e) { failed.push(`models: ${e.message}`); console.error('model discovery failed:', e); }
 
+      // Moderation sweep: resume cases a dropped waitUntil left mid-pipeline
+      // and classify a bounded slice of listings that predate the gate.
+      let moderation = null;
+      try { moderation = await sweepModeration(env, await moderationDeps({})); }
+      catch (e) { failed.push(`moderation: ${e.message}`); console.error('moderation sweep failed:', e); }
+
       // Durable run record. Cron failures used to vanish into console.error
       // with nothing queryable afterwards, so a silently skipped day was
       // invisible. `/api/admin/cron-health` reads these.
@@ -668,6 +713,8 @@ export default {
         models_applied: models?.applied ?? false,
         models_version: models?.version ?? models?.kept_version ?? null,
         models_changes: models?.changes ?? [],
+        moderation_resumed: moderation?.resumed ?? 0,
+        moderation_backfilled: moderation?.backfilled ?? 0,
       }), { expirationTtl: 86400 * 365 });
     })());
   },
@@ -863,9 +910,18 @@ export default {
       if (url.pathname === '/api/node/stats' && request.method === 'GET')
         return handleNodeStats(env, cors);
 
+      // Moderation: dossier + capture uploads, submit-for-review, the author's
+      // status view, appeals, and the admin queue and tool surface. Dispatched
+      // before the simulation routes because `/api/simulations/{id}/moderation`
+      // would otherwise be swallowed by the `/api/simulations/{id}` catch-all.
+      if (url.pathname.startsWith('/api/simulations/') || url.pathname.startsWith('/api/admin/moderation/')) {
+        const handled = await handleModerationRoute(request, url, env, ctx, await moderationDeps(cors));
+        if (handled) return handled;
+      }
+
       // Simulations (published)
       if (url.pathname === '/api/simulations' && request.method === 'GET')
-        return handleListSimulations(env, cors);
+        return handleListSimulations(url, env, cors);
       if (url.pathname === '/api/simulations/publish' && request.method === 'POST')
         return handlePublishSimulation(request, env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/space$/) && request.method === 'PUT')
@@ -883,7 +939,7 @@ export default {
       // Read side of the thumbnail, ported from the retired eustress-simulations
       // worker. Without it nothing served thumbnails/{id}/thumb.{ext} at all.
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/thumbnail$/) && request.method === 'GET')
-        return handleGetThumbnail(url.pathname.split('/')[3], env, cors);
+        return handleGetThumbnail(request, url.pathname.split('/')[3], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/download$/) && request.method === 'GET')
         return handleDownloadPak(request, url.pathname.split('/')[3], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/play$/) && request.method === 'POST')
@@ -893,7 +949,7 @@ export default {
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/website-manifest$/) && request.method === 'PUT')
         return handlePutWebsiteManifest(request, url.pathname.split('/')[3], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+$/) && request.method === 'GET')
-        return handleGetSimulation(url.pathname.split('/').pop(), env, cors);
+        return handleGetSimulation(request, url.pathname.split('/').pop(), env, cors);
 
       // Website manifest reads. Singular `/api/simulation/` on purpose: the
       // segment may be a namespace rather than a UUID, and a namespace spelled
@@ -911,10 +967,12 @@ export default {
         return handleRecordCost(request, env, cors);
 
       // Gallery (frontend-facing aliases for simulations)
+      // Featured is the judge's optional upside flag on an approved listing;
+      // it never gates listing, it only feeds this shelf.
       if (url.pathname === '/api/gallery/featured' && request.method === 'GET')
-        return json({ featured: [], timestamp: new Date().toISOString() }, 200, cors);
+        return handleListSimulations(url, env, cors, { featuredOnly: true });
       if (url.pathname === '/api/gallery' && request.method === 'GET')
-        return handleListSimulations(env, cors);
+        return handleListSimulations(url, env, cors);
 
       // API Keys management
       if (url.pathname === '/api/keys' && request.method === 'GET')
@@ -1066,6 +1124,13 @@ async function handleRegister(request, env, cors) {
     id: user_id,
     username,
     public_key,
+    // What kind of principal owns this account. Registration through the KYC
+    // flow always creates a human; an agent signup path (AI models registering
+    // in their own right) would write 'agent' here and never see a document.
+    // The avatar identity gate reads this: humans are bound to the sex marker
+    // on their document, agents are Robot, and neither is a choice. A record
+    // without the field predates it and is treated as human.
+    account_type: 'human',
     birthday: birthday || null,
     id_type: id_type || null,
     id_hash: id_hash || null,
@@ -1698,6 +1763,7 @@ async function handleKycSubmit(request, env, cors) {
       verified_at: new Date().toISOString(),
       ocr_name: grokResult.extracted_name || claimedName,
       extracted_dob: documentDob,
+      extracted_sex: grokResult.extracted_sex || '',
       // Age facts are stored so registration can re-check them server-side
       // without trusting anything the client sends back.
       age_status: ageStatus,
@@ -1827,7 +1893,7 @@ async function performFullKycVerification(frontR2Key, backR2Key, claimedName, cl
       doc_decision: 'DENY', screening_decision: 'REVIEW',
       doc_reason: 'Automated document verification is not configured',
       reason: 'Verification unavailable', extracted_name: '',
-      extracted_dob: '', risk_score: 0, screening_flags: ['verification_unavailable'],
+      extracted_dob: '', extracted_sex: '', risk_score: 0, screening_flags: ['verification_unavailable'],
       confidence: 0, requires_manual_review: true,
     };
   }
@@ -1842,7 +1908,7 @@ async function performFullKycVerification(frontR2Key, backR2Key, claimedName, cl
         doc_decision: 'DENY', screening_decision: 'REVIEW',
         doc_reason: 'Front document missing from storage',
         reason: 'Front document not found in storage', extracted_name: '',
-        extracted_dob: '', risk_score: 0, screening_flags: ['document_missing'],
+        extracted_dob: '', extracted_sex: '', risk_score: 0, screening_flags: ['document_missing'],
         confidence: 0, requires_manual_review: true,
       };
     }
@@ -1898,6 +1964,7 @@ Respond in EXACTLY this JSON format, nothing else:
   "image_quality": "clear|acceptable|blurry|unreadable",
   "extracted_name": "Full Legal Name from document or empty string",
   "extracted_dob": "YYYY-MM-DD from document or empty string",
+  "extracted_sex": "M|F|X exactly as printed in the document's sex field, or empty string if the field is absent or unreadable",
   "name_matches": true/false,
   "dob_matches": true/false,
   "screening_decision": "APPROVE|REVIEW|DENY",
@@ -1942,7 +2009,7 @@ Screening rules:
       return {
         doc_decision: 'DENY', screening_decision: 'REVIEW',
         doc_reason: `Verification service returned ${resp.status}`,
-        reason: 'Verification service error', extracted_name: '', extracted_dob: '',
+        reason: 'Verification service error', extracted_name: '', extracted_dob: '', extracted_sex: '',
         risk_score: 0, screening_flags: ['verification_error'], confidence: 0,
         requires_manual_review: true,
       };
@@ -1957,7 +2024,7 @@ Screening rules:
       return {
         doc_decision: 'DENY', screening_decision: 'REVIEW',
         doc_reason: 'Verification response could not be parsed',
-        reason: 'Could not parse verification response', extracted_name: '', extracted_dob: '',
+        reason: 'Could not parse verification response', extracted_name: '', extracted_dob: '', extracted_sex: '',
         risk_score: 0, screening_flags: ['unparseable_response'], confidence: 0,
         requires_manual_review: true,
       };
@@ -1972,6 +2039,7 @@ Screening rules:
       image_quality: r.image_quality || 'unknown',
       extracted_name: r.extracted_name || '',
       extracted_dob: r.extracted_dob || '',
+      extracted_sex: normaliseDocumentSex(r.extracted_sex),
       name_matches: r.name_matches ?? true,
       dob_matches: r.dob_matches ?? true,
       screening_decision: r.screening_decision || 'APPROVE',
@@ -1991,7 +2059,7 @@ Screening rules:
       doc_decision: 'DENY', screening_decision: 'REVIEW',
       doc_reason: 'Verification did not complete',
       reason: `Verification error: ${e.message}`,
-      extracted_name: '', extracted_dob: '',
+      extracted_name: '', extracted_dob: '', extracted_sex: '',
       risk_score: 0, screening_flags: ['verification_exception'], confidence: 0,
       requires_manual_review: true,
     };
@@ -2164,9 +2232,19 @@ async function handleHealth(env, cors) {
     model: GROK_MODEL,
     integrations: {
       grok: { configured: present(env.GROK_API_KEY), key_length: (env.GROK_API_KEY || '').length },
+      // Either transport makes Jev reachable; the key is preferred (pinned
+      // model string, usage visible in TypeSafe's dashboard).
+      jev: { configured: present(env.JEV_API_KEY) || !!env.AI, transport: present(env.JEV_API_KEY) ? 'typesafe' : (env.AI ? 'workers-ai' : null) },
       stripe: { configured: present(env.STRIPE_SECRET_KEY) },
       email: { configured: !!env.EMAIL },
       kyc_bucket: { configured: !!env.KYC_BUCKET },
+    },
+    moderation: {
+      version: MODERATION_VERSION,
+      policy_version: POLICY_VERSION,
+      policy_hash_shipped: shippedPolicyHash || ('sha256:' + await sha256Hex(GUARDIAN_POLICY_TEXT)),
+      policy_hash_anchored: POLICY_HASH_ANCHORED,
+      policy_hash_matches: (shippedPolicyHash || ('sha256:' + await sha256Hex(GUARDIAN_POLICY_TEXT))) === POLICY_HASH_ANCHORED,
     },
   }, 200, cors);
 }
@@ -4179,9 +4257,15 @@ async function handlePublishSimulation(request, env, cors) {
   if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
 
   const body = await request.json();
-  const { name, description, genre, max_players, thumbnail_url, r2_key } = body;
+  const { name, description, genre, max_players, thumbnail_url, r2_key, is_public, content_root } = body;
 
   if (!name) return json({ error: 'name required' }, 400, cors);
+
+  // A quarantine freezes the author until a person releases it. The freeze
+  // is the one moderation outcome that reaches back to the publish step
+  // itself, because re-uploading under a fresh id is the obvious evasion.
+  const frozen = await env.USERS.get(`publish-frozen:${userId}`);
+  if (frozen) return json({ error: 'Publishing is paused on this account pending review', code: 'publish_frozen' }, 403, cors);
 
   const userData = await env.USERS.get(`user:${userId}`);
   const user = userData ? JSON.parse(userData) : {};
@@ -4194,7 +4278,15 @@ async function handlePublishSimulation(request, env, cors) {
     // Explicit: handleDownloadPak gates on `!sim.is_public`, and the listing
     // endpoint separately defaults undefined to public. Leaving it unset made
     // every published simulation publicly listed and privately denied.
-    is_public: true,
+    //
+    // `is_public` is the author's intent. Whether the listing is actually
+    // served by the gallery is `moderation.status === 'approved'` on top of
+    // it (see isListable); a publish starts unlisted and earns its listing.
+    is_public: is_public !== false,
+    // BLAKE3 of the .pak as the engine computed it: the chain-facing content
+    // id. Client-asserted, so dedup keys on the R2 etag, never on this.
+    content_root: typeof content_root === 'string' && content_root.length < 128 ? content_root : null,
+    moderation: { status: 'pending', version: MODERATION_VERSION, policy_version: POLICY_VERSION },
     thumbnail_url: thumbnail_url || null, r2_key: r2_key || null,
     play_count: 0, favorite_count: 0, version: 1,
     published_at: new Date().toISOString(),
@@ -4231,14 +4323,17 @@ async function handleUploadScene(request, simId, env, cors) {
     return json({ error: 'Scene file too large (max 500MB)' }, 413, cors);
 
   const r2Key = `universes/${simId}/universe.pak`;
-  await env.SCENES.put(r2Key, body, {
+  const stored = await env.SCENES.put(r2Key, body, {
     httpMetadata: { contentType: 'application/octet-stream' },
     customMetadata: { simId, authorId: auth, uploadedAt: new Date().toISOString() },
   });
 
-  // Update simulation record with R2 key and file size
+  // Update simulation record with R2 key and file size. The etag is R2's own
+  // digest of what landed, which is what moderation dedups on: the client's
+  // content_root is an assertion, this is not.
   sim.r2_key = r2Key;
   sim.scene_size_bytes = body.byteLength;
+  sim.pak_etag = stored?.etag || null;
   sim.updated_at = new Date().toISOString();
   await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
 
@@ -4301,14 +4396,15 @@ async function handleMultipartComplete(request, simId, env, cors) {
     etag: p.etag,
   }));
 
-  await multipart.complete(uploadedParts);
+  const assembled = await multipart.complete(uploadedParts);
 
   // Update simulation record
   const simData = await env.SOCIAL.get(`sim:${simId}`);
   if (simData) {
     const sim = JSON.parse(simData);
     sim.r2_key = r2Key;
-    sim.scene_size_bytes = total_size || 0;
+    sim.scene_size_bytes = assembled?.size || total_size || 0;
+    sim.pak_etag = assembled?.etag || null;
     sim.updated_at = new Date().toISOString();
     await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
   }
@@ -4342,6 +4438,11 @@ async function handleUploadSingleSpace(request, simId, spaceName, env, cors) {
   if (!sim.spaces) sim.spaces = {};
   sim.spaces[decodedName] = { r2_key: r2Key, size_bytes: body.byteLength, updated_at: new Date().toISOString() };
   sim.updated_at = new Date().toISOString();
+  // The content changed, so the previous decision no longer describes it:
+  // back to pending until the engine resubmits, and no etag to dedup against,
+  // since the Universe .pak this listing was judged on is not what plays now.
+  sim.moderation = { ...(sim.moderation || {}), status: 'pending', version: MODERATION_VERSION, policy_version: POLICY_VERSION };
+  sim.pak_etag = null;
   await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
 
   return json({ r2_key: r2Key, space: decodedName, size_bytes: body.byteLength }, 200, cors);
@@ -4413,7 +4514,16 @@ async function handleUserProjects(request, url, env, cors) {
           name: sim.name || 'Untitled',
           description: sim.description || null,
           thumbnail_url: liveThumbnailUrl(sim),
-          status: 'published',
+          // 'published' means listed in the gallery. Anything else names the
+          // moderation state the author is waiting on (pending, classifying,
+          // held, rejected, changes_requested, quarantined, appealed), or
+          // 'unreviewed' for a listing that predates the gate.
+          status: isListable(sim) ? 'published' : (sim.moderation?.status || 'unreviewed'),
+          moderation: sim.moderation ? {
+            status: sim.moderation.status || null, rating: sim.moderation.rating || null,
+            child_directed: sim.moderation.child_directed === true, featured: sim.moderation.featured === true,
+            updated_at: sim.moderation.updated_at || null,
+          } : null,
           genre: sim.genre || 'All',
           max_players: sim.max_players || 10,
           is_public: sim.is_public !== false,
@@ -4437,8 +4547,32 @@ async function handleUserProjects(request, url, env, cors) {
   }
 }
 
-async function handleListSimulations(env, cors) {
+// The gallery-facing projection of a listing: no storage keys, no internal
+// moderation detail, just the rating and flags a card needs.
+function galleryView(sim) {
+  const m = sim.moderation || {};
+  return {
+    id: sim.id, name: sim.name, description: sim.description || '',
+    genre: sim.genre || 'all', max_players: sim.max_players || 10,
+    author_id: sim.author_id, author_name: sim.author_name,
+    thumbnail_url: liveThumbnailUrl(sim),
+    play_count: sim.play_count || 0, favorite_count: sim.favorite_count || 0,
+    version: sim.version || 1, published_at: sim.published_at, updated_at: sim.updated_at,
+    rating: m.rating || null, child_directed: m.child_directed === true, featured: m.featured === true,
+    scene_size_bytes: sim.scene_size_bytes || null,
+  };
+}
+
+// Only listings with a recorded approval are served. Pinning is free, listing
+// is curated: a rejected or pending Universe still exists for its author, it
+// is simply not surfaced here. `?rating_max=` lets a client that has not
+// age-gated its viewer ask for the all-ages slice only.
+async function handleListSimulations(url, env, cors, opts = {}) {
   try {
+    const ratingMax = url?.searchParams?.get('rating_max') || null;
+    const order = ['all_ages', 'teen_13', 'mature_17', 'adult_18'];
+    const maxIdx = ratingMax && order.includes(ratingMax) ? order.indexOf(ratingMax) : order.length - 1;
+    const genre = (url?.searchParams?.get('genre') || '').toLowerCase();
     const list = await env.SOCIAL.list({ prefix: 'sim:', limit: 100 });
     const sims = [];
 
@@ -4449,25 +4583,39 @@ async function handleListSimulations(env, cors) {
       if (data) {
         try {
           const sim = JSON.parse(data);
-          sim.thumbnail_url = liveThumbnailUrl(sim);
-          sims.push(sim);
+          if (!isListable(sim)) continue;
+          // Featured never carries adult_18: the shelf is what an un-gated visitor sees first.
+          if (opts.featuredOnly && (sim.moderation?.featured !== true || sim.moderation?.rating === 'adult_18')) continue;
+          const idx = order.indexOf(sim.moderation?.rating || 'adult_18');
+          if (idx > maxIdx) continue;
+          if (genre && genre !== 'all' && (sim.genre || '').toLowerCase() !== genre) continue;
+          sims.push(galleryView(sim));
         } catch (_) {}
       }
     }
 
     sims.sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
+    if (opts.featuredOnly) return json({ featured: sims, timestamp: new Date().toISOString() }, 200, cors);
     return json({ simulations: sims, total: sims.length }, 200, cors);
   } catch (e) {
+    if (opts.featuredOnly) return json({ featured: [], timestamp: new Date().toISOString() }, 200, cors);
     return json({ simulations: [], total: 0 }, 200, cors);
   }
 }
 
-async function handleGetSimulation(simId, env, cors) {
+async function handleGetSimulation(request, simId, env, cors) {
   const data = await env.SOCIAL.get(`sim:${simId}`);
   if (!data) return json({ error: 'Simulation not found' }, 404, cors);
   const sim = JSON.parse(data);
-  sim.thumbnail_url = liveThumbnailUrl(sim);
-  return json(sim, 200, cors);
+  if (isListable(sim)) return json(galleryView(sim), 200, cors);
+  // Unlisted: the author sees their own record with the moderation summary,
+  // an admin sees the same, everyone else sees nothing distinguishable from
+  // a missing id (a 404 does not confirm that a held listing exists).
+  const auth = await verifyAuth(request, env);
+  const admin = auth ? await requireAdmin(request, env) : null;
+  if (!auth || (auth !== sim.author_id && !admin)) return json({ error: 'Simulation not found' }, 404, cors);
+  const rec = await env.SOCIAL.get(`modcase:${simId}`);
+  return json({ ...galleryView(sim), is_public: sim.is_public !== false, listable: false, moderation: rec ? publicModeration(JSON.parse(rec)) : (sim.moderation || null) }, 200, cors);
 }
 
 // Play a simulation — returns server connection info
@@ -4478,11 +4626,14 @@ async function handleDownloadPak(request, simId, env, cors) {
   if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
   const sim = JSON.parse(simData);
 
-  // Private simulations require auth
-  if (!sim.is_public) {
+  // Approved public listings are open. Anything else is the author's alone,
+  // and a quarantined .pak is served to nobody but an admin: the legal lane
+  // applies to storage, not only to the gallery index.
+  if (!isListable(sim)) {
     const auth = await verifyAuth(request, env);
-    if (!auth || auth !== sim.author_id)
-      return json({ error: 'Private simulation — access denied' }, 403, cors);
+    const admin = auth ? await requireAdmin(request, env) : null;
+    if (!canServe(sim, auth, !!admin))
+      return json({ error: 'Simulation not available' }, sim.moderation?.status === 'quarantined' ? 451 : 403, cors);
   }
 
   if (!sim.r2_key) return json({ error: 'No published .pak' }, 404, cors);
@@ -4506,10 +4657,12 @@ async function handlePlaySimulation(request, simId, env, cors) {
 
   const sim = JSON.parse(data);
 
-  // Private simulations require auth
-  if (!sim.is_public) {
+  // Same gate as the download: approved and public, or the author, or an admin.
+  if (!isListable(sim)) {
     const auth = await verifyAuth(request, env);
-    if (!auth) return json({ error: 'Private simulation — sign in required' }, 401, cors);
+    const admin = auth ? await requireAdmin(request, env) : null;
+    if (!canServe(sim, auth, !!admin))
+      return json({ error: 'Simulation not available' }, auth ? 403 : 401, cors);
   }
 
   // Increment play count
@@ -5155,7 +5308,17 @@ async function handlePutWebsiteManifest(request, simId, env, cors) {
 // `{id}/thumbnail.webp` - a key namespace nothing ever wrote. The live key is
 // the one handleUploadThumbnail writes. webp is tried first because that is
 // what the engine uploads, so the common case is a single R2 read.
-async function handleGetThumbnail(simId, env, cors) {
+async function handleGetThumbnail(request, simId, env, cors) {
+  // A thumbnail of held or quarantined content is itself the content, so it
+  // follows the same gate as the .pak instead of leaking through a public URL.
+  const simData = await env.SOCIAL.get(`sim:${simId}`);
+  if (!simData) return json({ error: 'Thumbnail not found' }, 404, cors);
+  const sim = JSON.parse(simData);
+  if (!isListable(sim)) {
+    const auth = await verifyAuth(request, env);
+    const admin = auth ? await requireAdmin(request, env) : null;
+    if (!canServe(sim, auth, !!admin)) return json({ error: 'Thumbnail not found' }, 404, cors);
+  }
   for (const ext of ['webp', 'png', 'jpg']) {
     const object = await env.SCENES.get(`thumbnails/${simId}/thumb.${ext}`);
     if (!object) continue;
