@@ -7,15 +7,65 @@
 //! module only holds the picker's runtime state and the per-wheel swatch
 //! query the UI renders.
 
-use bevy::prelude::Resource;
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+use bevy::prelude::{Entity, Resource};
 use serde::{Deserialize, Serialize};
 
 use crate::brick_palette::{Wheel, PALETTE};
 
 /// Which wheel the two-step picker is currently drilled into. `None` = the
 /// top-level list (the seven wheels + favorites) is shown.
+///
+/// The drill itself is local to the Slint `BrickColorRow`, so this is written
+/// from the pick payload (`"wheel|name|r, g, b"`) rather than from a
+/// per-step round-trip; it records the wheel the LAST pick came from.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ActiveColorWheel(pub Option<Wheel>);
+
+/// The swatch a part was last given from the wheel picker.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PickedSwatch {
+    pub wheel: Option<Wheel>,
+    /// The cell's hover name, verbatim from its wheel's lexicon.
+    pub name: String,
+    /// The cell's sRGB bytes at the time of the pick.
+    pub rgb: [u8; 3],
+}
+
+/// Session memory of wheel picks, keyed by the entity that received them.
+///
+/// The BrickColor field shows a swatch NAME, but the part only stores an RGB.
+/// Re-deriving the name from the colour is lossy: the wheels are colour
+/// transforms of one shared base palette, so a pick's bytes rarely coincide
+/// with a curated Stone entry, and inside the dark wheels several cells
+/// quantise to the same bytes (Umbra's inner ring is all near-void). Naming by
+/// colour therefore answered with a different name from the one the cell had
+/// offered on hover: hover "Seraphic", click, read "Clover Field".
+///
+/// Keeping the pick lets the field echo exactly the name that was clicked.
+/// An entry only speaks while the part still wears that exact colour, so a
+/// typed RGB, an undo, or a script recolour falls back to the derived name
+/// instead of a stale one. Entity ids carry a generation, so a despawned part's
+/// entry can never match a later part that reuses its index.
+#[derive(Resource, Default, Debug)]
+pub struct BrickColorPicks(pub HashMap<Entity, PickedSwatch>);
+
+impl BrickColorPicks {
+    /// Record that `entity` was given `swatch` by the picker.
+    pub fn record(&mut self, entity: Entity, swatch: PickedSwatch) {
+        self.0.insert(entity, swatch);
+    }
+
+    /// The picked name for `entity`, only while its colour is still `rgb`.
+    pub fn name_for(&self, entity: Entity, rgb: [u8; 3]) -> Option<&str> {
+        self.0
+            .get(&entity)
+            .filter(|p| p.rgb == rgb)
+            .map(|p| p.name.as_str())
+    }
+}
 
 /// The user's favorite swatches (sRGB 0-255), most-recent first, capped at
 /// [`ColorFavorites::CAP`]. Surfaced at the top of the picker's first step.
@@ -449,10 +499,18 @@ fn radial_shade(wheel: Wheel, rgb: [u8; 3], t: f32) -> [u8; 3] {
     hsl_to_rgb(h, s.clamp(0.0, 1.0), l.clamp(0.0, 1.0))
 }
 
-/// The name of the [`BASE_PALETTE`] swatch nearest to `rgb` by squared RGB
-/// distance. Drives the BrickColor field's displayed value (a swatch name like
-/// `"Seraph Blue"`) instead of a raw `"r, g, b"` triple.
-/// Name to show for `rgb`, preferring the ACTIVE wheel's own lexicon.
+/// Every wheel's honeycomb, built once. The cells are a pure function of the
+/// palette and the lexicons, and the name lookup below walks all seven per
+/// Properties rebuild, so rebuilding them on each call would be pure waste.
+fn all_honeycombs() -> &'static [(Wheel, Vec<HoneycombCell>)] {
+    static CELLS: OnceLock<Vec<(Wheel, Vec<HoneycombCell>)>> = OnceLock::new();
+    CELLS.get_or_init(|| Wheel::ALL.iter().map(|w| (*w, wheel_honeycomb(*w))).collect())
+}
+
+/// Name to show for `rgb` when no pick is on record for the part (see
+/// [`BrickColorPicks`]): the cell with EXACTLY these bytes, looked for on the
+/// hinted wheel first, then Stone, then the remaining wheels; failing all of
+/// those, the nearest curated Stone name.
 ///
 /// A wheel pick applies `radial_shade(transform_color(wheel, base))`, so the
 /// resulting colour is NOT a `BASE_PALETTE` entry. Naming it with
@@ -461,22 +519,34 @@ fn radial_shade(wheel: Wheel, rgb: [u8; 3], t: f32) -> [u8; 3] {
 /// because Seraphic sits on the rank-121 cell (`BASE_PALETTE[0]`, a dark green)
 /// and the nearest curated green is Clover Field.
 ///
-/// Searching the active wheel for an EXACT match first makes a pick round-trip
-/// its own name: apply and display run the same transform, so the bytes match
-/// exactly. Anything not produced by that wheel (a typed RGB, an imported
-/// colour) still falls through to the nearest curated base name.
+/// The hint is only a preference: the part keeps its colour across a reload
+/// and across the user browsing other wheels, so a colour minted by one wheel
+/// must still find its own name when the hint points elsewhere. Stone goes
+/// second because its cells are the curated palette, the one a typed or
+/// imported colour is most likely to coincide with. Where several cells share
+/// one set of bytes (the dark wheels' inner rings), the first in wheel order
+/// answers; only the pick record can disambiguate those.
 pub fn display_name_for_wheel(wheel: Option<Wheel>, rgb: [u8; 3]) -> String {
-    if let Some(w) = wheel {
-        if let Some(cell) = wheel_honeycomb(w)
-            .into_iter()
-            .find(|c| [c.r, c.g, c.b] == rgb)
-        {
-            return cell.name;
+    let cells = all_honeycombs();
+    let order = wheel
+        .into_iter()
+        .chain(std::iter::once(Wheel::Stone))
+        .chain(Wheel::ALL);
+    for w in order {
+        let hit = cells
+            .iter()
+            .find(|(cw, _)| *cw == w)
+            .and_then(|(_, cs)| cs.iter().find(|c| [c.r, c.g, c.b] == rgb));
+        if let Some(cell) = hit {
+            return cell.name.clone();
         }
     }
     nearest_base_name(rgb).to_string()
 }
 
+/// The name of the [`BASE_PALETTE`] swatch nearest to `rgb` by squared RGB
+/// distance. The last resort behind [`display_name_for_wheel`], for a colour
+/// no wheel produced (typed, imported, scripted).
 pub fn nearest_base_name(rgb: [u8; 3]) -> &'static str {
     let mut best = BASE_PALETTE[0].name;
     let mut best_d = i32::MAX;
@@ -657,5 +727,69 @@ mod tests {
         for w in Wheel::ALL {
             assert!(!wheel_colors(w).is_empty());
         }
+    }
+
+    #[test]
+    fn a_hinted_pick_reads_back_its_own_name() {
+        // Every cell on every wheel names itself when its wheel is the hint.
+        // Where two cells on one wheel quantise to the same bytes, the first
+        // answers; that is the documented limit, and the pick record covers it.
+        for w in Wheel::ALL {
+            let cells = wheel_honeycomb(w);
+            for c in &cells {
+                let bytes = [c.r, c.g, c.b];
+                let first = cells
+                    .iter()
+                    .find(|x| [x.r, x.g, x.b] == bytes)
+                    .expect("cell finds itself");
+                assert_eq!(
+                    display_name_for_wheel(Some(w), bytes),
+                    first.name,
+                    "wheel {:?} cell {}",
+                    w,
+                    c.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unhinted_colour_still_gets_a_wheel_name() {
+        // After a reload no wheel is on record, yet a colour minted by Aether
+        // must not degrade to the nearest Stone name. Cells whose bytes Stone
+        // also owns are skipped: Stone deliberately answers first for those.
+        let stone = wheel_honeycomb(Wheel::Stone);
+        let aether = wheel_honeycomb(Wheel::Aether);
+        let mut checked = 0;
+        for c in &aether {
+            let bytes = [c.r, c.g, c.b];
+            if stone.iter().any(|s| [s.r, s.g, s.b] == bytes) {
+                continue;
+            }
+            let first = aether.iter().find(|x| [x.r, x.g, x.b] == bytes).unwrap();
+            assert_eq!(display_name_for_wheel(None, bytes), first.name);
+            checked += 1;
+        }
+        assert!(checked > 100, "Aether should be mostly distinct from Stone");
+    }
+
+    #[test]
+    fn a_pick_speaks_only_while_the_colour_matches() {
+        let entity = Entity::from_raw_u32(7).unwrap();
+        let mut picks = BrickColorPicks::default();
+        picks.record(
+            entity,
+            PickedSwatch {
+                wheel: Some(Wheel::Umbra),
+                name: "Paimon".to_string(),
+                rgb: [9, 4, 12],
+            },
+        );
+        assert_eq!(picks.name_for(entity, [9, 4, 12]), Some("Paimon"));
+        // A typed RGB, an undo, or a script recolour: the record goes quiet.
+        assert_eq!(picks.name_for(entity, [9, 4, 13]), None);
+        // Another entity never inherits the pick.
+        let other = Entity::from_raw_u32(8).unwrap();
+        assert_eq!(picks.name_for(other, [9, 4, 12]), None);
     }
 }

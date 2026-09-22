@@ -364,6 +364,10 @@ fn main() {
         // no disk persistence this pass.
         .init_resource::<eustress_common::color_wheels::ActiveColorWheel>()
         .init_resource::<eustress_common::color_wheels::ColorFavorites>()
+        // Which wheel swatch each part was last given, so the BrickColor
+        // field echoes the name that was clicked rather than re-deriving
+        // one from the colour bytes.
+        .init_resource::<eustress_common::color_wheels::BrickColorPicks>()
         // Startup args
         .insert_resource(args.clone())
         // Play-mode editor seam: Slint StudioState flags, F5-F8 keyboard
@@ -386,6 +390,9 @@ fn main() {
         // Independent off-screen AI camera — the AI's own eyes (renders to an
         // image, never the window, so it can't displace the editor camera).
         .add_plugins(ai_camera::AiCameraPlugin)
+        // Publish-time capture orbit for the moderation judge; steps the AI
+        // camera through its poses over frames after do_publish queues it.
+        .add_plugins(eustress_engine::moderation_dossier::PublishCapturePlugin)
         // Slint UI (software renderer overlay)
         .add_plugins(ui::slint_ui::SlintUiPlugin)
         // Studio auth + Bliss node — starts the local Bliss node API.
@@ -686,7 +693,15 @@ fn main() {
         // path can't survive it) — so an imported splat vanished on the next
         // launch. Re-spawn disk splat folders on Space open (once, gated), the
         // same way the file-watcher hot-creates them.
-        app.add_systems(Update, eustress_engine::space::instance_loader::load_disk_gaussian_splats_on_open);
+        // Gated on the DB open having settled: discovery reads the Fjall
+        // `tree` partition when a DB is active, so it must not start while
+        // the open is still on its worker (it would fall back to the slow
+        // disk walk against a Space whose DB is seconds from installing).
+        app.add_systems(
+            Update,
+            eustress_engine::space::instance_loader::load_disk_gaussian_splats_on_open
+                .run_if(eustress_engine::space::world_db_plugin::world_db_open_settled),
+        );
     }
 
     // (WorldDbPlugin now comes in with add_core_sim_plugins above.)
@@ -707,6 +722,11 @@ fn main() {
         app.add_systems(Update, part_selection::part_selection_system
             .after(ui::slint_ui::SlintSystems::Drain)
             .after(ui::slint_ui::update_slint_ui_focus));
+        // Hover outline: the same pick as the click, run on cursor move, so
+        // the part (or Model) that a click would select is outlined first.
+        app.add_systems(Update, part_selection::hover_highlight_system
+            .after(ui::slint_ui::update_slint_ui_focus)
+            .after(part_selection::part_selection_system));
         // Ctrl+Shift+Alt + mouse-wheel resizes the part under the cursor
         // (no click/selection). Runs after the UI-focus update so it sees
         // the authoritative cursor-over-viewport signal; fires
