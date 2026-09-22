@@ -338,9 +338,14 @@ Then:
    runtime, with no human driving), plus the structured scene digest (the same fields
    `eustress-space`'s `OpenReport` already computes). Blocks item 3 — the Grok pipeline has
    nothing to send without this.
+   **Status:** the publish flow now builds the dossier and runs a four-pose orbit through the
+   AI camera at publish (`engine/src/moderation_dossier.rs`), uploaded alongside the .pak. Close
+   orbits on notable clusters and the headless-runtime path remain open.
 3. Grok 4.5 verdict pipeline: policy file as system prompt + the renders/digest from item 2 as
    multi-modal input, strict-JSON output (`verdict` + `quality` + required `spatial_evidence`),
    verdict record (§5 contract) written on chain; pre-listing gate in discovery.
+   **Status:** the verdict pipeline and the pre-listing gate run in the API Worker on Grok 4.6
+   (`infrastructure/cloudflare/api/src/moderation.mjs`); the chain record is not written yet.
 4. Appeal transaction + overturn records; removal-list enforcement in node software.
 5. **Pre-Judge triage layer** (§7 scaling analysis): content-hash dedup against already-judged
    BLAKE3 roots (never re-judge unchanged content); a cheap heuristic/classifier pre-filter so
@@ -348,6 +353,9 @@ Then:
    now that Judge calls are vision calls, not text-only (§5 spatial-review scaling note) —
    needed before publish volume makes per-submission Grok calls the binding cost/latency
    constraint.
+   **Status:** built as the Jev triage layer in front of the Judge, with dedup on the stored
+   object identity and deterministic rejects for empty scenes. Design, thresholds and cost
+   model: `MODERATION_PIPELINE.md`.
 
 **MVP gate (testnet, end of Phase 4)** — all must pass (#28 as amended):
 - 3 genesis-named nodes live across ≥2 physical machines / admin domains.
