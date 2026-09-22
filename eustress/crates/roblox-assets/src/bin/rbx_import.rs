@@ -91,6 +91,12 @@ const PLACES: &[(&str, &str, &str)] = &[
     ("Dating", "Social & Civic", "Dating"),
     ("Relationship Dynamics", "Social & Civic", "Relationship Dynamics"),
     ("Mikhail J Olson Voting Record", "Social & Civic", "Mikhail J Olson Voting Record"),
+    // ── Benchmark (1) ──
+    // Vehicle Simulator is the importer's 1:1-fidelity reference (~161k
+    // instances, 60 MB, terrain + MeshPart cars + legacy welds). It lands as
+    // a NEW space beside the original June import so the two can be compared
+    // side by side; the original is never touched.
+    ("Vehicle Simulator", "Summit Studios", "Vehicle Simulator 2"),
 ];
 
 const SRC_DIR: &str = r"C:\Users\miksu\Documents\Roblox Import";
@@ -325,10 +331,8 @@ fn build_fetcher(eustress_root: &Path) -> Option<Arc<dyn AssetFetcher>> {
                 // cookie, so without one every mesh/texture/sound 401s — a past
                 // 36-place run logged 62,598 of them and imported almost no
                 // media. Learning that from the report afterwards is too late.
-                println!(
-                    "  WARNING: EUSTRESS_ROBLOSECURITY is not set — gated assets will fail                      with HTTP 401 and meshes/textures/sounds will be MISSING.
-                                Set it to a .ROBLOSECURITY cookie to import media."
-                );
+                println!("  WARNING: EUSTRESS_ROBLOSECURITY is not set. Gated assets will fail with HTTP 401");
+                println!("           and meshes/textures/sounds will be MISSING. Set it to a .ROBLOSECURITY cookie.");
                 chain.push(Arc::new(NetworkFetcher::new()));
             }
         }

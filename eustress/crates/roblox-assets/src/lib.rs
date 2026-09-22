@@ -121,7 +121,7 @@ impl AssetFetcher for NetworkFetcher {
         use std::sync::atomic::Ordering;
         if self.auth_failures.load(Ordering::Relaxed) >= AUTH_FAILURE_TRIP {
             return Err(format!(
-                "rbxassetid://{asset_id} skipped — {AUTH_FAILURE_TRIP} consecutive auth                  rejections; Roblox requires a .ROBLOSECURITY cookie for these assets.                  Set EUSTRESS_ROBLOSECURITY and re-run to fetch them."
+                "rbxassetid://{asset_id} skipped — {AUTH_FAILURE_TRIP} consecutive auth rejections; Roblox requires a .ROBLOSECURITY cookie for these assets. Set EUSTRESS_ROBLOSECURITY and re-run to fetch them."
             ));
         }
         let url = Self::url_for(asset_id);
@@ -140,7 +140,7 @@ impl AssetFetcher for NetworkFetcher {
                 let n = self.auth_failures.fetch_add(1, Ordering::Relaxed) + 1;
                 if n == AUTH_FAILURE_TRIP {
                     tracing::warn!(
-                        "roblox-assets: {AUTH_FAILURE_TRIP} consecutive auth rejections —                          halting network asset fetches. Set EUSTRESS_ROBLOSECURITY                          (a .ROBLOSECURITY cookie) and re-run to import meshes/textures."
+                        "roblox-assets: {AUTH_FAILURE_TRIP} consecutive auth rejections — halting network asset fetches. Set EUSTRESS_ROBLOSECURITY (a .ROBLOSECURITY cookie) and re-run to import meshes/textures."
                     );
                 }
             }
@@ -377,6 +377,16 @@ impl AssetFetcher for CachingFetcher {
                 Ok(bytes)
             }
             Err(e) => {
+                // Only a failure that says something about the ASSET belongs
+                // in the negative cache — a 404, a decode error, an oversize
+                // body. An authentication rejection says something about the
+                // CREDENTIALS, and resolves the moment a cookie is supplied;
+                // caching it as a permanent miss made 6,634 assets vanish from
+                // every later import until the markers were found by hand.
+                // The circuit breaker already stops the request storm.
+                if is_credential_failure(&e) {
+                    return Err(e);
+                }
                 if let Err(werr) = write_cache(&self.cache_dir, &err_marker, e.as_bytes()) {
                     tracing::warn!(asset_id, "roblox-assets: negative-cache write failed: {werr}");
                 }
@@ -384,6 +394,15 @@ impl AssetFetcher for CachingFetcher {
             }
         }
     }
+}
+
+/// Whether a fetch error is about the caller's credentials rather than the
+/// asset itself — HTTP 401/403, or the auth circuit breaker having tripped.
+/// These must never be negative-cached: they are not a property of the asset.
+fn is_credential_failure(reason: &str) -> bool {
+    reason.contains("HTTP 401")
+        || reason.contains("HTTP 403")
+        || reason.contains("consecutive auth")
 }
 
 /// Best-effort cache write: ensure the dir exists, then write the bytes.
@@ -541,6 +560,43 @@ mod tests {
         assert!(e2.contains("cached failure"), "got {e2}");
         assert!(e2.contains(&e1.replace(" (cached failure)", "")) || e2.len() > 4);
         assert!(dir.join("66.err").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fetcher whose failure reason looks like an authentication rejection.
+    struct Unauthorized(std::sync::atomic::AtomicUsize);
+    impl AssetFetcher for Unauthorized {
+        fn fetch(&self, id: u64) -> Result<Vec<u8>, String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(format!("network fetch rbxassetid://{id} failed: HTTP 401"))
+        }
+    }
+
+    /// A 401 says the CREDENTIALS are wrong, not that the asset is missing.
+    /// It must not leave a `.err` marker, or every later import — including
+    /// one run with a valid cookie — would skip the asset as a known miss.
+    /// (One 36-place batch left 6,634 such markers behind.)
+    #[test]
+    fn caching_fetcher_does_not_negative_cache_auth_failures() {
+        let dir = temp_dir("cache_no_401_marker");
+        let inner = Arc::new(Unauthorized(std::sync::atomic::AtomicUsize::new(0)));
+        let caching = CachingFetcher::new(&dir, inner.clone() as Arc<dyn AssetFetcher>);
+
+        let e = caching.fetch(77).unwrap_err();
+        assert!(e.contains("HTTP 401"), "got {e}");
+        assert!(
+            !dir.join("77.err").is_file(),
+            "a 401 must not be recorded as a permanent miss"
+        );
+
+        // With no marker, the next attempt reaches the network again — which
+        // is exactly what lets a later run with a cookie succeed.
+        let _ = caching.fetch(77);
+        assert_eq!(
+            inner.0.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "second attempt must not be short-circuited by a cached failure"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -354,9 +354,25 @@ fn read_mesh2(cur: &mut Cursor) -> Result<CsgMesh, CsgError> {
 /// Decode CSGMDL5 (obfuscated struct-of-arrays). Port of
 /// `rbx_mesh::union_graphics::v5`.
 fn decode_csgmdl5(body: &[u8]) -> Result<CsgMesh, CsgError> {
-    let mut deob = body.to_vec();
-    deobfuscate(10, &mut deob);
-    let mut cur = Cursor::new(&deob);
+    // Only the 10-byte magic is XOR-obfuscated; the v5 body is plaintext in
+    // every real sample examined (Vehicle Simulator). Reading it through the
+    // key produced garbage counts that failed as "truncated" — every v5
+    // union in the place fell to a grey block. The section headers carry a
+    // checksum of their own (each quantised block's byte-length must equal
+    // count × 6), so decode plaintext first and only if that check fails try
+    // the obfuscated reading, which keeps any obfuscated-body variant working.
+    match decode_csgmdl5_body(body) {
+        Ok(mesh) => Ok(mesh),
+        Err(plain_err) => {
+            let mut deob = body.to_vec();
+            deobfuscate(10, &mut deob);
+            decode_csgmdl5_body(&deob).map_err(|_| plain_err)
+        }
+    }
+}
+
+fn decode_csgmdl5_body(body: &[u8]) -> Result<CsgMesh, CsgError> {
+    let mut cur = Cursor::new(body);
 
     // positions: u16 count, then count × f32×3
     let pos_count = cur.u16()? as usize;
@@ -367,7 +383,12 @@ fn decode_csgmdl5(body: &[u8]) -> Result<CsgMesh, CsgError> {
 
     // normals: u16 count, u32 byte-len, then count × quantised i16×3
     let normals_count = cur.u16()? as usize;
-    let _normals_len = cur.u32()?;
+    let normals_len = cur.u32()? as usize;
+    if normals_len != normals_count * 6 {
+        return Err(CsgError::Malformed(format!(
+            "CSGMDL5 normals block length {normals_len} != {normals_count} normals × 6 (body is not in the expected encoding)"
+        )));
+    }
     let mut normals = Vec::with_capacity(normals_count);
     for _ in 0..normals_count {
         normals.push(dequantize_i16x3(&mut cur)?);
@@ -399,7 +420,12 @@ fn decode_csgmdl5(body: &[u8]) -> Result<CsgMesh, CsgError> {
 
     // tangents: u16 count, u32 byte-len, then count × quantised i16×3
     let tangents_count = cur.u16()? as usize;
-    let _tangents_len = cur.u32()?;
+    let tangents_len = cur.u32()? as usize;
+    if tangents_len != tangents_count * 6 {
+        return Err(CsgError::Malformed(format!(
+            "CSGMDL5 tangents block length {tangents_len} != {tangents_count} tangents × 6"
+        )));
+    }
     for _ in 0..tangents_count {
         let _ = dequantize_i16x3(&mut cur)?;
     }
@@ -1028,6 +1054,75 @@ pub(crate) fn make_csgmdl2_triangle_fixture() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Modern Roblox stores a union's baked mesh in `MeshData2` (a
+    /// deduplicated SharedString) and leaves the legacy `MeshData` empty.
+    /// This decodes real `MeshData2` blobs out of Vehicle Simulator to prove
+    /// the field carries a CSGMDL body the decoder understands — the exact
+    /// assumption that, left unverified, turned 12,121 unions into grey
+    /// blocks. Skips (loudly) when the reference place is not on this machine.
+    #[test]
+    fn real_place_mesh_data2_decodes() {
+        use rbx_dom_weak::types::Variant;
+        let path = std::path::Path::new(
+            r"C:\Users\miksu\Documents\Roblox Import\Vehicle Simulator.rbxl",
+        );
+        if !path.is_file() {
+            eprintln!("SKIP real_place_mesh_data2_decodes: {} not present", path.display());
+            return;
+        }
+        let rbx = crate::parser::parse(path).expect("parse Vehicle Simulator.rbxl");
+        let dom = rbx.dom();
+
+        let (mut seen, mut decoded, mut legacy_nonempty) = (0usize, 0usize, 0usize);
+        let mut first_err: Option<String> = None;
+        for inst in dom.descendants() {
+            if inst.class.as_str() != "UnionOperation" {
+                continue;
+            }
+            let bytes_of = |name: &str| -> Option<&[u8]> {
+                match inst.properties.get(&rbx_dom_weak::ustr(name))? {
+                    Variant::BinaryString(bs) => Some(bs.as_ref()),
+                    Variant::SharedString(ss) => Some(ss.data()),
+                    _ => None,
+                }
+            };
+            if bytes_of("MeshData").is_some_and(|b| !b.is_empty()) {
+                legacy_nonempty += 1;
+            }
+            let Some(blob) = bytes_of("MeshData2").filter(|b| !b.is_empty()) else {
+                continue;
+            };
+            seen += 1;
+            match decode_mesh_data(blob) {
+                Ok(m) if !m.positions.is_empty() && !m.indices.is_empty() => decoded += 1,
+                Ok(_) => {}
+                Err(e) => {
+                    if first_err.is_none() {
+                        let head = &blob[..blob.len().min(16)];
+                        first_err = Some(format!("{e} (first 16 bytes: {head:02x?})"));
+                    }
+                }
+            }
+            if seen >= 500 {
+                break; // a representative sample is plenty
+            }
+        }
+
+        assert!(seen > 0, "no UnionOperation carried a non-empty MeshData2");
+        eprintln!("MeshData2: {decoded}/{seen} unions decoded to real geometry; legacy MeshData non-empty on {legacy_nonempty}");
+        assert!(
+            decoded > 0,
+            "MeshData2 is not a CSGMDL format this decoder understands: {}",
+            first_err.clone().unwrap_or_default()
+        );
+        // The overwhelming majority should decode; a handful may be unbaked.
+        assert!(
+            decoded * 10 >= seen * 9,
+            "only {decoded}/{seen} decoded; first failure: {}",
+            first_err.unwrap_or_default()
+        );
+    }
 
     /// Build a tiny valid CSGMDL2 blob: a single triangle (3 vertices).
     fn make_csgmdl2_triangle() -> Vec<u8> {

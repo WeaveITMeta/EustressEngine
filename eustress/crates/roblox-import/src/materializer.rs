@@ -1321,14 +1321,22 @@ impl<'dom> Materializer<'dom> {
         report: &mut ImportReport,
     ) -> Result<(), ImportError> {
         let props = &inst.properties;
-        // MeshData may be a BinaryString or a (deduplicated) SharedString.
-        let mesh_data: Option<Vec<u8>> = match props.get(&rbx_dom_weak::ustr("MeshData")) {
-            Some(rbx_dom_weak::types::Variant::BinaryString(bs)) => {
-                Some(AsRef::<[u8]>::as_ref(bs).to_vec())
-            }
-            Some(rbx_dom_weak::types::Variant::SharedString(ss)) => Some(ss.data().to_vec()),
-            _ => None,
+        // Roblox has stored a union's baked mesh in two places over time.
+        // Modern files carry it in `MeshData2` as a deduplicated SharedString
+        // and leave the legacy `MeshData` present but EMPTY; older files have
+        // only `MeshData`. Reading the legacy field alone turned every union
+        // in a current place into a grey AABB block (Vehicle Simulator:
+        // 12,121 of them), so prefer the modern field and treat an empty blob
+        // as absent so it can never shadow a populated one.
+        let blob_of = |name: &str| -> Option<Vec<u8>> {
+            let bytes: &[u8] = match props.get(&rbx_dom_weak::ustr(name))? {
+                rbx_dom_weak::types::Variant::BinaryString(bs) => bs.as_ref(),
+                rbx_dom_weak::types::Variant::SharedString(ss) => ss.data(),
+                _ => return None,
+            };
+            (!bytes.is_empty()).then(|| bytes.to_vec())
         };
+        let mesh_data: Option<Vec<u8>> = blob_of("MeshData2").or_else(|| blob_of("MeshData"));
 
         // AABB fallback size from the source Part.Size (Vector3), else 4³.
         let size = match props.get(&rbx_dom_weak::ustr("Size")) {
