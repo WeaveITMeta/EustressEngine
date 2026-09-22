@@ -5,8 +5,6 @@
 // Trunk compiles this and injects it into index.html.
 // =============================================================================
 
-use eustress_web::App;
-
 fn main() {
     // Initialize panic hook for better error messages
     console_error_panic_hook::set_once();
@@ -16,6 +14,6 @@ fn main() {
     
     log::info!("🚀 Starting Eustress Web...");
     
-    // Mount the Leptos app to the body
-    leptos::mount::mount_to_body(App);
+    // Mount the Leptos app to the body, clearing any prerendered markup first
+    eustress_web::mount_app();
 }

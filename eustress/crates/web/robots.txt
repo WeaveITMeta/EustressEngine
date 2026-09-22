@@ -1,16 +1,20 @@
-# Eustress Engine - robots.txt
+# Eustress Engine
 # https://eustress.dev/robots.txt
+#
+# Every public page is open to every crawler. Which AI crawlers are admitted
+# is decided at the Cloudflare edge, not here. The paths below are account
+# pages: nothing on them exists without a session, so there is nothing to
+# index.
 
 User-agent: *
 Allow: /
+Disallow: /admin
+Disallow: /dashboard
+Disallow: /friends
+Disallow: /kyc
+Disallow: /projects
+Disallow: /settings
+Disallow: /tickets
+Disallow: /verify
 
-# Sitemap location
 Sitemap: https://eustress.dev/sitemap.xml
-
-# Crawl-delay for respectful crawling
-Crawl-delay: 1
-
-# Disallow admin/private areas (if any)
-Disallow: /api/
-Disallow: /admin/
-Disallow: /_trunk/

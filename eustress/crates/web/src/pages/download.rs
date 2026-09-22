@@ -28,7 +28,9 @@ pub fn DownloadPage() -> impl IntoView {
     let linux_url = RwSignal::new("https://downloads.eustress.dev/latest/linux-x64".to_string());
     let linux_size = RwSignal::new("~80 MB".to_string());
 
-    // Fetch latest.json on mount
+    // Fetch latest.json on mount. Browser only: the prerender ships the
+    // fallback URLs and sizes above, and the live app replaces them.
+    #[cfg(not(feature = "ssr"))]
     wasm_bindgen_futures::spawn_local(async move {
         if let Ok(resp) = gloo_net::http::Request::get("https://downloads.eustress.dev/latest.json")
             .send().await

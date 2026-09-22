@@ -109,9 +109,13 @@ impl AppState {
         // The local Bliss node (localhost:7777) only handles co-signing.
         let api_url = "https://api.eustress.dev".to_string();
         
-        // Check localStorage for saved preferences
+        // Check localStorage for saved preferences. The prerender build has no
+        // localStorage to ask, and dark is the site default anyway.
+        #[cfg(not(feature = "ssr"))]
         let dark_mode: bool = gloo_storage::LocalStorage::get("dark_mode")
             .unwrap_or(true); // Default to dark mode
+        #[cfg(feature = "ssr")]
+        let dark_mode = true;
         
         Self {
             auth: RwSignal::new(AuthState::Unknown),

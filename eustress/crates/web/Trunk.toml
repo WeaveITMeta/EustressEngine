@@ -21,7 +21,7 @@ file = ".env"
 
 [watch]
 # Files to watch for changes
-watch = ["src", "style", "index.html", "Cargo.toml"]
+watch = ["src", "style", "index.html", "Cargo.toml", "robots.txt", "sitemap.xml", "llms.txt"]
 # Ignore patterns
 ignore = ["target", "dist"]
 

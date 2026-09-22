@@ -119,10 +119,15 @@ pub fn ProjectsPage() -> impl IntoView {
             match client.get::<ProjectsResponse>("/api/projects").await {
                 Ok(response) => {
                     let places: Vec<Place> = response.projects.into_iter().map(|p| {
+                        // The API reports the moderation state for anything not yet
+                        // listed; every waiting state reads as "under review" here,
+                        // and a reject goes back to draft for the author to fix.
                         let status = match p.status.as_str() {
                             "published" => SpaceStatus::Published,
-                            "draft" => SpaceStatus::Draft,
+                            "draft" | "rejected" => SpaceStatus::Draft,
                             "archived" => SpaceStatus::Archived,
+                            "pending" | "classifying" | "held" | "appealed" | "quarantined"
+                            | "changes_requested" | "unreviewed" | "review" => SpaceStatus::UnderReview,
                             _ => SpaceStatus::Draft,
                         };
                         Place {

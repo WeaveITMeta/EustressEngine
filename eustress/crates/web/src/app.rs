@@ -8,9 +8,14 @@
 // =============================================================================
 
 use leptos::prelude::*;
+// Browser-only: the prerender build (feature `ssr`) has no task executor to
+// spawn on and no window to read, and the code that uses these is fenced
+// with the same feature inside App.
+#[cfg(not(feature = "ssr"))]
 use leptos::task::spawn_local;
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
+#[cfg(not(feature = "ssr"))]
 use web_sys::window;
 
 use crate::state::JurisdictionState;
@@ -87,124 +92,145 @@ use crate::state::AppState;
 pub fn App() -> impl IntoView {
     // Provide global app state
     let app_state = AppState::new();
-    
-    // Check for OAuth callback token in URL (from Discord login)
-    if let Some(win) = window() {
-        if let Ok(search) = win.location().search() {
-            if search.contains("token=") {
-                // Parse token and user_id from URL
-                let params: std::collections::HashMap<String, String> = search
-                    .trim_start_matches('?')
-                    .split('&')
-                    .filter_map(|pair| {
-                        let mut parts = pair.splitn(2, '=');
-                        Some((parts.next()?.to_string(), parts.next()?.to_string()))
-                    })
-                    .collect();
-                
-                if let (Some(token), Some(user_id)) = (params.get("token"), params.get("user_id")) {
-                    let token = token.clone();
-                    let user_id = user_id.clone();
-                    let app_state_clone = app_state.clone();
+    let jurisdiction_signal = app_state.jurisdiction;
+
+    // Everything in this block is session plumbing for a live browser: the
+    // OAuth callback, localStorage, timers, the pageview beacon and the
+    // jurisdiction lookup. The prerender bin (src/bin/prerender.rs) renders
+    // this same component on a native target where none of those exist, and a
+    // crawler reading the output needs none of them. The WASM build runs all
+    // of it on mount exactly as before.
+    #[cfg(not(feature = "ssr"))]
+    {
+        // Check for OAuth callback token in URL (from Discord login)
+        if let Some(win) = window() {
+            if let Ok(search) = win.location().search() {
+                if search.contains("token=") {
+                    // Parse token and user_id from URL
+                    let params: std::collections::HashMap<String, String> = search
+                        .trim_start_matches('?')
+                        .split('&')
+                        .filter_map(|pair| {
+                            let mut parts = pair.splitn(2, '=');
+                            Some((parts.next()?.to_string(), parts.next()?.to_string()))
+                        })
+                        .collect();
                     
-                    // Fetch user data and complete login
-                    spawn_local(async move {
-                        let client = crate::api::ApiClient::new(&app_state_clone.api_url);
-                        if let Ok(user) = crate::api::get_me(&client, &token).await {
-                            app_state_clone.login_with_token(token, user);
-                            // Clear URL params
-                            if let Some(win) = window() {
-                                let _ = win.history().and_then(|h| {
-                                    h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some("/dashboard"))
-                                });
+                    if let (Some(token), Some(user_id)) = (params.get("token"), params.get("user_id")) {
+                        let token = token.clone();
+                        let user_id = user_id.clone();
+                        let app_state_clone = app_state.clone();
+                        
+                        // Fetch user data and complete login
+                        spawn_local(async move {
+                            let client = crate::api::ApiClient::new(&app_state_clone.api_url);
+                            if let Ok(user) = crate::api::get_me(&client, &token).await {
+                                app_state_clone.login_with_token(token, user);
+                                // Clear URL params
+                                if let Some(win) = window() {
+                                    let _ = win.history().and_then(|h| {
+                                        h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some("/dashboard"))
+                                    });
+                                }
                             }
-                        }
-                    });
+                        });
+                    }
                 }
             }
         }
-    }
-    
-    // Restore session from localStorage on startup
-    app_state.restore_session();
+        
+        // Restore session from localStorage on startup
+        app_state.restore_session();
 
-    // Keep the signed-in user fresh. `restore_session` rehydrates from
-    // localStorage, which snapshots the balance at login time — so BLS earned
-    // since then (credited at the UTC-midnight distribution) never appeared
-    // until the user manually logged out and back in. Re-fetch once now and
-    // then on an interval so the wallet, nav badge, and dashboard all track
-    // the ledger.
-    {
-        let app_state = app_state.clone();
-        let refresh = move || {
+        // Keep the signed-in user fresh. `restore_session` rehydrates from
+        // localStorage, which snapshots the balance at login time — so BLS earned
+        // since then (credited at the UTC-midnight distribution) never appeared
+        // until the user manually logged out and back in. Re-fetch once now and
+        // then on an interval so the wallet, nav badge, and dashboard all track
+        // the ledger.
+        {
             let app_state = app_state.clone();
-            spawn_local(async move {
-                let Some(token) = app_state.get_token() else { return };
-                let client = crate::api::ApiClient::new(&app_state.api_url);
-                match crate::api::get_me(&client, &token).await {
-                    Ok(user) => {
-                        // The user may have signed out while this request was
-                        // in flight. Applying the response then would restore
-                        // a session they just ended (and re-persist it to
-                        // localStorage), so re-check before committing.
-                        if app_state.auth.get_untracked().is_authenticated() {
-                            // login() re-persists to localStorage, so the
-                            // refreshed balance survives the next reload.
-                            app_state.login(user);
+            let refresh = move || {
+                let app_state = app_state.clone();
+                spawn_local(async move {
+                    let Some(token) = app_state.get_token() else { return };
+                    let client = crate::api::ApiClient::new(&app_state.api_url);
+                    match crate::api::get_me(&client, &token).await {
+                        Ok(user) => {
+                            // The user may have signed out while this request was
+                            // in flight. Applying the response then would restore
+                            // a session they just ended (and re-persist it to
+                            // localStorage), so re-check before committing.
+                            if app_state.auth.get_untracked().is_authenticated() {
+                                // login() re-persists to localStorage, so the
+                                // refreshed balance survives the next reload.
+                                app_state.login(user);
+                            }
                         }
+                        // The session is genuinely dead — stop showing a signed-in
+                        // UI backed by a token the witness rejects.
+                        Err(crate::api::ApiError::Unauthorized) => app_state.logout(),
+                        // Network/5xx: transient. Keep the session and retry.
+                        Err(_) => {}
                     }
-                    // The session is genuinely dead — stop showing a signed-in
-                    // UI backed by a token the witness rejects.
-                    Err(crate::api::ApiError::Unauthorized) => app_state.logout(),
-                    // Network/5xx: transient. Keep the session and retry.
-                    Err(_) => {}
-                }
-            });
-        };
-        refresh();
-        let handle = gloo_timers::callback::Interval::new(60_000, refresh);
-        handle.forget(); // refresh for the life of the app
-    }
+                });
+            };
+            refresh();
+            let handle = gloo_timers::callback::Interval::new(60_000, refresh);
+            handle.forget(); // refresh for the life of the app
+        }
 
-    // Cookieless pageview beacon (feeds the /admin funnel). Fire-and-forget:
-    // a failure here must never affect the app. The Worker no-ops if the
-    // ANALYTICS namespace isn't bound yet.
-    {
-        let api_url = app_state.api_url.clone();
+        // Cookieless pageview beacon (feeds the /admin funnel). Fire-and-forget:
+        // a failure here must never affect the app. The Worker no-ops if the
+        // ANALYTICS namespace isn't bound yet.
+        {
+            let api_url = app_state.api_url.clone();
+            spawn_local(async move {
+                let client = crate::api::ApiClient::new(&api_url);
+                let _ = client
+                    .post::<serde_json::Value, serde_json::Value>(
+                        "/api/analytics/hit",
+                        &serde_json::json!({}),
+                    )
+                    .await;
+            });
+        }
+
+        // Detect jurisdiction from Cloudflare trace
         spawn_local(async move {
-            let client = crate::api::ApiClient::new(&api_url);
-            let _ = client
-                .post::<serde_json::Value, serde_json::Value>(
-                    "/api/analytics/hit",
-                    &serde_json::json!({}),
-                )
-                .await;
+            match detect_jurisdiction().await {
+                Some((iso2, supported)) => {
+                    if supported {
+                        jurisdiction_signal.set(JurisdictionState::Supported {
+                            iso2: iso2.clone(),
+                            name: jurisdiction_name(&iso2),
+                        });
+                    } else {
+                        jurisdiction_signal.set(JurisdictionState::Unsupported { iso2 });
+                    }
+                }
+                None => {
+                    // Can't detect (localhost, no CF): allow through
+                    jurisdiction_signal.set(JurisdictionState::Supported {
+                        iso2: "XX".to_string(),
+                        name: "Local Development".to_string(),
+                    });
+                }
+            }
         });
     }
 
-    // Detect jurisdiction from Cloudflare trace
-    let jurisdiction_signal = app_state.jurisdiction;
-    spawn_local(async move {
-        match detect_jurisdiction().await {
-            Some((iso2, supported)) => {
-                if supported {
-                    jurisdiction_signal.set(JurisdictionState::Supported {
-                        iso2: iso2.clone(),
-                        name: jurisdiction_name(&iso2),
-                    });
-                } else {
-                    jurisdiction_signal.set(JurisdictionState::Unsupported { iso2 });
-                }
-            }
-            None => {
-                // Can't detect (localhost, no CF) — allow through
-                jurisdiction_signal.set(JurisdictionState::Supported {
-                    iso2: "XX".to_string(),
-                    name: "Local Development".to_string(),
-                });
-            }
-        }
-    });
+    // A prerendered page is public by definition, and the live app re-runs
+    // the jurisdiction check the moment it mounts. Without this the server
+    // render would stop at the "Verifying jurisdiction" spinner and never
+    // reach the router.
+    #[cfg(feature = "ssr")]
+    {
+        jurisdiction_signal.set(JurisdictionState::Supported {
+            iso2: "XX".to_string(),
+            name: "Prerender".to_string(),
+        });
+    }
 
     provide_context(app_state);
 
@@ -225,6 +251,7 @@ pub fn App() -> impl IntoView {
                 JurisdictionState::Supported { .. } => {
                     view! {
                         <Router>
+            <TitleSync />
             <Routes fallback=|| "Not found.">
                 // Public routes
                 <Route path=path!("/") view=HomePage />
@@ -308,6 +335,7 @@ pub fn App() -> impl IntoView {
 // ── Jurisdiction Detection ──────────────────────────────────────────────────
 
 /// Supported KYC jurisdictions (IRS QI approved).
+#[cfg(not(feature = "ssr"))]
 const SUPPORTED_JURISDICTIONS: &[&str] = &[
     "AD","AE","AG","AR","AU","AW","BE","BH","BM","BN","BQ","BR","BS",
     "CA","CH","CK","CN","CO","CY","CZ","DE","DK","EE","ES","FI","FR",
@@ -319,6 +347,7 @@ const SUPPORTED_JURISDICTIONS: &[&str] = &[
 
 /// Detect jurisdiction from Cloudflare cdn-cgi/trace.
 /// Returns (iso2, is_supported) or None if detection fails.
+#[cfg(not(feature = "ssr"))]
 async fn detect_jurisdiction() -> Option<(String, bool)> {
     // On localhost, skip detection
     if let Some(win) = window() {
@@ -346,6 +375,7 @@ async fn detect_jurisdiction() -> Option<(String, bool)> {
 }
 
 /// Get a human-readable name for common jurisdictions.
+#[cfg(not(feature = "ssr"))]
 fn jurisdiction_name(iso2: &str) -> String {
     match iso2 {
         "US" => "United States", "CA" => "Canada", "GB" => "United Kingdom",
@@ -360,6 +390,51 @@ fn jurisdiction_name(iso2: &str) -> String {
         "AE" => "UAE", "XX" => "Local Development",
         other => return other.to_string(),
     }.to_string()
+}
+
+// ── Title Sync ──────────────────────────────────────────────────────────────
+
+/// The site title of the shell, used for the home page and for any page
+/// without a heading. Keep it identical to the `<title>` in index.html.
+#[cfg(not(feature = "ssr"))]
+const SITE_TITLE: &str = "Eustress Engine | Simulation & Data Platform";
+
+/// Keeps `document.title` in step with the page as the router moves.
+///
+/// A prerendered page lands with its own `<title>` (src/bin/prerender.rs
+/// names it after the first `<h1>`), and before this the app never touched
+/// the title, so the title of the page a visitor landed on would have
+/// followed them to every page after it. This applies the prerender's rule at
+/// runtime; the first run reproduces the title the page arrived with.
+#[component]
+fn TitleSync() -> impl IntoView {
+    #[cfg(not(feature = "ssr"))]
+    {
+        let location = leptos_router::hooks::use_location();
+        Effect::new(move |_| {
+            let path = location.pathname.get();
+            // The route's view is swapped in during the same reactive pass
+            // that fires this effect; read the heading once that pass is done.
+            set_timeout(
+                move || {
+                    let doc = document();
+                    let heading = doc
+                        .query_selector("h1")
+                        .ok()
+                        .flatten()
+                        .and_then(|h| h.text_content())
+                        .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+                        .filter(|t| !t.is_empty());
+                    doc.set_title(&match heading {
+                        Some(h) if path != "/" => format!("{h} | Eustress Engine"),
+                        _ => SITE_TITLE.to_string(),
+                    });
+                },
+                std::time::Duration::ZERO,
+            );
+        });
+    }
+    ()
 }
 
 // ── Blocked Page ────────────────────────────────────────────────────────────

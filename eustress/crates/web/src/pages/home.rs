@@ -544,10 +544,14 @@ fn WhatsInsideTabs() -> impl IntoView {
 
     // Auto-carousel: advance to the next tab every 30 seconds. A manual click
     // (below) jumps immediately; the timer just keeps advancing from there.
-    let timer = gloo_timers::callback::Interval::new(30_000, move || {
-        active.update(|i| *i = (*i + 1) % 4);
-    });
-    timer.forget();
+    // Browser only: the prerender renders the first tab and has no clock.
+    #[cfg(not(feature = "ssr"))]
+    {
+        let timer = gloo_timers::callback::Interval::new(30_000, move || {
+            active.update(|i| *i = (*i + 1) % 4);
+        });
+        timer.forget();
+    }
 
     let tab_label = |i: usize| match i {
         0 => "Games & Worlds",

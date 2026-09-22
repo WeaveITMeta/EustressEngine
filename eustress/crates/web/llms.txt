@@ -1,0 +1,61 @@
+# Eustress Engine
+
+> Eustress is a source-available simulation and data platform built in Rust. Model the real world, from a battery cell to a power grid, drive it with real data, run a year of simulation per second, and let AI agents work inside the same Spaces you do.
+
+Eustress ships as a desktop application for Windows, macOS and Linux with an editor, a play mode, scripting in Luau and Rune, and an MCP server so agents can drive the engine directly. The web platform at eustress.dev holds accounts, publishing, the marketplace and the Bliss ledger. The 3D scene and the entity component system underneath are implementation details; the product is the simulation and the data it produces.
+
+The source is public at https://github.com/WeaveITMeta/EustressEngine under PolyForm Shield 1.0.0. That is a source-available license, which is a different thing from an open source license: anyone can read, build and use it, and it may not be used to build a competing product.
+
+## Docs
+
+- [Getting Started](https://eustress.dev/docs/getting-started)
+- [Scripting System](https://eustress.dev/docs/scripting): Soul, the Rune API, ECS patterns, events and messages
+- [Services](https://eustress.dev/docs/services)
+- [Simulation System](https://eustress.dev/docs/simulation): running, stepping and reading simulations
+- [Physics System](https://eustress.dev/docs/physics)
+- [Building](https://eustress.dev/docs/building)
+- [Networking System](https://eustress.dev/docs/networking): QUIC transport, state replication, server authority, remote events
+- [UI Systems](https://eustress.dev/docs/ui): in-world and on-screen interfaces
+- [Audio System](https://eustress.dev/docs/audio): sound components, spatial audio, music and effects
+- [The Realism Platform](https://eustress.dev/docs/realism): STEM, industry, economics and rapid prototyping uses
+- [Universes](https://eustress.dev/docs/universes): how Universes, Spaces and publishing relate
+- [Publishing](https://eustress.dev/docs/publishing): taking a Space public
+- [Earning on Eustress](https://eustress.dev/docs/earning): contribution types, earning Bliss (BLS), Tickets (TKT)
+- [The Eustress Philosophy](https://eustress.dev/docs/philosophy): why the platform is built this way
+- [Website Service](https://eustress.dev/docs/website): let a website read live values out of a published Space
+
+## Website Service (Markdown)
+
+- [Website Service, scripting reference](https://eustress.dev/docs/api/WEBSITE_SERVICE_API.md): the `Website` service and its `Reference` children, with every property, function and event
+- [Wiring a website to a manifest](https://eustress.dev/docs/api/WEBSITE_MANIFEST_INTEGRATION.md): the read endpoint, the auth key, caching, rate limits and key rotation for the consuming website
+- [Website Service and the published manifest, specification](https://eustress.dev/docs/design/WEBSITE_SERVICE.md): the model behind the feature
+
+## Agents and tooling
+
+- [MCP Server](https://eustress.dev/learn/mcp): the Model Context Protocol server that lets an agent create, inspect and simulate inside a Space
+- [IDE Integration](https://eustress.dev/learn/ide): editing scripts from an external editor
+- [Rune LSP](https://eustress.dev/learn/lsp): language server for Rune scripts
+- [Learn](https://eustress.dev/learn): the full learning index
+
+## Product
+
+- [What is Eustress?](https://eustress.dev/about)
+- [Download](https://eustress.dev/download): Windows, macOS and Linux builds
+- [Marketplace](https://eustress.dev/marketplace): published Spaces and assets
+- [Bliss (BLS)](https://eustress.dev/bliss): the platform currency and its ledger
+- [Press and media resources](https://eustress.dev/press)
+- [License](https://eustress.dev/license): PolyForm Shield 1.0.0
+- [Contact](https://eustress.dev/contact)
+
+## API
+
+- Website manifest read: `GET https://api.eustress.dev/api/simulation/{namespace}/latest/manifest` with the Space's key in `X-Eustress-Key`. Responses carry an `ETag` and a five minute `Cache-Control`; the limit is 120 requests per minute per key. Details in the integration guide above.
+
+## Optional
+
+- [Terms of Service](https://eustress.dev/terms)
+- [Privacy Policy](https://eustress.dev/privacy)
+- [Cookies](https://eustress.dev/cookies)
+- [DMCA](https://eustress.dev/dmca)
+- [Legal Compliance](https://eustress.dev/acts)
+- [Online Trust Registry](https://eustress.dev/trust-registry)

@@ -22,10 +22,22 @@ license = "PolyForm-Shield-1.0.0"
 
 [dependencies]
 eustress-avatar-schema = { path = "../avatar-schema", default-features = false }
-# Leptos - Reactive Rust Framework (CSR mode)
-leptos = { version = "0.7", features = ["csr"] }
+# Leptos - Reactive Rust Framework. The rendering mode is a crate feature:
+# `csr` (default, the Trunk build) or `ssr` (the prerender bin, see
+# src/bin/prerender.rs). They are exclusive on purpose: `csr` turns effects
+# on, and an effect running inside a server render reaches for a window that
+# is not there.
+leptos = { version = "0.7" }
 leptos_router = "0.7"
 leptos_meta = "0.7"
+
+# Server rendering only. hydration_context supplies the shared context a root
+# Owner needs to render on the server. any_spawner's futures executor gives
+# spawn_local somewhere to park a future that is never polled, so a page that
+# fires a fetch on construction renders its loading state instead of aborting
+# the prerender.
+hydration_context = { version = "0.2", optional = true }
+any_spawner = { version = "0.2", features = ["futures-executor"], optional = true }
 
 # WASM utilities
 wasm-bindgen = "0.2"
@@ -64,7 +76,7 @@ web-sys = { version = "0.3", features = [
     "UrlSearchParams",
     "HtmlAnchorElement",
     "FormData",
-    # Live document capture (/verify) — rear camera, frame grab, crop + clean
+    # Live document capture (/verify): rear camera, frame grab, crop + clean
     "MediaDevices",
     "MediaStream",
     "MediaStreamTrack",
@@ -82,7 +94,7 @@ web-sys = { version = "0.3", features = [
 
 # QR code generation for the desktop → mobile verification handoff.
 # default-features off keeps the `image` and `svg` render backends (and their
-# dependency trees) out of the WASM bundle — we render the module matrix to
+# dependency trees) out of the WASM bundle; we render the module matrix to
 # SVG rects ourselves in `components::qr`.
 qrcode = { version = "0.14", default-features = false }
 
@@ -103,7 +115,7 @@ log = "0.4"
 console_log = "1"
 console_error_panic_hook = "0.1"
 
-# Bliss (crypto currency) — published crates from crates.io
+# Bliss (crypto currency): published crates from crates.io
 bliss-core = "0.1.1"
 bliss-crypto = "0.1.1"
 hex = "0.4"
@@ -120,10 +132,21 @@ urlencoding = "2.1"
 # =============================================================================
 
 [features]
-default = []
+default = ["csr"]
+# Client-side rendering: the WASM bundle Trunk builds for the browser.
+csr = ["leptos/csr"]
 # For SSR/hydration mode (future use with cargo-leptos)
 hydrate = ["leptos/hydrate"]
-ssr = ["leptos/ssr", "leptos_meta/ssr"]
+# Server rendering, used by the prerender bin to write every public route to
+# static HTML for crawlers and agents. Build with --no-default-features so
+# `csr` stays off.
+ssr = [
+    "leptos/ssr",
+    "leptos_meta/ssr",
+    "leptos_router/ssr",
+    "dep:hydration_context",
+    "dep:any_spawner",
+]
 
 # =============================================================================
 # 3. Build Configuration
@@ -131,6 +154,13 @@ ssr = ["leptos/ssr", "leptos_meta/ssr"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+# Renders the public routes into dist/ after `trunk build`. Native only, so it
+# never ends up in the WASM bundle.
+[[bin]]
+name = "prerender"
+path = "src/bin/prerender.rs"
+required-features = ["ssr"]
 
 # Note: Profile settings moved to workspace Cargo.toml
 

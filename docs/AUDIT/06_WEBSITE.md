@@ -10,6 +10,7 @@
 - **P3 (2026-05-14):** **Play button = dead end** escalated **P0**. +9 missing features (blog, status, bug bounty, accessibility, i18n, cookie, GDPR, editor canvas, creator analytics). Editor / dashboard / Stripe state corrected.
 - **P4 (2026-05-14):** **Full retrofit to per-feature-card format.** 19 cards. Addendum blocks removed.
 - **Updated 2026-05-16: storage pivot.** C11 footer corrected — the publish flow uploads the `.eustress` world container (Fjall WorldDb + baked `.echk` chunks), not `.pak`; upload mechanism unchanged. See MASTER C17.
+- **Updated 2026-09-20: Q6.3 decided, static prerender.** Measured first: every route returned the same 12.7 KB shell with an empty `#app`, so an agent or crawler that does not execute WASM got the `<head>` and nothing else; `/robots.txt` and `/sitemap.xml` were served as that HTML shell because both files were copied under `/assets`; the sitemap listed 10 URLs from Dec 2025 including `/steam`, which is not a route; and the Cloudflare zone blocks GPTBot, ClaudeBot, CCBot, Bytespider and Amazonbot at the edge (403, `text/plain`) while ChatGPT-User, Claude-User, OAI-SearchBot, Claude-SearchBot, PerplexityBot and Googlebot pass. Shipped: `src/bin/prerender.rs` renders every sitemap route on the native target with the `ssr` feature and writes `dist/<route>.html` with the markup inside `#app` (the WASM build empties it before mounting); `robots.txt`, `sitemap.xml` (46 public routes) and `llms.txt` at the site root; Markdown copies of the Website Service docs under `/docs/api` and `/docs/design`. Browser-only work at component construction (`App`, `AppState::new`, the home carousel timer, the Bliss KPI poll, the download manifest fetch) is fenced with `#[cfg(not(feature = "ssr"))]`. Islands / a server runtime were rejected: the crawlable content is static text and the site stays on Pages. The edge block is a dashboard setting and was left as found.
 
 ---
 
@@ -27,7 +28,7 @@ The site is *feature-complete for marketing* but *incomplete on monetisation, si
 - **Routing:** 52 pages in `app.rs`; AppState context holds auth, dark mode, jurisdiction, errors
 - **Backend:** [eustress-backend](../../eustress/crates/backend/) Axum / sqlx / SQLite; Cloudflare Worker fronts auth + KYC
 - **State:** JWT in localStorage; restored on app startup
-- **CSR-only** today (Trunk targets WASM); SSR feature in `Cargo.toml` comment but unused
+- **CSR + static prerender** (2026-09-20): Trunk targets WASM; `src/bin/prerender.rs` (feature `ssr`, native) writes every sitemap route to `dist/<route>.html` so crawlers and agents read the page without WASM
 
 ---
 
@@ -67,7 +68,7 @@ The site is *feature-complete for marketing* but *incomplete on monetisation, si
 **Concept.** 52 pages routed; comprehensive. Schema.org structured data is excellent (SoftwareApplication v0.16.1 + Organization + WebAPI EEP + MCP).
 
 **Forecasted feedback (R)**
-- R1.1 CSR-only loses 20–30% organic discovery vs. SSR/pre-render.
+- R1.1 ~~CSR-only loses 20–30% organic discovery vs. SSR/pre-render.~~ Closed 2026-09-20: static prerender ships with every deploy.
 - R1.2 No pricing-comparison table.
 - R1.3 Marketing copy needs unified voice.
 - R1.4 Hero is static; animated demo would drive signups.
@@ -79,9 +80,9 @@ The site is *feature-complete for marketing* but *incomplete on monetisation, si
 - *Cross-system:* localisation requires i18n framework (Feature 16).
 - *Strategic:* first impression for ~80% of traffic; underinvesting is irrational.
 
-**Risks (X)** — X1.1 CSR fails SEO at scale.
+**Risks (X)** — X1.1 ~~CSR fails SEO at scale.~~ Closed 2026-09-20 (prerender). Residual: a component that reaches for the browser while it is constructed drops its page out of the prerender until it is fenced with `#[cfg(not(feature = "ssr"))]`; the bin reports the route, and `--strict` fails the build.
 
-**Mitigations (M)** — M1.1 Leptos SSR or static pre-render for top marketing pages.
+**Mitigations (M)** — M1.1 ~~Leptos SSR or static pre-render for top marketing pages.~~ Done 2026-09-20: static prerender of every public route, not only marketing.
 
 ---
 
@@ -422,7 +423,7 @@ The site is *feature-complete for marketing* but *incomplete on monetisation, si
 18. Cookie consent banner (EU)
 19. GDPR self-serve data export
 20. In-browser Editor: WASM engine load
-21. Pre-rendered / SSR for top marketing pages
+21. ~~Pre-rendered / SSR for top marketing pages~~ Done 2026-09-20: static prerender of all public routes
 
 ---
 
@@ -441,7 +442,7 @@ The site is *feature-complete for marketing* but *incomplete on monetisation, si
 
 - Q6.1 OAuth vs. KYC-first launch policy (C14 says OAuth-first).
 - Q6.2 Stripe vs. Steam IAP primary checkout.
-- Q6.3 SSR / pre-render decision.
+- ~~Q6.3 SSR / pre-render decision.~~ Decided 2026-09-20: build-time static prerender on Pages; no server runtime, no islands.
 - Q6.4 In-browser play preview — 1.0 or 2.0?
 - Q6.5 Telemetry vendor (Posthog / Plausible / custom).
 - Q6.6 i18n framework choice (Fluent / gettext / custom).

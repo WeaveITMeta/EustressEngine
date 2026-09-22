@@ -1,72 +1,52 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Every public route of eustress.dev. This file is also the list of pages
+     the prerender step renders to static HTML (see src/bin/prerender.rs),
+     so adding a public route here is what makes it readable to crawlers. -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-    <!-- Homepage - highest priority -->
-    <url>
-        <loc>https://eustress.dev/</loc>
-        <lastmod>2025-01-01</lastmod>
-        <changefreq>weekly</changefreq>
-        <priority>1.0</priority>
-    </url>
-    
-    <!-- Core Pages -->
-    <url>
-        <loc>https://eustress.dev/download</loc>
-        <lastmod>2025-01-01</lastmod>
-        <changefreq>monthly</changefreq>
-        <priority>0.9</priority>
-    </url>
-    <url>
-        <loc>https://eustress.dev/gallery</loc>
-        <lastmod>2025-01-01</lastmod>
-        <changefreq>daily</changefreq>
-        <priority>0.9</priority>
-    </url>
-    <url>
-        <loc>https://eustress.dev/learn</loc>
-        <lastmod>2025-01-01</lastmod>
-        <changefreq>weekly</changefreq>
-        <priority>0.9</priority>
-    </url>
-    
-    <!-- Community Pages -->
-    <url>
-        <loc>https://eustress.dev/community</loc>
-        <lastmod>2025-01-01</lastmod>
-        <changefreq>daily</changefreq>
-        <priority>0.8</priority>
-    </url>
-    <url>
-        <loc>https://eustress.dev/leaderboard</loc>
-        <lastmod>2025-01-01</lastmod>
-        <changefreq>hourly</changefreq>
-        <priority>0.7</priority>
-    </url>
-    <url>
-        <loc>https://eustress.dev/marketplace</loc>
-        <lastmod>2025-01-01</lastmod>
-        <changefreq>daily</changefreq>
-        <priority>0.8</priority>
-    </url>
-    
-    <!-- Product Pages -->
-    <url>
-        <loc>https://eustress.dev/bliss</loc>
-        <lastmod>2025-01-01</lastmod>
-        <changefreq>monthly</changefreq>
-        <priority>0.7</priority>
-    </url>
-    <url>
-        <loc>https://eustress.dev/steam</loc>
-        <lastmod>2025-01-01</lastmod>
-        <changefreq>monthly</changefreq>
-        <priority>0.8</priority>
-    </url>
-    
-    <!-- Auth Pages -->
-    <url>
-        <loc>https://eustress.dev/login</loc>
-        <lastmod>2025-01-01</lastmod>
-        <changefreq>monthly</changefreq>
-        <priority>0.5</priority>
-    </url>
+  <url><loc>https://eustress.dev/</loc></url>
+  <url><loc>https://eustress.dev/about</loc></url>
+  <url><loc>https://eustress.dev/ai</loc></url>
+  <url><loc>https://eustress.dev/acts</loc></url>
+  <url><loc>https://eustress.dev/blog</loc></url>
+  <url><loc>https://eustress.dev/blog/indie-studios</loc></url>
+  <url><loc>https://eustress.dev/bliss</loc></url>
+  <url><loc>https://eustress.dev/bliss/history</loc></url>
+  <url><loc>https://eustress.dev/bliss-leaderboard</loc></url>
+  <url><loc>https://eustress.dev/careers</loc></url>
+  <url><loc>https://eustress.dev/community</loc></url>
+  <url><loc>https://eustress.dev/contact</loc></url>
+  <url><loc>https://eustress.dev/cookies</loc></url>
+  <url><loc>https://eustress.dev/dmca</loc></url>
+  <url><loc>https://eustress.dev/docs/getting-started</loc></url>
+  <url><loc>https://eustress.dev/docs/scripting</loc></url>
+  <url><loc>https://eustress.dev/docs/networking</loc></url>
+  <url><loc>https://eustress.dev/docs/physics</loc></url>
+  <url><loc>https://eustress.dev/docs/building</loc></url>
+  <url><loc>https://eustress.dev/docs/ui</loc></url>
+  <url><loc>https://eustress.dev/docs/services</loc></url>
+  <url><loc>https://eustress.dev/docs/simulation</loc></url>
+  <url><loc>https://eustress.dev/docs/realism</loc></url>
+  <url><loc>https://eustress.dev/docs/audio</loc></url>
+  <url><loc>https://eustress.dev/docs/publishing</loc></url>
+  <url><loc>https://eustress.dev/docs/earning</loc></url>
+  <url><loc>https://eustress.dev/docs/philosophy</loc></url>
+  <url><loc>https://eustress.dev/docs/universes</loc></url>
+  <url><loc>https://eustress.dev/docs/website</loc></url>
+  <url><loc>https://eustress.dev/download</loc></url>
+  <url><loc>https://eustress.dev/downloads/player</loc></url>
+  <url><loc>https://eustress.dev/gallery</loc></url>
+  <url><loc>https://eustress.dev/leaderboard</loc></url>
+  <url><loc>https://eustress.dev/learn</loc></url>
+  <url><loc>https://eustress.dev/learn/ide</loc></url>
+  <url><loc>https://eustress.dev/learn/lsp</loc></url>
+  <url><loc>https://eustress.dev/learn/mcp</loc></url>
+  <url><loc>https://eustress.dev/license</loc></url>
+  <url><loc>https://eustress.dev/marketplace</loc></url>
+  <url><loc>https://eustress.dev/premium</loc></url>
+  <url><loc>https://eustress.dev/press</loc></url>
+  <url><loc>https://eustress.dev/privacy</loc></url>
+  <url><loc>https://eustress.dev/simulations</loc></url>
+  <url><loc>https://eustress.dev/support</loc></url>
+  <url><loc>https://eustress.dev/terms</loc></url>
+  <url><loc>https://eustress.dev/trust-registry</loc></url>
 </urlset>

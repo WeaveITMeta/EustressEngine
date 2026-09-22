@@ -102,9 +102,30 @@ Set via `trunk serve` or in `Trunk.toml`:
 
 ```bash
 trunk build --release
+cargo run --no-default-features --features ssr --bin prerender
+wrangler pages deploy dist --project-name eustress --branch main
 ```
 
-Output is in `dist/`. Deploy to any static host (Netlify, Vercel, S3, etc.).
+Output is in `dist/`, served by Cloudflare Pages at eustress.dev.
+
+The second step matters for anything that reads the site without running
+WebAssembly: AI agents, link unfurlers, and search engines before their
+renderer gets to a page. The Trunk shell has an empty `#app`, so on its own a
+crawler sees the `<head>` and nothing else. `prerender` renders every route in
+`sitemap.xml` on the native target and writes `dist/<route>.html` with the
+page markup inside `#app`; the WASM build empties that div and mounts on top
+(`mount_app` in `lib.rs`). Adding a public route means adding it to
+`sitemap.xml`, which is the one list both the crawlers and the prerender read.
+
+It is a native build of the same crate with the `ssr` feature instead of
+`csr`, so a component that touches the browser while it is being constructed
+(rather than inside an effect or an event handler) panics during the render.
+The bin reports the route and skips it; pass `--strict` to fail the build
+instead.
+
+`llms.txt`, `robots.txt` and `sitemap.xml` at the crate root are copied to
+the root of `dist/` by `index.html`, along with Markdown copies of the Website
+Service docs under `dist/docs/`.
 
 ## Next Steps
 

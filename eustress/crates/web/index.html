@@ -37,9 +37,22 @@
     <meta name="twitter:site" content="@eustressengine">
     <meta name="twitter:creator" content="@eustressengine">
     
-    <!-- NLWeb / AI Discovery -->
-    <link rel="nlweb" href="/.well-known/nlweb.json" type="application/json">
-    
+    <!-- Crawler and agent discovery. These live at the site root, not under
+         /assets, because the root is the only place a crawler looks for them.
+         The Markdown docs mirror their repo paths so a URL doubles as a
+         source pointer; llms.txt is the index agents read first. -->
+    <link data-trunk rel="copy-file" href="robots.txt" />
+    <link data-trunk rel="copy-file" href="sitemap.xml" />
+    <link data-trunk rel="copy-file" href="llms.txt" />
+    <link data-trunk rel="copy-file" href="../../../docs/api/WEBSITE_SERVICE_API.md" data-target-path="docs/api" />
+    <link data-trunk rel="copy-file" href="../../../docs/api/WEBSITE_MANIFEST_INTEGRATION.md" data-target-path="docs/api" />
+    <link data-trunk rel="copy-file" href="../../../docs/design/WEBSITE_SERVICE.md" data-target-path="docs/design" />
+
+    <!-- Prerendered pages carry their content inside #app (see
+         src/bin/prerender.rs). Without scripts the loading overlay would
+         sit on top of it forever, so hide it for that case only. -->
+    <noscript><style>#loading { display: none !important; }</style></noscript>
+
     <!-- Favicon -->
     <link data-trunk rel="copy-dir" href="assets" />
     <link data-trunk rel="copy-file" href="_headers" />
@@ -249,12 +262,12 @@
         }, 30000);
     </script>
     
-    <!-- Fallback for no JavaScript -->
+    <!-- Without scripts a prerendered page still reads; only the live parts
+         (sign-in, the marketplace, anything that talks to the API) need
+         WebAssembly. -->
     <noscript>
-        <div class="noscript-warning" style="padding:40px;text-align:center;color:#fff;background:#0a0a12;min-height:100vh;">
-            <h1>Eustress Engine</h1>
-            <p>This site requires JavaScript (WebAssembly) to run.</p>
-            <p>Please enable JavaScript in your browser.</p>
+        <div class="noscript-warning" style="padding:24px;text-align:center;color:#fff;background:#0a0a12;">
+            <p>You are reading the static copy of this page. Signing in and the interactive parts of the site need JavaScript (WebAssembly).</p>
         </div>
     </noscript>
 </body>

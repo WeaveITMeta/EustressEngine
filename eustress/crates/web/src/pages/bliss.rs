@@ -78,6 +78,7 @@ fn fmt_thousands(n: f64) -> String {
 /// three endpoints — the economics/rate view, community stats, and node
 /// stats — and maps their authoritative fields onto the KPI cards. Any
 /// endpoint that fails leaves its prior value in place (no flicker to zero).
+#[cfg(not(feature = "ssr"))]
 async fn refresh_bliss_kpis(kpi: RwSignal<BlissKpi>) {
     // Economics: treasury, live emission, supply, distributed, drip rate.
     if let Ok(resp) = gloo_net::http::Request::get("https://api.eustress.dev/api/payouts/rate")
@@ -144,11 +145,16 @@ pub fn BlissPage() -> impl IntoView {
     // the dashboard stays near-real-time without a websocket. Every value is
     // authoritative ledger state; nothing on this page is hardcoded.
     let kpi = RwSignal::new(BlissKpi::default());
-    leptos::task::spawn_local(refresh_bliss_kpis(kpi));
-    let poll = gloo_timers::callback::Interval::new(20_000, move || {
+    // Browser only: the prerender renders the empty KPI frame, and the live
+    // app fills it the moment it mounts.
+    #[cfg(not(feature = "ssr"))]
+    {
         leptos::task::spawn_local(refresh_bliss_kpis(kpi));
-    });
-    poll.forget(); // keep polling for the life of the page
+        let poll = gloo_timers::callback::Interval::new(20_000, move || {
+            leptos::task::spawn_local(refresh_bliss_kpis(kpi));
+        });
+        poll.forget(); // keep polling for the life of the page
+    }
 
     // Payment mode: one-time or recurring (monthly)
     let is_recurring = RwSignal::new(false);
