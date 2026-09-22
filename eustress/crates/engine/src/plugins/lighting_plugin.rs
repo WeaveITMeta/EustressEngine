@@ -87,7 +87,10 @@ impl Plugin for LightingPlugin {
             // class names that lack their real Bevy components and attaches
             // DirectionalLight, SunMarker, SunClass, MoonMarker, etc.
             // This is the authoritative path for per-Space lighting.
-            .add_systems(Update, hydrate_lighting_entities)
+            // `Added<Instance>` is tick-based, so the bulk-load tick only
+            // batches the five per-frame archetype walks (9 ms per frame on
+            // Super Station's drain); nothing is missed.
+            .add_systems(Update, hydrate_lighting_entities.run_if(crate::space::file_loader::ui_sync_tick))
             // Sync Sun class properties with LightingService
             .add_systems(Update, sync_sun_with_lighting_service)
             // NOTE: no second sun driver here. `update_directional_light_from_sun_class`

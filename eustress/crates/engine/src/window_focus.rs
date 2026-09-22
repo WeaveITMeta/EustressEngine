@@ -356,6 +356,30 @@ fn detect_user_input(
     }
 }
 
+/// What the user is doing with the window right now, for code that runs
+/// without World access (the loader's spawn-slice sizing).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attention {
+    /// Focused and touched within the quiet threshold.
+    Interacting,
+    /// Focused, but no input for at least the quiet threshold.
+    IdleFocused,
+    /// Not the foreground window (or minimized).
+    Unfocused,
+}
+
+static ATTENTION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Mirror of the focus/idle state, refreshed every frame by
+/// `update_power_mode`.
+pub fn user_attention() -> Attention {
+    match ATTENTION.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Attention::IdleFocused,
+        2 => Attention::Unfocused,
+        _ => Attention::Interacting,
+    }
+}
+
 /// Update power mode based on focus and idle state
 fn update_power_mode(
     mut focus_state: ResMut<WindowFocusState>,
@@ -368,6 +392,16 @@ fn update_power_mode(
     modal_tool: Option<Res<crate::modal_tool::ActiveModalTool>>,
 ) {
     let old_mode = focus_state.power_mode;
+    let attention = if focus_state.minimized || !focus_state.focused {
+        2u8
+    } else if settings.quiet_threshold_focused > 0.0
+        && focus_state.is_idle_for(Duration::from_secs_f32(settings.quiet_threshold_focused))
+    {
+        1u8
+    } else {
+        0u8
+    };
+    ATTENTION.store(attention, std::sync::atomic::Ordering::Relaxed);
     let interacting = select_tool.as_deref().map(|s| s.dragging).unwrap_or(false)
         || modal_tool.as_deref().map(|m| m.is_active()).unwrap_or(false);
     
@@ -405,6 +439,16 @@ fn update_power_mode(
     
     // Log mode changes. Active↔Quiet flips on every pause and resume, so it
     // goes to `debug!`; the focus/idle/minimize transitions stay at `info!`.
+    // A bulk load streams entities in over frames; every throttled frame
+    // is a frame of loading not done. Hold Active until it settles (the
+    // normal mode returns on the next evaluation). Minimized keeps its 1 FPS
+    // wait: the loader's unfocused slice compensates there instead.
+    let new_mode = if new_mode != PowerMode::Minimized && crate::space::file_loader::bulk_load_active() {
+        PowerMode::Active
+    } else {
+        new_mode
+    };
+
     if new_mode != old_mode {
         let quiet_flip = matches!(
             (old_mode, new_mode),

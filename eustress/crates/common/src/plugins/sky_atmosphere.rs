@@ -105,11 +105,17 @@ impl Plugin for SkyAtmospherePlugin {
                     sync_camera_atmosphere_settings.after(attach_sky_to_cameras),
                     apply_custom_skybox.after(attach_sky_to_cameras),
                     sync_environment_intensity.after(attach_sky_to_cameras),
-                    sync_camera_exposure.after(attach_sky_to_cameras),
+                    attach_exposure_to_opted_out_cameras.after(attach_sky_to_cameras),
+                    sync_camera_exposure
+                        .after(attach_sky_to_cameras)
+                        .after(attach_exposure_to_opted_out_cameras),
                     rebuild_star_field_on_sky_change.after(resolve_sky_mode),
-                    fade_star_field
+                    poll_star_field_build
                         .after(attach_sky_to_cameras)
                         .after(rebuild_star_field_on_sky_change),
+                    fade_star_field
+                        .after(attach_sky_to_cameras)
+                        .after(poll_star_field_build),
                 ),
             );
     }
@@ -325,13 +331,41 @@ impl SceneAtmosphere {
     }
 }
 
-/// The star cubemap, built once at startup.
+/// The star cubemap, built on its own thread: once at startup for the
+/// default count, and again when a Space's Sky asks for another count.
 #[derive(Resource, Default)]
 pub struct StarField {
     pub handle: Option<Handle<Image>>,
     /// The `star_count` the current image was built for, so a [`Sky`] edit can
     /// trigger exactly one rebuild instead of none or one per frame.
     pub built_for_count: u32,
+    /// A build in flight and the count it is for. `create_star_field` fills
+    /// six 1024² faces with three noise samples per pixel, 2.3 s on the
+    /// main thread when it ran inline (at startup, then once more when the
+    /// Space's Sky loaded), so it runs on a thread and `poll_star_field_build`
+    /// lands the result. `Receiver` is not `Sync`, hence the mutex.
+    pub pending: Option<(u32, std::sync::Mutex<std::sync::mpsc::Receiver<Image>>)>,
+}
+
+impl StarField {
+    /// Start a build for `count` unless one for that count is already in
+    /// flight. A build for a different count supersedes the pending one:
+    /// its image is dropped when it lands.
+    fn spawn_build(&mut self, count: u32) {
+        if self.pending.as_ref().map(|(c, _)| *c == count).unwrap_or(false) {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<Image>();
+        let spawned = std::thread::Builder::new()
+            .name("eustress-star-field".into())
+            .spawn(move || {
+                let _ = tx.send(create_star_field(count));
+            });
+        match spawned {
+            Ok(_) => self.pending = Some((count, std::sync::Mutex::new(rx))),
+            Err(e) => warn!("star field build thread failed to spawn: {e} — no star field"),
+        }
+    }
 }
 
 /// Marks the single entity carrying the [`PlanetAtmosphere`] component.
@@ -725,11 +759,34 @@ fn environment_intensity(a: &EustressAtmosphere, lighting: &LightingService) -> 
     (a.environment_intensity * lighting.environment_specular_scale).clamp(0.0, 64.0)
 }
 
-/// Track `exposure_compensation` edits.
+/// Exposure for cameras that opt OUT of the sky ([`NoAtmosphere`]).
+///
+/// `attach_sky_to_cameras` grants `SkyCamera` and `Exposure` in one insert and
+/// its query excludes `NoAtmosphere`, so a camera that opts out of the
+/// atmosphere (the engine's off-screen AI camera, which must, to avoid the
+/// multi-camera atmosphere prepare race) silently opted out of exposure as
+/// well. It then rendered at bevy's Blender default, ev100 9.7, against a scene
+/// calibrated for 13.0: roughly ten times too bright, every lit surface washed
+/// to white, which made its captures useless for judging material or color.
+/// Exposure is a camera property, not a sky property, so it goes on every
+/// `Camera3d` the scene lights, atmosphere or not.
+fn attach_exposure_to_opted_out_cameras(
+    mut commands: Commands,
+    sky: Res<SkyConfig>,
+    lighting: Res<LightingService>,
+    cameras: Query<Entity, (With<Camera3d>, With<NoAtmosphere>, Without<Exposure>)>,
+) {
+    for camera in cameras.iter() {
+        commands.entity(camera).insert(camera_exposure(&sky, &lighting));
+    }
+}
+
+/// Track `exposure_compensation` edits, on every camera that carries an
+/// `Exposure` this plugin manages (sky cameras and opted-out ones alike).
 fn sync_camera_exposure(
     sky: Res<SkyConfig>,
     lighting: Res<LightingService>,
-    mut cameras: Query<&mut Exposure, With<SkyCamera>>,
+    mut cameras: Query<&mut Exposure, (With<Camera3d>, Or<(With<SkyCamera>, With<NoAtmosphere>)>)>,
 ) {
     if !lighting.is_changed() {
         return;
@@ -899,14 +956,62 @@ fn star_peak(magnitude: f32) -> f32 {
 const STAR_MAX_RADIUS: f32 = 0.62;
 
 /// Build the star cubemap once at startup.
-fn build_star_field(mut images: ResMut<Assets<Image>>, mut stars: ResMut<StarField>) {
-    // Built unconditionally: the sky path is not settled at Startup (a Space's
-    // Sky entity loads later and can select the cubemap path), and the field is
-    // needed the moment the path resolves to atmosphere or gradient.
+fn build_star_field(mut stars: ResMut<StarField>) {
+    // Started unconditionally: the sky path is not settled at Startup (a
+    // Space's Sky entity loads later and can select the cubemap path), and
+    // the field is wanted as soon as the path resolves to atmosphere or
+    // gradient. It lands through `poll_star_field_build`; until then the sky
+    // simply has no stars, which is what the fade shows at dusk anyway.
     let count = Sky::default().star_count;
-    stars.handle = Some(images.add(create_star_field(count)));
+    stars.spawn_build(count);
+    info!("✨ Star field build started ({count} stars, {STAR_FIELD_SIZE}px faces) on its own thread");
+}
+
+/// Land a finished star-field build: one image upload, every sky camera
+/// re-pointed, and a skybox attached to any atmosphere camera that had none
+/// because the handle was not ready when `attach_sky_to_cameras` ran.
+fn poll_star_field_build(
+    mut commands: Commands,
+    active: Res<ActiveSkyMode>,
+    mut images: ResMut<Assets<Image>>,
+    mut stars: ResMut<StarField>,
+    mut cameras: Query<(Entity, Option<&mut Skybox>), With<SkyCamera>>,
+) {
+    let (count, image) = {
+        let Some((count, rx)) = stars.pending.as_ref() else { return };
+        let image = match rx.lock() {
+            Ok(r) => match r.try_recv() {
+                Ok(img) => Some(img),
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+            },
+            Err(_) => None,
+        };
+        (*count, image)
+    };
+    stars.pending = None;
+    let Some(image) = image else {
+        warn!("star field build thread ended without an image — no star field");
+        return;
+    };
+    let handle = images.add(image);
     stars.built_for_count = count;
-    info!("✨ Star field built ({count} stars, {STAR_FIELD_SIZE}px faces)");
+    stars.handle = Some(handle.clone());
+    if active.0 != SkyMode::Skybox {
+        for (camera, skybox) in cameras.iter_mut() {
+            match skybox {
+                Some(mut skybox) => skybox.image = Some(handle.clone()),
+                None => {
+                    commands.entity(camera).insert(Skybox {
+                        image: Some(handle.clone()),
+                        brightness: 0.0,
+                        rotation: Quat::IDENTITY,
+                    });
+                }
+            }
+        }
+    }
+    info!("✨ Star field ready for star_count = {count}");
 }
 
 /// Rebuild the star field when an author changes `Sky.star_count`.
@@ -917,10 +1022,8 @@ fn build_star_field(mut images: ResMut<Assets<Image>>, mut stars: ResMut<StarFie
 /// image no longer depends on the sun.
 fn rebuild_star_field_on_sky_change(
     active: Res<ActiveSkyMode>,
-    mut images: ResMut<Assets<Image>>,
     mut stars: ResMut<StarField>,
     sky_query: Query<&Sky, Changed<Sky>>,
-    mut cameras: Query<&mut Skybox, With<SkyCamera>>,
 ) {
     if active.0 == SkyMode::Skybox {
         return;
@@ -931,14 +1034,8 @@ fn rebuild_star_field_on_sky_change(
     if sky.star_count == stars.built_for_count {
         return;
     }
-
-    let handle = images.add(create_star_field(sky.star_count));
-    stars.built_for_count = sky.star_count;
-    stars.handle = Some(handle.clone());
-    for mut skybox in cameras.iter_mut() {
-        skybox.image = Some(handle.clone());
-    }
-    info!("✨ Star field rebuilt for star_count = {}", sky.star_count);
+    stars.spawn_build(sky.star_count);
+    info!("✨ Star field rebuild started for star_count = {}", sky.star_count);
 }
 
 /// Fade the star field with the sun.

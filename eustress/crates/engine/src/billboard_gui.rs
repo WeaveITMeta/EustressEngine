@@ -1641,6 +1641,16 @@ fn update_and_render_billboards(
     // frames costs a label at most a few frames of staleness (they fade in at
     // the edge of the alloc radius anyway) and keeps the frame bounded.
     const MAX_LABEL_RASTERS_PER_FRAME: usize = 6;
+    // While a bulk load streams entities in, labels arrive faster than any
+    // cap can paint them and each raster is ~3.5 ms in a debug build (21 ms
+    // per frame at the cap of 6, measured on Super Station's drain). Paint
+    // fewer per frame then; the backlog catches up once the load settles.
+    const MAX_LABEL_RASTERS_PER_FRAME_LOADING: usize = 2;
+    let max_rasters = if crate::space::file_loader::bulk_load_active() {
+        MAX_LABEL_RASTERS_PER_FRAME_LOADING
+    } else {
+        MAX_LABEL_RASTERS_PER_FRAME
+    };
     let mut rasters_this_frame: usize = 0;
 
     for (entity, mut handle, tile, bb_tf, marker) in &mut billboards {
@@ -1715,7 +1725,7 @@ fn update_and_render_billboards(
         // and with a non-zero `last_label_hash` that stamp would make the
         // early-out at the top of the loop skip this label until the NEXT
         // epoch — so un-stamp it, and the next frame picks it up first.
-        if rasters_this_frame >= MAX_LABEL_RASTERS_PER_FRAME {
+        if rasters_this_frame >= max_rasters {
             painted_at.remove(&entity);
             continue;
         }
@@ -3054,7 +3064,12 @@ impl Plugin for BillboardGuiPlugin {
                     // zero billboard text there indefinitely, because the
                     // slotted set from the old area only released slots one
                     // roaming-eviction-lag at a time instead of all at once.
-                    recycle_offscreen_billboard_slots.after(sync_billboard_class_to_marker),
+                    // Camera-driven and tick-safe (no message readers): during a
+                    // bulk load it walks every slotted and unslotted billboard
+                    // each frame for a camera that is not moving.
+                    recycle_offscreen_billboard_slots
+                        .after(sync_billboard_class_to_marker)
+                        .run_if(crate::space::file_loader::ui_sync_tick),
                     release_atlas_slots.after(recycle_offscreen_billboard_slots),
                     spawn_billboard_render_state.after(release_atlas_slots),
                     sync_billboard_properties.after(spawn_billboard_render_state),

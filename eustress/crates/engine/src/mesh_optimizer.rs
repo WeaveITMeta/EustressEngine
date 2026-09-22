@@ -24,12 +24,9 @@ pub struct MeshOptPlugin;
 impl Plugin for MeshOptPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<OptimizedMeshTracker>()
-            // PERF: only run the optimizer on frames that actually emit mesh
-            // asset events; on a steady scene there is nothing to do.
-            .add_systems(
-                Update,
-                optimize_loaded_meshes.run_if(on_message::<AssetEvent<Mesh>>),
-            );
+            // Runs every frame but returns at once when there is neither a
+            // new mesh event nor a carried-over mesh in the queue.
+            .add_systems(Update, optimize_loaded_meshes);
         // NOTE: the runtime LOD system (lod_switch_system / LodSet / LodCache /
         // build_lod_set / LodEnabled) was DEAD CODE — `LodEnabled` was never
         // inserted on any entity, so the query was always empty — and has been
@@ -44,11 +41,21 @@ impl Plugin for MeshOptPlugin {
 #[derive(Resource, Default)]
 struct OptimizedMeshTracker {
     processed: std::collections::HashSet<AssetId<Mesh>>,
+    /// Meshes seen but not yet optimised: the per-frame budget carries the
+    /// rest over instead of doing every new mesh the frame it lands.
+    pending: std::collections::VecDeque<AssetId<Mesh>>,
 }
 
 /// Minimum triangle count to bother optimizing. Primitives (cube=12, sphere=~480)
 /// and small meshes don't benefit from cache/overdraw reordering.
 const MIN_TRIANGLES_FOR_OPTIMIZATION: usize = 500;
+
+/// Optimisation work per frame. A bulk load lands a dozen GLB meshes a frame
+/// and each takes ~1 ms in a debug build (14 ms per frame measured on Super
+/// Station's drain); this keeps it to a slice and lets the queue drain over
+/// frames. Optimisation is a render-time win, never a correctness step, so a
+/// mesh a few frames late costs nothing visible.
+const OPTIMIZE_BUDGET_MS: f64 = 2.0;
 
 /// Watches for newly loaded meshes and runs the meshopt pipeline.
 /// Skips engine primitives (parts/*.glb) and small meshes automatically.
@@ -67,7 +74,17 @@ fn optimize_loaded_meshes(
         if matches!(event, AssetEvent::Modified { .. }) {
             tracker.processed.remove(&id);
         }
+        if !tracker.processed.contains(&id) {
+            tracker.pending.push_back(id);
+        }
+    }
 
+    let t0 = std::time::Instant::now();
+    while let Some(id) = tracker.pending.pop_front() {
+        if t0.elapsed().as_secs_f64() * 1000.0 > OPTIMIZE_BUDGET_MS {
+            tracker.pending.push_front(id);
+            break;
+        }
         if tracker.processed.contains(&id) {
             continue;
         }
