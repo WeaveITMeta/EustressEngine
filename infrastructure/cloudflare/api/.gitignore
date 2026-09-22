@@ -1,0 +1,3 @@
+# Wrangler local secrets (JEV_API_KEY, GROK_API_KEY, ...) for `wrangler dev`. Never committed.
+.dev.vars
+.dev.vars.*
