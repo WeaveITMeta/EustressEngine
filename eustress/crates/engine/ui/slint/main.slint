@@ -4,7 +4,7 @@
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, TabWidget, Button, ComboBox, LineEdit, ScrollView, StandardListView, CheckBox, Slider, GridBox, GroupBox, SpinBox, TextEdit } from "std-widgets.slint";
-import { Ribbon, SavedIdentityData, InsertClassData, PluginSectionData, PluginButtonData, ModeData, RibbonTabData, SubmodeData, CustomTabSectionData, CustomTabToolData } from "ribbon.slint";
+import { Ribbon, SavedIdentityData, InsertClassData, RecentSpaceEntry, PluginSectionData, PluginButtonData, ModeData, RibbonTabData, SubmodeData, CustomTabSectionData, CustomTabToolData } from "ribbon.slint";
 import { ExplorerPanel, TreeNode } from "explorer.slint";
 import { PropertiesPanel, PropertyData, HoneycombCell } from "properties.slint";
 import { TagChip, TagSuggestion } from "tags_editor.slint";
@@ -61,6 +61,7 @@ import { DataSourcesDialog } from "data_sources.slint";
 import { DomainsDialog, DomainEntry } from "domains_dialog.slint";
 import { GlobalVariablesDialog, GlobalVariableEntry } from "global_variables_dialog.slint";
 import { KeybindingsDialog, ShortcutEntry } from "keybindings.slint";
+import { InsertObjectDialog } from "insert_object_dialog.slint";
 import { AboutDialog } from "about_dialog.slint";
 import { NewUniverseDialog } from "new_universe_dialog.slint";
 import { NewSpaceDialog } from "new_space_dialog.slint";
@@ -212,6 +213,50 @@ export component StudioWindow inherits Window {
     in-out property <string> keybinding-capturing: "";
     in-out property <string> keybinding-conflict: "";
     callback rebind-shortcut(string, string);
+    // Keymap preset ("eustress" / "roblox" / "custom"), pushed by
+    // `sync_keybindings_to_slint`; the dialog's preset buttons apply one.
+    in-out property <string> keymap-preset: "";
+    callback apply-keymap-preset(string);
+
+    // Insert Object dialog (Ctrl+I, Explorer plus button, ribbon item).
+    // Rust opens it with a fresh class list and the destination's name;
+    // each keystroke goes to Rust, which pushes the filtered `insert-results`.
+    in-out property <bool> show-insert-object-dialog: false;
+    in-out property <[InsertClassData]> insert-results: [];
+    in-out property <string> insert-target-name: "Workspace";
+    in-out property <string> insert-search-query: "";
+    callback insert-search-changed(string);
+    callback insert-into(int, string);   // Explorer row plus button (node-id, node-type)
+    callback insert-object-request();    // ribbon "Insert Object..."
+    in-out property <string> shortcut-insert-object: "";
+    in-out property <string> shortcut-paste-into: "";
+
+    // Focus shortcuts: Rust invokes these; each bump puts the keyboard in
+    // the matching search box (and shows the panel if it was hidden).
+    in-out property <int> explorer-focus-pulse: 0;
+    in-out property <int> properties-focus-pulse: 0;
+    callback focus-explorer-search();
+    focus-explorer-search => {
+        root.show-explorer = true;
+        root.left-tab-index = 0;
+        root.explorer-focus-pulse += 1;
+    }
+    callback focus-properties-filter();
+    focus-properties-filter => {
+        root.show-properties = true;
+        root.right-tab-index = 0;
+        root.properties-focus-pulse += 1;
+    }
+
+    // Snapshot line in the File menu, File > Recent, and the ribbon Snap group.
+    in-out property <string> snapshot-status: "";
+    in-out property <[RecentSpaceEntry]> recent-spaces: [];
+    callback open-recent(string);
+    callback close-space();
+    in-out property <float> angle-snap: 15.0;
+    in-out property <bool> collisions-enabled: false;
+    callback set-angle-snap(float);
+    callback toggle-collisions();
     in-out property <bool> show-about-dialog: false;
     in-out property <string> about-version: "0.4.0";
     in-out property <string> about-commit: "";
@@ -556,6 +601,118 @@ export component StudioWindow inherits Window {
     in-out property <length> context-menu-y: 0px;
     in-out property <string> context-menu-node-type: ""; // "entity" or "file"
     in-out property <[MenuItem]> context-menu-items: [];
+
+    // ── Explorer context-menu item sets, one per object type ──
+    // Picked in the Explorer's `on-context-menu` handler from the row's
+    // class. Ids are dispatched by the drain's `ContextAction` arm.
+    pure function is-script-class(class-name: string) -> bool {
+        return class-name == "SoulScript" || class-name == "Script"
+            || class-name == "LocalScript" || class-name == "ModuleScript";
+    }
+    pure function is-part-class(class-name: string) -> bool {
+        return class-name == "Part" || class-name == "MeshPart" || class-name == "UnionOperation"
+            || class-name == "WedgePart" || class-name == "CornerWedgePart" || class-name == "TrussPart"
+            || class-name == "Seat" || class-name == "VehicleSeat" || class-name == "SpawnLocation"
+            || class-name == "CadPart";
+    }
+    property <[MenuItem]> ctx-items-file: [
+        { id: "open", label: "Open", shortcut: "Enter", icon: @image-url("../../assets/icons/ui/new-file.svg"), enabled: true, separator-after: false },
+        { id: "open-with", label: "Open With...", shortcut: "", icon: @image-url("../../assets/icons/ui/settings.svg"), enabled: true, separator-after: true },
+        { id: "cut", label: "Cut", shortcut: root.shortcut-cut, icon: @image-url("../../assets/icons/ui/cut.svg"), enabled: true, separator-after: false },
+        { id: "copy", label: "Copy", shortcut: root.shortcut-copy, icon: @image-url("../../assets/icons/ui/copy.svg"), enabled: true, separator-after: false },
+        { id: "paste", label: "Paste", shortcut: root.shortcut-paste, icon: @image-url("../../assets/icons/ui/paste.svg"), enabled: true, separator-after: false },
+        { id: "delete", label: "Delete", shortcut: root.shortcut-delete, icon: @image-url("../../assets/icons/ui/delete.svg"), enabled: true, separator-after: true },
+        { id: "rename", label: "Rename", shortcut: root.shortcut-rename, icon: @image-url("../../assets/icons/ui/rename.svg"), enabled: true, separator-after: false },
+        { id: "duplicate", label: "Duplicate", shortcut: root.shortcut-duplicate, icon: @image-url("../../assets/icons/ui/duplicate.svg"), enabled: true, separator-after: true },
+        { id: "show-in-explorer", label: "Show in File Explorer", shortcut: "", icon: @image-url("../../assets/icons/folder.svg"), enabled: true, separator-after: false },
+        { id: "copy-path", label: "Copy Path", shortcut: root.shortcut-copy-path, icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
+        { id: "copy-relative-path", label: "Copy Relative Path", shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: true },
+        { id: "properties", label: "Properties", shortcut: "Alt+Enter", icon: @image-url("../../assets/icons/ui/settings.svg"), enabled: true, separator-after: false },
+    ];
+    // Service headers (Workspace, Lighting, SoulService, ...): containers
+    // that cannot be cut, deleted or renamed.
+    property <[MenuItem]> ctx-items-service: [
+        { id: "insert-object", label: "Insert Object...", shortcut: root.shortcut-insert-object, icon: @image-url("../../assets/icons/ui/plus.svg"), enabled: true, separator-after: false },
+        { id: "insert-part", label: "Insert Part", shortcut: "", icon: @image-url("../../assets/icons/part.svg"), enabled: true, separator-after: false },
+        { id: "paste-into", label: "Paste Into", shortcut: root.shortcut-paste-into, icon: @image-url("../../assets/icons/ui/paste.svg"), enabled: true, separator-after: true },
+        { id: "select_children", label: "Select Children", shortcut: root.shortcut-select-children, icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true, separator-after: false },
+        { id: "select_descendants", label: "Select Descendants", shortcut: root.shortcut-select-descendants, icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true, separator-after: true },
+        { id: "copy-path", label: "Copy Path", shortcut: root.shortcut-copy-path, icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
+    ];
+    property <[MenuItem]> ctx-items-script: [
+        { id: "open-script", label: "Open Script", shortcut: "Enter", icon: @image-url("../../assets/icons/ui/document.svg"), enabled: true, separator-after: true },
+        { id: "select_parent", label: "Select Parent", shortcut: root.shortcut-select-parent, icon: @image-url("../../assets/icons/ui/chevron-up.svg"), enabled: true, separator-after: false },
+        { id: "select_siblings", label: "Select Siblings", shortcut: root.shortcut-select-siblings, icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true, separator-after: true },
+        { id: "cut", label: "Cut", shortcut: root.shortcut-cut, icon: @image-url("../../assets/icons/ui/cut.svg"), enabled: true, separator-after: false },
+        { id: "copy", label: "Copy", shortcut: root.shortcut-copy, icon: @image-url("../../assets/icons/ui/copy.svg"), enabled: true, separator-after: false },
+        { id: "paste", label: "Paste", shortcut: root.shortcut-paste, icon: @image-url("../../assets/icons/ui/paste.svg"), enabled: true, separator-after: false },
+        { id: "duplicate", label: "Duplicate", shortcut: root.shortcut-duplicate, icon: @image-url("../../assets/icons/ui/duplicate.svg"), enabled: true, separator-after: false },
+        { id: "delete", label: "Delete", shortcut: root.shortcut-delete, icon: @image-url("../../assets/icons/ui/delete.svg"), enabled: true, separator-after: true },
+        { id: "rename", label: "Rename", shortcut: root.shortcut-rename, icon: @image-url("../../assets/icons/ui/rename.svg"), enabled: true, separator-after: true },
+        { id: "copy-path", label: "Copy Path", shortcut: root.shortcut-copy-path, icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
+        { id: "copy-relative-path", label: "Copy Relative Path", shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
+    ];
+    // Model and Folder: the insert and paste targets, and the only rows
+    // Ungroup makes sense on.
+    property <[MenuItem]> ctx-items-container: [
+        { id: "insert-object", label: "Insert Object...", shortcut: root.shortcut-insert-object, icon: @image-url("../../assets/icons/ui/plus.svg"), enabled: true, separator-after: false },
+        { id: "insert-part", label: "Insert Part", shortcut: "", icon: @image-url("../../assets/icons/part.svg"), enabled: true, separator-after: false },
+        { id: "paste-into", label: "Paste Into", shortcut: root.shortcut-paste-into, icon: @image-url("../../assets/icons/ui/paste.svg"), enabled: true, separator-after: true },
+        { id: "select_children", label: "Select Children", shortcut: root.shortcut-select-children, icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true, separator-after: false },
+        { id: "select_descendants", label: "Select Descendants", shortcut: root.shortcut-select-descendants, icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true, separator-after: false },
+        { id: "select_parent", label: "Select Parent", shortcut: root.shortcut-select-parent, icon: @image-url("../../assets/icons/ui/chevron-up.svg"), enabled: true, separator-after: false },
+        { id: "select_siblings", label: "Select Siblings", shortcut: root.shortcut-select-siblings, icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true, separator-after: true },
+        { id: "cut", label: "Cut", shortcut: root.shortcut-cut, icon: @image-url("../../assets/icons/ui/cut.svg"), enabled: true, separator-after: false },
+        { id: "copy", label: "Copy", shortcut: root.shortcut-copy, icon: @image-url("../../assets/icons/ui/copy.svg"), enabled: true, separator-after: false },
+        { id: "paste", label: "Paste", shortcut: root.shortcut-paste, icon: @image-url("../../assets/icons/ui/paste.svg"), enabled: true, separator-after: false },
+        { id: "duplicate", label: "Duplicate", shortcut: root.shortcut-duplicate, icon: @image-url("../../assets/icons/ui/duplicate.svg"), enabled: true, separator-after: false },
+        { id: "delete", label: "Delete", shortcut: root.shortcut-delete, icon: @image-url("../../assets/icons/ui/delete.svg"), enabled: true, separator-after: true },
+        { id: "zoom-to", label: "Zoom To", shortcut: root.shortcut-focus, icon: @image-url("../../assets/icons/ui/crosshair.svg"), enabled: true, separator-after: false },
+        { id: "group", label: "Group", shortcut: root.shortcut-group, icon: @image-url("../../assets/icons/folder.svg"), enabled: true, separator-after: false },
+        { id: "ungroup", label: "Ungroup", shortcut: root.shortcut-ungroup, icon: @image-url("../../assets/icons/ui/folder-open.svg"), enabled: true, separator-after: false },
+        { id: "rename", label: "Rename", shortcut: root.shortcut-rename, icon: @image-url("../../assets/icons/ui/rename.svg"), enabled: true, separator-after: true },
+        { id: "copy-path", label: "Copy Path", shortcut: root.shortcut-copy-path, icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
+        { id: "copy-relative-path", label: "Copy Relative Path", shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
+    ];
+    property <[MenuItem]> ctx-items-part: [
+        { id: "insert-object", label: "Insert Object...", shortcut: root.shortcut-insert-object, icon: @image-url("../../assets/icons/ui/plus.svg"), enabled: true, separator-after: false },
+        { id: "paste-into", label: "Paste Into", shortcut: root.shortcut-paste-into, icon: @image-url("../../assets/icons/ui/paste.svg"), enabled: true, separator-after: true },
+        { id: "select_children", label: "Select Children", shortcut: root.shortcut-select-children, icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true, separator-after: false },
+        { id: "select_parent", label: "Select Parent", shortcut: root.shortcut-select-parent, icon: @image-url("../../assets/icons/ui/chevron-up.svg"), enabled: true, separator-after: false },
+        { id: "select_siblings", label: "Select Siblings", shortcut: root.shortcut-select-siblings, icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true, separator-after: false },
+        { id: "invert_selection", label: "Invert Selection", shortcut: root.shortcut-invert-selection, icon: @image-url("../../assets/icons/ui/swap.svg"), enabled: true, separator-after: true },
+        { id: "cut", label: "Cut", shortcut: root.shortcut-cut, icon: @image-url("../../assets/icons/ui/cut.svg"), enabled: true, separator-after: false },
+        { id: "copy", label: "Copy", shortcut: root.shortcut-copy, icon: @image-url("../../assets/icons/ui/copy.svg"), enabled: true, separator-after: false },
+        { id: "paste", label: "Paste", shortcut: root.shortcut-paste, icon: @image-url("../../assets/icons/ui/paste.svg"), enabled: true, separator-after: false },
+        { id: "duplicate", label: "Duplicate", shortcut: root.shortcut-duplicate, icon: @image-url("../../assets/icons/ui/duplicate.svg"), enabled: true, separator-after: false },
+        { id: "delete", label: "Delete", shortcut: root.shortcut-delete, icon: @image-url("../../assets/icons/ui/delete.svg"), enabled: true, separator-after: true },
+        { id: "toggle-anchor", label: "Toggle Anchor", shortcut: root.shortcut-anchor, icon: @image-url("../../assets/icons/ui/anchor.svg"), enabled: true, separator-after: false },
+        { id: "toggle-lock", label: "Toggle Lock", shortcut: root.shortcut-lock, icon: @image-url("../../assets/icons/ui/lock.svg"), enabled: true, separator-after: false },
+        { id: "zoom-to", label: "Zoom To", shortcut: root.shortcut-focus, icon: @image-url("../../assets/icons/ui/crosshair.svg"), enabled: true, separator-after: true },
+        { id: "group", label: "Group", shortcut: root.shortcut-group, icon: @image-url("../../assets/icons/folder.svg"), enabled: true, separator-after: false },
+        { id: "rename", label: "Rename", shortcut: root.shortcut-rename, icon: @image-url("../../assets/icons/ui/rename.svg"), enabled: true, separator-after: true },
+        { id: "copy-path", label: "Copy Path", shortcut: root.shortcut-copy-path, icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
+        { id: "copy-relative-path", label: "Copy Relative Path", shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
+    ];
+    // Everything else (lights, GUI elements, constraints, values).
+    property <[MenuItem]> ctx-items-other: [
+        { id: "insert-object", label: "Insert Object...", shortcut: root.shortcut-insert-object, icon: @image-url("../../assets/icons/ui/plus.svg"), enabled: true, separator-after: false },
+        { id: "paste-into", label: "Paste Into", shortcut: root.shortcut-paste-into, icon: @image-url("../../assets/icons/ui/paste.svg"), enabled: true, separator-after: true },
+        { id: "select_children", label: "Select Children", shortcut: root.shortcut-select-children, icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true, separator-after: false },
+        { id: "select_descendants", label: "Select Descendants", shortcut: root.shortcut-select-descendants, icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true, separator-after: false },
+        { id: "select_parent", label: "Select Parent", shortcut: root.shortcut-select-parent, icon: @image-url("../../assets/icons/ui/chevron-up.svg"), enabled: true, separator-after: false },
+        { id: "select_siblings", label: "Select Siblings", shortcut: root.shortcut-select-siblings, icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true, separator-after: true },
+        { id: "cut", label: "Cut", shortcut: root.shortcut-cut, icon: @image-url("../../assets/icons/ui/cut.svg"), enabled: true, separator-after: false },
+        { id: "copy", label: "Copy", shortcut: root.shortcut-copy, icon: @image-url("../../assets/icons/ui/copy.svg"), enabled: true, separator-after: false },
+        { id: "paste", label: "Paste", shortcut: root.shortcut-paste, icon: @image-url("../../assets/icons/ui/paste.svg"), enabled: true, separator-after: false },
+        { id: "duplicate", label: "Duplicate", shortcut: root.shortcut-duplicate, icon: @image-url("../../assets/icons/ui/duplicate.svg"), enabled: true, separator-after: false },
+        { id: "delete", label: "Delete", shortcut: root.shortcut-delete, icon: @image-url("../../assets/icons/ui/delete.svg"), enabled: true, separator-after: true },
+        { id: "zoom-to", label: "Zoom To", shortcut: root.shortcut-focus, icon: @image-url("../../assets/icons/ui/crosshair.svg"), enabled: true, separator-after: false },
+        { id: "group", label: "Group", shortcut: root.shortcut-group, icon: @image-url("../../assets/icons/folder.svg"), enabled: true, separator-after: false },
+        { id: "rename", label: "Rename", shortcut: root.shortcut-rename, icon: @image-url("../../assets/icons/ui/rename.svg"), enabled: true, separator-after: true },
+        { id: "copy-path", label: "Copy Path", shortcut: root.shortcut-copy-path, icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
+        { id: "copy-relative-path", label: "Copy Relative Path", shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
+    ];
     // Soul Panel context menu — target script entity id + target-type tag
     in-out property <int> context-menu-target-id: -1;
     in-out property <string> context-menu-target-type: "";
@@ -821,6 +978,8 @@ export component StudioWindow inherits Window {
     // ──────────────────────────────────────────────────────────────────────
     in-out property <bool>   loading-active: false;
     in-out property <string> loading-detail: "";
+    // 0..1 position of the progress pill's sweep, paced by Rust.
+    in-out property <float>  loading-sweep: 0;
 
     // Commit-success flash — driven by a Rust system that subscribes
     // to `ModalToolCommittedEvent`. Sets `commit-flash-progress = 1.0`
@@ -1337,6 +1496,13 @@ export component StudioWindow inherits Window {
             shortcut-unlock: root.shortcut-unlock;
             shortcut-anchor: root.shortcut-anchor;
             shortcut-focus: root.shortcut-focus;
+            shortcut-insert-object: root.shortcut-insert-object;
+            snap-enabled: root.snap-enabled;
+            snap-size: root.snap-size;
+            angle-snap: root.angle-snap;
+            collisions-enabled: root.collisions-enabled;
+            recent-spaces: root.recent-spaces;
+            snapshot-status: root.snapshot-status;
             shortcut-gap-fill: root.shortcut-gap-fill;
             shortcut-resize-align: root.shortcut-resize-align;
             shortcut-edge-align: root.shortcut-edge-align;
@@ -1389,6 +1555,19 @@ export component StudioWindow inherits Window {
             on-import-roblox-place => { root.import-roblox-place(); }
             on-publish-universe => { root.publish-universe(); }
             on-publish-space => { root.publish-space(); }
+            on-show-insert-object => { root.insert-object-request(); }
+            on-open-recent(path) => { root.open-recent(path); }
+            on-close-space => {
+                // Snapshot in Rust, then the Universe browser takes over the
+                // left dock so another Space can be picked.
+                root.close-space();
+                root.show-universe-browser = true;
+                root.left-tab-index = 2;
+            }
+            on-toggle-snap => { root.toggle-snap(); }
+            on-set-snap-increment(v) => { root.set-snap-increment(v); }
+            on-set-angle-snap(v) => { root.set-angle-snap(v); }
+            on-toggle-collisions => { root.toggle-collisions(); }
             on-exit => { root.exit-app(); }
             
             // Edit
@@ -1716,85 +1895,41 @@ export component StudioWindow inherits Window {
                             on-collapse-all() => { root.collapse-all(); }
                             on-deselect() => { root.deselect(); }
                             on-search-changed(text) => { root.explorer-search(text); }
+                            on-insert-into(id, node-type) => { root.insert-into(id, node-type); }
+                            focus-pulse: root.explorer-focus-pulse;
                             navigate-up() => { root.explorer-navigate-up(); }
                             navigate-down() => { root.explorer-navigate-down(); }
                             navigate-collapse() => { root.explorer-navigate-collapse(); }
                             navigate-expand() => { root.explorer-navigate-expand(); }
-                            on-context-menu(x, y, node-id, node-type) => {
+                            on-context-menu(x, y, node-id, node-type, class-name, is-root) => {
                                 root.context-menu-x = x;
                                 root.context-menu-y = y;
                                 root.context-menu-node-type = node-type;
                                 // Stash the right-clicked node so backend
                                 // context-menu handlers (Select Children,
-                                // Copy Path, …) know which entity to act on.
-                                // The explorer panel has already triggered
-                                // `select-node` on non-selected targets
-                                // before dispatching to us, so by the
-                                // time the user clicks a menu item the
-                                // SelectionManager + `Selected` components
-                                // reflect this entity. Without that
-                                // upstream select, the hierarchy actions
-                                // (Select Children/Descendants/Parent/
-                                // Siblings/Invert) fell through to an
-                                // empty `With<Selected>` query and did
-                                // nothing.
+                                // Copy Path, Open Script, Insert Object)
+                                // know which entity to act on. The explorer
+                                // panel has already selected a non-selected
+                                // target before dispatching here.
                                 root.context-menu-target-id = node-id;
                                 root.context-menu-target-type = node-type;
 
-                                // Populate menu items based on node type
+                                // The item set follows the object type, as in
+                                // Roblox Studio: scripts open, containers
+                                // insert and receive pastes, parts anchor and
+                                // lock, services cannot be cut or renamed.
                                 if node-type == "file" {
-                                    // Shortcut text for every REMAPPABLE command reads
-                                    // the live `shortcut-*` properties (pushed by
-                                    // `sync_keybindings_to_slint`), so a remap can never
-                                    // leave this menu quoting a chord that no longer
-                                    // works. "Enter" and "Alt+Enter" stay literal: they
-                                    // are fixed Explorer keys with no `Action` behind
-                                    // them, so there is nothing that could drift.
-                                    root.context-menu-items = [
-                                        { id: "open", label: "Open", shortcut: "Enter", icon: @image-url("../../assets/icons/ui/new-file.svg"), enabled: true, separator-after: false },
-                                        { id: "open-with", label: "Open With...", shortcut: "", icon: @image-url("../../assets/icons/ui/settings.svg"), enabled: true, separator-after: true },
-                                        { id: "cut", label: "Cut", shortcut: root.shortcut-cut, icon: @image-url("../../assets/icons/ui/cut.svg"), enabled: true, separator-after: false },
-                                        { id: "copy", label: "Copy", shortcut: root.shortcut-copy, icon: @image-url("../../assets/icons/ui/copy.svg"), enabled: true, separator-after: false },
-                                        { id: "paste", label: "Paste", shortcut: root.shortcut-paste, icon: @image-url("../../assets/icons/ui/paste.svg"), enabled: true, separator-after: false },
-                                        { id: "delete", label: "Delete", shortcut: root.shortcut-delete, icon: @image-url("../../assets/icons/ui/delete.svg"), enabled: true, separator-after: true },
-                                        { id: "rename", label: "Rename", shortcut: root.shortcut-rename, icon: @image-url("../../assets/icons/ui/rename.svg"), enabled: true, separator-after: false },
-                                        { id: "duplicate", label: "Duplicate", shortcut: root.shortcut-duplicate, icon: @image-url("../../assets/icons/ui/duplicate.svg"), enabled: true, separator-after: true },
-                                        { id: "show-in-explorer", label: "Show in File Explorer", shortcut: "", icon: @image-url("../../assets/icons/folder.svg"), enabled: true, separator-after: false },
-                                        { id: "copy-path", label: "Copy Path", shortcut: root.shortcut-copy-path, icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
-                                        { id: "copy-relative-path", label: "Copy Relative Path", shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: true },
-                                        { id: "properties", label: "Properties", shortcut: "Alt+Enter", icon: @image-url("../../assets/icons/ui/settings.svg"), enabled: true, separator-after: false },
-                                    ];
+                                    root.context-menu-items = root.ctx-items-file;
+                                } else if is-root {
+                                    root.context-menu-items = root.ctx-items-service;
+                                } else if root.is-script-class(class-name) {
+                                    root.context-menu-items = root.ctx-items-script;
+                                } else if class-name == "Model" || class-name == "Folder" {
+                                    root.context-menu-items = root.ctx-items-container;
+                                } else if root.is-part-class(class-name) {
+                                    root.context-menu-items = root.ctx-items-part;
                                 } else {
-                                    // Entity menu — selection + hierarchy + edit
-                                    // commands. Items match the keybindings wired
-                                    // to MenuActionEvent in handle_menu_action_events.
-                                    // Every chord here is read from the live `shortcut-*`
-                                    // properties rather than spelled out — the literals
-                                    // this replaced had already drifted (Select
-                                    // Children/Parent/Siblings each quoted a chord the
-                                    // keybinding table does not hold).
-                                    root.context-menu-items = [
-                                        { id: "select_children",    label: "Select Children",     shortcut: root.shortcut-select-children,    icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true,  separator-after: false },
-                                        { id: "select_descendants", label: "Select Descendants",  shortcut: root.shortcut-select-descendants, icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true,  separator-after: false },
-                                        { id: "select_parent",      label: "Select Parent",       shortcut: root.shortcut-select-parent,      icon: @image-url("../../assets/icons/ui/chevron-up.svg"),    enabled: true,  separator-after: false },
-                                        { id: "select_siblings",    label: "Select Siblings",     shortcut: root.shortcut-select-siblings,    icon: @image-url("../../assets/icons/ui/chevron-right.svg"), enabled: true,  separator-after: false },
-                                        { id: "invert_selection",   label: "Invert Selection",    shortcut: root.shortcut-invert-selection,   icon: @image-url("../../assets/icons/ui/swap.svg"),         enabled: true,  separator-after: true  },
-                                        { id: "cut",       label: "Cut",        shortcut: root.shortcut-cut,       icon: @image-url("../../assets/icons/ui/cut.svg"),       enabled: true, separator-after: false },
-                                        { id: "copy",      label: "Copy",       shortcut: root.shortcut-copy,      icon: @image-url("../../assets/icons/ui/copy.svg"),      enabled: true, separator-after: false },
-                                        { id: "paste",     label: "Paste",      shortcut: root.shortcut-paste,     icon: @image-url("../../assets/icons/ui/paste.svg"),     enabled: true, separator-after: false },
-                                        { id: "duplicate", label: "Duplicate",  shortcut: root.shortcut-duplicate, icon: @image-url("../../assets/icons/ui/duplicate.svg"), enabled: true, separator-after: false },
-                                        { id: "delete",    label: "Delete",     shortcut: root.shortcut-delete,    icon: @image-url("../../assets/icons/ui/delete.svg"),    enabled: true, separator-after: true  },
-                                        { id: "group",     label: "Group",      shortcut: root.shortcut-group,     icon: @image-url("../../assets/icons/folder.svg"),    enabled: true, separator-after: false },
-                                        { id: "ungroup",   label: "Ungroup",    shortcut: root.shortcut-ungroup,   icon: @image-url("../../assets/icons/ui/folder-open.svg"), enabled: true, separator-after: true },
-                                        { id: "rename",    label: "Rename",     shortcut: root.shortcut-rename,    icon: @image-url("../../assets/icons/ui/rename.svg"),    enabled: true, separator-after: true },
-                                        // Copy the on-disk path (to the
-                                        // _instance.toml or parent folder) to
-                                        // the clipboard — matches the file
-                                        // menu's item + the Soul Panel's
-                                        // "Copy Path" shortcut.
-                                        { id: "copy-path",          label: "Copy Path",          shortcut: root.shortcut-copy-path, icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
-                                        { id: "copy-relative-path", label: "Copy Relative Path", shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
-                                    ];
+                                    root.context-menu-items = root.ctx-items-other;
                                 }
 
                                 root.show-context-menu = true;
@@ -2727,10 +2862,12 @@ export component StudioWindow inherits Window {
                                         height: parent.height;
                                         border-radius: 2px;
                                         background: Theme.accent-cyan;
-                                        // Indeterminate sweep: bounce across the
-                                        // track on the global animation clock.
-                                        x: (parent.width - self.width)
-                                            * abs(sin(360deg * (animation-tick() / 1.6s)));
+                                        // Indeterminate sweep, paced by Rust
+                                        // (`sync_load_progress_to_slint`): smooth
+                                        // while frames are fast, a few steps a
+                                        // second when they are not, so a slow
+                                        // load frame is not also a chrome repaint.
+                                        x: (parent.width - self.width) * root.loading-sweep;
                                     }
                                 }
                             }
@@ -3321,6 +3458,7 @@ export component StudioWindow inherits Window {
                             // `property-search-query`; the callback only asks
                             // it to rebuild the rows model.
                             search-query <=> root.property-search-query;
+                            focus-pulse: root.properties-focus-pulse;
                             on-search-changed(q) => { root.property-search-changed(q); }
                             on-search-focus-changed(f) => { root.property-search-has-focus = f; }
                             // BrickColor wheel picker — Rust pushes all seven
@@ -3783,6 +3921,7 @@ export component StudioWindow inherits Window {
             shortcut-focus: root.shortcut-focus;
             shortcut-anchor: root.shortcut-anchor;
             shortcut-lock: root.shortcut-lock;
+            shortcut-select-children: root.shortcut-select-children;
             on-action(action) => {
                 root.context-action(action);
                 root.show-context-menu = false;
@@ -4094,10 +4233,25 @@ export component StudioWindow inherits Window {
         capturing-action <=> root.keybinding-capturing;
         conflict-message: root.keybinding-conflict;
         on-rebind(action, chord) => { root.rebind-shortcut(action, chord); }
+        active-preset: root.keymap-preset;
+        on-apply-preset(preset) => { root.apply-keymap-preset(preset); }
         on-close => {
             root.keybinding-capturing = "";
             root.show-keybindings-dialog = false;
         }
+    }
+
+    // Insert Object: searchable class picker, inserting under the selection.
+    if root.show-insert-object-dialog: InsertObjectDialog {
+        results: root.insert-results;
+        target-name: root.insert-target-name;
+        search-query <=> root.insert-search-query;
+        on-search(text) => { root.insert-search-changed(text); }
+        on-insert(class-name) => {
+            root.show-insert-object-dialog = false;
+            root.menu-action("insert:" + class-name);
+        }
+        on-close => { root.show-insert-object-dialog = false; }
     }
 
     // About Eustress Engine dialog

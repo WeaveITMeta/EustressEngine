@@ -2359,7 +2359,7 @@ component BrickColorRow inherits Rectangle {
                                 b: cell.b;
                                 swatch-name: cell.name;
                                 swatch-clicked => {
-                                    root.value-changed(cell.name + "|" + cell.r + ", " + cell.g + ", " + cell.b);
+                                    root.value-changed(root.active-wheel-id + "|" + cell.name + "|" + cell.r + ", " + cell.g + ", " + cell.b);
                                     brick-color-popup.close();
                                 }
                             }
@@ -2373,7 +2373,7 @@ component BrickColorRow inherits Rectangle {
                                 b: cell.b;
                                 swatch-name: cell.name;
                                 swatch-clicked => {
-                                    root.value-changed(cell.name + "|" + cell.r + ", " + cell.g + ", " + cell.b);
+                                    root.value-changed(root.active-wheel-id + "|" + cell.name + "|" + cell.r + ", " + cell.g + ", " + cell.b);
                                     brick-color-popup.close();
                                 }
                             }
@@ -2387,7 +2387,7 @@ component BrickColorRow inherits Rectangle {
                                 b: cell.b;
                                 swatch-name: cell.name;
                                 swatch-clicked => {
-                                    root.value-changed(cell.name + "|" + cell.r + ", " + cell.g + ", " + cell.b);
+                                    root.value-changed(root.active-wheel-id + "|" + cell.name + "|" + cell.r + ", " + cell.g + ", " + cell.b);
                                     brick-color-popup.close();
                                 }
                             }
@@ -2401,7 +2401,7 @@ component BrickColorRow inherits Rectangle {
                                 b: cell.b;
                                 swatch-name: cell.name;
                                 swatch-clicked => {
-                                    root.value-changed(cell.name + "|" + cell.r + ", " + cell.g + ", " + cell.b);
+                                    root.value-changed(root.active-wheel-id + "|" + cell.name + "|" + cell.r + ", " + cell.g + ", " + cell.b);
                                     brick-color-popup.close();
                                 }
                             }
@@ -2415,7 +2415,7 @@ component BrickColorRow inherits Rectangle {
                                 b: cell.b;
                                 swatch-name: cell.name;
                                 swatch-clicked => {
-                                    root.value-changed(cell.name + "|" + cell.r + ", " + cell.g + ", " + cell.b);
+                                    root.value-changed(root.active-wheel-id + "|" + cell.name + "|" + cell.r + ", " + cell.g + ", " + cell.b);
                                     brick-color-popup.close();
                                 }
                             }
@@ -2429,7 +2429,7 @@ component BrickColorRow inherits Rectangle {
                                 b: cell.b;
                                 swatch-name: cell.name;
                                 swatch-clicked => {
-                                    root.value-changed(cell.name + "|" + cell.r + ", " + cell.g + ", " + cell.b);
+                                    root.value-changed(root.active-wheel-id + "|" + cell.name + "|" + cell.r + ", " + cell.g + ", " + cell.b);
                                     brick-color-popup.close();
                                 }
                             }
@@ -2443,7 +2443,7 @@ component BrickColorRow inherits Rectangle {
                                 b: cell.b;
                                 swatch-name: cell.name;
                                 swatch-clicked => {
-                                    root.value-changed(cell.name + "|" + cell.r + ", " + cell.g + ", " + cell.b);
+                                    root.value-changed(root.active-wheel-id + "|" + cell.name + "|" + cell.r + ", " + cell.g + ", " + cell.b);
                                     brick-color-popup.close();
                                 }
                             }
@@ -2620,6 +2620,9 @@ export component PropertiesPanel inherits Rectangle {
     // as a broken panel. `on-search-changed` only tells Rust to rebuild; the
     // query itself is read back off this property.
     in-out property <string> search-query: "";
+    // Bumped by the Filter Properties shortcut; each change puts the
+    // keyboard in the filter box.
+    in property <int> focus-pulse: 0;
     callback on-search-changed(string);
     // Deliberately NOT `on-input-focus-changed`: that one pauses the whole
     // properties sync while an editor has focus, which would freeze the very
@@ -2768,7 +2771,11 @@ export component PropertiesPanel inherits Rectangle {
                         }
                     }
 
-                    LineEdit {
+                    filter-edit := LineEdit {
+                        // The field lives inside a conditional, so it takes
+                        // the focus pulse through its own property.
+                        property <int> pulse: root.focus-pulse;
+                        changed pulse => { self.focus(); }
                         horizontal-stretch: 1;
                         placeholder-text: "Filter properties...";
                         text <=> root.search-query;

@@ -60,8 +60,14 @@ export component ExplorerPanel inherits Rectangle {
     callback on-expand-node(int, string);
     callback on-collapse-node(int, string);
     callback on-open-node(int, string);
-    callback on-context-menu(length, length, int, string); // x, y, node-id, node-type
+    // x, y, node-id, node-type, class-name, is-root (a service header row)
+    callback on-context-menu(length, length, int, string, string, bool);
     callback on-search-changed(string);
+    // Row plus button: insert a new object under this node (node-id, node-type).
+    callback on-insert-into(int, string);
+    // Bumped by the Search Explorer shortcut; each change puts the keyboard
+    // in the search box.
+    in property <int> focus-pulse: 0;
     callback on-rename-node(int, string, string);
     /// Fired when inline rename should start for the given node id.
     /// Handled by main.slint which sets explorer-renaming-node-id.
@@ -128,8 +134,10 @@ export component ExplorerPanel inherits Rectangle {
                 }
                 
                 search-input := LineEdit {
+                    property <int> pulse: root.focus-pulse;
+                    changed pulse => { self.focus(); }
                     horizontal-stretch: 1;
-                    placeholder-text: "Search...";
+                    placeholder-text: "Search  (is:Part, tag:Door, Locked = true)";
                     text <=> root.search-text;
                     edited(text) => { root.on-search-changed(text); }
                 }
@@ -308,7 +316,10 @@ export component ExplorerPanel inherits Rectangle {
                             if !node.selected {
                                 root.on-select-node(node.id, node.node-type, false, false);
                             }
-                            root.on-context-menu(x, y, node.id, node.node-type);
+                            root.on-context-menu(x, y, node.id, node.node-type, node.class-name, node.depth == 0);
+                        }
+                        insert-requested => {
+                            root.on-insert-into(node.id, node.node-type);
                         }
                         rename-committed(new-name) => {
                             root.on-rename-node(node.id, new-name, node.node-type);

@@ -329,8 +329,9 @@ pub enum SlintAction {
     SetDisplayUnit(String),
 
     // (PickWheel removed: the BrickColor wheel drill is now local to the Slint
-    // BrickColorRow — no Rust round-trip. The chosen cell's color still applies
-    // via the ordinary `PropertyChanged("BrickColor", "name|r, g, b")` path.)
+    // BrickColorRow — no Rust round-trip. The chosen cell applies via the
+    // ordinary `PropertyChanged("BrickColor", "wheel|name|r, g, b")` path,
+    // which is also where the wheel and the swatch name get recorded.)
 
     // Play controls
     PlaySolo,
@@ -345,6 +346,23 @@ pub enum SlintAction {
     ToggleGrid,
     ToggleSnap,
     SetSnapIncrement(f32),
+    /// Rotate snap increment in degrees (ribbon field).
+    SetAngleSnap(f32),
+    /// Ribbon toggle: dragged parts stop at other parts.
+    ToggleCollisions,
+    /// Insert Object dialog: the search box changed; Rust filters the
+    /// catalog and pushes the results.
+    InsertSearchChanged(String),
+    /// Explorer row plus button: select that row and open Insert Object.
+    InsertInto(i32, String),
+    /// Ribbon "Insert Object..." item.
+    OpenInsertObject,
+    /// Keyboard Shortcuts dialog preset button ("eustress" / "roblox").
+    ApplyKeymapPreset(String),
+    /// File > Recent entry.
+    OpenRecent(String),
+    /// File > Close Space: snapshot, then the Universe browser takes over.
+    CloseSpace,
     
     // Panel toggles (from Slint → Bevy state sync)
     ToggleCommandBar,
@@ -952,6 +970,12 @@ pub struct UnifiedExplorerState {
     /// When true, the next sync_unified_explorer_to_slint call bypasses the
     /// 30-frame throttle so selection/expand changes feel instant.
     pub needs_immediate_sync: bool,
+    /// Only WHICH rows are selected changed; the tree's shape did not. The
+    /// next sync patches the `selected` bit on the rows already in Slint
+    /// instead of rebuilding and re-pushing every node. Selecting a part in
+    /// a 2,000-row tree used to cost a 300 to 450 ms frame for exactly that
+    /// re-push, on every click.
+    pub selection_dirty: bool,
     /// Hash of last pushed tree model to avoid flickering on redundant pushes
     pub last_tree_hash: u64,
     /// Cached terrain file count (avoid re-reading directory every 30 frames)
@@ -1044,6 +1068,7 @@ impl Default for UnifiedExplorerState {
             dirty: true,
             file_path_cache: std::collections::HashMap::new(),
             needs_immediate_sync: false,
+            selection_dirty: false,
             last_tree_hash: 0,
             cached_terrain_file_count: 0,
             cached_dynamic_services: Vec::new(),
@@ -1320,7 +1345,9 @@ impl Plugin for StudioUiPlugin {
                 super::file_event_handler::execute_file_actions,
             ).chain())
             .add_systems(Update, crate::auth::auth_poll_system)
-            .add_systems(Startup, try_restore_auth_session);
+            .init_resource::<PendingAuthRestore>()
+            .add_systems(Startup, try_restore_auth_session)
+            .add_systems(Update, apply_restored_auth_session);
     }
 }
 
@@ -1520,7 +1547,7 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, push_brick_color_honeycombs.after(SlintSystems::Drain))
             .add_systems(Update, sync_selection_summary_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_universe_browser.after(SlintSystems::Drain))
-            .add_systems(Update, sync_gui_elements_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, sync_gui_elements_to_slint.after(SlintSystems::Drain).run_if(crate::space::file_loader::ui_sync_tick))
             // `.after(handle_window_resize)`: on a resize frame the staging
             // buffer, Slint texture, overlay quad, and camera projection are
             // all replaced — the render must observe them post-resize or it
@@ -1551,13 +1578,16 @@ impl Plugin for SlintUiPlugin {
             // Must run AFTER part_selection_system and SlintSystems::Drain
             .add_systems(Update, sync_viewport_selection_to_explorer.after(SlintSystems::Drain))
             // Unified explorer sync: entities + filesystem (throttled internally)
-            .add_systems(Update, sync_unified_explorer_to_slint.after(sync_viewport_selection_to_explorer))
+            // The slow tick: during a bulk load the tree changes every frame,
+            // and each push replaces the whole Slint model (every row
+            // re-instantiated on the next paint). Every 2 s is plenty then.
+            .add_systems(Update, sync_unified_explorer_to_slint.after(sync_viewport_selection_to_explorer).run_if(crate::space::file_loader::ui_sync_tick_slow))
             // Properties sync (throttled internally)
             .add_systems(Update, sync_properties_to_slint.after(sync_viewport_selection_to_explorer))
             // Tag chips/registry sync — NOT focus-gated, so tags added via the
             // (focused) add-field refresh immediately. Rebuilds on selection /
             // Changed<Tags> only.
-            .add_systems(Update, sync_tags_to_slint.after(sync_viewport_selection_to_explorer))
+            .add_systems(Update, sync_tags_to_slint.after(sync_viewport_selection_to_explorer).run_if(crate::space::file_loader::ui_sync_tick))
             // Enter on a selected part → open the Edit-Label modal for its
             // first TextLabel descendant. Runs after focus tracking so we
             // can correctly skip when another input has focus.
@@ -1635,7 +1665,9 @@ impl Plugin for SlintUiPlugin {
             // (Import pick or Assets double-click), push its wedges to Slint.
             .add_systems(Update, sync_radial_media_menu_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, crate::auth::auth_poll_system)
-            .add_systems(Startup, try_restore_auth_session);
+            .init_resource::<PendingAuthRestore>()
+            .add_systems(Startup, try_restore_auth_session)
+            .add_systems(Update, apply_restored_auth_session);
 
         // Ribbon keyboard-shortcut subtitles — pushes formatted binding
         // strings to Slint on startup and whenever user remaps.
@@ -1654,7 +1686,10 @@ impl Plugin for SlintUiPlugin {
         }
         #[cfg(feature = "soul-panel")]
         {
-            app.add_systems(Update, sync_soul_panel_to_slint.after(SlintSystems::Drain));
+            // Slow tick: it hashes every script and, on a change, probes each
+            // script's source files on disk (85 ms per frame on Super
+            // Station's drain, where scripts arrive every frame).
+            app.add_systems(Update, sync_soul_panel_to_slint.after(SlintSystems::Drain).run_if(crate::space::file_loader::ui_sync_tick_slow));
         }
     }
 }
@@ -1890,6 +1925,22 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_toggle_snap(move || q.push(SlintAction::ToggleSnap));
     let q = queue.clone();
     ui.on_set_snap_increment(move |val| q.push(SlintAction::SetSnapIncrement(val)));
+    let q = queue.clone();
+    ui.on_set_angle_snap(move |val| q.push(SlintAction::SetAngleSnap(val)));
+    let q = queue.clone();
+    ui.on_toggle_collisions(move || q.push(SlintAction::ToggleCollisions));
+    let q = queue.clone();
+    ui.on_insert_search_changed(move |text| q.push(SlintAction::InsertSearchChanged(text.to_string())));
+    let q = queue.clone();
+    ui.on_insert_into(move |id, node_type| q.push(SlintAction::InsertInto(id, node_type.to_string())));
+    let q = queue.clone();
+    ui.on_insert_object_request(move || q.push(SlintAction::OpenInsertObject));
+    let q = queue.clone();
+    ui.on_apply_keymap_preset(move |id| q.push(SlintAction::ApplyKeymapPreset(id.to_string())));
+    let q = queue.clone();
+    ui.on_open_recent(move |path| q.push(SlintAction::OpenRecent(path.to_string())));
+    let q = queue.clone();
+    ui.on_close_space(move || q.push(SlintAction::CloseSpace));
     
     // View
     let q = queue.clone();
@@ -3141,6 +3192,21 @@ fn render_slint_to_texture(
     if dirty_size.width == 0 || dirty_size.height == 0 {
         return;
     }
+    // Attribution aid: which part of the chrome keeps repainting. Every 120th
+    // painted frame, log the dirty bounding box and its share of the window,
+    // so a per-frame property write that dirties a large region (measured:
+    // 33 to 59 ms per frame during a bulk load) can be traced to its widget.
+    if frame % 120 == 0 {
+        let origin = dirty_region.bounding_box_origin();
+        let share = (dirty_size.width as f64 * dirty_size.height as f64)
+            / (tex_width as f64 * tex_height as f64).max(1.0)
+            * 100.0;
+        info!(
+            target: "eustress_engine::slint_paint",
+            "slint repaint: dirty {}x{} at ({}, {}) = {:.1}% of {}x{}",
+            dirty_size.width, dirty_size.height, origin.x, origin.y, share, tex_width, tex_height
+        );
+    }
 
     let Some(mut image) = images.get_mut(&scene.image) else { return };
     if let Some(data) = image.data.as_mut() {
@@ -3299,6 +3365,9 @@ pub fn update_slint_ui_focus(
     // NOT a Slint text input, so it must be OR'd into the same gate or
     // typing into the billboard also flies the camera around.
     billboard_edit: Option<Res<crate::billboard_gui::BillboardEditState>>,
+    frames: Res<bevy::diagnostic::FrameCount>,
+    // Cursor + button signature of the last GUI hit-test (see below).
+    mut hit_sig: Local<Option<(i32, i32, u8)>>,
 ) {
     // Block engine keyboard handling whenever ANY Slint modal is open
     // or a text input has focus. The atomic this feeds is what the
@@ -3459,6 +3528,34 @@ pub fn update_slint_ui_focus(
     ui_focus.has_focus = !in_viewport;
     ui_focus.last_ui_position = if !in_viewport { Some(cursor_pos) } else { None };
 
+    // The hit-test below walks every GUI element. On a MindSpace Space that
+    // is tens of thousands of billboard labels: 50 ms per frame measured on
+    // Super Station's drain. While a bulk load streams entities in, keep the
+    // previous hover answer unless the cursor or a button changed, or the
+    // load's UI tick fires. A click is a one-frame edge that always changes
+    // the signature, so clicks are never skipped; the stale click field is
+    // cleared so no consumer sees a click twice.
+    {
+        use bevy::input::mouse::MouseButton;
+        let mouse_bits = (mouse.pressed(MouseButton::Left) as u8)
+            | ((mouse.just_pressed(MouseButton::Left) as u8) << 1)
+            | ((mouse.just_released(MouseButton::Left) as u8) << 2)
+            | ((mouse.pressed(MouseButton::Right) as u8) << 3)
+            | ((mouse.just_pressed(MouseButton::Right) as u8) << 4)
+            | ((mouse.just_released(MouseButton::Right) as u8) << 5);
+        let sig = (cursor_pos.x as i32, cursor_pos.y as i32, mouse_bits);
+        let input_changed = *hit_sig != Some(sig);
+        *hit_sig = Some(sig);
+        if in_viewport
+            && !input_changed
+            && crate::space::file_loader::bulk_load_active()
+            && !crate::space::file_loader::ui_sync_tick_for_frame(frames.0 as u64)
+        {
+            ui_focus.gui_clicked_button = None;
+            return;
+        }
+    }
+
     // Check if cursor is over any visible ScreenGui element (buttons, labels, frames)
     // These are rendered inside the viewport but should consume clicks.
     ui_focus.gui_element_hit = false;
@@ -3587,85 +3684,148 @@ pub fn update_slint_ui_focus(
 }
 
 /// Try to restore auth session on startup
+/// What the saved-identity restore thread produces.
+struct RestoredIdentity {
+    public_key: String,
+    display_name: String,
+    /// The witness JWT when the challenge auth succeeded.
+    token: Option<String>,
+    /// The witness's account id when authenticated (the ledger keys
+    /// everything by it, not by the pubkey), else the public key.
+    account_id: String,
+}
+
+/// Receiver for the restore thread's result, polled by
+/// `apply_restored_auth_session`. `Receiver` is not `Sync`, hence the mutex.
+#[derive(Resource, Default)]
+struct PendingAuthRestore(Option<std::sync::Mutex<std::sync::mpsc::Receiver<Option<RestoredIdentity>>>>);
+
+/// Startup: restore a JWT session, and if there is none, start the saved-
+/// identity auto-login on its own thread. That login is two HTTPS round
+/// trips to the API (challenge + verify, 4 s connect / 8 s read timeouts);
+/// done inline it held the first frame for 1.3 to 1.6 s on every launch,
+/// and up to 12 s with the API unreachable. The result lands through
+/// `apply_restored_auth_session`; until then the editor is simply not
+/// signed in, exactly as it is when the API is slow.
 fn try_restore_auth_session(
     mut auth_state: ResMut<crate::auth::AuthState>,
     settings: Option<Res<crate::editor_settings::EditorSettings>>,
+    mut pending: ResMut<PendingAuthRestore>,
 ) {
     // First try JWT token restore
     auth_state.try_restore_session();
+    if auth_state.is_logged_in() {
+        return;
+    }
 
     // If no JWT session, try auto-login from saved identity file
-    if !auth_state.is_logged_in() {
-        if let Some(ref settings) = settings {
-            if let Some(identity) = settings.saved_identities.first() {
-                if let Ok(content) = std::fs::read_to_string(&identity.path) {
-                    let mut public_key = String::new();
-                    let mut username = String::new();
-                    for line in content.lines() {
-                        let trimmed = line.trim();
-                        if trimmed.starts_with("public_key") {
-                            if let Some(val) = trimmed.splitn(2, '=').nth(1) {
-                                public_key = val.trim().trim_matches('"').trim_matches('\'').to_string();
-                            }
-                        }
-                        if trimmed.starts_with("username") {
-                            if let Some(val) = trimmed.splitn(2, '=').nth(1) {
-                                username = val.trim().trim_matches('"').trim_matches('\'').to_string();
-                            }
+    let Some(identity_path) = settings
+        .as_ref()
+        .and_then(|s| s.saved_identities.first())
+        .map(|i| i.path.clone())
+    else {
+        return;
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel::<Option<RestoredIdentity>>();
+    let spawned = std::thread::Builder::new()
+        .name("eustress-auth-restore".into())
+        .spawn(move || {
+            let restored = (|| {
+                let content = std::fs::read_to_string(&identity_path).ok()?;
+                let mut public_key = String::new();
+                let mut username = String::new();
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("public_key") {
+                        if let Some(val) = trimmed.splitn(2, '=').nth(1) {
+                            public_key = val.trim().trim_matches('"').trim_matches('\'').to_string();
                         }
                     }
-                    if !public_key.is_empty() {
-                        let display_name = if username.is_empty() {
-                            public_key[..std::cmp::min(8, public_key.len())].to_string()
-                        } else {
-                            username.clone()
-                        };
-
-                        // Read private key for challenge-response auth
-                        let (_, private_key, _) = parse_identity_toml(&content);
-
-                        // Try challenge-response auth with the API
-                        let authed = if !private_key.is_empty() {
-                            match do_challenge_auth(&public_key, &private_key) {
-                                Ok(pair) => {
-                                    tracing::info!("Challenge auth succeeded for {}", display_name);
-                                    Some(pair)
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Challenge auth failed: {} — using local identity", e);
-                                    None
-                                }
-                            }
-                        } else {
-                            None
-                        };
-
-                        // Use the witness's account id when authenticated —
-                        // the ledger keys everything by it, not by the pubkey.
-                        let (token, account_id) = match authed {
-                            Some((jwt, uid)) => (Some(jwt), uid),
-                            None => (None, public_key.clone()),
-                        };
-                        auth_state.jwt_valid = token.is_some();
-
-                        auth_state.user = Some(crate::auth::AuthUser {
-                            id: account_id,
-                            username: display_name.clone(),
-                            email: None,
-                            avatar_url: None,
-                            steam_id: None,
-                            discord_id: None,
-                            bliss_balance: 0.0,
-                            total_hours: 0.0,
-                        });
-                        auth_state.token = token.or(Some(public_key));
-                        auth_state.status = crate::auth::AuthStatus::LoggedIn;
-                        tracing::info!("Auto-login from saved identity: {}", display_name);
+                    if trimmed.starts_with("username") {
+                        if let Some(val) = trimmed.splitn(2, '=').nth(1) {
+                            username = val.trim().trim_matches('"').trim_matches('\'').to_string();
+                        }
                     }
                 }
-            }
-        }
+                if public_key.is_empty() {
+                    return None;
+                }
+                let display_name = if username.is_empty() {
+                    public_key[..std::cmp::min(8, public_key.len())].to_string()
+                } else {
+                    username.clone()
+                };
+
+                // Read private key for challenge-response auth
+                let (_, private_key, _) = parse_identity_toml(&content);
+
+                // Try challenge-response auth with the API
+                let authed = if !private_key.is_empty() {
+                    match do_challenge_auth(&public_key, &private_key) {
+                        Ok(pair) => {
+                            tracing::info!("Challenge auth succeeded for {}", display_name);
+                            Some(pair)
+                        }
+                        Err(e) => {
+                            tracing::warn!("Challenge auth failed: {} — using local identity", e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let (token, account_id) = match authed {
+                    Some((jwt, uid)) => (Some(jwt), uid),
+                    None => (None, public_key.clone()),
+                };
+                Some(RestoredIdentity { public_key, display_name, token, account_id })
+            })();
+            let _ = tx.send(restored);
+        });
+    match spawned {
+        Ok(_) => pending.0 = Some(std::sync::Mutex::new(rx)),
+        Err(e) => tracing::warn!("auth restore thread failed to spawn: {} — not signed in", e),
     }
+}
+
+/// Update: apply the restore thread's result once it lands.
+fn apply_restored_auth_session(
+    mut auth_state: ResMut<crate::auth::AuthState>,
+    mut pending: ResMut<PendingAuthRestore>,
+) {
+    let outcome: Option<Option<RestoredIdentity>> = match pending.0.as_ref() {
+        None => return,
+        Some(rx) => match rx.lock() {
+            Ok(r) => match r.try_recv() {
+                Ok(restored) => Some(restored),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
+            },
+            Err(_) => Some(None),
+        },
+    };
+    let Some(restored) = outcome else { return };
+    pending.0 = None;
+    let Some(id) = restored else { return };
+    if auth_state.is_logged_in() {
+        return; // a session landed some other way meanwhile
+    }
+    auth_state.jwt_valid = id.token.is_some();
+    auth_state.user = Some(crate::auth::AuthUser {
+        id: id.account_id,
+        username: id.display_name.clone(),
+        email: None,
+        avatar_url: None,
+        steam_id: None,
+        discord_id: None,
+        bliss_balance: 0.0,
+        total_hours: 0.0,
+    });
+    auth_state.token = id.token.or(Some(id.public_key));
+    auth_state.status = crate::auth::AuthStatus::LoggedIn;
+    tracing::info!("Auto-login from saved identity: {}", id.display_name);
 }
 
 // ============================================================================
@@ -3892,6 +4052,11 @@ struct DrainResources<'w> {
     lighting: Option<ResMut<'w, eustress_common::services::LightingService>>,
     /// Stage 5 — user-selected display unit (set by status-bar dropdown).
     display_unit: Option<ResMut<'w, eustress_common::units::DisplayUnit>>,
+    /// BrickColor picker state written from the pick payload: the wheel the
+    /// last pick came from, and per-entity which swatch (name + bytes) was
+    /// clicked, so the Properties row can show that same name back.
+    active_wheel: Option<ResMut<'w, eustress_common::color_wheels::ActiveColorWheel>>,
+    color_picks: Option<ResMut<'w, eustress_common::color_wheels::BrickColorPicks>>,
     /// Sketch canvas projection (selected CadPart first sketch). Mut
     /// so entity-row clicks can toggle `selected_a`/`selected_b`
     /// in-place without a Message round-trip.
@@ -6044,6 +6209,89 @@ fn drain_slint_actions(
                     }
                 }
             }
+            SlintAction::SetAngleSnap(val) => {
+                if let Some(ref mut es) = res.editor_settings {
+                    es.angle_snap = if val.is_finite() { val.clamp(0.0, 180.0) } else { es.angle_snap };
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Rotate increment: {:.1} degrees", es.angle_snap));
+                    }
+                }
+            }
+            SlintAction::ToggleCollisions => {
+                if let Some(ref mut es) = res.editor_settings {
+                    es.collisions_enabled = !es.collisions_enabled;
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Collisions: {}", if es.collisions_enabled { "ON" } else { "OFF" }));
+                    }
+                }
+            }
+            SlintAction::InsertSearchChanged(query) => {
+                let Some(ui) = ui else { continue };
+                ui.set_insert_results(insert_results_model(ui, &query));
+            }
+            SlintAction::InsertInto(id, node_type) => {
+                // The row becomes the selection first (the insert handler
+                // writes under the selected entity's folder), then the
+                // dialog opens on the next UI sync.
+                let target = res
+                    .explorer_state
+                    .as_ref()
+                    .and_then(|es| es.entity_id_cache.get(&id).copied())
+                    .and_then(|e| queries.instances.get(e).ok().map(|(_, inst)| inst.name.clone()))
+                    .unwrap_or_else(|| "Workspace".to_string());
+                queue.push(SlintAction::SelectNode(id, node_type, false, false));
+                if let Some(ref mut s) = res.state {
+                    s.insert_target_name = target;
+                    s.show_insert_object_dialog = true;
+                }
+            }
+            SlintAction::OpenInsertObject => {
+                let target = res
+                    .explorer_state
+                    .as_ref()
+                    .and_then(|es| match &es.selected {
+                        SelectedItem::Entity(e) => Some(*e),
+                        _ => None,
+                    })
+                    .and_then(|e| queries.instances.get(e).ok().map(|(_, inst)| inst.name.clone()))
+                    .unwrap_or_else(|| "Workspace".to_string());
+                if let Some(ref mut s) = res.state {
+                    s.insert_target_name = target;
+                    s.show_insert_object_dialog = true;
+                }
+            }
+            SlintAction::ApplyKeymapPreset(id) => {
+                let Some(ui) = ui else { continue };
+                let Some(preset) = crate::keybindings::KeymapPreset::from_id(&id) else {
+                    ui.set_keybinding_conflict(format!("Unknown keymap preset '{}'.", id).into());
+                    continue;
+                };
+                let Some(bindings) = res.keybindings.as_mut() else {
+                    ui.set_keybinding_conflict("Keybindings are unavailable in this build.".into());
+                    continue;
+                };
+                match bindings.apply_preset(preset) {
+                    Ok(()) => {
+                        ui.set_keybinding_conflict(slint::SharedString::default());
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Keymap preset applied: {}", preset.id()));
+                        }
+                    }
+                    Err(e) => ui.set_keybinding_conflict(e.as_str().into()),
+                }
+            }
+            SlintAction::OpenRecent(path) => {
+                events.file_events.write(FileEvent::OpenRecent(std::path::PathBuf::from(path)));
+            }
+            SlintAction::CloseSpace => {
+                // A Space is never "closed" the Roblox way: edits are already
+                // in the world database. Take a snapshot and hand over to the
+                // Universe browser, which the Slint side has just opened.
+                events.file_events.write(FileEvent::SaveScene);
+                if let Some(ref mut out) = res.output {
+                    out.info("Snapshot taken. Pick a Space in the Universe browser to continue.".to_string());
+                }
+            }
             
             // Panel toggles → StudioState
             SlintAction::ToggleCommandBar => {
@@ -7394,7 +7642,7 @@ fn drain_slint_actions(
                     let defaults = crate::editor_settings::EditorSettings::default();
                     settings.snap_size = defaults.snap_size;
                     settings.snap_enabled = defaults.snap_enabled;
-                    settings.collision_snap = defaults.collision_snap;
+                    settings.collisions_enabled = defaults.collisions_enabled;
                     settings.surface_snap_enabled = defaults.surface_snap_enabled;
                     settings.align_to_normal_on_drop = defaults.align_to_normal_on_drop;
                     settings.scale_lock_proportional = defaults.scale_lock_proportional;
@@ -7590,7 +7838,7 @@ fn drain_slint_actions(
                             }
                         }
                         // Don't update last_selected_node_id on shift-click (anchor stays)
-                        es.needs_immediate_sync = true;
+                        es.selection_dirty = true;
                     }
                     // ── Ctrl+Click: toggle selection ──
                     else if ctrl {
@@ -7632,7 +7880,7 @@ fn drain_slint_actions(
                             }
                         }
                         es.last_selected_node_id = Some(id);
-                        es.needs_immediate_sync = true;
+                        es.selection_dirty = true;
                     }
                     // ── Normal click: single select ──
                     else {
@@ -7701,7 +7949,7 @@ fn drain_slint_actions(
                             }
                         }
                         es.last_selected_node_id = Some(id);
-                        es.needs_immediate_sync = true;
+                        es.selection_dirty = true;
                     }
                 }
             }
@@ -8399,7 +8647,7 @@ fn drain_slint_actions(
                 // Clear selection in both Explorer and 3D viewport
                 if let Some(ref mut es) = res.explorer_state {
                     es.selected = SelectedItem::None;
-                    es.needs_immediate_sync = true;
+                    es.selection_dirty = true;
                 }
                 if let Some(ref sel) = res.selection_manager {
                     sel.0.write().clear();
@@ -8535,7 +8783,7 @@ fn drain_slint_actions(
                     }
                     if let Some(ref mut es) = res.explorer_state {
                         es.selected = SelectedItem::Entity(tagged[0]);
-                        es.needs_immediate_sync = true;
+                        es.selection_dirty = true;
                     }
                     if let Some(ref mut out) = res.output {
                         let n = tagged.len();
@@ -8661,14 +8909,51 @@ fn drain_slint_actions(
             // Properties write-back — apply edits from Slint properties panel to ECS
             SlintAction::PropertyChanged(key, raw_val) => {
                 // BrickColor is a presentation-only alias for Color: the wheel
-                // picker writes a "name|r, g, b" payload (the swatch name plus
-                // its RGB). We apply only the RGB through the exact same path
-                // the Color field uses; the name shown in the BrickColor field
-                // is re-derived from the part's color next frame (see the
-                // property-population loop's `nearest_base_name` lookup). Older
-                // callers that pass a bare "r, g, b" still work.
+                // picker writes a "wheel|name|r, g, b" payload. Only the RGB is
+                // applied, through the exact same path the Color field uses.
+                // The wheel and the name are REMEMBERED (`BrickColorPicks`)
+                // for every part the colour lands on, because the Properties
+                // row cannot recover the name from the bytes: hover offered
+                // "Seraphic", the row then read "Clover Field" (the nearest
+                // Stone name), a different name for the very colour just
+                // clicked. Older callers passing "name|r, g, b" or a bare
+                // "r, g, b" still apply; they just leave no name on record.
                 if key == "BrickColor" {
-                    let rgb = raw_val.rsplit('|').next().unwrap_or(&raw_val).to_string();
+                    let mut fields = raw_val.rsplitn(3, '|');
+                    let rgb = fields.next().unwrap_or(&raw_val).trim().to_string();
+                    let name = fields.next().map(str::trim).unwrap_or("");
+                    let wheel = fields
+                        .next()
+                        .and_then(|w| eustress_common::brick_palette::Wheel::from_id(w.trim()));
+                    if let (Some(bytes), false) = (parse_color_rgb_u8(&rgb), name.is_empty()) {
+                        // The colour is applied to the primary AND broadcast to
+                        // the rest of the selection (see the post-match
+                        // ChangePropertyMulti block), so the name belongs to
+                        // all of them.
+                        let primary = res.explorer_state.as_ref().and_then(|es| match &es.selected {
+                            SelectedItem::Entity(e) => Some(*e),
+                            _ => None,
+                        });
+                        let targets: Vec<Entity> = primary
+                            .into_iter()
+                            .chain(queries.selected_entities.iter())
+                            .collect();
+                        if let Some(ref mut picks) = res.color_picks {
+                            for e in targets {
+                                picks.record(
+                                    e,
+                                    eustress_common::color_wheels::PickedSwatch {
+                                        wheel,
+                                        name: name.to_string(),
+                                        rgb: bytes,
+                                    },
+                                );
+                            }
+                        }
+                        if let (Some(w), Some(active)) = (wheel, res.active_wheel.as_mut()) {
+                            active.0 = Some(w);
+                        }
+                    }
                     queue.push(SlintAction::PropertyChanged("Color".to_string(), rgb));
                     continue;
                 }
@@ -11366,7 +11651,7 @@ fn drain_slint_actions(
                 if let Some(entity) = target {
                     if let Some(ref mut es) = res.explorer_state {
                         es.selected = SelectedItem::Entity(entity);
-                        es.needs_immediate_sync = true;
+                        es.selection_dirty = true;
                     }
                     if let Some(ref sel_mgr) = res.selection_manager {
                         let sm = sel_mgr.0.write();
@@ -12846,6 +13131,7 @@ fn drain_slint_actions(
                         events.paste_events.write(crate::clipboard::PasteEvent {
                             mode: crate::clipboard::PasteMode::Normal,
                             target_position: hit,
+                            target_parent: None,
                         });
                     }
                     // Focus and Zoom both frame the selection's bounds; the
@@ -12873,6 +13159,33 @@ fn drain_slint_actions(
                     "toggle-lock" => {
                         events.menu_events.write(MenuActionEvent::new(
                             crate::keybindings::Action::LockSelection,
+                        ));
+                    }
+                    // Per-type Explorer menu items (see main.slint). The
+                    // Explorer has already made the right-clicked row the
+                    // selection, so the actions below act on it.
+                    "open-script" => {
+                        if let Some(ui) = ui {
+                            let id = ui.get_context_menu_target_id();
+                            if id >= 0 {
+                                queue.push(SlintAction::OpenNode(id, "entity".to_string()));
+                            }
+                        }
+                    }
+                    "insert-object" => {
+                        queue.push(SlintAction::OpenInsertObject);
+                    }
+                    "insert-part" => {
+                        queue.push(SlintAction::MenuAction("insert:part".to_string()));
+                    }
+                    "paste-into" => {
+                        events.menu_events.write(MenuActionEvent::new(
+                            crate::keybindings::Action::PasteInto,
+                        ));
+                    }
+                    "zoom-to" => {
+                        events.menu_events.write(MenuActionEvent::new(
+                            crate::keybindings::Action::FocusSelection,
                         ));
                     }
                     // Soul Panel context menu actions — target entity id is encoded
@@ -13314,7 +13627,17 @@ fn drain_slint_actions(
                     // matches Lock's: ribbon arms a mode, keyboard acts on the
                     // selection.
                     "edit:anchor" => {
-                        if let Some(ref mut s) = res.state {
+                        // With a selection the button acts on it, the way
+                        // the Alt+A chord does; paint mode is for when there
+                        // is nothing selected and the user wants to click
+                        // parts one by one. Before this the button ALWAYS
+                        // armed paint mode, so "select five parts, press
+                        // Anchor" did nothing to them.
+                        if !queries.selected_entities.is_empty() {
+                            events.menu_events.write(MenuActionEvent::new(
+                                crate::keybindings::Action::ToggleAnchor,
+                            ));
+                        } else if let Some(ref mut s) = res.state {
                             s.current_tool = super::Tool::Anchor;
                         }
                         continue;
@@ -13323,7 +13646,11 @@ fn drain_slint_actions(
                     // `lock_tool::handle_lock_unlock_clicks` system
                     // handles clicks while either tool is active.
                     "edit:lock" => {
-                        if let Some(ref mut s) = res.state {
+                        if !queries.selected_entities.is_empty() {
+                            events.menu_events.write(MenuActionEvent::new(
+                                crate::keybindings::Action::LockSelection,
+                            ));
+                        } else if let Some(ref mut s) = res.state {
                             s.current_tool = super::Tool::Lock;
                         }
                         continue;
@@ -15097,6 +15424,52 @@ struct TerrainSyncParams<'w, 's> {
 
 /// Pushes Bevy state to Slint properties each frame (Bevy→Slint direction).
 /// Updates tool selection, play state, FPS, panel visibility, output logs, etc.
+/// What `sync_bevy_to_slint` last pushed, so one-shot requests fire once.
+#[derive(Default)]
+struct UiSyncMemo {
+    explorer_pulse: u32,
+    properties_pulse: u32,
+    settings_pushed: bool,
+}
+
+/// "Universe > Space" for a Space path, the way the File menu lists it.
+fn recent_space_label(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    let space = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    // <Universe>/Spaces/<Space>
+    let universe = p
+        .parent()
+        .and_then(|spaces| spaces.parent())
+        .and_then(|u| u.file_name())
+        .map(|n| n.to_string_lossy().to_string());
+    match universe {
+        Some(u) if !u.is_empty() => format!("{} > {}", u, space),
+        _ => space,
+    }
+}
+
+/// The Insert Object dialog's rows: the ribbon catalog filtered by `query`
+/// (case-insensitive, on class name, label and category), headers dropped.
+fn insert_results_model(ui: &StudioWindow, query: &str) -> slint::ModelRc<InsertClassData> {
+    use slint::Model;
+    let q = query.trim().to_lowercase();
+    let rows: Vec<InsertClassData> = ui
+        .get_insert_classes()
+        .iter()
+        .filter(|row| {
+            q.is_empty()
+                || row.class_name.to_lowercase().contains(&q)
+                || row.display.to_lowercase().contains(&q)
+                || row.category.to_lowercase().contains(&q)
+        })
+        .map(|mut row| {
+            row.show_header = false;
+            row
+        })
+        .collect();
+    slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(rows)))
+}
+
 fn sync_bevy_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     state: Option<ResMut<StudioState>>,
@@ -15115,6 +15488,10 @@ fn sync_bevy_to_slint(
     terrain: TerrainSyncParams,
     // Pending viewport right-click menu request (see `viewport_context_menu`).
     mut viewport_menu: Option<ResMut<super::viewport_context_menu::ViewportContextTarget>>,
+    // Snapshot bookkeeping: "unsaved" means edits since the last snapshot.
+    undo_stack: Option<Res<crate::undo::UndoStack>>,
+    mut ui_memo: Local<UiSyncMemo>,
+    frames: Res<bevy::diagnostic::FrameCount>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
@@ -15159,16 +15536,24 @@ fn sync_bevy_to_slint(
     // ── Per-frame: FPS / frame time ──
     // Only update when value changes by >= 1.0 to avoid marking Slint dirty every frame.
     // FPS fluctuates constantly; displaying sub-integer precision is unnecessary noise.
+    // During a bulk load the readouts change every frame (frames swing
+    // between 150 and 500 ms while entities stream in), and each write
+    // dirties the chrome: the software repaint that followed cost 33 to
+    // 59 ms per frame, measured on Super Station. The same 250 ms tick the
+    // panel syncs use bounds these writes as well.
+    let status_tick = crate::space::file_loader::ui_sync_tick_for_frame(frames.0 as u64);
     if let Some(ref perf) = perf {
-        let current_fps = ui.get_current_fps();
-        let current_frame_time = ui.get_current_frame_time();
-        let new_fps = perf.fps.round();
-        let new_frame_time = (perf.avg_frame_time_ms * 10.0).round() / 10.0;
-        if (new_fps - current_fps).abs() >= 1.0 {
-            ui.set_current_fps(new_fps);
-        }
-        if (new_frame_time - current_frame_time).abs() >= 0.5 {
-            ui.set_current_frame_time(new_frame_time);
+        if status_tick {
+            let current_fps = ui.get_current_fps();
+            let current_frame_time = ui.get_current_frame_time();
+            let new_fps = perf.fps.round();
+            let new_frame_time = (perf.avg_frame_time_ms * 10.0).round() / 10.0;
+            if (new_fps - current_fps).abs() >= 1.0 {
+                ui.set_current_fps(new_fps);
+            }
+            if (new_frame_time - current_frame_time).abs() >= 0.5 {
+                ui.set_current_frame_time(new_frame_time);
+            }
         }
     }
     
@@ -15233,6 +15618,57 @@ fn sync_bevy_to_slint(
     // Get mutable reference to state
     let Some(mut state) = state else { return };
     
+    // ── Snapshot state: title asterisk, exit prompt, File menu status ──
+    // Edits persist to the world database as they happen. "Unsaved" here
+    // means "not in a git snapshot yet", which is the question the asterisk
+    // and the exit prompt actually ask. Nothing set this flag before, so
+    // neither ever showed.
+    if let Some(undo) = undo_stack.as_ref() {
+        state.has_unsaved_changes = undo.sequence() != state.saved_undo_sequence;
+    }
+    if ui.get_snapshot_status().as_str() != state.snapshot_status.as_str() {
+        ui.set_snapshot_status(state.snapshot_status.as_str().into());
+    }
+
+    // ── Insert Object dialog: one-shot open with the full class list ──
+    if state.show_insert_object_dialog {
+        state.show_insert_object_dialog = false;
+        ui.set_insert_target_name(state.insert_target_name.as_str().into());
+        ui.set_insert_search_query(slint::SharedString::default());
+        ui.set_insert_results(insert_results_model(ui, ""));
+        ui.set_show_insert_object_dialog(true);
+    }
+
+    // ── Focus requests (Ctrl+Shift+X / Ctrl+Shift+E) ──
+    if state.focus_explorer_search_pulse != ui_memo.explorer_pulse {
+        ui_memo.explorer_pulse = state.focus_explorer_search_pulse;
+        ui.invoke_focus_explorer_search();
+    }
+    if state.focus_properties_filter_pulse != ui_memo.properties_pulse {
+        ui_memo.properties_pulse = state.focus_properties_filter_pulse;
+        ui.invoke_focus_properties_filter();
+    }
+
+    // ── Snap, collisions and the recent-spaces list follow the settings ──
+    if let Some(es) = editor_settings.as_ref() {
+        if es.is_changed() || !ui_memo.settings_pushed {
+            ui_memo.settings_pushed = true;
+            ui.set_snap_enabled(es.snap_enabled);
+            ui.set_snap_size(es.snap_size);
+            ui.set_angle_snap(es.angle_snap);
+            ui.set_collisions_enabled(es.collisions_enabled);
+            let recent: Vec<RecentSpaceEntry> = es
+                .recent_spaces
+                .iter()
+                .map(|path| RecentSpaceEntry {
+                    label: recent_space_label(path).into(),
+                    path: path.as_str().into(),
+                })
+                .collect();
+            ui.set_recent_spaces(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(recent))));
+        }
+    }
+
     // Boolean flags - only set when changed
     if ui.get_show_exit_confirmation() != state.show_exit_confirmation {
         ui.set_show_exit_confirmation(state.show_exit_confirmation);
@@ -15437,9 +15873,10 @@ fn sync_bevy_to_slint(
         }
     }
     
-    // Sync entity count - only when changed
+    // Sync entity count - only when changed, and during a bulk load only on
+    // the status tick (it changes every frame while entities stream in).
     let current_entity_count = ui.get_current_entity_count();
-    if entity_count as i32 != current_entity_count {
+    if status_tick && entity_count as i32 != current_entity_count {
         ui.set_current_entity_count(entity_count as i32);
     }
     
@@ -17739,6 +18176,10 @@ fn sync_load_progress_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     load: Option<Res<crate::space::file_loader::LoadInProgress>>,
     deferred: Option<Res<crate::space::file_loader::DeferredServiceLoader>>,
+    mut last_detail: Local<Option<std::time::Instant>>,
+    time: Res<Time>,
+    mut sweep_start: Local<Option<std::time::Instant>>,
+    mut sweep_last: Local<Option<std::time::Instant>>,
 ) {
     let Some(ctx) = slint_context else { return };
     let ui = &ctx.window;
@@ -17746,10 +18187,45 @@ fn sync_load_progress_to_slint(
     let active = load.as_deref().map(|l| l.active).unwrap_or(false);
     if ui.get_loading_active() != active {
         ui.set_loading_active(active);
+        *last_detail = None;
+        *sweep_start = None;
+        *sweep_last = None;
     }
     if !active {
         return;
     }
+
+    // The pill's sweep, paced here instead of by Slint's animation clock:
+    // the same bounce, from wall time so it never jumps backwards, written
+    // every frame while frames are fast and at most twice a second once
+    // they are not. A Slint animation repaints the chrome every frame, and
+    // during a large load that repaint was 33 to 73 ms of every frame.
+    {
+        let slow = time.delta_secs() > 0.05;
+        let due = !slow
+            || sweep_last
+                .map(|t| t.elapsed() >= std::time::Duration::from_millis(500))
+                .unwrap_or(true);
+        if due {
+            let t = sweep_start
+                .get_or_insert_with(std::time::Instant::now)
+                .elapsed()
+                .as_secs_f32();
+            let phase = (std::f32::consts::TAU * t / 1.6).sin().abs();
+            ui.set_loading_sweep(phase);
+            *sweep_last = Some(std::time::Instant::now());
+        }
+    }
+
+    // The queue counts change every frame of a load, and every write
+    // dirties the chrome (the software repaint behind it is 33 to 73 ms per
+    // frame on a large Space). Once a second is plenty for a progress pill.
+    if let Some(t) = *last_detail {
+        if t.elapsed() < std::time::Duration::from_secs(1) {
+            return;
+        }
+    }
+    *last_detail = Some(std::time::Instant::now());
 
     let services = deferred.as_deref().map(|d| d.pending.len()).unwrap_or(0);
     let instances = crate::space::file_loader::pending_spill_len();
@@ -18406,18 +18882,23 @@ fn sync_viewport_selection_to_explorer(
 
         // Auto-expand all ancestors so the selected entity is visible in the tree.
         // Walk up the ChildOf chain and insert each parent into expanded_entities.
+        // Only a NEWLY expanded ancestor changes the tree's shape; when the
+        // path was already open (the common case while working inside one
+        // Model) the rows in Slint are the right rows and only their
+        // `selected` bits need patching.
+        let mut shape_changed = false;
         if let SelectedItem::Entity(entity) = &new_selected {
             let mut current = *entity;
             while let Ok(child_of) = child_of_query.get(current) {
                 let parent = child_of.parent();
-                explorer_state.expanded_entities.insert(parent);
+                shape_changed |= explorer_state.expanded_entities.insert(parent);
                 // Also expand the service header if the parent is a service root
                 if let Ok((_, inst)) = instances.get(parent) {
                     let cn = inst.class_name;
                     use eustress_common::classes::ClassName;
                     if matches!(cn, ClassName::Workspace | ClassName::Lighting |
                         ClassName::Terrain | ClassName::Team | ClassName::Sound) {
-                        explorer_state.expanded_services.insert(inst.name.clone());
+                        shape_changed |= explorer_state.expanded_services.insert(inst.name.clone());
                     }
                 }
                 current = parent;
@@ -18425,8 +18906,95 @@ fn sync_viewport_selection_to_explorer(
         }
 
         explorer_state.selected = new_selected;
-        explorer_state.needs_immediate_sync = true;
+        if shape_changed {
+            explorer_state.needs_immediate_sync = true;
+        } else {
+            explorer_state.selection_dirty = true;
+        }
     }
+}
+
+thread_local! {
+    /// The `TreeNode` model currently shown by the Explorer, kept so a
+    /// selection change can patch rows in place (`patch_explorer_selection`)
+    /// instead of pushing a fresh model. `slint::VecModel` is not `Send`, so
+    /// it cannot live in a `Local`; the sync runs on the main thread anyway.
+    static EXPLORER_TREE_MODEL: std::cell::RefCell<Option<std::rc::Rc<slint::VecModel<TreeNode>>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Hash the fields of the tree that decide whether Slint must see a new
+/// model. Shared by the full rebuild and the in-place selection patch so the
+/// two paths agree on what "unchanged" means.
+fn hash_tree_rows<'a>(rows: impl Iterator<Item = &'a TreeNode>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for node in rows {
+        node.id.hash(&mut hasher);
+        node.name.hash(&mut hasher);
+        node.depth.hash(&mut hasher);
+        node.expanded.hash(&mut hasher);
+        node.selected.hash(&mut hasher);
+        node.expandable.hash(&mut hasher);
+        node.visible.hash(&mut hasher);
+        node.node_type.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Update the `selected` bit of the rows already in Slint to match the
+/// current selection, touching only the rows that actually flipped.
+///
+/// Returns `false` when there is no model to patch yet (first frame after a
+/// Space opens), in which case the caller falls back to a full rebuild. The
+/// caller has already ruled out anything that changes the tree's SHAPE
+/// (expand, collapse, structure, a pending reveal) and a primary selection
+/// that is not an entity row.
+fn patch_explorer_selection(
+    explorer_state: &mut UnifiedExplorerState,
+    selection_sync: Option<&crate::selection_sync::SelectionSyncManager>,
+) -> bool {
+    use slint::Model;
+    let selected_ids: std::collections::HashSet<String> = selection_sync
+        .map(|sm| sm.0.read().get_selected().into_iter().collect())
+        .unwrap_or_default();
+    let primary = match &explorer_state.selected {
+        SelectedItem::Entity(e) => Some(*e),
+        _ => None,
+    };
+    EXPLORER_TREE_MODEL.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(model) = borrow.as_ref() else { return false };
+        let mut flipped = 0usize;
+        for i in 0..model.row_count() {
+            let Some(row) = model.row_data(i) else { continue };
+            let want = if row.node_type == "entity" {
+                match explorer_state.entity_id_cache.get(&row.id) {
+                    Some(entity) => {
+                        selected_ids.contains(&format!("{}v{}", entity.index(), entity.generation()))
+                            || primary == Some(*entity)
+                    }
+                    None => false,
+                }
+            } else {
+                // The primary selection is an entity (or nothing), so no file,
+                // service or streamed row can be the selected one.
+                false
+            };
+            if row.selected != want {
+                let mut row = row;
+                row.selected = want;
+                model.set_row_data(i, row);
+                flipped += 1;
+            }
+        }
+        // Keep the change-detection hash coherent with what Slint now shows,
+        // so the next full rebuild only pushes when something else moved.
+        let rows: Vec<TreeNode> = model.iter().collect();
+        explorer_state.last_tree_hash = hash_tree_rows(rows.iter());
+        debug!("🌲 selection patched in place: {} row(s) flipped, no model push", flipped);
+        true
+    })
 }
 
 /// Syncs both ECS entities and filesystem to a single unified tree in Slint.
@@ -18455,7 +19023,14 @@ fn sync_unified_explorer_to_slint(
     // a sign READS and not just what its node is called. A label's text is
     // usually the only name a user knows it by — the owning Part is typically
     // `Part-a3f9`.
-    text_labels: Query<&eustress_common::classes::TextLabel>,
+    // What the search box can ask about a row (bundled to stay under the
+    // 16-param ceiling): label text for plain terms, tags for `tag:`, the
+    // BasePart for `Locked = true` and friends.
+    search_facts: (
+        Query<&eustress_common::classes::TextLabel>,
+        Query<&eustress_common::attributes::Tags>,
+        Query<&eustress_common::classes::BasePart>,
+    ),
     // EustressStream change-detection dirty flag
     mut panel_dirty: Option<ResMut<eustress_common::change_queue::PanelDirtyFlags>>,
     // Selection manager for multi-select highlighting in tree
@@ -18494,6 +19069,7 @@ fn sync_unified_explorer_to_slint(
     // Field-wise borrow of the bundled tuple so the call sites below read as
     // they did when these were separate params.
     let (terrain_roots, terrain_chunks) = (&terrain.0, &terrain.1);
+    let (text_labels, tags_q, base_parts_q) = (&search_facts.0, &search_facts.1, &search_facts.2);
     let Some(mut explorer_state) = explorer_state else { return };
 
     // EustressStream change-detection. In the Vehicle-Simulator steady state the
@@ -18560,6 +19136,25 @@ fn sync_unified_explorer_to_slint(
         .unwrap_or(0);
     if selection_generation != last_rebuild_frame.1 {
         last_rebuild_frame.1 = selection_generation;
+        explorer_state.selection_dirty = true;
+    }
+
+    // A selection-only change patches the rows already in Slint. The full
+    // rebuild below is reserved for anything that changes the tree's shape:
+    // expand/collapse (`needs_immediate_sync`), structure churn, a pending
+    // reveal (ancestors were just expanded for it), or a primary selection
+    // that is a file/service/streamed row, whose highlighting only the full
+    // build computes.
+    if explorer_state.selection_dirty {
+        explorer_state.selection_dirty = false;
+        let shape_stable = !explorer_state.needs_immediate_sync
+            && !structure_changed
+            && !*rebuild_requested
+            && explorer_state.pending_scroll_target_entity.is_none()
+            && matches!(explorer_state.selected, SelectedItem::Entity(_) | SelectedItem::None);
+        if shape_stable && patch_explorer_selection(&mut explorer_state, selection_sync.as_deref()) {
+            return;
+        }
         explorer_state.needs_immediate_sync = true;
     }
 
@@ -19632,28 +20227,12 @@ fn sync_unified_explorer_to_slint(
     // ================================================================
 
     if !explorer_state.search_query.is_empty() {
-        let query = explorer_state.search_query.to_lowercase();
-        // Match with whitespace collapsed on BOTH sides too, so typing the
-        // words the way they READ ("the ledger") finds a node named the way
-        // it was AUTHORED ("TheLedger"). Only used as a fallback, so a query
-        // containing a real space still prefers a literal hit.
-        let query_tight: String = query.chars().filter(|c| !c.is_whitespace()).collect();
-        let matches = |hay: &str| -> bool {
-            let h = hay.to_lowercase();
-            if h.contains(&query) {
-                return true;
-            }
-            if query_tight.is_empty() {
-                return false;
-            }
-            let h_tight: String = h.chars().filter(|c| !c.is_whitespace()).collect();
-            h_tight.contains(&query_tight)
-        };
-
-        // A node matches on its own name, or on the text of any TextLabel at
-        // or beneath it. Searching descendants is the point: a sign's text
-        // lives on a TextLabel child, while the row the user is hunting for is
-        // the Part that owns it.
+        let query = super::explorer_query::ExplorerQuery::parse(&explorer_state.search_query);
+        // A plain term matches on the node's own name, or on the text of any
+        // TextLabel at or beneath it. Searching descendants is the point: a
+        // sign's text lives on a TextLabel child, while the row the user is
+        // hunting for is the Part that owns it. `is:`, `tag:` and `Prop =
+        // value` terms read the class, the Tags component and the BasePart.
         let label_text_for = |entity: Entity| -> Option<String> {
             let mut out = String::new();
             let mut stack = vec![entity];
@@ -19675,18 +20254,24 @@ fn sync_unified_explorer_to_slint(
             }
             if out.is_empty() { None } else { Some(out) }
         };
-
         let mut matched: Vec<bool> = Vec::with_capacity(tree_nodes.len());
         for node in tree_nodes.iter() {
-            let mut hit = matches(&node.name.to_string());
-            if !hit {
-                if let Some(entity) = explorer_state.entity_id_cache.get(&node.id).copied() {
-                    if let Some(text) = label_text_for(entity) {
-                        hit = matches(&text);
-                    }
-                }
-            }
-            matched.push(hit);
+            let entity = explorer_state.entity_id_cache.get(&node.id).copied();
+            let tags: Vec<String> = entity
+                .and_then(|e| tags_q.get(e).ok())
+                .map(|t| t.0.clone())
+                .unwrap_or_default();
+            let base_part = entity.and_then(|e| base_parts_q.get(e).ok());
+            let name = node.name.to_string();
+            let class_name = node.class_name.to_string();
+            let facts = super::explorer_query::NodeFacts {
+                name: &name,
+                class_name: &class_name,
+                tags: &tags,
+                base_part,
+            };
+            let mut label = || entity.and_then(label_text_for);
+            matched.push(query.matches(&facts, &mut label));
         }
 
         // Keep the ancestors of every hit visible. `tree_nodes` is a flat,
@@ -19725,24 +20310,15 @@ fn sync_unified_explorer_to_slint(
     // Hash-based change detection: only push to Slint when the model data actually
     // changes. Re-pushing an identical model destroys and recreates all `for` loop
     // items in Slint, which resets hover state and causes visible flickering.
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for node in &tree_nodes {
-        node.id.hash(&mut hasher);
-        node.name.hash(&mut hasher);
-        node.depth.hash(&mut hasher);
-        node.expanded.hash(&mut hasher);
-        node.selected.hash(&mut hasher);
-        node.expandable.hash(&mut hasher);
-        node.visible.hash(&mut hasher);
-        node.node_type.hash(&mut hasher);
-    }
-    let new_hash = hasher.finish();
+    let new_hash = hash_tree_rows(tree_nodes.iter());
 
     if new_hash != explorer_state.last_tree_hash {
         info!("🌲 [diag] tree hash changed ({} -> {}), pushing {} nodes to Slint", explorer_state.last_tree_hash, new_hash, tree_nodes.len());
         explorer_state.last_tree_hash = new_hash;
         let model = std::rc::Rc::new(slint::VecModel::from(tree_nodes));
+        // Keep a handle so the next selection-only change can patch rows in
+        // place instead of pushing again (see `patch_explorer_selection`).
+        EXPLORER_TREE_MODEL.with(|cell| *cell.borrow_mut() = Some(model.clone()));
         ui.set_tree_nodes(slint::ModelRc::from(model));
 
         // Mirror visible-only ids to Slint so the drag-target row resolver
@@ -20515,6 +21091,10 @@ struct PropertyExtraQueries<'w, 's> {
     /// renderer itself consumes) rather than a parallel data component,
     /// so the panel always shows what's actually being rendered.
     projection: Query<'w, 's, &'static Projection>,
+    /// Which wheel swatch each part was last given. The BrickColor row shows
+    /// that name while the part still wears the picked colour; only when it
+    /// does not is a name derived from the bytes.
+    color_picks: Option<Res<'w, eustress_common::color_wheels::BrickColorPicks>>,
 }
 
 /// Syncs the selected entity's properties to the Slint properties panel.
@@ -21750,21 +22330,28 @@ fn sync_properties_to_slint(
                     placeholder_color
                 };
 
-                // BrickColor's text shows the nearest curated swatch NAME
-                // (e.g. "Seraph Blue"), not the raw "r, g, b" triple. The swatch
-                // preview still uses `color_value` (the actual RGB) above. The
-                // underlying value is "r, g, b" so the name re-derives whenever
-                // the part's color changes.
+                // BrickColor's text shows a swatch NAME (e.g. "Seraphic"), not
+                // the raw "r, g, b" triple. The swatch preview still uses
+                // `color_value` (the actual RGB) above. The underlying value is
+                // "r, g, b" so the name re-derives whenever the part's colour
+                // changes.
                 let display_value: String = if prop_type == "brickcolor" {
-                    let [r, g, b] = parse_color_rgb_u8(&value).unwrap_or([128, 128, 128]);
-                    // Ask the ACTIVE wheel first so a pick round-trips its own
-                    // name; `nearest_base_name` alone could only ever answer
-                    // with a Stone name, which is why picking "Seraphic"
-                    // reported "Clover Field".
-                    eustress_common::color_wheels::display_name_for_wheel(
-                        active_wheel.as_ref().and_then(|w| w.0),
-                        [r, g, b],
-                    )
+                    let rgb = parse_color_rgb_u8(&value).unwrap_or([128, 128, 128]);
+                    // The name that was CLICKED, while the part still wears
+                    // that colour. Deriving from the bytes is a fallback only:
+                    // the wheels share bytes between cells, so a derived name
+                    // can differ from the one the cell offered on hover.
+                    let picked = extra_q
+                        .color_picks
+                        .as_ref()
+                        .and_then(|p| p.name_for(selected_entity, rgb))
+                        .map(str::to_string);
+                    picked.unwrap_or_else(|| {
+                        eustress_common::color_wheels::display_name_for_wheel(
+                            active_wheel.as_ref().and_then(|w| w.0),
+                            rgb,
+                        )
+                    })
                 } else {
                     value.clone()
                 };
@@ -25119,6 +25706,8 @@ const KEYBINDING_ROWS: &[(&str, Option<crate::keybindings::Action>)] = {
         ("", Some(A::Cut)),
         ("", Some(A::Copy)),
         ("", Some(A::Paste)),
+        ("", Some(A::PasteInto)),
+        ("", Some(A::InsertObject)),
         ("", Some(A::Duplicate)),
         ("", Some(A::Delete)),
         ("", Some(A::SelectAll)),
@@ -25160,6 +25749,8 @@ const KEYBINDING_ROWS: &[(&str, Option<crate::keybindings::Action>)] = {
         ("", Some(A::ToggleCommandBar)),
         ("", Some(A::ToggleAssets)),
         ("", Some(A::ToggleCollaboration)),
+        ("", Some(A::FocusExplorerSearch)),
+        ("", Some(A::FocusPropertiesFilter)),
         ("CAMERA", None),
         ("", Some(A::FocusSelection)),
         ("", Some(A::ViewPerspectiveToggle)),
@@ -25415,6 +26006,10 @@ fn sync_keybindings_to_slint(
     ui.set_shortcut_save_as(s(Action::SaveSceneAs));
     ui.set_shortcut_publish_universe(s(Action::PublishUniverse));
     ui.set_shortcut_publish_space(s(Action::PublishSpace));
+    ui.set_shortcut_insert_object(s(Action::InsertObject));
+    ui.set_shortcut_paste_into(s(Action::PasteInto));
+    ui.set_shortcut_select_children(s(Action::SelectChildren));
+    ui.set_keymap_preset(bindings.preset().into());
     // Modal build tools (Model tab) + Pattern arrays (CAD tab) + the Play
     // dropdown. Same reasoning as the File block above: these buttons used to
     // spell their own chords, which was accurate only until the Keyboard

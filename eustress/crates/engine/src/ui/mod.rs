@@ -22,6 +22,7 @@ use crate::commands::{SelectionManager, TransformManager};
 pub mod slint_ui;
 /// Data-driven Insert-menu catalog (ClassRegistry → grouped descriptors).
 pub mod insert_classes;
+pub mod explorer_query;
 pub mod slint_native;
 pub mod slint_bridge;
 pub mod viewport_context_menu;
@@ -299,6 +300,27 @@ pub struct StudioState {
     pub show_settings_window: bool,
     pub has_unsaved_changes: bool,
     pub show_exit_confirmation: bool,
+    /// `UndoStack::sequence()` at the last snapshot (manual save or
+    /// autosave). Edits persist to the world database as they happen; this
+    /// only tracks whether a git snapshot has recorded them since, which is
+    /// what the title asterisk and the exit prompt mean.
+    pub saved_undo_sequence: u64,
+    /// Short status shown in the File menu: "Snapshot 12:03", "Autosaved
+    /// 12:08", or "No snapshot yet".
+    pub snapshot_status: String,
+    /// One-shot request to open the Insert Object dialog (Ctrl+I, the
+    /// Explorer plus button, the ribbon item). The UI sync pushes the class
+    /// list and the target name, shows the dialog, and clears this.
+    pub show_insert_object_dialog: bool,
+    /// Name shown in the dialog's "Insert into" line.
+    pub insert_target_name: String,
+    /// Bumped by the focus shortcuts; the UI sync invokes the matching Slint
+    /// callback once per change so the search box takes the keyboard.
+    pub focus_explorer_search_pulse: u32,
+    pub focus_properties_filter_pulse: u32,
+    /// Paste Into: the next paste lands under the primary selection instead
+    /// of beside the source. Consumed by `clipboard::consume_pending_paste`.
+    pub pending_paste_into: bool,
     pub mindspace_mode: MindSpaceMode,
     pub mindspace_edit_buffer: String,
     pub mindspace_font: eustress_common::classes::Font,
@@ -425,6 +447,13 @@ impl Default for StudioState {
             show_settings_window: false,
             has_unsaved_changes: false,
             show_exit_confirmation: false,
+            saved_undo_sequence: 0,
+            snapshot_status: "No snapshot yet".to_string(),
+            show_insert_object_dialog: false,
+            insert_target_name: "Workspace".to_string(),
+            focus_explorer_search_pulse: 0,
+            focus_properties_filter_pulse: 0,
+            pending_paste_into: false,
             mindspace_mode: MindSpaceMode::Edit,
             mindspace_edit_buffer: String::new(),
             mindspace_font: eustress_common::classes::Font::default(),

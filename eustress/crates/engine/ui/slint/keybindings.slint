@@ -127,11 +127,15 @@ export component KeybindingsDialog inherits Rectangle {
     /// Rust-supplied error for the last rejected rebind — names the action
     /// that already owns the chord. Cleared on the next successful rebind.
     in property <string> conflict-message: "";
+    /// "eustress", "roblox", or "custom" once any chord was rebound by hand.
+    in property <string> active-preset: "";
 
     callback on-close();
     /// (action-id, chord) — chord is the human form, e.g. "Ctrl+Shift+K".
     /// Rust parses it back into a `KeyBinding` and validates for conflicts.
     callback on-rebind(string, string);
+    /// Preset id from the preset row; Rust swaps the whole map and saves it.
+    callback on-apply-preset(string);
 
     // Slint encodes special keys as private-use codepoints (`Key.F1`,
     // `Key.Delete`, …) that mean nothing outside Slint. Spell them out here
@@ -277,6 +281,60 @@ export component KeybindingsDialog inherits Rectangle {
                         }
                     }
 
+                    Rectangle {
+                        y: parent.height - 1px;
+                        width: 100%; height: 1px;
+                        background: Theme.border-color;
+                    }
+                }
+
+                // ── Preset row: one click swaps the whole map ──
+                Rectangle {
+                    height: 34px;
+                    background: Theme.background-secondary;
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 8px;
+                        alignment: start;
+                        Text {
+                            text: "Preset";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        for preset in [
+                            { id: "eustress", label: "Eustress" },
+                            { id: "roblox", label: "Roblox Studio" },
+                        ]: Rectangle {
+                            width: 110px;
+                            height: 24px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: root.active-preset == preset.id ? Theme.accent-blue : Theme.border-color;
+                            background: root.active-preset == preset.id ? Theme.explorer-item-selected
+                                      : preset-touch.has-hover ? Theme.button-hover : transparent;
+                            preset-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.on-apply-preset(preset.id); }
+                            }
+                            Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: preset.label;
+                                color: Theme.text-primary;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if root.active-preset == "custom": Text {
+                            text: "custom (edited by hand)";
+                            color: Theme.text-secondary;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                        }
+                    }
                     Rectangle {
                         y: parent.height - 1px;
                         width: 100%; height: 1px;

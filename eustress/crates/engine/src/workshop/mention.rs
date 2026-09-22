@@ -225,11 +225,19 @@ pub struct SubstringSearcher {
     /// Compact layout: all lowercased strings contiguous, no hash lookup
     /// per entry in the search hot path.
     entries: Vec<(MentionId, String /* name_lc */, String /* qual_lc */)>,
+    /// `id → index into entries`. `upsert` and `remove` used to `retain`
+    /// over every entry, so each of the ~15 entities a bulk-load frame
+    /// spawns cost a full scan of the 100K-entry index: 17 ms per frame
+    /// on Super Station, for a panel nobody had open.
+    positions: HashMap<MentionId, usize>,
 }
 
 impl SubstringSearcher {
     pub fn new() -> Self {
-        Self { entries: Vec::with_capacity(1024) }
+        Self {
+            entries: Vec::with_capacity(1024),
+            positions: HashMap::with_capacity(1024),
+        }
     }
 }
 
@@ -240,19 +248,34 @@ impl Default for SubstringSearcher {
 impl MentionSearcher for SubstringSearcher {
     fn rebuild(&mut self, entries: &HashMap<MentionId, MentionEntry>) {
         self.entries.clear();
+        self.positions.clear();
         self.entries.reserve(entries.len());
+        self.positions.reserve(entries.len());
         for e in entries.values() {
+            self.positions.insert(e.id, self.entries.len());
             self.entries.push((e.id, e.name.to_lowercase(), e.qualifier.to_lowercase()));
         }
     }
 
     fn upsert(&mut self, entry: &MentionEntry) {
-        self.entries.retain(|(id, _, _)| *id != entry.id);
-        self.entries.push((entry.id, entry.name.to_lowercase(), entry.qualifier.to_lowercase()));
+        let row = (entry.id, entry.name.to_lowercase(), entry.qualifier.to_lowercase());
+        match self.positions.get(&entry.id) {
+            Some(&i) => self.entries[i] = row,
+            None => {
+                self.positions.insert(entry.id, self.entries.len());
+                self.entries.push(row);
+            }
+        }
     }
 
     fn remove(&mut self, id: MentionId) {
-        self.entries.retain(|(i, _, _)| *i != id);
+        let Some(i) = self.positions.remove(&id) else { return };
+        self.entries.swap_remove(i);
+        // The last row moved into slot `i` (unless `i` was the last row).
+        if i < self.entries.len() {
+            let moved = self.entries[i].0;
+            self.positions.insert(moved, i);
+        }
     }
 
     fn search(&self, query: &str, top_k: usize) -> Vec<(MentionId, f32)> {

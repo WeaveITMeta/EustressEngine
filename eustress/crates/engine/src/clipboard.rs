@@ -665,6 +665,9 @@ pub struct PasteEvent {
     pub mode: PasteMode,
     /// Target position (None = use offset from copy center)
     pub target_position: Option<Vec3>,
+    /// Paste Into: the copies become children of this entity (on disk, in
+    /// its folder) instead of siblings of the source.
+    pub target_parent: Option<Entity>,
 }
 
 /// Event to trigger duplicate operation
@@ -1002,6 +1005,36 @@ pub fn handle_paste_event(
         let workspace_dir = space_root.as_ref()
             .map(|sr| sr.0.join("Workspace"))
             .unwrap_or_else(|| crate::space::default_space_root().join("Workspace"));
+        // Paste Into: write the copies inside the target's own folder so they
+        // load as its children. A target with no folder of its own (a flat
+        // legacy file) falls back to the Workspace root.
+        let dest_dir: PathBuf = event
+            .target_parent
+            .and_then(|parent| {
+                instance_file_query
+                    .get(parent)
+                    .ok()
+                    .and_then(|f| {
+                        let is_folder_instance = f
+                            .toml_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            == Some("_instance.toml");
+                        if is_folder_instance {
+                            f.toml_path.parent().map(|p| p.to_path_buf())
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| {
+                        loaded_from_file_query
+                            .get(parent)
+                            .ok()
+                            .filter(|l| l.path.is_dir())
+                            .map(|l| l.path.clone())
+                    })
+            })
+            .unwrap_or_else(|| workspace_dir.clone());
 
         // ── IDENTITY.md §8.3 — cross-space MOVE conflict check ───────
         // For a MOVE (is_cut=true), refuse the paste up-front when any
@@ -1088,7 +1121,7 @@ pub fn handle_paste_event(
                 &mut materials,
                 entity_data,
                 offset,
-                &workspace_dir,
+                &dest_dir,
                 material_registry.as_deref_mut(),
                 mesh_cache.as_deref_mut(),
                 file_registry.as_deref_mut(),
@@ -1344,6 +1377,7 @@ pub fn handle_duplicate_event(
         paste_events.write(PasteEvent {
             mode: PasteMode::DuplicateInPlace,
             target_position: None,
+            target_parent: None,
         });
     }
 }
@@ -1522,11 +1556,18 @@ fn rewrite_service_toml_uuid(raw: &str, new_uuid: &str) -> Option<String> {
 /// erase the source folder's existing uuid (the duplicate would still
 /// trip the §8.1 "uuid collision" rename on next load, but that's the
 /// correct fallback for a pre-Wave-2.1 payload).
-fn apply_offset_to_root_toml(
+/// Rewrite the copied root `_instance.toml` from the LIVE state captured at
+/// copy time: transform, name, uuid, and the BasePart properties.
+///
+/// The folder copy carries whatever was last written to disk. In a
+/// database-backed Space that is often older than the part on screen, so a
+/// paste came back in the colour the part had before the user changed it,
+/// at its old rotation. What was copied is what the user saw; that is what
+/// the copy must be made of.
+fn patch_root_toml_with_live_state(
     toml_path: &std::path::Path,
     new_pos: Vec3,
-    display_name: &str,
-    target_uuid: &str,
+    data: &ClipboardEntityData2,
 ) -> std::io::Result<()> {
     let raw = std::fs::read_to_string(toml_path)?;
     let mut doc: toml::Value = match raw.parse() {
@@ -1536,59 +1577,60 @@ fn apply_offset_to_root_toml(
             return Ok(());
         }
     };
+    let rot = Quat::from_euler(
+        EulerRot::XYZ,
+        data.rotation[0].to_radians(),
+        data.rotation[1].to_radians(),
+        data.rotation[2].to_radians(),
+    );
+    let floats = |v: &[f32]| toml::Value::Array(v.iter().map(|f| toml::Value::Float(*f as f64)).collect());
     if let Some(table) = doc.as_table_mut() {
         let tform = table
             .entry("transform")
             .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
         if let Some(tform_table) = tform.as_table_mut() {
-            tform_table.insert(
-                "position".to_string(),
-                toml::Value::Array(vec![
-                    toml::Value::Float(new_pos.x as f64),
-                    toml::Value::Float(new_pos.y as f64),
-                    toml::Value::Float(new_pos.z as f64),
-                ]),
-            );
+            tform_table.insert("position".to_string(), floats(&[new_pos.x, new_pos.y, new_pos.z]));
+            tform_table.insert("rotation".to_string(), floats(&[rot.x, rot.y, rot.z, rot.w]));
+            tform_table.insert("scale".to_string(), floats(&data.scale));
         }
-
-        // Pin `[metadata].name` to the user-visible base so the Explorer
-        // doesn't surface the disk-safe hex suffix
-        // (`SimpleBlock-810f`). The folder name on disk has to be
-        // unique vs. siblings — we resolve that with a hex tag — but
-        // the entity's display name is read from `metadata.name` first
-        // (instance_loader::spawn_instance), so writing the original
-        // base here gives the duplicate the same label as the source
-        // (`SimpleBlock`/`SimpleBlock`) while the on-disk folder stays
-        // uniquely addressable.
         let meta = table
             .entry("metadata")
             .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
         if let Some(meta_table) = meta.as_table_mut() {
-            meta_table.insert(
-                "name".to_string(),
-                toml::Value::String(display_name.to_string()),
-            );
-            // Stamp the persistent uuid per IDENTITY.md §3.3 / §3.4.
-            // For COPY: a fresh §3.4 hash. For MOVE: the preserved
-            // source uuid. Empty string means "legacy clipboard, no
-            // uuid known" — leave the field alone so the file watcher
-            // can mint one via §3.1 on first load (or §8.1 collision
-            // rename if the source's old uuid is already present).
-            if !target_uuid.is_empty() {
-                meta_table.insert(
-                    "uuid".to_string(),
-                    toml::Value::String(target_uuid.to_string()),
-                );
+            meta_table.insert("name".to_string(), toml::Value::String(data.name.clone()));
+            if !data.uuid.is_empty() {
+                meta_table.insert("uuid".to_string(), toml::Value::String(data.uuid.clone()));
+            }
+        }
+        if !data.properties.is_empty() {
+            let props = table
+                .entry("properties")
+                .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+            if let Some(props_table) = props.as_table_mut() {
+                if let Some(c) = data.properties.get("color").and_then(|v| v.as_array()) {
+                    let rgba: Vec<f32> = c.iter().filter_map(|x| x.as_f64()).map(|x| x as f32).collect();
+                    if rgba.len() >= 3 {
+                        props_table.insert("color".to_string(), floats(&rgba));
+                    }
+                }
+                for key in ["transparency", "reflectance"] {
+                    if let Some(v) = data.properties.get(key).and_then(|v| v.as_f64()) {
+                        props_table.insert(key.to_string(), toml::Value::Float(v));
+                    }
+                }
+                for key in ["anchored", "can_collide", "locked"] {
+                    if let Some(v) = data.properties.get(key).and_then(|v| v.as_bool()) {
+                        props_table.insert(key.to_string(), toml::Value::Boolean(v));
+                    }
+                }
+                if let Some(m) = data.properties.get("material").and_then(|v| v.as_str()) {
+                    props_table.insert("material".to_string(), toml::Value::String(m.to_string()));
+                }
             }
         }
     }
     let serialised = toml::to_string_pretty(&doc)
         .unwrap_or_else(|_| raw.clone());
-    // Atomic write + retry. The fresh duplicate folder is still being
-    // touched by the engine's file watcher / antivirus / text editors;
-    // a plain write here races with their reads and used to drop the
-    // position/name patch (the duplicate would render at the source's
-    // exact spot with no metadata override).
     crate::space::gui_loader::write_atomic(toml_path, serialised.as_bytes())?;
     Ok(())
 }
@@ -1672,12 +1714,7 @@ fn spawn_pasted_entity(
             //   `apply_offset_to_root_toml` leaves the field alone and
             //   the file watcher's §3.1 path generates one on load.
             let dst_root_toml = dst_folder.join("_instance.toml");
-            if let Err(e) = apply_offset_to_root_toml(
-                &dst_root_toml,
-                new_pos,
-                &data.name,
-                &data.uuid,
-            ) {
+            if let Err(e) = patch_root_toml_with_live_state(&dst_root_toml, new_pos, data) {
                 warn!(
                     "📋 paste: copied folder but failed to patch position in {}: {}",
                     dst_root_toml.display(), e
@@ -1990,6 +2027,7 @@ pub fn render_cross_scene_modal(
         paste_events.write(PasteEvent {
             mode: PasteMode::NewIds,
             target_position: None,
+            target_parent: None,
         });
     }
 }
@@ -1999,19 +2037,31 @@ pub fn render_cross_scene_modal(
 /// This bridges the keybinding (Ctrl+V) path to the actual paste logic.
 pub fn consume_pending_paste(
     mut studio_state: ResMut<crate::ui::StudioState>,
+    explorer_state: Option<Res<crate::ui::slint_ui::UnifiedExplorerState>>,
     mut paste_events: MessageWriter<PasteEvent>,
 ) {
-    if !studio_state.pending_paste {
+    let into = studio_state.pending_paste_into;
+    if !studio_state.pending_paste && !into {
         return;
     }
     studio_state.pending_paste = false;
+    studio_state.pending_paste_into = false;
 
-    // Ctrl+V paste: place above original using clipboard offset (no raycast).
-    // get_paste_offset() returns Y offset based on entity height.
+    // Paste Into lands under the primary selection; a plain paste keeps the
+    // source's parent.
+    let target_parent = if into {
+        explorer_state.as_ref().and_then(|es| match &es.selected {
+            crate::ui::slint_ui::SelectedItem::Entity(e) => Some(*e),
+            _ => None,
+        })
+    } else {
+        None
+    };
 
     paste_events.write(PasteEvent {
         mode: PasteMode::Normal,
         target_position: None,
+        target_parent,
     });
 }
 

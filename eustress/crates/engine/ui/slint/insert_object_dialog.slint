@@ -1,0 +1,185 @@
+// ============================================================================
+// Insert Object dialog (Ctrl+I, the Explorer row plus button, the ribbon
+// "Insert Object..." item).
+//
+// A search box over every insertable class. Rust filters the catalog on each
+// keystroke (`insert-search-changed`) and pushes `results`; the dialog keeps
+// a highlighted row so Up/Down/Enter insert without the mouse. Inserting
+// fires `on-insert(class-name)`, which the window routes through the same
+// `insert:<class>` menu action the ribbon uses, so the object lands under
+// the current selection exactly as a ribbon insert would.
+// ============================================================================
+
+import { LineEdit, ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { InsertClassData } from "ribbon.slint";
+
+component ResultRow inherits Rectangle {
+    in property <string> display: "";
+    in property <string> category: "";
+    in property <bool> highlighted: false;
+    callback chosen();
+    callback hovered();
+    height: 26px;
+    border-radius: 4px;
+    background: root.highlighted ? Theme.explorer-item-selected
+              : row-touch.has-hover ? Theme.explorer-item-hover : transparent;
+    row-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.chosen(); }
+        changed has-hover => { if self.has-hover { root.hovered(); } }
+    }
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+        Text {
+            horizontal-stretch: 1;
+            text: root.display;
+            color: Theme.text-primary;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            text: root.category;
+            color: Theme.text-secondary;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component InsertObjectDialog inherits Rectangle {
+    in property <[InsertClassData]> results: [];
+    in property <string> target-name: "Workspace";
+    in-out property <string> search-query: "";
+    callback on-search(string);
+    callback on-insert(string);
+    callback on-close();
+
+    property <int> highlight: 0;
+
+    function insert-highlighted() {
+        if root.highlight >= 0 && root.highlight < root.results.length {
+            root.on-insert(root.results[root.highlight].class-name);
+        }
+    }
+
+    width: 100%;
+    height: 100%;
+    background: Theme.modal-backdrop;
+
+    // Click outside closes.
+    TouchArea {
+        clicked => { root.on-close(); }
+        scroll-event(event) => { return accept; }
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: max(60px, (parent.height - self.height) / 3);
+        width: 420px;
+        height: min(parent.height - 120px, 440px);
+        background: Theme.background-secondary;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: Theme.shadow-color;
+
+        TouchArea {
+            scroll-event(event) => { return accept; }
+        }
+
+        keys := FocusScope {
+            width: 100%;
+            height: 100%;
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.on-close();
+                    return accept;
+                }
+                if event.text == Key.DownArrow {
+                    if root.highlight < root.results.length - 1 { root.highlight += 1; }
+                    return accept;
+                }
+                if event.text == Key.UpArrow {
+                    if root.highlight > 0 { root.highlight -= 1; }
+                    return accept;
+                }
+                if event.text == Key.Return {
+                    root.insert-highlighted();
+                    return accept;
+                }
+                return reject;
+            }
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "Insert Object";
+                        color: Theme.text-primary;
+                        font-size: 13px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "into " + root.target-name;
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                search := LineEdit {
+                    placeholder-text: "Type a class name (Part, Model, PointLight, TextLabel)";
+                    text <=> root.search-query;
+                    init => { self.focus(); }
+                    edited(text) => {
+                        root.highlight = 0;
+                        root.on-search(text);
+                    }
+                    accepted(text) => { root.insert-highlighted(); }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+                    ScrollView {
+                        VerticalLayout {
+                            spacing: 1px;
+                            for row[idx] in root.results: ResultRow {
+                                display: row.display;
+                                category: row.category;
+                                highlighted: idx == root.highlight;
+                                chosen => { root.on-insert(row.class-name); }
+                                hovered => { root.highlight = idx; }
+                            }
+                            if root.results.length == 0: Text {
+                                height: 26px;
+                                text: "No class matches \"" + root.search-query + "\"";
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    text: "Up and Down move, Enter inserts, Esc closes";
+                    color: Theme.text-secondary;
+                    font-size: 10px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}

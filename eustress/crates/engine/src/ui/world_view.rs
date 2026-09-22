@@ -1404,6 +1404,7 @@ pub fn apply_ui_actions(
                                     world.write_message(crate::clipboard::PasteEvent {
                                         mode: crate::clipboard::PasteMode::Normal,
                                         target_position: Some(target_pos),
+                                        target_parent: None,
                                     });
 
                                     info!("📋 Pasting at mouse position: {:?}", target_pos);
@@ -1412,6 +1413,7 @@ pub fn apply_ui_actions(
                                     world.write_message(crate::clipboard::PasteEvent {
                                         mode: crate::clipboard::PasteMode::Normal,
                                         target_position: None,
+                                        target_parent: None,
                                     });
                                     warn!("Failed to calculate ray from cursor, using default paste position");
                                 }
@@ -1420,6 +1422,7 @@ pub fn apply_ui_actions(
                                 world.write_message(crate::clipboard::PasteEvent {
                                     mode: crate::clipboard::PasteMode::Normal,
                                     target_position: None,
+                                    target_parent: None,
                                 });
                                 warn!("No cursor position available for paste, using default position");
                             }
@@ -1428,6 +1431,7 @@ pub fn apply_ui_actions(
                             world.write_message(crate::clipboard::PasteEvent {
                                 mode: crate::clipboard::PasteMode::Normal,
                                 target_position: None,
+                                target_parent: None,
                             });
                             warn!("No camera/window available for paste position calculation, using default");
                         }

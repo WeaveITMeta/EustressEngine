@@ -121,6 +121,7 @@ export component ContextMenu inherits Rectangle {
     in property <string> shortcut-focus: "";
     in property <string> shortcut-anchor: "";
     in property <string> shortcut-lock: "";
+    in property <string> shortcut-select-children: "";
 
     callback on-action(string);
     callback on-close();
@@ -205,6 +206,11 @@ export component ContextMenu inherits Rectangle {
                     label: "Zoom to Selection"; shortcut: "";
                     clicked => { root.on-action("zoom-to-selection"); }
                 }
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/chevron-right.svg");
+                    label: "Select Children"; shortcut: root.shortcut-select-children;
+                    clicked => { root.on-action("select_children"); }
+                }
 
                 MenuSeparator {}
 
@@ -212,6 +218,11 @@ export component ContextMenu inherits Rectangle {
                     icon: @image-url("../../assets/icons/ui/duplicate.svg");
                     label: "Duplicate"; shortcut: root.shortcut-duplicate;
                     clicked => { root.on-action("duplicate"); }
+                }
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/rename.svg");
+                    label: "Rename"; shortcut: root.shortcut-rename;
+                    clicked => { root.on-action("rename"); }
                 }
                 MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/copy.svg");

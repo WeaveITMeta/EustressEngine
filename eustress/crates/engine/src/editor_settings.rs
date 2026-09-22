@@ -38,7 +38,10 @@ pub struct EditorSettings {
     pub snap_enabled: bool,
     
     /// Enable collision-based snapping
-    pub collision_snap: bool,
+    /// Roblox's "Collisions": a dragged part stops instead of passing
+    /// through another part. Off by default so free placement stays free.
+    #[serde(default, alias = "collision_snap")]
+    pub collisions_enabled: bool,
     
     /// Enable surface snapping (raycast to place parts on other parts)
     #[serde(default = "default_surface_snap")]
@@ -83,6 +86,9 @@ pub struct EditorSettings {
     /// to the first alphabetical space.
     #[serde(default)]
     pub last_space_path: Option<String>,
+    /// Most recently opened Space paths, newest first, for File > Recent.
+    #[serde(default)]
+    pub recent_spaces: Vec<String>,
 
     /// Modern (dark/glass, high-tech) vs Classic (today's flat look)
     /// theme. Classic is the default for new/never-saved settings — see
@@ -210,7 +216,7 @@ impl Default for EditorSettings {
         Self {
             snap_size: 1.0, // 1m default (press 1/2/3 to change)
             snap_enabled: true,
-            collision_snap: false,
+            collisions_enabled: false,
             surface_snap_enabled: true,
             align_to_normal_on_drop: false,
             scale_lock_proportional: false,
@@ -222,6 +228,7 @@ impl Default for EditorSettings {
             auto_save_enabled: true,
             saved_identities: Vec::new(),
             last_space_path: None,
+            recent_spaces: Vec::new(),
 
             theme_modern: false,
             active_theme_id: Some("classic".to_string()),
@@ -357,8 +364,43 @@ impl Plugin for EditorSettingsPlugin {
             .add_systems(Startup, setup_grid_gizmo_config)
             .add_systems(Update, draw_grid_overlay)
             .add_systems(Update, auto_save_settings)
-            .add_systems(Update, auto_save_scene_system);
+            .add_systems(Update, auto_save_scene_system)
+            .add_systems(Update, track_recent_spaces);
     }
+}
+
+/// How many Spaces File > Recent lists.
+const RECENT_SPACES_CAP: usize = 8;
+
+impl EditorSettings {
+    /// Move `path` to the front of the recent list, dropping duplicates and
+    /// anything past the cap.
+    pub fn remember_space(&mut self, path: &std::path::Path) {
+        let key = path.to_string_lossy().to_string();
+        self.recent_spaces.retain(|p| p != &key);
+        self.recent_spaces.insert(0, key);
+        self.recent_spaces.truncate(RECENT_SPACES_CAP);
+    }
+}
+
+/// Keep File > Recent current: every Space the editor opens goes to the
+/// front of the list, and the settings file persists it.
+fn track_recent_spaces(
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    mut settings: ResMut<EditorSettings>,
+) {
+    let Some(root) = space_root else { return };
+    if !root.is_changed() {
+        return;
+    }
+    let path = root.0.clone();
+    if !path.is_dir() {
+        return;
+    }
+    if settings.recent_spaces.first().map(|p| std::path::Path::new(p) == path).unwrap_or(false) {
+        return;
+    }
+    settings.remember_space(&path);
 }
 
 /// Auto-save settings when they change
@@ -490,6 +532,12 @@ fn auto_save_scene_system(
     mut notifications: ResMut<crate::notifications::NotificationManager>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
     auth: Option<Res<crate::auth::AuthState>>,
+    // The title asterisk and the exit prompt count edits since the last
+    // snapshot; an autosave is one.
+    mut snapshot_state: (
+        Option<ResMut<crate::ui::StudioState>>,
+        Option<Res<crate::undo::UndoStack>>,
+    ),
 ) {
     // Skip if auto-save is disabled
     if !settings.auto_save_enabled || settings.auto_save_interval <= 0.0 {
@@ -553,6 +601,11 @@ fn auto_save_scene_system(
     });
 
     auto_save.last_save = Some(std::time::Instant::now());
+    if let (Some(state), undo) = (snapshot_state.0.as_mut(), snapshot_state.1.as_ref()) {
+        state.saved_undo_sequence = undo.map(|u| u.sequence()).unwrap_or(0);
+        state.has_unsaved_changes = false;
+        state.snapshot_status = format!("Autosaved {}", chrono::Local::now().format("%H:%M"));
+    }
     let _ = &notifications; // toast now reported truthfully from the git thread
 }
 

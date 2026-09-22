@@ -885,6 +885,9 @@ export component TreeItem inherits Rectangle {
     in property <bool> renaming: false;
     callback rename-committed(string);
     callback rename-cancelled();
+    // The plus button at the row's right edge, shown on hover: insert a
+    // new object under this node (Roblox's per-row insert affordance).
+    callback insert-requested();
 
     // Internal: latched from pointer-event on mouse-down, read by clicked
     property <bool> pe-ctrl: false;
@@ -989,13 +992,36 @@ export component TreeItem inherits Rectangle {
     if !root.renaming: Text {
         x: 4px + root.depth * 16px + 16px + 20px;
         y: 0px;
-        width: root.width - (4px + root.depth * 16px + 16px + 20px + 4px);
+        width: root.width - (4px + root.depth * 16px + 16px + 20px + 4px) - (row-touch.has-hover ? 20px : 0px);
         height: 22px;
         text: root.label;
         color: Theme.text-primary;
         font-size: 12px;
         vertical-alignment: center;
         overflow: elide;
+    }
+
+    // Per-row insert button, visible while the row is hovered.
+    if row-touch.has-hover && !root.renaming: Rectangle {
+        x: root.width - 20px;
+        y: 3px;
+        width: 16px;
+        height: 16px;
+        border-radius: 3px;
+        background: plus-touch.has-hover ? Theme.accent-blue : transparent;
+        Image {
+            width: 12px;
+            height: 12px;
+            x: 2px;
+            y: 2px;
+            source: @image-url("../../assets/icons/ui/plus.svg");
+            image-fit: contain;
+            colorize: plus-touch.has-hover ? #ffffff : Theme.text-secondary;
+        }
+        plus-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.insert-requested(); }
+        }
     }
 
     // Inline rename TextInput — shown when renaming == true.

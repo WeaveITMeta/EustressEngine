@@ -126,6 +126,18 @@ pub enum Action {
     // is ToolPartSwap and Ctrl+Alt+G is ToolGapFill, so both obvious letters
     // are taken.
     ToolPathArray,
+    // Roblox Studio parity. Shipped as defaults so the muscle memory carries
+    // over; the Roblox keymap preset covers the chords that differ.
+    /// Ctrl+I: searchable class picker that inserts under the selection.
+    InsertObject,
+    /// Ctrl+Shift+V: paste as children of the primary selection.
+    PasteInto,
+    /// Ctrl+Shift+X: put the keyboard in the Explorer search box.
+    FocusExplorerSearch,
+    /// Ctrl+Shift+E: put the keyboard in the Properties filter box.
+    FocusPropertiesFilter,
+    /// Ribbon toggle (no default chord): dragged parts stop at other parts.
+    ToggleCollisions,
 }
 
 impl Action {
@@ -201,6 +213,11 @@ impl Action {
             Action::ToolRadialArray => "Radial Array",
             Action::ToolGridArray => "Grid Array",
             Action::ToolPathArray => "Path Array",
+            Action::InsertObject => "Insert Object",
+            Action::PasteInto => "Paste Into",
+            Action::FocusExplorerSearch => "Search Explorer",
+            Action::FocusPropertiesFilter => "Filter Properties",
+            Action::ToggleCollisions => "Toggle Collisions",
         }
     }
 }
@@ -335,6 +352,10 @@ pub struct KeyBindings {
     /// `keybindings.ron` written before alternates existed still loads.
     #[serde(default)]
     alternates: HashMap<Action, Vec<KeyBinding>>,
+    /// Which [`KeymapPreset`] the map was last set from ("custom" once any
+    /// chord is rebound by hand). Shown in the Keyboard Shortcuts dialog.
+    #[serde(default)]
+    preset: String,
 }
 
 impl Default for KeyBindings {
@@ -392,14 +413,21 @@ impl Default for KeyBindings {
         // Ctrl+Shift chords stay on as alternates so existing muscle memory keeps
         // working.
         bindings.insert(Action::SelectChildren, KeyBinding::new(KeyCode::KeyV).with_ctrl().with_alt());
-        alternates.entry(Action::SelectChildren).or_default()
-            .push(KeyBinding::new(KeyCode::KeyV).with_ctrl().with_shift());
+        // Ctrl+Shift+V is Paste Into (Roblox Studio's chord), not a second
+        // Select Children.
         bindings.insert(Action::SelectDescendants, KeyBinding::new(KeyCode::KeyD).with_ctrl().with_alt());
         alternates.entry(Action::SelectDescendants).or_default()
             .push(KeyBinding::new(KeyCode::KeyD).with_ctrl().with_shift());
         bindings.insert(Action::SelectParent, KeyBinding::new(KeyCode::KeyU).with_ctrl().with_shift());
         bindings.insert(Action::SelectSiblings, KeyBinding::new(KeyCode::KeyA).with_ctrl().with_shift());
-        bindings.insert(Action::InvertSelection, KeyBinding::new(KeyCode::KeyI).with_ctrl());
+        // Ctrl+I is Insert Object in Roblox Studio; Invert moves to Ctrl+Shift+I.
+        bindings.insert(Action::InvertSelection, KeyBinding::new(KeyCode::KeyI).with_ctrl().with_shift());
+        bindings.insert(Action::InsertObject, KeyBinding::new(KeyCode::KeyI).with_ctrl());
+        bindings.insert(Action::PasteInto, KeyBinding::new(KeyCode::KeyV).with_ctrl().with_shift());
+        bindings.insert(Action::FocusExplorerSearch, KeyBinding::new(KeyCode::KeyX).with_ctrl().with_shift());
+        // Roblox uses Ctrl+Shift+P here, which Eustress gives to Publish Space;
+        // the Roblox preset swaps them.
+        bindings.insert(Action::FocusPropertiesFilter, KeyBinding::new(KeyCode::KeyE).with_ctrl().with_shift());
         bindings.insert(Action::Group, KeyBinding::new(KeyCode::KeyG).with_ctrl());
         bindings.insert(Action::Ungroup, KeyBinding::new(KeyCode::KeyU).with_ctrl());
 
@@ -479,7 +507,7 @@ impl Default for KeyBindings {
         bindings.insert(Action::PlaySolo, KeyBinding::new(KeyCode::F7));
         bindings.insert(Action::StopPlay, KeyBinding::new(KeyCode::F8));
 
-        Self { bindings, alternates }
+        Self { bindings, alternates, preset: KeymapPreset::Eustress.id().to_string() }
     }
 }
 
@@ -488,6 +516,73 @@ impl Default for KeyBindings {
 /// (`target/debug/`, the desktop shortcut's working dir, …). Kept only as
 /// a read-time fallback in [`KeyBindings::load`] so users who already have
 /// one don't silently lose their remaps on upgrade.
+/// A whole keymap the Keyboard Shortcuts dialog applies in one click.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeymapPreset {
+    /// The Eustress defaults.
+    Eustress,
+    /// The Eustress defaults with Roblox Studio's chords where they differ:
+    /// Shift+1..4 pick the tools, F8 runs, Shift+F5 stops, Ctrl+Shift+P
+    /// filters Properties (Publish Space moves to Ctrl+Alt+Shift+P).
+    Roblox,
+}
+
+impl KeymapPreset {
+    pub const ALL: [KeymapPreset; 2] = [KeymapPreset::Eustress, KeymapPreset::Roblox];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            KeymapPreset::Eustress => "eustress",
+            KeymapPreset::Roblox => "roblox",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.id() == id)
+    }
+
+    /// The map this preset stands for.
+    pub fn bindings(self) -> KeyBindings {
+        let mut map = KeyBindings::default();
+        if self == KeymapPreset::Roblox {
+            map.bindings.insert(Action::SelectTool, KeyBinding::new(KeyCode::Digit1).with_shift());
+            map.bindings.insert(Action::MoveTool, KeyBinding::new(KeyCode::Digit2).with_shift());
+            map.bindings.insert(Action::ScaleTool, KeyBinding::new(KeyCode::Digit3).with_shift());
+            map.bindings.insert(Action::RotateTool, KeyBinding::new(KeyCode::Digit4).with_shift());
+            map.bindings.insert(Action::PlaySolo, KeyBinding::new(KeyCode::F8));
+            map.bindings.insert(Action::StopPlay, KeyBinding::new(KeyCode::F5).with_shift());
+            map.bindings.insert(Action::PublishSpace, KeyBinding::new(KeyCode::KeyP).with_ctrl().with_alt().with_shift());
+            map.bindings.insert(Action::FocusPropertiesFilter, KeyBinding::new(KeyCode::KeyP).with_ctrl().with_shift());
+        }
+        map.preset = self.id().to_string();
+        map
+    }
+}
+
+impl KeyBindings {
+    /// The preset this map was last set from, or "custom".
+    pub fn preset(&self) -> &str {
+        &self.preset
+    }
+
+    /// Replace the whole map with `preset` and persist it.
+    pub fn apply_preset(&mut self, preset: KeymapPreset) -> Result<(), String> {
+        *self = preset.bindings();
+        self.save()
+            .map_err(|e| format!("Could not save keybindings: {}", e))
+    }
+
+    /// Every chord in the map, primary and alternate, with its owner.
+    fn all_chords(&self) -> Vec<(Action, KeyBinding)> {
+        let mut out: Vec<(Action, KeyBinding)> =
+            self.bindings.iter().map(|(a, b)| (*a, b.clone())).collect();
+        for (a, alts) in &self.alternates {
+            out.extend(alts.iter().map(|b| (*a, b.clone())));
+        }
+        out
+    }
+}
+
 const LEGACY_BINDINGS_FILE: &str = "keybindings.ron";
 
 impl KeyBindings {
@@ -557,6 +652,7 @@ impl KeyBindings {
             ));
         }
         self.bindings.insert(action, binding);
+        self.preset = "custom".to_string();
         self.save()
             .map_err(|e| format!("Could not save keybindings: {}", e))
     }
@@ -667,6 +763,8 @@ const DISPATCHED_ACTIONS: &[Action] = &[
     Action::ToolResizeAlign, Action::ToolMaterialFlip,
     Action::ToolLinearArray, Action::ToolRadialArray, Action::ToolGridArray,
     Action::ToolPathArray,
+    Action::InsertObject, Action::PasteInto,
+    Action::FocusExplorerSearch, Action::FocusPropertiesFilter,
 ];
 
 /// Actions that are dispatched but deliberately have NO default chord.
@@ -690,6 +788,8 @@ const ALLOWED_UNBOUND: &[Action] = &[
     Action::CSGUnion,
     Action::CSGIntersect,
     Action::CSGSeparate,
+    // A ribbon toggle; reachable over the bridge and rebindable, no chord by default.
+    Action::ToggleCollisions,
 ];
 
 /// Reads keyboard input each frame and dispatches tool changes + MenuActionEvents.
@@ -851,6 +951,21 @@ fn space_root_for(path: &std::path::Path) -> Option<std::path::PathBuf> {
         cur = parent;
     }
     None
+}
+
+/// The name the Insert Object dialog shows as its destination: the primary
+/// selection, else the Workspace root the insert handler falls back to.
+fn insert_target_label(
+    explorer_state: Option<&crate::ui::slint_ui::UnifiedExplorerState>,
+    instances: &Query<&eustress_common::classes::Instance>,
+) -> String {
+    explorer_state
+        .and_then(|es| match &es.selected {
+            crate::ui::slint_ui::SelectedItem::Entity(e) => Some(*e),
+            _ => None,
+        })
+        .and_then(|e| instances.get(e).ok().map(|i| i.name.clone()))
+        .unwrap_or_else(|| "Workspace".to_string())
 }
 
 fn handle_menu_action_events(
@@ -1708,6 +1823,33 @@ fn handle_menu_action_events(
                 selection_events.4.write(crate::selection_sync::InvertSelectionEvent);
             }
 
+            // Roblox parity: the dialog, the paste target and the focus
+            // requests are all one-shot flags the UI sync consumes.
+            Action::InsertObject => {
+                studio_state.insert_target_name = insert_target_label(
+                    explorer_state.as_deref(),
+                    &instance_query,
+                );
+                studio_state.show_insert_object_dialog = true;
+            }
+            Action::PasteInto => { studio_state.pending_paste_into = true; }
+            Action::FocusExplorerSearch => {
+                studio_state.show_explorer = true;
+                studio_state.focus_explorer_search_pulse =
+                    studio_state.focus_explorer_search_pulse.wrapping_add(1);
+            }
+            Action::FocusPropertiesFilter => {
+                studio_state.show_properties = true;
+                studio_state.focus_properties_filter_pulse =
+                    studio_state.focus_properties_filter_pulse.wrapping_add(1);
+            }
+            Action::ToggleCollisions => {
+                if let Some(ref mut es) = editor_settings {
+                    es.collisions_enabled = !es.collisions_enabled;
+                    info!("⌨️ Collisions: {}", if es.collisions_enabled { "ON" } else { "OFF" });
+                }
+            }
+
             // Anchor (Alt+A) / Lock (Alt+L) / Unlock (Alt+Shift+L) —
             // flip a BasePart boolean across the whole selection.
             //
@@ -2354,5 +2496,46 @@ mod tests {
             .rebind(Action::FocusSelection, ctrl_shift_z)
             .expect_err("Ctrl+Shift+Z is Redo's alternate — rebinding onto it must fail");
         assert!(err.contains("Redo"), "expected the Redo alternate to be reported, got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+
+    /// Two actions on one chord means one of them is dead; a preset must
+    /// never ship that way.
+    #[test]
+    fn presets_have_no_chord_owned_twice() {
+        for preset in KeymapPreset::ALL {
+            let map = preset.bindings();
+            let chords = map.all_chords();
+            for (i, (a, chord)) in chords.iter().enumerate() {
+                for (b, other) in chords.iter().skip(i + 1) {
+                    assert!(
+                        !(chord == other && a != b),
+                        "{:?}: {} is bound to both {:?} and {:?}",
+                        preset, chord.display(), a, b
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn roblox_preset_moves_the_tools_and_play_keys() {
+        let map = KeymapPreset::Roblox.bindings();
+        assert_eq!(map.get(Action::MoveTool), Some(&KeyBinding::new(KeyCode::Digit2).with_shift()));
+        assert_eq!(map.get(Action::PlaySolo), Some(&KeyBinding::new(KeyCode::F8)));
+        assert_eq!(map.get(Action::StopPlay), Some(&KeyBinding::new(KeyCode::F5).with_shift()));
+        assert_eq!(map.get(Action::InsertObject), Some(&KeyBinding::new(KeyCode::KeyI).with_ctrl()));
+        assert_eq!(map.preset(), "roblox");
+    }
+
+    #[test]
+    fn eustress_preset_is_the_default_map() {
+        let map = KeymapPreset::Eustress.bindings();
+        assert_eq!(map.get(Action::MoveTool), Some(&KeyBinding::new(KeyCode::KeyX).with_alt()));
+        assert_eq!(map.preset(), "eustress");
     }
 }

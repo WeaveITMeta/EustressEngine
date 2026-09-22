@@ -63,14 +63,14 @@ export component ExitConfirmationDialog inherits Rectangle {
                     spacing: 8px;
                     
                     Text {
-                        text: "Unsaved Changes";
+                        text: "Edits since the last snapshot";
                         color: Theme.text-primary;
                         font-size: 18px;
                         font-weight: 600;
                     }
                     
                     Text {
-                        text: "Do you want to save changes to \"" + root.scene-name + "\" before closing?";
+                        text: "Take a snapshot of \"" + root.scene-name + "\" before closing? Your edits are already stored; a snapshot adds a restore point to History.";
                         color: Theme.text-secondary;
                         wrap: word-wrap;
                     }
@@ -95,7 +95,7 @@ export component ExitConfirmationDialog inherits Rectangle {
                     }
                     
                     Text {
-                        text: "Don't Save";
+                        text: "Skip";
                         color: white;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -131,7 +131,7 @@ export component ExitConfirmationDialog inherits Rectangle {
                     }
                     
                     Text {
-                        text: "Save & Exit";
+                        text: "Snapshot & Exit";
                         color: white;
                         font-weight: 500;
                         horizontal-alignment: center;

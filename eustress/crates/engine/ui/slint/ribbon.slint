@@ -3,7 +3,7 @@
 // Top toolbar with menus, tools, and play controls
 // ============================================================================
 
-import { HorizontalBox, VerticalBox, ScrollView, Slider } from "std-widgets.slint";
+import { HorizontalBox, VerticalBox, ScrollView, Slider, LineEdit } from "std-widgets.slint";
 import { Theme, IconButton, ToolbarSeparator } from "theme.slint";
 
 // An "Eustress Mode" entry for the Modes dropdown (id/name/icon-id pushed
@@ -94,6 +94,12 @@ export struct InsertClassData {
     category: string,
     display: string,
     show-header: bool,
+}
+
+// One File > Recent entry, pushed from Rust (`EditorSettings.recent_spaces`).
+export struct RecentSpaceEntry {
+    label: string,
+    path: string,
 }
 
 // A plugin-contributed section (button group) on the "Plugins" tab, and a
@@ -307,6 +313,43 @@ component ToolGroup inherits Rectangle {
 }
 
 // Vertical group divider with subtle line
+// A labelled numeric field for the ribbon's Snap group. Commits on Enter or
+// when focus leaves; anything that does not parse leaves the value alone.
+component SnapField inherits HorizontalLayout {
+    in property <string> label: "";
+    in property <string> unit: "";
+    in property <float> value: 0.0;
+    callback committed(float);
+    spacing: 4px;
+    alignment: start;
+    Text {
+        width: 36px;
+        text: root.label;
+        color: Theme.text-secondary;
+        font-size: 10px;
+        vertical-alignment: center;
+    }
+    field := LineEdit {
+        width: 48px;
+        height: 20px;
+        font-size: 10px;
+        text: round(root.value * 100) / 100;
+        accepted(text) => { root.committed(text.to-float()); }
+        changed has-focus => {
+            if !self.has-focus && self.text.is-float() {
+                root.committed(self.text.to-float());
+            }
+        }
+    }
+    Text {
+        width: 22px;
+        text: root.unit;
+        color: Theme.text-secondary;
+        font-size: 10px;
+        vertical-alignment: center;
+    }
+}
+
 component GroupDivider inherits Rectangle {
     width: 1px;
     height: 64px;
@@ -508,6 +551,15 @@ export component Ribbon inherits Rectangle {
     in property <string> shortcut-unlock: "";
     in property <string> shortcut-anchor: "";
     in property <string> shortcut-focus: "";
+    in property <string> shortcut-insert-object: "";
+    // Snap and collisions, mirrored from `EditorSettings` by the UI sync.
+    in property <bool> snap-enabled: true;
+    in property <float> snap-size: 1.0;
+    in property <float> angle-snap: 15.0;
+    in property <bool> collisions-enabled: false;
+    // File > Recent and the last snapshot line in the File menu.
+    in property <[RecentSpaceEntry]> recent-spaces: [];
+    in property <string> snapshot-status: "";
     // Modal build tools + play controls. Bound rather than hardcoded so a
     // remap in the Keyboard Shortcuts dialog reaches the button subtitles —
     // a literal here is correct only until the user rebinds it.
@@ -546,6 +598,13 @@ export component Ribbon inherits Rectangle {
     callback on-import-roblox-place();
     callback on-publish-universe();
     callback on-publish-space();
+    callback on-show-insert-object();
+    callback on-open-recent(string);
+    callback on-close-space();
+    callback on-toggle-snap();
+    callback on-set-snap-increment(float);
+    callback on-set-angle-snap(float);
+    callback on-toggle-collisions();
     callback on-exit();
     
     // Edit callbacks
@@ -1098,12 +1157,21 @@ export component Ribbon inherits Rectangle {
                                 DropdownItem { label: "New Universe..."; shortcut: root.shortcut-new-universe; clicked => { root.on-new-universe(); } }
                                 DropdownItem { label: "New Space"; shortcut: root.shortcut-new; clicked => { root.on-new-scene(); } }
                                 DropdownItem { label: "Open File..."; shortcut: root.shortcut-open; clicked => { root.on-open-scene(); } }
+                                if root.recent-spaces.length > 0: DropdownHeader { label: "RECENT"; }
+                                for recent in root.recent-spaces: DropdownItem {
+                                    label: recent.label;
+                                    clicked => { root.on-open-recent(recent.path); }
+                                }
                                 DropdownItem { label: "Import Roblox Place..."; clicked => { root.on-import-roblox-place(); } }
+                                DropdownSeparator {}
                                 DropdownItem { label: "Save Space"; shortcut: root.shortcut-save; clicked => { root.on-save-scene(); } }
                                 DropdownItem { label: "Save Space As..."; shortcut: root.shortcut-save-as; clicked => { root.on-save-scene-as(); } }
+                                DropdownItem { label: "Export Selection..."; clicked => { root.on-menu-action("model:export"); } }
+                                if root.snapshot-status != "": DropdownHeader { label: root.snapshot-status; }
                                 DropdownSeparator {}
                                 DropdownItem { label: "Publish Universe"; shortcut: root.shortcut-publish-universe; clicked => { root.on-publish-universe(); } }
                                 DropdownItem { label: "Publish Space"; shortcut: root.shortcut-publish-space; clicked => { root.on-publish-space(); } }
+                                DropdownItem { label: "Close Space"; clicked => { root.on-close-space(); } }
                                 DropdownSeparator {}
                                 DropdownItem { label: "Keyboard Shortcuts..."; clicked => { root.on-show-keybindings(); } }
                                 DropdownItem { label: "Soul Settings..."; clicked => { root.on-show-soul-settings(); } }
@@ -1244,6 +1312,8 @@ export component Ribbon inherits Rectangle {
                                     // fast primitive-mesh path (`insert:part`
                                     // etc. spawn with a real block/sphere
                                     // mesh, not a blank Part template).
+                                    DropdownItem { icon: @image-url("../../assets/icons/ui/plus.svg"); label: "Insert Object..."; shortcut: root.shortcut-insert-object; clicked => { root.on-show-insert-object(); } }
+                                    DropdownSeparator {}
                                     DropdownHeader { label: "COMMON"; }
                                     DropdownItem { icon: @image-url("../../assets/icons/part.svg"); label: "Part (Block)"; clicked => { root.on-menu-action("insert:part"); } }
                                     DropdownItem { icon: @image-url("../../assets/icons/part.svg"); label: "Sphere"; clicked => { root.on-menu-action("insert:sphere"); } }
@@ -2498,6 +2568,21 @@ export component Ribbon inherits Rectangle {
                     IconButton { icon: @image-url("../../assets/icons/ui/move.svg"); label: "Move"; shortcut: root.shortcut-move; tooltip: "Move"; tint: Theme.accent-green; selected: root.current-tool == "move"; clicked => { root.on-select-tool("move"); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/scale.svg"); label: "Scale"; shortcut: root.shortcut-scale; tooltip: "Scale"; tint: Theme.accent-yellow; selected: root.current-tool == "scale"; clicked => { root.on-select-tool("scale"); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/rotate.svg"); label: "Rotate"; shortcut: root.shortcut-rotate; tooltip: "Rotate"; tint: Theme.text-accent; selected: root.current-tool == "rotate"; clicked => { root.on-select-tool("rotate"); } }
+                }
+                GroupDivider {}
+
+                // ── SNAP group: the increments live on the ribbon, where the
+                // hand already is, instead of only in Settings ──
+                ToolGroup {
+                    label: "Snap";
+                    IconButton { icon: @image-url("../../assets/icons/ui/crosshair.svg"); label: "Snap"; tooltip: "Snap moves and rotations to the increments (1/2/3 keys: 1 m, 0.2 m, off)"; tint: Theme.accent-green; selected: root.snap-enabled; clicked => { root.on-toggle-snap(); } }
+                    VerticalLayout {
+                        spacing: 2px;
+                        alignment: center;
+                        SnapField { label: "Move"; unit: "m"; value: root.snap-size; committed(v) => { root.on-set-snap-increment(v); } }
+                        SnapField { label: "Rotate"; unit: "deg"; value: root.angle-snap; committed(v) => { root.on-set-angle-snap(v); } }
+                    }
+                    IconButton { icon: @image-url("../../assets/icons/ui/block.svg"); label: "Collisions"; tooltip: "Dragged parts stop at other parts instead of passing through them"; tint: Theme.accent-yellow; selected: root.collisions-enabled; clicked => { root.on-toggle-collisions(); } }
                 }
                 GroupDivider {}
                 
