@@ -108,11 +108,20 @@ python eustress/crates/common/assets/characters/scripts/validate_avatar_assets.p
 
 The first script uses `voltec_geometry.py` to rebuild the model, packed textures, source file, review images
 and runtime clips. `mixamo_bake.py` transfers the existing FBX motions using
-rest-relative rotations. The second builds X/Y Bot web previews without changing
+rest-relative rotations. `voltec_reference_shapes.py` replaces the principal
+front armor with closed castings based on contours from the supplied concept.
+It authors these in the idle review pose, fits them outside the supporting mesh,
+then applies inverse bone deformation to return them to bind-space coordinates.
+The source photograph constrains the front silhouette; rear depth is inferred.
+The second builds X/Y Bot web previews without changing
 their engine meshes and copies Voltec into the website. It updates the three
 built-in catalog entries and preserves custom catalog additions.
 The validator checks weights, joint coverage, all four moving clips and exact
 curve parity between Voltec's embedded clips and its runtime files.
+Before joining meshes, the builder standardizes their active texture-coordinate
+layer to `Surface UV`. The validator checks nonzero UV coverage on ceramic faces
+in the exported GLB, guarding against the donor's inactive/default UV layer
+making the armor sample a single texel despite having embedded PBR maps.
 The build also checks the deformed mesh bounds at five poses in each animation
 and writes `voltec_review/pose_bounds.json`, catching stretched geometry caused
 by invalid donor terminal markers. The review includes front and three-quarter
@@ -126,6 +135,8 @@ assembly builder checks that every edge is manifold before joining the rig mesh.
 `render_voltec_details.py` renders back, abdomen, boot and illuminated underside
 inspections, plus bent-pose checks. Pass view names after `--` to render a subset,
 for example `-- voltec_back_detail voltec_soles voltec_back_run`.
+`-- voltec_shape` produces a neutral clay render for judging shape without the
+surface maps. Ivory surfaces use restrained wear rather than heavy mottling.
 
 `common/assets/characters/voltec_review/index.html` is a standalone interactive
 review page. Serve the repository locally with `python -m http.server 8874

@@ -6,6 +6,7 @@ import re
 import os
 import json
 import shutil
+import time
 import sys
 from pathlib import Path
 from mathutils import Vector
@@ -29,15 +30,26 @@ import sys
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from mixamo_bake import bake_mixamo, install_tracks
 scene=bpy.context.scene
+actions=bake_mixamo(rig,ROOT)
+install_tracks(rig,actions)
+rig.animation_data.action=actions[0][0]
+scene.frame_set(20)
+from voltec_reference_shapes import refit
+parts=refit(rig,bones,parts)
 # Merge loose armor pieces into one skinned mesh with material primitives.
 # Vertex groups retain the independent rigid bone assignments.
 bpy.ops.object.select_all(action='DESELECT')
-for o in parts:o.select_set(True)
+for o in parts:
+    # Blender joins UV layers by name. The donor's UVMap previously stayed
+    # active while generated armor coordinates landed in an inactive layer.
+    # That made all mapped armor sample a single texel in Blender and glTF.
+    if o.data.uv_layers:
+        o.data.uv_layers.active.name='Surface UV'
+        o.data.uv_layers.active.active_render=True
+    o.select_set(True)
 bpy.context.view_layer.objects.active=parts[0]
 bpy.ops.object.join()
 parts=[bpy.context.object];parts[0].name='Voltec Supreme • armor and chassis'
-actions=bake_mixamo(rig,ROOT)
-install_tracks(rig,actions)
 # Inspect the actual skinned geometry, not only the animation curves. Invalid
 # donor end markers can leave weights valid while sending armor far off-body.
 pose_bounds = {}
@@ -64,14 +76,27 @@ scene.frame_set(0)
 bpy.ops.object.select_all(action='DESELECT')
 for o in parts+[rig]:o.select_set(True)
 bpy.context.view_layer.objects.active=rig
+def export_glb(path, **options):
+    staged=path.with_name('.'+path.stem+'-'+str(os.getpid())+'.glb')
+    bpy.ops.export_scene.gltf(filepath=str(staged), **options)
+    if path.exists() and path.read_bytes()==staged.read_bytes():
+        staged.unlink()
+        return
+    for attempt in range(6):
+        try:
+            os.replace(staged,path)
+            return
+        except OSError:
+            if attempt==5:raise
+            time.sleep(.3)
 for track in rig.animation_data.nla_tracks:track.mute=False
-bpy.ops.export_scene.gltf(filepath=str(ROOT/'voltec_supreme.glb'),export_format='GLB',use_selection=True,export_animations=True,export_animation_mode='NLA_TRACKS',export_skins=True,export_yup=True,export_force_sampling=True)
+export_glb(ROOT/'voltec_supreme.glb',export_format='GLB',use_selection=True,export_animations=True,export_animation_mode='NLA_TRACKS',export_skins=True,export_yup=True,export_force_sampling=True)
 # Export only armature + active action into the runtime's single-clip files.
 for track in rig.animation_data.nla_tracks:track.mute=True
 for action,filename,end in actions:
     rig.animation_data.action=action;scene.frame_start=0;scene.frame_end=end
     bpy.ops.object.select_all(action='DESELECT');rig.select_set(True)
-    bpy.ops.export_scene.gltf(filepath=str(ROOT/'animations'/('robot_'+filename+'.glb')),export_format='GLB',use_selection=True,export_animations=True,export_animation_mode='ACTIVE_ACTIONS',export_skins=True,export_yup=True,export_force_sampling=True)
+    export_glb(ROOT/'animations'/('robot_'+filename+'.glb'),export_format='GLB',use_selection=True,export_animations=True,export_animation_mode='ACTIVE_ACTIONS',export_skins=True,export_yup=True,export_force_sampling=True)
 rig.animation_data.action=actions[0][0];scene.frame_set(20)
 
 # Editable source and neutral review stage; nothing from this stage is in GLB.

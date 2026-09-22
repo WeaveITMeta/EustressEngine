@@ -21,7 +21,13 @@ scene.collection.objects.link(sole_light)
 sole_light.location = (0, -.7, -1.5)
 sole_light.rotation_euler = (Vector((0, 0, .1))-sole_light.location).to_track_quat('-Z','Y').to_euler()
 requested = sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else []
+clay=bpy.data.materials.new('Shape review neutral clay')
+clay.diffuse_color=(.37,.39,.41,1)
+clay.use_nodes=True
+clay.node_tree.nodes['Principled BSDF'].inputs['Base Color'].default_value=(.37,.39,.41,1)
+clay.node_tree.nodes['Principled BSDF'].inputs['Roughness'].default_value=.65
 for name, location, target, scale, dimensions, action, frame in [
+    ('voltec_shape', (0,-6,1.4), (0,0,.93), 2.1, (1000,1200), 'Idle',20),
     ('voltec_chest', (.18, -4, 1.52), (0, -.01, 1.39), .77, (1200, 1000), 'Idle', 20),
     ('voltec_back', (-1.8, 5.8, 2), (0, 0, .94), 2.15, (1000, 1200), 'Idle', 20),
     ('voltec_side', (6, 0, 1.55), (0, 0, .94), 2.15, (1000, 1200), 'Idle', 20),
@@ -37,6 +43,7 @@ for name, location, target, scale, dimensions, action, frame in [
 ]:
     if requested and name not in requested:
         continue
+    scene.view_layers[0].material_override=clay if name=='voltec_shape' else None
     sole_light.hide_render = name != 'voltec_soles'
     for obj in scene.objects:
         if obj.type == 'MESH' and any(m and m.name == 'Review floor' for m in obj.data.materials):

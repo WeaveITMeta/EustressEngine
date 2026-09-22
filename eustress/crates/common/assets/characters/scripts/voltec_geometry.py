@@ -55,10 +55,20 @@ def surface_maps(mat, kind, size=1024):
     pits = (rng.random((size, size)) > .993).astype(np.float32)
     if kind == 'ceramic':
         grime = np.maximum(0, -broad - .16) ** 1.7
-        value = np.clip(.77 + broad * .065 + grain * .009 - damage * .57 - pits * .12 - grime * .21, .12, .91)
+        mottling = np.zeros((size,size),dtype=np.float32)
+        for grid, strength in [(16,.004),(64,.006),(256,.008)]:
+            noise=rng.random((grid,grid)).astype(np.float32)
+            axis=np.arange(size,dtype=np.float32)*grid/size
+            cells=axis.astype(np.int32); fraction=axis-cells
+            fraction=fraction*fraction*(3-2*fraction)
+            nxt=(cells+1)%grid
+            horizontal=noise[:,cells]*(1-fraction)[None,:]+noise[:,nxt]*fraction[None,:]
+            scaled=horizontal[cells,:]*(1-fraction)[:,None]+horizontal[nxt,:]*fraction[:,None]
+            mottling += np.maximum(0,scaled-.38)*strength*5
+        value = np.clip(.84 + broad * .015 + grain * .006 - damage * .10 - pits * .025 - grime * .015 - mottling, .65, .89)
         colors = np.stack([value * 1.015, value, value * .975], axis=-1)
         rough = np.clip(.49 + broad * .10 + damage * .32 + grain * .025, .34, .85)
-        height = grain * .06 - damage * .95 - pits * .23
+        height = grain * .035 - damage * .15 - pits * .06
     else:
         # Crosswoven elastomer, with subdued metal grain beneath armor gaps.
         weave = np.sin(xx * .72) * np.sin(yy * .72)
@@ -246,7 +256,7 @@ def build(rig, bones):
         return mesh(name, vertices, faces, bone, mat, uv)
 
     def sleeve(name, rings, center, bone, mat=ceramic, axis='z', side=1,
-               arc=(-math.pi, math.pi), exponent=2.5, thickness=.007):
+               arc=(-math.pi, math.pi), exponent=2.5, thickness=.007, sculpt=(0,0)):
         """A shaped, hollow shell: rings are (axis position, width, depth).
 
         Cross sections are rounded rectangles, not spherical primitives.
@@ -274,7 +284,9 @@ def build(rig, bones):
                     sin, cos = math.sin(angle), math.cos(angle)
                     cross = math.copysign(abs(sin) ** (2 / exponent), sin) * (width - inset)
                     forward = -math.copysign(abs(cos) ** (2 / exponent), cos) * (depth - inset)
-                    co = (center[0] + cross, center[1] + forward, distance) if axis == 'z' else (side * distance, center[1] + forward, center[2] + cross)
+                    shaped=distance+sculpt[0]*abs(sin)**1.6*math.exp(-(distance-rings[0][0])/.040)
+                    shaped-=sculpt[1]*max(0,cos)**3*math.exp(-(rings[-1][0]-distance)/.040)
+                    co = (center[0] + cross, center[1] + forward, shaped) if axis == 'z' else (side * shaped, center[1] + forward, center[2] + cross)
                     verts.append(co)
                     uv.append((i / count, (distance - rings[0][0]) * 3.1))
         stride = count + 1
@@ -384,6 +396,16 @@ def build(rig, bones):
             if co is not None:coords.append(co)
         if len(coords)>1:tube(name,coords,radius,bone,black,sides=8)
 
+    def inset(name, surface, outline, bone, mat=black, relief=.0018):
+        """Thin backed insert conformed to its parent casting in bind space."""
+        obj=panel(name,outline,0,bone,mat,dome=.001,thickness=.001,rounds=1)
+        for vertex in obj.data.vertices:
+            hit=on_face(surface,vertex.co.x,vertex.co.z,relief)
+            if hit is None:
+                raise ValueError('Unsupported insert: '+name)
+            vertex.co.y=hit[1]+vertex.co.y
+        return obj
+
     font_path = Path('C:/Windows/Fonts/arialbd.ttf')
     font = bpy.data.fonts.load(str(font_path)) if font_path.exists() else None
 
@@ -458,10 +480,17 @@ def build(rig, bones):
         fastener('Helmet / ear pivot', (s*.115, .002, 1.708), 'head', .019, (s, 0, 0))
         for i in range(3):
             tube('Helmet / cheek ventilation', [(s*(.076+i*.007),-.104,1.680+i*.009),(s*(.066+i*.007),-.108,1.659+i*.009)], .0018, 'head', black)
+    # Seat the helmet closer to the shoulders while preserving its bone.
+    for part in parts:
+        if part.name.startswith('Helmet'):
+            for vertex in part.data.vertices:
+                vertex.co.x*=1.07
+                vertex.co.z=1.66+(vertex.co.z-1.72)*1.16
+    surface_trees.clear()
     # Neck is a compact, ribbed gimbal rather than a smooth human neck.
-    for j in range(7):
+    for j in range(4):
         ring('Cervical flex gaiter', (0,.025,1.508+j*.010), .056, 'neck', dark, (0,0,1), .0045)
-    sleeve('Cervical frame', [(1.495,.052,.047),(1.57,.046,.043)], (0,.023,0), 'neck', titanium)
+    sleeve('Cervical frame', [(1.495,.052,.047),(1.542,.046,.043)], (0,.023,0), 'neck', titanium)
 
     chest = [(-.075,1.488),(-.142,1.510),(-.188,1.489),(-.216,1.449),
              (-.238,1.395),(-.237,1.356),(-.215,1.318),(-.176,1.290),
@@ -511,7 +540,7 @@ def build(rig, bones):
            [(.965,.117,.084),(1.014,.116,.085),(1.065,.116,.084),(1.125,.124,.084),
             (1.186,.129,.079),(1.236,.132,.083),(1.275,.135,.092),
             (1.315,.143,.107),(1.353,.154,.117),(1.390,.164,.121)],
-           (0,.012,0),'spine1',black,exponent=3.2,thickness=.012)
+           (0,.012,0),'spine1',dark,exponent=3.2,thickness=.012)
     boot.vertex_groups.clear()
     groups={name:boot.vertex_groups.new(name=bones[name].name) for name in ['hips','spine','spine1','spine2']}
     def blend_weight(z,start,end):
@@ -535,6 +564,8 @@ def build(rig, bones):
         panel('Abdomen / recessed segment gasket',outline,-.085,bone,black,dome=.007,thickness=.022,rounds=1)
         armor=panel('Abdomen / overlapping chevron armor',[(x*.96,z+(zz-z)*.92) for x,zz in outline],
                     -.093,bone,ceramic,dome=.006,thickness=.018,rounds=1)
+        inset('Abdomen / recessed graphite core',armor,
+              [(x*.79,z+(zz-z)*.63) for x,zz in outline],bone,black,relief=.0013)
         for s in [-1,1]:
             socket=on_face(armor,s*width*.68,z+.004,.001)
             if socket:fastener('Abdomen / captive service screw',socket,bone,.005)
@@ -568,15 +599,19 @@ def build(rig, bones):
         # A shoulder crown tapers into a long upper-arm shield. Gaps between
         # front/rear castings expose the internal satin actuator sleeve.
         sleeve(side+' / shoulder bearing',[(.195,.090,.083),(.265,.094,.088),(.316,.077,.076)],(0,.061,1.438),arm,dark,axis='x',side=s)
-        shoulder=[(.101,.007,.007),(.116,.069,.066),(.146,.125,.112),(.191,.157,.140),(.246,.149,.138),(.302,.116,.119),(.325,.080,.090)]
-        pauldron=sleeve(side+' / shoulder ceramic casting',shoulder,(0,.061,1.453),arm,axis='x',side=s,arc=(-1.66,1.70),exponent=2.25)
+        shoulder=[(.111,.010,.010),(.125,.066,.060),(.153,.108,.098),(.190,.135,.119),(.240,.126,.118),(.287,.104,.102),(.317,.066,.072)]
+        pauldron=sleeve(side+' / shoulder ceramic casting',shoulder,(0,.045,1.510),arm,axis='x',side=s,arc=(-1.66,1.70),exponent=2.8)
         engraved(side+' / shoulder panel split',pauldron,[(s*.138,1.47),(s*.157,1.502),(s*.204,1.535),(s*.271,1.528)],arm)
-        sleeve(side+' / shoulder rear casting',shoulder,(0,.061,1.453),arm,axis='x',side=s,arc=(1.74,4.57),exponent=2.45)
-        socket=on_face(pauldron,s*.233,1.460,.004)
+        sleeve(side+' / shoulder rear casting',shoulder,(0,.045,1.510),arm,axis='x',side=s,arc=(1.74,4.57),exponent=2.8)
+        socket=on_face(pauldron,s*.220,1.582,.002)
         if socket:fastener(side+' / shoulder service socket',socket,arm,.024)
+        engraved(side+' / shoulder etched perimeter',pauldron,
+                 [(s*.154,1.407),(s*.190,1.366),(s*.243,1.373),(s*.283,1.408)],arm,.00075)
         upper=[(.328,.070,.073),(.34,.079,.080),(.37,.080,.082),(.413,.068,.075),(.427,.054,.061)]
-        sleeve(side+' / upper arm titanium barrel',upper,(0,.061,1.436),arm,titanium,axis='x',side=s)
-        sleeve(side+' / upper arm ceramic',[(a,b+.006,c+.006) for a,b,c in upper],(0,.061,1.436),arm,axis='x',side=s,arc=(-1.45,1.62))
+        sleeve(side+' / upper arm structural barrel',upper,(0,.061,1.436),arm,black,axis='x',side=s)
+        bicep=sleeve(side+' / upper arm ceramic',[(a,b+.002,c+.003) for a,b,c in upper],(0,.061,1.436),arm,axis='x',side=s,arc=(-1.23,1.30),exponent=3.4,sculpt=(.019,.018))
+        engraved(side+' / upper arm plate break',bicep,
+                 [(s*.342,1.392),(s*.370,1.400),(s*.403,1.436),(s*.413,1.461)],arm,.0009)
         # Dense elastomer pleats are thin rings rather than oversized beads.
         for j in range(8):
             x=.432+j*.007
@@ -584,7 +619,11 @@ def build(rig, bones):
         fastener(side+' / elbow hinge',(s*.46,-.001,1.436),fore,.029)
         lower=[(.49,.051,.056),(.505,.074,.073),(.53,.082,.085),(.57,.080,.088),(.626,.067,.077),(.677,.053,.062),(.706,.047,.051)]
         sleeve(side+' / forearm graphite frame',[(a,b*.95,c*.95) for a,b,c in lower],(0,.061,1.436),fore,dark,axis='x',side=s)
-        sleeve(side+' / forearm front casting',lower,(0,.061,1.436),fore,axis='x',side=s,arc=(-1.42,1.40),exponent=3.1)
+        gauntlet=sleeve(side+' / forearm front casting',lower,(0,.061,1.436),fore,axis='x',side=s,arc=(-1.42,1.40),exponent=3.6,sculpt=(.025,.012))
+        engraved(side+' / forearm angular panel break',gauntlet,
+                 [(s*.52,1.390),(s*.556,1.398),(s*.577,1.427),(s*.663,1.428)],fore,.0008)
+        engraved(side+' / forearm outer panel break',gauntlet,
+                 [(s*.52,1.477),(s*.557,1.466),(s*.582,1.449),(s*.668,1.449)],fore,.0008)
         sleeve(side+' / forearm rear casting',lower,(0,.061,1.436),fore,axis='x',side=s,arc=(1.47,4.80),exponent=2.6)
         for zoff in [-.025,.025]:
             tube(side+' / gauntlet longitudinal reveal',[(s*.521,-.027,1.436+zoff),(s*.574,-.031,1.436+zoff),(s*.658,-.008,1.436+zoff*.75)],.0013,fore,black,smooth_path=True)
@@ -616,7 +655,13 @@ def build(rig, bones):
         # Tapered femoral shells stop before the knee, exposing the actuator.
         femur=[(.608,.065,.066),(.625,.083,.087),(.686,.102,.108),(.785,.107,.116),(.857,.093,.106),(.886,.077,.084)]
         sleeve(side+' / femoral structural housing',[(a,b*.93,c*.93) for a,b,c in femur],(s*.099,.012,0),thigh,dark)
-        sleeve(side+' / femoral ceramic front',[(a,b+.005,c+.007) for a,b,c in femur],(s*.099,.012,0),thigh,arc=(-1.42,1.48),exponent=2.7)
+        femoral=sleeve(side+' / femoral ceramic front',[(a,b+.001,c+.003) for a,b,c in femur],(s*.099,.012,0),thigh,arc=(-1.33,1.36),exponent=3.4,sculpt=(.037,.025))
+        engraved(side+' / femoral diagonal division',femoral,
+                 [(s*.041,.829),(s*.068,.783),(s*.113,.739),(s*.146,.668)],thigh,.0008)
+        engraved(side+' / femoral lateral division',femoral,
+                 [(s*.166,.823),(s*.168,.778),(s*.159,.742)],thigh,.0008)
+        inset(side+' / femoral recessed vent',femoral,
+              [(s*.139,.787),(s*.162,.802),(s*.165,.755),(s*.149,.741)],thigh)
         sleeve(side+' / femoral rear shell',femur,(s*.099,.012,0),thigh,arc=(1.56,4.78))
         for j in range(6):
             ring(side+' / knee flex seal',(s*.094,.016,.53+j*.010),.062,shin,dark,(0,0,1),.0045)
@@ -625,14 +670,20 @@ def build(rig, bones):
         fastener(side+' / patella socket',(s*.097,-.11,.494),shin,.009)
         calf=[(.160,.071,.067),(.173,.079,.079),(.23,.082,.087),(.342,.090,.091),(.398,.080,.082),(.452,.068,.068)]
         sleeve(side+' / tibial carbon frame',[(a,b*.92,c*.92) for a,b,c in calf],(s*.095,.031,0),shin,dark)
-        sleeve(side+' / tibial ceramic casting',[(a,b+.006,c+.013) for a,b,c in calf],(s*.095,.027,0),shin,arc=(-1.37,1.4),exponent=2.9)
+        tibial=sleeve(side+' / tibial ceramic casting',[(a,b+.001,c+.008) for a,b,c in calf],(s*.095,.027,0),shin,arc=(-1.32,1.35),exponent=3.5,sculpt=(.023,.038))
+        engraved(side+' / tibial angular division',tibial,
+                 [(s*.050,.396),(s*.062,.347),(s*.096,.302),(s*.104,.218)],shin,.0008)
+        engraved(side+' / tibial lateral division',tibial,
+                 [(s*.151,.374),(s*.131,.325),(s*.126,.241)],shin,.0008)
+        socket=on_face(tibial,s*.133,.371,.001)
+        if socket:fastener(side+' / tibial access port',socket,shin,.019)
         sleeve(side+' / calf rear ceramic',calf,(s*.095,.034,0),shin,arc=(1.58,4.75))
         for xx in [.048,.141]:
             tube(side+' / calf hydraulic cylinder',[(s*xx,.115,.222),(s*xx,.121,.331)],.010,shin,dark)
             tube(side+' / calf piston',[(s*xx,.116,.175),(s*xx,.122,.241)],.005,shin,titanium)
         fastener(side+' / ankle lateral hinge',(s*.168,.019,.171),foot,.024,(s,0,0))
         # A broad flat outsole and angular toe replace the original oval shoes.
-        boot=[(.025,.095,.148),(.034,.099,.151),(.049,.100,.153),(.070,.092,.148),(.106,.082,.124),(.134,.065,.089)]
+        boot=[(.044,.098,.151),(.049,.100,.153),(.070,.092,.148),(.106,.082,.124),(.134,.065,.089)]
         solid_loft(side+' / sealed armored boot upper',boot,(s*.095,-.063,0),foot,black,exponent=3.5)
         solid_loft(side+' / closed arched outsole',[(.014,.098,.152),(.035,.102,.155),(.048,.099,.152)],
                    (s*.095,-.063,0),foot,rubber,exponent=3.6,arch=True)
