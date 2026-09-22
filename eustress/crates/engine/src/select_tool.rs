@@ -39,14 +39,10 @@ use crate::ui::{StudioState, Tool, SlintUIFocus};
 use crate::rendering::BevySelectionManager;
 use crate::math_utils::{
     calculate_rotated_aabb, ray_plane_intersection, ray_obb_intersection,
-    ray_intersects_part,
-    find_surface_with_physics as math_find_surface_with_physics,
-    find_surface_under_cursor_with_normal as math_find_surface_with_normal,
     calculate_surface_offset as math_calculate_surface_offset,
     snap_to_grid as math_snap_to_grid,
     snap_to_grid_in_frame as math_snap_to_grid_in_frame,
     face_snap_offset as math_face_snap_offset,
-    find_face_contact as math_find_face_contact,
     FACE_SNAP_THRESHOLD,
 };
 
@@ -115,6 +111,13 @@ pub struct SelectToolState {
     /// label, ordinary building Parts don't — needs no modifier at all and
     /// can't collide with selection.
     pub drag_is_billboard_node: bool,
+    /// World-space pose of every selected entity at grab time. The drag math
+    /// runs in world space and is written back through each entity's parent,
+    /// so a selection spanning different parents moves as one rigid body.
+    pub initial_world: std::collections::HashMap<Entity, (Vec3, Quat)>,
+    /// The selection plus every descendant: never a surface for the drag.
+    pub moving_set: std::collections::HashSet<Entity>,
+    pub selected_count: usize,
 }
 
 impl Default for SelectToolState {
@@ -141,6 +144,9 @@ impl Default for SelectToolState {
             drag_camera_distance: 10.0,
             drag_neighbor_rest_lengths: std::collections::HashMap::new(),
             drag_is_billboard_node: false,
+            initial_world: std::collections::HashMap::new(),
+            moving_set: std::collections::HashSet::new(),
+            selected_count: 0,
         }
     }
 }
@@ -373,12 +379,15 @@ fn handle_select_drag(
     // dragging. See `SelectToolState.drag_is_billboard_node` for why this
     // replaced a modifier-key trigger.
     billboard_query: Query<&crate::classes::BillboardGui>,
-    _spatial_query: SpatialQuery,
+    spatial_query: SpatialQuery,
     settings_and_undo: (Res<crate::editor_settings::EditorSettings>, ResMut<crate::undo::UndoStack>),
     // Tool states to check if clicking on handles
     tool_states: (Res<crate::move_tool::MoveToolState>, Res<crate::scale_tool::ScaleToolState>, Res<crate::rotate_tool::RotateToolState>),
     // For writing transform back to TOML after drag
     instance_files: Query<&crate::space::instance_loader::InstanceFile>,
+    // Parents' world transforms: the drag computes in world space and writes
+    // each entity's pose back in its own parent's frame.
+    global_transforms: Query<&GlobalTransform>,
 ) {
     let Some(studio_state) = studio_state else { return };
     let (mouse, keys) = input;
@@ -429,6 +438,10 @@ fn handle_select_drag(
     let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) else { return; };
 
     if mouse.just_pressed(MouseButton::Left) {
+        // A transform tool that already took this press owns the drag.
+        if scale_state.dragged_axis.is_some() || rotate_state.dragged_axis.is_some() {
+            return;
+        }
         // Check Move tool handles FIRST (before blanket return)
         // This allows clicking on unselected objects while Move tool is active
         if move_state.active && studio_state.current_tool == Tool::Move {
@@ -485,66 +498,13 @@ fn handle_select_drag(
             // Not clicking on handle or selected part - continue to allow selecting new objects
         }
         
-        // Check Scale tool handles (group-level, matching scale_handles.rs).
-        if scale_state.active && studio_state.current_tool == Tool::Scale {
-            let mut s_bmin = Vec3::splat(f32::MAX);
-            let mut s_bmax = Vec3::splat(f32::MIN);
-            let mut s_count = 0;
-            for (_e, _, gt, _, _, bp) in selected_query.iter() {
-                let t = gt.compute_transform();
-                let sz = bp.map(|b| b.size).unwrap_or(t.scale);
-                let (mn, mx) = calculate_rotated_aabb(t.translation, sz * 0.5, t.rotation);
-                s_bmin = s_bmin.min(mn);
-                s_bmax = s_bmax.max(mx);
-                s_count += 1;
-            }
-            if s_count > 0 {
-                let group_center = (s_bmin + s_bmax) * 0.5;
-                let group_extent = (s_bmax - s_bmin) * 0.5;
-                let scale_fov = match projection {
-                    Projection::Perspective(p) => p.fov,
-                    _ => std::f32::consts::FRAC_PI_4,
-                };
-                let screen_scale = crate::scale_tool::compute_scale_screen_scale(
-                    group_center, camera_transform.translation(), scale_fov,
-                );
-                let scale_rotation = crate::move_tool::gizmo_rotation_for(
-                    studio_state.transform_mode,
-                    selected_query.iter().map(|(_, _, gt, _, _, _)| gt.compute_transform().rotation),
-                );
-                if crate::scale_tool::is_clicking_scale_handle_group(&ray, group_center, group_extent, screen_scale, scale_rotation) {
-                    return;
-                }
-            }
-        }
-        
-        // Check Rotate tool handles (group bounding box, matching rotate_tool.rs)
-        if rotate_state.active && studio_state.current_tool == Tool::Rotate {
-            let mut rot_bmin = Vec3::splat(f32::MAX);
-            let mut rot_bmax = Vec3::splat(f32::MIN);
-            let mut rot_cnt = 0;
-            for (_entity, _, global_transform, _, _, basepart_opt) in selected_query.iter() {
-                let t = global_transform.compute_transform();
-                let size = basepart_opt.map(|bp| bp.size).unwrap_or(t.scale);
-                let (mn, mx) = calculate_rotated_aabb(t.translation, size * 0.5, t.rotation);
-                rot_bmin = rot_bmin.min(mn);
-                rot_bmax = rot_bmax.max(mx);
-                rot_cnt += 1;
-            }
-            if rot_cnt > 0 {
-                let rot_center = (rot_bmin + rot_bmax) * 0.5;
-                let rot_extent = rot_bmax - rot_bmin;
-                let rotate_radius = crate::rotate_tool::compute_ring_radius(rot_center, rot_extent, &camera_transform, projection);
-                let rotate_rotation = crate::move_tool::gizmo_rotation_for(
-                    studio_state.transform_mode,
-                    selected_query.iter().map(|(_, _, gt, _, _, _)| gt.compute_transform().rotation),
-                );
-                if crate::rotate_tool::is_clicking_rotate_handle(&ray, rot_center, rotate_radius, &camera_transform, rotate_rotation) {
-                    return;
-                }
-            }
-        }
-        
+        // Scale and Rotate handles are NOT re-detected here. Each tool
+        // engages its own handle on this same press; the pressed branch
+        // below stands down the moment one of them has (`dragged_axis`),
+        // so the two systems never drive the part at once. Re-implementing
+        // their hit tests here drifted from the real ones (the ring is
+        // sized from the Model's children, this file only saw the parts),
+        // which is how a ring drag also became a body drag.
         // No tool handle clicked - check if clicking on a selected part to start dragging
         for (entity, transform, global_transform, _part_entity, _instance, basepart_opt) in &selected_query {
             let t = global_transform.compute_transform();
@@ -610,21 +570,17 @@ fn handle_select_drag(
                 let mut bounds_min = Vec3::splat(f32::MAX);
                 let mut bounds_max = Vec3::splat(f32::MIN);
                 
-                for (sel_entity, sel_transform, _, _, _, sel_basepart_opt) in selected_query.iter() {
+                state.initial_world.clear();
+                for (sel_entity, sel_transform, sel_global, _, _, sel_basepart_opt) in selected_query.iter() {
                     state.initial_positions.insert(sel_entity, sel_transform.translation);
                     state.initial_rotations.insert(sel_entity, sel_transform.rotation);
-                    
-                    // Calculate this part's AABB contribution to the group bounds
-                    let part_size = sel_basepart_opt.map(|bp| bp.size).unwrap_or(sel_transform.scale);
+                    // World pose for the drag math; the local pose above is
+                    // what undo restores.
+                    let world = sel_global.compute_transform();
+                    state.initial_world.insert(sel_entity, (world.translation, world.rotation));
+                    let part_size = sel_basepart_opt.map(|bp| bp.size).unwrap_or(world.scale);
                     let half_size = part_size * 0.5;
-                    
-                    // Get rotated extents for accurate bounding box
-                    let (part_min, part_max) = calculate_rotated_aabb(
-                        sel_transform.translation,
-                        half_size,
-                        sel_transform.rotation
-                    );
-                    
+                    let (part_min, part_max) = calculate_rotated_aabb(world.translation, half_size, world.rotation);
                     bounds_min = bounds_min.min(part_min);
                     bounds_max = bounds_max.max(part_max);
                 }
@@ -634,7 +590,11 @@ fn handle_select_drag(
                 state.group_bounds_max = bounds_max;
                 state.group_center = (bounds_min + bounds_max) * 0.5;
                 state.group_size = bounds_max - bounds_min;
-                
+                state.selected_count = state.initial_world.len();
+                state.moving_set = crate::math_utils::moving_set(
+                    state.initial_world.keys().copied(),
+                    &children_query,
+                );
                 return;
             }
         }
@@ -642,6 +602,16 @@ fn handle_select_drag(
         // PRIORITY: When Move tool is active, it handles ALL dragging
         // Cancel any select_tool drag and let move_tool take over
         if move_state.active && studio_state.current_tool == Tool::Move {
+            state.dragging = false;
+            state.drag_started = false;
+            state.dragged_entity = None;
+            return;
+        }
+        // The Scale or Rotate tool engaged a handle on the same press: it
+        // owns the drag. Driving the part from here as well made both
+        // systems write the transform every frame, and the part stuttered
+        // between the two answers.
+        if scale_state.dragged_axis.is_some() || rotate_state.dragged_axis.is_some() {
             state.dragging = false;
             state.drag_started = false;
             state.dragged_entity = None;
@@ -662,28 +632,14 @@ fn handle_select_drag(
         if state.drag_started {
             if let Some(dragged_entity) = state.dragged_entity {
                 // Get list of selected entities to exclude from raycasting
-                let mut excluded_entities: Vec<Entity> = selected_query.iter()
-                    .map(|(e, _, _, _, _, _)| e)
-                    .collect();
-                // Exclude the FULL descendant tree of every selected entity
-                // (not just direct children) so a dragged Model never snaps
-                // its surface to its own child parts — and so selection
-                // adornments/wireframes don't interfere with the raycast.
-                {
-                    let mut stack: Vec<Entity> = excluded_entities.clone();
-                    while let Some(p) = stack.pop() {
-                        if let Ok(children) = children_query.get(p) {
-                            for k in children.iter() {
-                                excluded_entities.push(k);
-                                stack.push(k);
-                            }
-                        }
-                    }
-                }
-
+                // Everything that moves with the drag, captured at grab time.
+                let excluded_entities: Vec<Entity> = state.moving_set.iter().copied().collect();
                 // Retrieve leader initial state
-                let initial_leader_pos = state.initial_positions.get(&dragged_entity).cloned().unwrap_or(Vec3::ZERO);
-                let initial_leader_rot = state.initial_rotations.get(&dragged_entity).cloned().unwrap_or(Quat::IDENTITY);
+                let (initial_leader_pos, initial_leader_rot) = state
+                    .initial_world
+                    .get(&dragged_entity)
+                    .copied()
+                    .unwrap_or((Vec3::ZERO, Quat::IDENTITY));
 
                 // We need the leader's size for offset calculation. When BasePart
                 // is missing (Models, custom-mesh imports, partially-loaded
@@ -714,8 +670,16 @@ fn handle_select_drag(
                 let surface_hit = if state.drag_is_billboard_node {
                     None
                 } else {
-                    math_find_surface_with_normal(&ray, &all_parts_query, &excluded_entities)
-                        .map(|(pt, norm, ent)| (pt, norm, Some(ent)))
+                    // Part boxes first ("what you see is the snap surface"),
+                    // plus the physics colliders that are not parts, which
+                    // is how terrain and mesh geometry catch a drag too.
+                    crate::math_utils::find_drag_surface(
+                        &ray,
+                        &all_parts_query,
+                        &spatial_query,
+                        &excluded_entities,
+                        |e| all_parts_query.get(e).map(|(_, _, _, _, _, bp)| bp.is_some()).unwrap_or(false),
+                    )
                 };
 
                 // The grab pivot rotated into the current world frame.
@@ -741,7 +705,16 @@ fn handle_select_drag(
                     // surface. Compute the offset along the surface normal that
                     // makes that happen, then mix: keep the cursor-pivot
                     // tangent components, lift to flush along the normal.
-                    let offset = math_calculate_surface_offset(&leader_size, &initial_leader_rot, &hit_normal);
+                    // Rest the WHOLE group on the surface: for one part the
+                    // exact box offset, for several the distance from the
+                    // leader down to the group's lowest corner.
+                    let offset = if state.selected_count > 1 {
+                        crate::math_utils::group_support_distance(
+                            state.group_bounds_min, state.group_bounds_max, initial_leader_pos, hit_normal,
+                        ) + crate::math_utils::SURFACE_SNAP_CLEARANCE
+                    } else {
+                        math_calculate_surface_offset(&leader_size, &initial_leader_rot, &hit_normal)
+                    };
                     let flush_along_normal = hit_point + hit_normal * offset;
                     // Strip the grab_offset_world's component along the
                     // surface normal so the part's contact face sits ON the
@@ -940,32 +913,26 @@ fn handle_select_drag(
                     }
                     if is_descendant { continue; }
 
-                    if let (Some(initial_pos), Some(initial_rot)) = (state.initial_positions.get(&entity), state.initial_rotations.get(&entity)) {
-                        
-                        // New Position = Pivot + RotationDelta * (InitialPos - Pivot) + TranslationDelta
-                        // (Rotate around pivot, then translate to new location)
-                        // Actually:
-                        // 1. Relative pos from pivot: rel = initial - pivot
-                        // 2. Rotate rel: rel_rot = rot_delta * rel
-                        // 3. New pos = final_target_pos + rel_rot (since final_target_pos IS the new pivot location)
-                        
-                        let relative_pos = *initial_pos - pivot;
-                        let rotated_relative_pos = rotation_delta * relative_pos;
-                        let raw_pos = final_target_pos + rotated_relative_pos;
-                        // Clamp NaN + cap at MAX_WORLD_EXTENT (5000)
-                        // before writing — drag-into-the-sky shouldn't
-                        // be able to teleport the part to ±∞ where
-                        // Avian's AABB math overflows into NaN.
+                    if let Some((initial_pos, initial_rot)) = state.initial_world.get(&entity).copied() {
+                        // Rigid group move in WORLD space: every entity keeps
+                        // its world offset from the leader, then the pose is
+                        // written back through its own parent.
+                        let relative_pos = initial_pos - pivot;
+                        let world_pos = final_target_pos + rotation_delta * relative_pos;
+                        let world_rot = rotation_delta * initial_rot;
+                        let parent_gt = parent_query
+                            .get(entity)
+                            .ok()
+                            .and_then(|c| global_transforms.get(c.parent()).ok());
+                        let (local_pos, local_rot) =
+                            crate::math_utils::world_to_local_pose(parent_gt, world_pos, world_rot);
+                        // Clamp NaN + cap at MAX_WORLD_EXTENT before writing.
                         let new_pos = crate::space::instance_loader::safe_translation(
-                            raw_pos, *initial_pos,
+                            local_pos, transform.translation,
                         );
-
-                        let new_rot = rotation_delta * *initial_rot;
-
+                        let new_rot = local_rot;
                         transform.translation = new_pos;
                         transform.rotation = new_rot;
-
-                        // Update BasePart
                         if let Some(mut bp) = basepart_opt {
                             bp.cframe.translation = new_pos;
                             bp.cframe.rotation = new_rot;
@@ -1030,6 +997,9 @@ fn handle_select_drag(
         state.dragged_entity = None;
         state.initial_positions.clear();
         state.initial_rotations.clear();
+        state.initial_world.clear();
+        state.moving_set.clear();
+        state.selected_count = 0;
         // Reset group bounds
         state.group_center = Vec3::ZERO;
         state.group_bounds_min = Vec3::ZERO;
@@ -1059,82 +1029,77 @@ fn handle_select_drag(
     let rotate_pressed = keys.just_pressed(KeyCode::KeyR);
     let tilt_pressed = keys.just_pressed(KeyCode::KeyT);
     if rotate_pressed || tilt_pressed {
-        // Group centroid — average of every selected part's current
-        // translation. For single-select this collapses to the part's
-        // own position, so the pivot is always sensible.
+        // Skip children of already-selected entities: they turn with their
+        // parent. Everything here is in WORLD space, written back through
+        // each entity's parent, so a group spanning several parents pivots
+        // as one rigid body.
+        let selected_entities: std::collections::HashSet<Entity> =
+            selected_query.iter().map(|(e, ..)| e).collect();
         let mut group_center = Vec3::ZERO;
         let mut count = 0;
-        for (_, transform, _, _, _, _) in selected_query.iter() {
-            group_center += transform.translation;
+        for (entity, _, global, _, _, _) in selected_query.iter() {
+            if has_selected_ancestor(entity, &selected_entities, &parent_query) { continue; }
+            group_center += global.translation();
             count += 1;
         }
         if count == 0 {
             return;
         }
         group_center /= count as f32;
-
-        // Skip children of already-selected entities: rotating a
-        // Model's root part would double-transform its mesh children
-        // if the hierarchy is intact. The descendant filter below
-        // walks `ChildOf` until it hits a selected ancestor; if one
-        // exists the child gets skipped so only the top-of-selection
-        // entities move.
-        let selected_entities: std::collections::HashSet<Entity> =
-            selected_query.iter().map(|(e, ..)| e).collect();
-
+        let mut delta = Quat::IDENTITY;
         if rotate_pressed {
-            let rotation = Quat::from_rotation_y(90.0_f32.to_radians());
-            for (entity, mut transform, _, _, _, _) in selected_query.iter_mut() {
-                let mut is_descendant = false;
-                let mut current = entity;
-                while let Ok(child_of) = parent_query.get(current) {
-                    let parent_entity = child_of.parent();
-                    if selected_entities.contains(&parent_entity) {
-                        is_descendant = true;
-                        break;
-                    }
-                    current = parent_entity;
-                }
-                if is_descendant { continue; }
-                let relative_pos = transform.translation - group_center;
-                transform.translation = group_center + rotation * relative_pos;
-                transform.rotate_y(90.0_f32.to_radians());
-                // Keep drag caches in sync so if the user IS mid-drag
-                // the next frame's drag-follow doesn't snap the
-                // rotation back.
-                state.initial_positions.insert(entity, transform.translation);
-                state.initial_rotations.insert(entity, transform.rotation);
-            }
+            delta = Quat::from_rotation_y(90.0_f32.to_radians()) * delta;
         }
-
         if tilt_pressed {
-            let tilt = Quat::from_rotation_z(90.0_f32.to_radians());
-            for (entity, mut transform, _, _, _, _) in selected_query.iter_mut() {
-                let mut is_descendant = false;
-                let mut current = entity;
-                while let Ok(child_of) = parent_query.get(current) {
-                    let parent_entity = child_of.parent();
-                    if selected_entities.contains(&parent_entity) {
-                        is_descendant = true;
-                        break;
-                    }
-                    current = parent_entity;
-                }
-                if is_descendant { continue; }
-                let relative_pos = transform.translation - group_center;
-                transform.translation = group_center + tilt * relative_pos;
-                transform.rotate_z(90.0_f32.to_radians());
-                state.initial_positions.insert(entity, transform.translation);
-                state.initial_rotations.insert(entity, transform.rotation);
+            delta = Quat::from_rotation_z(90.0_f32.to_radians()) * delta;
+        }
+        for (entity, mut transform, global, _, _, basepart_opt) in selected_query.iter_mut() {
+            if has_selected_ancestor(entity, &selected_entities, &parent_query) { continue; }
+            let world = global.compute_transform();
+            let world_pos = group_center + delta * (world.translation - group_center);
+            let world_rot = delta * world.rotation;
+            let parent_gt = parent_query
+                .get(entity)
+                .ok()
+                .and_then(|c| global_transforms.get(c.parent()).ok());
+            let (local_pos, local_rot) =
+                crate::math_utils::world_to_local_pose(parent_gt, world_pos, world_rot);
+            transform.translation = local_pos;
+            transform.rotation = local_rot;
+            if let Some(mut bp) = basepart_opt {
+                bp.cframe.translation = local_pos;
+                bp.cframe.rotation = local_rot;
             }
+            // Keep the drag caches in sync so a drag in flight does not
+            // snap the rotation back next frame.
+            state.initial_positions.insert(entity, local_pos);
+            state.initial_rotations.insert(entity, local_rot);
+            state.initial_world.insert(entity, (world_pos, world_rot));
         }
     }
-    
     // `+` / `-` nudging lives in `keybindings.rs::nudge_selection_system`
     // exclusively — that handler uses a proper first-press + auto-repeat
     // timer. A duplicate `pressed()`-based handler used to live here and
     // fired once per frame while the key was held, producing a double-
     // or N-unit jump for every tap. Removed.
+}
+
+/// True when any ancestor of `entity` is in `selected`: such an entity moves
+/// with its parent and must not be transformed a second time.
+fn has_selected_ancestor(
+    entity: Entity,
+    selected: &std::collections::HashSet<Entity>,
+    parent_query: &Query<&ChildOf>,
+) -> bool {
+    let mut current = entity;
+    while let Ok(child_of) = parent_query.get(current) {
+        let parent = child_of.parent();
+        if selected.contains(&parent) {
+            return true;
+        }
+        current = parent;
+    }
+    false
 }
 
 /// Ray-OBB intersection returning distance (for paste raycasting)
@@ -1356,57 +1321,22 @@ fn handle_box_selection(
                 // camera being selected). Locked parts are also skipped.
                 let Some(bp) = basepart else { continue; };
                 if bp.locked { continue; }
-
-                // Project the entity's full OBB to screen-space and test
-                // RECTANGLE INTERSECTION rather than center containment.
-                // A long horizontal bar (5×1×1) with its center outside
-                // the marquee but most of its body inside should still
-                // select — matches Blender / Maya convention.
+                // Roblox-style marquee: a part is inside the box when its
+                // CENTER projects inside the rectangle. Edge-touch selection
+                // grabbed every large part the rectangle merely brushed, so a
+                // small box over a floor took the floor with it.
                 let t = transform.compute_transform();
-                let size = bp.size;
-                let half = size * 0.5;
-                let corners = [
-                    Vec3::new(-half.x, -half.y, -half.z),
-                    Vec3::new( half.x, -half.y, -half.z),
-                    Vec3::new(-half.x,  half.y, -half.z),
-                    Vec3::new( half.x,  half.y, -half.z),
-                    Vec3::new(-half.x, -half.y,  half.z),
-                    Vec3::new( half.x, -half.y,  half.z),
-                    Vec3::new(-half.x,  half.y,  half.z),
-                    Vec3::new( half.x,  half.y,  half.z),
-                ];
-                let mut ent_min_x = f32::MAX;
-                let mut ent_max_x = f32::MIN;
-                let mut ent_min_y = f32::MAX;
-                let mut ent_max_y = f32::MIN;
-                let mut projected_any = false;
-                for c in corners {
-                    let world_corner = t.translation + t.rotation * c;
-                    if let Ok(sp) = camera.world_to_viewport(camera_transform, world_corner) {
-                        // Bevy 0.18 `world_to_viewport` returns PHYSICAL pixels
-                        // when the camera has an explicit `Viewport` (which is
-                        // the Slint-hosted case). Scale back to LOGICAL to
-                        // match the rect (built from logical-pixel cursor +
-                        // logical-pixel viewport offset).
-                        let s = window.scale_factor() as f32;
-                        let s = if s > 0.0 { s } else { 1.0 };
-                        let sp_logical = Vec2::new(sp.x / s, sp.y / s);
-                        ent_min_x = ent_min_x.min(sp_logical.x);
-                        ent_max_x = ent_max_x.max(sp_logical.x);
-                        ent_min_y = ent_min_y.min(sp_logical.y);
-                        ent_max_y = ent_max_y.max(sp_logical.y);
-                        projected_any = true;
-                    }
-                }
-                if !projected_any { continue; }
+                let Ok(sp) = camera.world_to_viewport(camera_transform, t.translation) else { continue };
+                // `world_to_viewport` answers in PHYSICAL pixels for a camera
+                // with an explicit `Viewport`; the rect is window-logical.
+                let s = window.scale_factor() as f32;
+                let s = if s > 0.0 { s } else { 1.0 };
+                let center_logical = Vec2::new(sp.x / s, sp.y / s);
                 projected_count += 1;
-
-                // Standard AABB-AABB overlap test in WINDOW space (the projected
-                // corners and the rect are both window-logical now).
-                let overlaps = ent_max_x >= win_min_x
-                    && ent_min_x <= win_max_x
-                    && ent_max_y >= win_min_y
-                    && ent_min_y <= win_max_y;
+                let overlaps = center_logical.x >= win_min_x
+                    && center_logical.x <= win_max_x
+                    && center_logical.y >= win_min_y
+                    && center_logical.y <= win_max_y;
                 if overlaps {
                     overlap_count += 1;
                     // The selection id MUST be the entity index/generation — that

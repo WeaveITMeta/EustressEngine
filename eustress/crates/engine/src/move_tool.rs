@@ -68,6 +68,19 @@ pub struct MoveToolState {
     pub free_drag: bool,
     /// The entity whose body was clicked to start a free drag
     pub dragged_entity: Option<Entity>,
+    /// World-space pose of every selected entity at drag start. The drag
+    /// math runs in world space and is written back through each entity's
+    /// parent, so a selection spanning different parents moves as one rigid
+    /// body.
+    pub initial_world: std::collections::HashMap<Entity, (Vec3, Quat)>,
+    /// The selection plus every descendant: never a surface, a face-contact
+    /// candidate or a guide for the drag, or the group lands on itself.
+    pub moving_set: std::collections::HashSet<Entity>,
+    /// World AABB of the selection at drag start, for resting the whole
+    /// group on a surface rather than only its leader.
+    pub group_bounds_min: Vec3,
+    pub group_bounds_max: Vec3,
+    pub selected_count: usize,
 }
 
 impl Default for MoveToolState {
@@ -87,6 +100,11 @@ impl Default for MoveToolState {
             drag_start_pos: Vec2::ZERO,
             free_drag: false,
             dragged_entity: None,
+            initial_world: std::collections::HashMap::new(),
+            moving_set: std::collections::HashSet::new(),
+            group_bounds_min: Vec3::ZERO,
+            group_bounds_max: Vec3::ZERO,
+            selected_count: 0,
         }
     }
 }
@@ -143,6 +161,7 @@ impl Plugin for MoveToolPlugin {
             .add_systems(Update, (
                 manage_tool_activation,
                 handle_move_interaction,
+                enforce_drag_collisions,
                 finalize_numeric_input_on_move,
             ).chain());
     }
@@ -489,6 +508,8 @@ fn handle_move_interaction(
             state.dragged_entity = None;
             state.initial_positions.clear();
             state.initial_rotations.clear();
+            state.initial_world.clear();
+            state.moving_set.clear();
             state.initial_units_offsets.clear();
             return;
         }
@@ -631,7 +652,10 @@ fn handle_move_interaction(
 
             state.initial_positions.clear();
             state.initial_rotations.clear();
+            state.initial_world.clear();
+            state.moving_set.clear();
             state.initial_units_offsets.clear();
+            snapshot_world_poses(&mut state, &query, &children_query);
             for (entity, _, transform, _) in query.iter() {
                 state.initial_positions.insert(entity, transform.translation);
                 state.initial_rotations.insert(entity, transform.rotation);
@@ -667,7 +691,10 @@ fn handle_move_interaction(
             // Store initial state for all selected parts
             state.initial_positions.clear();
             state.initial_rotations.clear();
+            state.initial_world.clear();
+            state.moving_set.clear();
             state.initial_units_offsets.clear();
+            snapshot_world_poses(&mut state, &query, &children_query);
             for (entity, _, transform, _) in query.iter() {
                 state.initial_positions.insert(entity, transform.translation);
                 state.initial_rotations.insert(entity, transform.rotation);
@@ -715,7 +742,10 @@ fn handle_move_interaction(
 
                 state.initial_positions.clear();
                 state.initial_rotations.clear();
+                state.initial_world.clear();
+                state.moving_set.clear();
                 state.initial_units_offsets.clear();
+                snapshot_world_poses(&mut state, &query, &children_query);
                 for (ent, _, transform, _) in query.iter() {
                     state.initial_positions.insert(ent, transform.translation);
                     state.initial_rotations.insert(ent, transform.rotation);
@@ -773,10 +803,18 @@ fn handle_move_interaction(
 
                 for (entity, _, mut transform, base_part_opt) in query.iter_mut() {
                     if is_descendant(entity, &selected_set, &parent_query) { continue; }
-                    if let Some(initial_pos) = state.initial_positions.get(&entity) {
-                        let raw_pos = *initial_pos + snapped_delta;
+                    if let Some((initial_pos, initial_rot)) = state.initial_world.get(&entity).copied() {
+                        // World-space delta, written back in the entity's own parent frame.
+                        let parent_gt = parent_query
+                            .get(entity)
+                            .ok()
+                            .and_then(|c| child_global_transforms.get(c.parent()).ok())
+                            .map(|(gt, _)| gt);
+                        let (local_pos, _) = crate::math_utils::world_to_local_pose(
+                            parent_gt, initial_pos + snapped_delta, initial_rot,
+                        );
                         let new_pos = crate::space::instance_loader::safe_translation(
-                            raw_pos, *initial_pos,
+                            local_pos, transform.translation,
                         );
                         transform.translation = new_pos;
                         if let Some(mut bp) = base_part_opt {
@@ -822,10 +860,18 @@ fn handle_move_interaction(
                         }
                         continue;
                     }
-                    if let Some(initial_pos) = state.initial_positions.get(&entity) {
-                        let raw_pos = *initial_pos + axis_vec * snapped_delta;
+                    if let Some((initial_pos, initial_rot)) = state.initial_world.get(&entity).copied() {
+                        // World-space delta, written back in the entity's own parent frame.
+                        let parent_gt = parent_query
+                            .get(entity)
+                            .ok()
+                            .and_then(|c| child_global_transforms.get(c.parent()).ok())
+                            .map(|(gt, _)| gt);
+                        let (local_pos, _) = crate::math_utils::world_to_local_pose(
+                            parent_gt, initial_pos + axis_vec * snapped_delta, initial_rot,
+                        );
                         let new_pos = crate::space::instance_loader::safe_translation(
-                            raw_pos, *initial_pos,
+                            local_pos, transform.translation,
                         );
                         transform.translation = new_pos;
                         if let Some(mut bp) = base_part_opt {
@@ -837,12 +883,11 @@ fn handle_move_interaction(
         } else if state.free_drag {
             // Free drag — surface snapping (same as select tool)
             // Exclude selected entities AND their children (adornments) from raycast
-            let mut selected_entities: Vec<Entity> = query.iter().map(|(e, ..)| e).collect();
-            for parent in selected_entities.clone() {
-                if let Ok(children) = children_query.get(parent) {
-                    selected_entities.extend(children.iter());
-                }
-            }
+            // Everything that moves with the drag, to the last descendant. A
+            // Model dragged with only its direct children excluded landed on
+            // its own grandchildren and climbed itself one frame at a time.
+            let selected_entities: Vec<Entity> = state.moving_set.iter().copied().collect();
+            let moving_set = state.moving_set.clone();
 
             let surface_hit = find_surface_with_physics(&spatial_query, &ray, &selected_entities)
                 .map(|(pt, norm, ent)| (pt, norm, Some(ent)))
@@ -870,12 +915,21 @@ fn handle_move_interaction(
                     }
                 })
                 .unwrap_or(Vec3::ONE);
-            let leader_rot = dragged_entity
-                .and_then(|e| state.initial_rotations.get(&e).copied())
-                .unwrap_or(Quat::IDENTITY);
-            let leader_initial = dragged_entity
-                .and_then(|e| state.initial_positions.get(&e).copied())
-                .unwrap_or(state.group_center);
+            let (leader_initial, leader_rot) = dragged_entity
+                .and_then(|e| state.initial_world.get(&e).copied())
+                .unwrap_or((state.group_center, Quat::IDENTITY));
+            // Rest the WHOLE group on a surface: for one part the exact box
+            // offset, for several the distance from the leader down to the
+            // group's lowest corner (a taller companion sank into the floor).
+            let (gb_min, gb_max, sel_count) = (state.group_bounds_min, state.group_bounds_max, state.selected_count);
+            let flush_offset = |n: &Vec3| -> f32 {
+                if sel_count > 1 {
+                    crate::math_utils::group_support_distance(gb_min, gb_max, leader_initial, *n)
+                        + crate::math_utils::SURFACE_SNAP_CLEARANCE
+                } else {
+                    calculate_surface_offset(&leader_size, &leader_rot, n)
+                }
+            };
 
             // Phase-1 vertex/edge/face snap — if the user is holding
             // V / E / F during drag, override the cursor-derived target
@@ -891,6 +945,7 @@ fn handle_move_interaction(
                         .unwrap_or(state.group_center);
                     let candidates: Vec<crate::geom_snap::SnapCandidate> = snap_candidates_q
                         .iter()
+                        .filter(|(e, _, _)| !moving_set.contains(e))
                         .map(|(e, gt, bp)| {
                             let t = gt.compute_transform();
                             crate::geom_snap::SnapCandidate {
@@ -911,14 +966,14 @@ fn handle_move_interaction(
             let cursor_pos = if let Some(p) = snap_override {
                 p
             } else if let Some((hit_point, hit_normal, _)) = surface_hit.as_ref() {
-                let offset = calculate_surface_offset(&leader_size, &leader_rot, hit_normal);
+                let offset = flush_offset(hit_normal);
                 hit_point + *hit_normal * offset
             } else {
                 // No surface hit — fall back to horizontal plane at group_center height.
                 if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, state.group_center, Vec3::Y) {
                     let t = t.min(2000.0);
                     let ground = ray.origin + *ray.direction * t;
-                    let offset = calculate_surface_offset(&leader_size, &leader_rot, &Vec3::Y);
+                    let offset = flush_offset(&Vec3::Y);
                     Vec3::new(ground.x, offset, ground.z)
                 } else {
                     leader_initial
@@ -938,6 +993,7 @@ fn handle_move_interaction(
             let face_contact: Option<crate::math_utils::FaceContactResult> = if snap_override.is_none() {
                 let candidates: Vec<(Vec3, Vec3, Quat)> = snap_candidates_q
                     .iter()
+                    .filter(|(e, _, _)| !moving_set.contains(e))
                     .map(|(_, gt, bp)| {
                         let t = gt.compute_transform();
                         (t.translation, bp.size, t.rotation)
@@ -1085,16 +1141,24 @@ fn handle_move_interaction(
 
             for (entity, _, mut transform, base_part_opt) in query.iter_mut() {
                 if is_descendant(entity, &selected_set, &parent_query) { continue; }
-                if let Some(initial_pos) = state.initial_positions.get(&entity) {
-                    let initial_rot = state.initial_rotations.get(&entity).copied().unwrap_or(Quat::IDENTITY);
-                    let rel = *initial_pos - pivot;
-                    let (raw_pos, new_rot) = if let Some(q) = align_rotation {
+                if let Some((initial_pos, initial_rot)) = state.initial_world.get(&entity).copied() {
+                    // Rigid group move in WORLD space, written back through
+                    // the entity's own parent.
+                    let rel = initial_pos - pivot;
+                    let (world_pos, world_rot) = if let Some(q) = align_rotation {
                         (final_target + q * rel, q * initial_rot)
                     } else {
                         (final_target + rel, initial_rot)
                     };
+                    let parent_gt = parent_query
+                        .get(entity)
+                        .ok()
+                        .and_then(|c| child_global_transforms.get(c.parent()).ok())
+                        .map(|(gt, _)| gt);
+                    let (local_pos, new_rot) =
+                        crate::math_utils::world_to_local_pose(parent_gt, world_pos, world_rot);
                     let new_pos = crate::space::instance_loader::safe_translation(
-                        raw_pos, *initial_pos,
+                        local_pos, transform.translation,
                     );
                     transform.translation = new_pos;
                     if align_rotation.is_some() {
@@ -1170,6 +1234,8 @@ fn handle_move_interaction(
         state.dragged_entity = None;
         state.initial_positions.clear();
         state.initial_rotations.clear();
+        state.initial_world.clear();
+        state.moving_set.clear();
     }
 }
 
@@ -1261,6 +1327,8 @@ fn finalize_numeric_input_on_move(
         state.dragged_entity = None;
         state.initial_positions.clear();
         state.initial_rotations.clear();
+        state.initial_world.clear();
+        state.moving_set.clear();
     }
 }
 
@@ -1492,4 +1560,100 @@ fn is_descendant(
         current = parent;
     }
     false
+}
+
+/// Roblox's "Collisions" toggle: while a drag is in progress, a selected part
+/// that would end the frame inside another part is put back where it was at
+/// the end of the previous frame, so the drag stops at the obstacle instead
+/// of passing through it.
+///
+/// Runs right after the move interaction (and covers the Select tool's
+/// surface drag too) by testing each selected BasePart's box, shrunk two
+/// percent so parts placed flush against a neighbour are not "colliding",
+/// against every collider outside the selection and its descendants.
+pub fn enforce_drag_collisions(
+    settings: Res<EditorSettings>,
+    move_state: Res<MoveToolState>,
+    select_state: Option<Res<crate::select_tool::SelectToolState>>,
+    spatial_query: SpatialQuery,
+    mut selected: Query<(Entity, &mut Transform, Option<&mut crate::classes::BasePart>), With<Selected>>,
+    children_query: Query<&Children>,
+    mut last_good: Local<std::collections::HashMap<Entity, (Vec3, Quat)>>,
+) {
+    use avian3d::prelude::{Collider, SpatialQueryFilter};
+
+    let dragging = move_state.dragged_axis.is_some()
+        || move_state.dragged_plane.is_some()
+        || move_state.free_drag
+        || select_state.as_ref().map(|s| s.dragging).unwrap_or(false);
+    if !settings.collisions_enabled || !dragging {
+        last_good.clear();
+        return;
+    }
+
+    // The moving set: the selection and everything under it.
+    let mut excluded: std::collections::HashSet<Entity> = std::collections::HashSet::new();
+    let mut stack: Vec<Entity> = selected.iter().map(|(e, _, _)| e).collect();
+    while let Some(e) = stack.pop() {
+        if !excluded.insert(e) {
+            continue;
+        }
+        if let Ok(children) = children_query.get(e) {
+            stack.extend(children.iter());
+        }
+    }
+    let filter = SpatialQueryFilter::default().with_excluded_entities(excluded.iter().copied());
+
+    let blocked = selected.iter().any(|(_, transform, base_part)| {
+        let Some(bp) = base_part else { return false };
+        let size = (bp.size * 0.98).max(Vec3::splat(0.01));
+        let collider = Collider::cuboid(size.x, size.y, size.z);
+        !spatial_query
+            .shape_intersections(&collider, transform.translation, transform.rotation, &filter)
+            .is_empty()
+    });
+
+    if blocked {
+        for (entity, mut transform, base_part) in selected.iter_mut() {
+            if let Some((pos, rot)) = last_good.get(&entity).copied() {
+                transform.translation = pos;
+                transform.rotation = rot;
+                if let Some(mut bp) = base_part {
+                    bp.cframe.translation = pos;
+                    bp.cframe.rotation = rot;
+                }
+            }
+        }
+    } else {
+        for (entity, transform, _) in selected.iter() {
+            last_good.insert(entity, (transform.translation, transform.rotation));
+        }
+    }
+}
+
+/// Capture what every drag branch needs beyond the local poses: the world
+/// pose of each selected entity, the selection's world bounds, and the
+/// moving set (selection plus every descendant).
+fn snapshot_world_poses(
+    state: &mut MoveToolState,
+    query: &Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>), With<Selected>>,
+    children: &Query<&Children>,
+) {
+    state.initial_world.clear();
+    let mut bounds_min = Vec3::splat(f32::MAX);
+    let mut bounds_max = Vec3::splat(f32::MIN);
+    for (entity, gt, _, base_part) in query.iter() {
+        let world = gt.compute_transform();
+        state.initial_world.insert(entity, (world.translation, world.rotation));
+        let size = base_part.map(|bp| bp.size).unwrap_or(world.scale);
+        let (mn, mx) = calculate_rotated_aabb(world.translation, size * 0.5, world.rotation);
+        bounds_min = bounds_min.min(mn);
+        bounds_max = bounds_max.max(mx);
+    }
+    state.selected_count = state.initial_world.len();
+    if state.selected_count > 0 {
+        state.group_bounds_min = bounds_min;
+        state.group_bounds_max = bounds_max;
+    }
+    state.moving_set = crate::math_utils::moving_set(state.initial_world.keys().copied(), children);
 }

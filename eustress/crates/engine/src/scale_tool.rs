@@ -38,6 +38,9 @@ pub struct ScaleToolState {
     pub dragged_entity: Option<Entity>,
     pub initial_scales: std::collections::HashMap<Entity, Vec3>,
     pub initial_positions: std::collections::HashMap<Entity, Vec3>,
+    /// World pose of every selected entity at drag start, so a one-sided
+    /// resize moves a parented part correctly in world space.
+    pub initial_world: std::collections::HashMap<Entity, (Vec3, Quat)>,
     pub group_center: Vec3,
     /// Gizmo rotation captured at drag start. `IDENTITY` for World mode,
     /// active entity's rotation for Local. Unused in current drag math
@@ -377,6 +380,9 @@ fn handle_scale_interaction(
     parent_query: Query<&ChildOf>,
     mut undo_stack: ResMut<crate::undo::UndoStack>,
     mut extras: ScaleToolExtras,
+    // Parents' world transforms: a one-sided resize shifts the part in world
+    // space and the pose is written back in its own parent's frame.
+    parent_transforms: Query<&GlobalTransform, Without<Selected>>,
 ) {
     if !state.active {
         // Clear stale hover state so the gizmo doesn't briefly flash a
@@ -418,6 +424,7 @@ fn handle_scale_interaction(
             state.dragged_entity = None;
             state.initial_scales.clear();
             state.initial_positions.clear();
+            state.initial_world.clear();
             return;
         }
     }
@@ -504,10 +511,13 @@ fn handle_scale_interaction(
 
             state.initial_scales.clear();
             state.initial_positions.clear();
-            for (ent, _, trans, bp_opt, _, _, _) in query.iter() {
+            state.initial_world.clear();
+            for (ent, gt, trans, bp_opt, _, _, _) in query.iter() {
                 let ent_size = bp_opt.as_ref().map(|bp| bp.size).unwrap_or(Vec3::ONE);
                 state.initial_scales.insert(ent, ent_size);
                 state.initial_positions.insert(ent, trans.translation);
+                let world = gt.compute_transform();
+                state.initial_world.insert(ent, (world.translation, world.rotation));
                 commands.entity(ent).insert(
                     crate::space::instance_loader::BeingDragged,
                 );
@@ -648,7 +658,20 @@ fn handle_scale_interaction(
                             ScaleAxis::Uniform => Vec3::ZERO,
                         };
                         let world_offset = state.drag_rotation * gizmo_offset;
-                        let new_pos = *initial_pos + world_offset;
+                        // The shift is a world-space vector; apply it to the
+                        // world pose and write back in the parent's frame.
+                        let (init_world_pos, init_world_rot) = state
+                            .initial_world
+                            .get(&entity)
+                            .copied()
+                            .unwrap_or((*initial_pos, transform.rotation));
+                        let parent_gt = parent_query
+                            .get(entity)
+                            .ok()
+                            .and_then(|c| parent_transforms.get(c.parent()).ok());
+                        let (new_pos, _) = crate::math_utils::world_to_local_pose(
+                            parent_gt, init_world_pos + world_offset, init_world_rot,
+                        );
                         // Mid-drag: defer mesh regen.
                         apply_size_to_entity(
                             &mut transform, basepart_opt, part_opt, mesh_opt,
@@ -782,6 +805,7 @@ fn handle_scale_interaction(
         state.dragged_entity = None;
         state.initial_scales.clear();
         state.initial_positions.clear();
+        state.initial_world.clear();
     }
 }
 
@@ -975,6 +999,7 @@ fn finalize_numeric_input_on_scale(
         state.dragged_entity = None;
         state.initial_scales.clear();
         state.initial_positions.clear();
+        state.initial_world.clear();
     }
 }
 

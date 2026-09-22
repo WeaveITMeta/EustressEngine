@@ -354,6 +354,12 @@ pub fn find_surface_under_cursor_with_normal<T: bevy::ecs::query::QueryFilter>(
         if excluded_entities.contains(&entity) {
             continue;
         }
+        // Only real parts are surfaces. Gizmo handles, selection wireframes
+        // and other adornment meshes carry neither component; treating them
+        // as surfaces let a dragged part climb its own gizmo every frame.
+        if base_part.is_none() && _instance.is_none() {
+            continue;
+        }
 
         let t_world = global_transform.compute_transform();
         let size = base_part.map(|bp| bp.size).unwrap_or(t_world.scale);
@@ -719,4 +725,107 @@ pub fn find_face_contact(
         target_rot,
         target_size,
     })
+}
+
+/// The local pose that puts an entity at `world_pos` / `world_rot` under
+/// `parent` (`None` for a world-root entity).
+///
+/// Every drag computes in world space and writes back through this, so a
+/// selection spanning different parents (a Part inside a Model next to a
+/// Part at the Workspace root) moves as one rigid body. Mixing a parented
+/// entity's LOCAL translation into world-space drag math offset it by its
+/// parent's position, which is what "certain parts jump by an unknown
+/// length" looked like.
+pub fn world_to_local_pose(
+    parent: Option<&GlobalTransform>,
+    world_pos: Vec3,
+    world_rot: Quat,
+) -> (Vec3, Quat) {
+    match parent {
+        Some(p) => {
+            let (_, parent_rot, _) = p.to_scale_rotation_translation();
+            let local_pos = p.affine().inverse().transform_point3(world_pos);
+            (local_pos, parent_rot.inverse() * world_rot)
+        }
+        None => (world_pos, world_rot),
+    }
+}
+
+/// `roots` plus every descendant: the set that travels together during a
+/// drag. Nothing in it may serve as a surface, a face-contact candidate or
+/// an alignment guide for the drag, or the group lands on its own children
+/// and climbs itself one frame at a time.
+pub fn moving_set(
+    roots: impl IntoIterator<Item = Entity>,
+    children: &Query<&Children>,
+) -> std::collections::HashSet<Entity> {
+    let mut set = std::collections::HashSet::new();
+    let mut stack: Vec<Entity> = roots.into_iter().collect();
+    while let Some(e) = stack.pop() {
+        if !set.insert(e) {
+            continue;
+        }
+        if let Ok(kids) = children.get(e) {
+            stack.extend(kids.iter());
+        }
+    }
+    set
+}
+
+/// How far a rigid group reaches from `pivot` against `normal`: the
+/// distance, along `normal`, from the pivot down to the group's lowest
+/// corner. Add [`SURFACE_SNAP_CLEARANCE`] and you have the offset that
+/// rests the WHOLE group on a surface, not just its leader; with the
+/// leader-only offset a taller companion part sank into the floor.
+pub fn group_support_distance(bounds_min: Vec3, bounds_max: Vec3, pivot: Vec3, normal: Vec3) -> f32 {
+    let n = normal.normalize_or_zero();
+    let mut best = 0.0f32;
+    for i in 0..8 {
+        let corner = Vec3::new(
+            if i & 1 == 0 { bounds_min.x } else { bounds_max.x },
+            if i & 2 == 0 { bounds_min.y } else { bounds_max.y },
+            if i & 4 == 0 { bounds_min.z } else { bounds_max.z },
+        );
+        best = best.max((pivot - corner).dot(n));
+    }
+    best
+}
+
+/// The surface under the cursor for a drag: the nearest of the visible
+/// part boxes (`find_surface_under_cursor_with_normal`, so "what you see is
+/// the snap surface") and the physics colliders that are NOT parts, which is
+/// how terrain and mesh geometry become droppable targets. `excluded` is the
+/// moving set; `is_part` tells the physics pass which hits the box pass
+/// already answered better.
+pub fn find_drag_surface<T: bevy::ecs::query::QueryFilter>(
+    ray: &Ray3d,
+    parts: &Query<(Entity, &GlobalTransform, &Mesh3d, Option<&crate::rendering::PartEntity>, Option<&crate::classes::Instance>, Option<&crate::classes::BasePart>), T>,
+    spatial_query: &avian3d::prelude::SpatialQuery,
+    excluded: &[Entity],
+    is_part: impl Fn(Entity) -> bool,
+) -> Option<(Vec3, Vec3, Option<Entity>)> {
+    use avian3d::prelude::SpatialQueryFilter;
+
+    let box_hit = find_surface_under_cursor_with_normal(ray, parts, excluded)
+        .map(|(pt, n, e)| ((pt - ray.origin).length(), pt, n, Some(e)));
+
+    let physics_hit = Dir3::new(*ray.direction).ok().and_then(|dir| {
+        let filter = SpatialQueryFilter::default().with_excluded_entities(excluded.iter().copied());
+        let mut hits = spatial_query.ray_hits(ray.origin, dir, 1000.0, 16, true, &filter);
+        hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+        hits.into_iter()
+            .find(|h| !is_part(h.entity) && h.distance.is_finite() && h.distance > 0.0)
+            .map(|h| {
+                let n = h.normal.normalize_or_zero();
+                let n = if n.length_squared() > 0.5 { n } else { Vec3::Y };
+                (h.distance, ray.origin + *ray.direction * h.distance, n, Some(h.entity))
+            })
+    });
+
+    match (box_hit, physics_hit) {
+        (Some(b), Some(p)) => Some(if b.0 <= p.0 { (b.1, b.2, b.3) } else { (p.1, p.2, p.3) }),
+        (Some(b), None) => Some((b.1, b.2, b.3)),
+        (None, Some(p)) => Some((p.1, p.2, p.3)),
+        (None, None) => None,
+    }
 }

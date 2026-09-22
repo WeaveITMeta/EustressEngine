@@ -38,6 +38,10 @@ pub struct RotateToolState {
     pub initial_rotations: std::collections::HashMap<Entity, Quat>,
     /// Initial positions of ALL selected entities (for pivot rotation)
     pub initial_positions: std::collections::HashMap<Entity, Vec3>,
+    /// World pose of every selected entity at drag start: the rotation runs
+    /// in world space around the group pivot and is written back through
+    /// each entity's parent.
+    pub initial_world: std::collections::HashMap<Entity, (Vec3, Quat)>,
     /// Group center at drag start (pivot point)
     pub group_center: Vec3,
     /// Gizmo rotation captured at drag start. World mode → IDENTITY;
@@ -214,6 +218,7 @@ fn handle_rotate_interaction(
             state.dragged_axis = None;
             state.initial_rotations.clear();
             state.initial_positions.clear();
+            state.initial_world.clear();
             return;
         }
     }
@@ -256,7 +261,8 @@ fn handle_rotate_interaction(
         let snapshot: Vec<(Entity, Vec3, Quat, Vec3)> = query.iter()
             .map(|(e, gt, t, _)| {
                 let tr = gt.compute_transform();
-                (e, tr.translation, t.rotation, tr.scale)
+                let _ = t;
+                (e, tr.translation, tr.rotation, tr.scale)
             })
             .collect();
 
@@ -303,9 +309,16 @@ fn handle_rotate_interaction(
 
             state.initial_rotations.clear();
             state.initial_positions.clear();
+            state.initial_world.clear();
+            state.initial_world.clear();
             for (entity, pos, rot, _) in &snapshot {
-                state.initial_rotations.insert(*entity, *rot);
-                state.initial_positions.insert(*entity, *pos);
+                // World pose drives the math; the local pose is what Escape
+                // and undo restore.
+                state.initial_world.insert(*entity, (*pos, *rot));
+                if let Ok((_, _, local, _)) = query.get(*entity) {
+                    state.initial_rotations.insert(*entity, local.rotation);
+                    state.initial_positions.insert(*entity, local.translation);
+                }
                 commands.entity(*entity).insert(
                     crate::space::instance_loader::BeingDragged,
                 );
@@ -354,16 +367,22 @@ fn handle_rotate_interaction(
             for (entity, _, mut transform, basepart_opt) in query.iter_mut() {
                 if is_descendant(entity, &selected_set, &parent_query) { continue; }
 
-                if let (Some(init_rot), Some(init_pos)) = (
-                    state.initial_rotations.get(&entity),
-                    state.initial_positions.get(&entity),
-                ) {
-                    let (new_pos, new_rot) = if individual_pivot {
-                        (*init_pos, rotation_delta * *init_rot)
+                if let Some((init_pos, init_rot)) = state.initial_world.get(&entity).copied() {
+                    // World-space rotation about the pivot, written back in
+                    // the entity's own parent frame.
+                    let (world_pos, world_rot) = if individual_pivot {
+                        (init_pos, rotation_delta * init_rot)
                     } else {
-                        let rel = *init_pos - center;
-                        (center + rotation_delta * rel, rotation_delta * *init_rot)
+                        let rel = init_pos - center;
+                        (center + rotation_delta * rel, rotation_delta * init_rot)
                     };
+                    let parent_gt = parent_query
+                        .get(entity)
+                        .ok()
+                        .and_then(|c| child_transforms.get(c.parent()).ok())
+                        .map(|(gt, _)| gt);
+                    let (new_pos, new_rot) =
+                        crate::math_utils::world_to_local_pose(parent_gt, world_pos, world_rot);
 
                     transform.translation = new_pos;
                     transform.rotation = new_rot;
@@ -406,6 +425,7 @@ fn handle_rotate_interaction(
         state.dragged_axis = None;
         state.initial_rotations.clear();
         state.initial_positions.clear();
+        state.initial_world.clear();
     }
 }
 
@@ -485,6 +505,7 @@ fn finalize_numeric_input_on_rotate(
         state.dragged_axis = None;
         state.initial_rotations.clear();
         state.initial_positions.clear();
+        state.initial_world.clear();
     }
 }
 

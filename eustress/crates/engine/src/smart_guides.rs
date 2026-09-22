@@ -71,6 +71,8 @@ pub struct SmartGuidesState {
 fn refresh_guides(
     mut state: ResMut<SmartGuidesState>,
     candidates: Query<(Entity, &GlobalTransform, &BasePart), Without<Selected>>,
+    selected: Query<Entity, With<Selected>>,
+    children: Query<&Children>,
 ) {
     // Honor user toggle + cheap exit when nothing could snap.
     if !state.enabled {
@@ -83,8 +85,13 @@ fn refresh_guides(
 
     state.planes.clear();
     state.planes.reserve(candidates.iter().count() * 9);
-
+    // A dragged Model's own child parts are not `Selected`, but they move
+    // with it; as guides they pulled the drag toward itself every frame.
+    let moving = crate::math_utils::moving_set(selected.iter(), &children);
     for (entity, gt, bp) in candidates.iter() {
+        if moving.contains(&entity) {
+            continue;
+        }
         let t = gt.compute_transform();
         let (mn, mx) = calculate_rotated_aabb(t.translation, bp.size * 0.5, t.rotation);
         let center = (mn + mx) * 0.5;

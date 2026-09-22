@@ -3,7 +3,7 @@ use bevy::window::PrimaryWindow;
 use crate::rendering::PartEntity;
 use eustress_common::default_scene::PartEntityMarker;
 use crate::classes::{Instance, BasePart};
-use crate::selection_box::Selected;
+use crate::selection_box::{Hovered, Selected};
 use crate::math_utils::ray_obb_intersection;
 use crate::entity_utils::entity_to_id_string;
 
@@ -95,6 +95,259 @@ pub struct PartClickExtras<'w, 's> {
     pub collider_q: Query<'w, 's, (), With<avian3d::prelude::Collider>>,
 }
 
+/// The query every viewport pick walks: anything that can be clicked in
+/// edit mode. Shared by the click (`part_selection_system`) and the hover
+/// preview (`hover_highlight_system`) so both resolve the same entity.
+pub type PickQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        Option<&'static PartEntity>,
+        Option<&'static PartEntityMarker>,
+        Option<&'static Instance>,
+        &'static GlobalTransform,
+        Option<&'static Mesh3d>,
+        Option<&'static BasePart>,
+        Option<&'static ChildOf>,
+    ),
+    Or<(
+        With<PartEntityMarker>,
+        With<PartEntity>,
+        (With<BasePart>, With<Instance>),
+        (With<Instance>, With<bevy::camera::primitives::Aabb>, Without<Mesh3d>),
+    )>,
+>;
+
+/// What a viewport pick resolved to.
+pub struct PickHit {
+    /// The part (or splat cloud) under the ray.
+    pub entity: Entity,
+    /// The Model a plain click selects instead of the part, when the part
+    /// sits directly inside one.
+    pub parent_model: Option<Entity>,
+    pub distance: f32,
+}
+
+/// When to run the oriented-bounding-box test on top of the collider raycast.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ObbFallback {
+    /// Test every candidate: catches parts whose collider is stale or absent.
+    /// The click uses this; it runs once per click.
+    Always,
+    /// Only when the collider raycast found nothing. The hover preview uses
+    /// this because it runs on every cursor move.
+    OnColliderMiss,
+}
+
+/// Find the selectable part under `ray`.
+///
+/// Containers (Model, Folder, services), adornments and locked parts are
+/// never hit. The collider raycast answers first; the OBB test covers parts
+/// with no collider (splat clouds, mesh parts still loading) and, for the
+/// click, parts whose collider does not match their mesh.
+pub fn pick_under_cursor(
+    ray: &Ray3d,
+    parts: &PickQuery,
+    parent_query: &Query<&Instance>,
+    spatial_query: &avian3d::prelude::SpatialQuery,
+    aabb_q: &Query<&bevy::camera::primitives::Aabb>,
+    fallback: ObbFallback,
+) -> Option<PickHit> {
+    use avian3d::prelude::SpatialQueryFilter;
+
+    // entity -> the Model a plain click resolves it to
+    let mut candidates: std::collections::HashMap<Entity, Option<Entity>> =
+        std::collections::HashMap::new();
+    for (entity, part_entity, part_entity_marker, instance, _transform, _mesh, basepart, child_of) in parts.iter() {
+        if let Some(inst) = instance {
+            match inst.class_name {
+                crate::classes::ClassName::Folder
+                | crate::classes::ClassName::Model
+                | crate::classes::ClassName::ScreenGui
+                | crate::classes::ClassName::Frame
+                | crate::classes::ClassName::SoulScript
+                | crate::classes::ClassName::Workspace
+                | crate::classes::ClassName::Lighting
+                | crate::classes::ClassName::Camera => continue,
+                _ => {}
+            }
+        }
+        if part_entity.is_none() && part_entity_marker.is_none() && instance.is_none() {
+            continue;
+        }
+        if let Some(bp) = basepart {
+            if bp.locked {
+                continue;
+            }
+        }
+        let parent_model = child_of.and_then(|c| {
+            let parent = c.parent();
+            parent_query
+                .get(parent)
+                .ok()
+                .filter(|pi| pi.class_name == crate::classes::ClassName::Model)
+                .map(|_| parent)
+        });
+        candidates.insert(entity, parent_model);
+    }
+
+    let mut closest: Option<(Entity, f32)> = None;
+    if let Ok(dir) = Dir3::new(*ray.direction) {
+        spatial_query.ray_hits_callback(
+            ray.origin,
+            dir,
+            10000.0,
+            true,
+            &SpatialQueryFilter::default(),
+            |hit| {
+                if candidates.contains_key(&hit.entity)
+                    && closest.map_or(true, |(_, d)| hit.distance < d)
+                {
+                    closest = Some((hit.entity, hit.distance));
+                }
+                true
+            },
+        );
+    }
+
+    if fallback == ObbFallback::Always || closest.is_none() {
+        for (entity, _pe, _pem, _inst, transform, _mesh, basepart, _child_of) in parts.iter() {
+            if !candidates.contains_key(&entity) {
+                continue;
+            }
+            let t = transform.compute_transform();
+            let (obb_center, size) = if let Some(bp) = basepart {
+                (t.translation, bp.size)
+            } else if let Ok(aabb) = aabb_q.get(entity) {
+                let world_center = t.translation + t.rotation * (Vec3::from(aabb.center) * t.scale);
+                (world_center, Vec3::from(aabb.half_extents) * 2.0 * t.scale)
+            } else {
+                (t.translation, t.scale)
+            };
+            // ray_obb_intersection takes HALF-extents, not full size
+            if let Some(distance) =
+                ray_obb_intersection(ray.origin, *ray.direction, obb_center, size * 0.5, t.rotation)
+            {
+                if closest.map_or(true, |(_, d)| distance < d) {
+                    closest = Some((entity, distance));
+                }
+            }
+        }
+    }
+
+    closest.map(|(entity, distance)| PickHit {
+        entity,
+        parent_model: candidates.get(&entity).copied().flatten(),
+        distance,
+    })
+}
+
+/// Where the hover preview last looked, so a still cursor costs nothing.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub struct HoverProbe {
+    cursor: Option<Vec2>,
+    target: Option<Entity>,
+}
+
+/// Outline whatever a click would select, before the click.
+///
+/// Runs the same pick as the click on every cursor move while the Select
+/// tool is active and nothing is being dragged, and marks the result
+/// `Hovered`; `selection_box` draws the outline and removes it when the
+/// marker goes. Holding Alt previews the part instead of its Model, exactly
+/// as Alt+click selects it. An already selected target gets no hover mark,
+/// so a selected part never wears two outlines.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn hover_highlight_system(
+    mouse_button: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform, &Projection)>,
+    part_entities_query: PickQuery,
+    parent_query: Query<&Instance>,
+    aabb_q: Query<&bevy::camera::primitives::Aabb>,
+    hovered: Query<Entity, With<Hovered>>,
+    selected: Query<(), With<Selected>>,
+    tool_states: PartSelectionToolStates,
+    viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
+    ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
+    spatial_query: avian3d::prelude::SpatialQuery,
+    mut commands: Commands,
+    mut probe: Local<HoverProbe>,
+) {
+    let PartSelectionToolStates { move_state, scale_state, rotate_state, studio_state } = tool_states;
+    let select_tool = studio_state
+        .as_ref()
+        .map(|s| s.current_tool == crate::ui::Tool::Select)
+        .unwrap_or(true);
+    let dragging = mouse_button.pressed(MouseButton::Left)
+        || move_state.as_ref().and_then(|s| s.dragged_axis).is_some()
+        || scale_state.as_ref().and_then(|s| s.dragged_axis).is_some()
+        || rotate_state.as_ref().and_then(|s| s.dragged_axis).is_some();
+    let over_ui = ui_focus.as_ref().map(|f| f.has_focus).unwrap_or(false);
+
+    let cursor = windows.single().ok().and_then(|w| {
+        let pos = w.cursor_position()?;
+        let inside = viewport_bounds
+            .as_ref()
+            .map(|vb| vb.contains_logical(pos, w.scale_factor() as f32))
+            .unwrap_or(true);
+        inside.then_some(pos)
+    });
+
+    let alt_edge = keys.just_pressed(KeyCode::AltLeft)
+        || keys.just_pressed(KeyCode::AltRight)
+        || keys.just_released(KeyCode::AltLeft)
+        || keys.just_released(KeyCode::AltRight);
+
+    let target: Option<Entity> = match cursor {
+        Some(pos) if select_tool && !dragging && !over_ui => {
+            if probe.cursor == Some(pos) && !alt_edge {
+                // Nothing moved: keep the current target unless it vanished.
+                match probe.target {
+                    Some(t) if hovered.contains(t) => return,
+                    Some(_) => None,
+                    None => return,
+                }
+            } else {
+                probe.cursor = Some(pos);
+                let camera = camera_query.iter().find(|(c, _, _)| c.order == 0);
+                let ray = camera.and_then(|(c, tf, _)| c.viewport_to_world(tf, pos).ok());
+                let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+                ray.and_then(|ray| {
+                    pick_under_cursor(
+                        &ray,
+                        &part_entities_query,
+                        &parent_query,
+                        &spatial_query,
+                        &aabb_q,
+                        ObbFallback::OnColliderMiss,
+                    )
+                })
+                .map(|hit| if alt { hit.entity } else { hit.parent_model.unwrap_or(hit.entity) })
+                .filter(|e| !selected.contains(*e))
+            }
+        }
+        _ => {
+            probe.cursor = None;
+            None
+        }
+    };
+
+    if target == probe.target && target.map_or(true, |t| hovered.contains(t)) {
+        return;
+    }
+    for e in hovered.iter() {
+        commands.entity(e).remove::<Hovered>();
+    }
+    if let Some(t) = target {
+        commands.entity(t).insert(Hovered);
+    }
+    probe.target = target;
+}
+
 /// Supports both PartEntity (legacy) and Instance (modern) components
 #[cfg(not(target_arch = "wasm32"))]
 pub fn part_selection_system(
@@ -104,14 +357,10 @@ pub fn part_selection_system(
     camera_query: Query<(&Camera, &GlobalTransform, &Projection)>,
     // Query selectable parts: must have PartEntityMarker OR (Instance + BasePart) so Folders,
     // Services, Scripts, and UI entities are excluded from raycasting entirely.
-    part_entities_query: Query<(Entity, Option<&PartEntity>, Option<&PartEntityMarker>, Option<&Instance>, &GlobalTransform, Option<&Mesh3d>, Option<&BasePart>, Option<&ChildOf>),
-        // Last clause admits Gaussian-splat clouds: they carry `Instance` +
-        // a bevy `Aabb` (inserted by bevy_gaussian_splatting) but NO
-        // `BasePart`/`PartEntity`/`Mesh3d`, so the prior filter excluded them
-        // entirely and the OBB pass below never ran → unselectable in the
-        // viewport. `Without<Mesh3d>` keeps this clause from redundantly
-        // re-matching ordinary mesh parts (already covered above).
-        Or<(With<PartEntityMarker>, With<PartEntity>, (With<BasePart>, With<Instance>), (With<Instance>, With<bevy::camera::primitives::Aabb>, Without<Mesh3d>))>>,
+    // The same `PickQuery` the hover system uses: `pick_under_cursor` takes
+    // `&PickQuery`, and `Query` is invariant in its data tuple, so an
+    // expanded copy with elided lifetimes here does not unify with it.
+    part_entities_query: PickQuery,
     // Query for children to calculate accurate group bounds (matching move_tool.rs)
     children_query: Query<&Children>,
     // Query for child transforms/baseparts
@@ -246,8 +495,6 @@ pub fn part_selection_system(
     
     // Raycast against all part entities
     let mut closest_hit: Option<(String, f32, Entity, Option<Entity>)> = None;
-    // Map entity → (part_id, parent_model) built during the filter loop below
-    let mut entity_part_ids: std::collections::HashMap<Entity, (String, Option<Entity>)> = std::collections::HashMap::new();
     
     // PRIORITY CHECK: Check if we are clicking on a tool handle BEFORE checking for part hits
     // This ensures handles are always clickable even if a part is behind them
@@ -399,169 +646,17 @@ pub fn part_selection_system(
         }
     }
     
-    for (entity, part_entity, part_entity_marker, instance, transform, _mesh_handle, basepart, child_of) in part_entities_query.iter() {
-        // Skip entities that don't have PartEntity, PartEntityMarker, or Instance (not selectable)
-        // Entity ID format must match: "indexVgeneration" e.g. "68v0"
-        let entity_id = entity_to_id_string(entity);
-        
-        // Skip non-Part class names — Folder, ScreenGui, Service, Script etc. are not selectable
-        // even if they have an Instance component. Only Part/MeshPart/BasePart-carrying classes
-        // should receive 3D click selection.
-        if let Some(inst) = instance {
-            match inst.class_name {
-                crate::classes::ClassName::Folder
-                | crate::classes::ClassName::Model
-                | crate::classes::ClassName::ScreenGui
-                | crate::classes::ClassName::Frame
-                | crate::classes::ClassName::SoulScript
-                | crate::classes::ClassName::Workspace
-                | crate::classes::ClassName::Lighting
-                | crate::classes::ClassName::Camera => continue,
-                _ => {}
-            }
-        }
-
-        // The selection id is ALWAYS `"{index}v{generation}"`. It is the one
-        // key the whole engine agrees on — `selection_sync::get_part_id` /
-        // `make_part_id`, `keybindings` (Delete / Select All / Anchor / Lock),
-        // `clipboard`, `csg`, `cad_plugin`, the Explorer, the engine bridge and
-        // the Rune bindings all build it that way, 42 sites in 12 files.
-        //
-        // This used to prefer `PartEntity::part_id` / `PartEntityMarker::part_id`
-        // whenever they were non-empty, and that is a DIFFERENT key: parts loaded
-        // from a Space get their folder NAME there (`file_loader.rs` sets
-        // `part_id: file_meta.name`, so "Column_10"). Clicking such a part wrote
-        // "Column_10" into the SelectionManager while `sync_selection_components`
-        // looked up "2078v0", found no match, and never inserted `Selected` — so
-        // the click registered, the manager held a selection, and nothing on
-        // screen changed: no selection box, no Properties. Parts with an empty
-        // stored id happened to agree on the entity format and worked, which is
-        // why it presented as selection being unreliable rather than broken.
-        //
-        // Only the identity requirement survives from the old branch: an entity
-        // with no `PartEntity` / `PartEntityMarker` / `Instance` is engine
-        // scaffolding, not scene content, and stays unselectable.
-        if part_entity.is_none() && part_entity_marker.is_none() && instance.is_none() {
-            continue;
-        }
-        let part_id = entity_id.clone();
-        
-        // Skip locked parts - they cannot be selected!
-        if let Some(bp) = basepart {
-            if bp.locked {
-                continue;
-            }
-        }
-        
-        // Store part_id + parent model info for lookup after physics raycast
-        entity_part_ids.insert(entity, (part_id, child_of.and_then(|c| {
-            let parent_entity = c.parent();
-            if let Ok(parent_instance) = parent_query.get(parent_entity) {
-                if parent_instance.class_name == crate::classes::ClassName::Model {
-                    return Some(parent_entity);
-                }
-            }
-            None
-        })));
-    }
-
-    // Physics-first raycast: use Avian3d colliders for precise hit detection.
-    {
-        use avian3d::prelude::SpatialQueryFilter;
-        if let Ok(dir) = Dir3::new(*ray.direction) {
-            // `ray_hits_callback` visits EVERY collider along the ray; we keep
-            // the nearest one that maps to a selectable part.
-            //
-            // Do NOT use `ray_hits(.., max_hits, ..)` here. It is implemented
-            // as this same callback pushing hits in BVH TRAVERSAL order and
-            // stopping once `max_hits` is reached — the results are never
-            // distance-sorted. With the old cap of 20, a dense scene
-            // (Mountain Ascension is ~131K instances) filled those 20 slots
-            // with arbitrary colliders and the part actually under the cursor
-            // was usually never collected, so clicking selected the wrong
-            // part or nothing at all. Streaming every hit and comparing
-            // distance is both correct and allocation-free.
-            spatial_query.ray_hits_callback(
-                ray.origin,
-                dir,
-                10000.0,
-                true,
-                &SpatialQueryFilter::default(),
-                |hit| {
-                    if let Some((part_id, parent_model)) = entity_part_ids.get(&hit.entity) {
-                        if closest_hit.as_ref().map_or(true, |(_, d, _, _)| hit.distance < *d) {
-                            closest_hit =
-                                Some((part_id.clone(), hit.distance, hit.entity, *parent_model));
-                        }
-                    }
-                    // Keep traversing — a nearer part can still appear later
-                    // because hits arrive in tree order, not distance order.
-                    true
-                },
-            );
-        }
-    }
-
-    // OBB pass: test every selectable part WITHOUT a collider against its
-    // oriented bounding box, and keep it if it's closer than any physics hit.
-    // This runs ALWAYS (not only when the physics raycast missed everything):
-    // in a dense scene the ray almost always strikes *some* collider, so the
-    // old `closest_hit.is_none()` guard left every collider-less part
-    // permanently unclickable — including parts whose mirrored/degenerate mesh
-    // scale legitimately has no collider. Collider'd parts are skipped here
-    // (the physics raycast already resolved them precisely); merging by nearest
-    // distance means a collider-less part in FRONT of a collider'd one still
-    // wins the click.
-    {
-        for (entity, _pe, _pem, _inst, transform, _mesh, basepart, _child_of) in part_entities_query.iter() {
-            if !entity_part_ids.contains_key(&entity) { continue; }
-            // NO collider-based skip here.
-            //
-            // This used to `continue` for any entity carrying a `Collider`, on
-            // the assumption that the physics raycast above had already resolved
-            // it precisely. Having a `Collider` COMPONENT is not the same as
-            // being in Avian's broadphase: a part that just spawned, streamed
-            // in, or had its collider rebuilt owns the component while the BVH
-            // has not picked it up yet. Such a part missed the physics pass AND
-            // was skipped here, so it was simply unclickable — for a frame, or
-            // for as long as the rebuild took. That is the "selecting takes
-            // three clicks, sometimes it does not work at all" symptom: the
-            // clicks that appeared to do nothing landed in that window, and
-            // `closest_hit` staying `None` made them read as empty space, which
-            // CLEARED the selection instead of leaving it alone.
-            //
-            // Running the OBB test for every part and merging by nearest
-            // distance is strictly more robust: when the collider IS in the BVH
-            // both passes resolve the same entity, so the result is unchanged;
-            // when it is not, the box still catches the click. The cost is that
-            // a click just outside a concave part but inside its bounding box
-            // can now hit it — a precision trade that is plainly better than the
-            // part not being selectable.
-            let t = transform.compute_transform();
-            // Bounds priority: BasePart.size (Parts) → render Aabb
-            // (Gaussian Splat clouds — bevy_gaussian_splatting inserts a
-            // computed Aabb, and they have no BasePart/Mesh3d/Collider, so
-            // without this they hit-tested as a 1×1×1 box at the entity
-            // origin and were unselectable in the viewport) → Transform.scale.
-            // The Aabb is LOCAL-space (center + half_extents), so transform
-            // its center into world space and scale its extents.
-            let (obb_center, size) = if let Some(bp) = basepart {
-                (t.translation, bp.size)
-            } else if let Ok(aabb) = click_extras.aabb_q.get(entity) {
-                let world_center = t.translation + t.rotation * (Vec3::from(aabb.center) * t.scale);
-                (world_center, Vec3::from(aabb.half_extents) * 2.0 * t.scale)
-            } else {
-                (t.translation, t.scale)
-            };
-            // ray_obb_intersection takes HALF-extents, not full size
-            if let Some(distance) = ray_obb_intersection(ray.origin, *ray.direction, obb_center, size * 0.5, t.rotation) {
-                if let Some((part_id, parent_model)) = entity_part_ids.get(&entity) {
-                    if closest_hit.as_ref().map_or(true, |(_, d, _, _)| distance < *d) {
-                        closest_hit = Some((part_id.clone(), distance, entity, *parent_model));
-                    }
-                }
-            }
-        }
+    // One pick for click and hover alike (see `pick_under_cursor`), so the
+    // outline shown under the cursor is exactly what the click will select.
+    if let Some(hit) = pick_under_cursor(
+        &ray,
+        &part_entities_query,
+        &parent_query,
+        &spatial_query,
+        &click_extras.aabb_q,
+        ObbFallback::Always,
+    ) {
+        closest_hit = Some((entity_to_id_string(hit.entity), hit.distance, hit.entity, hit.parent_model));
     }
 
     // Update selection
