@@ -24,11 +24,23 @@ impl AvatarIdentity {
             Self::Robot => "R",
         }
     }
+    /// Display name. The wire code (`M`/`F`/`R`) is a storage detail and does
+    /// not belong in front of the user.
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Male => "M — Male",
-            Self::Female => "F — Female",
-            Self::Robot => "R — Robot",
+            Self::Male => "Male",
+            Self::Female => "Female",
+            Self::Robot => "Robot",
+        }
+    }
+
+    /// Parse the wire code. The inverse of [`Self::code`].
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "M" => Some(Self::Male),
+            "F" => Some(Self::Female),
+            "R" => Some(Self::Robot),
+            _ => None,
         }
     }
 }

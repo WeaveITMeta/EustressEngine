@@ -7,6 +7,16 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 struct AvatarResponse {
     descriptor: Option<AvatarDescriptor>,
+    /// The one identity this account may have: `"M"` or `"F"` from the sex
+    /// marker on a human's verified document, `"R"` for an agent account, or
+    /// `None` when a human has nothing usable on file (an X marker, an
+    /// unreadable field, or a verification that predates the field). Absent
+    /// from older server builds, so it defaults rather than failing the parse.
+    #[serde(default)]
+    locked_identity: Option<String>,
+    /// `"document"` or `"agent"`, so the panel can say why the identity is fixed.
+    #[serde(default)]
+    lock_source: Option<String>,
 }
 
 /// A mounted customizer belongs to the authenticated profile owner only.
@@ -14,6 +24,26 @@ struct AvatarResponse {
 pub fn AvatarCustomizer() -> impl IntoView {
     let avatar = RwSignal::new(AvatarDescriptor::default());
     let rigs = RwSignal::new(AvatarIdentity::ALL.map(RigDefinition::builtin).to_vec());
+    // The account's one identity. Never a choice: a human is the sex marker on
+    // their verified document, an agent account is Robot. `None` means a human
+    // has no usable marker on file and the controls do not render.
+    let locked = RwSignal::new(Option::<AvatarIdentity>::None);
+    let lock_source = RwSignal::new(String::new());
+    let blocked = RwSignal::new(false);
+    // The rig <select>'s value is applied from an Effect, not `prop:value`.
+    // `prop:value` runs when the element is created, before the reactive
+    // <option> list has mounted, so it set a value with no matching option and
+    // the browser resolved that to empty; the catalog load then re-rendered the
+    // options and nothing re-applied it. An Effect runs after the DOM commits,
+    // and reading `rigs` here makes it re-run whenever the option list changes.
+    let rig_select = NodeRef::<leptos::html::Select>::new();
+    Effect::new(move |_| {
+        let id = avatar.get().resolved_rig().id;
+        rigs.track();
+        if let Some(select) = rig_select.get() {
+            select.set_value(&id);
+        }
+    });
     let status = RwSignal::new(String::new());
     let loading = RwSignal::new(true);
     let saving = RwSignal::new(false);
@@ -24,23 +54,52 @@ pub fn AvatarCustomizer() -> impl IntoView {
             .await
         {
             Ok(response) => {
-                if let Some(mut descriptor) = response.descriptor {
-                    let identity = descriptor.resolved_identity();
-                    descriptor.identity = identity;
-                    descriptor.schema_version = eustress_avatar_schema::AVATAR_SCHEMA_VERSION;
-                    match descriptor.validate() {
-                        Ok(()) => {
-                            if let Some(rig) = descriptor.rig.clone() {
-                                rigs.update(|catalog| {
-                                    if !catalog.iter().any(|r| r.id == rig.id) {
-                                        catalog.push(rig);
-                                    }
-                                });
-                            }
-                            avatar.set(descriptor);
+                let fixed = response.locked_identity.as_deref().and_then(AvatarIdentity::from_code);
+                locked.set(fixed);
+                lock_source.set(response.lock_source.unwrap_or_default());
+                let Some(fixed) = fixed else {
+                    // No marker to bind to. The server refuses writes in this
+                    // state, so offering controls would only produce errors.
+                    blocked.set(true);
+                    loading.set(false);
+                    return;
+                };
+                match response.descriptor {
+                    Some(mut descriptor) => {
+                        let identity = descriptor.resolved_identity();
+                        descriptor.identity = identity;
+                        descriptor.schema_version = eustress_avatar_schema::AVATAR_SCHEMA_VERSION;
+                        // A saved avatar that disagrees with the account's identity
+                        // is brought back to it. The server would refuse to store it
+                        // as it was, so correcting it here is the difference between
+                        // a working Save and a dead one.
+                        if identity != fixed {
+                            descriptor.select_identity(fixed);
+                            status.set("Your avatar was updated to match your verified identity.".into());
+                        } else if fixed == AvatarIdentity::Robot && !descriptor.morphs.is_robot_body() {
+                            // Robot bodies do not resize. The server refuses any
+                            // other height or build, so a drifted save is pinned
+                            // back here rather than left as a Save that can only fail.
+                            descriptor.morphs = eustress_avatar_schema::BodyMorphs::robot();
+                            status.set("Robot bodies have a fixed size; yours was reset.".into());
                         }
-                        Err(error) => status.set(format!("Saved avatar could not load: {error}")),
+                        match descriptor.validate() {
+                            Ok(()) => {
+                                if let Some(rig) = descriptor.rig.clone() {
+                                    rigs.update(|catalog| {
+                                        if !catalog.iter().any(|r| r.id == rig.id) {
+                                            catalog.push(rig);
+                                        }
+                                    });
+                                }
+                                avatar.set(descriptor);
+                            }
+                            Err(error) => status.set(format!("Saved avatar could not load: {error}")),
+                        }
                     }
+                    // A fresh account starts as its document says, not as the
+                    // schema's default.
+                    None => avatar.update(|d| d.select_identity(fixed)),
                 }
             }
             Err(error) => status.set(format!("Could not load saved avatar: {error}")),
@@ -83,6 +142,14 @@ pub fn AvatarCustomizer() -> impl IntoView {
         });
     };
     view! {
+        <Show when=move || !blocked.get() fallback=move || view! {
+            <div class="avatar-customizer avatar-customizer-blocked">
+                <h3 class="avatar-section-title">"Customize Character"</h3>
+                <p>"Your avatar is tied to the sex marker on your verified identity document, and your current verification does not carry one we can read."</p>
+                <p>"Verify again with a document that shows the marker, and this panel unlocks."</p>
+                <a class="btn btn-primary" href="/verify">"Verify identity"</a>
+            </div>
+        }>
         <div class="avatar-customizer">
             <div class="avatar-preview-section">
                 <div class="avatar-viewport">
@@ -115,26 +182,21 @@ pub fn AvatarCustomizer() -> impl IntoView {
                 <fieldset disabled=move || loading.get() || saving.get() style="border:0;padding:0;margin:0;">
                     <div class="avatar-category">
                         <div class="avatar-option">
-                            <label for="avatar-identity">"Gender identity"</label>
-                            <select id="avatar-identity" class="form-input avatar-select"
-                                prop:value=move || avatar.get().resolved_identity().code()
-                                on:change=move |ev| {
-                                    let identity = match event_target_value(&ev).as_str() {
-                                        "M" => AvatarIdentity::Male, "F" => AvatarIdentity::Female,
-                                        "R" => AvatarIdentity::Robot, _ => return,
-                                    };
-                                    avatar.update(|d| d.select_identity(identity)); status.set(String::new());
-                                }>
-                                {AvatarIdentity::ALL.into_iter().map(|i| view! { <option value=i.code()>{i.label()}</option> }).collect_view()}
-                            </select>
+                            <label for="avatar-identity">"Identity"</label>
+                            <output id="avatar-identity" class="form-input avatar-select avatar-identity-fixed" aria-readonly="true">
+                                {move || locked.get().map(|i| i.label()).unwrap_or("")}
+                            </output>
+                            <p class="avatar-hint">{move || match lock_source.get().as_str() {
+                                "agent" => "Agent accounts are Robot.",
+                                _ => "Set by the sex marker on your verified identity document.",
+                            }}</p>
                         </div>
                         <div class="avatar-option">
                             <label for="avatar-rig">"Character rig"</label>
-                            <select id="avatar-rig" class="form-input avatar-select"
-                                prop:value=move || avatar.get().resolved_rig().id
+                            <select id="avatar-rig" class="form-input avatar-select" node_ref=rig_select
                                 on:change=move |ev| {
                                     let id=event_target_value(&ev);
-                                    if let Some(rig)=rigs.get_untracked().into_iter().find(|r| r.id==id && r.identity==avatar.get_untracked().identity) {
+                                    if let Some(rig)=rigs.get_untracked().into_iter().find(|r| r.id==id && r.identity==avatar.get_untracked().resolved_identity()) {
                                         avatar.update(|d| d.rig=Some(rig)); status.set(String::new());
                                     }
                                 }>
@@ -147,21 +209,26 @@ pub fn AvatarCustomizer() -> impl IntoView {
                             </select>
                         </div>
                     </div>
-                    <div class="avatar-category">
-                        <h4 class="avatar-category-title">"Body"</h4>
-                        <div class="avatar-option">
-                            <label for="avatar-height">"Height"</label>
-                            <input id="avatar-height" type="range" min="0" max="100" class="avatar-slider"
-                                prop:value=move || avatar.get().morphs.height.percent()
-                                on:input=move |ev| {if let Ok(v)=event_target_value(&ev).parse(){avatar.update(|d| d.morphs.height=Norm01::from_percent(v));}} />
+                    // Robots have one body: the authored model at its bind size.
+                    // Agents do not resize, so the sliders are not offered at all
+                    // rather than shown disabled.
+                    <Show when=move || locked.get() != Some(AvatarIdentity::Robot)>
+                        <div class="avatar-category">
+                            <h4 class="avatar-category-title">"Body"</h4>
+                            <div class="avatar-option">
+                                <label for="avatar-height">"Height"</label>
+                                <input id="avatar-height" type="range" min="0" max="100" class="avatar-slider"
+                                    prop:value=move || avatar.get().morphs.height.percent()
+                                    on:input=move |ev| {if let Ok(v)=event_target_value(&ev).parse(){avatar.update(|d| d.morphs.height=Norm01::from_percent(v));}} />
+                            </div>
+                            <div class="avatar-option">
+                                <label for="avatar-build">"Build"</label>
+                                <input id="avatar-build" type="range" min="0" max="100" class="avatar-slider"
+                                    prop:value=move || avatar.get().morphs.build.percent()
+                                    on:input=move |ev| {if let Ok(v)=event_target_value(&ev).parse(){avatar.update(|d| d.morphs.build=Norm01::from_percent(v));}} />
+                            </div>
                         </div>
-                        <div class="avatar-option">
-                            <label for="avatar-build">"Build"</label>
-                            <input id="avatar-build" type="range" min="0" max="100" class="avatar-slider"
-                                prop:value=move || avatar.get().morphs.build.percent()
-                                on:input=move |ev| {if let Ok(v)=event_target_value(&ev).parse(){avatar.update(|d| d.morphs.build=Norm01::from_percent(v));}} />
-                        </div>
-                    </div>
+                    </Show>
                     <button class="btn btn-primary avatar-save-btn" on:click=save>
                         {move || if loading.get(){"Loading…"}else if saving.get(){"Saving…"}else{"Save Avatar"}}
                     </button>
@@ -173,5 +240,6 @@ pub fn AvatarCustomizer() -> impl IntoView {
                 }>"Export avatar"</a>
             </div>
         </div>
+        </Show>
     }
 }

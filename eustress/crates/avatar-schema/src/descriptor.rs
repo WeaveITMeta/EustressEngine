@@ -206,6 +206,32 @@ impl Default for BodyMorphs {
     }
 }
 
+impl BodyMorphs {
+    /// Height that renders a rig at exactly its bind size: the value that
+    /// `remap(MIN_HEIGHT_M, MAX_HEIGHT_M)` carries to `NOMINAL_BIND_HEIGHT_M`,
+    /// so the customizer's `height / NOMINAL_BIND_HEIGHT_M` comes out as 1.0.
+    /// The neutral 0.5 does NOT do this; it lands at 1.75 m and shrinks the
+    /// model to 95.6%.
+    pub fn bind_height() -> Norm01 {
+        use crate::metrics::{MAX_HEIGHT_M, MIN_HEIGHT_M, NOMINAL_BIND_HEIGHT_M};
+        Norm01::new((NOMINAL_BIND_HEIGHT_M - MIN_HEIGHT_M) / (MAX_HEIGHT_M - MIN_HEIGHT_M))
+    }
+
+    /// The one body a Robot has. Agents do not resize: height is the authored
+    /// model's bind height and build is neutral width, so the rig renders at
+    /// scale 1.0 on every axis. `validate` refuses anything else on a Robot.
+    pub fn robot() -> Self {
+        Self { height: Self::bind_height(), build: Norm01::new(0.5), ..Self::default() }
+    }
+
+    /// Whether height and build are the Robot's fixed values, within f32 noise
+    /// of a JSON round trip.
+    pub fn is_robot_body(&self) -> bool {
+        let fixed = Self::robot();
+        (self.height.get() - fixed.height.get()).abs() < 1e-4 && (self.build.get() - fixed.build.get()).abs() < 1e-4
+    }
+}
+
 /// The website's 4-option Face Shape dropdown (`profile.rs:394-399`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "bevy", derive(Reflect))]
@@ -408,6 +434,9 @@ impl AvatarDescriptor {
             AvatarIdentity::Robot => BaseBody::Robot,
         };
         self.rig = None;
+        if identity == AvatarIdentity::Robot {
+            self.morphs = BodyMorphs::robot();
+        }
     }
 
     /// Version-one descriptors only carried base_body. Preserve their body.
@@ -438,6 +467,9 @@ impl AvatarDescriptor {
         let rig = self.resolved_rig();
         rig.validate()?;
         if rig.identity != self.resolved_identity() { return Err("Rig does not match the selected identity".into()); }
+        if self.resolved_identity() == AvatarIdentity::Robot && !self.morphs.is_robot_body() {
+            return Err("Robot bodies have a fixed height and build".into());
+        }
         Ok(())
     }
 
