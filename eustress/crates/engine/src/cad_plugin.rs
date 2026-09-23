@@ -580,11 +580,13 @@ fn handle_cad_insert(
     mut notifications: Option<ResMut<NotificationManager>>,
     mut undo: Option<ResMut<crate::undo::UndoStack>>,
     mut registry: Option<ResMut<crate::space::SpaceFileRegistry>>,
+    space_root_res: Option<Res<crate::space::SpaceRoot>>,
 ) {
     for event in events.read() {
         let pos = event.position.unwrap_or_else(|| camera_forward_spawn(&cameras));
         let toml = template_toml(event.template);
         let label = template_label(event.template);
+        let space_root = crate::space::open_space_root(space_root_res.as_deref());
 
         match spawn_cad_entity(
             &mut commands,
@@ -593,6 +595,7 @@ fn handle_cad_insert(
             toml,
             pos,
             label,
+            &space_root,
         ) {
             Ok((entity, folder)) => {
                 if let Some(folder) = folder {
@@ -630,7 +633,7 @@ fn handle_cad_insert(
                         reg.register(instance_toml, entity, metadata);
                     }
                     if let Some(ref mut u) = undo {
-                        let trash = crate::space::default_space_root()
+                        let trash = space_root
                             .join(".eustress")
                             .join("trash")
                             .join(chrono::Utc::now().format("%Y%m%d_%H%M%S_%f").to_string())
@@ -681,6 +684,7 @@ fn spawn_cad_entity(
     tree_toml: String,
     position: Vec3,
     name: &str,
+    space_root: &std::path::Path,
 ) -> Result<(Entity, Option<std::path::PathBuf>), String> {
     let tree = parse_tree(&tree_toml).map_err(|e| format!("parse: {e}"))?;
     let out = evaluate_tree(&tree).map_err(|e| format!("eval: {e}"))?;
@@ -718,7 +722,7 @@ fn spawn_cad_entity(
     let uuid = eustress_common::instance_create::fresh_uuid_for_create();
 
     // Auto-save folder on insert so CadParts are git-diffable immediately.
-    let (instance_file, display_name) = persist_cad_folder(name, &tree_toml, position, size, &uuid)
+    let (instance_file, display_name) = persist_cad_folder(space_root, name, &tree_toml, position, size, &uuid)
         .unwrap_or((None, name.to_string()));
 
     let half = size * 0.5;
@@ -743,7 +747,11 @@ fn spawn_cad_entity(
             ok: true,
             message: status,
         },
-        Collider::cuboid(half.x.max(0.001), half.y.max(0.001), half.z.max(0.001)),
+        // Avian's `Collider::cuboid` takes FULL side lengths and halves them
+        // itself (avian3d 0.7: `SharedShape::cuboid(x_length * 0.5, ..)`).
+        // Passing the already-halved `half` halved it twice and gave a
+        // collider HALF the visible part's size. Same idiom as spawn.rs.
+        Collider::cuboid(half.x.max(0.001) * 2.0, half.y.max(0.001) * 2.0, half.z.max(0.001) * 2.0),
         RigidBody::Static,
         Name::new(display_name),
         PartEntity {
@@ -768,13 +776,13 @@ fn spawn_cad_entity(
 /// Write `Workspace/{Name}/_instance.toml` + `features.toml` and return
 /// the InstanceFile component. Unique-suffixes the folder name if needed.
 fn persist_cad_folder(
+    space_root: &std::path::Path,
     base_name: &str,
     tree_toml: &str,
     position: Vec3,
     size: Vec3,
     uuid: &str,
 ) -> Result<(Option<crate::space::instance_loader::InstanceFile>, String), String> {
-    let space_root = crate::space::default_space_root();
     let workspace = space_root.join("Workspace");
     std::fs::create_dir_all(&workspace).map_err(|e| format!("mkdir Workspace: {e}"))?;
 
@@ -1815,6 +1823,7 @@ fn handle_cad_export_glb(
         Option<&crate::space::instance_loader::InstanceFile>,
     )>,
     mut notifications: Option<ResMut<NotificationManager>>,
+    space_root_res: Option<Res<crate::space::SpaceRoot>>,
 ) {
     for event in events.read() {
         let Ok((cad, name, inst_file)) = query.get(event.entity) else {
@@ -1878,7 +1887,12 @@ fn handle_cad_export_glb(
             Ok(()) => {
                 // Round-trip into the Space asset library so Toolbox / Insert
                 // can pick the mesh up as a standard GLB part.
-                let library_note = publish_glb_to_asset_library(&label, &path, &tree.variables);
+                let library_note = publish_glb_to_asset_library(
+                    &crate::space::open_space_root(space_root_res.as_deref()),
+                    &label,
+                    &path,
+                    &tree.variables,
+                );
                 if let Some(ref mut n) = notifications {
                     n.success(format!(
                         "Exported GLB → {}{}",
@@ -1900,11 +1914,11 @@ fn handle_cad_export_glb(
 /// Copy exported GLB into `Workspace/Assets/Cad/{label}.glb` + a small
 /// `_instance.toml` stub so the Asset Manager / Toolbox can discover it.
 fn publish_glb_to_asset_library(
+    space_root: &std::path::Path,
     label: &str,
     source_glb: &std::path::Path,
     variables: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
-    let space_root = crate::space::default_space_root();
     let lib_dir = space_root.join("Workspace").join("Assets").join("Cad");
     std::fs::create_dir_all(&lib_dir).ok()?;
     let safe: String = label

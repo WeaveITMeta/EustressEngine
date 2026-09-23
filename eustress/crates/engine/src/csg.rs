@@ -70,12 +70,14 @@ fn handle_csg_actions(
     instance_files: Query<&crate::space::instance_loader::InstanceFile>,
     mut undo: Option<ResMut<crate::undo::UndoStack>>,
     mut registry: Option<ResMut<crate::space::SpaceFileRegistry>>,
+    space_root_res: Option<Res<crate::space::SpaceRoot>>,
 ) {
     let Some(selection) = selection else {
         return;
     };
 
     for event in events.read() {
+        let space_root = crate::space::open_space_root(space_root_res.as_deref());
         match event.action {
             Action::CSGUnion => {
                 run_boolean(
@@ -90,6 +92,7 @@ fn handle_csg_actions(
                     &instance_files,
                     &mut undo,
                     &mut registry,
+                    &space_root,
                 );
             }
             Action::CSGNegate => {
@@ -105,6 +108,7 @@ fn handle_csg_actions(
                     &instance_files,
                     &mut undo,
                     &mut registry,
+                    &space_root,
                 );
             }
             Action::CSGIntersect => {
@@ -120,6 +124,7 @@ fn handle_csg_actions(
                     &instance_files,
                     &mut undo,
                     &mut registry,
+                    &space_root,
                 );
             }
             Action::CSGSeparate => {
@@ -164,6 +169,7 @@ fn run_boolean(
     instance_files: &Query<&crate::space::instance_loader::InstanceFile>,
     undo: &mut Option<ResMut<crate::undo::UndoStack>>,
     registry: &mut Option<ResMut<crate::space::SpaceFileRegistry>>,
+    space_root: &std::path::Path,
 ) {
     let selected = selected_set(selection);
     if selected.len() < 2 {
@@ -289,7 +295,6 @@ fn run_boolean(
             // "glb parts store size in BasePart and scale the unit
             // mesh" convention) + `_instance.toml` beside it.
             let uuid = eustress_common::instance_create::fresh_uuid_for_create();
-            let space_root = crate::space::default_space_root();
             let workspace = space_root.join("Workspace");
             let _ = std::fs::create_dir_all(&workspace);
             let folder_name = crate::space::instance_loader::unique_entity_name(
@@ -334,7 +339,11 @@ fn run_boolean(
                     instance,
                     bp,
                     part,
-                    Collider::cuboid(half.x, half.y, half.z),
+                    // Avian's `Collider::cuboid` takes FULL side lengths and halves them
+                    // itself (avian3d 0.7: `SharedShape::cuboid(x_length * 0.5, ..)`).
+                    // Passing the already-halved `half` halved it twice and gave a
+                    // collider HALF the visible part's size. Same idiom as spawn.rs.
+                    Collider::cuboid(half.x * 2.0, half.y * 2.0, half.z * 2.0),
                     RigidBody::Static,
                     Name::new(name.clone()),
                     PartEntity {

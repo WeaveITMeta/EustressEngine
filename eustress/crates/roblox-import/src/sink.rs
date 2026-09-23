@@ -270,6 +270,11 @@ pub fn is_file_natured_node(class: ClassName) -> bool {
             | ClassName::TextBox
             | ClassName::ImageLabel
             | ClassName::ImageButton
+            // Local lights load through the engine's folder-form light arm;
+            // the binary path has no light spawner and skips light cores.
+            | ClassName::PointLight
+            | ClassName::SpotLight
+            | ClassName::SurfaceLight
     )
 }
 

@@ -632,6 +632,26 @@ fn val_bool(v: &Variant) -> Option<toml::Value> {
     }
 }
 
+/// Convert a Roblox constraint ANGLE (degrees) into the engine's unit (radians).
+///
+/// Roblox authors `HingeConstraint.LowerAngle/UpperAngle` and
+/// `BallSocketConstraint.UpperAngle` in degrees, while the engine's joint limits
+/// are radians -- the hinge spawner documents `lower_angle`/`upper_angle` as
+/// radians and `joint_resolver` feeds them straight into Avian's `AngleLimit`.
+/// Passing degrees through made every imported limit 180/pi (about 57.3) times
+/// too wide. Converted once, here at the import boundary, so the engine's
+/// radian contract holds everywhere downstream.
+///
+/// NOT for angular SPEEDS or velocities (`AngularSpeed`, `AngularVelocity`,
+/// `MaxAngularVelocity`), which Roblox already expresses in rad/s, nor for the
+/// legacy Motor/Motor6D angles, which are radians too.
+fn deg_to_rad(v: toml::Value) -> toml::Value {
+    match v.as_float() {
+        Some(deg) => toml::Value::Float(deg.to_radians()),
+        None => v,
+    }
+}
+
 fn val_float(v: &Variant) -> Option<toml::Value> {
     match v {
         Variant::Float32(f) => Some(toml::Value::Float(*f as f64)),
@@ -1368,11 +1388,12 @@ fn try_constraint_property(bag: &mut PropertyBag, target_class: ClassName, key: 
         _ => {}
     }
 
-    // Hinge / Motor6D angle limits (raw degrees; joint_resolver passthrough).
+    // Hinge angle limits: Roblox degrees -> engine radians (see `deg_to_rad`).
+    // Motor6D is listed for the shared joint path but has no Lower/UpperAngle.
     if matches!(target_class, HingeConstraint | Motor6D) {
         match key {
-            "LowerAngle" => { if let Some(v) = val_float(variant) { put_section(bag, "constraint", "lower_angle", v); return true; } }
-            "UpperAngle" => { if let Some(v) = val_float(variant) { put_section(bag, "constraint", "upper_angle", v); return true; } }
+            "LowerAngle" => { if let Some(v) = val_float(variant) { put_section(bag, "constraint", "lower_angle", deg_to_rad(v)); return true; } }
+            "UpperAngle" => { if let Some(v) = val_float(variant) { put_section(bag, "constraint", "upper_angle", deg_to_rad(v)); return true; } }
             _ => {}
         }
     }
@@ -1446,7 +1467,9 @@ fn try_constraint_property(bag: &mut PropertyBag, target_class: ClassName, key: 
     // BallSocketConstraint.
     if matches!(target_class, BallSocketConstraint) {
         match key {
-            "UpperAngle" => { if let Some(v) = val_float(variant) { put_section(bag, "constraint", "upper_angle", v); bag.approximation_notes.push("BallSocketConstraint.UpperAngle written as degrees to [constraint].upper_angle; engine cone_angle is radians (deg->rad unresolved, loader does not read it yet)".to_string()); return true; } }
+            // Same key and same unit trap as the hinge: converted to radians so
+            // it is correct the moment the loader starts reading the cone.
+            "UpperAngle" => { if let Some(v) = val_float(variant) { put_section(bag, "constraint", "upper_angle", deg_to_rad(v)); return true; } }
             "LimitsEnabled" => { if let Some(v) = val_bool(variant) { put_section(bag, "constraint", "limits_enabled", v); return true; } }
             _ => {}
         }
