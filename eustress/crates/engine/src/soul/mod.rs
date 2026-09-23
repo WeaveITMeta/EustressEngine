@@ -31,6 +31,9 @@ pub mod rune_api;
 pub mod error_tracker;
 pub mod vm_pool;
 pub mod rune_ecs_module;
+/// `eustress::dm`: Rune's access to the live Play DataModel Luau shares.
+#[cfg(feature = "realism-scripting")]
+pub mod rune_datamodel;
 /// Per-frame Rune execution for Play / Run mode — bridge install, lifecycle
 /// callbacks, and effect drain, all inside ONE Bevy system. See the module
 /// docs for why the previous multi-system split could not work.

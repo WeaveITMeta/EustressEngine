@@ -144,6 +144,8 @@ pub fn stop_rune_session(
         }
         let _ = rune_ecs_module::drain_pending_property_writes();
         let _ = rune_ecs_module::drain_script_sim_writes();
+        // Left on this thread they would reach the next session's first frame.
+        let _ = rune_ecs_module::drain_physics_commands();
         clear_bridges();
         bridges.registry = None;
         bridges.snapshot_built = false;
@@ -316,6 +318,7 @@ fn clear_bridges() {
     rune_ecs_module::clear_instance_snapshot();
     rune_ecs_module::clear_existing_tags();
     rune_ecs_module::clear_ecs_bindings();
+    rune_ecs_module::clear_physics_state();
     eustress_common::events::clear_event_bus_for_rune();
 }
 
@@ -339,6 +342,7 @@ pub fn drive_rune_frame(
     event_bus: Option<Res<eustress_common::events::EventBusResource>>,
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut physics: ResMut<crate::soul::physics_bridge::RunePhysicsBridge>,
 ) {
     if runtime.compiled.is_empty() {
         // No scripts — make sure last frame's assertions don't linger and keep
@@ -360,6 +364,11 @@ pub fn drive_rune_frame(
     if let Some(bus) = event_bus.as_deref() {
         eustress_common::events::set_event_bus_for_rune(bus.0.clone());
     }
+    // Physics reads (`part_get_mass` / `part_get_velocity`, the live gravity)
+    // come from `RunePhysicsBridge`, installed here like every other bridge.
+    rune_ecs_module::set_physics_state(physics.state.clone());
+    let gravity_seed = physics.gravity;
+    rune_ecs_module::WORKSPACE_GRAVITY.with(|g| *g.borrow_mut() = gravity_seed);
     // Raycast answers are keyed by call slot within a frame — see
     // `ScriptSpatialQuery`'s docs.
     crate::spatial_query_bridge::reset_raycast_slots();
@@ -370,6 +379,14 @@ pub fn drive_rune_frame(
     call_script_update(&mut runtime, time.delta_secs() as f64);
 
     // ── 3. Drain queued effects ──────────────────────────────────────────
+    // Physics: impulses and velocity sets go to the systems that apply them,
+    // and a gravity a script set goes to `Workspace.gravity`.
+    physics.commands.extend(rune_ecs_module::drain_physics_commands());
+    let gravity = rune_ecs_module::WORKSPACE_GRAVITY.with(|g| *g.borrow());
+    if gravity != gravity_seed {
+        physics.gravity_write = Some(gravity);
+    }
+
     // Sim values: merge only what scripts wrote, so watchpoints, recordings,
     // `runtime-snapshot.json` and the MCP sim tools finally see script output.
     // The same set is published as `ScriptSimWrites` so consumers can tell an

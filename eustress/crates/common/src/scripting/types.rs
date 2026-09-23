@@ -366,16 +366,23 @@ impl CFrame {
     }
 
     /// Create CFrame looking from `position` towards `look_at` with optional up vector
+    /// (Roblox `CFrame.lookAt`). When the view is parallel to `up` the X axis
+    /// stands in for it, so looking straight down still yields a valid frame.
     pub fn look_at(position: Vector3, look_at: Vector3, up: Option<Vector3>) -> Self {
-        let up = up.unwrap_or(Vector3::Y_AXIS);
+        let mut up = up.unwrap_or(Vector3::Y_AXIS);
         let look = (look_at - position).unit();
-        
+
         if look.magnitude() < 1e-10 {
             return Self::from_position(position);
         }
+        if look.cross(&up).magnitude() < 1e-9 {
+            up = if look.x.abs() < 0.9 { Vector3::X_AXIS } else { Vector3::Z_AXIS };
+        }
 
-        let right = up.cross(&look).unit();
-        let actual_up = look.cross(&right);
+        // Right-handed: right = look x up, up' = right x look. (up x look was
+        // the mirror image, a determinant -1 frame.)
+        let right = look.cross(&up).unit();
+        let actual_up = right.cross(&look);
 
         Self {
             position,
@@ -387,58 +394,72 @@ impl CFrame {
         }
     }
 
-    /// Create CFrame from Euler angles (radians) in XYZ order
+    /// Build a CFrame from a position and the rotation matrix `r` in the
+    /// usual row-major, column-vector convention (`world = r * local`), so
+    /// `r`'s COLUMNS are the right, up and back vectors. Storage keeps those
+    /// vectors as rows, which is the transpose; every constructor that
+    /// starts from a textbook matrix goes through here so the two
+    /// conventions can never mix again.
+    pub fn from_rotation_matrix(position: Vector3, r: [[f64; 3]; 3]) -> Self {
+        Self {
+            position,
+            rotation: [
+                [r[0][0], r[1][0], r[2][0]],
+                [r[0][1], r[1][1], r[2][1]],
+                [r[0][2], r[1][2], r[2][2]],
+            ],
+        }
+    }
+
+    /// The rotation as a row-major matrix `r` with `world = r * local`
+    /// (the transpose of the stored rows).
+    pub fn rotation_matrix(&self) -> [[f64; 3]; 3] {
+        let m = &self.rotation;
+        [
+            [m[0][0], m[1][0], m[2][0]],
+            [m[0][1], m[1][1], m[2][1]],
+            [m[0][2], m[1][2], m[2][2]],
+        ]
+    }
+
+    /// The same frame with its position at the origin (Roblox `CFrame.Rotation`).
+    pub fn rotation_only(&self) -> Self {
+        Self { position: Vector3::ZERO, rotation: self.rotation }
+    }
+
+    /// Create CFrame from Euler angles in radians. Same as
+    /// [`CFrame::from_euler_angles_xyz`], matching Roblox `CFrame.Angles`.
     pub fn angles(rx: f64, ry: f64, rz: f64) -> Self {
         Self::from_euler_angles_xyz(rx, ry, rz)
     }
 
-    /// Create CFrame from Euler angles (radians) in XYZ order
+    /// Roblox `CFrame.fromEulerAnglesXYZ(rx, ry, rz)`: the rotations apply in
+    /// Z, Y, X order, so the matrix is `Rx * Ry * Rz`.
+    /// `CFrame.Angles(0, math.pi / 2, 0).LookVector` is `(-1, 0, 0)`.
     pub fn from_euler_angles_xyz(rx: f64, ry: f64, rz: f64) -> Self {
-        let (sx, cx) = rx.sin_cos();
-        let (sy, cy) = ry.sin_cos();
-        let (sz, cz) = rz.sin_cos();
-
-        // Combined rotation matrix for XYZ order
-        Self {
-            position: Vector3::ZERO,
-            rotation: [
-                [cy * cz, sx * sy * cz - cx * sz, cx * sy * cz + sx * sz],
-                [cy * sz, sx * sy * sz + cx * cz, cx * sy * sz - sx * cz],
-                [-sy, sx * cy, cx * cy],
-            ],
-        }
+        let r = mat3_mul(mat3_mul(rot_x(rx), rot_y(ry)), rot_z(rz));
+        Self::from_rotation_matrix(Vector3::ZERO, r)
     }
 
-    /// Create CFrame from Euler angles (radians) in YXZ order (Roblox default)
-    pub fn from_euler_angles_yxz(ry: f64, rx: f64, rz: f64) -> Self {
-        let (sx, cx) = rx.sin_cos();
-        let (sy, cy) = ry.sin_cos();
-        let (sz, cz) = rz.sin_cos();
-
-        Self {
-            position: Vector3::ZERO,
-            rotation: [
-                [cy * cz + sy * sx * sz, cz * sy * sx - cy * sz, cx * sy],
-                [cx * sz, cx * cz, -sx],
-                [cy * sx * sz - cz * sy, sy * sz + cy * cz * sx, cy * cx],
-            ],
-        }
+    /// Roblox `CFrame.fromEulerAnglesYXZ(rx, ry, rz)` and
+    /// `CFrame.fromOrientation`: the rotations apply in Z, X, Y order, so the
+    /// matrix is `Ry * Rx * Rz`. Arguments are in X, Y, Z order like Roblox.
+    pub fn from_euler_angles_yxz(rx: f64, ry: f64, rz: f64) -> Self {
+        let r = mat3_mul(mat3_mul(rot_y(ry), rot_x(rx)), rot_z(rz));
+        Self::from_rotation_matrix(Vector3::ZERO, r)
     }
 
-    /// Create CFrame from axis-angle rotation
+    /// Create CFrame from axis-angle rotation (right-handed, radians).
     pub fn from_axis_angle(axis: Vector3, angle: f64) -> Self {
         let axis = axis.unit();
         let (s, c) = angle.sin_cos();
         let t = 1.0 - c;
-
-        Self {
-            position: Vector3::ZERO,
-            rotation: [
-                [t * axis.x * axis.x + c, t * axis.x * axis.y - s * axis.z, t * axis.x * axis.z + s * axis.y],
-                [t * axis.x * axis.y + s * axis.z, t * axis.y * axis.y + c, t * axis.y * axis.z - s * axis.x],
-                [t * axis.x * axis.z - s * axis.y, t * axis.y * axis.z + s * axis.x, t * axis.z * axis.z + c],
-            ],
-        }
+        let r = [
+            [t * axis.x * axis.x + c, t * axis.x * axis.y - s * axis.z, t * axis.x * axis.z + s * axis.y],
+            [t * axis.x * axis.y + s * axis.z, t * axis.y * axis.y + c, t * axis.y * axis.z - s * axis.x],
+            [t * axis.x * axis.z - s * axis.y, t * axis.y * axis.z + s * axis.x, t * axis.z * axis.z + c],
+        ];
+        Self::from_rotation_matrix(Vector3::ZERO, r)
     }
 
     /// Create CFrame from rotation matrix components
@@ -535,14 +556,12 @@ impl CFrame {
         let wy = w * y;
         let wz = w * z;
 
-        Self {
-            position: Vector3::ZERO,
-            rotation: [
-                [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
-                [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
-                [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
-            ],
-        }
+        let r = [
+            [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
+            [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
+            [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
+        ];
+        Self::from_rotation_matrix(Vector3::ZERO, r)
     }
 
     // ========== Accessors ==========
@@ -698,41 +717,42 @@ impl CFrame {
         cf
     }
 
-    /// Get Euler angles in XYZ order (radians)
+    /// Inverse of [`CFrame::from_euler_angles_xyz`]: `(rx, ry, rz)` in
+    /// radians such that `from_euler_angles_xyz(rx, ry, rz)` rebuilds this
+    /// rotation (Roblox `ToEulerAnglesXYZ`).
     pub fn to_euler_angles_xyz(&self) -> (f64, f64, f64) {
-        let m = &self.rotation;
-        let sy = -m[2][0];
-        
-        if sy.abs() < 0.99999 {
-            let rx = m[2][1].atan2(m[2][2]);
+        // r = Rx * Ry * Rz, so r[0][2] = sin(ry).
+        let r = self.rotation_matrix();
+        let sy = r[0][2].clamp(-1.0, 1.0);
+        if sy.abs() < 0.999_999 {
+            let rx = (-r[1][2]).atan2(r[2][2]);
             let ry = sy.asin();
-            let rz = m[1][0].atan2(m[0][0]);
+            let rz = (-r[0][1]).atan2(r[0][0]);
             (rx, ry, rz)
         } else {
-            // Gimbal lock
-            let rx = (-m[1][2]).atan2(m[1][1]);
+            // Gimbal lock: fold all of the remaining turn into X.
+            let rx = r[2][1].atan2(r[1][1]);
             let ry = if sy > 0.0 { std::f64::consts::FRAC_PI_2 } else { -std::f64::consts::FRAC_PI_2 };
-            let rz = 0.0;
-            (rx, ry, rz)
+            (rx, ry, 0.0)
         }
     }
 
-    /// Get Euler angles in YXZ order (Roblox default)
+    /// Inverse of [`CFrame::from_euler_angles_yxz`]: `(rx, ry, rz)` in
+    /// radians, X first like Roblox `ToEulerAnglesYXZ` / `ToOrientation`.
     pub fn to_euler_angles_yxz(&self) -> (f64, f64, f64) {
-        let m = &self.rotation;
-        let sx = -m[2][1];
-        
-        if sx.abs() < 0.99999 {
-            let ry = m[2][0].atan2(m[2][2]);
+        // r = Ry * Rx * Rz, so r[1][2] = -sin(rx).
+        let r = self.rotation_matrix();
+        let sx = (-r[1][2]).clamp(-1.0, 1.0);
+        if sx.abs() < 0.999_999 {
             let rx = sx.asin();
-            let rz = m[0][1].atan2(m[1][1]);
-            (ry, rx, rz)
+            let ry = r[0][2].atan2(r[2][2]);
+            let rz = r[1][0].atan2(r[1][1]);
+            (rx, ry, rz)
         } else {
-            // Gimbal lock
-            let ry = (-m[0][2]).atan2(m[0][0]);
+            // Gimbal lock: fold all of the remaining turn into Y.
             let rx = if sx > 0.0 { std::f64::consts::FRAC_PI_2 } else { -std::f64::consts::FRAC_PI_2 };
-            let rz = 0.0;
-            (ry, rx, rz)
+            let ry = (-r[2][0]).atan2(r[0][0]);
+            (rx, ry, 0.0)
         }
     }
 
@@ -763,13 +783,15 @@ impl CFrame {
 impl Mul for CFrame {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self {
-        // Matrix multiplication for rotation
+        // `self * rhs` places `rhs` in `self`'s frame: r = r_self * r_rhs.
+        // Storage holds the transpose of r, so the stored product runs the
+        // other way round: (r_self * r_rhs)^T = r_rhs^T * r_self^T.
         let mut rot = [[0.0; 3]; 3];
         for i in 0..3 {
             for j in 0..3 {
-                rot[i][j] = self.rotation[i][0] * rhs.rotation[0][j]
-                          + self.rotation[i][1] * rhs.rotation[1][j]
-                          + self.rotation[i][2] * rhs.rotation[2][j];
+                rot[i][j] = rhs.rotation[i][0] * self.rotation[0][j]
+                          + rhs.rotation[i][1] * self.rotation[1][j]
+                          + rhs.rotation[i][2] * self.rotation[2][j];
             }
         }
 
@@ -778,6 +800,35 @@ impl Mul for CFrame {
 
         Self { position: pos, rotation: rot }
     }
+}
+
+/// Row-major 3x3 product `a * b`.
+fn mat3_mul(a: [[f64; 3]; 3], b: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let mut out = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            out[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j];
+        }
+    }
+    out
+}
+
+/// Right-handed rotation about +X, row-major, `world = r * local`.
+fn rot_x(a: f64) -> [[f64; 3]; 3] {
+    let (s, c) = a.sin_cos();
+    [[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]]
+}
+
+/// Right-handed rotation about +Y, row-major, `world = r * local`.
+fn rot_y(a: f64) -> [[f64; 3]; 3] {
+    let (s, c) = a.sin_cos();
+    [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]]
+}
+
+/// Right-handed rotation about +Z, row-major, `world = r * local`.
+fn rot_z(a: f64) -> [[f64; 3]; 3] {
+    let (s, c) = a.sin_cos();
+    [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]
 }
 
 impl Mul<Vector3> for CFrame {
@@ -1364,8 +1415,73 @@ mod tests {
         let cf = CFrame::new(10.0, 20.0, 30.0) * CFrame::angles(0.5, 0.3, 0.1);
         let inv = cf.inverse();
         let result = cf * inv;
-        
+
         assert!(result.position.fuzzy_eq(&Vector3::ZERO, 1e-10));
+        assert!(result.right_vector().fuzzy_eq(&Vector3::X_AXIS, 1e-10));
+        assert!(result.look_vector().fuzzy_eq(&Vector3::new(0.0, 0.0, -1.0), 1e-10));
+    }
+
+    // Values below are what Roblox returns for the same calls.
+
+    #[test]
+    fn test_cframe_angles_matches_roblox() {
+        let yaw = CFrame::angles(0.0, std::f64::consts::FRAC_PI_2, 0.0);
+        assert!(yaw.look_vector().fuzzy_eq(&Vector3::new(-1.0, 0.0, 0.0), 1e-12));
+        assert!(yaw.right_vector().fuzzy_eq(&Vector3::new(0.0, 0.0, -1.0), 1e-12));
+        let pitch = CFrame::angles(std::f64::consts::FRAC_PI_2, 0.0, 0.0);
+        assert!(pitch.look_vector().fuzzy_eq(&Vector3::new(0.0, 1.0, 0.0), 1e-12));
+        // Angles(x, y, z) == Angles(x,0,0) * Angles(0,y,0) * Angles(0,0,z)
+        let (x, y, z) = (0.3, -1.1, 0.7);
+        let whole = CFrame::angles(x, y, z);
+        let parts = CFrame::angles(x, 0.0, 0.0) * CFrame::angles(0.0, y, 0.0) * CFrame::angles(0.0, 0.0, z);
+        assert!(whole.look_vector().fuzzy_eq(&parts.look_vector(), 1e-12));
+        assert!(whole.up_vector().fuzzy_eq(&parts.up_vector(), 1e-12));
+    }
+
+    #[test]
+    fn test_cframe_look_at_is_right_handed() {
+        let cf = CFrame::look_at(Vector3::ZERO, Vector3::new(0.0, 0.0, -5.0), None);
+        assert!(cf.right_vector().fuzzy_eq(&Vector3::X_AXIS, 1e-12));
+        assert!(cf.up_vector().fuzzy_eq(&Vector3::Y_AXIS, 1e-12));
+        let aim = CFrame::look_at(Vector3::new(1.0, 0.0, 1.0), Vector3::new(4.0, 0.0, 5.0), None);
+        assert!(aim.look_vector().fuzzy_eq(&Vector3::new(0.6, 0.0, 0.8), 1e-12));
+        // Straight down does not collapse.
+        let down = CFrame::look_at(Vector3::new(0.0, 10.0, 0.0), Vector3::ZERO, None);
+        assert!(down.look_vector().fuzzy_eq(&Vector3::new(0.0, -1.0, 0.0), 1e-12));
+        assert!((down.right_vector().magnitude() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_cframe_quaternion_round_trip() {
+        let cf = CFrame::angles(0.4, -0.9, 1.3);
+        let back = CFrame::from_quaternion(cf.to_quaternion());
+        assert!(cf.look_vector().fuzzy_eq(&back.look_vector(), 1e-12));
+        assert!(cf.right_vector().fuzzy_eq(&back.right_vector(), 1e-12));
+        // A +90 degree turn about Y as a quaternion.
+        let h = std::f64::consts::FRAC_1_SQRT_2;
+        let q = CFrame::from_quaternion([0.0, h, 0.0, h]);
+        assert!(q.look_vector().fuzzy_eq(&Vector3::new(-1.0, 0.0, 0.0), 1e-12));
+    }
+
+    #[test]
+    fn test_cframe_euler_round_trips() {
+        let (x, y, z) = (0.25, -0.6, 1.1);
+        let xyz = CFrame::from_euler_angles_xyz(x, y, z).to_euler_angles_xyz();
+        assert!((xyz.0 - x).abs() < 1e-12 && (xyz.1 - y).abs() < 1e-12 && (xyz.2 - z).abs() < 1e-12);
+        let yxz = CFrame::from_euler_angles_yxz(x, y, z).to_euler_angles_yxz();
+        assert!((yxz.0 - x).abs() < 1e-12 && (yxz.1 - y).abs() < 1e-12 && (yxz.2 - z).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_cframe_composition_and_points() {
+        // A frame 10 m up, turned to face -X; a point 2 m in front of it.
+        let cf = CFrame::new(0.0, 10.0, 0.0) * CFrame::angles(0.0, std::f64::consts::FRAC_PI_2, 0.0);
+        let ahead = cf * Vector3::new(0.0, 0.0, -2.0);
+        assert!(ahead.fuzzy_eq(&Vector3::new(-2.0, 10.0, 0.0), 1e-12));
+        assert!(cf.point_to_object_space(ahead).fuzzy_eq(&Vector3::new(0.0, 0.0, -2.0), 1e-12));
+        let t = cf.to_transform();
+        let back = CFrame::from_transform(&t);
+        assert!(back.look_vector().fuzzy_eq(&cf.look_vector(), 1e-6));
     }
 
     #[test]

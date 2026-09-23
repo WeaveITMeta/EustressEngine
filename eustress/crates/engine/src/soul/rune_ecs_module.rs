@@ -4161,10 +4161,11 @@ fn part_apply_angular_impulse(entity_name: &str, x: f64, y: f64, z: f64) {
     });
 }
 
-// Thread-local physics state snapshot (populated by Bevy system before script execution)
+// Thread-local physics state snapshot, installed by `drive_rune_frame` on the
+// VM thread from `physics_bridge::RunePhysicsBridge`.
 thread_local! {
-    pub static PHYSICS_STATE: std::cell::RefCell<std::collections::HashMap<String, PhysicsSnapshot>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+    pub static PHYSICS_STATE: std::cell::RefCell<std::sync::Arc<std::collections::HashMap<String, PhysicsSnapshot>>> =
+        std::cell::RefCell::new(std::sync::Arc::default());
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4174,14 +4175,14 @@ pub struct PhysicsSnapshot {
     pub angular_velocity: [f64; 3],
 }
 
-/// Populate physics state from Avian3d before Rune script execution.
-pub fn set_physics_state(states: std::collections::HashMap<String, PhysicsSnapshot>) {
+/// Install the physics snapshot for Rune script execution on this thread.
+pub fn set_physics_state(states: std::sync::Arc<std::collections::HashMap<String, PhysicsSnapshot>>) {
     PHYSICS_STATE.with(|ps| *ps.borrow_mut() = states);
 }
 
 /// Clear physics state after Rune script execution.
 pub fn clear_physics_state() {
-    PHYSICS_STATE.with(|ps| ps.borrow_mut().clear());
+    PHYSICS_STATE.with(|ps| *ps.borrow_mut() = std::sync::Arc::default());
 }
 
 /// Get the mass of an entity in kg.

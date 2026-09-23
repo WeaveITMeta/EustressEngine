@@ -163,11 +163,9 @@ impl Plugin for ScriptPluginHostPlugin {
 /// function. Never runs its body twice — see `ScriptPluginsDiscovered`.
 ///
 /// LAZILY CREATES the Luau VM if it doesn't exist yet: the EDITOR never
-/// adds common's `LuauPlugin` (whose first-Update init this system
-/// originally waited on) — in the editor the VM is otherwise only created
-/// at Play start (`start_luau_scripts_on_play`), so waiting would mean
-/// script plugins never load in Edit mode. Verified live 2026-07-13: a
-/// full Edit session logged zero "Luau runtime initialized" lines.
+/// adds common's `LuauPlugin`, and Play runs Space scripts in a VM of its
+/// own (`eustress_common::luau::play`), so nothing else creates this one;
+/// waiting for it would mean script plugins never load in Edit mode.
 /// (`RuneModuleRegistry` needs no such wait — populated at `Startup`.)
 fn discover_script_plugins(
     mut discovered: ResMut<ScriptPluginsDiscovered>,

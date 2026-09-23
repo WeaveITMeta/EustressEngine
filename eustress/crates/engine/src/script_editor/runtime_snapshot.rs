@@ -12,8 +12,17 @@
 //!
 //! ## Contract
 //!
-//! - Snapshot path: `<universe>/.eustress/runtime-snapshot.json`.
-//! - Written by [`EngineStatePlugin`] at 4 Hz when the engine is
+//! - Two snapshot paths, same content:
+//!   - `<workspace>/.eustress/instances/<pid>/snapshot.json` — this
+//!     instance's own, always written. Tools address one engine among
+//!     several with a Space of the same Universe open by reading its PID's
+//!     snapshot.
+//!   - `<universe>/.eustress/runtime-snapshot.json` — the Universe's
+//!     legacy single slot, written only by the Universe's owner (the
+//!     instance named in `engine.port`; see `simulation::ipc`). With one
+//!     engine per Universe that is simply that engine; with several, the
+//!     slot no longer flips between whichever wrote last.
+//! - Written by [`RuntimeSnapshotPlugin`] at 4 Hz when the engine is
 //!   running (250 ms between writes). Stale mtime = stale snapshot =
 //!   LSP shows the cached values until a new write lands.
 //! - Read by [`read_snapshot`] which caches per-mtime inside the LSP
@@ -36,6 +45,12 @@
 //! - [`RuntimeSnapshot::generated_at`] — RFC-3339 timestamp. Helps
 //!   humans reading the JSON directly and lets the LSP detect obvious
 //!   clock-skew scenarios (future-dated snapshots from an older host).
+//! - Which engine wrote it ([`RuntimeSnapshot::pid`], `space`,
+//!   `owns_universe`), the sim clock, and the run ledger
+//!   ([`RuntimeSnapshot::runs`]): the current run, the last few completed
+//!   runs with their final values, and acknowledgements for ticketed
+//!   commands. A client that queued `run` with a ticket waits for exactly
+//!   that run to appear here as completed.
 //!
 //! ## What's intentionally NOT in the snapshot
 //!
@@ -93,19 +108,50 @@ pub struct RuntimeSnapshot {
     /// completion for component-aware scripting suggestions.
     #[serde(default)]
     pub component_types: Vec<String>,
+
+    /// Process id of the engine that wrote this snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+
+    /// Folder name of the Space that engine has loaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<String>,
+
+    /// Whether that engine owns the Universe's single-slot files (and so
+    /// also serves `<universe>/.eustress/sim-commands.jsonl`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owns_universe: Option<bool>,
+
+    /// Sim clock tick count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick: Option<u64>,
+
+    /// Simulated seconds since the run started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sim_time_s: Option<f64>,
+
+    /// The run ledger: `pending`, `current`, `last`, `completed` (with
+    /// final values) and `acks`. Shape defined by
+    /// `simulation::command::SimRunLedger::to_json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs: Option<serde_json::Value>,
 }
 
 impl RuntimeSnapshot {
     /// Canonical path for the snapshot file given a Universe root.
     pub fn path_in_universe(universe: &Path) -> PathBuf {
-        universe.join(".eustress").join("runtime-snapshot.json")
+        eustress_bridge_client::universe_snapshot_path(universe)
+    }
+
+    /// Write to the Universe's legacy slot.
+    pub fn write_to_universe(&self, universe: &Path) -> std::io::Result<()> {
+        self.write_to_path(&Self::path_in_universe(universe))
     }
 
     /// Write atomically — we write to `.tmp` first then rename so a
     /// crash mid-write never leaves a truncated JSON file for the LSP
     /// to choke on.
-    pub fn write_to_universe(&self, universe: &Path) -> std::io::Result<()> {
-        let final_path = Self::path_in_universe(universe);
+    pub fn write_to_path(&self, final_path: &Path) -> std::io::Result<()> {
         if let Some(parent) = final_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -113,7 +159,7 @@ impl RuntimeSnapshot {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, &final_path)?;
+        std::fs::rename(&tmp, final_path)?;
         Ok(())
     }
 }
@@ -174,6 +220,8 @@ mod engine_writer {
     pub struct SnapshotState {
         pub last_write: Instant,
         pub interval: Duration,
+        /// True while a background thread is writing the previous snapshot.
+        pub in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl Default for SnapshotState {
@@ -181,6 +229,7 @@ mod engine_writer {
             Self {
                 last_write: Instant::now() - Duration::from_secs(1),
                 interval: Duration::from_millis(250),
+                in_flight: Default::default(),
             }
         }
     }
@@ -209,7 +258,10 @@ mod engine_writer {
         // early-returns when SimValues is empty). Merge the registry in
         // here so anything recorded as a watchpoint reaches the snapshot.
         watchpoints: Option<Res<eustress_common::simulation::WatchPointRegistry>>,
-        space_root: Option<Res<crate::space::SpaceRoot>>,
+        clock: Option<Res<eustress_common::simulation::SimulationClock>>,
+        ledger: Option<Res<crate::simulation::command::SimRunLedger>>,
+        ipc: Option<Res<crate::simulation::ipc::SimIpc>>,
+        bridge: Option<Res<crate::engine_bridge::EngineBridgeHandle>>,
     ) {
         // Throttle — write at most every `interval`. Cheap guard; we
         // still run every frame for the readiness check so we pick up
@@ -217,16 +269,17 @@ mod engine_writer {
         if state.last_write.elapsed() < state.interval {
             return;
         }
-
-        // Need a real Universe to know where to write. Same walk-up as
-        // the LSP launcher so the snapshot lands where external IDEs
-        // look for it — closest ancestor that contains `Spaces/`.
-        let Some(universe) = space_root
-            .as_deref()
-            .and_then(|sr| nearest_universe(&sr.0))
-        else {
+        // The previous snapshot is still being written (see below): skip
+        // this tick; the next one carries newer values anyway.
+        if state.in_flight.load(std::sync::atomic::Ordering::Acquire) {
             return;
-        };
+        }
+
+        // Need a real Universe to know where to write — resolved once per
+        // Space switch by `simulation::ipc::sync_sim_ipc`.
+        let Some(ipc) = ipc.as_deref() else { return };
+        let Some(universe) = ipc.universe.as_deref() else { return };
+        let owns_universe = ipc.owns_universe(bridge.as_deref());
 
         let snap = RuntimeSnapshot {
             generated_at: chrono::Utc::now().to_rfc3339(),
@@ -235,58 +288,62 @@ mod engine_writer {
                 Some(crate::play_mode::PlayModeState::Paused) => PlayState::Paused,
                 _ => PlayState::Editing,
             },
-            sim_values: {
-                // `SimValuesResource` first — it is what `set_sim_value`
-                // writes, so it stays authoritative for any shared key and
-                // existing behaviour is unchanged.
-                let mut merged: BTreeMap<String, f64> = sim_values
-                    .as_deref()
-                    .map(|r| r.0.iter().map(|(k, v)| (k.clone(), *v)).collect())
-                    .unwrap_or_default();
-
-                // Then fill in every watchpoint the registry knows about.
-                // Disabled watchpoints are skipped: `WatchPoint::record`
-                // early-returns while disabled, so `current` is stale.
-                // Non-finite values are skipped too — serde_json renders
-                // NaN/±inf as `null`, which the MCP reader silently drops
-                // and which would make the file misleading to read by hand.
-                if let Some(reg) = watchpoints.as_deref() {
-                    for (name, wp) in &reg.watchpoints {
-                        if !wp.enabled || !wp.current.is_finite() {
-                            continue;
-                        }
-                        merged.entry(name.clone()).or_insert(wp.current);
-                    }
-                }
-                merged
-            },
+            // `SimValuesResource` first — it is what `set_sim_value` writes,
+            // so it stays authoritative for any shared key — then every
+            // enabled, finite watchpoint. (Disabled watchpoints are skipped
+            // because `WatchPoint::record` early-returns while disabled, so
+            // `current` is stale; non-finite values because serde_json
+            // renders NaN/±inf as `null`, which readers silently drop.)
+            sim_values: crate::simulation::command::merged_sim_values(
+                sim_values.as_deref(),
+                watchpoints.as_deref(),
+            ),
             // ECS schema fields are populated by the extended writer
             // system below; kept empty here to avoid querying the full
             // World on every 250ms tick. A separate 2-second timer
             // refreshes these.
             entity_names: BTreeMap::new(),
             component_types: Vec::new(),
+            pid: Some(std::process::id()),
+            space: ipc.space_name.clone(),
+            owns_universe: Some(owns_universe),
+            tick: clock.as_deref().map(|c| c.tick_count),
+            sim_time_s: clock.as_deref().map(|c| c.simulation_time_s),
+            runs: ledger
+                .as_deref()
+                .map(crate::simulation::command::snapshot_runs_json),
         };
 
-        if snap.write_to_universe(&universe).is_ok() {
-            state.last_write = Instant::now();
+        // This instance's own snapshot is the one that must land: it is
+        // how a tool addresses this engine among several on one Universe.
+        // The legacy per-Universe copy is written only by the owner.
+        let instance_path = ipc.instance_snapshot();
+        let legacy_path = owns_universe.then(|| RuntimeSnapshot::path_in_universe(universe));
+        if instance_path.is_none() && legacy_path.is_none() {
+            return;
         }
-    }
 
-    /// Duplicate of the LSP launcher's walk — kept local to avoid
-    /// forcing that module to expose a pub function. Closest ancestor
-    /// of `start` containing a `Spaces/` subdirectory IS a Universe.
-    fn nearest_universe(start: &std::path::Path) -> Option<PathBuf> {
-        let mut cur = start.to_path_buf();
-        for _ in 0..16 {
-            if cur.join("Spaces").is_dir() {
-                return Some(cur);
+        // Each write is a directory check, a temp file and a rename, twice
+        // for the owner: milliseconds of file-system time, four times a
+        // second. It runs on its own thread so the frame never waits on the
+        // disk.
+        use std::sync::atomic::Ordering;
+        state.in_flight.store(true, Ordering::Release);
+        state.last_write = Instant::now();
+        let in_flight = state.in_flight.clone();
+        std::thread::spawn(move || {
+            if let Some(path) = instance_path {
+                if let Err(e) = snap.write_to_path(&path) {
+                    debug!("runtime snapshot write to {} failed: {e}", path.display());
+                }
             }
-            if !cur.pop() {
-                return None;
+            if let Some(path) = legacy_path {
+                if let Err(e) = snap.write_to_path(&path) {
+                    debug!("runtime snapshot write to {} failed: {e}", path.display());
+                }
             }
-        }
-        None
+            in_flight.store(false, Ordering::Release);
+        });
     }
 }
 
