@@ -801,6 +801,32 @@ pub fn open_space(world: &mut World, space_path: &Path) {
     {
         *residency = crate::space::residency::ResidencyState::default();
     }
+    // Release the outgoing Space's database at the same instant `SpaceRoot`
+    // moves (below), not a frame later when the open decision runs. Anything
+    // that pairs a DB reference with `SpaceRoot` in between would otherwise
+    // key the incoming Space's paths into the outgoing Space's store. The
+    // entities that belong to that store were despawned above, so nothing
+    // legitimate still needs it; `finish_pending_open` installs the new
+    // Space's handle, subscription, source and funnel together.
+    #[cfg(feature = "world-db")]
+    {
+        crate::space::active_db::clear();
+        if let Some(mut h) =
+            world.get_resource_mut::<crate::space::world_db_plugin::WorldDbHandle>()
+        {
+            h.0 = None;
+        }
+        if let Some(mut s) =
+            world.get_resource_mut::<crate::space::world_db_plugin::WorldDbSubscription>()
+        {
+            s.0 = None;
+        }
+        if let Some(mut src) =
+            world.get_resource_mut::<crate::space::space_source::ActiveSpaceSource>()
+        {
+            *src = crate::space::space_source::ActiveSpaceSource::disk(space_path.to_path_buf());
+        }
+    }
     // Phase 4: clear the non-gated streaming flag + the Explorer's DB-section
     // cache so the virtual "Database (streamed)" section never shows the
     // outgoing Space's classes/rows before the new boot-load re-decides. The
@@ -815,6 +841,11 @@ pub fn open_space(world: &mut World, space_path: &Path) {
         es.db_class_id_cache.clear();
         es.expanded_db_classes.clear();
         es.db_cache_valid = false;
+        // The filesystem side too: the Terrain folder and the dynamic
+        // services are read from the open Space, so rescan them for it.
+        es.cached_dynamic_services.clear();
+        es.explorer_fs_stale = true;
+        es.dirty = true;
     }
 
     // Bump the load generation and clear any in-flight deferred queue.
@@ -888,7 +919,11 @@ pub struct SpaceRescanNeeded(pub bool);
 /// re-running the file loader system logic directly.
 pub fn apply_space_rescan(
     mut rescan: ResMut<SpaceRescanNeeded>,
-    pending_open: Res<crate::space::world_db_plugin::PendingWorldDbOpen>,
+    // One tuple param: Bevy systems take at most 16.
+    (pending_open, db_decision): (
+        Res<crate::space::world_db_plugin::PendingWorldDbOpen>,
+        Res<crate::space::world_db_plugin::WorldDbDecision>,
+    ),
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -909,6 +944,17 @@ pub fn apply_space_rescan(
     // that ran before it settled would read the previous (or disk) source
     // and load the wrong tree. Leave the request armed; it fires the first
     // frame the open is settled.
+    //
+    // "No open pending" alone does not mean settled: on the frame of a
+    // switch, before `open_world_db_on_space_change` has run for the new
+    // Space, nothing is pending YET while `ActiveSpaceSource` still serves
+    // the previous Space's tree. A rescan in that gap loads the previous
+    // Space's instances and registers them under the new Space's paths,
+    // where the first edit persists them. So also require that the open
+    // decision has been made for THIS Space.
+    if db_decision.0.as_deref() != Some(space_root.0.as_path()) {
+        return;
+    }
     if pending_open.0.as_ref().map(|p| !p.installed()).unwrap_or(false) {
         return;
     }

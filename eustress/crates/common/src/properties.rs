@@ -514,6 +514,7 @@ impl PropertyAccess for EustressPointLight {
             "Color" => Some(PropertyValue::Color(self.color)),
             "Range" => Some(PropertyValue::Float(self.range)),
             "Shadows" => Some(PropertyValue::Bool(self.shadows)),
+            "Enabled" => Some(PropertyValue::Bool(self.enabled)),
             _ => None,
         }
     }
@@ -524,6 +525,7 @@ impl PropertyAccess for EustressPointLight {
             ("Color", PropertyValue::Color(c)) => { self.color = c; Ok(()) }
             ("Range", PropertyValue::Float(f)) => { self.range = f.max(0.0); Ok(()) }
             ("Shadows", PropertyValue::Bool(b)) => { self.shadows = b; Ok(()) }
+            ("Enabled", PropertyValue::Bool(b)) => { self.enabled = b; Ok(()) }
             _ => Err(format!("Unknown property: {}", name)),
         }
     }
@@ -534,6 +536,7 @@ impl PropertyAccess for EustressPointLight {
             PropertyDescriptor { name: "Color".to_string(), property_type: "Color".to_string(), read_only: false, category: "Light".to_string() },
             PropertyDescriptor { name: "Range".to_string(), property_type: "float".to_string(), read_only: false, category: "Light".to_string() },
             PropertyDescriptor { name: "Shadows".to_string(), property_type: "bool".to_string(), read_only: false, category: "Light".to_string() },
+            PropertyDescriptor { name: "Enabled".to_string(), property_type: "bool".to_string(), read_only: false, category: "Light".to_string() },
         ]
     }
 }
@@ -549,6 +552,7 @@ impl PropertyAccess for EustressSpotLight {
             "Color" => Some(PropertyValue::Color(self.color)),
             "Range" => Some(PropertyValue::Float(self.range)),
             "Shadows" => Some(PropertyValue::Bool(self.shadows)),
+            "Enabled" => Some(PropertyValue::Bool(self.enabled)),
             "Angle" => Some(PropertyValue::Float(self.angle)),
             _ => None,
         }
@@ -560,6 +564,7 @@ impl PropertyAccess for EustressSpotLight {
             ("Color", PropertyValue::Color(c)) => { self.color = c; Ok(()) }
             ("Range", PropertyValue::Float(f)) => { self.range = f.max(0.0); Ok(()) }
             ("Shadows", PropertyValue::Bool(b)) => { self.shadows = b; Ok(()) }
+            ("Enabled", PropertyValue::Bool(b)) => { self.enabled = b; Ok(()) }
             ("Angle", PropertyValue::Float(f)) => { self.angle = f.clamp(0.0, 180.0); Ok(()) }
             _ => Err(format!("Unknown property: {}", name)),
         }
@@ -570,6 +575,7 @@ impl PropertyAccess for EustressSpotLight {
             PropertyDescriptor { name: "Brightness".to_string(), property_type: "float".to_string(), read_only: false, category: "Light".to_string() },
             PropertyDescriptor { name: "Color".to_string(), property_type: "Color".to_string(), read_only: false, category: "Light".to_string() },
             PropertyDescriptor { name: "Angle".to_string(), property_type: "float".to_string(), read_only: false, category: "Light".to_string() },
+            PropertyDescriptor { name: "Enabled".to_string(), property_type: "bool".to_string(), read_only: false, category: "Light".to_string() },
         ]
     }
 }
@@ -992,6 +998,7 @@ impl PropertyAccess for SurfaceLight {
             "Color" => Some(PropertyValue::Color(self.color)),
             "Range" => Some(PropertyValue::Float(self.range)),
             "Shadows" => Some(PropertyValue::Bool(self.shadows)),
+            "Enabled" => Some(PropertyValue::Bool(self.enabled)),
             "Face" => Some(PropertyValue::String(self.face.clone())),
             _ => None,
         }
@@ -1003,6 +1010,7 @@ impl PropertyAccess for SurfaceLight {
             ("Color", PropertyValue::Color(c)) => { self.color = c; Ok(()) }
             ("Range", PropertyValue::Float(f)) => { self.range = f.max(0.0); Ok(()) }
             ("Shadows", PropertyValue::Bool(b)) => { self.shadows = b; Ok(()) }
+            ("Enabled", PropertyValue::Bool(b)) => { self.enabled = b; Ok(()) }
             ("Face", PropertyValue::String(s)) => { self.face = s; Ok(()) }
             _ => Err(format!("Unknown property: {}", name)),
         }
@@ -1013,6 +1021,7 @@ impl PropertyAccess for SurfaceLight {
             PropertyDescriptor { name: "Brightness".to_string(), property_type: "float".to_string(), read_only: false, category: "Light".to_string() },
             PropertyDescriptor { name: "Color".to_string(), property_type: "Color".to_string(), read_only: false, category: "Light".to_string() },
             PropertyDescriptor { name: "Face".to_string(), property_type: "Face".to_string(), read_only: false, category: "Light".to_string() },
+            PropertyDescriptor { name: "Enabled".to_string(), property_type: "bool".to_string(), read_only: false, category: "Light".to_string() },
         ]
     }
 }

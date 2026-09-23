@@ -823,6 +823,21 @@ pub fn open_world_db_on_space_change(
     // writer funnels (`active_db::*`) correctly use disk for a legacy
     // un-converted world and the DB for a converted one.
     super::active_db::clear();
+    // The handle, the change subscription and the content source follow the
+    // same rule, for the same reason: from this line `SpaceRoot` names the
+    // incoming Space, and the open that installs its database finishes on a
+    // worker, seconds later on a large Space. Until `finish_pending_open`
+    // installs all four together, NOTHING may still point at the outgoing
+    // Space's database. Seven consumers read `handle.0` or `sub.0` directly
+    // (the Explorer reparent, stream-in on select, the voxel terrain
+    // boot-load, the data recorder, the bridge's entity/tree requests, the
+    // transform mirror, the change-stream drain); with them cleared they stand
+    // down on `None`, which every one of them already handles, instead of
+    // reading or writing the previous Space's records under the new Space's
+    // paths.
+    handle.0 = None;
+    sub.0 = None;
+    *active_source = super::space_source::ActiveSpaceSource::disk(space_root.0.clone());
     info!(
         target: "eustress_engine::world_db",
         space = %space_root.0.display(),
@@ -1039,6 +1054,13 @@ pub fn open_world_db_on_space_change(
     }
 }
 
+/// Run condition for the store mirrors: a Play session is transient, so
+/// nothing it moves (physics, scripts) is an edit to persist. True outside
+/// Play, and in apps that have no Play mode at all (headless runtimes).
+pub(crate) fn outside_play_session(state: Option<Res<State<crate::play_mode::PlayModeState>>>) -> bool {
+    state.map_or(true, |s| *s.get() == crate::play_mode::PlayModeState::Editing)
+}
+
 /// Mirror Changed<Transform> writes into WorldDb. Bypassed entirely
 /// when the load gate is active — same condition that gates the
 /// legacy TOML writer (see file_loader::LoadInProgress).
@@ -1206,44 +1228,36 @@ pub struct WorldDbPlugin;
 /// and drop Removed ones. Writing to Fjall never touches disk, so it
 /// can't re-trigger the disk watcher — no hot-reload loop. This is the
 /// "if a TOML exists/changes, read it and update the engine" wire.
+///
+/// Every write goes through [`super::active_db`], which holds the database
+/// and the root it belongs to as ONE record. The relative key is therefore
+/// always computed against the root of the database it is written into, and
+/// a file outside that Space is refused rather than keyed into it. Pairing
+/// `WorldDbHandle` with `SpaceRoot` here instead is what let a Space switch
+/// write the incoming Space's edits into the outgoing Space's `tree`: the
+/// two resources change at different moments, and for the whole of an
+/// asynchronous open they named different Spaces.
 fn sync_toml_edits_to_fjall(
     mut reader: MessageReader<eustress_common::file_events::FileChanged>,
-    handle: Res<WorldDbHandle>,
-    space_root: Res<SpaceRoot>,
 ) {
     use eustress_common::file_events::FileChangeKind;
-    let Some(db) = handle.0.as_ref() else {
-        return;
-    };
     for change in reader.read() {
-        let Some(rel) =
-            crate::space::space_source::rel_from_root(&space_root.0, &change.path)
-        else {
-            continue;
-        };
         match change.kind {
             FileChangeKind::Created | FileChangeKind::Modified => {
                 // read error = transient / mid-write; the watcher's own
                 // reload retries, so skip silently here.
                 if let Ok(bytes) = std::fs::read(&change.path) {
-                    if let Err(e) = db.put_file(&rel, &bytes) {
-                        warn!(
-                            target: "eustress_engine::world_db",
-                            error = %e,
-                            rel = %rel,
-                            "TOML→Fjall sync: put_file failed"
-                        );
-                    } else {
+                    if super::active_db::put_tree_file(&change.path, &bytes) {
                         debug!(
                             target: "eustress_engine::world_db",
-                            rel = %rel,
+                            path = %change.path.display(),
                             "TOML edit synced into Fjall (dual model)"
                         );
                     }
                 }
             }
             FileChangeKind::Removed => {
-                let _ = db.delete_file(&rel);
+                super::active_db::delete_tree_file(&change.path);
             }
         }
     }
@@ -1272,10 +1286,15 @@ impl Plugin for WorldDbPlugin {
             // Startup ordering against it is needed (or possible).
             .add_systems(Startup, open_world_db_on_space_change)
             // Update copy handles runtime Space switches (latched per
-            // path); `mirror_transform_changes` persists live edits.
+            // path); `mirror_transform_changes` persists live edits, never
+            // what a Play session moves.
             .add_systems(
                 Update,
-                (open_world_db_on_space_change, mirror_transform_changes).chain(),
+                (
+                    open_world_db_on_space_change,
+                    mirror_transform_changes.run_if(outside_play_session),
+                )
+                    .chain(),
             )
             // Dual model: mirror runtime TOML edits into the Fjall tree
             // so the binary store stays in lockstep with hand/IDE edits.

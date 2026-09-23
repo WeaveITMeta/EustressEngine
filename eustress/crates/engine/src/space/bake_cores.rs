@@ -157,7 +157,7 @@ fn compose(parent: &Transform, local: &TransformData) -> Transform {
 /// properties for free, and ties the core to the identity already recorded in
 /// `path_to_uuid` by the UUID migration pass. `0` is reserved (some call sites
 /// treat it as "unset"), so it is nudged to 1.
-fn stored_id_from_uuid(uuid: &[u8; 16]) -> u64 {
+pub(crate) fn stored_id_from_uuid(uuid: &[u8; 16]) -> u64 {
     let mut b = [0u8; 8];
     b.copy_from_slice(&uuid[..8]);
     let id = u64::from_le_bytes(b);

@@ -1231,6 +1231,11 @@ fn pointlight_from_properties(props: &HashMap<String, serde_json::Value>) -> Eus
         let _ = light.set_property("Shadows", PropertyValue::Bool(shadows));
     }
     
+    // Roblox `Light.Enabled`; absent = on (the class default).
+    if let Some(enabled) = props.get("Enabled").and_then(|v| v.as_bool()) {
+        light.enabled = enabled;
+    }
+
     light
 }
 
@@ -1255,6 +1260,11 @@ fn spotlight_from_properties(props: &HashMap<String, serde_json::Value>) -> Eust
         }
     }
     
+    // Roblox `Light.Enabled`; absent = on (the class default).
+    if let Some(enabled) = props.get("Enabled").and_then(|v| v.as_bool()) {
+        light.enabled = enabled;
+    }
+
     light
 }
 
@@ -1279,6 +1289,11 @@ fn surfacelight_from_properties(props: &HashMap<String, serde_json::Value>) -> S
         }
     }
     
+    // Roblox `Light.Enabled`; absent = on (the class default).
+    if let Some(enabled) = props.get("Enabled").and_then(|v| v.as_bool()) {
+        light.enabled = enabled;
+    }
+
     light
 }
 

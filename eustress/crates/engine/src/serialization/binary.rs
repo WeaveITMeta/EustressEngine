@@ -736,11 +736,25 @@ impl ClassId {
             ClassName::ColorGradingEffect => ClassId::Instance,
             ClassName::TerrainDetail => ClassId::Instance,
             ClassName::TerrainRegion => ClassId::Instance,
+            // Terrain layers persist as TOML field tables, so the legacy
+            // binary tag is only a label; a spline is a container of points.
+            ClassName::TerrainSpline => ClassId::Folder,
+            ClassName::TerrainSplinePoint
+            | ClassName::TerrainStamp
+            | ClassName::TerrainFlattenPad
+            | ClassName::TerrainNoise
+            | ClassName::TerrainMaterialFill
+            | ClassName::TerrainScatter
+            | ClassName::TerrainWaterBody => ClassId::Instance,
             // Data Platform non-visual data nouns (DATA_PLATFORM_PLAN.md §A.1):
             // container-like, so they fold to the Folder id. The reverse map
             // (to_class_name) never produces these, so there is no round-trip
             // ambiguity; no new ClassId variants are required.
             ClassName::Dataset => ClassId::Folder,
+            // Particle simulations are containers of species; both persist as
+            // TOML field tables, so the legacy binary tag is only a label.
+            ClassName::ParticleSimulation => ClassId::Folder,
+            ClassName::ParticleSpecies => ClassId::Folder,
             ClassName::Series => ClassId::Folder,
             ClassName::Column => ClassId::Folder,
             // ExperimentService sections. Like their Data Platform siblings

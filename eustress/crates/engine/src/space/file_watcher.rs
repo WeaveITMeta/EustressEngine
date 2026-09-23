@@ -221,8 +221,18 @@ impl SpaceFileWatcher {
         let file_type = if change_type == FileChangeType::Removed {
             FileType::Toml // placeholder — not used for removal, just needs a value
         } else {
-            FileType::from_path(&path)
-                .or_else(|| path.extension().and_then(|e| e.to_str()).and_then(FileType::from_extension))?
+            match FileType::from_path(&path) {
+                Some(t) => t,
+                // A plain `.toml` is Space configuration the loader skips on
+                // purpose (`StarterPlayer/Characters/*.rig.toml`, a script's
+                // data file). Falling back to the bare extension made it an
+                // instance file here: the class-schema self-heal rewrote it
+                // (dropping its comments, reordering its keys) and the load
+                // then failed on the missing `[metadata]`. `_service.toml`
+                // still flows through as before.
+                None if is_plain_config_toml(&path) => return None,
+                None => path.extension().and_then(|e| e.to_str()).and_then(FileType::from_extension)?,
+            }
         };
         
         // Determine service from path
@@ -240,6 +250,13 @@ impl SpaceFileWatcher {
     fn extract_service_from_path(&self, path: &Path) -> Option<String> {
         service_from_space_root(&self.space_path, path)
     }
+}
+
+/// A `.toml` that is neither an instance, GUI, material or scene file nor a
+/// `_service.toml`: configuration the loader leaves alone.
+fn is_plain_config_toml(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    name.ends_with(".toml") && !name.ends_with("_service.toml") && FileType::from_path(path).is_none()
 }
 
 /// True for paths the watcher must never treat as editable Space content.
@@ -565,6 +582,24 @@ pub fn process_file_changes(
         handle_file_renamed(&old_ev.path, &new_ev.path, &mut registry, &mut commands, &file_entities);
     }
 
+    // An instance file that changed but backs no entity never loaded (it
+    // failed to parse when the Space opened, say). Load it now as a new file,
+    // the way the reconcile path above treats closed-engine edits; otherwise
+    // fixing it on disk changes nothing until a restart. Not while the Space
+    // is still streaming in, where an unregistered path is one the drain has
+    // simply not reached yet.
+    if !loading && !in_grace_period {
+        for e in events.iter_mut() {
+            if e.change_type == FileChangeType::Modified
+                && is_instance_file(&e.path)
+                && registry.get_entity(&e.path).is_none()
+            {
+                info!("🔁 {} backs no entity yet: loading it as new", e.path.display());
+                e.change_type = FileChangeType::Created;
+            }
+        }
+    }
+
     // PARENT-BEFORE-CHILD ordering for CREATE events (2026-05-24). Copy-paste /
     // duplicate writes a whole folder TREE to disk; the watcher can deliver a
     // child's `_instance.toml` (e.g. `<Part>/Label/_instance.toml`) BEFORE the
@@ -641,6 +676,25 @@ pub fn process_file_changes(
                     &mut soul_scripts,
                 );
             }
+            // An editor that saves by renaming a temp file onto the path can
+            // reach us as a Create alone. For a script that is already loaded
+            // that is an edit: the create path returns early for a registered
+            // path, so the new source was never picked up.
+            FileChangeType::Created
+                if matches!(event.file_type, FileType::Soul | FileType::Rune | FileType::Lua)
+                    && registry.get_entity(&event.path).is_some() =>
+            {
+                recently_written.mark_written(event.path.clone());
+                handle_file_modified(
+                    &event,
+                    &mut registry,
+                    &mut commands,
+                    &asset_server,
+                    &mut mesh_cache,
+                    &file_entities,
+                    &mut soul_scripts,
+                );
+            }
             FileChangeType::Created => {
                 // `process_file_changes` is already at the 16-param ceiling, so
                 // we don't add a ForwardDecalMaterial ResMut here. A hot-created
@@ -701,9 +755,19 @@ pub fn process_file_changes(
         // changes (streaming spatial grid, plugin hosts, …). Emitted
         // AFTER the engine's own processing so subscribers see a
         // world where the ECS already reflects the change.
+        //
+        // A Remove whose path still exists is the replace half of an atomic
+        // save and was handled as a modify above; it is reported as one too.
+        // Reported as a Remove it reached the Fjall dual-model sync AFTER the
+        // pair's Create (Creates sort first), so the sync stored the new
+        // bytes and then deleted the key: every file saved while Studio ran
+        // dropped out of the tree, and the next open treated it as new.
         let kind = match event.change_type {
             FileChangeType::Created  => eustress_common::file_events::FileChangeKind::Created,
             FileChangeType::Modified => eustress_common::file_events::FileChangeKind::Modified,
+            FileChangeType::Removed if event.path.exists() => {
+                eustress_common::file_events::FileChangeKind::Modified
+            }
             FileChangeType::Removed  => eustress_common::file_events::FileChangeKind::Removed,
         };
         file_change_out.write(eustress_common::file_events::FileChanged {
@@ -726,6 +790,16 @@ fn raw_transform_is_finite(t: &Transform) -> bool {
         && t.scale.is_finite()
 }
 
+/// A file that defines an instance (as opposed to a script, mesh or texture).
+fn is_instance_file(path: &std::path::Path) -> bool {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    name.ends_with(".part.toml")
+        || name.ends_with(".glb.toml")
+        || name.ends_with(".model.toml")
+        || name.ends_with(".instance.toml")
+        || name == "_instance.toml"
+}
+
 fn handle_file_modified(
     event: &FileChangeEvent,
     registry: &mut SpaceFileRegistry,
@@ -737,14 +811,13 @@ fn handle_file_modified(
 ) {
     match event.file_type {
         FileType::Soul | FileType::Rune | FileType::Lua => {
-            // Hot-reload script source for every dynamic language. The
-            // actual in-memory recompile / re-execute happens in
-            // `hot_recompile_dirty_rune_scripts` (Rune) and
-            // `hot_reload_dirty_luau_scripts` (Luau); both run in
-            // Update and pick up `dirty = true` flags we set here.
-            // Doing the work there (not inline) keeps this system free
-            // of RuneRuntimeState / LuauRuntimeState / module-registry
-            // params and avoids Bevy query-borrow conflicts.
+            // Hot-reload script source for every dynamic language. Rune
+            // recompiles in `hot_recompile_dirty_rune_scripts`, which runs
+            // in Update and picks up the `dirty = true` flag set here; Luau
+            // reads the source when Play starts, so an edit applies on the
+            // next Play. Doing the work there (not inline) keeps this
+            // system free of runtime / module-registry params and avoids
+            // Bevy query-borrow conflicts.
             // Two ways a script entity gets into the registry, and only one of
             // them registers the source file.
             //
@@ -877,6 +950,32 @@ fn handle_file_modified(
                                             );
                                         }
                                         commands.entity(entity).insert(transform);
+
+                                        // Particle simulation field tables
+                                        // (`[particle_simulation]`,
+                                        // `[particle_species]`): an MCP or
+                                        // text-editor edit applies live.
+                                        crate::particles::bridge::queue_section_reload(
+                                            commands,
+                                            entity,
+                                            &toml_content,
+                                        );
+                                        // Terrain layer field tables
+                                        // (`[terrain_stamp]`, ...): the same,
+                                        // and the terrain re-bakes under them.
+                                        crate::terrain_layers::queue_section_reload(
+                                            commands,
+                                            entity,
+                                            &toml_content,
+                                        );
+                                        // A standalone Decal's `[decal]`
+                                        // section: its image, tint and fade
+                                        // redraw live.
+                                        crate::decal_place_tool::queue_decal_reload(
+                                            commands,
+                                            entity,
+                                            &toml_content,
+                                        );
 
                                         // Re-derive BasePart.size from the mesh
                                         // AABB × the new Transform.scale, exactly
@@ -1091,6 +1190,76 @@ fn handle_file_modified(
     }
 }
 
+/// The entity that owns folder `dir`, for a file created in it while Studio
+/// runs: the folder's instance or service marker, or the folder itself
+/// (services and folders register under their folder path). A folder that is
+/// new too (a `Machines/` holding template parts, say) has no marker, so
+/// nothing spawned it; it becomes a Folder instance here, as the file loader
+/// makes plain folders at load, under its own owner up to the service root.
+/// Only `<service>/_service.toml` used to be tried, which nothing registers,
+/// so such files landed at the root.
+fn folder_entity(
+    registry: &mut SpaceFileRegistry,
+    commands: &mut Commands,
+    space_root: &std::path::Path,
+    dir: &std::path::Path,
+    service: &str,
+) -> Option<Entity> {
+    if let Some(e) = registry
+        .get_entity(&dir.join("_instance.toml"))
+        .or_else(|| registry.get_entity(&dir.join("_service.toml")))
+        .or_else(|| registry.get_entity(dir))
+    {
+        return Some(e);
+    }
+    let service_dir = space_root.join(service);
+    if dir == service_dir.as_path() || !dir.starts_with(&service_dir) {
+        return registry.get_entity(&service_dir);
+    }
+    let owner = dir
+        .parent()
+        .and_then(|p| folder_entity(registry, commands, space_root, p, service));
+    let name = dir.file_name()?.to_string_lossy().to_string();
+    let entity = commands
+        .spawn((
+            eustress_common::classes::Instance {
+                name: name.clone(),
+                class_name: eustress_common::classes::ClassName::Folder,
+                archivable: true,
+                id: 0,
+                ai: false,
+                uuid: String::new(),
+            },
+            super::file_loader::LoadedFromFile {
+                path: dir.to_path_buf(),
+                file_type: FileType::Directory,
+                service: service.to_string(),
+            },
+            Name::new(name.clone()),
+            Transform::default(),
+            Visibility::default(),
+        ))
+        .id();
+    if let Some(owner) = owner {
+        commands.entity(entity).insert(ChildOf(owner));
+    }
+    registry.register(
+        dir.to_path_buf(),
+        entity,
+        super::file_loader::FileMetadata {
+            path: dir.to_path_buf(),
+            file_type: FileType::Directory,
+            service: service.to_string(),
+            name,
+            size: 0,
+            modified: std::time::SystemTime::now(),
+            children: Vec::new(),
+        },
+    );
+    info!("📁 Folder for new files: {:?}", dir);
+    Some(entity)
+}
+
 /// Handle new file creation
 fn handle_file_created(
     event: &FileChangeEvent,
@@ -1192,7 +1361,10 @@ fn handle_file_created(
             );
         }
         
-        FileType::Soul | FileType::Rune => {
+        // Luau too: a `.luau` file that appears while Studio runs (or that
+        // the reconcile hands over after an edit made with Studio closed)
+        // must load like one found at open, or Play starts without it.
+        FileType::Soul | FileType::Rune | FileType::Lua => {
             match std::fs::read_to_string(&event.path) {
                 Ok(source) => {
                     let name = event.path.file_stem()
@@ -1216,7 +1388,11 @@ fn handle_file_created(
                             generated_code: None,
                             build_status: crate::soul::SoulBuildStatus::NotBuilt,
                             errors: Vec::new(),
-                            run_context: Default::default(),
+                            run_context: if event.file_type == FileType::Lua {
+                                crate::soul::SoulRunContext::Luau
+                            } else {
+                                Default::default()
+                            },
                         },
                         super::file_loader::LoadedFromFile {
                             path: event.path.clone(),
@@ -1226,10 +1402,18 @@ fn handle_file_created(
                         Name::new(name.clone()),
                     )).id();
 
-                    // Parent to service entity so the Explorer primary path finds it
-                    let service_toml = space_root.join(&event.service).join("_service.toml");
-                    if let Some(service_entity) = registry.get_entity(&service_toml) {
-                        commands.entity(entity).insert(ChildOf(service_entity));
+                    // Parent to the folder the file sits in (a client script
+                    // in StarterPlayer/StarterPlayerScripts belongs THERE, not
+                    // under StarterPlayer), falling back to its service. Only
+                    // the service's `_service.toml` used to be tried, which a
+                    // database-loaded Space does not register: the new script
+                    // landed at the root and Play never ran it.
+                    let owner = match event.path.parent() {
+                        Some(dir) => folder_entity(registry, commands, space_root, dir, &event.service),
+                        None => None,
+                    };
+                    if let Some(owner) = owner {
+                        commands.entity(entity).insert(ChildOf(owner));
                     }
 
                     registry.register(
@@ -1246,7 +1430,11 @@ fn handle_file_created(
                         },
                     );
                     info!("➕ Loaded new {} script: {:?}",
-                        if event.file_type == FileType::Rune { "Rune" } else { "Soul" },
+                        match event.file_type {
+                            FileType::Rune => "Rune",
+                            FileType::Lua => "Luau",
+                            _ => "Soul",
+                        },
                         event.path);
                 }
                 Err(e) => {
@@ -1495,26 +1683,22 @@ fn handle_file_created(
                         .unwrap_or("Unknown")
                         .to_string();
                     
-                    // Parent to containing folder entity or service root.
-                    // event.path = .../V1/VCell_Foo/_instance.toml
-                    // parent_dir  = .../V1/VCell_Foo/          (the part folder itself)
-                    // grandparent = .../V1/                     (the folder that should own it)
-                    if let Some(part_folder) = event.path.parent() {
-                        if let Some(grandparent_dir) = part_folder.parent() {
-                            // Try grandparent as a named folder (registered by path)
-                            let grandparent_instance = grandparent_dir.join("_instance.toml");
-                            if let Some(parent_entity) = registry.get_entity(&grandparent_instance)
-                                .or_else(|| registry.get_entity(grandparent_dir))
-                            {
-                                commands.entity(entity).insert(ChildOf(parent_entity));
-                            } else {
-                                // grandparent is the service root itself
-                                let service_toml = space_root.join(&event.service).join("_service.toml");
-                                if let Some(service_entity) = registry.get_entity(&service_toml) {
-                                    commands.entity(entity).insert(ChildOf(service_entity));
-                                }
-                            }
-                        }
+                    // Parent to the folder that owns it. A folder-form part
+                    // (`.../V1/VCell_Foo/_instance.toml`) is its own folder, so
+                    // the owner is the folder above; a file-form one
+                    // (`.../Map/Crate.part.toml`) belongs to the folder it sits
+                    // in, which the folder-form rule put one level too high.
+                    let owner_dir = if event.path.file_name().map_or(false, |n| n == "_instance.toml") {
+                        event.path.parent().and_then(|p| p.parent())
+                    } else {
+                        event.path.parent()
+                    };
+                    let owner = match owner_dir {
+                        Some(dir) => folder_entity(registry, commands, space_root, dir, &event.service),
+                        None => None,
+                    };
+                    if let Some(owner) = owner {
+                        commands.entity(entity).insert(ChildOf(owner));
                     }
 
                     registry.register(
@@ -1602,18 +1786,13 @@ fn handle_file_created(
                         Name::new(name.clone()),
                     )).id();
 
-                    // Parent to containing directory entity if it exists
-                    if let Some(parent_dir) = event.path.parent() {
-                        let parent_instance = parent_dir.join("_instance.toml");
-                        if let Some(parent_entity) = registry.get_entity(&parent_instance) {
-                            commands.entity(entity).insert(ChildOf(parent_entity));
-                        } else {
-                            // Try parent service
-                            let service_toml = space_root.join(&event.service).join("_service.toml");
-                            if let Some(service_entity) = registry.get_entity(&service_toml) {
-                                commands.entity(entity).insert(ChildOf(service_entity));
-                            }
-                        }
+                    // Parent to the folder it sits in, up to its service.
+                    let owner = match event.path.parent() {
+                        Some(dir) => folder_entity(registry, commands, space_root, dir, &event.service),
+                        None => None,
+                    };
+                    if let Some(owner) = owner {
+                        commands.entity(entity).insert(ChildOf(owner));
                     }
 
                     registry.register(

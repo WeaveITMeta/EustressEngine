@@ -346,6 +346,9 @@ fn emit_scene_change_deltas(
     changed_tags: Query<(), (bevy::prelude::Changed<crate::attributes::Tags>, Without<crate::classes::ColdStreamed>)>,
     changed_attrs: Query<(), (bevy::prelude::Changed<crate::attributes::Attributes>, Without<crate::classes::ColdStreamed>)>,
     mut dirty: ResMut<PanelDirtyFlags>,
+    // Attribution only: names the entity behind the counts in `diag`.
+    names: Query<&bevy::prelude::Name>,
+    mut diag: Local<SceneDeltaDiag>,
 ) {
     // ── Idle short-circuit. `removed.is_empty()` peeks the unread-events
     //    cursor without consuming, so skipping it here cannot leak events:
@@ -354,21 +357,36 @@ fn emit_scene_change_deltas(
     //    `evicted` is a plain `Res` (no per-reader cursor to leak), so it
     //    plays no part in this gate — it is only consulted on the slow path
     //    below, which runs whenever `removed` is non-empty. ──
-    if driver.is_empty() && removed.is_empty() {
+    let driver_hit = !driver.is_empty();
+    let removal_hit = !removed.is_empty();
+    diag.frame(driver_hit, removal_hit, &names);
+    if !driver_hit && !removal_hit {
         return;
     }
 
     // ── Slow path: at least one of the watched components changed, an
-    //    Instance was added, or a Name was removed this frame. ──
+    //    Instance was added, or a Name was removed this frame. Every
+    //    per-type query below matches a subset of what `driver` matches
+    //    (same filters, same `Without<ColdStreamed>`), so when the driver is
+    //    empty they are all empty too and only the removals are read: a
+    //    frame that only despawned something skips six table walks. ──
 
     // (1) emit_lifecycle_deltas: Instance spawn flags Explorer rebuild even
     //     when no Name was added/removed (bulk in-memory imports insert
     //     `Instance` without tripping Changed<Name>/Changed<ChildOf>).
-    if !added_instances.is_empty() {
+    if driver_hit && !added_instances.is_empty() {
         dirty.explorer = true;
+        diag.count(|d| d.added_instances += 1);
     }
 
-    let added_list: Vec<Entity> = added_names.iter().collect();
+    let added_list: Vec<Entity> = if driver_hit {
+        added_names.iter().collect()
+    } else {
+        Vec::new()
+    };
+    if let Some(&first) = added_list.first() {
+        diag.note(DeltaArm::NameAdded, first);
+    }
     // Real Name-removals MINUS residency evictions: an evict despawn removed
     // `Name` (so the entity is in `removed`) but is not a real delete, so drop
     // it here — streaming churn emits no lifecycle delta and no Explorer
@@ -378,10 +396,16 @@ fn emit_scene_change_deltas(
     // `Name`-removal only becomes readable here after the end-of-`Update`
     // flush, i.e. the next frame). A genuine delete (MCP/user) is never in this
     // set, so its `PartRemoved` delta is emitted normally.
+    let mut removals_read = 0u32;
     let removed_list: Vec<Entity> = removed
         .read()
+        .inspect(|_| removals_read += 1)
         .filter(|e| !evicted.contains(*e))
         .collect();
+    diag.count(|d| d.names_removed += removals_read);
+    if let Some(&first) = removed_list.first() {
+        diag.note(DeltaArm::NameRemoved, first);
+    }
     if !added_list.is_empty() || !removed_list.is_empty() {
         dirty.explorer = true;
         if let Some(ref queue) = queue {
@@ -398,15 +422,26 @@ fn emit_scene_change_deltas(
         }
     }
 
+    // Removal-only frame: the per-type queries below cannot match.
+    if !driver_hit {
+        return;
+    }
+
     // (2) emit_tag_attr_dirty: any Tags/Attributes change refreshes the
     //     Properties panel (single selected entity rebuild — cheap).
     if !changed_tags.is_empty() || !changed_attrs.is_empty() {
         dirty.properties = true;
+        diag.count(|d| d.tags_or_attributes += 1);
     }
 
     // (3) emit_part_property_deltas.
     if !changed_parts.is_empty() {
         dirty.properties = true;
+        if diag.armed {
+            if let Some((first, _)) = changed_parts.iter().next() {
+                diag.note(DeltaArm::Part, first);
+            }
+        }
         if let Some(ref queue) = queue {
             for (entity, bp) in changed_parts.iter() {
                 let seq = queue.next_seq();
@@ -431,6 +466,11 @@ fn emit_scene_change_deltas(
     // (4) emit_name_deltas.
     if !changed_names.is_empty() {
         dirty.explorer = true;
+        if diag.armed {
+            if let Some((first, _)) = changed_names.iter().next() {
+                diag.note(DeltaArm::Name, first);
+            }
+        }
         if let Some(ref queue) = queue {
             for (entity, name) in changed_names.iter() {
                 let seq = queue.next_seq();
@@ -443,6 +483,11 @@ fn emit_scene_change_deltas(
     // (5) emit_parent_deltas.
     if !changed_parents.is_empty() {
         dirty.explorer = true;
+        if diag.armed {
+            if let Some((first, _)) = changed_parents.iter().next() {
+                diag.note(DeltaArm::Parent, first);
+            }
+        }
         if let Some(ref queue) = queue {
             for (entity, child_of) in changed_parents.iter() {
                 let seq = queue.next_seq();
@@ -458,6 +503,106 @@ fn emit_scene_change_deltas(
                     new_parent:   Some(child_of.0.to_bits()),
                 });
             }
+        }
+    }
+}
+
+/// Which per-type arm of `emit_scene_change_deltas` a sample came from.
+#[derive(Clone, Copy, Debug)]
+enum DeltaArm {
+    NameAdded,
+    NameRemoved,
+    Part,
+    Name,
+    Parent,
+}
+
+/// Why `emit_scene_change_deltas` left its idle path, counted over 10 s and
+/// logged when `EUSTRESS_PROFILE` is set. A settled scene shows only idle
+/// frames; anything else names what keeps the slow path running.
+#[derive(Default)]
+struct SceneDeltaDiag {
+    armed: bool,
+    since: Option<Instant>,
+    frames: u32,
+    changed_frames: u32,
+    removal_only_frames: u32,
+    added_instances: u32,
+    names_removed: u32,
+    tags_or_attributes: u32,
+    /// Frames each `DeltaArm` fired, indexed by the enum's order.
+    arms: [u32; 5],
+    sample: Option<(DeltaArm, Entity)>,
+}
+
+impl SceneDeltaDiag {
+    /// Called once per run, before any `count`/`note`: arms the counters and
+    /// reports the previous 10 s.
+    fn frame(&mut self, driver_hit: bool, removal_hit: bool, names: &Query<&Name>) {
+        static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        self.armed = *ARMED.get_or_init(|| std::env::var("EUSTRESS_PROFILE").is_ok());
+        if !self.armed {
+            return;
+        }
+        let now = Instant::now();
+        let since = *self.since.get_or_insert(now);
+        let elapsed = now.duration_since(since).as_secs_f32();
+        if elapsed >= 10.0 {
+            let sample = self
+                .sample
+                .map(|(arm, entity)| {
+                    let name = names
+                        .get(entity)
+                        .map(|n| n.as_str().to_string())
+                        .unwrap_or_else(|_| "<no name now>".to_string());
+                    format!("; e.g. {arm:?} on {entity:?} \"{name}\"")
+                })
+                .unwrap_or_default();
+            info!(
+                "🔁 scene deltas, last {:.0}s / {} frames: {} idle, {} removal-only, {} with changes (instances added {}, names added {}, name removals {} [{} events], parts {}, names {}, parents {}, tags/attributes {}){}",
+                elapsed,
+                self.frames,
+                self.frames - self.changed_frames - self.removal_only_frames,
+                self.removal_only_frames,
+                self.changed_frames,
+                self.added_instances,
+                self.arms[DeltaArm::NameAdded as usize],
+                self.arms[DeltaArm::NameRemoved as usize],
+                self.names_removed,
+                self.arms[DeltaArm::Part as usize],
+                self.arms[DeltaArm::Name as usize],
+                self.arms[DeltaArm::Parent as usize],
+                self.tags_or_attributes,
+                sample,
+            );
+            *self = SceneDeltaDiag {
+                armed: true,
+                since: Some(now),
+                ..Default::default()
+            };
+        }
+        self.frames += 1;
+        if driver_hit {
+            self.changed_frames += 1;
+        } else if removal_hit {
+            self.removal_only_frames += 1;
+        }
+    }
+
+    /// Applies `f` only while armed, so the counters never grow unread.
+    fn count(&mut self, f: impl FnOnce(&mut Self)) {
+        if self.armed {
+            f(self);
+        }
+    }
+
+    fn note(&mut self, arm: DeltaArm, entity: Entity) {
+        if !self.armed {
+            return;
+        }
+        self.arms[arm as usize] += 1;
+        if self.sample.is_none() {
+            self.sample = Some((arm, entity));
         }
     }
 }

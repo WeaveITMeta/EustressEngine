@@ -293,13 +293,16 @@ pub fn create_instance(
     let folder_name = unique_entity_name(dest_dir, preferred);
     let folder_path = dest_dir.join(&folder_name);
 
-    // If the requested name had to be altered to be representable on disk
-    // (`A: B` sanitized, an over-long name truncated, a collision suffixed),
-    // keep the ORIGINAL as the display name so the Explorer still shows what
-    // the author actually typed. Callers that set `display_name` themselves
-    // (the Roblox importer does) already carry the truth and are left alone.
+    // The requested name is the instance's name: it lands in `[metadata] name`
+    // whether or not the folder could carry it verbatim (`A: B` sanitized, an
+    // over-long name truncated, a collision suffixed), so the Explorer shows
+    // what the author or the calling surface asked for. With no requested
+    // name, or one equal to the class, the name is the class name and a
+    // template's own `[metadata] name` is kept unless the folder was renamed.
+    // Callers that set `display_name` themselves (the Roblox importer does)
+    // already carry the truth and are left alone.
     let mut overrides = overrides;
-    if overrides.display_name.is_none() && folder_name != preferred {
+    if overrides.display_name.is_none() && (folder_name != preferred || preferred != class_name) {
         overrides.display_name = Some(preferred.to_string());
     }
 
@@ -1052,6 +1055,76 @@ mod sanitize_tests {
             "the original name must survive in metadata: {toml}"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod requested_name_tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "eustress_requested_name_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn metadata_name(created: &CreatedInstance) -> Option<String> {
+        let doc: toml::Value = std::fs::read_to_string(&created.toml_path).unwrap().parse().unwrap();
+        doc.get("metadata")?.get("name")?.as_str().map(str::to_string)
+    }
+
+    /// A requested name that fits on disk as-is is still the instance's
+    /// name, not just its folder's.
+    #[test]
+    fn requested_name_reaches_metadata_name() {
+        let dir = temp_dir("plain");
+        let created = create_instance(&dir, "Part", Some("Tank"), InstanceOverrides::default()).unwrap();
+        assert_eq!(created.folder_name, "Tank");
+        assert_eq!(metadata_name(&created).as_deref(), Some("Tank"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A second instance with the same requested name gets a suffixed folder
+    /// and keeps the requested name.
+    #[test]
+    fn colliding_requested_name_keeps_the_name() {
+        let dir = temp_dir("collide");
+        create_instance(&dir, "Part", Some("Tank"), InstanceOverrides::default()).unwrap();
+        let second = create_instance(&dir, "Part", Some("Tank"), InstanceOverrides::default()).unwrap();
+        assert_ne!(second.folder_name, "Tank");
+        assert_eq!(metadata_name(&second).as_deref(), Some("Tank"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An explicit display name wins over the requested (folder) name.
+    #[test]
+    fn explicit_display_name_wins() {
+        let dir = temp_dir("explicit");
+        let overrides = InstanceOverrides { display_name: Some("Shown".into()), ..Default::default() };
+        let created = create_instance(&dir, "Part", Some("Folder"), overrides).unwrap();
+        assert_eq!(created.folder_name, "Folder");
+        assert_eq!(metadata_name(&created).as_deref(), Some("Shown"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No requested name: the instance is named after its class, as before.
+    #[test]
+    fn no_requested_name_uses_the_class_name() {
+        let dir = temp_dir("none");
+        let first = create_instance(&dir, "Part", None, InstanceOverrides::default()).unwrap();
+        let second = create_instance(&dir, "Part", None, InstanceOverrides::default()).unwrap();
+        assert_eq!(first.folder_name, "Part");
+        assert!(metadata_name(&first).map_or(true, |n| n == "Part"), "{:?}", metadata_name(&first));
+        assert_ne!(second.folder_name, "Part");
+        assert_eq!(metadata_name(&second).as_deref(), Some("Part"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

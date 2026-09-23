@@ -206,6 +206,53 @@ fn property_value_to_toml(value: &PropertyValue) -> toml::Value {
 
 /// Spawn a service entity from a ServiceDefinition
 /// Fully data-driven: any properties in the TOML are loaded dynamically
+/// Every property a `_service.toml` defines, from BOTH places it can live.
+///
+/// Values sit either flattened under `[service]` (where `save_service_to_file`
+/// writes them) or in a top-level `[properties]` SECTION, where all 15 shipped
+/// service templates put them.
+///
+/// The section needs expanding by hand. `ServiceDefinition.properties` is
+/// `#[serde(flatten)]`, which gathers every unrecognised top-level key -- so a
+/// `[properties]` section arrives as ONE entry, `"properties"` holding a
+/// `toml::Value::Table`, and `toml_to_property_value` has no arm for tables.
+/// Iterating the map directly therefore dropped every templated value for every
+/// service: a fresh Space ran Lighting at the built-in 12:00 and latitude 45
+/// instead of the template's 14:00 and 41.73. Worse, the first save then wrote
+/// an empty `[properties]`, so the template values were gone from disk too.
+/// Once the component holds them, saving moves them into `[service]`, where
+/// they load on every open.
+///
+/// `[properties]` is merged second so it wins a collision. Both spawn paths call
+/// this, so StarterGui (`spawn_service_as_ui_root`) gets the same treatment.
+fn merged_service_properties(definition: &ServiceDefinition) -> HashMap<String, PropertyValue> {
+    let mut properties = HashMap::new();
+    for (key, value) in &definition.service.properties {
+        insert_service_property(&mut properties, key, value);
+    }
+    for (key, value) in &definition.properties {
+        match value {
+            toml::Value::Table(section) if key == "properties" => {
+                for (inner_key, inner_value) in section {
+                    insert_service_property(&mut properties, inner_key, inner_value);
+                }
+            }
+            other => insert_service_property(&mut properties, key, other),
+        }
+    }
+    properties
+}
+
+fn insert_service_property(
+    properties: &mut HashMap<String, PropertyValue>,
+    key: &str,
+    value: &toml::Value,
+) {
+    if let Some(prop_val) = toml_to_property_value(value) {
+        properties.insert(key.to_string(), prop_val);
+    }
+}
+
 pub fn spawn_service(
     commands: &mut Commands,
     path: std::path::PathBuf,
@@ -226,19 +273,7 @@ pub fn spawn_service(
         _ => eustress_common::classes::ClassName::Folder,
     };
     
-    // Convert all TOML properties to dynamic PropertyValue map
-    // Merge from both [service] flattened props and [properties] section
-    let mut properties = HashMap::new();
-    for (key, value) in &props.properties {
-        if let Some(prop_val) = toml_to_property_value(value) {
-            properties.insert(key.clone(), prop_val);
-        }
-    }
-    for (key, value) in &definition.properties {
-        if let Some(prop_val) = toml_to_property_value(value) {
-            properties.insert(key.clone(), prop_val);
-        }
-    }
+    let properties = merged_service_properties(&definition);
     
     let service_component = ServiceComponent {
         class_name: class_name.clone(),
@@ -286,12 +321,7 @@ pub fn spawn_service_as_ui_root(
     let icon = props.icon.clone()
         .unwrap_or_else(|| class_name.to_lowercase());
 
-    let mut properties = HashMap::new();
-    for (key, value) in &props.properties {
-        if let Some(prop_val) = toml_to_property_value(value) {
-            properties.insert(key.clone(), prop_val);
-        }
-    }
+    let properties = merged_service_properties(&definition);
 
     let service_component = ServiceComponent {
         class_name: class_name.clone(),
@@ -399,4 +429,49 @@ pub fn save_service_to_file_signed(
 
     info!("💾 Saved service to {:?}", service.toml_path);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn float(props: &HashMap<String, PropertyValue>, key: &str) -> Option<f64> {
+        match props.get(key) {
+            Some(PropertyValue::Float(v)) => Some(*v as f64),
+            _ => None,
+        }
+    }
+
+    /// The shipped Lighting template, loaded exactly as production loads it
+    /// (`load_service_definition_from_str`: parse, `normalise_keys`,
+    /// deserialize). Its values live in a `[properties]` SECTION, which
+    /// `#[serde(flatten)]` delivers as a single Table entry -- the case that
+    /// silently dropped every templated service value.
+    #[test]
+    fn shipped_lighting_template_values_reach_the_component() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../common/assets/service_templates/Lighting/_service.toml");
+        let text = std::fs::read_to_string(&path).expect("read the shipped Lighting template");
+        let def = load_service_definition_from_str(&text).expect("parse the Lighting template");
+        let props = merged_service_properties(&def);
+
+        assert_eq!(float(&props, "clock_time"), Some(14.0), "clock_time must come from [properties]");
+        assert_eq!(float(&props, "geographic_latitude"), Some(41.73), "latitude must come from [properties]");
+        assert_eq!(float(&props, "brightness"), Some(2.0));
+        assert!(
+            !props.contains_key("properties"),
+            "the section itself must be expanded, not stored as a key"
+        );
+    }
+
+    /// A value written flat under `[service]` (where saving puts it) still
+    /// loads, and `[properties]` wins when both define the same key.
+    #[test]
+    fn service_table_values_load_and_properties_section_wins() {
+        let text = "[service]\nclass_name = \"Lighting\"\nclock_time = 9.0\nbrightness = 3.0\n\n[properties]\nclock_time = 14.0\n";
+        let def = load_service_definition_from_str(text).expect("parse");
+        let props = merged_service_properties(&def);
+        assert_eq!(float(&props, "brightness"), Some(3.0), "a [service] value loads");
+        assert_eq!(float(&props, "clock_time"), Some(14.0), "[properties] wins a collision");
+    }
 }

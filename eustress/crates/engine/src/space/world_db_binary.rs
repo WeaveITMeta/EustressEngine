@@ -562,6 +562,25 @@ pub(crate) fn spawn_binary_core(
     };
     let t1 = timing.then(std::time::Instant::now);
 
+    // A light core cannot be spawned as what it is: this path builds bare
+    // parts, and a light made that way was an unanchored, collidable block
+    // that lit nothing. Lights load from their folder form instead
+    // (`representation::class_is_file_natured`); cores stored before that
+    // rule are skipped.
+    if matches!(arch.class_name.as_str(), "PointLight" | "SpotLight" | "SurfaceLight") {
+        static SKIPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        if SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+            warn!(
+                target: "eustress_engine::world_db",
+                stored_id,
+                class = %arch.class_name,
+                "binary-ECS spawn: skipping a stored light core (lights load from their \
+                 folder form; this path would make it a collidable block)"
+            );
+        }
+        return None;
+    }
+
     let marker = BinaryEcsInstance::from_core(stored_id, &arch);
     let synthetic = synthetic_path(space_root, &arch.class_name, stored_id);
     let def = arch_instance::arch_to_instance(&arch);
@@ -869,6 +888,9 @@ fn load_binary_ecs_instances(
     // HLOD shares the streaming gate: merged-cell proxies only run for a
     // large Space (the same condition that turns residency streaming on).
     mut hlod: ResMut<super::hlod::HlodState>,
+    // Every live instance, to recognise baked leaves the file loader has
+    // already spawned from the tree (see the boot-load-all branch below).
+    live_instances: Query<&eustress_common::classes::Instance>,
 ) {
     // Already loaded for this Space.
     if latch.0.as_deref() == Some(space_root.0.as_path()) {
@@ -937,12 +959,28 @@ fn load_binary_ecs_instances(
     }
 
     // stored_ids already live this session (runtime-created before boot-load).
-    let existing_ids: std::collections::HashSet<u64> =
+    let mut existing_ids: std::collections::HashSet<u64> =
         existing.iter().map(|b| b.stored_id).collect();
+    // A baked leaf keeps its tree entry next to its core, and below the
+    // streaming threshold the file loader spawns every tree entry (it skips
+    // baked leaves only while STREAMING, when residency owns them). So by the
+    // time this runs, each baked leaf is already live from the tree, and
+    // spawning its core as well put a second copy of it in the scene: 25,003
+    // duplicate parts on Super Station, each rendered, shadowed, collided and
+    // visibility-tested twice. A core is the same entity as a live instance
+    // when its stored id derives from that instance's uuid.
+    let before = existing_ids.len();
+    existing_ids.extend(live_instances.iter().filter_map(|i| {
+        eustress_common::instance_create::uuid_hex_to_bytes(&i.uuid)
+            .map(|b| super::bake_cores::stored_id_from_uuid(&b))
+    }));
+    let live_from_tree = existing_ids.len() - before;
 
     let mut spawned = 0usize;
+    let mut already_live = 0usize;
     for (stored_id, bytes) in cores {
         if existing_ids.contains(&stored_id) {
+            already_live += 1;
             continue;
         }
         if spawn_binary_core(
@@ -964,9 +1002,12 @@ fn load_binary_ecs_instances(
     info!(
         target: "eustress_engine::world_db",
         spawned,
+        already_live,
+        live_from_tree,
         space = %space_root.0.display(),
         "binary-ECS boot-load: spawned entities from the entities partition \
-         into the ECS (visible in viewport + Explorer + Properties)"
+         into the ECS (visible in viewport + Explorer + Properties); cores \
+         whose entity is already live from the tree were skipped"
     );
 }
 
@@ -1256,7 +1297,8 @@ pub fn register(app: &mut App) {
                 load_binary_ecs_instances,
                 super::residency::sys_residency_load,
                 super::hlod::sys_hlod_plan,
-                mirror_binary_ecs_changes,
+                // Play sessions are transient: nothing they move persists.
+                mirror_binary_ecs_changes.run_if(super::world_db_plugin::outside_play_session),
                 super::residency::sys_residency_evict,
                 super::hlod::sys_hlod_visibility,
             )

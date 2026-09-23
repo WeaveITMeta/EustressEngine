@@ -2,7 +2,9 @@
 //!
 //! Periodic scanner that maintains the list of all Universes and their Spaces
 //! found under `Documents/Eustress/`.  The registry is a Bevy Resource updated
-//! on Startup and then every 5 seconds from an Update system.
+//! on Startup, then every 5 seconds and whenever the watcher sees a Space
+//! marker change. Those later scans walk the folders on the IO task pool, so
+//! the frame never waits on the disk.
 //!
 //! ## Types
 //! - `SpaceInfo`         — name + path for one Space
@@ -59,46 +61,7 @@ pub struct UniverseRegistry {
 impl UniverseRegistry {
     /// Scan `Documents/Eustress/` and rebuild the universe list.
     pub fn scan(&mut self) {
-        let workspace = workspace_root();
-        let mut universes = Vec::new();
-
-        if let Ok(entries) = std::fs::read_dir(&workspace) {
-            let mut dirs: Vec<PathBuf> = entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.is_dir()
-                        && !looks_like_space_root(p)
-                        // Skip hidden/metadata directories (.eustress, .git, etc.)
-                        && !p.file_name()
-                            .map(|n| n.to_string_lossy().starts_with('.'))
-                            .unwrap_or(true)
-                })
-                .collect();
-            dirs.sort();
-
-            for universe_path in dirs {
-                let name = universe_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-
-                let spaces = collect_spaces(&universe_path);
-                // Only show directories that actually contain Spaces
-                // (or have a Spaces/ subdirectory). This filters out
-                // stale/unrelated folders that happen to live in
-                // Documents/Eustress/ (game cache dirs, temp folders, etc.)
-                if spaces.is_empty()
-                    && !universe_path.join("Spaces").is_dir()
-                    && !universe_path.join("spaces").is_dir()
-                {
-                    continue;
-                }
-                universes.push(UniverseInfo { path: universe_path, name, spaces });
-            }
-        }
-
-        self.universes = universes;
+        self.universes = scan_universes();
         self.last_scan = Some(Instant::now());
         self.rescan_requested = false;
     }
@@ -114,6 +77,50 @@ impl UniverseRegistry {
             u.spaces.iter().any(|s| s.path == space_path)
         })
     }
+}
+
+/// Walk `Documents/Eustress/` and list every Universe with its Spaces.
+fn scan_universes() -> Vec<UniverseInfo> {
+    let workspace = workspace_root();
+    let mut universes = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&workspace) {
+        let mut dirs: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_dir()
+                    && !looks_like_space_root(p)
+                    // Skip hidden/metadata directories (.eustress, .git, etc.)
+                    && !p.file_name()
+                        .map(|n| n.to_string_lossy().starts_with('.'))
+                        .unwrap_or(true)
+            })
+            .collect();
+        dirs.sort();
+
+        for universe_path in dirs {
+            let name = universe_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            let spaces = collect_spaces(&universe_path);
+            // Only show directories that actually contain Spaces
+            // (or have a Spaces/ subdirectory). This filters out
+            // stale/unrelated folders that happen to live in
+            // Documents/Eustress/ (game cache dirs, temp folders, etc.)
+            if spaces.is_empty()
+                && !universe_path.join("Spaces").is_dir()
+                && !universe_path.join("spaces").is_dir()
+            {
+                continue;
+            }
+            universes.push(UniverseInfo { path: universe_path, name, spaces });
+        }
+    }
+
+    universes
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -280,7 +287,10 @@ fn drain_watcher_events(
 fn periodic_scan(
     mut registry: ResMut<UniverseRegistry>,
     space_root: Option<Res<SpaceRoot>>,
+    mut pending: Local<Option<bevy::tasks::Task<Vec<UniverseInfo>>>>,
 ) {
+    use bevy::tasks::{block_on, futures_lite::future};
+
     // Sync active_space whenever SpaceRoot changes
     if let Some(sr) = &space_root {
         if sr.is_changed() {
@@ -288,11 +298,24 @@ fn periodic_scan(
         }
     }
 
-    if registry.needs_rescan() {
-        registry.scan();
+    // The walk reads every Universe and Space folder (~30 ms measured), so it
+    // runs on the IO pool; done inline it was a hitch every 5 seconds.
+    if let Some(task) = pending.as_mut() {
+        let Some(universes) = block_on(future::poll_once(task)) else { return };
+        *pending = None;
+        registry.universes = universes;
         if let Some(sr) = space_root {
             registry.active_space = Some(sr.0.clone());
         }
+        return;
+    }
+
+    if registry.needs_rescan() {
+        // Cleared at launch, so a request made while the walk runs is kept
+        // and starts another one.
+        registry.last_scan = Some(Instant::now());
+        registry.rescan_requested = false;
+        *pending = Some(bevy::tasks::IoTaskPool::get().spawn(async { scan_universes() }));
     }
 }
 

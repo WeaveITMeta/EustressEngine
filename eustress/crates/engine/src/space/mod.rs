@@ -116,7 +116,13 @@ pub fn skip_disk_scans() -> bool {
         .unwrap_or(false)
 }
 
-/// Resource holding the current Space root path
+/// Resource holding the current Space root path: the Space that is open.
+///
+/// Anything that reads or writes Space files resolves the Space through this
+/// resource (see [`open_space_root`]), never through [`default_space_root`],
+/// which re-reads the settings file and names the last Space the settings
+/// remember, not the one opened with `--space`, a `.eustress` launch file or
+/// an in-session switch.
 #[derive(Resource, Debug, Clone)]
 pub struct SpaceRoot(pub PathBuf);
 
@@ -124,6 +130,19 @@ impl Default for SpaceRoot {
     fn default() -> Self {
         Self(default_space_root())
     }
+}
+
+/// The open Space's root: the live [`SpaceRoot`], or the settings default
+/// when no Space has been opened yet.
+pub fn open_space_root(space_root: Option<&SpaceRoot>) -> PathBuf {
+    space_root.map(|r| r.0.clone()).unwrap_or_else(default_space_root)
+}
+
+/// The Space an app is being built for, for plugins that load Space files in
+/// `Plugin::build`: the [`SpaceRoot`] the shell inserted from its launch
+/// arguments, else the settings default.
+pub fn open_space_root_of(app: &App) -> PathBuf {
+    open_space_root(app.world().get_resource::<SpaceRoot>())
 }
 
 pub fn workspace_root() -> PathBuf {

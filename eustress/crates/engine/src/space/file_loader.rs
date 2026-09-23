@@ -203,12 +203,48 @@ impl FileType {
             // AdornmentService: Adornment definition TOMLs spawn as adornment entities
             (Self::Toml, "AdornmentService") => true,
 
+            // Storage services hold the templates scripts clone at run time
+            // (zombie models, weapons, GUI prefabs), so their instance files
+            // load like Workspace content. They stay hidden and out of
+            // physics (see `hide_storage_service_content`), as in Roblox.
+            (Self::Toml | Self::Gltf | Self::Obj | Self::Fbx | Self::GuiElement, s) if is_storage_service_name(s) => true,
+
             // Scripts in any service folder — Rune, Soul (markdown), and Luau
             // all spawn as SoulScript entities wherever the user drops them.
             (Self::Soul | Self::Rune | Self::Lua, _) => true,
             
             // Default: don't spawn
             _ => false,
+        }
+    }
+}
+
+/// Services whose contents never render: templates and scripts live here.
+/// Their instances load (scripts clone them) but stay hidden and out of
+/// physics, in Edit as in Play.
+pub fn is_storage_service_name(service: &str) -> bool {
+    matches!(
+        service,
+        "ServerStorage" | "ReplicatedStorage" | "ReplicatedFirst" | "ServerScriptService" | "StarterPack"
+            | "StarterPlayer" | "SoulService"
+    )
+}
+
+/// Anything loaded under a storage service is hidden and takes no part in
+/// physics or picking. Hiding each loaded entity (not only the service
+/// root) also covers entities whose parent link lands a frame late.
+pub fn hide_storage_service_content(
+    mut commands: Commands,
+    added: Query<(Entity, &LoadedFromFile, Has<Visibility>), Added<LoadedFromFile>>,
+) {
+    for (e, loaded, has_visibility) in added.iter() {
+        if !is_storage_service_name(&loaded.service) {
+            continue;
+        }
+        let mut ec = commands.entity(e);
+        ec.insert(avian3d::prelude::ColliderDisabled);
+        if has_visibility {
+            ec.insert(Visibility::Hidden);
         }
     }
 }
@@ -1656,8 +1692,32 @@ pub fn spawn_file_entry(
         }
 
         FileType::Ogg | FileType::Mp3 | FileType::Wav | FileType::Flac => {
-            info!("🔊 Audio file discovered: {:?} (loader not yet implemented)", file_meta.path);
-            return None;
+            // An audio file in SoundService is a Sound instance. Its SoundId
+            // is the Space-relative path, which `Sound:Play()` loads through
+            // the `space://` asset source, so `SoundService.Gunshot:Play()`
+            // works for a `SoundService/Gunshot.wav` dropped in the folder.
+            let sound_id = super::space_source::rel_from_root(space_path, &file_meta.path)
+                .unwrap_or_else(|| file_meta.path.to_string_lossy().replace('\\', "/"));
+            let e = commands
+                .spawn((
+                    eustress_common::classes::Instance {
+                        name: file_meta.name.clone(),
+                        class_name: eustress_common::classes::ClassName::Sound,
+                        archivable: true,
+                        id: 0,
+                        ..Default::default()
+                    },
+                    eustress_common::classes::Sound { sound_id, ..Default::default() },
+                    LoadedFromFile {
+                        path: file_meta.path.clone(),
+                        file_type: file_meta.file_type,
+                        service: file_meta.service.clone(),
+                    },
+                    Name::new(file_meta.name.clone()),
+                ))
+                .id();
+            registry.register(file_meta.path.clone(), e, file_meta.clone());
+            e
         }
 
         _ => {
@@ -1710,7 +1770,7 @@ pub fn spawn_directory_entry(
         return;
     }
 
-    // Skip the worldgen Terrain EXPORT directory (chunks/*.r16, splatmap/*.png,
+    // Skip the worldgen Terrain EXPORT directory (chunks/*.r16, matmap/*.png,
     // _terrain.toml, materials/*.mat.toml) — it has no `_instance.toml`, so
     // without this check it falls through to the generic Folder-class default
     // below and gets spawned as a real ECS entity named "Terrain", DUPLICATING
@@ -1729,8 +1789,35 @@ pub fn spawn_directory_entry(
         Some(m) => m & dir_markers::TERRAIN != 0,
         None => source.exists(&terrain_toml_rel),
     };
-    if has_terrain {
+    // `Workspace/Terrain` holding only terrain layers (added before the
+    // terrain was first saved, or a migrated Space whose raster lives in the
+    // voxel store) is the same directory without a `_terrain.toml`; one with
+    // an `_instance.toml` is a user folder that happens to be called Terrain.
+    let is_terrain_dir = has_terrain
+        || (dir_rel == "Workspace/Terrain"
+            && match markers {
+                Some(m) => m & dir_markers::INSTANCE == 0,
+                None => !source.exists(&format!("{dir_rel}/_instance.toml")),
+            });
+    if is_terrain_dir {
         debug!("Skipping terrain export directory {:?} (asset storage, not an instance)", dir_meta.path);
+        // Its `Layers` folder holds the terrain layer instances (see
+        // `terrain_layers`). They spawn under this directory's parent, beside
+        // the Workspace's own children, as the file watcher parents one
+        // created at runtime; the Explorer lists them under the Terrain.
+        let layers = dir_meta.children.iter().find(|c| {
+            c.file_type == FileType::Directory
+                && c.name == eustress_common::terrain::layer_instances::LAYERS_FOLDER
+        });
+        for layer in layers.into_iter().flat_map(|l| &l.children) {
+            if layer.file_type == FileType::Directory {
+                spawn_directory_entry(
+                    commands, asset_server, meshes, materials, registry,
+                    material_registry, mesh_cache, decal_materials, space_path, layer, parent_entity,
+                    class_defaults, source,
+                );
+            }
+        }
         return;
     }
 
@@ -2404,6 +2491,9 @@ pub fn spawn_directory_entry(
         if let Some(ref src_path) = source_file {
             if let Ok(script_src) = src_read_string(source, space_path, src_path) {
                 let script_name = dir_meta.name.clone();
+                // A folder holding a `.luau` source is a Luau script, exactly
+                // like a bare `.luau` file.
+                let is_luau = matches!(src_path.extension().and_then(|x| x.to_str()), Some("luau") | Some("lua"));
                 commands.spawn((
                     eustress_common::classes::Instance {
                         name: script_name.clone(),
@@ -2417,7 +2507,7 @@ pub fn spawn_directory_entry(
                         generated_code: None,
                         build_status: crate::soul::SoulBuildStatus::NotBuilt,
                         errors: Vec::new(),
-                        run_context: Default::default(),
+                        run_context: if is_luau { crate::soul::SoulRunContext::Luau } else { Default::default() },
                     },
                     LoadedFromFile {
                         // The SOURCE FILE, not the folder that holds it.
@@ -2433,7 +2523,7 @@ pub fn spawn_directory_entry(
                         // which is why the failure looked like it belonged to the
                         // scripts rather than to the loader.
                         path: src_path.clone(),
-                        file_type: FileType::Rune,
+                        file_type: if is_luau { FileType::Lua } else { FileType::Rune },
                         service: dir_meta.service.clone(),
                     },
                     Name::new(script_name),
@@ -2505,6 +2595,62 @@ pub fn spawn_directory_entry(
             Err(e) => {
                 warn!("Failed to load Part folder {:?}: {}", dir_meta.path, e);
                 // Fall back to empty folder entity
+                commands.spawn((
+                    eustress_common::classes::Instance {
+                        name: dir_meta.name.clone(),
+                        class_name: eustress_common::classes::ClassName::Folder,
+                        archivable: true, id: 0, ai: false, uuid: String::new(),
+                    },
+                    LoadedFromFile {
+                        path: dir_meta.path.clone(),
+                        file_type: FileType::Directory,
+                        service: dir_meta.service.clone(),
+                    },
+                    Name::new(dir_meta.name.clone()),
+                    Transform::default(),
+                    Visibility::default(),
+                )).id()
+            }
+        }
+    } else if matches!(class_name,
+        eustress_common::classes::ClassName::ParticleSimulation
+        | eustress_common::classes::ClassName::ParticleSpecies
+        | eustress_common::classes::ClassName::TerrainSpline
+        | eustress_common::classes::ClassName::TerrainSplinePoint
+        | eustress_common::classes::ClassName::TerrainStamp
+        | eustress_common::classes::ClassName::TerrainFlattenPad
+        | eustress_common::classes::ClassName::TerrainNoise
+        | eustress_common::classes::ClassName::TerrainMaterialFill
+        | eustress_common::classes::ClassName::TerrainScatter
+        | eustress_common::classes::ClassName::TerrainWaterBody
+    ) {
+        // Particle simulations and their species, and the terrain layer
+        // classes: the same definition + spawn as the Insert path (class
+        // component, InstanceFile, pose), plus LoadedFromFile so inserting
+        // with one selected lands inside its folder. Species and spline-point
+        // subfolders are spawned by the recursion below.
+        let instance_toml = dir_meta.path.join("_instance.toml");
+        match take_instance_def(&mut parsed, source, space_path, &instance_toml) {
+            Ok(instance_def) => {
+                let entity = super::instance_loader::spawn_instance(
+                    commands,
+                    asset_server,
+                    materials,
+                    material_registry,
+                    mesh_cache,
+                    decal_materials,
+                    instance_toml,
+                    instance_def,
+                );
+                commands.entity(entity).insert(LoadedFromFile {
+                    path: dir_meta.path.clone(),
+                    file_type: FileType::Directory,
+                    service: dir_meta.service.clone(),
+                });
+                entity
+            }
+            Err(e) => {
+                warn!("Failed to load {:?} folder {:?}: {}", class_name, dir_meta.path, e);
                 commands.spawn((
                     eustress_common::classes::Instance {
                         name: dir_meta.name.clone(),
@@ -2822,43 +2968,56 @@ pub fn spawn_directory_entry(
             .and_then(|p| p.get("extras"));
 
         // Field readers: prefer the extras `light_*` value (real import
-        // data), then the `[Light]` section (PascalCase template key),
-        // else `None` (component default stands).
+        // data), then the `[Light]` section, else `None` (component default
+        // stands). Section keys are PascalCase in class templates and
+        // lowercase in Eustress-authored lights (`enabled` below reads both),
+        // and numbers may be written as integers. Reading only PascalCase
+        // floats dropped a hand-written `shadows = false`, so every such
+        // lamp cast six-face cube shadows at the default 60 m range.
+        let sec_get =
+            |key: &str| light_section.and_then(|l| l.get(key).or_else(|| l.get(key.to_ascii_lowercase().as_str())));
+        let as_f32 = |v: &toml::Value| -> Option<f32> {
+            v.as_float().or_else(|| v.as_integer().map(|i| i as f64)).map(|f| f as f32)
+        };
         let read_f32 = |sec_key: &str, extra_key: &str| -> Option<f32> {
             extras
                 .and_then(|e| e.get(extra_key))
-                .and_then(|v| v.as_float().map(|f| f as f32))
-                .or_else(|| {
-                    light_section
-                        .and_then(|l| l.get(sec_key))
-                        .and_then(|v| v.as_float().map(|f| f as f32))
-                })
+                .and_then(as_f32)
+                .or_else(|| sec_get(sec_key).and_then(as_f32))
         };
         let read_bool = |sec_key: &str, extra_key: &str| -> Option<bool> {
             extras
                 .and_then(|e| e.get(extra_key))
                 .and_then(|v| v.as_bool())
+                .or_else(|| sec_get(sec_key).and_then(|v| v.as_bool()))
+        };
+        // Roblox `Light.Enabled`: the importer's `light_enabled` first (the
+        // real imported value), then the section's `Enabled` / `enabled`
+        // (templates and Eustress-authored lights write it lowercase). Missing
+        // everywhere = the class default, on. It used to be read nowhere, so
+        // a light switched off in the source place shone, and cast shadows.
+        let read_enabled = || -> Option<bool> {
+            extras
+                .and_then(|e| e.get("light_enabled"))
+                .and_then(|v| v.as_bool())
                 .or_else(|| {
                     light_section
-                        .and_then(|l| l.get(sec_key))
+                        .and_then(|l| l.get("Enabled").or_else(|| l.get("enabled")))
                         .and_then(|v| v.as_bool())
                 })
         };
         // Color: extras `light_color` = [r,g,b] floats (0..1); section
-        // `Color` = same shape.
+        // `Color` / `color` = the same, or 0..255 channels.
         let read_color = || -> Option<Color> {
             let arr = extras
                 .and_then(|e| e.get("light_color"))
                 .and_then(|v| v.as_array())
-                .or_else(|| {
-                    light_section
-                        .and_then(|l| l.get("Color"))
-                        .and_then(|v| v.as_array())
-                })?;
-            let r = arr.first()?.as_float()? as f32;
-            let g = arr.get(1)?.as_float()? as f32;
-            let b = arr.get(2)?.as_float()? as f32;
-            Some(Color::srgb(r, g, b))
+                .or_else(|| sec_get("Color").and_then(|v| v.as_array()))?;
+            let r = as_f32(arr.first()?)?;
+            let g = as_f32(arr.get(1)?)?;
+            let b = as_f32(arr.get(2)?)?;
+            let scale = if r > 1.0 || g > 1.0 || b > 1.0 { 1.0 / 255.0 } else { 1.0 };
+            Some(Color::srgb(r * scale, g * scale, b * scale))
         };
 
         // Transform position from `[transform]` (lights are point sources;
@@ -2880,13 +3039,17 @@ pub fn spawn_directory_entry(
             .unwrap_or(Vec3::ZERO);
         let transform = Transform::from_translation(position);
 
+        // Carry the UUID: the binary-ECS boot-load skips a stored core whose
+        // entity is already live, and it recognises one by this identity.
+        // Without it every light that also had a binary core loaded twice,
+        // the second copy an unanchored, collidable box at the Workspace root.
         let instance = eustress_common::classes::Instance {
             name: dir_meta.name.clone(),
             class_name,
             archivable: true,
             id: 0,
             ai: false,
-            uuid: String::new(),
+            uuid: instance_uuid.clone(),
         };
 
         let spawned = match class_name {
@@ -2897,6 +3060,7 @@ pub fn spawn_directory_entry(
                 if let Some(rad) = read_f32("Radius", "light_radius") { light.radius = rad; }
                 if let Some(c) = read_color() { light.color = c; }
                 if let Some(s) = read_bool("Shadows", "light_shadows") { light.shadows = s; }
+                if let Some(e) = read_enabled() { light.enabled = e; }
                 crate::spawn::spawn_point_light(commands, instance, light, transform)
             }
             eustress_common::classes::ClassName::SpotLight => {
@@ -2906,6 +3070,7 @@ pub fn spawn_directory_entry(
                 if let Some(a) = read_f32("Angle", "light_angle") { light.angle = a; }
                 if let Some(c) = read_color() { light.color = c; }
                 if let Some(s) = read_bool("Shadows", "light_shadows") { light.shadows = s; }
+                if let Some(e) = read_enabled() { light.enabled = e; }
                 crate::spawn::spawn_spot_light(commands, instance, light, transform)
             }
             _ => {
@@ -2915,6 +3080,7 @@ pub fn spawn_directory_entry(
                 if let Some(r) = read_f32("Range", "light_range") { light.range = r; }
                 if let Some(c) = read_color() { light.color = c; }
                 if let Some(s) = read_bool("Shadows", "light_shadows") { light.shadows = s; }
+                if let Some(e) = read_enabled() { light.enabled = e; }
                 // Pass the AUTHORED transform so the surface lights from where it
                 // was placed (not the origin); light_sync keeps its PointLight
                 // intensity/color synced from `brightness`.
@@ -4250,7 +4416,16 @@ impl Plugin for SpaceFileLoaderPlugin {
     fn build(&self, app: &mut App) {
         // Note: The "space://" asset source is registered in main.rs BEFORE DefaultPlugins
         // This must happen before AssetPlugin is initialized, so we can't do it here.
-        
+
+        // Content source for the loader: Disk, rooted at the open Space, until
+        // the world-db plugin swaps it to Fjall on Space open once the tree is
+        // seeded. Registered here (not behind the feature) so loader systems
+        // can always read through it. A shell that inserted its own keeps it.
+        if !app.world().contains_resource::<super::space_source::ActiveSpaceSource>() {
+            let open_space = super::open_space_root_of(app);
+            app.insert_resource(super::space_source::ActiveSpaceSource::disk(open_space));
+        }
+
         app.init_resource::<super::SpaceRoot>()
             .init_resource::<SpaceFileRegistry>()
             .init_resource::<SpaceLoadGeneration>()
@@ -4267,11 +4442,6 @@ impl Plugin for SpaceFileLoaderPlugin {
             // Deterministic spawn queue for copy-paste/duplicate folder trees
             // (drained by `drain_paste_spawn_queue` — reliable child parenting).
             .init_resource::<PasteSpawnQueue>()
-            // Content source for the loader — Disk by default; the
-            // world-db plugin swaps it to Fjall on Space open once the
-            // tree is seeded. Registered here (not behind the feature)
-            // so loader systems can always read through it.
-            .init_resource::<super::space_source::ActiveSpaceSource>()
             // Class schema — common-crate source of truth for every
             // `_instance.toml`. Embedded templates normalise to PascalCase,
             // `load_and_heal_instance` fills missing fields + self-heals
@@ -4346,10 +4516,15 @@ impl Plugin for SpaceFileLoaderPlugin {
                 super::file_watcher::process_file_changes,
                 super::instance_loader::ensure_tags_and_attributes_components,
                 super::instance_loader::ensure_measure_unit,
+                hide_storage_service_content,
                 // Live: edited Workspace `render_distance` service
                 // property → part VisibilityRange. Changed-gated.
                 super::instance_loader::sync_workspace_render_distance,
-                super::space_ops::apply_space_rescan,
+                // After the open decision, so the frame of a Space switch
+                // sees the new Space's open already pending (the rescan's
+                // own gate then holds it until the DB is installed).
+                super::space_ops::apply_space_rescan
+                    .after(super::world_db_plugin::open_world_db_on_space_change),
                 super::instance_loader::update_base_part_size_from_mesh,
                 // Per-frame safety net: clamp NaN/Inf and sky-distance
                 // overflow on every Avian-tracked Transform so any

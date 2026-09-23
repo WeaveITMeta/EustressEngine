@@ -17,7 +17,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use eustress_common::classes::Material as PresetMaterial;
 use bevy::asset::RenderAssetUsages;
-use bevy::image::{ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
+use bevy::image::{
+    CompressedImageFormats, ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler,
+    ImageSamplerDescriptor, ImageType,
+};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use texture_gen::mips::{build_mip_chain_rgba8, MapKind};
 
 // ============================================================================
 // MaterialDefinition — the parsed .mat.toml structure
@@ -135,6 +140,10 @@ pub struct MaterialRegistry {
     pending_textures: HashMap<String, PendingTextures>,
     /// Materials whose maps have been attached.
     hydrated: std::collections::HashSet<String>,
+    /// One GPU image per map file and filtering kind, shared by every
+    /// material that references it (the library points `occlusion` and
+    /// `metallic_roughness` at the same ORM file).
+    texture_cache: HashMap<(PathBuf, MapKind), Handle<Image>>,
 }
 
 /// Adaptive color-quantization shift for the dedup key. `0` == lossless
@@ -305,14 +314,18 @@ impl MaterialRegistry {
     /// forces one draw call per entity — bevy_pbr batch key = material bind
     /// group + mesh).
     ///
-    /// Two build paths, preserving `material_sync`'s exact prior math (C2 — no
-    /// visible change, only handle sharing):
+    /// Two build paths:
     /// - `base_template = Some(h)`: clone the registry's (possibly textured)
-    ///   base material `h` and tint it — the old "registry-clone" branches.
-    /// - `base_template = None`: build from the `preset` PBR params — the old
-    ///   "preset-scratch" branch (formerly an in-place `get_mut`, which is the
-    ///   "edit one, change all" trap once handles are shared — now a fresh
-    ///   build + dedup instead).
+    ///   base material `h` and tint it with the part's colour.
+    /// - `base_template = None`: build from the `preset` PBR params (formerly
+    ///   an in-place `get_mut`, which is the "edit one, change all" trap once
+    ///   handles are shared, so it is a fresh build + dedup instead).
+    ///
+    /// In both, the part's `Reflectance` only ever RAISES the material's own
+    /// specular (`reflectance.max(..)`). It is the Eustress mirror knob and
+    /// defaults to 0, while `StandardMaterial::reflectance = 0` means an F0 of
+    /// zero (no highlight, no environment reflection), so it must never
+    /// replace the material's own value.
     ///
     /// Copy-on-write: the returned handle is keyed on the FULL appearance, so
     /// editing one part's `BasePart` re-resolves it to the handle matching its
@@ -392,7 +405,7 @@ impl MaterialRegistry {
                 if transparency > 0.0 {
                     cloned.alpha_mode = AlphaMode::Blend;
                 }
-                cloned.reflectance = reflectance;
+                cloned.reflectance = cloned.reflectance.max(reflectance);
                 cloned.metallic = (cloned.metallic + reflectance).min(1.0);
                 cloned.perceptual_roughness *= 1.0 - reflectance * 0.5;
                 if is_neon {
@@ -449,9 +462,112 @@ pub fn load_material_definition(path: &Path) -> Result<MaterialDefinition, Strin
 
 /// In-memory twin — parse a `.mat.toml` from content the caller
 /// already sourced through `SpaceSource`. No `std::fs`.
+///
+/// A Space's copy of a library material that is an unedited earlier release
+/// is read as the current release (see [`SUPERSEDED_LIBRARY_VERSIONS`]).
 pub fn load_material_definition_from_str(content: &str) -> Result<MaterialDefinition, String> {
+    let content = match current_library_version(content) {
+        Some((name, current)) => {
+            debug!("🎨 material '{}': unedited earlier library version, reading the current one", name);
+            current
+        }
+        None => content,
+    };
     toml::from_str::<MaterialDefinition>(content)
         .map_err(|e| format!("Failed to parse material TOML: {}", e))
+}
+
+// ============================================================================
+// Library materials
+// ============================================================================
+
+macro_rules! library_file {
+    ($name:literal) => {
+        (
+            $name,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../common/assets/service_templates/MaterialService/",
+                $name,
+                ".mat.toml"
+            )),
+        )
+    };
+}
+
+/// The textured library materials as the engine ships them. Every Space keeps
+/// its own copy of each file in `MaterialService/`, seeded from these.
+const LIBRARY: &[(&str, &str)] = &[
+    library_file!("Brick"),
+    library_file!("Bronze"),
+    library_file!("Concrete"),
+    library_file!("CorrodedMetal"),
+    library_file!("DiamondPlate"),
+    library_file!("Fabric"),
+    library_file!("Foil"),
+    library_file!("Gold"),
+    library_file!("Granite"),
+    library_file!("Grass"),
+    library_file!("Ice"),
+    library_file!("Marble"),
+    library_file!("Metal"),
+    library_file!("Sand"),
+    library_file!("Silver"),
+    library_file!("Slate"),
+    library_file!("Wood"),
+    library_file!("WoodPlanks"),
+];
+
+/// Digests of every earlier shipped version of a [`LIBRARY`] file. A Space
+/// copy that matches one was never edited, so it is read as the current
+/// version: the library improves in every existing Space, while a copy anyone
+/// has changed, even by one value, is used exactly as written. Nothing on disk
+/// is touched.
+///
+/// Digest: SHA-256 of the file with every space, tab, CR and LF removed, first
+/// 16 hex digits (`tr -d ' \t\r\n' < file | sha256sum | cut -c1-16`).
+const SUPERSEDED_LIBRARY_VERSIONS: &[(&str, &str)] = &[
+    ("8192f189b2efcfd0", "Brick"),
+    ("0d03ab8dc11033a9", "Bronze"),
+    ("c4179e9403b14c92", "Bronze"),
+    ("b6525465f4da65d2", "Concrete"),
+    ("b8360ad353304185", "CorrodedMetal"),
+    ("d58eff07e4f25e55", "DiamondPlate"),
+    ("99bb4cbfceb00f05", "Fabric"),
+    ("99c0560696632afd", "Foil"),
+    ("0f23318fe7473225", "Gold"),
+    ("b5488ce716be7c6d", "Gold"),
+    ("d0e27edc49836c5e", "Granite"),
+    ("bbb1d63d8b342303", "Grass"),
+    ("deaed6963d78adab", "Ice"),
+    ("6f3a8237fc387637", "Marble"),
+    ("0a12c50db0281462", "Metal"),
+    ("0c3194a2dd92d443", "Sand"),
+    ("199106bd745bf23b", "Silver"),
+    ("fcfc904fe9a2f446", "Silver"),
+    ("7d5bcdd62d4d149a", "Slate"),
+    ("959c40d1b6e33ce3", "Wood"),
+    ("af14376f309c20dc", "WoodPlanks"),
+];
+
+fn library_digest(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let stripped: Vec<u8> = content
+        .bytes()
+        .filter(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+        .collect();
+    Sha256::digest(&stripped)
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// `(name, current text)` when `content` is an unedited earlier library version.
+fn current_library_version(content: &str) -> Option<(&'static str, &'static str)> {
+    let digest = library_digest(content);
+    let (_, name) = SUPERSEDED_LIBRARY_VERSIONS.iter().find(|(d, _)| *d == digest)?;
+    LIBRARY.iter().find(|(n, _)| n == name).copied()
 }
 
 /// Extract a material name from its file path (stem before first dot).
@@ -539,39 +655,41 @@ pub fn build_standard_material(
     mat
 }
 
-/// Load a texture file relative to the .mat.toml directory via the `space://` asset source.
-/// Falls back to bundled engine assets (common/assets/) if not found in user space.
+/// Load a material map relative to the .mat.toml directory (the Space), falling
+/// back to the bundled library (`common/assets/`). One image per file and
+/// filtering kind, shared through `cache`.
 fn load_texture(
     asset_server: &AssetServer,
+    cache: &mut HashMap<(PathBuf, MapKind), Handle<Image>>,
     mat_toml_dir: &Path,
     relative_path: &str,
     space_root: &Path,
-    is_srgb: bool,
+    kind: MapKind,
 ) -> Option<Handle<Image>> {
-    // 1. Try relative to the .mat.toml directory (user space)
-    let absolute_path = mat_toml_dir.join(relative_path);
-    if absolute_path.exists() {
-        if let Ok(rel) = absolute_path.strip_prefix(space_root) {
-            let asset_path = format!("space://{}", rel.to_string_lossy().replace('\\', "/"));
-            return Some(load_image(asset_server, asset_path, is_srgb));
-        } else {
-            let asset_path = absolute_path.to_string_lossy().into_owned();
-            return Some(load_image(asset_server, asset_path, is_srgb));
-        }
-    }
-
-    // 2. Fallback: try bundled engine assets via "bundled://" asset source
-    //    e.g. "materials/textures/brick_base_color.png" → "bundled://materials/textures/brick_base_color.png"
-    let bundled_check = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    // 1. Relative to the .mat.toml directory (user space), 2. the bundled
+    //    library, e.g. "materials/textures/brick_base_color.png" →
+    //    "bundled://materials/textures/brick_base_color.png".
+    let in_space = mat_toml_dir.join(relative_path);
+    let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../common/assets")
         .join(relative_path);
-    if bundled_check.exists() {
-        let asset_path = format!("bundled://{}", relative_path.replace('\\', "/"));
-        return Some(load_image(asset_server, asset_path, is_srgb));
-    }
-
-    warn!("Texture not found: {:?} (not in space or bundled assets)", absolute_path);
-    None
+    let (disk, asset_path) = if in_space.exists() {
+        let asset_path = match in_space.strip_prefix(space_root) {
+            Ok(rel) => format!("space://{}", rel.to_string_lossy().replace('\\', "/")),
+            Err(_) => in_space.to_string_lossy().into_owned(),
+        };
+        (in_space, asset_path)
+    } else if bundled.exists() {
+        (bundled, format!("bundled://{}", relative_path.replace('\\', "/")))
+    } else {
+        warn!("Texture not found: {:?} (not in space or bundled assets)", in_space);
+        return None;
+    };
+    let handle = cache
+        .entry((disk.clone(), kind))
+        .or_insert_with(|| load_image(asset_server, disk, asset_path, kind))
+        .clone();
+    Some(handle)
 }
 
 // ============================================================================
@@ -747,6 +865,29 @@ mod tests {
     }
 
     #[test]
+    fn library_files_parse_and_superseded_versions_have_successors() {
+        for (name, text) in LIBRARY {
+            let def = load_material_definition_from_str(text).expect(name);
+            assert_eq!(def.material.name, *name);
+            assert!(!def.textures.occlusion.is_empty(), "{name}: no occlusion map");
+            assert!(current_library_version(text).is_none(), "{name}: current text listed as superseded");
+        }
+        for (_, name) in SUPERSEDED_LIBRARY_VERSIONS {
+            assert!(LIBRARY.iter().any(|(n, _)| n == name), "{name} has no current version");
+        }
+    }
+
+    #[test]
+    fn edited_library_copy_is_used_as_written() {
+        let (_, current) = LIBRARY[0];
+        let edited = current.replace("reflectance = 0.5", "reflectance = 0.45");
+        assert_ne!(edited, current);
+        assert!(current_library_version(&edited).is_none());
+        let def = load_material_definition_from_str(&edited).unwrap();
+        assert_eq!(def.pbr.reflectance, Some(0.45));
+    }
+
+    #[test]
     fn transparency_and_reflectance_fragment() {
         let c = Color::srgb(0.5, 0.5, 0.5);
         assert_ne!(
@@ -839,6 +980,7 @@ impl MaterialRegistry {
             &mut *mat,
             &pending.refs,
             asset_server,
+            &mut self.texture_cache,
             &pending.mat_toml_dir,
             &pending.space_root,
         );
@@ -850,71 +992,144 @@ impl MaterialRegistry {
 
 /// Load `tex`'s maps and attach them to `mat`. Colour maps (base colour,
 /// emissive) are sRGB; every data map (normal, metallic/roughness,
-/// occlusion, depth) is LINEAR. The previous loader used Bevy's default
-/// `is_srgb = true` for all six, which gamma-decoded normal and roughness
-/// data as if it were colour — darker roughness, skewed normals — on every
-/// textured material.
+/// occlusion, depth) is linear, and each is mip-filtered the way its data
+/// needs (see [`MapKind`]).
 pub fn attach_material_textures(
     mat: &mut StandardMaterial,
     tex: &TextureProperties,
     asset_server: &AssetServer,
+    cache: &mut HashMap<(PathBuf, MapKind), Handle<Image>>,
     mat_toml_dir: &Path,
     space_root: &Path,
 ) {
-    if !tex.base_color.is_empty() {
-        if let Some(h) = load_texture(asset_server, mat_toml_dir, &tex.base_color, space_root, true) {
-            mat.base_color_texture = Some(h);
+    let mut load = |path: &str, kind: MapKind| -> Option<Handle<Image>> {
+        if path.is_empty() {
+            return None;
         }
+        load_texture(asset_server, cache, mat_toml_dir, path, space_root, kind)
+    };
+    if let Some(h) = load(&tex.base_color, MapKind::Color) {
+        mat.base_color_texture = Some(h);
     }
-    if !tex.normal.is_empty() {
-        if let Some(h) = load_texture(asset_server, mat_toml_dir, &tex.normal, space_root, false) {
-            mat.normal_map_texture = Some(h);
-        }
+    if let Some(h) = load(&tex.normal, MapKind::Normal) {
+        mat.normal_map_texture = Some(h);
     }
-    if !tex.metallic_roughness.is_empty() {
-        if let Some(h) = load_texture(asset_server, mat_toml_dir, &tex.metallic_roughness, space_root, false) {
-            mat.metallic_roughness_texture = Some(h);
-        }
+    if let Some(h) = load(&tex.metallic_roughness, MapKind::Data) {
+        mat.metallic_roughness_texture = Some(h);
     }
-    if !tex.emissive.is_empty() {
-        if let Some(h) = load_texture(asset_server, mat_toml_dir, &tex.emissive, space_root, true) {
-            mat.emissive_texture = Some(h);
-        }
+    if let Some(h) = load(&tex.emissive, MapKind::Color) {
+        mat.emissive_texture = Some(h);
     }
-    if !tex.occlusion.is_empty() {
-        if let Some(h) = load_texture(asset_server, mat_toml_dir, &tex.occlusion, space_root, false) {
-            mat.occlusion_texture = Some(h);
-        }
+    if let Some(h) = load(&tex.occlusion, MapKind::Data) {
+        mat.occlusion_texture = Some(h);
     }
-    if !tex.depth.is_empty() {
-        if let Some(h) = load_texture(asset_server, mat_toml_dir, &tex.depth, space_root, false) {
-            mat.depth_map = Some(h);
-        }
+    if let Some(h) = load(&tex.depth, MapKind::Data) {
+        mat.depth_map = Some(h);
     }
 }
 
-/// Load a material texture GPU-only, with the material sampler baked in.
-///
-/// * `asset_usage = RENDER_WORLD`: Bevy's default keeps a full decoded copy of
-///   every image in `Assets<Image>` after upload. For 2048² PBR maps that is
-///   16 MB of RAM per map that nothing ever reads again — it was ~1 GB of the
-///   engine's committed memory on a 130-entity Space.
-/// * The sampler (Repeat, trilinear, 16× anisotropy) is set here rather than
-///   patched afterwards by `material_sync`, because a `RENDER_WORLD`-only image
-///   is not in `Assets<Image>` to be patched.
-fn load_image(asset_server: &AssetServer, asset_path: String, is_srgb: bool) -> Handle<Image> {
-    asset_server.load_with_settings(asset_path, move |s: &mut ImageLoaderSettings| {
-        s.is_srgb = is_srgb;
-        s.asset_usage = RenderAssetUsages::RENDER_WORLD;
-        s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-            address_mode_u: ImageAddressMode::Repeat,
-            address_mode_v: ImageAddressMode::Repeat,
-            address_mode_w: ImageAddressMode::Repeat,
-            mag_filter: ImageFilterMode::Linear,
-            min_filter: ImageFilterMode::Linear,
-            mipmap_filter: ImageFilterMode::Linear,
-            anisotropy_clamp: 16,
-            ..ImageSamplerDescriptor::linear()
-        });
+/// Repeat addressing, trilinear filtering, 16× anisotropy: what a tiled
+/// surface texture needs at every viewing distance and angle.
+fn material_sampler() -> ImageSampler {
+    ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        address_mode_w: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        anisotropy_clamp: 16,
+        ..ImageSamplerDescriptor::linear()
     })
+}
+
+/// Load a material map GPU-only, with a full mip chain and the material
+/// sampler baked in.
+///
+/// * Mips: PNG and the other formats the `image` crate decodes arrive as a
+///   single level, and Bevy builds none, so a map would be sampled at its
+///   full 2048² at every distance: shimmer, moiré, and a texel cache thrashed
+///   by far-away surfaces. These are decoded on the IO pool and given a chain
+///   built for their [`MapKind`]. KTX2/DDS/Basis carry their own chain and go
+///   through Bevy's loader.
+/// * `asset_usage = RENDER_WORLD`: no decoded copy stays in `Assets<Image>`
+///   after upload (16 MB of RAM per 2048² map that nothing reads again).
+/// * The sampler is set here because a `RENDER_WORLD`-only image is never in
+///   `Assets<Image>` for anything to patch afterwards.
+fn load_image(asset_server: &AssetServer, disk: PathBuf, asset_path: String, kind: MapKind) -> Handle<Image> {
+    let ext = disk
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if matches!(ext.as_str(), "ktx2" | "dds" | "basis") {
+        let is_srgb = kind == MapKind::Color;
+        return asset_server
+            .load_builder()
+            .with_settings(move |s: &mut ImageLoaderSettings| {
+                s.is_srgb = is_srgb;
+                s.asset_usage = RenderAssetUsages::RENDER_WORLD;
+                s.sampler = material_sampler();
+            })
+            .load(asset_path);
+    }
+    asset_server.add_async(async move {
+        Ok::<Image, std::convert::Infallible>(decode_with_mips(&disk, &ext, kind))
+    })
+}
+
+/// Decode `disk` and append its mip chain. A file that cannot be read or
+/// decoded becomes a single neutral texel, so the material still renders
+/// (untextured) instead of waiting forever on an image that never arrives.
+fn decode_with_mips(disk: &Path, ext: &str, kind: MapKind) -> Image {
+    let decoded = std::fs::read(disk).map_err(|e| e.to_string()).and_then(|bytes| {
+        Image::from_buffer(
+            &bytes,
+            ImageType::Extension(ext),
+            CompressedImageFormats::NONE,
+            kind == MapKind::Color,
+            material_sampler(),
+            RenderAssetUsages::RENDER_WORLD,
+        )
+        .map_err(|e| e.to_string())
+    });
+    let mut image = match decoded {
+        Ok(image) => image,
+        Err(e) => {
+            warn!("Material map {:?} could not be decoded ({}); using a neutral texel", disk, e);
+            return neutral_texel(kind);
+        }
+    };
+    let desc = &image.texture_descriptor;
+    let plain_rgba8 = matches!(desc.format, TextureFormat::Rgba8Unorm | TextureFormat::Rgba8UnormSrgb)
+        && desc.mip_level_count == 1
+        && desc.dimension == TextureDimension::D2
+        && desc.size.depth_or_array_layers == 1;
+    if plain_rgba8 {
+        let (w, h) = (desc.size.width, desc.size.height);
+        if let Some(level0) = image.data.take() {
+            let (chain, levels) = build_mip_chain_rgba8(level0, w, h, kind);
+            image.data = Some(chain);
+            image.texture_descriptor.mip_level_count = levels;
+        }
+    }
+    image
+}
+
+/// A 1×1 map that leaves the material's own factors unchanged.
+fn neutral_texel(kind: MapKind) -> Image {
+    let (texel, format) = match kind {
+        MapKind::Color => ([255, 255, 255, 255], TextureFormat::Rgba8UnormSrgb),
+        MapKind::Normal => ([128, 128, 255, 255], TextureFormat::Rgba8Unorm),
+        MapKind::Data => ([255, 255, 255, 255], TextureFormat::Rgba8Unorm),
+    };
+    let mut image = Image::new(
+        Extent3d::default(),
+        TextureDimension::D2,
+        texel.to_vec(),
+        format,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = material_sampler();
+    image
 }

@@ -94,6 +94,10 @@ pub fn class_is_file_natured(class_name: &str) -> bool {
         // directory loader's env arm; keep FileSystem so they are not
         // skipped on streaming-primary imports.
         | "Atmosphere" | "Sky" | "Clouds" | "DirectionalLight"
+        // Local lights are read by the directory loader's light arm. The
+        // binary path has no light spawner: a light core came back as an
+        // unanchored, collidable block and never lit anything.
+        | "PointLight" | "SpotLight" | "SurfaceLight"
         // Gaussian-splat clouds: essential content is a real `.ply`
         // radiance-field file (referenced by a `[gaussian_splats].path`
         // section), exactly like a custom-mesh part owns its `.glb`. This
@@ -106,6 +110,16 @@ pub fn class_is_file_natured(class_name: &str) -> bool {
         // reconcile sweep trashed it on the next open ("imported splat
         // vanishes on restart").
         | "GaussianSplats"
+        // Particle simulations: their properties are TOML field tables
+        // (`[particle_simulation]` / `[particle_species]`) that a binary core
+        // cannot carry, and a simulation is a container of species folders.
+        | "ParticleSimulation" | "ParticleSpecies"
+        // Terrain layers, for the same reasons: `[terrain_spline]` and its
+        // siblings are field tables, and a spline is a container of point
+        // folders under `Workspace/Terrain/Layers`.
+        | "TerrainSpline" | "TerrainSplinePoint" | "TerrainStamp"
+        | "TerrainFlattenPad" | "TerrainNoise" | "TerrainMaterialFill" | "TerrainScatter"
+        | "TerrainWaterBody"
     )
 }
 

@@ -656,6 +656,55 @@ mod imp {
         removed_toml || removed_bin
     }
 
+    /// Put one disk file's bytes into the active Space's `tree` partition,
+    /// keyed relative to that Space's root — the disk → tree half of the dual
+    /// model (`world_db_plugin::sync_toml_edits_to_fjall`).
+    ///
+    /// `false` when no DB is active or `abs` lies outside the active Space.
+    /// The second case is the one that matters: the key and the database come
+    /// from the same record here, so a file from another Space can never be
+    /// keyed into this one's tree.
+    pub fn put_tree_file(abs: &Path, bytes: &[u8]) -> bool {
+        let Ok(g) = ACTIVE.read() else {
+            return false;
+        };
+        let Some(a) = g.as_ref() else {
+            return false;
+        };
+        let Some(rel) = rel_key(&a.root, abs) else {
+            return false;
+        };
+        match a.db.put_file(&rel, bytes) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(
+                    target: "eustress_engine::world_db",
+                    error = %e,
+                    rel = %rel,
+                    "TOML→Fjall sync: put_file failed"
+                );
+                false
+            }
+        }
+    }
+
+    /// Drop the `tree` key for a disk file that was removed, under the same
+    /// same-Space rule as [`put_tree_file`]. Only the base key: the `#bin`
+    /// twin carries edits the disk file never had, and a same-path
+    /// Remove+Create pair from an atomic save must not destroy it.
+    pub fn delete_tree_file(abs: &Path) -> bool {
+        let Ok(g) = ACTIVE.read() else {
+            return false;
+        };
+        let Some(a) = g.as_ref() else {
+            return false;
+        };
+        let Some(rel) = rel_key(&a.root, abs) else {
+            return false;
+        };
+        a.db.delete_file(&rel).is_ok()
+    }
+
     /// Purge a folder-form entity from EVERY Fjall store so a delete actually
     /// STICKS in a migrated Space — the fix for the "I delete it, it comes
     /// back next session / delete one CadBox and its twin resurrects it" bug.
@@ -1238,6 +1287,12 @@ mod imp {
         false
     }
     pub fn delete_path(_abs: &Path) -> bool {
+        false
+    }
+    pub fn put_tree_file(_abs: &Path, _bytes: &[u8]) -> bool {
+        false
+    }
+    pub fn delete_tree_file(_abs: &Path) -> bool {
         false
     }
     pub fn purge_path_all_stores(_abs: &Path, _uuid_hex: &str, _class_name: &str) -> bool {

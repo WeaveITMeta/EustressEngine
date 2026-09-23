@@ -720,10 +720,11 @@ where
 {
     let values: Vec<toml::Value> = serde::Deserialize::deserialize(deserializer)?;
 
+    // A bad colour is one bad property, not a bad part: failing here dropped
+    // the whole instance from the scene over its colour.
     if values.len() < 3 {
-        return Err(serde::de::Error::custom(
-            "color array must have at least 3 elements (RGB)",
-        ));
+        warn!("color {:?} has fewer than 3 components; using the default grey", values);
+        return Ok(default_color());
     }
 
     // Check if all values are integers (0-255 format)
@@ -2351,6 +2352,14 @@ pub fn spawn_instance(
             if _section_name == "gaussian_splats" {
                 continue;
             }
+            // `[particle_simulation]` / `[particle_species]` and the terrain
+            // layer sections (`[terrain_stamp]`, ...) are the classes' own
+            // field tables, read into typed components below.
+            if crate::particles::bridge::is_class_section(_section_name)
+                || crate::terrain_layers::is_class_section(_section_name)
+            {
+                continue;
+            }
             // Each top-level entry under [extra] is a section table (e.g. [Appearance])
             if let toml::Value::Table(props) = section_val {
                 for (prop_key, prop_val) in props {
@@ -2400,6 +2409,27 @@ pub fn spawn_instance(
         // land here. Attaches the typed component from [particle]/[beam] so
         // Properties + scripts see live data (renderers are still stubs).
         attach_vfx_component(&mut commands.entity(entity), class_name, &instance.extra);
+        crate::particles::bridge::attach_class_component(
+            &mut commands.entity(entity),
+            class_name,
+            &instance.extra,
+            &toml_path,
+        );
+        crate::terrain_layers::attach_class_component(
+            &mut commands.entity(entity),
+            class_name,
+            &instance.extra,
+            &toml_path,
+        );
+        // A Decal without a mesh of its own projects from its own Transform
+        // (one placed on the terrain). `decal_place_tool::sync_standalone_decals`
+        // draws it from this component with the live decal material store,
+        // which not every caller of this spawn path can hand over.
+        if matches!(class_name, eustress_common::classes::ClassName::Decal) {
+            if let Some(sec) = section_table(&instance.extra, "decal") {
+                commands.entity(entity).insert(decal_from_section(sec));
+            }
+        }
         // GaussianSplats: attach the real radiance-field rendering components
         // (splats have no [asset], so they land in this no-mesh branch too).
         #[cfg(feature = "gaussian-splatting")]
@@ -2898,6 +2928,7 @@ pub fn spawn_instance(
     }
     // Attach UI ECS component if this is a UI class
     attach_ui_component(&mut ec, class_name, instance.ui.as_ref());
+    attach_spawn_location(&mut ec, class_name, &instance.extra);
     // End the EntityCommands borrow before the decal/mesh attach (needs
     // `&mut commands`); the attach removes the consumed `decal`/`mesh` key
     // so PendingExtraSections below never double-dispatches it.
@@ -3092,6 +3123,37 @@ pub fn attach_ui_component(
 
 /// Borrow a named `[section]` table out of the flattened `extra` map
 /// (case-insensitive on the section name).
+/// A SpawnLocation is a Part plus the `SpawnLocation` component Play looks
+/// for when it places the player, read from the `[spawn]` section.
+fn attach_spawn_location(
+    ec: &mut bevy::ecs::system::EntityCommands,
+    class_name: eustress_common::classes::ClassName,
+    extra: &std::collections::HashMap<String, toml::Value>,
+) {
+    if class_name != eustress_common::classes::ClassName::SpawnLocation {
+        return;
+    }
+    let mut spawn = eustress_common::classes::SpawnLocation::default();
+    if let Some(sec) = section_table(extra, "spawn") {
+        if let Some(v) = sec.get("enabled").and_then(|v| v.as_bool()) {
+            spawn.enabled = v;
+        }
+        if let Some(v) = sec.get("neutral").and_then(|v| v.as_bool()) {
+            spawn.neutral = v;
+        }
+        if let Some(v) = sec.get("allow_team_change_on_touch").and_then(|v| v.as_bool()) {
+            spawn.allow_team_change = v;
+        }
+        if let Some(v) = toml_f32(sec.get("duration")) {
+            spawn.spawn_protection_duration = v.max(0.0);
+        }
+        if let Some(v) = sec.get("team_color").and_then(|v| v.as_str()) {
+            spawn.team_name = v.to_string();
+        }
+    }
+    ec.insert(spawn);
+}
+
 fn section_table<'a>(
     extra: &'a std::collections::HashMap<String, toml::Value>,
     name: &str,
@@ -3166,6 +3228,32 @@ fn face_from_str(s: &str) -> eustress_common::classes::Face {
     }
 }
 
+/// A `Decal` from its `[decal]` section, the importer's and the Studio's
+/// alike. A missing key keeps the class default; `depth_fade_factor` is
+/// written by the terrain placement, which sizes it to the ground's relief.
+pub(crate) fn decal_from_section(sec: &toml::value::Table) -> eustress_common::classes::Decal {
+    let defaults = eustress_common::classes::Decal::default();
+    eustress_common::classes::Decal {
+        texture: sec
+            .get("texture")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        face: sec
+            .get("face")
+            .and_then(|v| v.as_str())
+            .map(face_from_str)
+            .unwrap_or(defaults.face),
+        transparency: toml_f32(sec.get("transparency")).unwrap_or(defaults.transparency),
+        depth_fade_factor: toml_f32(sec.get("depth_fade_factor")).unwrap_or(defaults.depth_fade_factor),
+        color: color_u8_array_to_rgba(sec.get("color"), defaults.color),
+        z_index: sec
+            .get("z_index")
+            .and_then(|v| v.as_integer())
+            .map_or(defaults.z_index, |z| z as i32),
+    }
+}
+
 /// Map an importer `[mesh].mesh_type` string → engine `MeshType` enum.
 fn mesh_type_from_str(s: &str) -> eustress_common::classes::MeshType {
     use eustress_common::classes::MeshType;
@@ -3195,34 +3283,11 @@ fn attach_decal_mesh_component(
     base_transform: Transform,
     name: &str,
 ) {
-    use eustress_common::classes::{ClassName, Decal, Instance, SpecialMesh};
+    use eustress_common::classes::{ClassName, Instance, SpecialMesh};
     match class_name {
         ClassName::Decal => {
             let Some(sec) = section_table(extra, "decal") else { return; };
-            let color = color_u8_array_to_rgba(sec.get("color"), [1.0, 1.0, 1.0, 1.0]);
-            let transparency = toml_f32(sec.get("transparency")).unwrap_or(0.0);
-            let z_index = sec
-                .get("z_index")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(0) as i32;
-            let face = sec
-                .get("face")
-                .and_then(|v| v.as_str())
-                .map(face_from_str)
-                .unwrap_or(eustress_common::classes::Face::Front);
-            let texture = sec
-                .get("texture")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let decal = Decal {
-                texture,
-                face,
-                transparency,
-                color,
-                z_index,
-                ..Default::default()
-            };
+            let decal = decal_from_section(sec);
             let inst = Instance {
                 name: name.to_string(),
                 class_name: ClassName::Decal,
@@ -3848,10 +3913,31 @@ pub fn write_instance_changes_system(
         // is for non-drag changes (Properties panel edits, scripts, MCP).
         Without<BeingDragged>,
     )>,
+    // The same instances without the change filter: entities picked up
+    // from the deferred set or from a drag that just ended are written from
+    // their CURRENT state.
+    current: Query<(
+        Entity,
+        &Transform,
+        &InstanceFile,
+        Option<&eustress_common::classes::BasePart>,
+        Option<&eustress_common::units::MeasureUnit>,
+    ), Without<BeingDragged>>,
     added_instances: Query<Entity, Added<Transform>>,
     mut recently_written: ResMut<super::file_watcher::RecentlyWrittenFiles>,
     load_in_progress: Res<super::file_loader::LoadInProgress>,
+    // A drag ends by removing `BeingDragged`, and by then the transform's
+    // change tick is older than this system's last run, so the change
+    // filter never sees it. Without this, a tool that relies on this writer
+    // (Rotate does) left the dragged pose unsaved.
+    mut undragged: RemovedComponents<BeingDragged>,
+    // Changes that arrived while their file was inside the recent-write
+    // window. They are written once the window passes; they used to be
+    // dropped, which lost an undo made within two seconds of a drag: the
+    // file kept the moved pose and the part came back moved on reload.
+    mut deferred: Local<std::collections::HashSet<Entity>>,
 ) {
+    deferred.extend(undragged.read());
     // Gate every disk write while the cold-load / rescan path is still
     // settling. Without this, mesh-handle resolution and class-default
     // backfill mark BasePart as Changed for every just-loaded entity,
@@ -3895,11 +3981,26 @@ pub fn write_instance_changes_system(
     }
     let mut jobs: Vec<WriteJob> = Vec::new();
 
-    for (entity, transform, instance_file, base_part, measure_unit) in instances.iter() {
+    // This frame's changes plus everything still waiting from earlier ones.
+    let mut candidates: Vec<Entity> = instances.iter().map(|(e, ..)| e).collect();
+    candidates.extend(deferred.drain());
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    for candidate in candidates {
+        let Ok((entity, transform, instance_file, base_part, measure_unit)) = current.get(candidate) else {
+            // Despawned, or picked up by a new drag (whose own release
+            // writes it): nothing to do here.
+            continue;
+        };
         if just_added.contains(&entity) {
             continue;
         }
+        // Writing inside the window would re-arm the watcher reload loop the
+        // window exists to break. Hold the change and write the latest state
+        // once the window has passed; never drop it.
         if recently_written.was_recently_written(&instance_file.toml_path) {
+            deferred.insert(entity);
             continue;
         }
         // Lighting-service entities (Star/Sun, Moon, Sky, Atmosphere) have

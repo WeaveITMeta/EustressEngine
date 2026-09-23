@@ -333,6 +333,11 @@ pub enum ClassName {
     Animator,
     KeyframeSequence,
     ParticleEmitter,
+    /// Physical particle simulation domain: SPH fluids, charged particles,
+    /// conduction. Its `ParticleSpecies` children are the populations.
+    ParticleSimulation,
+    /// One particle population inside a `ParticleSimulation`.
+    ParticleSpecies,
     Beam,
     Sound,
     Terrain,
@@ -543,6 +548,28 @@ pub enum ClassName {
     TerrainRegion,           // Saved voxel region serialized out of Terrain
     // ── Fission branch: nuclear simulation ──
     ArcReactorCore,          // ARC-1 compact fission reactor — carries nuclear kinetics + thermal-hydraulics components
+    // Terrain layers: non-destructive edits baked over a terrain's base (see
+    // `terrain::layer_instances`). Appended last so no existing variant moves.
+    /// A road, path, river, canyon or embankment along a spline through its
+    /// `TerrainSplinePoint` children.
+    TerrainSpline,
+    /// One control point of a `TerrainSpline`, placed by its Transform.
+    TerrainSplinePoint,
+    /// An analytic crater, mound, plateau or ridge pressed into the ground.
+    TerrainStamp,
+    /// A flat pad at its Transform's height, blending back into the ground.
+    TerrainFlattenPad,
+    /// Deterministic fractal noise over a rectangle.
+    TerrainNoise,
+    /// A material painted over a rectangle by slope and height rules.
+    TerrainMaterialFill,
+    /// Grass, shrubs, rocks, trees or a custom mesh scattered over the
+    /// finished ground by rules. Bakes nothing into the terrain, and nothing
+    /// it places is stored.
+    TerrainScatter,
+    /// A lake: the ground below a level around its Transform, filled with
+    /// water. Bakes nothing into the terrain, and nothing it fills is stored.
+    TerrainWaterBody,
 }
 
 impl ClassName {
@@ -639,6 +666,8 @@ impl ClassName {
             ClassName::Animator => "Animator",
             ClassName::KeyframeSequence => "KeyframeSequence",
             ClassName::ParticleEmitter => "ParticleEmitter",
+            ClassName::ParticleSimulation => "ParticleSimulation",
+            ClassName::ParticleSpecies => "ParticleSpecies",
             ClassName::Beam => "Beam",
             ClassName::Sound => "Sound",
             ClassName::Terrain => "Terrain",
@@ -829,6 +858,14 @@ impl ClassName {
             ClassName::TerrainDetail => "TerrainDetail",
             ClassName::TerrainRegion => "TerrainRegion",
             ClassName::ArcReactorCore => "ArcReactorCore",
+            ClassName::TerrainSpline => "TerrainSpline",
+            ClassName::TerrainSplinePoint => "TerrainSplinePoint",
+            ClassName::TerrainStamp => "TerrainStamp",
+            ClassName::TerrainFlattenPad => "TerrainFlattenPad",
+            ClassName::TerrainNoise => "TerrainNoise",
+            ClassName::TerrainMaterialFill => "TerrainMaterialFill",
+            ClassName::TerrainScatter => "TerrainScatter",
+            ClassName::TerrainWaterBody => "TerrainWaterBody",
         }
     }
 
@@ -927,6 +964,8 @@ impl ClassName {
             "Animator" => Ok(ClassName::Animator),
             "KeyframeSequence" => Ok(ClassName::KeyframeSequence),
             "ParticleEmitter" => Ok(ClassName::ParticleEmitter),
+            "ParticleSimulation" => Ok(ClassName::ParticleSimulation),
+            "ParticleSpecies" => Ok(ClassName::ParticleSpecies),
             "Beam" => Ok(ClassName::Beam),
             "Sound" => Ok(ClassName::Sound),
             "Terrain" => Ok(ClassName::Terrain),
@@ -1129,6 +1168,14 @@ impl ClassName {
             "TerrainDetail" => Ok(ClassName::TerrainDetail),
             "TerrainRegion" => Ok(ClassName::TerrainRegion),
             "ArcReactorCore" => Ok(ClassName::ArcReactorCore),
+            "TerrainSpline" => Ok(ClassName::TerrainSpline),
+            "TerrainSplinePoint" => Ok(ClassName::TerrainSplinePoint),
+            "TerrainStamp" => Ok(ClassName::TerrainStamp),
+            "TerrainFlattenPad" => Ok(ClassName::TerrainFlattenPad),
+            "TerrainNoise" => Ok(ClassName::TerrainNoise),
+            "TerrainMaterialFill" => Ok(ClassName::TerrainMaterialFill),
+            "TerrainScatter" => Ok(ClassName::TerrainScatter),
+            "TerrainWaterBody" => Ok(ClassName::TerrainWaterBody),
             _ => Err(format!("Unknown class name: {}", s)),
         }
     }
@@ -1154,6 +1201,23 @@ impl ClassName {
             ClassName::GridSensor |
             ClassName::AlignmentGuide |
             ClassName::SnapIndicator
+        )
+    }
+
+    /// Returns true for the terrain layer classes, a spline's control points
+    /// included. Their properties are field tables, they live under
+    /// `Workspace/Terrain/Layers`, and the Explorer lists them under the
+    /// Terrain.
+    pub fn is_terrain_layer(&self) -> bool {
+        matches!(self,
+            ClassName::TerrainSpline |
+            ClassName::TerrainSplinePoint |
+            ClassName::TerrainStamp |
+            ClassName::TerrainFlattenPad |
+            ClassName::TerrainNoise |
+            ClassName::TerrainMaterialFill |
+            ClassName::TerrainScatter |
+            ClassName::TerrainWaterBody
         )
     }
 }
@@ -2166,6 +2230,12 @@ pub struct EustressPointLight {
     /// Cast shadows (Eustress "Shadows")
     pub shadows: bool,
 
+    /// Roblox `Light.Enabled`: a disabled light emits nothing and casts no
+    /// shadow. Defaults to on, so data written before the field existed
+    /// loads unchanged.
+    #[serde(default = "light_enabled_default")]
+    pub enabled: bool,
+
     /// Optional light texture/cookie (Bevy 0.17+: PointLightTexture)
     /// Asset path to a cubemap texture that modulates light intensity.
     /// Used for artistic effects like stained glass, gobos, or patterned shadows.
@@ -2182,9 +2252,15 @@ impl Default for EustressPointLight {
             range: 60.0,
             radius: 0.0, // Point source by default, increase for area light
             shadows: true,
+            enabled: true,
             texture: None,
         }
     }
+}
+
+/// Serde default for the light classes' `enabled` field.
+fn light_enabled_default() -> bool {
+    true
 }
 
 /// Spot light (Eustress SpotLight)
@@ -2198,7 +2274,10 @@ pub struct EustressSpotLight {
     /// Cone angle in degrees (Eustress "Angle")
     pub angle: f32,
     pub shadows: bool,
-    
+    /// Roblox `Light.Enabled` (see `EustressPointLight::enabled`).
+    #[serde(default = "light_enabled_default")]
+    pub enabled: bool,
+
     /// Optional light texture/cookie (Bevy 0.17+: SpotLightTexture)
     /// Asset path to a 2D texture that modulates light intensity.
     /// Projects the texture pattern onto illuminated surfaces.
@@ -2215,6 +2294,7 @@ impl Default for EustressSpotLight {
             range: 60.0,
             angle: 45.0, // Degrees — typical spotlight cone
             shadows: true,
+            enabled: true,
             texture: None,
         }
     }
@@ -2230,7 +2310,10 @@ pub struct SurfaceLight {
     pub range: f32,
     pub face: String,  // "Top", "Bottom", "Front", "Back", "Left", "Right"
     pub shadows: bool,
-    
+    /// Roblox `Light.Enabled` (see `EustressPointLight::enabled`).
+    #[serde(default = "light_enabled_default")]
+    pub enabled: bool,
+
     /// Optional light texture/cookie
     /// Asset path to a 2D texture that modulates light intensity from this surface.
     /// Format: "assets/textures/surface_cookie.png" or content hash
@@ -2246,6 +2329,7 @@ impl Default for SurfaceLight {
             range: 60.0,
             face: "Front".to_string(),
             shadows: true,
+            enabled: true,
             texture: None,
         }
     }
@@ -6738,6 +6822,9 @@ impl Terrain {
                 .collect(),
             view_distance: self.view_distance,
             height_scale: self.height_scale,
+            // The class has no offset property; its procedural terrain
+            // keeps the band floor at world Y = 0.
+            height_offset: 0.0,
             seed: self.seed,
         }
     }
