@@ -1,15 +1,18 @@
 [material]
 name = "DiamondPlate"
 preset = "DiamondPlate"
-description = "DiamondPlate surface with PBR textures"
+description = "Tread plate: raised lugs with wear-polished crowns and dirt around their bases"
 
+# The maps carry colour, roughness, metalness and occlusion; these factors multiply them.
 [pbr]
 base_color = [1.0, 1.0, 1.0, 1.0]
-metallic = 0.95
-roughness = 0.3
-reflectance = 0.7
+metallic = 1.0
+roughness = 1.0
+reflectance = 0.5
 
+# metallic_roughness is packed glTF-style: R = occlusion, G = roughness, B = metallic.
 [textures]
 base_color = "materials/textures/diamond_plate_base_color.png"
 normal = "materials/textures/diamond_plate_normal.png"
 metallic_roughness = "materials/textures/diamond_plate_metallic_roughness.png"
+occlusion = "materials/textures/diamond_plate_metallic_roughness.png"

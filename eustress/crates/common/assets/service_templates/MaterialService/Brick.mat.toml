@@ -1,15 +1,18 @@
 [material]
 name = "Brick"
 preset = "Brick"
-description = "Brick surface with PBR textures"
+description = "Red brick in running bond, 25 x 8.3 cm courses in recessed mortar"
 
+# The maps carry colour, roughness, metalness and occlusion; these factors multiply them.
 [pbr]
 base_color = [1.0, 1.0, 1.0, 1.0]
 metallic = 0.0
-roughness = 0.5
+roughness = 1.0
 reflectance = 0.5
 
+# metallic_roughness is packed glTF-style: R = occlusion, G = roughness, B = metallic.
 [textures]
 base_color = "materials/textures/brick_base_color.png"
 normal = "materials/textures/brick_normal.png"
 metallic_roughness = "materials/textures/brick_metallic_roughness.png"
+occlusion = "materials/textures/brick_metallic_roughness.png"

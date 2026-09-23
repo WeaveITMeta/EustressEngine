@@ -1,15 +1,18 @@
 [material]
 name = "Marble"
 preset = "Marble"
-description = "Marble surface with PBR textures"
+description = "Polished white marble with soft grey clouding and fine dark veins"
 
+# The maps carry colour, roughness, metalness and occlusion; these factors multiply them.
 [pbr]
 base_color = [1.0, 1.0, 1.0, 1.0]
 metallic = 0.0
-roughness = 0.5
+roughness = 1.0
 reflectance = 0.5
 
+# metallic_roughness is packed glTF-style: R = occlusion, G = roughness, B = metallic.
 [textures]
 base_color = "materials/textures/marble_base_color.png"
 normal = "materials/textures/marble_normal.png"
 metallic_roughness = "materials/textures/marble_metallic_roughness.png"
+occlusion = "materials/textures/marble_metallic_roughness.png"

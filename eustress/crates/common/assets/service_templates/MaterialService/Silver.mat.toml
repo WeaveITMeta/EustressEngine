@@ -1,15 +1,18 @@
 [material]
 name = "Silver"
 preset = "Silver"
-description = "Polished silver - highly reflective cool-white metal"
+description = "Polished silver with buffing swirls and patches of light tarnish"
 
+# The maps carry colour, roughness, metalness and occlusion; these factors multiply them.
 [pbr]
-base_color = [0.753, 0.753, 0.753, 1.0]
+base_color = [1.0, 1.0, 1.0, 1.0]
 metallic = 1.0
-roughness = 0.15
-reflectance = 0.75
+roughness = 1.0
+reflectance = 0.5
 
+# metallic_roughness is packed glTF-style: R = occlusion, G = roughness, B = metallic.
 [textures]
 base_color = "materials/textures/silver_base_color.png"
 normal = "materials/textures/silver_normal.png"
 metallic_roughness = "materials/textures/silver_metallic_roughness.png"
+occlusion = "materials/textures/silver_metallic_roughness.png"

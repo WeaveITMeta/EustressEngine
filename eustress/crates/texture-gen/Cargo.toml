@@ -1,8 +1,15 @@
 [package]
 name = "texture-gen"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Procedural PBR texture generator for Eustress default materials"
+description = "Eustress material textures: the seamless PBR library generator (bin) and the mip-chain builder the engine runs when it loads a material map (lib)"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "texture-gen"
+path = "src/main.rs"
 
 [dependencies]
 png = "0.17"

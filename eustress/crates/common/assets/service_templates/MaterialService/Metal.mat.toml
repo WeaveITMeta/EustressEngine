@@ -1,15 +1,18 @@
 [material]
 name = "Metal"
 preset = "Metal"
-description = "Metal surface with PBR textures"
+description = "Brushed steel with fine directional grain and light scratches"
 
+# The maps carry colour, roughness, metalness and occlusion; these factors multiply them.
 [pbr]
 base_color = [1.0, 1.0, 1.0, 1.0]
 metallic = 1.0
-roughness = 0.3
-reflectance = 0.6
+roughness = 1.0
+reflectance = 0.5
 
+# metallic_roughness is packed glTF-style: R = occlusion, G = roughness, B = metallic.
 [textures]
 base_color = "materials/textures/metal_base_color.png"
 normal = "materials/textures/metal_normal.png"
 metallic_roughness = "materials/textures/metal_metallic_roughness.png"
+occlusion = "materials/textures/metal_metallic_roughness.png"

@@ -1,15 +1,18 @@
 [material]
 name = "Granite"
 preset = "Granite"
-description = "Granite surface with PBR textures"
+description = "Polished grey granite: feldspar, quartz and mica crystals about a centimetre across"
 
+# The maps carry colour, roughness, metalness and occlusion; these factors multiply them.
 [pbr]
 base_color = [1.0, 1.0, 1.0, 1.0]
 metallic = 0.0
-roughness = 0.55
-reflectance = 0.35
+roughness = 1.0
+reflectance = 0.5
 
+# metallic_roughness is packed glTF-style: R = occlusion, G = roughness, B = metallic.
 [textures]
 base_color = "materials/textures/granite_base_color.png"
 normal = "materials/textures/granite_normal.png"
 metallic_roughness = "materials/textures/granite_metallic_roughness.png"
+occlusion = "materials/textures/granite_metallic_roughness.png"

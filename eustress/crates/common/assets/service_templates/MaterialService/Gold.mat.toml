@@ -1,15 +1,18 @@
 [material]
 name = "Gold"
 preset = "Gold"
-description = "Polished gold - warm yellow highly-reflective precious metal"
+description = "Polished gold with faint buffing swirls and handling smudges"
 
+# The maps carry colour, roughness, metalness and occlusion; these factors multiply them.
 [pbr]
-base_color = [1.0, 0.766, 0.336, 1.0]
+base_color = [1.0, 1.0, 1.0, 1.0]
 metallic = 1.0
-roughness = 0.20
-reflectance = 0.70
+roughness = 1.0
+reflectance = 0.5
 
+# metallic_roughness is packed glTF-style: R = occlusion, G = roughness, B = metallic.
 [textures]
 base_color = "materials/textures/gold_base_color.png"
 normal = "materials/textures/gold_normal.png"
 metallic_roughness = "materials/textures/gold_metallic_roughness.png"
+occlusion = "materials/textures/gold_metallic_roughness.png"

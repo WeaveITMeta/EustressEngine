@@ -1,15 +1,18 @@
 [material]
 name = "Grass"
 preset = "Grass"
-description = "Grass surface with PBR textures"
+description = "Mown lawn: individual blades over a dark thatch"
 
+# The maps carry colour, roughness, metalness and occlusion; these factors multiply them.
 [pbr]
 base_color = [1.0, 1.0, 1.0, 1.0]
 metallic = 0.0
-roughness = 0.95
-reflectance = 0.1
+roughness = 1.0
+reflectance = 0.4
 
+# metallic_roughness is packed glTF-style: R = occlusion, G = roughness, B = metallic.
 [textures]
 base_color = "materials/textures/grass_base_color.png"
 normal = "materials/textures/grass_normal.png"
 metallic_roughness = "materials/textures/grass_metallic_roughness.png"
+occlusion = "materials/textures/grass_metallic_roughness.png"

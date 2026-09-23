@@ -1,15 +1,18 @@
 [material]
 name = "WoodPlanks"
 preset = "WoodPlanks"
-description = "WoodPlanks surface with PBR textures"
+description = "Satin-finished floorboards of mixed width with staggered joints and knots"
 
+# The maps carry colour, roughness, metalness and occlusion; these factors multiply them.
 [pbr]
 base_color = [1.0, 1.0, 1.0, 1.0]
 metallic = 0.0
-roughness = 0.75
-reflectance = 0.2
+roughness = 1.0
+reflectance = 0.5
 
+# metallic_roughness is packed glTF-style: R = occlusion, G = roughness, B = metallic.
 [textures]
 base_color = "materials/textures/wood_planks_base_color.png"
 normal = "materials/textures/wood_planks_normal.png"
 metallic_roughness = "materials/textures/wood_planks_metallic_roughness.png"
+occlusion = "materials/textures/wood_planks_metallic_roughness.png"
