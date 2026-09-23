@@ -52,7 +52,9 @@ pub struct RigDefinition {
     pub id: String,
     pub label: String,
     pub identity: AvatarIdentity,
-    /// Asset source is deliberately limited to the engine's bundled directory.
+    /// `bundled://characters/...` (shipped with the engine) or `space://...`
+    /// (inside the open Space, for a Space's own characters). Nothing else:
+    /// no absolute paths, no other sources.
     pub body_asset: String,
     /// Idle, walk, run, jump; each GLB contains its clip at Animation0.
     pub animations: [String; 4],
@@ -93,8 +95,11 @@ impl RigDefinition {
             return Err("Rig label must contain 1–80 characters".into());
         }
         for asset in std::iter::once(&self.body_asset).chain(self.animations.iter()) {
-            let Some(path) = asset.strip_prefix("bundled://characters/") else {
-                return Err("Rig assets must be installed under bundled://characters/".into());
+            let Some(path) = asset
+                .strip_prefix("bundled://characters/")
+                .or_else(|| asset.strip_prefix("space://"))
+            else {
+                return Err("Rig assets must live under bundled://characters/ or in the Space (space://)".into());
             };
             if !path.ends_with(".glb")
                 || path.len() > 240

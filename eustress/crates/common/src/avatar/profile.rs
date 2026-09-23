@@ -1,4 +1,5 @@
 //! Fetch the signed-in avatar off the render thread, then use the sealed spawner.
+use super::space_character::SpaceCharacterPolicy;
 use super::{AvatarDescriptor, AvatarSystems, DespawnAllAvatars, SpawnAvatar};
 use bevy::prelude::*;
 use std::sync::{mpsc, Mutex};
@@ -53,11 +54,22 @@ fn cancel_pending(
     }
 }
 
+/// The descriptor as the open Space dresses it: its own body for the
+/// account's body option, when it has one.
+fn dress(policy: Option<&SpaceCharacterPolicy>, descriptor: AvatarDescriptor) -> AvatarDescriptor {
+    match policy {
+        Some(p) => p.apply(descriptor),
+        None => descriptor,
+    }
+}
+
 fn request_profile(
     mut requests: MessageReader<SpawnSavedAvatar>,
     pending: Res<ProfileRequests>,
+    policy: Option<Res<SpaceCharacterPolicy>>,
     mut spawn: MessageWriter<SpawnAvatar>,
 ) {
+    let policy = policy.as_deref();
     for request in requests.read() {
         // Useful for offline Studio authoring and website descriptor exports.
         if let Some(path) = std::env::var_os("EUSTRESS_AVATAR_FILE") {
@@ -69,7 +81,7 @@ fn request_profile(
                 .and_then(|d| d.validate().map(|_| d));
             match result {
                 Ok(d) => {
-                    spawn.write(SpawnAvatar::new(d, request.at));
+                    spawn.write(SpawnAvatar::new(dress(policy, d), request.at));
                 }
                 Err(e) => {
                     tracing::error!("avatar: cannot load EUSTRESS_AVATAR_FILE: {e}");
@@ -78,7 +90,7 @@ fn request_profile(
             continue;
         }
         let Some(token) = request.token.clone().filter(|t| !t.trim().is_empty()) else {
-            spawn.write(SpawnAvatar::new(AvatarDescriptor::default(), request.at));
+            spawn.write(SpawnAvatar::new(dress(policy, AvatarDescriptor::default()), request.at));
             continue;
         };
         let sender = pending.sender.clone();
@@ -121,7 +133,12 @@ fn fetch_profile(token: &str) -> Result<AvatarDescriptor, String> {
     Ok(descriptor)
 }
 
-fn finish_profile(pending: Res<ProfileRequests>, mut spawn: MessageWriter<SpawnAvatar>) {
+fn finish_profile(
+    pending: Res<ProfileRequests>,
+    policy: Option<Res<SpaceCharacterPolicy>>,
+    mut spawn: MessageWriter<SpawnAvatar>,
+) {
+    let policy = policy.as_deref();
     let Ok(receiver) = pending.receiver.lock() else {
         return;
     };
@@ -136,6 +153,6 @@ fn finish_profile(pending: Res<ProfileRequests>, mut spawn: MessageWriter<SpawnA
                 AvatarDescriptor::default()
             }
         };
-        spawn.write(SpawnAvatar::new(descriptor, at));
+        spawn.write(SpawnAvatar::new(dress(policy, descriptor), at));
     }
 }

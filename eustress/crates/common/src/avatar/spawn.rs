@@ -234,7 +234,10 @@ fn handle_spawn_avatar(
     mut commands: Commands,
     mut events: MessageReader<SpawnAvatar>,
     asset_server: Res<AssetServer>,
+    policy: Option<Res<super::space_character::SpaceCharacterPolicy>>,
 ) {
+    // The movement verbs the open Space starts every avatar with.
+    let abilities = policy.as_deref().map(|p| p.abilities).unwrap_or_default();
     for req in events.read() {
         let desc = req.descriptor().clone();
         if let Err(error) = desc.validate() {
@@ -267,6 +270,7 @@ fn handle_spawn_avatar(
                 AvatarIntent::default(),
                 AvatarLocomotion::default(),
                 desc.clone(),
+                abilities,
             ))
             .id();
 

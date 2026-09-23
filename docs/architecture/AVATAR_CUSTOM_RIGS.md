@@ -77,25 +77,80 @@ uses private clip copies so multiple avatars cannot rewrite each other's data.
 ## Voltec source and rebuild
 
 `common/assets/characters/voltec_supreme.blend` is the editable source. The model
-is a reconstruction of the supplied front-view reference; unseen rear armor is
-newly designed. The second art pass replaces primitive armor blobs with shaped,
-tapered castings, a recessed Y visor, a formed chest with a planar branding face,
-separate side armor, recessed fasteners, ribbed joint seals and armored boots.
-Ceramic and carbon use packed albedo, roughness and tangent-normal textures.
-Surface-conforming seams, chipped coating and lettering are part of the mesh.
-The neckline has no raised collar tabs. The abdomen replaces the donor torso
-with a continuous flexible housing and three graphite plates; upper-arm rods
-and unsupported decorative lines have been removed. Seams are projected onto
-the bind mesh and split at gaps instead of bridging empty space.
-The breastplate sits close to the torso and has a continuous ceramic return
-from its perimeter into the chest. Face and return share the same spine joint,
-so the mounting remains closed as the torso moves.
-The graphite housing below the breastplate is a single continuous mesh with
-smoothly blended weights across all three spine joints. It replaces intersecting
-rigid transition shells and removes the donor torso beneath the chest opening.
-Close-up renders cover idle, walk, run and jump to inspect that seam in motion.
-Armor islands have rigid weights; the donor underbody retains blended skinning.
-The exported mesh is joined into material primitives to reduce draw calls.
+reconstructs the supplied front-view concept: a white ceramic plate suit over a
+black graphite chassis, with a recessed Y visor in xenon blue. The concept does
+not show the back, which carries the ion thruster pack from the V-Supreme
+product specification.
+
+`voltec_forge.py` builds the armour around the Y Bot skeleton. Only the skeleton
+is kept. The arm and leg chains are moved outward so the armour clears the
+torso; this translates the bones without rotating them, so the baked motion is
+unchanged. After baking, corrections fit the motion to the armour in every clip.
+Each upper arm is held 12 degrees further from the body, which keeps the
+running forearm clear of the breastplate. No knee folds past 115 degrees and no
+elbow past 95: the Mixamo run kicks each heel to within 30 degrees of the thigh
+and folds the elbows to 120, where the calf would sink into the thigh and the
+forearm into the upper arm. Each forearm turns its palm 55 degrees toward the
+back and the fingers curl into claws, as the concept holds its hands; with the
+palms against the thighs, the claws would dig into the thigh plates.
+
+The idle then settles into the concept's heavy stance: the arms hang 3.5 degrees
+wider, the elbows bend a further 16 degrees, and the legs crouch. Each leg folds
+in its own plane, the hips drop by the height the fold takes off the legs, and
+a small outward swing at each hip returns the foot to its mark, so the feet stay
+within a few millimetres of where the clip planted them. The walk keeps 12
+degrees of the extra elbow bend, so the two blend without the arms snapping
+straight. The torso armour is laid out against the source height of the hips
+and lowered with them.
+
+Proportions are measured off the concept against its breastplate, which the
+camera's perspective does not distort relative to the helmet and pauldrons at
+the same depth. The helmet is 0.28 m wide, about three fifths of the breastplate,
+and each pauldron under half of it.
+
+Every piece is authored in the idle pose, in the frame of the bone that carries
+it, then mapped back to bind space through that bone's inverse deformation.
+Left and right pieces come from the same code in their own bone frames, so they
+are exact mirror images although the idle clip leans slightly. Positions come
+from bone heads only: the glTF importer invents bone tails, and the finger end
+markers carry positions tens of centimetres from the finger.
+
+Armour is swept from superellipse cross-sections with exponents near 2.3, which
+gives rounded ceramic shells rather than boxes. Plates stand off the chassis and
+curl their edges inward. Plates whose edges are not simple rings, such as the
+breastplate, collar, codpiece and knees, are cut to outlines taken from the
+concept's front view, and panel lines are shallow grooves cut by thin shells
+built from each plate's own sections. Every cut is made before the rims are
+bevelled, because the exact boolean solver returns an empty mesh on the
+bevel's slivers. Where an edge must follow a joint instead, as at the elbow, the
+loft's sections slant along the limb so the edge dips at the front and the rim
+stays whole: the gauntlet's top and the upper arm plate's lower edge leave a
+black crease the folding forearm swings into. The chassis runs continuously
+from boot to collar, so a gap between plates always shows black structure, and
+its joints swell as broad as the plates either side of them, so a limb's
+outline runs on through each joint. Plates are weighted rigidly to one bone; the
+chassis blends across the spine, neck, elbows, wrists and knees. The hip is a
+ball centred on the joint under a white cap, and the thigh plates start below
+it, so a rising thigh turns in place under the belt instead of sweeping through
+it. A high collar frames the helmet up to its cheeks, open at the throat. The
+exported mesh is joined into one primitive per material.
+
+Ceramic and graphite carry packed, tiling albedo, roughness and normal maps
+generated with numpy, so they export to glTF exactly as rendered. The ceramic is
+pitted with dark grunge where its coating has worn, with scratches and hairline
+cracks, and each piece starts the tile at its own offset so the marks do not
+repeat from plate to plate. The graphite is black marble: a dark base with pale
+veins swirling through it at two scales, its roughness and relief varying with
+the veins and mottling so highlights break up instead of reading as moulded
+plastic. A fully matte finish would turn it grey, since a dielectric's sheen
+spread by a matte surface lifts black under broad light. Xenon blue is emissive
+and marks what is live: the visor's deep well and the Y-shaped lens standing in
+it, the five-cell status array under the visor, the thruster throats and the
+pack status strip.
+
+The review renders use AgX with the Punchy look. Plain AgX lifts deep shadows
+and shows the black as grey, where the engine's Reinhard and TonyMcMapface
+tonemappers keep it dark.
 
 Run with Blender 4.4 from the repository root:
 
@@ -106,37 +161,35 @@ blender --background --python eustress/crates/common/assets/characters/scripts/s
 python eustress/crates/common/assets/characters/scripts/validate_avatar_assets.py
 ```
 
-The first script uses `voltec_geometry.py` to rebuild the model, packed textures, source file, review images
-and runtime clips. `mixamo_bake.py` transfers the existing FBX motions using
-rest-relative rotations. `voltec_reference_shapes.py` replaces the principal
-front armor with closed castings based on contours from the supplied concept.
-It authors these in the idle review pose, fits them outside the supporting mesh,
-then applies inverse bone deformation to return them to bind-space coordinates.
-The source photograph constrains the front silhouette; rear depth is inferred.
-The second builds X/Y Bot web previews without changing
-their engine meshes and copies Voltec into the website. It updates the three
-built-in catalog entries and preserves custom catalog additions.
-The validator checks weights, joint coverage, all four moving clips and exact
-curve parity between Voltec's embedded clips and its runtime files.
-Before joining meshes, the builder standardizes their active texture-coordinate
-layer to `Surface UV`. The validator checks nonzero UV coverage on ceramic faces
-in the exported GLB, guarding against the donor's inactive/default UV layer
-making the armor sample a single texel despite having embedded PBR maps.
-The build also checks the deformed mesh bounds at five poses in each animation
-and writes `voltec_review/pose_bounds.json`, catching stretched geometry caused
-by invalid donor terminal markers. The review includes front and three-quarter
-renders; its browser controls support front/back views and pausing animation.
+`build_voltec.py` bakes the Mixamo motions with `mixamo_bake.py`, which uses
+rest-relative rotations, then forges the armour and writes the model, packed
+textures, source file, review images and runtime clips. It checks the deformed
+mesh bounds at five poses in each animation and writes
+`voltec_review/pose_bounds.json`, catching stretched geometry.
 
-The torso uses a continuous flexible liner blended from hips through the spine,
-with fitted abdominal and lumbar plates over it. A closed hip chassis supports
-the groin and sacral armor. The boots have closed uppers, capped arched outsoles,
-embedded support shanks, heel cups and modeled chevron traction pads. The closed
-assembly builder checks that every edge is manifold before joining the rig mesh.
-`render_voltec_details.py` renders back, abdomen, boot and illuminated underside
-inspections, plus bent-pose checks. Pass view names after `--` to render a subset,
-for example `-- voltec_back_detail voltec_soles voltec_back_run`.
+`sync_web_avatars.py` builds X/Y Bot web previews without changing their engine
+meshes and produces `voltec_supreme_preview.glb` with 1K texture maps for the
+website. Geometry, skinning and animations remain byte-identical; the
+full-resolution `voltec_supreme.glb` stays outside `web/assets` and Pages. The
+sync removes the obsolete full-size website copy and rejects previews at 24 MiB,
+below the Pages 25 MiB per-file cap. The customizer resolves the native Voltec
+path to the preview URL without changing saved descriptors. Run only
+`web_avatar_preview.py` with Blender to refresh Voltec's web preview. The full
+sync updates the three built-in catalog entries and preserves custom catalog
+additions.
+
+The validator checks weights, joint coverage, all four moving clips and exact
+curve parity between Voltec's embedded clips and its runtime files. Before
+joining meshes, the builder standardizes their active texture-coordinate layer
+to `Surface UV`, and the validator checks nonzero UV coverage on ceramic faces in
+the exported GLB, so the armour cannot silently sample a single texel of its
+embedded maps.
+
+`render_voltec_details.py` renders chest, back, abdomen, boot and underside
+inspections, plus poses from walk, run and jump. Pass view names after `--` to
+render a subset, for example `-- voltec_back_detail voltec_soles voltec_back_run`.
 `-- voltec_shape` produces a neutral clay render for judging shape without the
-surface maps. Ivory surfaces use restrained wear rather than heavy mottling.
+surface maps.
 
 `common/assets/characters/voltec_review/index.html` is a standalone interactive
 review page. Serve the repository locally with `python -m http.server 8874

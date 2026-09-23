@@ -15,6 +15,15 @@ CharacterWalkSpeed = { type = "float", value = 16.0, description = "Walk speed i
 HealthDisplayDistance = { type = "float", value = 100.0, description = "Distance at which health bars are visible" }
 NameDisplayDistance = { type = "float", value = 100.0, description = "Distance at which name tags are visible" }
 
+[Movement]
+JumpEnabled = { type = "bool", value = true, description = "Players can jump" }
+SprintEnabled = { type = "bool", value = true, description = "Players can sprint" }
+ClimbingEnabled = { type = "bool", value = true, description = "Grab ledges, hang, shimmy, move between grips, mantle and lower off edges" }
+VaultingEnabled = { type = "bool", value = true, description = "Stride over low obstacles" }
+LedgeLeapEnabled = { type = "bool", value = true, description = "Leap across a gap from one grip to the next" }
+WallJumpEnabled = { type = "bool", value = true, description = "Kick off a wall from a hang" }
+RollEnabled = { type = "bool", value = true, description = "Roll out of a hard landing" }
+
 [Camera]
 CameraMaxZoomDistance = { type = "float", value = 128.0, description = "Maximum camera zoom distance" }
 CameraMinZoomDistance = { type = "float", value = 0.5, description = "Minimum camera zoom distance" }

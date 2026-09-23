@@ -133,12 +133,9 @@ impl Plugin for AvatarAnimPlugin {
     }
 }
 
-/// Holds the hips translation this avatar is pinned to.
+/// Marks an avatar whose hips translation `lock_root_motion` pins.
 #[derive(Component, Debug, Default)]
-pub struct RootMotionLock {
-    pinned: Option<Vec3>,
-    settle: u8,
-}
+pub struct RootMotionLock;
 
 /// Pin the hips translation, discarding the clip's root motion.
 ///
@@ -146,45 +143,39 @@ pub struct RootMotionLock {
 /// before transform propagation, so the clip's rotations survive and only its
 /// translation is neutralised. Without this the jump clip walks the mesh off
 /// the capsule and snaps it back on loop.
+///
+/// The pin is the body's own bind-pose hips, mapped through the skeleton
+/// root's CURRENT transform. The retarget gives that root the clip's up-axis
+/// correction (+90° X for Mixamo clips), under which the bind LOCAL value
+/// (0, +99.79, 0) points a metre forward; mapped from the root's parent space
+/// it lands back over the capsule. An animated sample is not a usable pin:
+/// the avatar spawns in the air, so its first animated frames are the jump
+/// clip, and holding one of those kept the pelvis 0.66 m forward and 0.43 m up
+/// for the whole session.
 pub(crate) fn lock_root_motion(
     mut bones: Query<&mut Transform, Without<SpawnedByAvatarRuntime>>,
-    mut q: Query<
-        (&AvatarRig, &mut RootMotionLock, Option<&AvatarMotionGraph>),
-        With<SpawnedByAvatarRuntime>,
+    q: Query<
+        (&AvatarRig, Option<&AvatarMotionGraph>),
+        (With<SpawnedByAvatarRuntime>, With<RootMotionLock>),
     >,
 ) {
     use super::rig::HumanoidBone;
-    for (rig, mut lock, graph) in q.iter_mut() {
-        // Do not capture the pin until clips are actually driving the skeleton.
-        //
-        // Capturing on the first frame grabbed the BIND-pose hips translation
-        // (local Y = 0.998). The skeleton root carries the clip's +90° X
-        // correction, which maps local +Y to world FORWARD — so the body was
-        // pinned a metre ahead of the capsule and visibly pivoted around a
-        // point behind itself when turning. A few frames of settling makes the
-        // captured value a real animated one.
+    for (rig, graph) in q.iter() {
+        // The retarget sets the skeleton root's correction in the same command
+        // flush that attaches the graph, so once the graph exists the root is
+        // final.
         if graph.is_none() {
             continue;
         }
-        if lock.settle < 8 {
-            lock.settle += 1;
-            continue;
-        }
-
         let Some(hips) = rig.bone(HumanoidBone::Hips) else { continue };
-        let Ok(mut t) = bones.get_mut(hips) else { continue };
 
-        // Pin to the CLIP's hips translation, captured on the first animated
-        // frame — not to the body's bind pose.
-        //
-        // The body's bind hips is (0, +99.79, 0) in armature-local units, but
-        // the skeleton root carries the clip's +90° X correction, which maps
-        // that to 1 m FORWARD rather than 1 m UP. Pinning to it dropped the
-        // body a metre and left the foot calibration silently compensating
-        // with a +1.03 m shove. The clip's own value is already expressed in
-        // the rotated frame, so capturing it is correct by construction and
-        // works for any body/clip pair.
-        let pinned = *lock.pinned.get_or_insert(t.translation);
+        let pinned = match rig.skeleton_root.and_then(|s| bones.get(s).ok().copied()) {
+            Some(root) if root.scale.abs().min_element() > 1e-6 => {
+                root.rotation.inverse() * (rig.bind_hips_in_root_parent - root.translation) / root.scale
+            }
+            _ => rig.bind_hips_translation,
+        };
+        let Ok(mut t) = bones.get_mut(hips) else { continue };
         t.translation = pinned;
     }
 }
@@ -357,7 +348,10 @@ fn retarget_and_build_graph(
         (Entity, &mut AvatarClipsLoading, &AvatarRig),
         (With<SpawnedByAvatarRuntime>, Without<AvatarMotionGraph>),
     >,
+    policy: Option<Res<super::space_character::SpaceCharacterPolicy>>,
 ) {
+    // `space://` clips (a Space's own character) are read from the Space.
+    let space_root = policy.as_deref().and_then(|p| p.space_root.as_deref());
     for (root, mut loading, rig) in q.iter_mut() {
         // The Armature carries the export's unit scale (0.01 for Mixamo);
         // replacing its Transform must preserve that or the body collapses.
@@ -388,9 +382,11 @@ fn retarget_and_build_graph(
         let mut clip_root_fix: Option<Quat> = None;
         let mut retargeted = Vec::new();
         for (index, handle) in all.iter().enumerate() {
-            let rel = loading.rig.animations[index].strip_prefix("bundled://").expect("validated rig");
-            let Ok(bytes) = super::retarget::read_bundled_clip(&rel) else {
-                warn!("avatar: cannot read {rel} for retargeting; limbs will not animate");
+            let asset = loading.rig.animations[index].clone();
+            let Some(bytes) = super::space_character::clip_file(&asset, space_root)
+                .and_then(|file| std::fs::read(file).ok())
+            else {
+                warn!("avatar: cannot read {asset} for retargeting; limbs will not animate");
                 continue;
             };
             // Clips authored Z-up carry their correction on their own root
@@ -403,8 +399,8 @@ fn retarget_and_build_graph(
             // private copy so a second spawn or custom alias map cannot erase
             // curves already rewritten by the first character.
             if let Some(mut clip) = clips.get(handle).cloned() {
-                if let Err(e) = super::retarget::retarget_clip_with_aliases(&mut clip, &bytes, rel, &loading.rig.bone_aliases) {
-                    warn!("avatar: retarget {rel} failed: {e}");
+                if let Err(e) = super::retarget::retarget_clip_with_aliases(&mut clip, &bytes, &asset, &loading.rig.bone_aliases) {
+                    warn!("avatar: retarget {asset} failed: {e}");
                     continue;
                 }
                 retargeted.push(clip);

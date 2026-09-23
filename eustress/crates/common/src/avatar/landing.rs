@@ -163,6 +163,7 @@ fn drive_landing(
             &AvatarLocomotion,
             &AvatarBody,
             Option<&AvatarClimb>,
+            Option<&super::abilities::AvatarAbilities>,
         ),
         With<SpawnedByAvatarRuntime>,
     >,
@@ -172,7 +173,7 @@ fn drive_landing(
         return;
     }
 
-    for (mut tf, mut vel, mut landing, intent, loco, body, climb) in q.iter_mut() {
+    for (mut tf, mut vel, mut landing, intent, loco, body, climb, abilities) in q.iter_mut() {
         // A climb outranks a landing: dropping onto a ledge grab must not also
         // trigger a roll on the frame the grab lands.
         if climb.map(|c| c.is_climbing()).unwrap_or(false) {
@@ -187,7 +188,9 @@ fn drive_landing(
                     continue;
                 }
                 let wants = intent.direction.with_y(0.0).length_squared() > 1e-4;
-                let outcome = landing_outcome(loco.land_speed_mps, wants);
+                // With rolling off, a hard landing is a stumble or nothing.
+                let may_roll = abilities.map_or(true, |a| a.roll);
+                let outcome = landing_outcome(loco.land_speed_mps, wants && may_roll);
                 if outcome == LandingPhase::None {
                     continue;
                 }

@@ -243,6 +243,7 @@ pub(crate) fn drive_locomotion(
             &Collider,
             Option<&super::climb::AvatarClimb>,
             Option<&super::landing::AvatarLanding>,
+            Option<&super::abilities::AvatarAbilities>,
         ),
         With<SpawnedByAvatarRuntime>,
     >,
@@ -252,9 +253,10 @@ pub(crate) fn drive_locomotion(
         return;
     }
 
-    for (entity, mut tf, mut vel, mut loco, mut intent, mut timers, body, collider, climb, landing)
+    for (entity, mut tf, mut vel, mut loco, mut intent, mut timers, body, collider, climb, landing, abilities)
         in q.iter_mut()
     {
+        let abilities = abilities.copied().unwrap_or_default();
         // A climb owns the body outright. Letting the controller integrate at
         // the same time makes the two fight over position and the character
         // jitters off the ledge.
@@ -332,6 +334,12 @@ pub(crate) fn drive_locomotion(
         loco.air_time = timers.since_grounded;
 
         // ── Jump buffering ──────────────────────────────────────────────────
+        // With jumping switched off a press is dropped, not buffered, so it
+        // cannot fire later when jumping comes back on.
+        if !abilities.jump {
+            intent.jump_pressed = false;
+            timers.jump_consumed = true;
+        }
         if intent.jump_pressed {
             timers.since_jump_press = 0.0;
             timers.jump_consumed = false;
@@ -354,7 +362,7 @@ pub(crate) fn drive_locomotion(
         dir.y = 0.0;
         let dir = if dir.length_squared() > 1e-6 { dir.normalize() } else { Vec3::ZERO };
 
-        let target_speed = if intent.sprint {
+        let target_speed = if intent.sprint && abilities.sprint {
             motion.run_speed * motion.sprint_multiplier
         } else if dir != Vec3::ZERO {
             motion.walk_speed

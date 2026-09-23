@@ -42,6 +42,10 @@ use bevy::prelude::*;
 
 pub mod boot;
 pub mod rig;
+/// Which movement verbs an avatar may use (jump, sprint, climb, vault, ...).
+pub mod abilities;
+/// A Space's own player characters, per body option.
+pub mod space_character;
 
 /// The motion graph — retargeted clips blended by real locomotion.
 #[cfg(all(feature = "physics", feature = "model-import"))]

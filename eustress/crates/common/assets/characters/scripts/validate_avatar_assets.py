@@ -114,7 +114,7 @@ def validate_model(path):
     return dict(file=path.name,joints=len(joints),meshes=len(d['meshes']),primitives=sum(len(m['primitives']) for m in d['meshes']),vertices=vertices,triangles=triangles,moving_bones=motion_report)
 
 reports=[validate_model(ROOT/'voltec_supreme.glb')]
-for body in ['x_bot','y_bot','voltec_supreme']:
+for body in ['x_bot','y_bot','voltec_supreme_preview']:
     reports.append(validate_model(WEB/(body+'.glb')))
 for motion,label in [('idle','Idle'),('walking','Walk'),('running','Run'),('jump','Jump')]:
     d,b=read_glb(ROOT/'animations'/('robot_'+motion+'.glb'))
@@ -132,6 +132,14 @@ for motion,label in [('idle','Idle'),('walking','Walk'),('running','Run'),('jump
     assert curves(d,b,d['animations'][0])==curves(model,model_blob,embedded),motion
 catalog=json.loads((WEB/'rigs.json').read_text())
 assert {r['id']:r['identity'] for r in catalog if r['id'] in {'y_bot','x_bot','voltec_supreme'}}=={'y_bot':'M','x_bot':'F','voltec_supreme':'R'}
-assert (WEB/'voltec_supreme.glb').read_bytes()==(ROOT/'voltec_supreme.glb').read_bytes()
+assert not (WEB/'voltec_supreme.glb').exists(), 'Full Voltec asset must never be copied into Pages'
+for asset in WEB.rglob('*'):
+    assert not asset.is_file() or asset.stat().st_size < 25*1024*1024, f'Pages file cap: {asset}'
+native,native_blob=read_glb(ROOT/'voltec_supreme.glb')
+preview,preview_blob=read_glb(WEB/'voltec_supreme_preview.glb')
+assert native['skins']==preview['skins'] and native['animations']==preview['animations']
+assert native['meshes']==preview['meshes'] and native['accessors']==preview['accessors']
+for i in range(len(native['accessors'])):
+    assert accessor(native,native_blob,i)==accessor(preview,preview_blob,i), f'Preview changed accessor {i}'
 report=ROOT/'voltec_review/validation.json';report.write_text(json.dumps(reports,indent=2)+'\n')
 print(json.dumps(reports,indent=2))

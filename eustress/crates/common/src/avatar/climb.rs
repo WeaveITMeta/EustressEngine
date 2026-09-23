@@ -622,6 +622,7 @@ fn drive_climb(
             &AvatarIntent,
             &AvatarLocomotion,
             &AvatarBody,
+            Option<&super::abilities::AvatarAbilities>,
         ),
         With<SpawnedByAvatarRuntime>,
     >,
@@ -631,7 +632,10 @@ fn drive_climb(
         return;
     }
 
-    for (entity, mut tf, mut vel, mut climb, intent, loco, body) in q.iter_mut() {
+    for (entity, mut tf, mut vel, mut climb, intent, loco, body, abilities) in q.iter_mut() {
+        // Each verb is checked where it begins, so switching one off never
+        // drops a character out of a move already under way.
+        let abilities = abilities.copied().unwrap_or_default();
         let filter = SpatialQueryFilter::default().with_excluded_entities([entity]);
         let half = body.metrics.capsule_half_extent();
         // Slightly under body size. A hang deliberately parks the capsule close
@@ -648,8 +652,13 @@ fn drive_climb(
                     continue;
                 }
 
+                // Nothing below starts without one of these.
+                if !abilities.climb && !abilities.vault {
+                    continue;
+                }
+
                 // Deliberate step-off: grounded, crouching, walking at an edge.
-                if loco.grounded && intent.crouch && intent.direction.length_squared() > 1e-4 {
+                if abilities.climb && loco.grounded && intent.crouch && intent.direction.length_squared() > 1e-4 {
                     if let Some(g) = probe_ledge_below(
                         &spatial,
                         &filter,
@@ -690,7 +699,8 @@ fn drive_climb(
                 // vaulted onto — a low lip with nothing to land on is still a
                 // hang, however short.
                 let feet = tf.translation.y - half;
-                if g.height_above(feet) <= body.metrics.height_m * VAULT_MAX_FRAC
+                if abilities.vault
+                    && g.height_above(feet) <= body.metrics.height_m * VAULT_MAX_FRAC
                     && can_mantle(&spatial, &filter, &g, body, face_wall(&g))
                 {
                     climb.grip = Some(g);
@@ -717,16 +727,16 @@ fn drive_climb(
                 // No room to hang: vault it if we can, otherwise refuse. A
                 // grab that buries the character is worse than no grab.
                 if !has_hang_clearance(&spatial, &filter, &g, body) {
-                    if can_mantle(&spatial, &filter, &g, body, face_wall(&g)) {
+                    // Low enough to stride over, or high enough that it has
+                    // to be pulled? Same decision as above, and it has to be
+                    // made here too — this branch is reached by anything with
+                    // no room to hang, at any height.
+                    let low = g.height_above(tf.translation.y - half) <= body.metrics.height_m * VAULT_MAX_FRAC;
+                    let allowed = if low { abilities.vault } else { abilities.climb };
+                    if allowed && can_mantle(&spatial, &filter, &g, body, face_wall(&g)) {
                         climb.grip = Some(g);
                         tf.rotation = face_wall(&g);
-                        // Low enough to stride over, or high enough that it has
-                        // to be pulled? Same decision as above, and it has to
-                        // be made here too — this branch is reached by anything
-                        // with no room to hang, at any height.
-                        if g.height_above(tf.translation.y - half)
-                            <= body.metrics.height_m * VAULT_MAX_FRAC
-                        {
+                        if low {
                             begin_vault(&mut climb, &tf);
                         } else {
                             begin_mantle(&mut climb, &tf);
@@ -736,6 +746,9 @@ fn drive_climb(
                     continue;
                 }
 
+                if !abilities.climb {
+                    continue;
+                }
                 begin_hang(&mut climb, &spatial, &filter, &mut vel, g, body);
                 info!("🧗 grip at {:?} (standable: {})", g.point, g.standable);
             }
@@ -825,9 +838,11 @@ fn drive_climb(
                             probe_next_grip(&spatial, &filter, &g, body, Vec3::Y)
                         {
                             begin_transfer(&mut climb, &tf, up);
-                        } else if g.standable {
+                        } else if g.standable || !abilities.wall_jump {
                             // There IS a top — something is sitting on it. A
-                            // ceiling, a pipe, an overhang. Keep hanging.
+                            // ceiling, a pipe, an overhang. Keep hanging. (With
+                            // wall jumps switched off, the dead end below holds
+                            // too: letting go stays on the drop input.)
                             //
                             // Distinct from the dead end below: that is a lip
                             // with nowhere to go, where leaving is the only
@@ -865,16 +880,19 @@ fn drive_climb(
                     // it" — the parkour verb, where the wall is a surface to
                     // push against rather than an obstacle to surmount.
                     HangAction::WallJump => {
-                        let launch = wall_jump_velocity(
-                            g.normal,
-                            intent.direction,
-                            body.motion.jump_velocity(),
-                        );
+                        // Switched off, the same input lets go instead.
+                        let launch = if abilities.wall_jump {
+                            wall_jump_velocity(g.normal, intent.direction, body.motion.jump_velocity())
+                        } else {
+                            Vec3::ZERO
+                        };
                         climb.phase = ClimbPhase::None;
                         climb.grip = None;
                         climb.regrab_lockout = REGRAB_LOCKOUT;
                         vel.0 = launch;
-                        info!("🧗 wall kick at {:.1} m/s", launch.length());
+                        if abilities.wall_jump {
+                            info!("🧗 wall kick at {:.1} m/s", launch.length());
+                        }
                     }
 
                     HangAction::Shimmy(_) => climb.phase = ClimbPhase::Shimmy,
@@ -896,7 +914,9 @@ fn drive_climb(
                             // reaching along a continuing wall are both static
                             // moves; when neither finds anything the lip has
                             // genuinely ended, and jumping is the verb.
-                            .or_else(|| probe_leap(&spatial, &filter, &g, body, side));
+                            .or_else(|| {
+                                abilities.ledge_leap.then(|| probe_leap(&spatial, &filter, &g, body, side)).flatten()
+                            });
                         if let Some(next) = next {
                             begin_transfer(&mut climb, &tf, next);
                         }

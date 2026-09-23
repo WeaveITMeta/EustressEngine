@@ -1,8 +1,7 @@
-"""Build Voltec Supreme v2: manufactured armor, skin and Mixamo motion.
+"""Build Voltec Supreme: forged armour, skin and Mixamo motion.
 Blender 4.4: blender --background --python build_voltec.py
 """
 import bpy
-import re
 import os
 import json
 import shutil
@@ -14,28 +13,31 @@ ROOT = Path(__file__).resolve().parents[1]
 REVIEW = ROOT / 'voltec_review'
 REVIEW.mkdir(exist_ok=True)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from voltec_geometry import build, material
+from voltec_forge import (build, curl_fingers, limit_elbows, limit_knees, material, settle_idle, space_arms,
+                          turn_palms, widen_skeleton)
+from mixamo_bake import bake_mixamo, install_tracks
 bpy.ops.wm.read_factory_settings(use_empty=True)
 bpy.ops.import_scene.gltf(filepath=str(ROOT / 'y_bot.glb'))
+# Only the donor's skeleton is kept; its body is replaced entirely.
+for obj in list(bpy.context.scene.objects):
+    if obj.type == 'MESH':
+        bpy.data.objects.remove(obj, do_unlink=True)
 rig = next(o for o in bpy.context.scene.objects if o.type == 'ARMATURE')
 rig.name = 'Armature'
-def key(name):
-    return re.sub(r'[^a-z0-9]', '', re.sub(r'_\d+$', '', name.split(':')[-1]).lower())
-bones = {key(b.name): b for b in rig.data.bones}
-parts = build(rig, bones)
-
-# Bake each Mixamo motion onto THIS armature using rest-relative rotations.
-# Copying fcurve names alone fails when FBX/GLB bone frames differ.
-import sys
-sys.path.insert(0,str(Path(__file__).resolve().parent))
-from mixamo_bake import bake_mixamo, install_tracks
-scene=bpy.context.scene
-actions=bake_mixamo(rig,ROOT)
-install_tracks(rig,actions)
-rig.animation_data.action=actions[0][0]
-scene.frame_set(20)
-from voltec_reference_shapes import refit
-parts=refit(rig,bones,parts)
+# Spread the limbs BEFORE baking: the bake is rest-relative, so it reproduces
+# each clip exactly on the widened skeleton.
+widen_skeleton(rig)
+scene = bpy.context.scene
+actions = bake_mixamo(rig, ROOT)
+space_arms(rig, actions)
+limit_knees(rig, actions)
+turn_palms(rig, actions)
+curl_fingers(rig, actions)
+settle_idle(rig, actions)
+limit_elbows(rig, actions)
+install_tracks(rig, actions)
+# The armour is authored against the idle pose and returned in bind space.
+parts = build(rig, actions[0][0])
 # Merge loose armor pieces into one skinned mesh with material primitives.
 # Vertex groups retain the independent rigid bone assignments.
 bpy.ops.object.select_all(action='DESELECT')
@@ -116,6 +118,9 @@ camera.location=(1.7,-5.8,2.0);camera.rotation_euler=(Vector((0,0,.94))-camera.l
 scene.render.engine='CYCLES';scene.cycles.samples=48;scene.cycles.use_denoising=True
 scene.render.resolution_x=1000;scene.render.resolution_y=1200;scene.render.resolution_percentage=100
 scene.view_settings.view_transform='AgX'
+# Punchy keeps black black: plain AgX lifts deep shadows the engine's
+# Reinhard and TonyMcMapface tonemappers leave dark.
+scene.view_settings.look='AgX - Punchy'
 bpy.context.preferences.filepaths.save_version=0
 bpy.data.orphans_purge(do_recursive=True)
 stage=ROOT/('.voltec-'+str(os.getpid())+'.blend')

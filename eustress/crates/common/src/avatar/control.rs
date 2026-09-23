@@ -74,6 +74,30 @@ impl AvatarCamera {
 /// on Bevy's 45° default because it never inserted a `Projection`.
 pub const AVATAR_FOV_DEG: f32 = 70.0;
 
+/// A script owns this avatar camera (`Camera.CameraType = Scriptable`): the
+/// orbit, zoom and follow systems leave it alone and the host writes its
+/// transform and projection. `yaw` on its [`AvatarCamera`] is still kept in
+/// step, so WASD stays relative to what the player sees.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct AvatarCameraScripted;
+
+/// Script control over an avatar body (`Humanoid.AutoRotate`, and the facing
+/// a script gives `HumanoidRootPart`). With `auto_rotate` off the body keeps
+/// `facing_yaw` instead of turning toward its movement, which is what a
+/// top-down shooter needs to strafe while aiming.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct AvatarScriptControl {
+    pub auto_rotate: bool,
+    /// Radians about +Y, Bevy convention (0 faces -Z).
+    pub facing_yaw: Option<f32>,
+}
+
+impl Default for AvatarScriptControl {
+    fn default() -> Self {
+        Self { auto_rotate: true, facing_yaw: None }
+    }
+}
+
 /// Whether gameplay input is currently allowed. Studio sets this false when
 /// the 3D viewport does not have focus, so typing in a panel does not walk the
 /// character. The Client leaves it true.
@@ -224,7 +248,7 @@ fn camera_look(
     mut motion: MessageReader<MouseMotion>,
     mouse: Res<ButtonInput<MouseButton>>,
     enabled: Res<AvatarInputEnabled>,
-    mut cameras: Query<&mut AvatarCamera>,
+    mut cameras: Query<&mut AvatarCamera, Without<AvatarCameraScripted>>,
     mut warned: Local<bool>,
 ) {
     if !enabled.0 {
@@ -279,7 +303,7 @@ fn camera_orbit_keys(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     enabled: Res<AvatarInputEnabled>,
-    mut cameras: Query<&mut AvatarCamera>,
+    mut cameras: Query<&mut AvatarCamera, Without<AvatarCameraScripted>>,
 ) {
     if !enabled.0 {
         return;
@@ -313,7 +337,7 @@ fn camera_orbit_keys(
 fn camera_zoom(
     mut wheel: MessageReader<MouseWheel>,
     enabled: Res<AvatarInputEnabled>,
-    mut cameras: Query<&mut AvatarCamera>,
+    mut cameras: Query<&mut AvatarCamera, Without<AvatarCameraScripted>>,
     mut cursor: Query<&mut CursorOptions, With<Window>>,
 ) {
     let Ok(mut cam) = cameras.single_mut() else {
@@ -397,7 +421,7 @@ pub(crate) const FIRST_PERSON_HIDDEN_BONES: [super::rig::HumanoidBone; 3] = [
 fn camera_follow(
     time: Res<Time>,
     bodies: Query<(&Transform, &AvatarBody), (With<SpawnedByAvatarRuntime>, Without<AvatarCamera>)>,
-    mut cameras: Query<(&mut Transform, &AvatarCamera)>,
+    mut cameras: Query<(&mut Transform, &AvatarCamera), Without<AvatarCameraScripted>>,
 ) {
     let dt = time.delta_secs();
     for (mut cam_tf, cam) in cameras.iter_mut() {
@@ -500,12 +524,12 @@ fn hide_head_in_first_person(
 pub(crate) fn face_movement_direction(
     time: Res<Time>,
     mut q: Query<
-        (&mut Transform, &AvatarIntent, Option<&super::climb::AvatarClimb>),
+        (&mut Transform, &AvatarIntent, Option<&super::climb::AvatarClimb>, Option<&AvatarScriptControl>),
         With<SpawnedByAvatarRuntime>,
     >,
 ) {
     let dt = time.delta_secs();
-    for (mut tf, intent, climb) in q.iter_mut() {
+    for (mut tf, intent, climb, script) in q.iter_mut() {
         // A climbing avatar's facing is owned by the ledge, not by input.
         // This runs in PostAnim, strictly AFTER `drive_climb`'s face-the-wall
         // slerp in Update, so without this guard any held direction during a
@@ -513,6 +537,15 @@ pub(crate) fn face_movement_direction(
         // welded to the ledge frame.
         if climb.is_some_and(|c| c.is_climbing()) {
             continue;
+        }
+        // A script owns the facing (`Humanoid.AutoRotate = false`).
+        if let Some(control) = script {
+            if !control.auto_rotate {
+                if let Some(yaw) = control.facing_yaw {
+                    tf.rotation = Quat::from_rotation_y(yaw);
+                }
+                continue;
+            }
         }
         let mut d = intent.direction;
         d.y = 0.0;
