@@ -1,0 +1,35 @@
+# ParticleSpecies: one particle population, a child of a ParticleSimulation.
+#
+# particle picks what one particle is: Electron, Positron, Proton, Ion
+# (charge_number, mass_amu), Argon, Water, Oil, Mercury, CustomFluid
+# (rest_density, viscosity) or Custom (charge_number, mass_amu).
+# For conduction electrons pick particle = "Electron" and a conductor
+# ("Copper", "Silver", ...), which fills number_density and collision_time.
+# region_min / region_max are fractions of the domain (0 to 1 per axis).
+# color is sRGB 0-255.
+
+[particle_species]
+enabled = true
+particle = "Water"
+count = 2000
+charge_number = 1.0
+mass_amu = 1.0
+rest_density = 998.2
+viscosity = 0.001002
+conductor = "Custom"
+number_density = 0.0
+collision_time = 0.0
+mobile = true
+temperature = 293.15
+drift_velocity = [0.0, 0.0, 0.0]
+arrangement = "Lattice"
+region_shape = "Box"
+region_min = [0.0, 0.0, 0.0]
+region_max = [1.0, 0.4, 1.0]
+emission_rate = 0.0
+color = [31, 107, 242]
+display_radius = 0.0
+
+[metadata]
+class_name = "ParticleSpecies"
+archivable = true

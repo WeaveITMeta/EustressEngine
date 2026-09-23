@@ -251,16 +251,10 @@ pub fn apply_particle_forces(
                 _ => {}
             }
         }
-        
-        // Fluid-specific forces
-        if let Some(fluid) = fluid {
-            // Buoyancy in water
-            if fluid.phase == FluidPhase::Liquid {
-                let volume = (4.0 / 3.0) * std::f32::consts::PI * particle.radius.powi(3);
-                let buoyancy = fluid.rest_density * volume * 9.81;
-                kinetic.apply_force(Vec3::new(0.0, buoyancy, 0.0));
-            }
-        }
+        // A liquid SPH parcel is not buoyant in itself: its support comes
+        // from the pressure force in `fluids::sph::update_sph_forces`, which
+        // is also what floats anything immersed in it.
+        let _ = fluid;
     }
 }
 

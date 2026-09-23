@@ -1,0 +1,62 @@
+# ParticleSimulation: a physical particle simulation domain.
+# Its ParticleSpecies children are the particle populations (water, electrons,
+# ions, gas). Everything is SI: metres, seconds, kelvin, volts, tesla.
+#
+# DomainSize is the physical box; DisplayScale maps it into the world, so a
+# 20 nm copper conductor (domain_size = [2e-8, 2e-8, 2e-8]) shows as a 2 m box
+# with display_scale = 1e8. TimeScale is simulated seconds per real second.
+# A simulation runs while the world does (Play, a runtime, a scripted step)
+# and shows its initial state while editing; frame_budget caps the solver's
+# wall time per frame (ms), so a heavy run plays in slow motion instead of
+# lowering the frame rate. See docs/architecture/PARTICLE_SIMULATION.md.
+
+[transform]
+position = [0.0, 1.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[particle_simulation]
+enabled = true
+running = true
+time_scale = 1.0
+timestep = 0.0
+max_substeps = 64
+frame_budget = 6.0
+max_particles = 200000
+seed = 1
+domain_size = [1.0, 1.0, 1.0]
+display_scale = 1.0
+boundary_x = "Reflect"
+boundary_y = "Reflect"
+boundary_z = "Reflect"
+restitution = 0.3
+wall_friction = 0.05
+collide_with_parts = true
+push_parts = true
+gravity = [0.0, -9.80665, 0.0]
+electric_field = [0.0, 0.0, 0.0]
+magnetic_field = [0.0, 0.0, 0.0]
+applied_voltage = 0.0
+voltage_axis = "X"
+electrostatics = "Off"
+grid_resolution = 32
+softening = 0.3
+neutralizing_background = true
+wall_potential = "Grounded"
+fluid_solver = "DFSPH"
+kernel_radius = 2.4
+speed_of_sound = 0.0
+artificial_viscosity = 0.05
+surface_tension = 0.0
+lattice_temperature = 293.15
+joule_heating = false
+lattice_heat_capacity = 3450000.0
+color_mode = "Species"
+color_range_min = 0.0
+color_range_max = 0.0
+particle_scale = 1.0
+show_domain = true
+
+[metadata]
+class_name = "ParticleSimulation"
+archivable = true

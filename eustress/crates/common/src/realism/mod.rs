@@ -68,6 +68,9 @@ pub mod structures;
 pub mod thermocycles;
 pub mod propulsion;
 pub mod plasma;
+// Particle simulations: the solver and Bevy integration behind the
+// `ParticleSimulation` / `ParticleSpecies` classes.
+pub mod particle_sim;
 
 #[cfg(feature = "realism-gpu")]
 pub mod gpu;
@@ -150,6 +153,7 @@ impl Plugin for RealismPlugin {
             thermocycles::ThermoCyclesPlugin,
             propulsion::PropulsionPlugin,
             plasma::PlasmaPlugin,
+            particle_sim::ParticleSimulationPlugin,
         ));
         
         #[cfg(feature = "realism-symbolic")]

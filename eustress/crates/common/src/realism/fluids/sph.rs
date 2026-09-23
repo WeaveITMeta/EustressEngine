@@ -145,14 +145,16 @@ pub fn cubic_spline_kernel(r: f32, h: f32) -> f32 {
 #[inline]
 pub fn cubic_spline_gradient(r_vec: Vec3, h: f32) -> Vec3 {
     let r = r_vec.length();
-    if r < 1e-6 || r > h {
+    // Relative cutoff: an absolute 1e-6 m would zero every gradient of a
+    // micrometre-scale fluid.
+    if r < 1e-6 * h || r > h {
         return Vec3::ZERO;
     }
-    
+
     let q = r / h;
     let sigma = 48.0 / (std::f32::consts::PI * h.powi(4));
     let direction = r_vec / r;
-    
+
     let grad_magnitude = if q <= 0.5 {
         sigma * q * (3.0 * q - 2.0)
     } else if q <= 1.0 {
@@ -160,7 +162,7 @@ pub fn cubic_spline_gradient(r_vec: Vec3, h: f32) -> Vec3 {
     } else {
         0.0
     };
-    
+
     grad_magnitude * direction
 }
 
@@ -297,82 +299,65 @@ pub fn surface_tension_force(
 // Systems
 // ============================================================================
 
-/// Update SPH density for fluid particles
+/// Update SPH density for fluid particles (one entity per particle; the
+/// `ParticleSimulation` class uses the structure-of-arrays solver in
+/// `realism::particle_sim` instead).
 pub fn update_sph_density(
     mut query: Query<(Entity, &Transform, &Particle, &mut FluidProperties)>,
     spatial_hash: Res<SpatialHash>,
     config: Res<SphConfig>,
 ) {
-    // Collect particle data for neighbor queries
-    let particle_data: Vec<(Entity, Vec3, f32)> = query
-        .iter()
-        .map(|(e, t, p, _)| (e, t.translation, p.mass))
-        .collect();
-    
-    // Update density for each particle
+    // Neighbour masses by entity: the spatial hash returns entities, so
+    // look them up directly instead of matching positions.
+    let masses: std::collections::HashMap<Entity, f32> =
+        query.iter().map(|(e, _, p, _)| (e, p.mass)).collect();
+
     for (entity, transform, particle, mut fluid) in query.iter_mut() {
-        let neighbors = spatial_hash.query_radius_with_positions(
-            transform.translation,
-            config.smoothing_length * 2.0,
-        );
-        
-        // Build neighbor data
-        let neighbor_data: Vec<(Vec3, f32)> = neighbors.iter()
-            .filter(|(e, _)| *e != entity)
-            .filter_map(|(_, pos)| {
-                particle_data.iter()
-                    .find(|(e, p, _)| (*p - *pos).length() < 0.01)
-                    .map(|(_, _, mass)| (*pos, *mass))
-            })
-            .collect();
-        
-        // Estimate density
+        let neighbors = spatial_hash.query_radius_with_positions(transform.translation, config.smoothing_length);
         let mut density = particle.mass * poly6_kernel(0.0, config.smoothing_length);
-        for (pos, mass) in &neighbor_data {
-            let r = (transform.translation - *pos).length();
-            density += mass * poly6_kernel(r, config.smoothing_length);
+        for (other, pos) in neighbors {
+            if other == entity {
+                continue;
+            }
+            if let Some(mass) = masses.get(&other) {
+                density += mass * poly6_kernel((transform.translation - pos).length(), config.smoothing_length);
+            }
         }
-        
         fluid.density = density.max(1.0); // Prevent zero density
     }
 }
 
-/// Update SPH forces for fluid particles
+/// Update SPH forces for fluid particles (one entity per particle).
+///
+/// The kernel sums give force densities (N/m^3); each is converted to a
+/// force on the particle's parcel (x m / rho). Gravity is applied once, by
+/// `particles::systems::apply_particle_forces`, for every particle kind.
 pub fn update_sph_forces(
     mut query: Query<(Entity, &Transform, &Particle, &FluidProperties, &mut KineticState)>,
     spatial_hash: Res<SpatialHash>,
     config: Res<SphConfig>,
 ) {
-    // Collect all particle data
-    let particle_data: Vec<(Entity, Vec3, f32, f32, f32, Vec3)> = query
+    // (position, mass, density, pressure, velocity) by entity.
+    let data: std::collections::HashMap<Entity, (Vec3, f32, f32, f32, Vec3)> = query
         .iter()
         .map(|(e, t, p, f, k)| {
             let pressure = pressure_from_density(f.density, config.rest_density, config.gas_constant);
-            (e, t.translation, p.mass, f.density, pressure, k.velocity)
+            (e, (t.translation, p.mass, f.density, pressure, k.velocity))
         })
         .collect();
-    
-    // Calculate forces for each particle
+
     for (entity, transform, particle, fluid, mut kinetic) in query.iter_mut() {
         let particle_pressure = pressure_from_density(fluid.density, config.rest_density, config.gas_constant);
-        
-        // Get neighbors
-        let neighbors = spatial_hash.query_radius_with_positions(
-            transform.translation,
-            config.smoothing_length * 2.0,
-        );
-        
-        // Build neighbor data for pressure force
-        let pressure_neighbors: Vec<(Vec3, f32, f32, f32)> = neighbors.iter()
+        let neighbors: Vec<(Vec3, f32, f32, f32, Vec3)> = spatial_hash
+            .query_radius_with_positions(transform.translation, config.smoothing_length)
+            .into_iter()
             .filter(|(e, _)| *e != entity)
-            .filter_map(|(_, pos)| {
-                particle_data.iter()
-                    .find(|(_, p, _, _, _, _)| (*p - *pos).length() < 0.01)
-                    .map(|(_, _, mass, density, pressure, _)| (*pos, *mass, *density, *pressure))
-            })
+            .filter_map(|(e, _)| data.get(&e).copied())
             .collect();
-        
-        // Pressure force
+        let to_force = particle.mass / fluid.density.max(1e-6);
+
+        let pressure_neighbors: Vec<(Vec3, f32, f32, f32)> =
+            neighbors.iter().map(|(p, m, d, pr, _)| (*p, *m, *d, *pr)).collect();
         let f_pressure = pressure_force(
             transform.translation,
             fluid.density,
@@ -380,19 +365,11 @@ pub fn update_sph_forces(
             &pressure_neighbors,
             config.smoothing_length,
         );
-        kinetic.apply_force(f_pressure);
-        
-        // Viscosity force
+        kinetic.apply_force(f_pressure * to_force);
+
         if config.viscosity_enabled {
-            let viscosity_neighbors: Vec<(Vec3, f32, f32, Vec3)> = neighbors.iter()
-                .filter(|(e, _)| *e != entity)
-                .filter_map(|(_, pos)| {
-                    particle_data.iter()
-                        .find(|(_, p, _, _, _, _)| (*p - *pos).length() < 0.01)
-                        .map(|(_, _, mass, density, _, velocity)| (*pos, *mass, *density, *velocity))
-                })
-                .collect();
-            
+            let viscosity_neighbors: Vec<(Vec3, f32, f32, Vec3)> =
+                neighbors.iter().map(|(p, m, d, _, v)| (*p, *m, *d, *v)).collect();
             let f_viscosity = viscosity_force(
                 transform.translation,
                 kinetic.velocity,
@@ -401,33 +378,51 @@ pub fn update_sph_forces(
                 config.smoothing_length,
                 config.viscosity,
             );
-            kinetic.apply_force(f_viscosity);
+            kinetic.apply_force(f_viscosity * to_force);
         }
-        
-        // Surface tension
+
         if config.surface_tension_enabled {
-            let surface_neighbors: Vec<(Vec3, f32, f32)> = pressure_neighbors.iter()
-                .map(|(pos, mass, density, _)| (*pos, *mass, *density))
-                .collect();
-            
+            let surface_neighbors: Vec<(Vec3, f32, f32)> =
+                neighbors.iter().map(|(p, m, d, _, _)| (*p, *m, *d)).collect();
             let f_surface = surface_tension_force(
                 transform.translation,
                 &surface_neighbors,
                 config.smoothing_length,
                 config.surface_tension,
             );
-            kinetic.apply_force(f_surface);
+            kinetic.apply_force(f_surface * to_force);
         }
-        
-        // Gravity
-        kinetic.apply_force(particle.mass * config.gravity);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
+    /// The particle solver evaluates this same spline through its own
+    /// hoisted form.
+    #[test]
+    fn hoisted_spline_matches_reference() {
+        use eustress_particle_sim::kernel::CubicSpline;
+        let h = 0.037;
+        let k = CubicSpline::new(h);
+        for i in 0..=40 {
+            let r = h * i as f32 / 40.0;
+            assert!((k.w(r) - cubic_spline_kernel(r, h)).abs() <= 1e-3 * k.w(0.0));
+            let g = cubic_spline_gradient(Vec3::new(r, 0.0, 0.0), h).x;
+            if r > 1e-6 * h {
+                assert!((k.dw(r) - g).abs() <= 1e-3 * k.dw(0.5 * h).abs());
+            }
+        }
+    }
+
+    #[test]
+    fn gradient_is_scale_independent() {
+        let h = 2.0e-7;
+        let g = cubic_spline_gradient(Vec3::new(0.3 * h, 0.0, 0.0), h);
+        assert!(g.x < 0.0);
+    }
+
     #[test]
     fn test_poly6_kernel() {
         let h = 0.1;
