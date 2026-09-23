@@ -126,6 +126,11 @@ pub enum MethodName {
     /// path runs identically to a real key press. The core of systematic
     /// editor testing over MCP.
     ActionInvoke,
+    /// Play-test input for running scripts: a virtual cursor plus held,
+    /// released and tapped keys and mouse buttons, merged with the real
+    /// devices (see `play_datamodel::pull::InjectedInput`). The real mouse
+    /// never moves, so an AI can play a game beside a working user.
+    InputInject,
     /// Capture the primary window (3D viewport + UI overlay) to a PNG on
     /// disk and return its path — the AI's "eyes". The viewport renders to
     /// the window, so this is exactly what a human sees. Read the returned
@@ -215,6 +220,38 @@ pub enum MethodName {
     /// The orchestrator's `eustress close` verb; the multi-instance
     /// counterpart of `eustress open`.
     EngineShutdown,
+    /// Start a run (from Edit), resume a paused one, or retune a running
+    /// one: `{time_scale?, duration_s?, ticket?}`. Answers with the run id.
+    /// The same interpreter serves the per-instance and Universe command
+    /// queues (`simulation::command`), so a run started here is the same
+    /// run a queued command would start.
+    SimRun,
+    /// Pause the current run.
+    SimPause,
+    /// Stop the current run (full Play-stop lifecycle: restore + despawn).
+    SimStop,
+    /// Write sim values: `{key, value}` or `{values: {key: value, …}}`.
+    SimSet,
+    /// Play state, sim clock, auto-stop target, and the run ledger (current
+    /// run, completed runs with final values, ticket acknowledgements).
+    SimState,
+    /// Enumerate the mode / discipline / tab taxonomy, with per-mode counts of
+    /// how many of each mode's tools are actually wired.
+    UiModes,
+    /// List the tools of a mode/discipline, filterable and paginated, each
+    /// carrying the `wired` flag that says whether it does anything.
+    UiTools,
+    /// Invoke one ribbon tool through the same queue a real click uses.
+    /// Refuses an unwired id rather than reporting a false success.
+    UiInvokeTool,
+    /// Switch the active mode and discipline.
+    UiSetMode,
+    /// Synthetic pointer input, for surfaces that have no tool id.
+    UiClick,
+    /// Whether a publish could run right now, without running one.
+    PublishStatus,
+    /// Start a publish of the open Space/Universe.
+    PublishSubmit,
     Unknown(String),
 }
 
@@ -233,6 +270,7 @@ where
         "selection.set" => MethodName::SelectionSet,
         "state.get" => MethodName::StateGet,
         "action.invoke" => MethodName::ActionInvoke,
+        "input.inject" => MethodName::InputInject,
         "viewport.capture" => MethodName::ViewportCapture,
         "ai_camera.set_pose" => MethodName::AiCameraSetPose,
         "ai_camera.orbit" => MethodName::AiCameraOrbit,
@@ -258,7 +296,19 @@ where
         "data.bindings" => MethodName::DataBindings,
         "data.unbind" => MethodName::DataUnbind,
         "db.export_toml" => MethodName::DbExportToml,
+        "ui.modes" => MethodName::UiModes,
+        "ui.tools" => MethodName::UiTools,
+        "ui.invoke_tool" => MethodName::UiInvokeTool,
+        "ui.set_mode" => MethodName::UiSetMode,
+        "ui.click" => MethodName::UiClick,
+        "publish.status" => MethodName::PublishStatus,
+        "publish.submit" => MethodName::PublishSubmit,
         "engine.shutdown" => MethodName::EngineShutdown,
+        "sim.run" => MethodName::SimRun,
+        "sim.pause" => MethodName::SimPause,
+        "sim.stop" => MethodName::SimStop,
+        "sim.set" => MethodName::SimSet,
+        "sim.state" => MethodName::SimState,
         _ => MethodName::Unknown(s),
     })
 }
@@ -287,6 +337,50 @@ pub mod handlers {
                 "pid": std::process::id(),
             }),
         )
+    }
+
+    /// `sim.run` / `sim.pause` / `sim.stop` / `sim.set` — one simulation
+    /// command, applied by the interpreter every transport shares. `op` is
+    /// the command (`run`, `pause`, `stop`, `set`); the params are the
+    /// command's fields, plus an optional `ticket` recorded in the ledger.
+    pub fn sim_command(world: &mut World, req: &BridgeRequest, op: &str) -> BridgeResponse {
+        let mut line = match &req.params {
+            Value::Object(m) => m.clone(),
+            Value::Null => serde_json::Map::new(),
+            _ => {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::invalid_params("params must be an object"),
+                )
+            }
+        };
+        // Queue lines carry their ticket as `id`; over the bridge `id` is
+        // the JSON-RPC id, so the ticket travels as `ticket`.
+        line.remove("id");
+        if let Some(ticket) = line.remove("ticket") {
+            line.insert("id".into(), ticket);
+        }
+        line.insert("op".into(), Value::from(op));
+
+        let (cmd, ticket) = match crate::simulation::command::SimCommand::from_queue_line(&Value::Object(line)) {
+            Ok(parsed) => parsed,
+            Err(e) => return BridgeResponse::error(req.id.clone(), BridgeError::invalid_params(e)),
+        };
+        let origin = crate::simulation::command::Origin { source: "bridge", ticket };
+        match crate::simulation::command::apply(world, cmd, &origin) {
+            Ok(mut ack) => {
+                if let Value::Object(ref mut m) = ack {
+                    m.insert("pid".into(), Value::from(std::process::id()));
+                }
+                BridgeResponse::ok(req.id.clone(), ack)
+            }
+            Err(e) => BridgeResponse::error(req.id.clone(), BridgeError::internal(e)),
+        }
+    }
+
+    /// `sim.state` — see [`crate::simulation::command::state_json`].
+    pub fn sim_state(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        BridgeResponse::ok(req.id.clone(), crate::simulation::command::state_json(world))
     }
 
     /// Trivial health check — lets siblings verify the bridge is alive
@@ -374,6 +468,12 @@ pub mod handlers {
         if let Some(mut pt) = world.get_resource_mut::<Time<avian3d::prelude::Physics>>() {
             pt.unpause();
         }
+        // Stepped ticks are deterministic: particle simulations pay each
+        // tick's whole debt instead of holding to their real-time FrameBudget.
+        use eustress_common::realism::particle_sim::ParticleSimControl;
+        let particles_budgeted = world
+            .get_resource_mut::<ParticleSimControl>()
+            .map(|mut c| std::mem::replace(&mut c.budgeted, false));
 
         let started = std::time::Instant::now();
         let mut ran = 0;
@@ -388,6 +488,9 @@ pub mod handlers {
             }
         }
 
+        if let (Some(was), Some(mut c)) = (particles_budgeted, world.get_resource_mut::<ParticleSimControl>()) {
+            c.budgeted = was;
+        }
         // Leave physics PAUSED so the world is frozen between steps.
         if let Some(mut pt) = world.get_resource_mut::<Time<avian3d::prelude::Physics>>() {
             pt.pause();
@@ -2438,9 +2541,11 @@ pub mod handlers {
                     return BridgeResponse::error(
                         req.id.clone(),
                         BridgeError::internal(format!(
-                            "unknown action '{}' — use the Action enum variant name \
-                             (Copy, Cut, Paste, Duplicate, Group, Ungroup, Delete, \
-                             SelectAll, Undo, Redo, SaveScene, MoveTool, ScaleTool, …)",
+                            "unknown action '{}' — use the Action enum variant name. The \
+                             accepted set is the WHOLE enum, not a safe subset: alongside \
+                             Copy/Cut/Paste/Duplicate/Group/Ungroup/SelectAll/Undo/Redo/\
+                             SaveScene/MoveTool/ScaleTool it includes irreversible actions \
+                             (Delete) and outward-facing ones (PublishSpace, PublishUniverse).",
                             name
                         )),
                     );

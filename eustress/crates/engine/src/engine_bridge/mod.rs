@@ -53,6 +53,7 @@ mod port_file;
 mod protocol;
 mod self_test;
 mod server;
+mod ui_surface;
 #[cfg(unix)]
 mod unix_socket_file;
 
@@ -100,8 +101,42 @@ impl Plugin for EngineBridgePlugin {
                 (
                     (drain_bridge_requests, pump_sim_step).chain(),
                     resync_port_file_to_space,
+                    reclaim_port_file_if_released,
                 ),
             );
+    }
+}
+
+/// How often a non-owner checks whether the Universe's `engine.port` slot
+/// has been released.
+const PORT_RECLAIM_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Re-claim the Universe's `engine.port` once its owner exits.
+///
+/// With several engines on one Universe, the slot names whichever wrote it
+/// last, and that engine removes it on exit (compare-and-delete, so only
+/// its own port) — or, if it crashed, leaves a port nothing listens on.
+/// Without a successor the Universe would then have no owner at all:
+/// Universe-addressed clients couldn't connect, and nothing would serve
+/// the Universe's legacy sim queue. Any surviving engine re-writes its own
+/// port into the released slot, within a second.
+fn reclaim_port_file_if_released(
+    handle: Option<Res<EngineBridgeHandle>>,
+    mut last_check: Local<Option<std::time::Instant>>,
+) {
+    if last_check.is_some_and(|t| t.elapsed() < PORT_RECLAIM_INTERVAL) {
+        return;
+    }
+    *last_check = Some(std::time::Instant::now());
+    let Some(handle) = handle else { return };
+    let Some(pf) = handle.port_file.as_ref() else { return };
+    if pf.reclaim_if_released() {
+        info!(
+            "🔗 Engine Bridge: the Universe's previous owner released {}; pid {} (port {}) now owns it",
+            pf.display_path(),
+            std::process::id(),
+            handle.port.unwrap_or_default()
+        );
     }
 }
 
@@ -627,6 +662,16 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::SelectionSet => protocol::handlers::selection_set(world, &pending.request),
             MethodName::StateGet => protocol::handlers::state_get(world, &pending.request),
             MethodName::ActionInvoke => protocol::handlers::action_invoke(world, &pending.request),
+            MethodName::InputInject => {
+                let result = match world.get_resource_mut::<crate::play_datamodel::pull::InjectedInput>() {
+                    Some(mut inj) => crate::play_datamodel::pull::apply_injection(&mut inj, &pending.request.params),
+                    None => Err("input injection needs the Play DataModel plugin".to_string()),
+                };
+                match result {
+                    Ok(v) => BridgeResponse::ok(pending.request.id.clone(), v),
+                    Err(e) => BridgeResponse::error(pending.request.id.clone(), BridgeError::invalid_params(e)),
+                }
+            }
             MethodName::ViewportCapture => protocol::handlers::viewport_capture(world, &pending.request),
             MethodName::AiCameraSetPose => protocol::handlers::ai_camera_set_pose(world, &pending.request),
             MethodName::AiCameraOrbit => protocol::handlers::ai_camera_orbit(world, &pending.request),
@@ -660,10 +705,22 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::Raycast => protocol::handlers::raycast(world, &pending.request),
             MethodName::SceneOverview => protocol::handlers::scene_overview(world, &pending.request),
             MethodName::SimBindings => protocol::handlers::sim_bindings(world, &pending.request),
+            MethodName::UiModes => ui_surface::ui_modes(world, &pending.request),
+            MethodName::UiTools => ui_surface::ui_tools(world, &pending.request),
+            MethodName::UiInvokeTool => ui_surface::ui_invoke_tool(world, &pending.request),
+            MethodName::UiSetMode => ui_surface::ui_set_mode(world, &pending.request),
+            MethodName::UiClick => ui_surface::ui_click(world, &pending.request),
+            MethodName::PublishStatus => ui_surface::publish_status(world, &pending.request),
+            MethodName::PublishSubmit => ui_surface::publish_submit(world, &pending.request),
             MethodName::DataBind => protocol::handlers::data_bind(world, &pending.request),
             MethodName::DataBindings => protocol::handlers::data_bindings(world, &pending.request),
             MethodName::DataUnbind => protocol::handlers::data_unbind(world, &pending.request),
             MethodName::EngineShutdown => protocol::handlers::engine_shutdown(world, &pending.request),
+            MethodName::SimRun => protocol::handlers::sim_command(world, &pending.request, "run"),
+            MethodName::SimPause => protocol::handlers::sim_command(world, &pending.request, "pause"),
+            MethodName::SimStop => protocol::handlers::sim_command(world, &pending.request, "stop"),
+            MethodName::SimSet => protocol::handlers::sim_command(world, &pending.request, "set"),
+            MethodName::SimState => protocol::handlers::sim_state(world, &pending.request),
             MethodName::Unknown(ref name) => {
                 // Unknown method — return a JSON-RPC "method not found"
                 // error rather than crashing the handler.
@@ -743,7 +800,15 @@ fn resync_port_file_to_space(
                     new_pf.display_path()
                 );
                 // Replacing the handle drops the previous `PortFile`, whose
-                // `Drop` removes the stale (wrong-Universe) port file.
+                // `Drop` removes the stale (wrong-Universe) port file. Both
+                // Universes usually share one workspace, and so one global
+                // copy, which the new `PortFile` has just rewritten with the
+                // same port: hand it over, or the old `Drop` deletes it.
+                if let Some(old) = handle.port_file.as_ref() {
+                    if old.global_path().is_some() && old.global_path() == new_pf.global_path() {
+                        old.disarm_global();
+                    }
+                }
                 handle.port_file = Some(Arc::new(new_pf));
             }
             Err(e) => warn!(

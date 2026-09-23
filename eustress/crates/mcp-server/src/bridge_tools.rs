@@ -781,12 +781,12 @@ impl ToolHandler for SimStepTool {
         ToolDefinition {
             name: "sim_step",
             description: "Deterministically advance the LIVE engine's physics simulation by N fixed-timestep ticks (1 tick = 1/60s), then return — the POMDP control primitive (observe -> act -> STEP -> observe). Pause the sim first (pause_simulation) so ONLY these steps advance the world; then sim_step(ticks) advances physics by exactly that many ticks, wall-clock-independent and reproducible. Long steps are spread across frames so the engine keeps rendering and answering other tools while it works — the reply arrives when every tick has run, and `frames` in the result says how many frames it spanned. Only one sim_step may be in flight at a time. After stepping, read the new state with inspect_scene. Requires the engine running.",
-            input_schema: serde_json::json!({
+            input_schema: eustress_tools::sim_ipc::with_target_props(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "ticks": { "type": "integer", "description": "Number of 1/60s fixed ticks to advance (default 1, max 10000)." }
                 }
-            }),
+            })),
             modes: &[WorkshopMode::General],
             requires_approval: false,
             stream_topics: &[],
@@ -810,12 +810,30 @@ impl ToolHandler for SimStepTool {
         // At the default 2 s, anything past a few hundred ticks timed out and
         // reported "engine is not running" while the engine was mid-step.
         let deadline = std::time::Duration::from_millis(5_000 + ticks * 10);
-        match eustress_bridge_client::call_engine_with_timeout(
-            &ctx.universe_root,
-            "sim.step",
-            Value::Object(params),
-            deadline,
-        ) {
+        // With several engines on one Universe, `pid` / `port` step exactly
+        // one of them; without either, the Universe's owner, as before.
+        let reply = if input.get("pid").is_some() || input.get("port").is_some() {
+            match eustress_tools::sim_ipc::resolve(&input, ctx) {
+                Ok(route) => match route.port {
+                    Some(port) => eustress_bridge_client::call_port_with_timeout(
+                        port,
+                        "sim.step",
+                        Value::Object(params),
+                        deadline,
+                    ),
+                    None => Err(format!("{} has no known bridge port", route.label())),
+                },
+                Err(e) => Err(e),
+            }
+        } else {
+            eustress_bridge_client::call_engine_with_timeout(
+                &ctx.universe_root,
+                "sim.step",
+                Value::Object(params),
+                deadline,
+            )
+        };
+        match reply {
             Ok(result) => {
                 let stepped = result.get("stepped").and_then(|v| v.as_u64()).unwrap_or(0);
                 let secs = result.get("sim_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -883,6 +901,564 @@ impl ToolHandler for SceneRaycastTool {
                 ok("scene_raycast", summary, result)
             }
             Err(e) => fail("scene_raycast", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UI surface — modes / disciplines / tabs / tools, and driving them
+// ---------------------------------------------------------------------------
+//
+// The ribbon declares ~1,400 tool ids across twelve modes, but only a fraction
+// are implemented; the rest render as buttons and deliberately do nothing.
+// Every tool below therefore carries the `wired` flag through to the caller,
+// and `invoke_mode_tool` REFUSES an unwired id instead of reporting success.
+// An agent that believes it applied an operation it did not will build its
+// next ten steps on a fiction, so a false success is worse here than an error.
+
+pub struct ListModesTool;
+
+impl ToolHandler for ListModesTool {
+    /// Read-only: enumerates the taxonomy, changes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "list_modes",
+            description: "Enumerate the LIVE engine's mode / discipline taxonomy — every Eustress mode (Business, Engineering, Justice, Government, ...), its disciplines (submodes), its tabs, and how many of its tools are actually implemented. START HERE before driving the UI: each mode reports `tools_total` and `tools_wired`, and the gap is large on purpose — most ribbon buttons are declared but not built. Use list_mode_tools next to see individual tools. Requires the engine running. Read-only.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
+        match call_engine(&ctx.universe_root, "ui.modes", serde_json::json!({})) {
+            Ok(result) => {
+                let active = result.get("active_mode").and_then(|v| v.as_str()).unwrap_or("?");
+                let active_sub = result.get("active_submode").and_then(|v| v.as_str()).unwrap_or("");
+                let mut lines = Vec::new();
+                if let Some(arr) = result.get("modes").and_then(|v| v.as_array()) {
+                    for m in arr {
+                        let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                        let name = m.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                        let total = m.get("tools_total").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let wired = m.get("tools_wired").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let subs = m
+                            .get("submodes")
+                            .and_then(|v| v.as_array())
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                        lines.push(format!(
+                            "  - {id} ({name}): {subs} discipline(s), {wired}/{total} tools wired"
+                        ));
+                    }
+                }
+                let summary = format!(
+                    "active: {active}{}{}\n{}",
+                    if active_sub.is_empty() { "" } else { " / " },
+                    active_sub,
+                    lines.join("\n")
+                );
+                ok("list_modes", summary, result)
+            }
+            Err(e) => fail("list_modes", e),
+        }
+    }
+}
+
+pub struct ListModeToolsTool;
+
+impl ToolHandler for ListModeToolsTool {
+    /// Read-only: lists tools, invokes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "list_mode_tools",
+            description: "List the ribbon tools of one mode/discipline in the LIVE engine, with the tab and section each sits in. Every entry carries `wired`: true means clicking it does something, false means it renders as a button and does nothing. Pass wired_only=true to see only tools that work — that is usually what you want before planning a sequence. Filter with `tab` or a text `query` (matches id and label), and page with offset/limit (default 100). Requires the engine running. Read-only.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "mode":       { "type": "string",  "description": "Mode id from list_modes. Defaults to the active mode." },
+                    "submode":    { "type": "string",  "description": "Discipline id within the mode. Defaults to the active one." },
+                    "tab":        { "type": "string",  "description": "Restrict to one tab id." },
+                    "query":      { "type": "string",  "description": "Case-insensitive substring match on tool id or label." },
+                    "wired_only": { "type": "boolean", "description": "Only tools that actually do something (default false)." },
+                    "offset":     { "type": "integer", "description": "Pagination offset (default 0)." },
+                    "limit":      { "type": "integer", "description": "Max tools to return (default 100, cap 1000)." }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = serde_json::Map::new();
+        for key in ["mode", "submode", "tab", "query", "wired_only", "offset", "limit"] {
+            if let Some(v) = input.get(key) {
+                if !v.is_null() {
+                    params.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+        match call_engine(&ctx.universe_root, "ui.tools", Value::Object(params)) {
+            Ok(result) => {
+                let matched = result.get("matched").and_then(|v| v.as_u64()).unwrap_or(0);
+                let wired = result.get("matched_wired").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mut lines = Vec::new();
+                if let Some(arr) = result.get("tools").and_then(|v| v.as_array()) {
+                    for t in arr.iter().take(40) {
+                        let id = t.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                        let label = t.get("label").and_then(|v| v.as_str()).unwrap_or("?");
+                        let tab = t.get("tab").and_then(|v| v.as_str()).unwrap_or("?");
+                        let w = t.get("wired").and_then(|v| v.as_bool()).unwrap_or(false);
+                        lines.push(format!(
+                            "  [{}] {id} — {label} (tab {tab})",
+                            if w { "WIRED" } else { " ... " }
+                        ));
+                    }
+                    if arr.len() > 40 {
+                        lines.push(format!("  … and {} more in this page", arr.len() - 40));
+                    }
+                }
+                let summary = format!(
+                    "{matched} tool(s) matched, {wired} of them wired:\n{}",
+                    lines.join("\n")
+                );
+                ok("list_mode_tools", summary, result)
+            }
+            Err(e) => fail("list_mode_tools", e),
+        }
+    }
+}
+
+pub struct SetModeTool;
+
+impl ToolHandler for SetModeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "set_mode",
+            description: "Switch the LIVE engine's active mode and discipline, exactly as picking them from the Modes dropdown does (ribbon tabs, accent theme, and persisted editor settings all follow). A mode that has disciplines is a container and is NOT directly selectable — name one of its submodes. Tools live per mode/discipline, so switch here before invoking a tool that belongs to another mode. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "mode":    { "type": "string", "description": "Mode id from list_modes." },
+                    "submode": { "type": "string", "description": "Discipline id. Required when the mode has any." }
+                },
+                "required": ["mode"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = serde_json::Map::new();
+        for key in ["mode", "submode"] {
+            if let Some(v) = input.get(key) {
+                if !v.is_null() {
+                    params.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+        match call_engine(&ctx.universe_root, "ui.set_mode", Value::Object(params)) {
+            Ok(result) => {
+                let mode = result.get("mode").and_then(|v| v.as_str()).unwrap_or("?");
+                let sub = result.get("submode").and_then(|v| v.as_str()).unwrap_or("");
+                ok(
+                    "set_mode",
+                    format!("Switched to {mode}{}{sub}.", if sub.is_empty() { "" } else { " / " }),
+                    result,
+                )
+            }
+            Err(e) => fail("set_mode", e),
+        }
+    }
+}
+
+pub struct InvokeModeToolTool;
+
+impl ToolHandler for InvokeModeToolTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "invoke_mode_tool",
+            description: "Invoke one ribbon tool by id in the LIVE engine, through the same action queue a real click uses — so the tool runs its actual handler, not a parallel code path. Get ids from list_mode_tools. An id that is declared but NOT implemented is REFUSED with an error rather than silently doing nothing, so a success here means the tool really ran. The effect lands on the next frame: confirm it with inspect_scene / get_editor_state rather than assuming. Some tools only exist in a particular mode — call set_mode first. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tool_id": { "type": "string", "description": "Ribbon tool id, e.g. \"cad:export_glb\" or \"csg:union\"." }
+                },
+                "required": ["tool_id"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let id = input.get("tool_id").and_then(|v| v.as_str()).unwrap_or("");
+        if id.is_empty() {
+            return fail("invoke_mode_tool", "Missing required `tool_id`.".to_string());
+        }
+        match call_engine(
+            &ctx.universe_root,
+            "ui.invoke_tool",
+            serde_json::json!({ "tool_id": id }),
+        ) {
+            Ok(result) => {
+                let label = result.get("label").and_then(|v| v.as_str()).unwrap_or(id);
+                ok(
+                    "invoke_mode_tool",
+                    format!("Invoked '{label}' ({id}). Applies next frame — verify the effect."),
+                    result,
+                )
+            }
+            Err(e) => fail("invoke_mode_tool", e),
+        }
+    }
+}
+
+pub struct UiClickTool;
+
+impl ToolHandler for UiClickTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "ui_click",
+            description: "Dispatch a synthetic pointer event into the LIVE engine's UI at a logical coordinate, through the same Slint window events real mouse input produces. This is the ESCAPE HATCH for surfaces with no tool id — panel widgets, list rows, dialog buttons. Prefer invoke_mode_tool wherever a tool id exists: a named tool survives a layout change, whereas a coordinate silently means something else the moment the UI moves. Take a capture_viewport first to find the target, and another afterwards to confirm what happened, because a coordinate cannot confirm its own effect. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "x":      { "type": "number", "description": "Logical X, from the top-left of the window." },
+                    "y":      { "type": "number", "description": "Logical Y, from the top-left of the window." },
+                    "button": { "type": "string", "enum": ["left", "right", "middle"], "description": "Default left." },
+                    "action": { "type": "string", "enum": ["click", "press", "release", "move", "double"], "description": "Default click. Use press/release as a pair to drag." }
+                },
+                "required": ["x", "y"]
+            }),
+            modes: &[WorkshopMode::General],
+            // Clicking blind can hit a destructive control.
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = serde_json::Map::new();
+        for key in ["x", "y", "button", "action"] {
+            if let Some(v) = input.get(key) {
+                if !v.is_null() {
+                    params.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+        match call_engine(&ctx.universe_root, "ui.click", Value::Object(params)) {
+            Ok(result) => {
+                let x = result.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let y = result.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let a = result.get("action").and_then(|v| v.as_str()).unwrap_or("click");
+                ok(
+                    "ui_click",
+                    format!("Dispatched {a} at ({x:.0}, {y:.0}). Capture the viewport to confirm."),
+                    result,
+                )
+            }
+            Err(e) => fail("ui_click", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ui_sequence — ordered multi-step UI drive
+// ---------------------------------------------------------------------------
+
+/// Settle time between sequence steps, in milliseconds.
+///
+/// The engine applies a queued UI action on its NEXT frame, so a step issued
+/// with no gap can be observed before the previous one has taken effect. This
+/// is the default gap; callers on a heavy Space (low framerate) should raise it.
+const SEQUENCE_DEFAULT_SETTLE_MS: u64 = 150;
+/// Cap on steps per sequence, so one call cannot drive the UI indefinitely.
+const SEQUENCE_MAX_STEPS: usize = 64;
+
+pub struct UiSequenceTool;
+
+impl ToolHandler for UiSequenceTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "ui_sequence",
+            description: "Run an ordered sequence of UI operations against the LIVE engine — the general way to perform a multi-step task (switch mode, pick a tool, select something, click, step the sim, look at the result). Each step is applied, then the engine is given time to settle before the next, so steps genuinely compose instead of racing each other. Ops: set_mode {mode,submode}, invoke_tool {tool_id}, click {x,y,button,action}, select {ids}, equip {tool}, action {action}, step {ticks}, wait {ms}, capture {}. Stops at the first failure by default so a broken step does not cascade; pass stop_on_error=false to run the rest anyway. Every step's outcome is reported individually. Requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "description": "Ordered operations. Each is an object with an `op` plus that op's parameters.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "op": { "type": "string", "enum": ["set_mode","invoke_tool","click","select","equip","action","step","wait","capture"] }
+                            },
+                            "required": ["op"]
+                        }
+                    },
+                    "settle_ms":     { "type": "integer", "description": "Milliseconds to wait between steps (default 150). Raise it on a slow Space." },
+                    "stop_on_error": { "type": "boolean", "description": "Stop at the first failing step (default true)." }
+                },
+                "required": ["steps"]
+            }),
+            modes: &[WorkshopMode::General],
+            // A sequence can include clicks and destructive actions.
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let Some(steps) = input.get("steps").and_then(|v| v.as_array()) else {
+            return fail("ui_sequence", "`steps` must be an array of operations.".to_string());
+        };
+        if steps.is_empty() {
+            return fail("ui_sequence", "`steps` is empty — nothing to do.".to_string());
+        }
+        if steps.len() > SEQUENCE_MAX_STEPS {
+            return fail(
+                "ui_sequence",
+                format!(
+                    "{} steps exceeds the cap of {SEQUENCE_MAX_STEPS} — split the task into \
+                     several sequences so each one's result can be checked.",
+                    steps.len()
+                ),
+            );
+        }
+        let settle = std::time::Duration::from_millis(
+            input
+                .get("settle_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(SEQUENCE_DEFAULT_SETTLE_MS)
+                .min(5_000),
+        );
+        let stop_on_error = input
+            .get("stop_on_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let mut results: Vec<Value> = Vec::new();
+        let mut ok_count = 0usize;
+        let mut failed_at: Option<usize> = None;
+
+        for (i, step) in steps.iter().enumerate() {
+            let op = step.get("op").and_then(|v| v.as_str()).unwrap_or("");
+
+            // `wait` is local: it never touches the engine.
+            if op == "wait" {
+                let ms = step.get("ms").and_then(|v| v.as_u64()).unwrap_or(250).min(10_000);
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+                results.push(serde_json::json!({ "step": i, "op": op, "ok": true, "waited_ms": ms }));
+                ok_count += 1;
+                continue;
+            }
+
+            // Map the op onto its bridge method and parameters.
+            let (method, params): (&str, Value) = match op {
+                "set_mode" => ("ui.set_mode", pick(step, &["mode", "submode"])),
+                "invoke_tool" => ("ui.invoke_tool", pick(step, &["tool_id"])),
+                "click" => ("ui.click", pick(step, &["x", "y", "button", "action"])),
+                "select" => ("selection.set", pick(step, &["ids", "id"])),
+                "equip" => ("tool.equip", pick(step, &["tool"])),
+                "action" => ("action.invoke", pick(step, &["action"])),
+                "step" => ("sim.step", pick(step, &["ticks"])),
+                "capture" => ("viewport.capture", serde_json::json!({})),
+                other => {
+                    results.push(serde_json::json!({
+                        "step": i, "op": other, "ok": false,
+                        "error": format!("unknown op '{other}'"),
+                    }));
+                    failed_at = Some(i);
+                    if stop_on_error {
+                        break;
+                    }
+                    continue;
+                }
+            };
+
+            match call_engine(&ctx.universe_root, method, params) {
+                Ok(v) => {
+                    results.push(serde_json::json!({ "step": i, "op": op, "ok": true, "result": v }));
+                    ok_count += 1;
+                }
+                Err(e) => {
+                    results.push(serde_json::json!({ "step": i, "op": op, "ok": false, "error": e }));
+                    failed_at = Some(i);
+                    if stop_on_error {
+                        break;
+                    }
+                }
+            }
+
+            // Let the queued action reach the world before the next step reads
+            // or builds on it.
+            std::thread::sleep(settle);
+        }
+
+        let attempted = results.len();
+        let summary = match failed_at {
+            None => format!("All {attempted} step(s) succeeded."),
+            Some(i) => format!(
+                "{ok_count}/{attempted} step(s) succeeded; step {i} ({}) failed{}.",
+                steps[i].get("op").and_then(|v| v.as_str()).unwrap_or("?"),
+                if stop_on_error { " and the sequence stopped there" } else { "" }
+            ),
+        };
+        let payload = serde_json::json!({
+            "attempted": attempted,
+            "succeeded": ok_count,
+            "failed_at": failed_at,
+            "steps": results,
+        });
+        if failed_at.is_some() {
+            // A partially-applied sequence is a failure, not a success with a
+            // footnote: the caller must not assume the whole task landed.
+            return ToolResult {
+                tool_name: "ui_sequence".to_string(),
+                tool_use_id: String::new(),
+                success: false,
+                content: summary,
+                structured_data: Some(payload),
+                stream_topic: None,
+            };
+        }
+        ok("ui_sequence", summary, payload)
+    }
+}
+
+/// Copy the named keys from a sequence step into a params object, dropping
+/// absent and null ones so engine-side defaults still apply.
+fn pick(step: &Value, keys: &[&str]) -> Value {
+    let mut out = serde_json::Map::new();
+    for k in keys {
+        if let Some(v) = step.get(*k) {
+            if !v.is_null() {
+                out.insert((*k).to_string(), v.clone());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+// ---------------------------------------------------------------------------
+// publish_status / publish_space
+// ---------------------------------------------------------------------------
+
+pub struct PublishStatusTool;
+
+impl ToolHandler for PublishStatusTool {
+    /// Read-only: reports readiness, publishes nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "publish_status",
+            description: "Report whether the LIVE engine could publish right now, and the progress of any publish already running — WITHOUT publishing. Checks that a Space is open, that the session is signed in, and that no publish is already in flight, returning a named blocker for each unmet precondition. Call this before publish_space so the preconditions are established separately from the act of publishing. Requires the engine running. Read-only.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
+        match call_engine(&ctx.universe_root, "publish.status", serde_json::json!({})) {
+            Ok(result) => {
+                let ready = result.get("ready").and_then(|v| v.as_bool()).unwrap_or(false);
+                let blockers: Vec<String> = result
+                    .get("blockers")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|b| b.as_str().map(str::to_owned)).collect())
+                    .unwrap_or_default();
+                let summary = if ready {
+                    "Ready to publish.".to_string()
+                } else {
+                    format!("NOT ready to publish:\n  - {}", blockers.join("\n  - "))
+                };
+                ok("publish_status", summary, result)
+            }
+            Err(e) => fail("publish_status", e),
+        }
+    }
+}
+
+pub struct PublishSpaceTool;
+
+impl ToolHandler for PublishSpaceTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "publish_space",
+            description: "Publish the LIVE engine's open Space or Universe to the Eustress gallery. Runs the same path the Publish dialog does: packages the content, bakes the website manifest, builds the moderation dossier with a capture orbit, and uploads. THIS IS OUTWARD-FACING — it creates a listing other people can see, and a public listing is gated on moderation approval. Call publish_status first, and confirm with the person that they want to publish before calling this. Requires the engine running and a signed-in session.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "experience_name":  { "type": "string",  "description": "Listing name. Required — an unnamed listing has to be fixed after the fact." },
+                    "description":      { "type": "string",  "description": "Listing description." },
+                    "genre":            { "type": "string",  "description": "Genre label (default \"All\")." },
+                    "is_public":        { "type": "boolean", "description": "Visible in the public gallery (default true). Set false to publish privately." },
+                    "open_source":      { "type": "boolean", "description": "Publish the source as open (default false)." },
+                    "studio_editable":  { "type": "boolean", "description": "Allow others to open it in the editor (default false)." },
+                    "space_only":       { "type": "boolean", "description": "Publish only the current Space as an incremental update, rather than the whole Universe (default false)." }
+                },
+                "required": ["experience_name"]
+            }),
+            modes: &[WorkshopMode::General],
+            // Outward-facing and not cleanly reversible.
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = serde_json::Map::new();
+        for key in [
+            "experience_name",
+            "description",
+            "genre",
+            "is_public",
+            "open_source",
+            "studio_editable",
+            "space_only",
+        ] {
+            if let Some(v) = input.get(key) {
+                if !v.is_null() {
+                    params.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+        match call_engine(&ctx.universe_root, "publish.submit", Value::Object(params)) {
+            Ok(result) => {
+                let name = result.get("experience_name").and_then(|v| v.as_str()).unwrap_or("?");
+                let public = result.get("is_public").and_then(|v| v.as_bool()).unwrap_or(true);
+                ok(
+                    "publish_space",
+                    format!(
+                        "Publish started for '{name}' ({}). Packaging, manifest bake, moderation \
+                         dossier and upload run over the next frames — poll publish_status for \
+                         progress. A public listing appears only after moderation approves it.",
+                        if public { "public" } else { "private" }
+                    ),
+                    result,
+                )
+            }
+            Err(e) => fail("publish_space", e),
         }
     }
 }
@@ -1320,7 +1896,7 @@ impl ToolHandler for InvokeActionTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "invoke_action",
-            description: "Invoke any LIVE engine editor action by name over the bridge — the AI equivalent of pressing its keyboard shortcut. Runs the SAME handler a real key press does. Examples: Copy, Cut, Paste, Duplicate, Group, Ungroup, Delete, SelectAll, Undo, Redo, SaveScene, and tool switches SelectTool/MoveTool/ScaleTool/RotateTool. Combine with select_entity (to set the operand) + inspect_scene/get_editor_state (to verify the effect) for end-to-end editor testing. Requires the engine to be running. NOTE: some actions (Delete, Cut) are destructive.",
+            description: "Invoke any LIVE engine editor action by name over the bridge — the AI equivalent of pressing its keyboard shortcut. Runs the SAME handler a real key press does. Examples: Copy, Cut, Paste, Duplicate, Group, Ungroup, Delete, SelectAll, Undo, Redo, SaveScene, and tool switches SelectTool/MoveTool/ScaleTool/RotateTool. Combine with select_entity (to set the operand) + inspect_scene/get_editor_state (to verify the effect) for end-to-end editor testing. Requires the engine to be running. BLAST RADIUS: this accepts ANY variant of the editor's Action enum, not just the examples above — the set includes irreversible ones (Delete, Cut) and OUTWARD-FACING ones (PublishSpace, PublishUniverse, which start a publish to the public gallery). Treat an action name you have not verified as unbounded, and do not use this to publish: publish_space exists for that and states what it does.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1352,6 +1928,57 @@ impl ToolHandler for InvokeActionTool {
         ) {
             Ok(result) => ok("invoke_action", format!("Invoked action '{action}'."), result),
             Err(e) => fail("invoke_action", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// play_input  ->  input.inject
+// ---------------------------------------------------------------------------
+
+pub struct PlayInputTool;
+
+impl ToolHandler for PlayInputTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "play_input",
+            description: "Play a running game (Play mode) like a player, without moving the real mouse. Set a virtual cursor in 3D-viewport pixels (Mouse.Hit and aiming follow it), press, release or tap keys and mouse buttons (the avatar walks on W/A/S/D; scripts receive InputBegan/InputEnded), and scroll the wheel. Names are Roblox's: W, One, LeftShift, Space, MouseButton1. `down` holds until `up`; `tap` presses for one frame; `clear` releases everything and hands the cursor back. Pair with capture_viewport to see the result. Pass `port` to reach one engine when several are running (ports from `eustress instances`).",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "cursor": {
+                        "type": ["array", "null"],
+                        "items": { "type": "number" },
+                        "description": "[x, y] in 3D-viewport logical pixels (origin top-left), or null to hand the cursor back to the OS."
+                    },
+                    "down": { "type": "array", "items": { "type": "string" }, "description": "Keys or buttons to press and hold." },
+                    "up": { "type": "array", "items": { "type": "string" }, "description": "Held keys or buttons to release." },
+                    "tap": { "type": "array", "items": { "type": "string" }, "description": "Keys or buttons to press for one frame." },
+                    "wheel": { "type": "number", "description": "Mouse wheel steps (positive = away from the user)." },
+                    "clear": { "type": "boolean", "description": "Release everything held and drop the virtual cursor." },
+                    "port": { "type": "integer", "description": "Bridge port of one engine instance, when several run." }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = input;
+        let port = params
+            .as_object_mut()
+            .and_then(|m| m.remove("port"))
+            .and_then(|p| p.as_u64())
+            .and_then(|p| u16::try_from(p).ok());
+        let result = match port {
+            Some(port) => eustress_bridge_client::call_port(port, "input.inject", params),
+            None => call_engine(&ctx.universe_root, "input.inject", params),
+        };
+        match result {
+            Ok(r) => ok("play_input", "Input applied; scripts see it on the next frame.".to_string(), r),
+            Err(e) => fail("play_input", e),
         }
     }
 }

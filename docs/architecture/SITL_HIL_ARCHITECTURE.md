@@ -73,17 +73,31 @@ INTENT → [SiTL] → FEEDBACK GATE → [HIL] → PHYSICAL PRODUCT
   physics systems. Read by everything downstream.
 
 - **runtime-snapshot.json** — written at 4 Hz by the engine. Contains
-  `play_state`, `sim_values`, and `generated_at`. The LSP reads this for
-  inline hover telemetry. MCP tools read it for `get_sim_value`,
-  `list_sim_values`, and `get_simulation_state`.
+  `play_state`, `sim_values`, `generated_at`, the writing engine's `pid`
+  and `space`, the sim clock, and its run ledger (current run, recent
+  runs with their final values). Every engine writes its own copy to
+  `<workspace>/.eustress/instances/<pid>/snapshot.json`; the Universe's
+  `.eustress/runtime-snapshot.json` is written by the Universe's owner
+  (the engine named in `engine.port`). The LSP reads the Universe copy for
+  inline hover telemetry. MCP tools read the copy of the engine they
+  target for `get_sim_value`, `list_sim_values`, `get_simulation_state`
+  and `await_simulation`.
 
-- **telemetry.jsonl** — append-only log of watchpoint samples. Each line
-  is `{ "t": "<rfc3339>", "values": { "key": f64 } }`. The
-  `tail_telemetry` MCP tool reads this for time-series analysis.
+- **telemetry.jsonl** — append-only log of watchpoint samples, shared by
+  every engine on the Universe. Each line is `{ "t": "<rfc3339>", "pid",
+  "space", "run_id", "tick", "sim_time_s", "values": { "key": f64 } }`.
+  The `tail_telemetry` MCP tool reads this for time-series analysis and
+  filters it by `pid` and `run_id`.
 
 - **sim-commands.jsonl** — command queue from MCP tools to the engine.
-  `run_simulation`, `stop_simulation`, and `set_sim_value` all append
-  here. The engine drains on the next frame tick.
+  `run_simulation`, `pause_simulation`, `stop_simulation`, and
+  `set_sim_value` append to the queue of the engine they target
+  (`<workspace>/.eustress/instances/<pid>/sim-commands.jsonl`); the
+  Universe's `.eustress/sim-commands.jsonl` is served by the Universe's
+  owner. The engine drains its queues on the next frame tick. The Engine
+  Bridge methods `sim.run`, `sim.pause`, `sim.stop`, `sim.set` and
+  `sim.state` apply the same commands synchronously (see
+  [HEADLESS_RUNTIME.md §7.5](HEADLESS_RUNTIME.md)).
 
 - **Scenario Engine** — branches, evidence collection, pruning. Each
   scenario branch runs independently with its own parameter set.

@@ -48,6 +48,7 @@ fn registry() -> &'static ToolRegistry {
         r.register(crate::bridge_tools::SelectEntityTool);
         r.register(crate::bridge_tools::GetEditorStateTool);
         r.register(crate::bridge_tools::InvokeActionTool);
+        r.register(crate::bridge_tools::PlayInputTool);
         r.register(crate::bridge_tools::CaptureViewportTool);
         // Causal op-log read surface (Phase 1, Way 8) — the AI's audit trail.
         r.register(crate::bridge_tools::OplogTailTool);
@@ -88,6 +89,20 @@ fn registry() -> &'static ToolRegistry {
         // out for reading rather than changing what owns an entity, and it
         // covers streamed-out entities that promote can't touch.
         r.register(crate::bridge_tools::ExportInstancesTomlTool);
+        // Mode / discipline / tab / tool surface. Discovery first
+        // (list_modes -> list_mode_tools), then set_mode + invoke_mode_tool to
+        // drive it by NAME, with ui_click as the escape hatch for widgets that
+        // have no tool id and ui_sequence to compose an ordered task.
+        r.register(crate::bridge_tools::ListModesTool);
+        r.register(crate::bridge_tools::ListModeToolsTool);
+        r.register(crate::bridge_tools::SetModeTool);
+        r.register(crate::bridge_tools::InvokeModeToolTool);
+        r.register(crate::bridge_tools::UiClickTool);
+        r.register(crate::bridge_tools::UiSequenceTool);
+        // Publishing: readiness is a separate call from the act, so an agent
+        // can establish every precondition and still leave the decision open.
+        r.register(crate::bridge_tools::PublishStatusTool);
+        r.register(crate::bridge_tools::PublishSpaceTool);
         // Disk world-container tools — create Universes / Spaces (no engine).
         r.register(crate::bridge_tools::NewUniverseTool);
         r.register(crate::bridge_tools::NewSpaceTool);
@@ -112,6 +127,7 @@ pub const BRIDGE_TOOL_NAMES: &[&str] = &[
     "select_entity",
     "get_editor_state",
     "invoke_action",
+    "play_input",
     "capture_viewport",
     "oplog_tail",
     "sim_step",
@@ -121,6 +137,15 @@ pub const BRIDGE_TOOL_NAMES: &[&str] = &[
     "ai_camera_frame",
     "ai_camera_capture",
     "export_instances_toml",
+    // The UI surface and publishing all reach the RUNNING engine.
+    "list_modes",
+    "list_mode_tools",
+    "set_mode",
+    "invoke_mode_tool",
+    "ui_click",
+    "ui_sequence",
+    "publish_status",
+    "publish_space",
     // Bridge-only too: both fail outright without a live engine, so pointing
     // them at the server's nominal default Universe rather than the running
     // one just produces "engine is not running" against a Universe that was
@@ -412,6 +437,27 @@ pub fn to_mcp_json(result: ToolResult) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every tool this server actually SERVES must have a capability class.
+    ///
+    /// The tools crate guards its own registry, but the bridge tools are
+    /// registered here on top of it, out of that guard's sight. That is how
+    /// twelve of them -- invoke_action, select_entity, capture_viewport, the
+    /// ai_camera_* set and more -- were advertised in `tools/list` and then
+    /// refused at dispatch.
+    #[test]
+    fn every_served_tool_is_classified() {
+        let unclassified: Vec<&str> = registry()
+            .all_tools()
+            .into_iter()
+            .map(|d| d.name)
+            .filter(|name| eustress_tools::capability::capability_of(name).is_none())
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "served over MCP but unclassified, so refused at dispatch: {unclassified:?}"
+        );
+    }
 
     fn result_with(content: &str, data: Option<Value>) -> ToolResult {
         ToolResult {

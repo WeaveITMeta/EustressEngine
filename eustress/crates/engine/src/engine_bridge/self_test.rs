@@ -16,24 +16,40 @@
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
-/// Total budget for the round-trip. The drain runs every `Update`, but
-/// the first frame can be slow on 0.19 startup, so we allow plenty.
-const ROUND_TRIP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// When a slow answer earns a note in the log. The drain runs every
+/// `Update`, and loading a Space can hold the first frames longer than this.
+const SLOW_NOTICE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Total budget for the round-trip. A 10 s budget reported a working bridge
+/// as dead whenever a Space took longer than that to reach its first frame.
+const ROUND_TRIP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 /// Connect to `127.0.0.1:<port>`, send one `ping`, await the response.
 pub(crate) async fn run(port: u16) {
-    match tokio::time::timeout(ROUND_TRIP_TIMEOUT, ping_roundtrip(port)).await {
-        Ok(Ok(())) => {
+    let mut roundtrip = std::pin::pin!(ping_roundtrip(port));
+    let result = match tokio::time::timeout(SLOW_NOTICE, roundtrip.as_mut()).await {
+        Ok(r) => Some(r),
+        Err(_) => {
+            tracing::info!(
+                "Engine Bridge self-test: no ping answer after {}s on 127.0.0.1:{port}; the first frames are still loading, waiting up to {}s",
+                SLOW_NOTICE.as_secs(),
+                ROUND_TRIP_TIMEOUT.as_secs()
+            );
+            tokio::time::timeout(ROUND_TRIP_TIMEOUT - SLOW_NOTICE, roundtrip.as_mut()).await.ok()
+        }
+    };
+    match result {
+        Some(Ok(())) => {
             tracing::info!(
                 "✅ Engine Bridge SELF-TEST PASSED — ping round-trip OK on 127.0.0.1:{port} (bridge is accepting + draining)"
             );
         }
-        Ok(Err(e)) => {
+        Some(Err(e)) => {
             tracing::error!(
                 "❌ Engine Bridge SELF-TEST FAILED on 127.0.0.1:{port}: {e} — the MCP/AI bridge is NOT usable this run"
             );
         }
-        Err(_) => {
+        None => {
             tracing::error!(
                 "❌ Engine Bridge SELF-TEST TIMED OUT after {}s on 127.0.0.1:{port} — listener bound but no ping response (drain not running?)",
                 ROUND_TRIP_TIMEOUT.as_secs()

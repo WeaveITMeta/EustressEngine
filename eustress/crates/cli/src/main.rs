@@ -21,9 +21,12 @@
 //! `open` / `instances` / `close` are the orchestration primitives: an agent calls
 //! `open` once per Space (windowed or `--headless`), captures each instance's
 //! `port` from the printed record, drives each with `bridge --port <N>`, and tears
-//! them down with `close`. The per-Universe `engine.port` file is a single slot and
-//! cannot tell two instances apart, so multi-instance work MUST address by
+//! them down with `close`. The per-Universe `engine.port` file is a single slot
+//! naming the Universe's owner, so multi-instance work MUST address by
 //! `--port`/`--pid`; the registry behind it is `<workspace>/.eustress/instances/`.
+//! Simulation runs are per instance too: `bridge --pid <N> sim-run --duration 60
+//! --wait` runs one engine's simulation and prints that run's final values, while
+//! its siblings on the same Universe run their own.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,7 +37,6 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use eustress_bridge_client::call_engine;
 use eustress_common::sim_record::{ArcEpisodeRecord, IterationRecord, RuneScriptRecord, SimRecord, WorkshopIterationRecord};
 use eustress_common::sim_stream::{SimQuery, SimStreamConfig, SimStreamReader};
 
@@ -172,6 +174,48 @@ enum BridgeCommands {
         #[arg(long, default_value = "1")]
         ticks: u64,
     },
+    /// Start a simulation run (from Edit), resume a paused one, or retune a
+    /// running one. Prints the run id; `--wait` blocks until the run ends
+    /// and prints its final values.
+    SimRun {
+        /// Time compression (1.0 = realtime). A new run defaults to 1.0; a
+        /// running or paused one keeps its scale unless this is given.
+        #[arg(long)]
+        time_scale: Option<f64>,
+        /// Auto-stop after this many simulated seconds.
+        #[arg(long)]
+        duration: Option<f64>,
+        /// Wait for the run to end and print its outcome.
+        #[arg(long)]
+        wait: bool,
+        /// With --wait: give up after this many wall-clock seconds.
+        #[arg(long, default_value = "300")]
+        timeout: f64,
+    },
+    /// Pause the current run.
+    SimPause,
+    /// Stop the current run (restores the scene, like the Stop button).
+    SimStop,
+    /// Write sim values: `sim-set battery.current=0 cell.temp_c=25`.
+    SimSet {
+        /// `key=value` pairs.
+        #[arg(required = true, value_name = "KEY=VALUE")]
+        values: Vec<String>,
+    },
+    /// Play state, sim clock, and the run ledger (current run, recent runs
+    /// with their final values).
+    SimState,
+    /// Wait for a run to end and print its outcome (final values, end
+    /// reason, recording path).
+    SimAwait {
+        /// The run to wait for. Default: the run in progress, else the most
+        /// recent one.
+        #[arg(long)]
+        run_id: Option<u64>,
+        /// Give up after this many wall-clock seconds.
+        #[arg(long, default_value = "300")]
+        timeout: f64,
+    },
     /// Cast a ray against live Avian colliders — the POMDP "sense" primitive.
     Raycast {
         #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"])]
@@ -269,7 +313,9 @@ enum EntityCommands {
 struct OpenArgs {
     /// `.eustress` Space directory to open.
     space: PathBuf,
-    /// Start straight into Play mode (editor only; passes --play).
+    /// Start straight into Play mode. Without it, the instance opens in Edit
+    /// and waits for a run (`eustress bridge --pid <N> sim-run`, or the
+    /// run_simulation tool), so per-instance values can be set first.
     #[arg(long)]
     play: bool,
     /// Open in a windowless eustress-headless process instead of an editor window.
@@ -545,11 +591,84 @@ enum Target {
 
 impl Target {
     fn call(&self, method: &str, params: serde_json::Value) -> std::result::Result<serde_json::Value, String> {
+        self.call_with_timeout(method, params, eustress_bridge_client::DEFAULT_REPLY_TIMEOUT)
+    }
+
+    /// [`Target::call`] with a reply deadline for methods that work before
+    /// answering (`sim.step` runs every requested tick first).
+    fn call_with_timeout(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: std::time::Duration,
+    ) -> std::result::Result<serde_json::Value, String> {
         match self {
-            Target::Universe(u) => call_engine(u, method, params),
-            Target::Port(p) => eustress_bridge_client::call_port(*p, method, params),
+            Target::Universe(u) => eustress_bridge_client::call_engine_with_timeout(u, method, params, timeout),
+            Target::Port(p) => eustress_bridge_client::call_port_with_timeout(*p, method, params, timeout),
         }
     }
+}
+
+/// Poll `sim.state` until run `run_id` (or, when `None`, the run in progress
+/// at the first poll, else the most recent one) appears among the finished
+/// runs; returns its ledger record.
+fn await_run_over_bridge(
+    target: &Target,
+    run_id: Option<u64>,
+    timeout_secs: f64,
+) -> std::result::Result<serde_json::Value, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout_secs.max(0.0));
+    let mut want = run_id;
+    loop {
+        let state = target.call("sim.state", serde_json::json!({}))?;
+        let runs = state.get("runs").cloned().unwrap_or_default();
+        if want.is_none() {
+            let active = runs
+                .get("current")
+                .and_then(|c| c.get("run_id"))
+                .or_else(|| runs.get("pending").and_then(|p| p.get("run_id")))
+                .and_then(|v| v.as_u64());
+            match active {
+                Some(id) => want = Some(id),
+                None => {
+                    return runs
+                        .get("last")
+                        .filter(|l| !l.is_null())
+                        .cloned()
+                        .ok_or_else(|| "no run in progress and none completed".to_string());
+                }
+            }
+        }
+        let id = want.unwrap_or_default();
+        let done = runs
+            .get("completed")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+            .find(|r| r.get("run_id").and_then(|v| v.as_u64()) == Some(id))
+            .cloned();
+        if let Some(record) = done {
+            return Ok(record);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("timed out after {timeout_secs:.0}s waiting for run #{id}"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+/// One-line summary of a finished run's ledger record.
+fn run_summary(record: &serde_json::Value) -> String {
+    let id = record.get("run_id").and_then(|v| v.as_u64()).unwrap_or(0);
+    let reason = record.get("end_reason").and_then(|v| v.as_str()).unwrap_or("stopped");
+    let ticks = record.get("ticks").and_then(|v| v.as_u64()).unwrap_or(0);
+    let secs = record.get("sim_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let values = record
+        .get("final_values")
+        .and_then(|v| v.as_object())
+        .map(|m| m.len())
+        .unwrap_or(0);
+    format!("run #{id} {reason} after {ticks} ticks ({secs:.2}s simulated), {values} final value(s)")
 }
 
 /// Find a sibling binary: prefer the one next to this executable (a dev
@@ -670,7 +789,10 @@ fn cmd_bridge(
         }
 
         BridgeCommands::SimStep { ticks } => {
-            match target.call("sim.step", serde_json::json!({ "ticks": ticks })) {
+            // The engine runs every tick before it replies, so the deadline
+            // scales with the work (the MCP `sim_step` tool uses the same).
+            let deadline = std::time::Duration::from_millis(5_000 + ticks.min(10_000) * 10);
+            match target.call_with_timeout("sim.step", serde_json::json!({ "ticks": ticks }), deadline) {
                 Ok(r) => {
                     let stepped = r.get("stepped").and_then(|v| v.as_u64()).unwrap_or(0);
                     let secs = r.get("sim_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -680,6 +802,97 @@ fn cmd_bridge(
                 Err(e) => print_bridge_error("sim.step", &e),
             }
         }
+
+        BridgeCommands::SimRun { time_scale, duration, wait, timeout } => {
+            let mut params = serde_json::Map::new();
+            if let Some(s) = time_scale { params.insert("time_scale".into(), s.into()); }
+            if let Some(d) = duration { params.insert("duration_s".into(), d.into()); }
+            let ack = match target.call("sim.run", serde_json::Value::Object(params)) {
+                Ok(r) => r,
+                Err(e) => return print_bridge_error("sim.run", &e),
+            };
+            let run_id = ack.get("run_id").and_then(|v| v.as_u64());
+            let status = ack.get("status").and_then(|v| v.as_str()).unwrap_or("ok");
+            if !wait {
+                let id = run_id.map(|i| format!(" run #{i}")).unwrap_or_default();
+                print_bridge_result(&format!("sim.run {status}{id}"), &ack);
+                return Ok(());
+            }
+            println!("{} sim.run {status}{}, waiting…", "·".dimmed(), run_id.map(|i| format!(" run #{i}")).unwrap_or_default());
+            match await_run_over_bridge(&target, run_id, timeout) {
+                Ok(record) => {
+                    print_bridge_result(&run_summary(&record), &record);
+                    Ok(())
+                }
+                Err(e) => print_bridge_error("sim.run --wait", &e),
+            }
+        }
+
+        BridgeCommands::SimPause => match target.call("sim.pause", serde_json::json!({})) {
+            Ok(r) => {
+                let status = r.get("status").and_then(|v| v.as_str()).unwrap_or("ok");
+                print_bridge_result(&format!("sim.pause {status}"), &r);
+                Ok(())
+            }
+            Err(e) => print_bridge_error("sim.pause", &e),
+        },
+
+        BridgeCommands::SimStop => match target.call("sim.stop", serde_json::json!({})) {
+            Ok(r) => {
+                let status = r.get("status").and_then(|v| v.as_str()).unwrap_or("ok");
+                print_bridge_result(&format!("sim.stop {status}"), &r);
+                Ok(())
+            }
+            Err(e) => print_bridge_error("sim.stop", &e),
+        },
+
+        BridgeCommands::SimSet { values } => {
+            let mut map = serde_json::Map::new();
+            for pair in &values {
+                let (key, value) = pair
+                    .split_once('=')
+                    .with_context(|| format!("expected KEY=VALUE, got {pair:?}"))?;
+                let value: f64 = value
+                    .trim()
+                    .parse()
+                    .with_context(|| format!("value for {key:?} is not a number: {value:?}"))?;
+                map.insert(key.trim().to_string(), value.into());
+            }
+            match target.call("sim.set", serde_json::json!({ "values": map })) {
+                Ok(r) => {
+                    let n = r.get("applied").and_then(|v| v.as_u64()).unwrap_or(0);
+                    print_bridge_result(&format!("set {n} sim value(s)"), &r);
+                    Ok(())
+                }
+                Err(e) => print_bridge_error("sim.set", &e),
+            }
+        }
+
+        BridgeCommands::SimState => match target.call("sim.state", serde_json::json!({})) {
+            Ok(r) => {
+                let play = r.get("play_state").and_then(|v| v.as_str()).unwrap_or("?");
+                let pid = r.get("pid").and_then(|v| v.as_u64()).map(|p| format!(" pid {p}")).unwrap_or_default();
+                let owner = if r.get("owns_universe").and_then(|v| v.as_bool()) == Some(true) { ", Universe owner" } else { "" };
+                let runs = r.get("runs");
+                let run = runs
+                    .and_then(|x| x.get("current"))
+                    .and_then(|c| c.get("run_id"))
+                    .and_then(|v| v.as_u64())
+                    .map(|i| format!(", run #{i} in progress"))
+                    .unwrap_or_default();
+                print_bridge_result(&format!("{play}{pid}{owner}{run}"), &r);
+                Ok(())
+            }
+            Err(e) => print_bridge_error("sim.state", &e),
+        },
+
+        BridgeCommands::SimAwait { run_id, timeout } => match await_run_over_bridge(&target, run_id, timeout) {
+            Ok(record) => {
+                print_bridge_result(&run_summary(&record), &record);
+                Ok(())
+            }
+            Err(e) => print_bridge_error("sim.await", &e),
+        },
 
         BridgeCommands::Raycast { origin, direction, max_distance, max_hits } => {
             let mut params = serde_json::Map::new();
@@ -817,11 +1030,20 @@ fn cmd_open(args: OpenArgs) -> Result<()> {
 
     let mut cmd = std::process::Command::new(&bin);
     cmd.arg("--space").arg(&space);
-    if args.play && !args.headless {
-        cmd.arg("--play");
+    // `--play` means the same for both kinds. The editor boots into Edit
+    // unless told `--play`; the headless runner boots into Play unless told
+    // `--no-autoplay`, so translate. An orchestrator opening several
+    // variants sets each one's values before starting its run, which an
+    // instance that starts playing on its own would race.
+    match (args.headless, args.play) {
+        (false, true) => {
+            cmd.arg("--play");
+        }
+        (true, false) => {
+            cmd.arg("--no-autoplay");
+        }
+        _ => {}
     }
-    // Headless without a tick limit would autoplay and run forever, which
-    // is exactly what "open" means for it — leave its defaults alone.
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -833,6 +1055,8 @@ fn cmd_open(args: OpenArgs) -> Result<()> {
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
     }
+    #[cfg(windows)]
+    stop_std_handle_inheritance();
 
     let child = cmd.spawn().with_context(|| {
         format!(
@@ -903,12 +1127,33 @@ fn cmd_open(args: OpenArgs) -> Result<()> {
 
 fn cmd_instances(args: InstancesArgs) -> Result<()> {
     let workspace = resolve_workspace(args.workspace);
-    // `list_instances` pings each record and prunes the dead ones, so what
+    // `list_instances` probes each record and prunes the dead ones, so what
     // comes back is what is actually drivable right now.
     let live = eustress_bridge_client::list_instances(&workspace);
 
+    // The owner of a Universe is the instance whose port is in its
+    // `engine.port`: the engine a Universe-addressed client (`bridge
+    // --universe`, the MCP server by default) reaches, and the one that
+    // serves the Universe's legacy sim-command queue.
+    let owns_universe = |r: &eustress_bridge_client::InstanceRecord| {
+        r.universe
+            .as_ref()
+            .and_then(|u| eustress_bridge_client::read_port_file(&u.join(".eustress").join("engine.port")))
+            == Some(r.port)
+    };
+
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&live).unwrap_or_default());
+        let rows: Vec<serde_json::Value> = live
+            .iter()
+            .map(|r| {
+                let mut v = serde_json::to_value(r).unwrap_or_default();
+                if let serde_json::Value::Object(ref mut m) = v {
+                    m.insert("owns_universe".into(), owns_universe(r).into());
+                }
+                v
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
         return Ok(());
     }
 
@@ -923,19 +1168,27 @@ fn cmd_instances(args: InstancesArgs) -> Result<()> {
 
     println!("{}", format!("{} running instance(s)", live.len()).bold());
     println!("{}", "─".repeat(78).dimmed());
-    println!("  {:<8} {:<6} {:<9} {}", "PID", "PORT", "KIND", "SPACE");
+    println!("  {:<8} {:<6} {:<9} {:<6} {}", "PID", "PORT", "KIND", "OWNER", "SPACE");
     for r in &live {
         let space = r
             .space
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(none)".to_string());
+        let owner = if owns_universe(r) { "*" } else { "" };
         println!(
-            "  {:<8} {:<6} {:<9} {}",
+            "  {:<8} {:<6} {:<9} {:<6} {}",
             r.pid.to_string().yellow(),
             r.port.to_string().cyan(),
             r.kind.as_str(),
+            owner.green(),
             space.dimmed()
+        );
+    }
+    if live.iter().any(|r| owns_universe(r)) {
+        println!(
+            "{}",
+            "  * owns its Universe: reached by --universe and serves the Universe's sim queue".dimmed()
         );
     }
     Ok(())
@@ -985,8 +1238,10 @@ fn cmd_close(args: CloseArgs) -> Result<()> {
             Err(e) if args.force => {
                 eprintln!("{} pid {}: graceful shutdown failed ({e}); killing", "⚠".yellow(), r.pid);
                 if kill_pid(r.pid) {
-                    // The engine never got to remove its own record.
+                    // The engine never got to remove its own record, or
+                    // its private IPC directory.
                     let _ = std::fs::remove_file(eustress_bridge_client::instance_file_path(&workspace, r.pid));
+                    let _ = std::fs::remove_dir_all(eustress_bridge_client::instance_dir(&workspace, r.pid));
                     println!("{} pid {} killed", "✓".green(), r.pid);
                 } else {
                     eprintln!("{} pid {}: kill failed", "✗".red(), r.pid);
@@ -1003,6 +1258,41 @@ fn cmd_close(args: CloseArgs) -> Result<()> {
         anyhow::bail!("{failed} instance(s) could not be closed");
     }
     Ok(())
+}
+
+/// Keep this process's standard handles out of any child it spawns.
+///
+/// `open` returns while the engine it launched keeps running, and whoever
+/// launched `open` (an agent capturing `--json`, a shell `$(...)`) reads its
+/// output until EOF. EOF arrives only once every holder of the pipe's write
+/// end has closed it. `std::process::Command` spawns with handle inheritance
+/// on, so an inheritable handle this process holds, such as the stdout pipe
+/// its parent gave it, reaches the engine whatever the engine's own `Stdio`
+/// settings say, and the caller then waits for as long as the engine runs.
+#[cfg(windows)]
+fn stop_std_handle_inheritance() {
+    use std::os::windows::io::AsRawHandle;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+
+    for handle in [
+        std::io::stdin().as_raw_handle(),
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ] {
+        if !handle.is_null() {
+            // SAFETY: a handle this process owns, or one the call rejects
+            // harmlessly (a console pseudo-handle); only the inherit flag
+            // changes.
+            unsafe {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
 }
 
 /// Best-effort hard kill, for `close --force` when the bridge won't answer.

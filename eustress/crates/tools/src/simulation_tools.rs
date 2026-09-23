@@ -10,9 +10,17 @@
 //! - list_sim_values: list all active watchpoints with values
 //! - get_tagged_entities: find entities by CollectionService tag
 //! - raycast: cast a ray into the 3D scene and return hit results
+//!
+//! Every tool that commands or reads a running simulation targets ONE
+//! engine, chosen by [`crate::sim_ipc::resolve`]: an explicit `pid` or
+//! `port`, else the engine the tool runs in, else the Universe's owner.
+//! Several engines can have Spaces of one Universe open at once, so none of
+//! these tools reads or writes a Universe-wide slot when an engine can be
+//! named instead.
 
 use crate::{ToolContext, ToolDefinition, ToolHandler, ToolResult};
 use crate::modes::WorkshopMode;
+use crate::sim_ipc::{self, Awaited, RunTarget, SimRoute, TelemetryFilter};
 
 /// Tolerant numeric arg parse: accepts a JSON number (`60`, `60.0`) OR a
 /// string-encoded number (`"60"`). Returns `None` only when the key is absent
@@ -22,6 +30,51 @@ use crate::modes::WorkshopMode;
 fn num_arg(input: &serde_json::Value, key: &str) -> Option<f64> {
     let v = input.get(key)?;
     v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+}
+
+/// A failed result with no structured payload.
+fn fail(tool: &str, content: impl Into<String>) -> ToolResult {
+    ToolResult {
+        tool_name: tool.to_string(),
+        tool_use_id: String::new(),
+        success: false,
+        content: content.into(),
+        structured_data: None,
+        stream_topic: None,
+    }
+}
+
+/// `content`, followed by the route's multi-engine note when it has one.
+fn with_note(content: String, route: &SimRoute) -> String {
+    match route.note() {
+        Some(note) => format!("{content}\n{note}"),
+        None => content,
+    }
+}
+
+/// ` on engine pid 1234` when other engines share the Universe or the
+/// target was named explicitly; empty otherwise, so a single-engine session
+/// reads exactly as before.
+fn on_engine(route: &SimRoute) -> String {
+    match route.pid {
+        Some(pid) if !route.others.is_empty() || matches!(route.via, "pid" | "port") => {
+            format!(" on engine pid {pid}")
+        }
+        _ => String::new(),
+    }
+}
+
+/// Resolve the tool's target engine, or the failed result to return.
+fn route_or_fail(tool: &str, input: &serde_json::Value, ctx: &ToolContext) -> Result<SimRoute, ToolResult> {
+    sim_ipc::resolve(input, ctx).map_err(|e| fail(tool, e))
+}
+
+/// Queue one command on the route, returning its ticket, or the failed
+/// result to return.
+fn queue_or_fail(tool: &str, route: &SimRoute, cmd: serde_json::Value) -> Result<String, ToolResult> {
+    route
+        .queue(cmd)
+        .map_err(|e| fail(tool, format!("Failed to queue on {}: {e}", route.label())))
 }
 
 // ---------------------------------------------------------------------------
@@ -39,14 +92,14 @@ impl ToolHandler for GetSimValueTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "get_sim_value",
-            description: "Read a simulation watchpoint value from the running simulation. Watchpoints are named numeric values tracked during simulation. Common keys: voltage, soc, temperature, pressure, dendrite_risk, cycle_count, capacity_wh, efficiency.",
-            input_schema: serde_json::json!({
+            description: "Read a simulation watchpoint value from the running simulation. Watchpoints are named numeric values tracked during simulation. Common keys: voltage, soc, temperature, pressure, dendrite_risk, cycle_count, capacity_wh, efficiency. With several engines on one Universe, pass `pid` to read a specific one.",
+            input_schema: sim_ipc::with_target_props(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "key": { "type": "string", "description": "Watchpoint key name" }
                 },
                 "required": ["key"]
-            }),
+            })),
             modes: &[WorkshopMode::General, WorkshopMode::Simulation],
             requires_approval: false,
             stream_topics: &[],
@@ -55,22 +108,30 @@ impl ToolHandler for GetSimValueTool {
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
         let key = input.get("key").and_then(|v| v.as_str()).unwrap_or("");
-        match read_sim_snapshot(ctx) {
+        let route = match route_or_fail("get_sim_value", &input, ctx) {
+            Ok(r) => r,
+            Err(fail) => return fail,
+        };
+        match sim_ipc::read_snapshot(&route) {
             Ok(snap) => {
                 if let Some(val) = snap.sim_values.get(key) {
                     ToolResult {
                         tool_name: "get_sim_value".to_string(),
                         tool_use_id: String::new(),
                         success: true,
-                        content: format!(
-                            "{} = {} (play_state={}, snapshot {}ms old)",
-                            key, val, snap.play_state, snap.age_ms,
+                        content: with_note(
+                            format!(
+                                "{} = {}{} (play_state={}, snapshot {}ms old)",
+                                key, val, on_engine(&route), snap.play_state, snap.age_ms,
+                            ),
+                            &route,
                         ),
                         structured_data: Some(serde_json::json!({
                             "key": key,
                             "value": val,
                             "play_state": snap.play_state,
                             "snapshot_age_ms": snap.age_ms,
+                            "engine": route.describe(),
                         })),
                         stream_topic: None,
                     }
@@ -79,26 +140,24 @@ impl ToolHandler for GetSimValueTool {
                         tool_name: "get_sim_value".to_string(),
                         tool_use_id: String::new(),
                         success: false,
-                        content: format!(
-                            "No watchpoint named '{}' in current snapshot. Known keys: {}",
-                            key,
-                            snap.sim_values.keys().cloned().collect::<Vec<_>>().join(", "),
+                        content: with_note(
+                            format!(
+                                "No watchpoint named '{}' in the current snapshot{}. Known keys: {}",
+                                key,
+                                on_engine(&route),
+                                snap.sim_values.keys().cloned().collect::<Vec<_>>().join(", "),
+                            ),
+                            &route,
                         ),
                         structured_data: Some(serde_json::json!({
                             "known_keys": snap.sim_values.keys().collect::<Vec<_>>(),
+                            "engine": route.describe(),
                         })),
                         stream_topic: None,
                     }
                 }
             }
-            Err(e) => ToolResult {
-                tool_name: "get_sim_value".to_string(),
-                tool_use_id: String::new(),
-                success: false,
-                content: format!("Runtime snapshot unavailable: {}", e),
-                structured_data: None,
-                stream_topic: None,
-            },
+            Err(e) => fail("get_sim_value", format!("Runtime snapshot unavailable: {}", e)),
         }
     }
 }
@@ -113,15 +172,15 @@ impl ToolHandler for SetSimValueTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "set_sim_value",
-            description: "Write a simulation watchpoint value. Injects a value into the simulation that Rune scripts can read via get_sim_value(). Use to set initial conditions, override parameters, or inject test data.",
-            input_schema: serde_json::json!({
+            description: "Write a simulation watchpoint value. Injects a value into the simulation that Rune scripts can read via get_sim_value(). Use to set initial conditions, override parameters, or inject test data. With several engines on one Universe, pass `pid` to write to a specific one.",
+            input_schema: sim_ipc::with_target_props(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "key": { "type": "string", "description": "Watchpoint key name" },
                     "value": { "type": "number", "description": "Numeric value to set" }
                 },
                 "required": ["key", "value"]
-            }),
+            })),
             modes: &[WorkshopMode::General, WorkshopMode::Simulation],
             requires_approval: false,
             stream_topics: &["workshop.tool.set_sim_value"],
@@ -130,55 +189,40 @@ impl ToolHandler for SetSimValueTool {
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
         let key = input.get("key").and_then(|v| v.as_str()).unwrap_or("");
-        let value = input.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let Some(value) = num_arg(&input, "value") else {
+            return fail("set_sim_value", "Missing or non-numeric parameter: value");
+        };
+        let route = match route_or_fail("set_sim_value", &input, ctx) {
+            Ok(r) => r,
+            Err(fail) => return fail,
+        };
 
-        // Queue the command by writing to `<universe>/.eustress/sim-commands.jsonl`
-        // — one JSON-line entry per pending mutation. The engine drains
-        // this file on its next sim tick and applies the write to
-        // `SimValuesResource`, then truncates. Keeps the write path
-        // identical in-process and out-of-process.
-        let cmd = serde_json::json!({
-            "op": "set_sim_value",
-            "key": key,
-            "value": value,
-            "queued_at": chrono::Utc::now().to_rfc3339(),
-        });
-        let path = ctx.universe_root.join(".eustress").join("sim-commands.jsonl");
-        let write_result = (|| -> std::io::Result<()> {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            use std::io::Write as _;
-            let mut f = std::fs::OpenOptions::new()
-                .create(true).append(true).open(&path)?;
-            writeln!(f, "{}", cmd)?;
-            Ok(())
-        })();
-
-        match write_result {
-            Ok(()) => ToolResult {
+        // Queued on the target engine's command queue, which that engine
+        // drains on its next frame and applies to `SimValuesResource`. The
+        // write path is identical in-process and out-of-process.
+        let cmd = serde_json::json!({ "op": "set_sim_value", "key": key, "value": value });
+        match queue_or_fail("set_sim_value", &route, cmd) {
+            Ok(ticket) => ToolResult {
                 tool_name: "set_sim_value".to_string(),
                 tool_use_id: String::new(),
                 success: true,
-                content: format!(
-                    "Queued set_sim_value({} = {}). Engine will apply on next sim tick.",
-                    key, value,
+                content: with_note(
+                    format!(
+                        "Queued set_sim_value({} = {}){}. The engine applies it on its next frame.",
+                        key, value, on_engine(&route),
+                    ),
+                    &route,
                 ),
                 structured_data: Some(serde_json::json!({
-                    "queue_path": path.to_string_lossy(),
+                    "queue_path": route.queue.to_string_lossy(),
                     "key": key,
                     "value": value,
+                    "ticket": ticket,
+                    "engine": route.describe(),
                 })),
                 stream_topic: Some("workshop.tool.set_sim_value".to_string()),
             },
-            Err(e) => ToolResult {
-                tool_name: "set_sim_value".to_string(),
-                tool_use_id: String::new(),
-                success: false,
-                content: format!("Failed to queue set_sim_value: {}", e),
-                structured_data: None,
-                stream_topic: None,
-            },
+            Err(fail) => fail,
         }
     }
 }
@@ -198,13 +242,13 @@ impl ToolHandler for ListSimValuesTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "list_sim_values",
-            description: "List simulation watchpoints compactly (key=val at 3 dp). Use prefix to filter by namespace (e.g. 'battery.' shows only battery watchpoints, reducing token cost when you only care about one subsystem).",
-            input_schema: serde_json::json!({
+            description: "List simulation watchpoints compactly (key=val at 3 dp). Use prefix to filter by namespace (e.g. 'battery.' shows only battery watchpoints, reducing token cost when you only care about one subsystem). With several engines on one Universe, pass `pid` to read a specific one.",
+            input_schema: sim_ipc::with_target_props(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "prefix": { "type": "string", "description": "Only return keys starting with this prefix. E.g. 'battery.' or 'vcell.'. Default: all keys." }
                 }
-            }),
+            })),
             modes: &[WorkshopMode::General, WorkshopMode::Simulation],
             requires_approval: false,
             stream_topics: &[],
@@ -213,41 +257,39 @@ impl ToolHandler for ListSimValuesTool {
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
         let prefix_filter = input.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
-        match read_sim_snapshot(ctx) {
+        let route = match route_or_fail("list_sim_values", &input, ctx) {
+            Ok(r) => r,
+            Err(fail) => return fail,
+        };
+        match sim_ipc::read_snapshot(&route) {
             Ok(snap) => {
                 let filtered: std::collections::BTreeMap<_, _> = snap.sim_values.iter()
                     .filter(|(k, _)| prefix_filter.is_empty() || k.starts_with(prefix_filter))
                     .collect();
                 let body = if filtered.is_empty() {
-                    format!("No watchpoints (play_state={}).", snap.play_state)
+                    format!("No watchpoints{} (play_state={}).", on_engine(&route), snap.play_state)
                 } else {
                     // Compact: key=val pairs, 3 dp
                     let pairs: Vec<String> = filtered.iter()
                         .map(|(k, v)| format!("{}={:.3}", k, v))
                         .collect();
-                    format!("[{}] {}ms old — {}", snap.play_state, snap.age_ms, pairs.join("  "))
+                    format!("[{}{}] {}ms old — {}", snap.play_state, on_engine(&route), snap.age_ms, pairs.join("  "))
                 };
                 ToolResult {
                     tool_name: "list_sim_values".to_string(),
                     tool_use_id: String::new(),
                     success: true,
-                    content: body,
+                    content: with_note(body, &route),
                     structured_data: Some(serde_json::json!({
                         "sim_values": snap.sim_values,
                         "play_state": snap.play_state,
                         "snapshot_age_ms": snap.age_ms,
+                        "engine": route.describe(),
                     })),
                     stream_topic: None,
                 }
             }
-            Err(e) => ToolResult {
-                tool_name: "list_sim_values".to_string(),
-                tool_use_id: String::new(),
-                success: false,
-                content: format!("Runtime snapshot unavailable: {}", e),
-                structured_data: None,
-                stream_topic: None,
-            },
+            Err(e) => fail("list_sim_values", format!("Runtime snapshot unavailable: {}", e)),
         }
     }
 }
@@ -849,15 +891,16 @@ impl ToolHandler for TailTelemetryTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "tail_telemetry",
-            description: "Tail recent telemetry events from Eustress Streams. Returns the last N simulation watchpoint samples with timestamps. Use for monitoring simulation health, detecting anomalies, and feeding the Repairman feedback loop. Reads from the runtime snapshot history log.",
-            input_schema: serde_json::json!({
+            description: "Tail recent telemetry events from Eustress Streams. Returns the last N simulation watchpoint samples with timestamps. Use for monitoring simulation health, detecting anomalies, and feeding the Repairman feedback loop. Reads from the runtime snapshot history log. Every engine on a Universe appends to the same log and each sample names its engine (`pid`) and run (`run_id`): pass `pid` and/or `run_id` to see one engine's or one run's samples.",
+            input_schema: sim_ipc::with_target_props(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "count": { "type": "integer", "description": "Number of recent samples to return (default: 20, max: 100)", "default": 20 },
                     "keys": { "type": "array", "items": { "type": "string" }, "description": "Filter to specific watchpoint keys (e.g. ['battery.voltage', 'battery.soc']). Empty = all keys." },
-                    "since_ms": { "type": "integer", "description": "Only return samples newer than this many milliseconds ago" }
+                    "since_ms": { "type": "integer", "description": "Only return samples newer than this many milliseconds ago" },
+                    "run_id": { "type": "integer", "description": "Only samples from this run (ids from run_simulation / await_simulation results). Run ids are per engine, so pair with `pid` when several engines are running." }
                 }
-            }),
+            })),
             modes: &[WorkshopMode::General, WorkshopMode::Simulation],
             requires_approval: false,
             stream_topics: &[],
@@ -871,73 +914,73 @@ impl ToolHandler for TailTelemetryTool {
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default();
         let since_ms = input.get("since_ms").and_then(|v| v.as_u64());
-
-        // Read the telemetry log — the engine appends one JSON line per
-        // snapshot tick to `<universe>/.eustress/telemetry.jsonl`. Each
-        // line: { "t": "<rfc3339>", "values": { "key": f64, ... } }
-        let path = ctx.universe_root.join(".eustress").join("telemetry.jsonl");
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => {
-                // Fall back to reading current snapshot as a single sample
-                match read_sim_snapshot(ctx) {
-                    Ok(snap) => {
-                        let filtered: std::collections::BTreeMap<String, f64> = if key_filter.is_empty() {
-                            snap.sim_values
-                        } else {
-                            snap.sim_values.into_iter()
-                                .filter(|(k, _)| key_filter.iter().any(|f| k.contains(f.as_str())))
-                                .collect()
-                        };
-                        let lines: Vec<String> = filtered.iter()
-                            .map(|(k, v)| format!("  {} = {:.4}", k, v))
-                            .collect();
-                        return ToolResult {
-                            tool_name: "tail_telemetry".to_string(),
-                            tool_use_id: String::new(),
-                            success: true,
-                            content: format!(
-                                "Live snapshot (play_state={}, {}ms old):\n{}",
-                                snap.play_state, snap.age_ms, lines.join("\n"),
-                            ),
-                            structured_data: Some(serde_json::json!({
-                                "source": "snapshot",
-                                "play_state": snap.play_state,
-                                "values": filtered,
-                                "sample_count": 1,
-                            })),
-                            stream_topic: None,
-                        };
-                    }
-                    Err(e) => return ToolResult {
-                        tool_name: "tail_telemetry".to_string(), tool_use_id: String::new(),
-                        success: false,
-                        content: format!("No telemetry log and no live snapshot: {}. Is the engine running a simulation?", e),
-                        structured_data: None, stream_topic: None,
-                    },
-                }
-            }
+        let route = match route_or_fail("tail_telemetry", &input, ctx) {
+            Ok(r) => r,
+            Err(fail) => return fail,
+        };
+        // Filter to one engine only when one was named: without `pid`/`port`
+        // the caller asked for the Universe's log, all engines included.
+        let explicit_engine = input.get("pid").is_some() || input.get("port").is_some();
+        let filter = TelemetryFilter {
+            pid: if explicit_engine { route.pid } else { None },
+            run_id: input.get("run_id").and_then(|v| v.as_u64()),
+            since: since_ms.map(|ms| chrono::Utc::now() - chrono::TimeDelta::milliseconds(ms as i64)),
         };
 
-        // Parse the last N lines from the JSONL log
-        let now = chrono::Utc::now();
-        let mut samples: Vec<serde_json::Value> = content.lines().rev()
-            .take(count * 2) // over-read then filter
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .filter(|entry| {
-                // Apply since_ms filter
-                if let Some(max_age) = since_ms {
-                    if let Some(ts) = entry.get("t").and_then(|v| v.as_str()) {
-                        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(ts) {
-                            let age = now.signed_duration_since(parsed.with_timezone(&chrono::Utc));
-                            return age.num_milliseconds() <= max_age as i64;
-                        }
+        // The engine appends one JSON line per second to
+        // `<universe>/.eustress/telemetry.jsonl`: { "t", "pid", "space",
+        // "run_id", "tick", "sim_time_s", "values": { "key": f64, ... } }.
+        if !route.telemetry.is_file() {
+            // Fall back to reading the current snapshot as a single sample
+            return match sim_ipc::read_snapshot(&route) {
+                Ok(snap) => {
+                    let filtered: std::collections::BTreeMap<String, f64> = if key_filter.is_empty() {
+                        snap.sim_values
+                    } else {
+                        snap.sim_values.into_iter()
+                            .filter(|(k, _)| key_filter.iter().any(|f| k.contains(f.as_str())))
+                            .collect()
+                    };
+                    let lines: Vec<String> = filtered.iter()
+                        .map(|(k, v)| format!("  {} = {:.4}", k, v))
+                        .collect();
+                    ToolResult {
+                        tool_name: "tail_telemetry".to_string(),
+                        tool_use_id: String::new(),
+                        success: true,
+                        content: with_note(
+                            format!(
+                                "Live snapshot{} (play_state={}, {}ms old):\n{}",
+                                on_engine(&route), snap.play_state, snap.age_ms, lines.join("\n"),
+                            ),
+                            &route,
+                        ),
+                        structured_data: Some(serde_json::json!({
+                            "source": "snapshot",
+                            "play_state": snap.play_state,
+                            "values": filtered,
+                            "sample_count": 1,
+                            "engine": route.describe(),
+                        })),
+                        stream_topic: None,
                     }
                 }
-                true
-            })
+                Err(e) => fail(
+                    "tail_telemetry",
+                    format!("No telemetry log and no live snapshot: {}. Is the engine running a simulation?", e),
+                ),
+            };
+        }
+
+        // Newest first, parsing only as far back as needed: the log is
+        // append-only and shared, so it grows by a line per second per engine.
+        let raw = std::fs::read_to_string(&route.telemetry).unwrap_or_default();
+        let mut samples: Vec<serde_json::Value> = raw
+            .lines()
+            .rev()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|entry| filter.matches(entry))
             .filter(|entry| {
-                // Apply key filter
                 if key_filter.is_empty() { return true; }
                 entry.get("values").and_then(|v| v.as_object()).map(|obj| {
                     key_filter.iter().any(|k| obj.contains_key(k))
@@ -946,6 +989,12 @@ impl ToolHandler for TailTelemetryTool {
             .take(count)
             .collect();
         samples.reverse(); // Chronological order
+
+        // Name each sample's engine when the samples come from more than one.
+        let engines: std::collections::BTreeSet<u64> = samples.iter()
+            .filter_map(|s| s.get("pid").and_then(|v| v.as_u64()))
+            .collect();
+        let tag_engines = engines.len() > 1;
 
         let body = if samples.is_empty() {
             "No telemetry samples matching filters.".to_string()
@@ -964,9 +1013,17 @@ impl ToolHandler for TailTelemetryTool {
                             .join(", ")
                     })
                     .unwrap_or_default();
-                format!("  [{}] {}", ts, vals)
+                let who = if tag_engines {
+                    let pid = s.get("pid").and_then(|v| v.as_u64()).map(|p| p.to_string()).unwrap_or_else(|| "?".into());
+                    let run = s.get("run_id").and_then(|v| v.as_u64()).map(|r| format!(" run {r}")).unwrap_or_default();
+                    format!(" pid {pid}{run}")
+                } else {
+                    String::new()
+                };
+                format!("  [{}{}] {}", ts, who, vals)
             }).collect();
-            format!("{} telemetry sample(s):\n{}", samples.len(), lines.join("\n"))
+            let from = if tag_engines { format!(" from {} engines", engines.len()) } else { String::new() };
+            format!("{} telemetry sample(s){}:\n{}", samples.len(), from, lines.join("\n"))
         };
 
         ToolResult {
@@ -978,6 +1035,7 @@ impl ToolHandler for TailTelemetryTool {
                 "source": "telemetry_log",
                 "sample_count": samples.len(),
                 "samples": samples,
+                "engine_pids": engines,
             })),
             stream_topic: None,
         }
@@ -1157,14 +1215,14 @@ impl ToolHandler for RunSimulationTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "run_simulation",
-            description: "Start or resume the simulation (enter Play mode). Equivalent to pressing the Play button in the IDE. The simulation runs the electrochemistry tick, Rune scripts, physics, and all registered systems. Use with set_sim_value to configure initial conditions before running.",
-            input_schema: serde_json::json!({
+            description: "Start or resume the simulation (enter Play mode). Equivalent to pressing the Play button in the IDE. The simulation runs the electrochemistry tick, Rune scripts, physics, and all registered systems. Use with set_sim_value to configure initial conditions before running. Returns a `ticket`: await_simulation(ticket) waits for exactly the run this call started. With several engines on one Universe, pass `pid` to start a specific one.",
+            input_schema: sim_ipc::with_target_props(serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "time_scale": { "type": "number", "description": "Time scale multiplier (1.0 = realtime, 10.0 = 10x speed, 0.1 = slow-mo). Default: 1.0", "default": 1.0 },
+                    "time_scale": { "type": "number", "description": "Time scale multiplier (1.0 = realtime, 10.0 = 10x speed, 0.1 = slow-mo). Default: 1.0 for a new run; a running or paused run keeps its current scale.", "default": 1.0 },
                     "duration_s": { "type": "number", "description": "Auto-stop after this many simulation-seconds. Omit for indefinite run." }
                 }
-            }),
+            })),
             modes: &[WorkshopMode::General, WorkshopMode::Simulation],
             requires_approval: true,
             stream_topics: &["workshop.simulation.started"],
@@ -1172,36 +1230,44 @@ impl ToolHandler for RunSimulationTool {
     }
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
-        let time_scale = num_arg(&input, "time_scale").unwrap_or(1.0);
+        let time_scale = num_arg(&input, "time_scale");
         let duration_s = num_arg(&input, "duration_s");
+        let route = match route_or_fail("run_simulation", &input, ctx) {
+            Ok(r) => r,
+            Err(fail) => return fail,
+        };
 
-        // Queue the command via sim-commands.jsonl — the engine reads this
-        // on its next frame and transitions PlayModeState accordingly.
-        let cmd = serde_json::json!({
-            "op": "run_simulation",
-            "time_scale": time_scale,
-            "duration_s": duration_s,
-            "queued_at": chrono::Utc::now().to_rfc3339(),
-        });
-        match queue_sim_command(ctx, &cmd) {
-            Ok(()) => ToolResult {
+        // Queued on the target engine's command queue; the engine picks it up
+        // on its next frame and enters Play through the same message the Play
+        // button sends.
+        let mut cmd = serde_json::json!({ "op": "run_simulation" });
+        if let Some(s) = time_scale {
+            cmd["time_scale"] = s.into();
+        }
+        if let Some(d) = duration_s {
+            cmd["duration_s"] = d.into();
+        }
+        match queue_or_fail("run_simulation", &route, cmd) {
+            Ok(ticket) => ToolResult {
                 tool_name: "run_simulation".to_string(), tool_use_id: String::new(),
                 success: true,
-                content: format!(
-                    "Simulation start queued (time_scale={:.1}x{}).",
-                    time_scale,
-                    duration_s.map(|d| format!(", auto-stop after {:.1}s", d)).unwrap_or_default(),
+                content: with_note(
+                    format!(
+                        "Simulation start queued{} (time_scale={}{}), ticket {}. await_simulation waits for exactly this run.",
+                        on_engine(&route),
+                        time_scale.map(|s| format!("{:.1}x", s)).unwrap_or_else(|| "unchanged".into()),
+                        duration_s.map(|d| format!(", auto-stop after {:.1}s", d)).unwrap_or_default(),
+                        ticket,
+                    ),
+                    &route,
                 ),
                 structured_data: Some(serde_json::json!({
                     "action": "run", "time_scale": time_scale, "duration_s": duration_s,
+                    "ticket": ticket, "engine": route.describe(),
                 })),
                 stream_topic: Some("workshop.simulation.started".to_string()),
             },
-            Err(e) => ToolResult {
-                tool_name: "run_simulation".to_string(), tool_use_id: String::new(),
-                success: false, content: format!("Failed to queue: {}", e),
-                structured_data: None, stream_topic: None,
-            },
+            Err(fail) => fail,
         }
     }
 }
@@ -1212,35 +1278,33 @@ impl ToolHandler for StopSimulationTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "stop_simulation",
-            description: "Stop the running simulation (return to Edit mode). Equivalent to pressing the Stop button in the IDE. Simulation state is preserved in watchpoints for post-analysis.",
-            input_schema: serde_json::json!({
+            description: "Stop the running simulation (return to Edit mode). Equivalent to pressing the Stop button in the IDE. The run's final values are kept in the engine's run ledger (await_simulation / get_simulation_state report them). With several engines on one Universe, pass `pid` to stop a specific one.",
+            input_schema: sim_ipc::with_target_props(serde_json::json!({
                 "type": "object",
                 "properties": {}
-            }),
+            })),
             modes: &[WorkshopMode::General, WorkshopMode::Simulation],
             requires_approval: false,
             stream_topics: &["workshop.simulation.stopped"],
         }
     }
 
-    fn execute(&self, _input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
-        let cmd = serde_json::json!({
-            "op": "stop_simulation",
-            "queued_at": chrono::Utc::now().to_rfc3339(),
-        });
-        match queue_sim_command(ctx, &cmd) {
-            Ok(()) => ToolResult {
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let route = match route_or_fail("stop_simulation", &input, ctx) {
+            Ok(r) => r,
+            Err(fail) => return fail,
+        };
+        match queue_or_fail("stop_simulation", &route, serde_json::json!({ "op": "stop_simulation" })) {
+            Ok(ticket) => ToolResult {
                 tool_name: "stop_simulation".to_string(), tool_use_id: String::new(),
                 success: true,
-                content: "Simulation stop queued.".to_string(),
-                structured_data: Some(serde_json::json!({ "action": "stop" })),
+                content: with_note(format!("Simulation stop queued{}.", on_engine(&route)), &route),
+                structured_data: Some(serde_json::json!({
+                    "action": "stop", "ticket": ticket, "engine": route.describe(),
+                })),
                 stream_topic: Some("workshop.simulation.stopped".to_string()),
             },
-            Err(e) => ToolResult {
-                tool_name: "stop_simulation".to_string(), tool_use_id: String::new(),
-                success: false, content: format!("Failed to queue: {}", e),
-                structured_data: None, stream_topic: None,
-            },
+            Err(fail) => fail,
         }
     }
 }
@@ -1256,8 +1320,8 @@ impl ToolHandler for GetSimulationStateTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "get_simulation_state",
-            description: "Get the current simulation state: play mode, watchpoint values, snapshot age. compact=true (default) returns one token-efficient line per watchpoint at 3 decimal places. Set compact=false for full precision. Use skip_keys to omit watchpoints you don't care about.",
-            input_schema: serde_json::json!({
+            description: "Get the current simulation state: play mode, watchpoint values, snapshot age, the current run and the last finished one. compact=true (default) returns one token-efficient line per watchpoint at 3 decimal places. Set compact=false for full precision. Use skip_keys to omit watchpoints you don't care about. With several engines on one Universe, pass `pid` to read a specific one; `engine.other_engines` lists the rest.",
+            input_schema: sim_ipc::with_target_props(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "compact": { "type": "boolean", "description": "One line per watchpoint, 3 decimal places. Default: true.", "default": true },
@@ -1266,7 +1330,7 @@ impl ToolHandler for GetSimulationStateTool {
                         "description": "Watchpoint keys to omit from the response (e.g. static values you don't need to re-read)."
                     }
                 }
-            }),
+            })),
             modes: &[WorkshopMode::General, WorkshopMode::Simulation],
             requires_approval: false,
             stream_topics: &[],
@@ -1279,146 +1343,72 @@ impl ToolHandler for GetSimulationStateTool {
             .get("skip_keys").and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default();
+        let route = match route_or_fail("get_simulation_state", &input, ctx) {
+            Ok(r) => r,
+            Err(fail) => return fail,
+        };
 
-        match read_sim_snapshot(ctx) {
+        match sim_ipc::read_snapshot(&route) {
             Ok(snap) => {
                 let filtered: std::collections::BTreeMap<_, _> = snap.sim_values.iter()
                     .filter(|(k, _)| !skip_keys.contains(*k))
                     .collect();
 
+                // "run=#3" while a run is in progress, else "last_run=#2(duration_reached)".
+                let last = snap.runs.as_ref().and_then(|r| r.get("last")).filter(|l| !l.is_null());
+                let run_part = match (snap.active_run_id(), last) {
+                    (Some(id), _) => format!(" run=#{id}"),
+                    (None, Some(l)) => format!(
+                        " last_run=#{}({})",
+                        l.get("run_id").and_then(|v| v.as_u64()).unwrap_or(0),
+                        l.get("end_reason").and_then(|v| v.as_str()).unwrap_or("?"),
+                    ),
+                    (None, None) => String::new(),
+                };
+                let pid_part = snap.pid.map(|p| format!(" pid={p}")).unwrap_or_default();
+                let tick_part = snap.tick.map(|t| format!(" tick={t}")).unwrap_or_default();
+
                 let body = if compact {
-                    // Token-efficient: "state=Playing age=250ms | key=1.234 key2=5.678 ..."
+                    // Token-efficient: "state=Playing age=250ms pid=1234 run=#3 | key=1.234 key2=5.678 ..."
                     let pairs: Vec<String> = filtered.iter()
                         .map(|(k, v)| format!("{}={:.3}", k, v))
                         .collect();
-                    format!("state={} age={}ms | {}", snap.play_state, snap.age_ms, pairs.join(" "))
+                    format!(
+                        "state={} age={}ms{}{}{} | {}",
+                        snap.play_state, snap.age_ms, pid_part, run_part, tick_part, pairs.join(" ")
+                    )
                 } else {
                     let lines: Vec<String> = filtered.iter()
                         .map(|(k, v)| format!("  {} = {:.6}", k, v))
                         .collect();
                     format!(
-                        "Play state: {}\nSnapshot age: {}ms\n{} watchpoint(s):\n{}",
-                        snap.play_state, snap.age_ms, filtered.len(), lines.join("\n"),
+                        "Play state: {}\nSnapshot age: {}ms\nEngine:{}{}{}\n{} watchpoint(s):\n{}",
+                        snap.play_state, snap.age_ms, pid_part, run_part, tick_part,
+                        filtered.len(), lines.join("\n"),
                     )
                 };
 
                 ToolResult {
                     tool_name: "get_simulation_state".to_string(), tool_use_id: String::new(),
                     success: true,
-                    content: body,
+                    content: with_note(body, &route),
                     structured_data: Some(serde_json::json!({
                         "play_state": snap.play_state,
                         "snapshot_age_ms": snap.age_ms,
                         "watchpoint_count": filtered.len(),
                         "sim_values": snap.sim_values,
+                        "tick": snap.tick,
+                        "sim_time_s": snap.sim_time_s,
+                        "space": snap.space,
+                        "runs": snap.runs,
+                        "engine": route.describe(),
                     })),
                     stream_topic: None,
                 }
             }
-            Err(e) => ToolResult {
-                tool_name: "get_simulation_state".to_string(), tool_use_id: String::new(),
-                success: false,
-                content: format!("Runtime snapshot unavailable: {}", e),
-                structured_data: None, stream_topic: None,
-            },
+            Err(e) => fail("get_simulation_state", format!("Runtime snapshot unavailable: {}", e)),
         }
     }
-}
-
-/// Shared helper — append a JSON command to `<universe>/.eustress/sim-commands.jsonl`.
-/// The engine drains this file on its next frame tick.
-fn queue_sim_command(ctx: &ToolContext, cmd: &serde_json::Value) -> Result<(), String> {
-    let path = ctx.universe_root.join(".eustress").join("sim-commands.jsonl");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
-    }
-    use std::io::Write as _;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true).append(true).open(&path)
-        .map_err(|e| format!("open: {}", e))?;
-    writeln!(f, "{}", cmd).map_err(|e| format!("write: {}", e))?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Runtime-snapshot reader — feeds the sim-value tools
-// ---------------------------------------------------------------------------
-//
-// The engine writes `<universe>/.eustress/runtime-snapshot.json` at 4 Hz
-// (see `engine/src/script_editor/runtime_snapshot.rs`). Every sibling
-// process — LSP, MCP, Workshop-in-engine — reads the same file, so live
-// sim values are available identically in-process and out-of-process.
-//
-// We parse the JSON loosely with `serde_json::Value` here to avoid a
-// structural dependency on the engine's `RuntimeSnapshot` type; the on-
-// disk schema is: `{ generated_at, play_state, sim_values: {k: f64} }`.
-
-struct SnapshotReading {
-    sim_values: std::collections::BTreeMap<String, f64>,
-    play_state: String,
-    age_ms: u128,
-}
-
-fn read_sim_snapshot(ctx: &ToolContext) -> Result<SnapshotReading, String> {
-    let path = ctx
-        .universe_root
-        .join(".eustress")
-        .join("runtime-snapshot.json");
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) => {
-            // Distinguish "engine not running" from "engine running but no
-            // live snapshot yet". The `engine.port` sibling is written at
-            // bridge Startup and removed on shutdown, so its presence is the
-            // canonical liveness signal — independent of play state (Gap 1b/2).
-            let port_file = ctx.universe_root.join(".eustress").join("engine.port");
-            let engine_up = port_file.exists();
-            if e.kind() == std::io::ErrorKind::NotFound {
-                if engine_up {
-                    return Err(format!(
-                        "engine is running but no runtime snapshot has been written yet \
-                         (missing {}). It is written ~4 Hz once a Space is open in either \
-                         Edit or Play mode; retry in a moment.",
-                        path.display(),
-                    ));
-                } else {
-                    return Err(format!(
-                        "engine does not appear to be running — no {} and no live \
-                         snapshot at {}. Launch the engine on this Universe first.",
-                        port_file.display(),
-                        path.display(),
-                    ));
-                }
-            }
-            return Err(format!("read {}: {}", path.display(), e));
-        }
-    };
-    let val: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("runtime snapshot at {} is unparseable (mid-write or corrupt): {}", path.display(), e))?;
-
-    let sim_values = val.get("sim_values")
-        .and_then(|v| v.as_object())
-        .map(|m| m.iter().filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n))).collect())
-        .unwrap_or_default();
-
-    let play_state = val.get("play_state")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Unknown")
-        .to_string();
-
-    // `generated_at` is RFC-3339. Compute age against `now`; report 0 if
-    // the timestamp is missing or unparseable — better than failing.
-    let age_ms = val.get("generated_at")
-        .and_then(|v| v.as_str())
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|t| {
-            let now = chrono::Utc::now();
-            let diff = now.signed_duration_since(t.with_timezone(&chrono::Utc));
-            diff.num_milliseconds().max(0) as u128
-        })
-        .unwrap_or(0);
-
-    Ok(SnapshotReading { sim_values, play_state, age_ms })
 }
 
 // ---------------------------------------------------------------------------
@@ -1431,38 +1421,36 @@ impl ToolHandler for PauseSimulationTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "pause_simulation",
-            description: "Pause the running simulation (enter Paused state). The simulation clock stops but all watchpoint values and simulation state are preserved. Resume with run_simulation.",
-            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            description: "Pause the running simulation (enter Paused state). The simulation clock stops but all watchpoint values and simulation state are preserved. Resume with run_simulation. With several engines on one Universe, pass `pid` to pause a specific one.",
+            input_schema: sim_ipc::with_target_props(serde_json::json!({ "type": "object", "properties": {} })),
             modes: &[WorkshopMode::General, WorkshopMode::Simulation],
             requires_approval: false,
             stream_topics: &["workshop.simulation.paused"],
         }
     }
 
-    fn execute(&self, _input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
-        let cmd = serde_json::json!({
-            "op": "pause_simulation",
-            "queued_at": chrono::Utc::now().to_rfc3339(),
-        });
-        match queue_sim_command(ctx, &cmd) {
-            Ok(()) => ToolResult {
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let route = match route_or_fail("pause_simulation", &input, ctx) {
+            Ok(r) => r,
+            Err(fail) => return fail,
+        };
+        match queue_or_fail("pause_simulation", &route, serde_json::json!({ "op": "pause_simulation" })) {
+            Ok(ticket) => ToolResult {
                 tool_name: "pause_simulation".to_string(), tool_use_id: String::new(),
                 success: true,
-                content: "Simulation pause queued.".to_string(),
-                structured_data: Some(serde_json::json!({ "action": "pause" })),
+                content: with_note(format!("Simulation pause queued{}.", on_engine(&route)), &route),
+                structured_data: Some(serde_json::json!({
+                    "action": "pause", "ticket": ticket, "engine": route.describe(),
+                })),
                 stream_topic: Some("workshop.simulation.paused".to_string()),
             },
-            Err(e) => ToolResult {
-                tool_name: "pause_simulation".to_string(), tool_use_id: String::new(),
-                success: false, content: format!("Failed to queue: {}", e),
-                structured_data: None, stream_topic: None,
-            },
+            Err(fail) => fail,
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// AwaitSimulationTool — block until sim stops, return final state + telemetry summary
+// AwaitSimulationTool — block until a run ends, return its final state + telemetry summary
 // ---------------------------------------------------------------------------
 
 pub struct AwaitSimulationTool;
@@ -1471,14 +1459,16 @@ impl ToolHandler for AwaitSimulationTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "await_simulation",
-            description: "Wait for the simulation to finish (transition from Playing to Editing/Paused) and return the final watchpoint values plus a telemetry summary. Use after run_simulation(duration_s=N) to collect results synchronously. Polls every 500ms; times out after timeout_s (default 300).",
-            input_schema: serde_json::json!({
+            description: "Wait for a simulation run to finish and return its final watchpoint values (captured the moment it ended) plus a telemetry summary. Pass the `ticket` from run_simulation (or a `run_id`) to wait for exactly that run; with neither, waits for the run in progress, else the last run this session started. Use after run_simulation(duration_s=N) to collect results synchronously. Times out after timeout_s (default 300). With several engines on one Universe, pass `pid` to wait on a specific one.",
+            input_schema: sim_ipc::with_target_props(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "timeout_s": { "type": "number", "description": "Max wall-clock seconds to wait. Default: 300.", "default": 300.0 },
-                    "run_label": { "type": "string", "description": "Optional label for this run, included in the result." }
+                    "run_label": { "type": "string", "description": "Optional label for this run, included in the result." },
+                    "ticket": { "type": "string", "description": "The `ticket` run_simulation returned. Waits for exactly the run it started." },
+                    "run_id": { "type": "integer", "description": "Wait for this run id (per engine; from run results or get_simulation_state)." }
                 }
-            }),
+            })),
             modes: &[WorkshopMode::General, WorkshopMode::Simulation],
             requires_approval: false,
             stream_topics: &[],
@@ -1486,72 +1476,71 @@ impl ToolHandler for AwaitSimulationTool {
     }
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
-        let timeout_s = input.get("timeout_s").and_then(|v| v.as_f64()).unwrap_or(300.0);
+        let timeout_s = num_arg(&input, "timeout_s").unwrap_or(300.0).max(0.0);
         let run_label = input.get("run_label").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let target = if let Some(t) = input.get("ticket").and_then(|v| v.as_str()) {
+            RunTarget::Ticket(t.to_owned())
+        } else if let Some(id) = input.get("run_id").and_then(|v| v.as_u64()) {
+            RunTarget::RunId(id)
+        } else {
+            RunTarget::Active
+        };
+        let route = match route_or_fail("await_simulation", &input, ctx) {
+            Ok(r) => r,
+            Err(fail) => return fail,
+        };
 
         let start_wall = std::time::Instant::now();
         let start_ts = chrono::Utc::now();
-        let poll = std::time::Duration::from_millis(500);
-
-        // Poll until not Playing, cancelled, or timed out.
-        let final_snap = loop {
-            // Checked first so a cancel that lands during a sleep is honoured
-            // on the very next tick instead of after the full timeout. The
-            // simulation itself keeps running — this call stops *waiting*, it
-            // does not stop the world.
-            if ctx.is_cancelled() {
-                return ToolResult {
-                    tool_name: "await_simulation".to_string(), tool_use_id: String::new(),
-                    success: false,
-                    content: format!(
-                        "Cancelled after {:.1}s of waiting. The simulation was NOT stopped — \
-                         call stop_simulation if you want it to end.",
-                        start_wall.elapsed().as_secs_f64()
-                    ),
-                    structured_data: None, stream_topic: None,
-                };
-            }
-            if start_wall.elapsed().as_secs_f64() >= timeout_s {
-                return ToolResult {
-                    tool_name: "await_simulation".to_string(), tool_use_id: String::new(),
-                    success: false,
-                    content: format!("Timeout after {:.1}s — simulation still running.", timeout_s),
-                    structured_data: None, stream_topic: None,
-                };
-            }
-
-            match read_sim_snapshot(ctx) {
-                Ok(snap) if snap.play_state != "Playing" => break snap,
-                Ok(_) => std::thread::sleep(poll),
-                Err(_) => std::thread::sleep(poll),
-            }
+        let awaited = match sim_ipc::await_run(
+            &route,
+            target,
+            std::time::Duration::from_secs_f64(timeout_s),
+            ctx,
+        ) {
+            Ok(a) => a,
+            Err(e) => return fail("await_simulation", with_note(e, &route)),
         };
-
         let wall_s = start_wall.elapsed().as_secs_f64();
 
-        // Read telemetry lines since this run started
-        let tele_path = ctx.universe_root.join(".eustress").join("telemetry.jsonl");
-        let tele_lines = read_telemetry_since(&tele_path, &start_ts);
-
-        // Compute per-key stats from telemetry
+        let tele_lines = sim_ipc::read_telemetry(&route.telemetry, &run_telemetry_filter(&route, &awaited, start_ts));
         let stats = compute_telemetry_stats(&tele_lines);
+        let final_values = awaited.final_values();
 
-        let content = format_await_result(&final_snap, &stats, wall_s, tele_lines.len(), &run_label);
+        let content = format_await_result(&awaited, &final_values, &stats, wall_s, tele_lines.len(), &run_label);
 
         ToolResult {
             tool_name: "await_simulation".to_string(), tool_use_id: String::new(),
             success: true,
-            content,
+            content: with_note(content, &route),
             structured_data: Some(serde_json::json!({
                 "run_label": run_label,
-                "final_play_state": final_snap.play_state,
+                "run_id": awaited.run_id(),
+                "end_reason": awaited.end_reason(),
+                "run": match &awaited { Awaited::Run(r) => r.clone(), Awaited::LegacyStopped(_) => serde_json::Value::Null },
                 "wall_time_s": wall_s,
                 "telemetry_samples": tele_lines.len(),
-                "final_values": final_snap.sim_values,
+                "final_values": final_values,
                 "stats": stats,
+                "engine": route.describe(),
             })),
             stream_topic: None,
         }
+    }
+}
+
+/// The telemetry lines that belong to `awaited`: exactly its engine's
+/// lines for its run when both are known, else — for an engine that
+/// predates tagging — everything written since the wait began.
+fn run_telemetry_filter(
+    route: &SimRoute,
+    awaited: &Awaited,
+    waited_since: chrono::DateTime<chrono::Utc>,
+) -> TelemetryFilter {
+    match (route.pid, awaited.run_id()) {
+        (Some(pid), Some(run_id)) => TelemetryFilter { pid: Some(pid), run_id: Some(run_id), since: None },
+        (None, Some(run_id)) => TelemetryFilter { pid: None, run_id: Some(run_id), since: Some(waited_since) },
+        _ => TelemetryFilter { pid: None, run_id: None, since: Some(waited_since) },
     }
 }
 
@@ -1565,8 +1554,8 @@ impl ToolHandler for RunExperimentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "run_experiment",
-            description: "Run a complete simulation experiment: optionally create a git branch, apply sim-value overrides, run the simulation for duration_s, wait for completion, collect telemetry, compute stats, and save a structured result to .eustress/experiments/. Returns the full result so you can compare experiments and pick the best configuration. This is the primary tool for AI-driven optimization loops.",
-            input_schema: serde_json::json!({
+            description: "Run a complete simulation experiment: optionally create a git branch, apply sim-value overrides, run the simulation for duration_s, wait for completion, collect telemetry, compute stats, and save a structured result to .eustress/experiments/. Returns the full result so you can compare experiments and pick the best configuration. This is the primary tool for AI-driven optimization loops. To run design variants in parallel, open each variant's Space in its own engine (`eustress open`) and call this once per engine with its `pid`.",
+            input_schema: sim_ipc::with_target_props(serde_json::json!({
                 "type": "object",
                 "required": ["name", "duration_s"],
                 "properties": {
@@ -1579,10 +1568,10 @@ impl ToolHandler for RunExperimentTool {
                     },
                     "duration_s": { "type": "number", "description": "Simulation seconds to run. E.g. 60 for 60s of simulated time." },
                     "time_scale": { "type": "number", "description": "Time compression (1.0 = realtime, 100.0 = 100× faster). Default: 1.0.", "default": 1.0 },
-                    "create_branch": { "type": "boolean", "description": "Create a git branch exp/<name>-<timestamp> for this experiment. Default: false.", "default": false },
+                    "create_branch": { "type": "boolean", "description": "Create a git branch exp/<name>-<timestamp> in the target engine's Space for this experiment. Default: false.", "default": false },
                     "timeout_s": { "type": "number", "description": "Max wall-clock wait time. Default: 300.", "default": 300.0 }
                 }
-            }),
+            })),
             modes: &[WorkshopMode::General, WorkshopMode::Simulation],
             requires_approval: true,
             stream_topics: &["workshop.simulation.experiment"],
@@ -1594,49 +1583,51 @@ impl ToolHandler for RunExperimentTool {
         let description = input.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let duration_s = match num_arg(&input, "duration_s") {
             Some(d) => d,
-            None => return ToolResult {
-                tool_name: "run_experiment".to_string(), tool_use_id: String::new(),
-                success: false, content: "Missing required parameter: duration_s".to_string(),
-                structured_data: None, stream_topic: None,
-            },
+            None => return fail("run_experiment", "Missing required parameter: duration_s"),
         };
         let time_scale = num_arg(&input, "time_scale").unwrap_or(1.0);
         let create_branch = input.get("create_branch").and_then(|v| v.as_bool()).unwrap_or(false);
-        let timeout_s = num_arg(&input, "timeout_s").unwrap_or(300.0);
+        let timeout_s = num_arg(&input, "timeout_s").unwrap_or(300.0).max(0.0);
         let sim_values: std::collections::HashMap<String, f64> = input
             .get("sim_values").and_then(|v| v.as_object())
             .map(|m| m.iter().filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n))).collect())
             .unwrap_or_default();
+        let route = match route_or_fail("run_experiment", &input, ctx) {
+            Ok(r) => r,
+            Err(fail) => return fail,
+        };
 
-        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+        let now = chrono::Utc::now();
+        let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
         let branch_name = format!("exp/{}-{}", name.replace(' ', "_"), timestamp);
 
-        // Step 1 — optionally create a git branch
+        // Step 1 — optionally create a git branch, in the repo of the Space
+        // the TARGET engine has open (with several engines, the context's
+        // Space may belong to a different one).
+        let git_root = route.space.clone().unwrap_or_else(|| ctx.space_root.clone());
         let branch_created = if create_branch {
-            match run_git_in_universe(&ctx.space_root, &["checkout", "-b", &branch_name]) {
+            match run_git_in_universe(&git_root, &["checkout", "-b", &branch_name]) {
                 Ok(_) => Some(branch_name.clone()),
                 Err(e) => {
-                    return ToolResult {
-                        tool_name: "run_experiment".to_string(), tool_use_id: String::new(),
-                        success: false,
-                        content: format!("Failed to create branch '{}': {}", branch_name, e),
-                        structured_data: None, stream_topic: None,
-                    };
+                    return fail(
+                        "run_experiment",
+                        format!("Failed to create branch '{}': {}", branch_name, e),
+                    );
                 }
             }
         } else {
             None
         };
 
-        // Step 2 — apply sim-value overrides
-        for (key, value) in &sim_values {
-            let cmd = serde_json::json!({
-                "op": "set_sim_value",
-                "key": key,
-                "value": value,
-                "queued_at": chrono::Utc::now().to_rfc3339(),
-            });
-            let _ = queue_sim_command(ctx, &cmd);
+        // Step 2 — apply sim-value overrides. Same queue as the run below,
+        // so the engine applies them, in order, before it starts the run.
+        let mut keys: Vec<&String> = sim_values.keys().collect();
+        keys.sort();
+        for key in keys {
+            let cmd = serde_json::json!({ "op": "set_sim_value", "key": key, "value": sim_values[key] });
+            if let Err(fail) = queue_or_fail("run_experiment", &route, cmd) {
+                return fail;
+            }
         }
 
         // Step 3 — start simulation with auto-stop
@@ -1646,64 +1637,45 @@ impl ToolHandler for RunExperimentTool {
             "op": "run_simulation",
             "time_scale": time_scale,
             "duration_s": duration_s,
-            "queued_at": start_ts.to_rfc3339(),
         });
-        if let Err(e) = queue_sim_command(ctx, &run_cmd) {
-            return ToolResult {
-                tool_name: "run_experiment".to_string(), tool_use_id: String::new(),
-                success: false, content: format!("Failed to start simulation: {}", e),
-                structured_data: None, stream_topic: None,
-            };
-        }
-
-        // Step 4 — poll until done
-        let poll = std::time::Duration::from_millis(500);
-        // Give the engine a moment to transition state before polling
-        std::thread::sleep(std::time::Duration::from_secs(1));
-
-        let final_snap = loop {
-            // A cancelled experiment stops being waited on immediately rather
-            // than holding the caller for the full timeout. The run itself is
-            // already in flight engine-side; stop_simulation ends it.
-            if ctx.is_cancelled() {
-                return ToolResult {
-                    tool_name: "run_experiment".to_string(), tool_use_id: String::new(),
-                    success: false,
-                    content: format!(
-                        "Experiment '{}' cancelled after {:.0}s of waiting. The run was NOT \
-                         stopped — call stop_simulation if you want it to end.",
-                        name,
-                        start_wall.elapsed().as_secs_f64()
-                    ),
-                    structured_data: None, stream_topic: None,
-                };
-            }
-            if start_wall.elapsed().as_secs_f64() >= timeout_s {
-                return ToolResult {
-                    tool_name: "run_experiment".to_string(), tool_use_id: String::new(),
-                    success: false,
-                    content: format!("Experiment '{}' timed out after {:.0}s.", name, timeout_s),
-                    structured_data: None, stream_topic: None,
-                };
-            }
-            match read_sim_snapshot(ctx) {
-                Ok(snap) if snap.play_state != "Playing" => break snap,
-                Ok(_) => std::thread::sleep(poll),
-                Err(_) => std::thread::sleep(poll),
-            }
+        let ticket = match queue_or_fail("run_experiment", &route, run_cmd) {
+            Ok(t) => t,
+            Err(fail) => return fail,
         };
 
+        // Step 4 — wait for exactly the run that ticket started
+        let awaited = match sim_ipc::await_run(
+            &route,
+            RunTarget::Ticket(ticket.clone()),
+            std::time::Duration::from_secs_f64(timeout_s),
+            ctx,
+        ) {
+            Ok(a) => a,
+            Err(e) => return fail("run_experiment", with_note(format!("Experiment '{}': {}", name, e), &route)),
+        };
         let wall_s = start_wall.elapsed().as_secs_f64();
 
-        // Step 5 — read telemetry and compute stats
-        let tele_path = ctx.universe_root.join(".eustress").join("telemetry.jsonl");
-        let tele_lines = read_telemetry_since(&tele_path, &start_ts);
+        // Step 5 — read this run's telemetry and compute stats
+        let tele_lines = sim_ipc::read_telemetry(&route.telemetry, &run_telemetry_filter(&route, &awaited, start_ts));
         let stats = compute_telemetry_stats(&tele_lines);
+        let final_values = awaited.final_values();
+        let run_record = match &awaited {
+            Awaited::Run(r) => Some(r.clone()),
+            Awaited::LegacyStopped(_) => None,
+        };
 
-        // Step 6 — save experiment result
-        let exp_dir = ctx.universe_root.join(".eustress").join("experiments");
+        // Step 6 — save experiment result. Engines running variants side by
+        // side share this directory, so the name carries milliseconds and
+        // the engine's pid: two same-named experiments finishing in the same
+        // second used to overwrite each other.
+        let exp_dir = route.universe.join(".eustress").join("experiments");
         let _ = std::fs::create_dir_all(&exp_dir);
-        let exp_filename = format!("{}-{}.json", name.replace(' ', "_"), timestamp);
+        let exp_filename = format!(
+            "{}-{}{}.json",
+            name.replace(' ', "_"),
+            start_ts.format("%Y%m%d_%H%M%S_%3f"),
+            route.pid.map(|p| format!("-pid{p}")).unwrap_or_default(),
+        );
         let exp_path = exp_dir.join(&exp_filename);
 
         let experiment = serde_json::json!({
@@ -1716,8 +1688,16 @@ impl ToolHandler for RunExperimentTool {
             "time_scale": time_scale,
             "wall_time_s": wall_s,
             "telemetry_samples": tele_lines.len(),
-            "final_values": final_snap.sim_values,
+            "final_values": final_values,
             "stats": stats,
+            "pid": route.pid,
+            "space": route.space.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            "run_id": awaited.run_id(),
+            "ticket": ticket,
+            "end_reason": awaited.end_reason(),
+            "ticks": run_record.as_ref().and_then(|r| r.get("ticks")).cloned(),
+            "sim_seconds": run_record.as_ref().and_then(|r| r.get("sim_seconds")).cloned(),
+            "recording": run_record.as_ref().and_then(|r| r.get("recording")).cloned(),
         });
 
         let saved_path = if let Ok(json) = serde_json::to_string_pretty(&experiment) {
@@ -1731,12 +1711,12 @@ impl ToolHandler for RunExperimentTool {
 
         // Step 7 — format report
         let report = format_experiment_report(&name, &description, &sim_values, duration_s, time_scale,
-            wall_s, tele_lines.len(), &final_snap, &stats, &branch_created, &saved_path);
+            wall_s, tele_lines.len(), &awaited, &final_values, &stats, &branch_created, &saved_path);
 
         ToolResult {
             tool_name: "run_experiment".to_string(), tool_use_id: String::new(),
             success: true,
-            content: report,
+            content: with_note(report, &route),
             structured_data: Some(experiment),
             stream_topic: Some("workshop.simulation.experiment".to_string()),
         }
@@ -1985,20 +1965,6 @@ fn run_git_in_universe(start_root: &std::path::Path, args: &[&str]) -> Result<St
     }
 }
 
-fn read_telemetry_since(path: &std::path::Path, since: &chrono::DateTime<chrono::Utc>)
-    -> Vec<serde_json::Value>
-{
-    let raw = match std::fs::read_to_string(path) { Ok(r) => r, Err(_) => return vec![] };
-    raw.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|entry| {
-            entry.get("t").and_then(|v| v.as_str())
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|t| t.with_timezone(&chrono::Utc) >= *since)
-                .unwrap_or(false)
-        })
-        .collect()
-}
-
 fn compute_telemetry_stats(lines: &[serde_json::Value])
     -> std::collections::BTreeMap<String, serde_json::Value>
 {
@@ -2020,8 +1986,33 @@ fn compute_telemetry_stats(lines: &[serde_json::Value])
     }).collect()
 }
 
+/// "Run #3: duration_reached after 3600 ticks (60.00s simulated)" — or, for
+/// an engine that predates the run ledger, a warning that its values were
+/// read after the stop had already reset them.
+fn describe_run(awaited: &Awaited) -> String {
+    match awaited {
+        Awaited::Run(r) => {
+            let id = r.get("run_id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let reason = r.get("end_reason").and_then(|v| v.as_str()).unwrap_or("stopped");
+            let ticks = r.get("ticks").and_then(|v| v.as_u64()).unwrap_or(0);
+            let secs = r.get("sim_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let mut line = format!("Run #{id}: {reason} after {ticks} ticks ({secs:.2}s simulated)");
+            if let Some(rec) = r.get("recording").and_then(|v| v.as_str()) {
+                line.push_str(&format!("\nRecording: {rec}"));
+            }
+            line
+        }
+        Awaited::LegacyStopped(s) => format!(
+            "Final state: {} (this engine predates the run ledger, so the values below were \
+             read after its stop reset them)",
+            s.play_state
+        ),
+    }
+}
+
 fn format_await_result(
-    snap: &SnapshotReading,
+    awaited: &Awaited,
+    final_values: &std::collections::BTreeMap<String, f64>,
     stats: &std::collections::BTreeMap<String, serde_json::Value>,
     wall_s: f64,
     samples: usize,
@@ -2030,11 +2021,11 @@ fn format_await_result(
     let mut lines = vec![
         format!("Simulation finished in {:.2}s wall-time ({} telemetry samples){}.",
             wall_s, samples, if label.is_empty() { String::new() } else { format!(" [{}]", label) }),
-        format!("Final state: {}", snap.play_state),
+        describe_run(awaited),
         String::new(),
         "Final watchpoint values:".to_string(),
     ];
-    for (k, v) in &snap.sim_values {
+    for (k, v) in final_values {
         lines.push(format!("  {} = {:.6}", k, v));
     }
     if !stats.is_empty() {
@@ -2053,7 +2044,8 @@ fn format_await_result(
 fn format_experiment_report(
     name: &str, description: &str, config: &std::collections::HashMap<String, f64>,
     duration_s: f64, time_scale: f64, wall_s: f64, samples: usize,
-    snap: &SnapshotReading,
+    awaited: &Awaited,
+    final_values: &std::collections::BTreeMap<String, f64>,
     stats: &std::collections::BTreeMap<String, serde_json::Value>,
     branch: &Option<String>, saved: &Option<String>,
 ) -> String {
@@ -2064,6 +2056,7 @@ fn format_experiment_report(
     lines.push(String::new());
     if let Some(b) = branch { lines.push(format!("Branch: {}", b)); }
     lines.push(format!("Duration: {:.1}s simulated at {:.0}× ({:.2}s wall)", duration_s, time_scale, wall_s));
+    lines.push(describe_run(awaited));
     lines.push(format!("Telemetry: {} samples", samples));
     if let Some(s) = saved { lines.push(format!("Saved: .eustress/experiments/{}", s)); }
     if !config.is_empty() {
@@ -2075,7 +2068,7 @@ fn format_experiment_report(
     }
     lines.push(String::new());
     lines.push("Final watchpoint values:".to_string());
-    for (k, v) in &snap.sim_values { lines.push(format!("  {} = {:.6}", k, v)); }
+    for (k, v) in final_values { lines.push(format!("  {} = {:.6}", k, v)); }
     if !stats.is_empty() {
         lines.push(String::new());
         lines.push("Telemetry stats (min / mean / max):".to_string());

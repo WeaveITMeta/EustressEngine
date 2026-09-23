@@ -218,17 +218,23 @@ Lift [`bridge_client.rs`](../../eustress/crates/mcp-server/src/bridge_client.rs)
 ### 7.2 Un-stub and extend the CLI
 Replace the `agent` / `scene` / `stream` stubs ([`cli/src/main.rs:318`](../../eustress/crates/cli/src/main.rs)) with real bridge calls, and add a sim-control surface that works against **either** shell (headless runner or running editor):
 
-| New / fixed verb | Bridge method |
+| Verb | Bridge method |
 |---|---|
-| `eustress run <space> [--ticks N] [--out f]` | launches `eustress-headless` (or attaches if `engine.port` live) |
-| `eustress sim step --ticks N` | `sim.step` |
-| `eustress sim run [--scale x] [--for s]` | writes `run_simulation` sim-command |
-| `eustress sim stop` | `stop_simulation` |
-| `eustress ecs query <filter>` | `ecs.query` |
-| `eustress entity create\|read\|update\|delete` | `entity.*` |
-| `eustress raycast --from .. --dir ..` | `raycast` |
-| `eustress oplog tail [-n N]` | `oplog_tail` |
-| `eustress inspect` | `ecs.inspect` |
+| `eustress run <space> [--ticks N]` | launches `eustress-headless` and relays its exit code |
+| `eustress bridge sim-step --ticks N` | `sim.step` |
+| `eustress bridge sim-run [--time-scale x] [--duration s] [--wait]` | `sim.run` (then `sim.state` polling with `--wait`) |
+| `eustress bridge sim-pause` / `sim-stop` | `sim.pause` / `sim.stop` |
+| `eustress bridge sim-set KEY=VALUE ...` | `sim.set` |
+| `eustress bridge sim-state` / `sim-await [--run-id N]` | `sim.state` |
+| `eustress bridge sim-read [--keys ..]` | `sim.read` |
+| `eustress bridge ecs-query [--class C]` | `ecs.query` |
+| `eustress bridge entity create\|read\|update\|delete\|find` | `entity.*` |
+| `eustress bridge raycast --origin .. --direction ..` | `scene.raycast` |
+| `eustress bridge oplog [--limit N]` | `oplog.tail` |
+| `eustress bridge inspect` | `ecs.inspect` |
+| `eustress bridge call <method> --params '{..}'` | any method |
+
+Every `bridge` verb takes `--universe <dir>` (the Universe's owner), `--port <N>` or `--pid <N>` (one specific instance, §7.4).
 
 The existing `sim replay/best/convergence` history commands stay (they read the stream ring buffer).
 
@@ -238,11 +244,13 @@ The existing `sim replay/best/convergence` history commands stay (they read the 
 
 ### 7.4 Fan-out — many engines at once
 
-An orchestrator that dispatches missions to several Spaces needs several engines at once, and `engine.port` cannot support that: it is **one slot per Universe** — the last engine to start owns it, and the first to exit deletes it. Two engines on two Spaces of the *same* Universe (the normal case — one Universe holds dozens of Spaces) overwrite each other, and the survivor's port file may be deleted by the other's shutdown.
+An orchestrator that dispatches missions to several Spaces needs several engines at once, and `engine.port` cannot address them: it is **one slot per Universe**. It names a single engine, the Universe's **owner**, and two engines on two Spaces of the *same* Universe (the normal case, since one Universe holds dozens of Spaces) cannot both be reached through it.
 
-The fix is a second, additive discovery mechanism keyed by something that cannot collide:
+Ownership is well defined. The owner is whichever engine wrote `engine.port` last. An engine removes the file on exit only while it still names that engine's own port (compare-and-delete), and every other engine on the Universe re-claims a released slot within a second: one removed on a clean exit, or one naming a port nothing listens on because its owner crashed. So a Universe with any engine running always has exactly one reachable owner.
 
-- **Instance registry** — every engine (editor and headless) writes `<workspace>/.eustress/instances/<pid>.json` once its bridge is bound: `{pid, port, kind, space, universe, started_at}` ([`InstanceRecord`](../../eustress/crates/bridge-client/src/lib.rs), one shared definition). The engine updates `space`/`universe` on every runtime Space switch and removes the file on clean exit; a crash leaves a stale record, which readers prune by pinging. The record sits beside the global `engine.port`, so the two conventions never disagree about where the workspace is. `engine.port` is untouched — single-instance callers (the MCP server as configured today) keep working.
+Discovery by something that cannot collide sits beside it:
+
+- **Instance registry**: every engine (editor and headless) writes `<workspace>/.eustress/instances/<pid>.json` once its bridge is bound: `{pid, port, kind, space, universe, started_at}` ([`InstanceRecord`](../../eustress/crates/bridge-client/src/lib.rs), one shared definition). The engine updates `space`/`universe` on every runtime Space switch (moving the record if the new Universe lives in another workspace) and removes the file on clean exit; a crash leaves a stale record, which readers prune by probing its port. A busy engine still accepts connections, so it is never pruned. The record sits beside the global `engine.port`, so the two conventions never disagree about where the workspace is. Single-instance callers (the MCP server as configured today) keep reaching the owner through `engine.port`.
 - **Direct-port addressing** — [`call_port`](../../eustress/crates/bridge-client/src/lib.rs) bypasses port-file discovery. It is the *only* unambiguous way to reach one engine among several; `call_engine` (by Universe) stays for the single-instance case.
 - **`engine.shutdown`** bridge method — writes `AppExit`, so a close runs the normal shutdown path (port file, instance record, and Fjall handle all released) instead of a kill.
 
@@ -250,15 +258,59 @@ The CLI exposes the lifecycle:
 
 ```bash
 eustress open <space> [--play] [--headless] --json   # spawn detached; prints {pid, port, ...} once the bridge is up
-eustress instances [--json]                            # every live engine (pings + prunes dead records)
+eustress instances [--json]                            # every live engine (probes + prunes dead records; * = Universe owner)
 eustress bridge --port <N> <cmd>                       # drive ONE specific instance
 eustress bridge --pid <N> <cmd>                        #   (same, looked up in the registry)
 eustress close --pid <N> | --space <dir> | --all [--force]
 ```
 
-`open` returns as soon as it can hand back a port; the window stays up. Verified 2026-09-19: two editor windows on two Spaces of `ARC-AGI-3`, distinct ports, each returning its own entity count over `--port`/`--pid`, while the old `engine.port` named only one of them; `close --all` exited both cleanly and emptied the registry.
+`open` returns as soon as it can hand back a port; the window stays up. Both kinds open in Edit unless `--play` is given, so an orchestrator can prepare each instance before starting its run. Verified 2026-09-19: two editor windows on two Spaces of `ARC-AGI-3`, distinct ports, each returning its own entity count over `--port`/`--pid`, while the old `engine.port` named only one of them; `close --all` exited both cleanly and emptied the registry.
 
 **Trap:** pass Spaces as plain absolute paths. `canonicalize()` on Windows yields the `\\?\C:\…` verbatim form, which the engine stores verbatim and its Universe resolver does not understand — the record then reports the wrong Universe, and a later `close --space` never matches. The CLI uses `std::path::absolute` throughout for this reason.
+
+### 7.5 Simulation commands under fan-out
+
+Running design variants side by side means several engines on one Universe, each running its own simulation. Every simulation file a client talks through is therefore one of two kinds:
+
+| Scope | Files | Who reads / writes |
+|---|---|---|
+| **Per instance**: `<workspace>/.eustress/instances/<pid>/` | `sim-commands.jsonl`, `snapshot.json` | exactly one engine drains the queue and writes the snapshot |
+| **Per Universe**: `<universe>/.eustress/` | `sim-commands.jsonl`, `runtime-snapshot.json` | the Universe's owner only (§7.4); non-owners ignore them |
+| **Shared, tagged**: `<universe>/.eustress/` | `telemetry.jsonl` | every engine appends; each line carries `pid`, `space`, `run_id`, `tick`, `sim_time_s` and is written in one `write` so lines never interleave |
+
+The paths are defined once, in [`eustress-bridge-client`](../../eustress/crates/bridge-client/src/lib.rs), and shared by the engine and its clients. The per-Universe files are what single-instance clients (and the LSP's live hover values) use; because only the owner serves them, a command written there reaches the same engine `call_engine` does.
+
+**One interpreter, three transports.** [`simulation::command::apply`](../../eustress/crates/engine/src/simulation/command.rs) is the only place a run / pause / stop / set becomes engine state. It is reached by the bridge methods `sim.run`, `sim.pause`, `sim.stop`, `sim.set` (answered synchronously, with the run id), by the instance's private queue, and by the Universe queue. Play-state changes go through the same `StartPlayEvent` / `TogglePauseEvent` / `StopPlayEvent` messages as the Play, Pause and Stop buttons, so a commanded run gets the full snapshot-and-restore lifecycle. A `stop` or `pause` that arrives while its run is still starting applies the moment the run begins; a `run` while one is already running retunes it rather than toggling pause.
+
+**Runs are addressable.** Every entry into Play from Edit is a run with an id; resuming from Pause continues it. The engine's run ledger records each run's source, configuration, end reason (`duration_reached`, `stop_command`, `stopped`), tick count, simulated seconds, recording path, and its **final values, captured before Stop resets the sim store**. `sim.state` returns the ledger; the snapshot publishes the current run and the last few finished ones. Queued commands may carry a ticket (`"id"`): the ledger acknowledges each ticket, and a `run` ticket names the run it started, so a file-only client waits for exactly its own run.
+
+**Queues are drained exactly once.** An engine claims a queue file by renaming it aside, reads it, and re-reads the claimed file one frame later before deleting it, which picks up a line whose writer opened the file just before the rename. Two engines can never both execute a line, and no line is erased unread.
+
+**Recordings and experiment results** are named with a millisecond timestamp, the run id and the pid (`sim_<YYYYMMDD_HHMMSS_mmm>_run<id>_pid<pid>.json`), so variants finishing in the same second never overwrite each other.
+
+**Tools pick one engine.** The simulation tools (`run_simulation`, `pause_simulation`, `stop_simulation`, `set_sim_value`, `get_sim_value`, `list_sim_values`, `get_simulation_state`, `await_simulation`, `run_experiment`, `tail_telemetry`, and the bridge tool `sim_step`) all accept `pid` or `port`, and resolve their target in this order ([`sim_ipc::resolve`](../../eustress/crates/tools/src/sim_ipc.rs)):
+
+1. `pid`, else `port`: that instance;
+2. the calling process, when the tool runs inside an engine (Workshop, bridge `tools.call`);
+3. the Universe's owner;
+4. the Universe's files, for an engine without an instance record.
+
+When other engines share the Universe, results say which engine answered and list the others. Tools use files rather than the bridge because they also run inside an engine, where a round-trip to their own bridge would deadlock: `tools.call` executes on the main thread that would have to answer it. For the same reason `await_simulation` refuses to wait on its own engine's main thread, since the run could never advance.
+
+The CLI drives the same surface per instance:
+
+```bash
+eustress open Spaces/Bracket-A --headless --json     # one Space per design variant; both open in Edit
+eustress open Spaces/Bracket-B --headless --json
+eustress bridge --pid <A> sim-run --duration 60 --time-scale 100
+eustress bridge --pid <B> sim-run --duration 60 --time-scale 100
+eustress bridge --pid <A> sim-await                  # run #1 on A: end reason, final values, recording path
+eustress bridge --pid <B> sim-await
+eustress bridge --pid <A> sim-state                  # play state, clock, run ledger
+eustress bridge --pid <A> sim-set ambient.temperature_c=40 load.current_a=2.5
+```
+
+A design variant is a Space (a git branch checked out as its own worktree folder), so its design lives in the datamodel where the commit records it. `sim-set` is for scenario inputs a run consumes, not for design fields.
 
 ---
 
@@ -293,6 +345,7 @@ This makes a space a pure function: `(space, inputs, ticks) → recording.json +
 | **P6** | `--render gpu` tier (windowless `DefaultPlugins`) for `ai_camera` capture | M | `new` |
 | **P7** | Retire dead `--server` flag; fold `eustress-server` onto `add_core_sim_plugins` (one sim path) or document it as multiplayer-only | S | `extend` |
 | **P8** | Fan-out: per-PID instance registry, `call_port`, `engine.shutdown`, and `eustress open` / `instances` / `close` / `bridge --port` (§7.4) | M | **`done`** — 2026-09-19; verified with two windows on one Universe |
+| **P9** | Per-instance sim commands: one interpreter (`simulation::command`), run ledger with final values, per-PID queue + snapshot, owner-only Universe files, tagged telemetry, `sim.run/pause/stop/set/state`, `pid`/`port` on every sim tool, CLI `sim-*` verbs (§7.5) | M | **`done`**: 2026-09-22; verified with two headless engines and one editor on one Universe: concurrent runs with their own final values and recordings, owner-only Universe queue, owner hand-over on clean exit and on a killed owner, tools over MCP stdio and inside the editor |
 
 **P1 → P2 → P3** is the spine that delivers "run spaces apart from visualization." With P0 already done, P1 and P2 are both small — P1 is a mechanical plugin split with no TypeId risk, and P2 is pure reorganization (grouping existing `add_plugins` calls, not fixing a bug). P4/P5 make the spine *usable*; P6 is the observation upgrade.
 
@@ -335,6 +388,10 @@ A phase is "done" only when the gate passes — not when it compiles.
 | `crates/bridge-client/` *(new)* or `eustress-tools` | Home for the lifted `bridge_client` |
 | [`mcp-server/src/bridge_client.rs`](../../eustress/crates/mcp-server/src/bridge_client.rs) | Re-export from the shared crate |
 | [`cli/src/main.rs`](../../eustress/crates/cli/src/main.rs) | Un-stub `agent`/`scene`; add `sim`/`ecs`/`entity`/`raycast`/`oplog`/`run` verbs over the bridge |
+| [`engine/src/simulation/command.rs`](../../eustress/crates/engine/src/simulation/command.rs) | Sim command interpreter, run ledger, claim-by-rename queue drain (§7.5) |
+| [`engine/src/simulation/ipc.rs`](../../eustress/crates/engine/src/simulation/ipc.rs) | Per-instance / per-Universe sim file locations; Universe ownership test |
+| [`tools/src/sim_ipc.rs`](../../eustress/crates/tools/src/sim_ipc.rs) | Sim tools' target resolution (`pid` / `port` / self / owner), tickets, run awaiting, telemetry filters |
+| [`bridge-client/src/lib.rs`](../../eustress/crates/bridge-client/src/lib.rs) | Shared sim IPC paths, `append_json_line`, `port_is_live` |
 | [`engine/src/startup.rs`](../../eustress/crates/engine/src/startup.rs) | Remove dead `server_mode`, or repurpose `--headless` to exec the new bin |
 
 ---
