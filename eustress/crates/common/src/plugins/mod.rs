@@ -5,6 +5,7 @@
 
 pub mod lighting_plugin;
 pub mod sky_atmosphere;
+pub mod orthographic_sky;
 pub mod reflections;
 pub mod character_plugin;
 pub mod humanoid;
