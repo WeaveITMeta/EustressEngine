@@ -1109,3 +1109,90 @@ never in the pack.
 **One count worth keeping straight.** A census that asks "which items carry a *direct* edge to
 `G1.01`" gets 13; a census that asks "which items *reach* `G1.01`" gets all 131 that consume a build.
 The gate is a reachability question, and an item is not exempt because its edge is inherited.
+
+---
+
+## 10. Executor routing
+
+Every item has one executor. Claude owns the code, the verifiers, and the instrumented Studio sessions;
+the founder owns decisions and anyone outside the company. Meta Muse is an agent in its own virtual
+machine that works mainly in a browser and can also install programs there. Under
+`05_META_MUSE_HANDOFF.md` it does the founder's web work (company formation, banking, store accounts,
+dashboards, posting) and installs Eustress from the public site the way a new user would. Within these
+159 items it runs the clean-machine journey `G7.45`, sends the approved messages for `G0.08` and
+`G0.09`, and flips the GitHub setting `G0.12` needs.
+
+State on 2026-09-22: 159 items, 7 `PASSED` (`G1.01`, `G1.02`, `G1.30`, `G6.01`, `G0.06`, `G7.30`,
+`G1.40`), 152 remaining.
+
+### 10.1 Shared items (2)
+
+| Item | The other party | Claude |
+|:--|:--|:--|
+| `G7.45` | **Meta Muse**, card R01: downloads the installer from the public site onto its own fresh virtual machine and walks the journey three times. The founder approves the release first | Builds and publishes the installer, turns Muse's three reports into the item's evidence, sends the recordings to the blinded Critic, fixes what breaks |
+| `G1.14` | **The founder** chooses the reference product, installs it on the workstation, signs in, accepts its licence, and completes the publication-rights memo | Captures on the reference machine `RM-1` with the computer-use tool, or the founder does; runs `eustress-capture verify` |
+
+### 10.2 Claude drives the running Studio (10)
+
+These need real mouse and keyboard input on the Studio window so the in-engine instruments have
+something to measure. Claude builds the instrument or fix, drives the session with the computer-use
+tool against the installed copy in §10.5, and runs the verifier. The verdict comes from the
+instrument and the blinded Critic, so the operator's impression never enters it. Where a stranger
+must be able to rerun a measurement with one command, an in-engine input replayer replaces the
+computer-use session.
+
+| Item | Item | Item | Item | Item |
+|:--|:--|:--|:--|:--|
+| `G6.02` | `G6.04` | `G6.07` | `G6.08` | `G6.10` |
+| `G6.11` | `G6.12` | `G6.14` | `G6.15` | `G6.31` |
+
+These sessions stay on the workstation because their numbers only mean something on the pinned
+reference machine `RM-1`, and their instruments write files Claude reads there. The 30-minute soak
+from the launch checklist runs the same way. The checklist's other hands-on items go to Muse's fresh
+machine: the clean install, cold start, telemetry notice, and Send Feedback check (R01), the
+auto-update test (R02), and the ten core interactions with the save and load test (R03), which falls
+back to the workstation if the Studio cannot run on Muse's machine.
+
+### 10.3 The founder owns the item (5)
+
+| Item | What only the founder can do |
+|:--|:--|
+| `G0.07` | Find an engineer outside the company who runs the container |
+| `G0.08` | Bring five qualified strangers through the discovery instrument; Muse sends the approved outreach |
+| `G0.09` | Approve each post in each named channel; Muse posts it, and Claude builds the arrival attribution |
+| `G0.10` | Obtain one outside submission to EUSTRESS-PHYS-12 |
+| `G6.34` | Agree and sign the pilot whose metric is hashed in advance |
+
+### 10.4 Claude owns everything else (135)
+
+Of these, 13 have every dependency `PASSED` today:
+
+| Item | Tier | Builds | Title |
+|:--|:--|--:|:--|
+| `G1.31` | S | 0 | A proof standard an outside engineer can execute without contacting anyone |
+| `G1.41` | S | 0 | Vertical selection with an evidence-scored kill list |
+| `G1.48` | S | 0 | Licence decision-forcing memo with four costed options |
+| `G7.33` | S | 0 | CI truth ledger: what ci.yml gates today versus what it must gate |
+| `G1.03` | L | 12 | Harness scene set S1-S6 emitted by a seeded generator |
+| `G1.05` | M | 6 | AI camera capture accepts width, height, and output path |
+| `G1.07` | M | 6 | Independent physics-step counter exported into the recording and the manifest |
+| `G1.08` | M | 6 | Per-frame tick-indexed frame-time CSV with p50/p99/max/cv |
+| `G1.43` | M | 6 | Unit economics of simulation compute, from a measured throughput baseline |
+| `G1.56` | M | 6 | Operator automation baseline with a measured wall-clock reduction |
+| `G6.03` | M | 6 | Drain-contract regression test and removal of the dead parallel drain |
+| `G6.30` | M | 6 | Every declared tool id classified shipped or declared, with a gate that blocks a demo script |
+| `G7.01` | L | 12 | MCP tool-surface conformance census and reliability baseline |
+
+`G1.48` records a decision the founder has already made: the licence stays PolyForm Shield 1.0.0, in
+`docs/PROMPTS/artifacts/B2/G1.48/licence_decision_memo.json`. What remains of the item is the
+four-option memo that decision closes, and it unblocks `G1.49` and the rest of W5.
+
+### 10.5 The Studio sessions have one prerequisite
+
+No session in §10.2 runs until Claude installs a self-contained copy of the Studio on the workstation,
+outside `eustress/target/`, built from `installer/windows/eustress-engine.iss`. The same installer,
+once the founder approves publishing it, is what Muse downloads for R01. Two reasons for the local copy. A Studio launched
+from the build tree locks the binary every concurrent session is linking ("Access is denied, os error
+5"). And the computer-use tool cannot attach to a cargo-launched binary, while an installed copy is an
+ordinary application it can be granted. The install costs one release build, so it takes the single
+build slot like any other item.

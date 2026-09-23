@@ -828,8 +828,10 @@ about the decoupling; no counter, no watchpoint, and no error surfaces it.
 
 **Where sim values are read.** `eustress/crates/engine/src/simulation/plugin.rs` holds
 `SimValuesResource`; the MCP tool `get_sim_value` reads from it, and `set_sim_value`
-(`eustress/crates/tools/src/simulation_tools.rs` line 115) writes through
-`<universe>/.eustress/sim-commands.jsonl`, which the engine drains on its next sim tick. Watchpoints
+(`eustress/crates/tools/src/simulation_tools.rs` line 115) writes through the target engine's
+command queue, `<workspace>/.eustress/instances/<pid>/sim-commands.jsonl` (the Universe's
+`<universe>/.eustress/sim-commands.jsonl` for an engine without an instance record), which the
+engine drains on its next sim tick. Watchpoints
 live in `eustress/crates/common/src/simulation/watchpoint.rs` (`WatchPoint::record(value, time_s,
 tick)`).
 
@@ -4842,8 +4844,9 @@ Physics is **Avian**; never Rapier. Units are meter-native. Licence: PolyForm Sh
   shortcuts `latest` / `latest-1`); optional `higher_is_better` (array of metric keys). Loads both
   JSON files from `<universe_root>/.eustress/experiments/` and reports per-metric deltas.
 - `list_experiments` — same file, line 1889.
-- `set_sim_value` — same file, line 115. Queues the write to
-  `<universe>/.eustress/sim-commands.jsonl`; the engine drains it on the next sim tick.
+- `set_sim_value` — same file, line 115. Queues the write on the target engine's command queue
+  (`<workspace>/.eustress/instances/<pid>/sim-commands.jsonl`; pass `pid` to pick the engine when
+  several share a Universe); the engine drains it on the next sim tick.
 - `feedback_diff` — `eustress/crates/tools/src/git_tools.rs` line 467. **This is a git diff, not a
   telemetry diff.** Do not use it to compare experiment outputs; `compare_runs` is the tool for that.
 

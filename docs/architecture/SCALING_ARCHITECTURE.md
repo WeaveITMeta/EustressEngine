@@ -54,7 +54,7 @@ Bulk surfaces (Roblox import, procedural spawners) likewise write rkyv cores dir
 [`material_sync.rs`](eustress/crates/engine/src/material_sync.rs) is the authoritative visual-property pipeline and must keep producing **pixel-identical** results. Its semantics, which any scaling refactor must reproduce exactly:
 - registry-material lookup by `material_name` (custom `.mat.toml`) then enum preset; texture-Repeat patching (seam fix);
 - `color`+`transparency` → `base_color` alpha + `AlphaMode::Blend`; `reflectance` → boosted `metallic` and reduced `perceptual_roughness`; `Neon` → emissive; `Glass` → specular/diffuse transmission + IOR;
-- per-axis `uv_transform` tiling from `BasePart.size` (and `texture_repeat` override);
+- texture scale: a textured block, wedge or corner wedge is drawn from a copy of its primitive sized to the part, whose UVs are in world metres (one tile per 4 m) under an identity `uv_transform`, so every face matches and parts of one look share one material; other shapes get a per-axis `uv_transform` from `BasePart.size`; a non-default `texture_repeat` sets explicit tile counts instead;
 - `cast_shadow`/transparency-driven `NotShadowCaster` opt-out — a first-class perf knob at 50K+ parts.
 
 **The tension, stated plainly:** sync currently does `materials.add(cloned)` — **one unique `StandardMaterial` (and bind group) per entity.** That is correctness-fine but is exactly the cost the scaling plan must remove. So C1 and C2 are coupled: defaulting inserts to `BinaryEcs` (C1) only pays off if the material path is **instanced** (bindless / GPU material-index — §5 A-render-1/2). The refactor:

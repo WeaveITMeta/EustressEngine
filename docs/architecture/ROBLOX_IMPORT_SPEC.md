@@ -609,14 +609,13 @@ Rock      = [0.50, 0.45, 0.40]
 # … etc., 23 entries
 ```
 
-The Eustress terrain renderer reads this block on chunk-mesh generation
-and applies the per-source-material color as a vertex tint on top of the
-Eustress material's base color. Implementation hook:
-`eustress-common::terrain::material::TerrainMaterialConfig` already has a
-`textures: [Option<Handle<Image>>; 8]` slot — we add a parallel `tints:
-[Option<Color>; 8]` slot (sourced from `MaterialColors`) that the shader
-multiplies in. This is a small additive change to `material.rs` and the
-splat shader.
+The Eustress terrain renderer applies each per-source-material color as
+the tint of that material's slot. Implementation hook: the terrain
+material slot table (`eustress-common::terrain::material_slots`), whose
+`MaterialSlot::tint` the textured terrain shader multiplies into the
+slot's albedo and whose swatch colours the vertex-colour fallback. The
+tints come from `MaterialColors`, one per built-in slot the importer maps
+a source material onto.
 
 ### 6.5 Water layer
 

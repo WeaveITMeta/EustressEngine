@@ -53,8 +53,8 @@ safety thresholds (voltage, temperature, dendrite risk).
 ### Expected Behaviour
 
 1. User (or agent) calls `run_simulation(time_scale=10.0)`.
-2. Engine-side `drain_sim_commands` reads `sim-commands.jsonl` and
-   transitions `PlayModeState` to `Playing`.
+2. Engine-side `drain_sim_command_queues` reads the command from its
+   `sim-commands.jsonl` queue and transitions `PlayModeState` to `Playing`.
 3. `write_telemetry_log` begins appending 1 Hz JSONL entries.
 4. `runtime-snapshot.json` updates at 4 Hz with sim values + ECS schema.
 5. `get_simulation_state` returns `play_mode: "Playing"` with live values.
