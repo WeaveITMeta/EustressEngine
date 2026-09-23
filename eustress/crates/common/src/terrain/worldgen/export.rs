@@ -1,6 +1,6 @@
-//! Export a generated world into a Space's on-disk terrain model —
-//! `Workspace/Terrain/_terrain.toml` + `chunks/x{cx}_z{cz}.r16` +
-//! `splatmap/x{cx}_z{cz}.png` — in EXACTLY the format
+//! Export a generated world into a Space's on-disk terrain model
+//! (`Workspace/Terrain/_terrain.toml` + `chunks/x{cx}_z{cz}.r16` +
+//! `matmap/x{cx}_z{cz}.png`) in EXACTLY the format
 //! [`crate::terrain::toml_loader`] reads back, so the existing engine
 //! renderer/streamer consumes generated worlds with zero new code.
 //!
@@ -33,33 +33,44 @@
 //!   and seam-free by construction.
 //! - **R16**: exactly `R*R` little-endian `u16`, row-major z-then-x, no
 //!   header (`load_chunk_r16` rejects any other size). Stored value is
-//!   NORMALIZED height: `u16 = round(clamp(h / height_scale, 0, 1) * 65535)`
-//!   — written through [`save_chunk_r16`] itself for bit-parity with the
-//!   loader's inverse (`raw/65535`, then world-Y `= value * height_scale`
-//!   at mesh time). The toml `height_scale` is the ceiling of the
-//!   generated band: `spec.sea_level + spec.height_scale`.
-//! - **Splatmap**: RGBA8 PNG per chunk, `R x R`, pixel `(x, z)` with `z` =
-//!   image row (same row-major order as the R16). Channels are the 4
-//!   splat buckets in `splat_cache` RGBA order `[grass, rock, dirt, snow]`
-//!   (`config.rs`); all 23 materials project onto them via
-//!   [`TerrainMaterial::splat_bucket`]. Channel bytes always sum to
-//!   exactly 255; a fixed 3x3 kernel (1-2-1 / 2-4-2 / 1-2-1) over
-//!   neighbouring cache pixels softens material transitions
-//!   deterministically. Requires the `image` feature (default via
-//!   `geotiff`); without it the export writes R16 + toml only and reports
-//!   `splatmaps_written = 0`. The palette slots are bucket-named
-//!   Grass/Rock/Dirt/Snow — never the `create_default_terrain_toml`
-//!   example, which wrongly puts Sand at slot 2.
-//! - The 23-material identity is preserved separately in
-//!   [`super::GeneratedRegion::materials`]; the splatmap is its lossy
-//!   4-bucket projection for today's renderer (per material.rs Wave 9.C
-//!   docs).
+//!   height NORMALIZED across the band `[height_offset, height_offset +
+//!   height_scale]`:
+//!   `u16 = round(clamp((h - height_offset) / height_scale, 0, 1) * 65535)`,
+//!   written through [`save_chunk_r16`] itself for bit-parity with the
+//!   loader's inverse (`raw/65535`, then world-Y
+//!   `= height_offset + value * height_scale` at mesh time, via
+//!   `TerrainConfig::world_height`). A generated world writes
+//!   `height_offset = min(0, lowest generated sample)` and
+//!   `height_scale = spec.sea_level + spec.height_scale - height_offset`,
+//!   so seabeds below Y = 0 keep their depth; a flat plate takes both from
+//!   its [`FlatSpec`].
+//! - **Matmap**: RGBA8 PNG per chunk, `R x R`, pixel `(x, z)` with `z` =
+//!   image row (same row-major order as the R16). Each pixel is one
+//!   material cell `[id_a, id_b, blend_b, 0]` (see the `material` module
+//!   docs): the two heaviest of the region materials under a fixed 3x3
+//!   kernel (1-2-1 / 2-4-2 / 1-2-1) over neighbouring cache pixels, ties to
+//!   the lower id, so material transitions soften deterministically while
+//!   every cell keeps the true ids of
+//!   [`super::GeneratedRegion::materials`] (built-in slots 0..=22). Encoded
+//!   by [`crate::terrain::toml_loader::encode_material_tile_png`], the
+//!   encoder Save uses. Requires the `image` feature (default via
+//!   `geotiff`); without it the export writes R16 + toml only, reports
+//!   `matmaps_written = 0`, and the loader reads every cell as Grass.
+//! - Stale `matmap/` PNGs and any legacy `splatmap/` PNGs a previous
+//!   export or build left are removed first, so the loader cannot convert
+//!   an old splatmap over the new ground.
+//! - **Default layers**: with `WorldSpec::default_layers` on (the default)
+//!   the export also writes the world's default `TerrainScatter` and
+//!   `TerrainWaterBody` instances into `Layers/`, in the format Insert
+//!   writes (see [`super::default_layers`]). Every export, the flat plate's
+//!   included, first removes the layers an earlier export wrote; the other
+//!   layers in the folder stay.
 //!
 //! ## Load trigger — INTEGRATOR NOTE
 //!
 //! The engine currently has NO code path that reads this format on Space
 //! open: `load_terrain_toml` / `load_chunks_from_disk` /
-//! `chunk_splatmap_path` have zero callers, so an exported
+//! `chunk_matmap_path` have zero callers, so an exported
 //! `Workspace/Terrain/` directory is inert until one of these lands:
 //! (a) in-session, spawn it the way `handle_import_terrain` (engine
 //! `ui/spawn_events.rs`) does — `TerrainTomlFile::to_terrain_config()`,
@@ -81,12 +92,13 @@ use std::fs;
 use std::path::Path;
 
 use super::pipeline::{WorldOutput, WorldSpec};
-use crate::terrain::toml_loader::{chunk_r16_path, save_chunk_r16};
+use crate::terrain::material::{TerrainMaterial, MATERIAL_SLOT_NONE};
+use crate::terrain::toml_loader::{chunk_r16_path, save_chunk_r16, LEGACY_SPLATMAP_DIR, MATMAP_DIR};
 
 #[cfg(feature = "image")]
-use crate::terrain::material::TerrainMaterial;
+use crate::terrain::material::{canonical_material_cell, material_cell, MaterialCell};
 #[cfg(feature = "image")]
-use crate::terrain::toml_loader::chunk_splatmap_path;
+use crate::terrain::toml_loader::{chunk_matmap_path, encode_material_tile_png};
 
 /// Samples per chunk side written to disk (`[terrain] chunk_resolution`).
 /// 64 is the loader default and keeps every R16 at exactly 8 KiB
@@ -105,7 +117,11 @@ const MAX_HALF_EXTENT: u32 = 32;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExportSummary {
     pub chunks_written: usize,
-    pub splatmaps_written: usize,
+    pub matmaps_written: usize,
+    /// Default layer instances written into `Workspace/Terrain/Layers` (see
+    /// [`super::default_layers`]); 0 when `WorldSpec::default_layers` is off
+    /// and for a flat plate.
+    pub layers_written: usize,
     /// Total bytes written across all files.
     pub bytes_written: u64,
 }
@@ -125,8 +141,11 @@ pub struct ExportGrid {
     pub chunk_resolution: u32,
     /// Chunk coordinates span `[-half_extent, +half_extent]` on both axes.
     pub half_extent: u32,
-    /// The `[terrain] height_scale` written to toml — the ceiling of the
-    /// generated height band, `spec.sea_level + spec.height_scale`.
+    /// The `[terrain] height_scale` written to toml: the range R16 values
+    /// span above the `height_offset` written beside it. [`plan_export_grid`]
+    /// returns the band ceiling measured from Y = 0,
+    /// `spec.sea_level + spec.height_scale`, and [`export_to_space`] widens
+    /// it downward by the world's floor.
     pub height_scale: f32,
 }
 
@@ -219,15 +238,29 @@ pub fn plan_export_grid(spec: &WorldSpec) -> Result<ExportGrid, String> {
     })
 }
 
+/// World Y of the generated band's floor: the lowest region sample, capped
+/// at 0 so a world with no ground below Y = 0 keeps offset 0 and exports
+/// byte-identically. Bilinear resampling never undershoots its lowest
+/// input, so no cache pixel can fall below this.
+fn world_height_floor(world: &WorldOutput) -> f32 {
+    world
+        .regions
+        .iter()
+        .flat_map(|r| r.heights.iter().copied())
+        .filter(|h| h.is_finite())
+        .fold(0.0f32, f32::min)
+}
+
 /// Smallest `N` with `(2N+1) * size >= extent`, floored at 1.
 fn half_extent_for(extent: f64, size: f64) -> u32 {
     let q = extent / size;
     ((q - 1.0) / 2.0).ceil().max(1.0) as u32
 }
 
-/// Bucket-named material palette written alongside the terrain: slot index
-/// == splat channel (`[grass, rock, dirt, snow]`). Roughness values are
-/// fixed constants so the files are byte-deterministic.
+/// Material palette written alongside the terrain: the first four built-in
+/// material slots (Grass 0, Rock 1, Dirt 2, Snow 3, their `TerrainMaterial`
+/// discriminants). Roughness values are fixed constants so the files are
+/// byte-deterministic.
 const MATERIAL_PALETTE: [(&str, &str, f32); 4] = [
     ("Grass", "grass", 0.85),
     ("Rock", "rock", 0.7),
@@ -239,8 +272,12 @@ const MATERIAL_PALETTE: [(&str, &str, f32); 4] = [
 /// format contract. Deterministic: same world => byte-identical files.
 pub fn export_to_space(world: &WorldOutput, space_root: &Path) -> Result<ExportSummary, String> {
     let spec = &world.spec;
-    let grid = plan_export_grid(spec)?;
+    let mut grid = plan_export_grid(spec)?;
     let sampler = WorldSampler::new(world)?;
+    let floor = world_height_floor(world);
+    // Band = [floor, sea_level + height_scale]; plan_export_grid validated
+    // the ceiling > 0 >= floor.
+    grid.height_scale -= floor;
 
     let terrain_dir = space_root.join("Workspace").join("Terrain");
     let chunks_dir = terrain_dir.join("chunks");
@@ -250,25 +287,29 @@ pub fn export_to_space(world: &WorldOutput, space_root: &Path) -> Result<ExportS
     fs::create_dir_all(&materials_dir)
         .map_err(|e| format!("export: failed to create {:?}: {}", materials_dir, e))?;
     #[cfg(feature = "image")]
-    let splat_dir = {
-        let dir = terrain_dir.join("splatmap");
+    {
+        let dir = terrain_dir.join(MATMAP_DIR);
         fs::create_dir_all(&dir)
             .map_err(|e| format!("export: failed to create {:?}: {}", dir, e))?;
-        dir
-    };
+    }
 
     // Hygiene: drop stale chunk files a previous, larger export left behind
     // so the directory afterwards contains EXACTLY this export. (Stale
     // out-of-range chunks are bounds-dropped by the loader anyway, so a
-    // failed removal is non-fatal.)
+    // failed removal is non-fatal.) The previous terrain's volume bricks go
+    // too, or its caves would be carved into the new ground on load, and so
+    // do its material maps, legacy splatmaps included.
     clear_stale_files(&chunks_dir, "r16");
-    #[cfg(feature = "image")]
-    clear_stale_files(&splat_dir, "png");
+    clear_stale_material_maps(&terrain_dir);
+    clear_stale_files(&crate::terrain::volume::volume_dir(&terrain_dir), "vbk");
 
     let mut summary = ExportSummary::default();
 
     // ── Master config + palette (fixed templates, stable field order) ──
-    let toml_text = render_terrain_toml(&grid, spec.seed as u32, spec.sea_level as f32);
+    // The band floor is the lowest generated sample, so seabeds and shelves
+    // below Y = 0 survive instead of clamping flat at 0. The per-chunk
+    // heights below are measured up from the same floor.
+    let toml_text = render_terrain_toml(&grid, spec.seed as u32, spec.sea_level as f32, floor);
     let toml_path = terrain_dir.join("_terrain.toml");
     fs::write(&toml_path, toml_text.as_bytes())
         .map_err(|e| format!("export: failed to write {:?}: {}", toml_path, e))?;
@@ -282,14 +323,13 @@ pub fn export_to_space(world: &WorldOutput, space_root: &Path) -> Result<ExportS
         summary.bytes_written += text.len() as u64;
     }
 
-    // ── Per-chunk heights (+ splatmaps) ──
+    // ── Per-chunk heights (+ material maps) ──
     // Every cache pixel samples the generated world at its exact fence-post
     // position — a pure global function of the pixel index, so the value is
     // identical no matter which chunk writes it: seam-free by construction.
     let coords = cache_pixel_coords(&grid);
     let res = grid.chunk_resolution as usize;
     let half = grid.half_extent as i64;
-    let ceiling = grid.height_scale;
 
     let mut heights = vec![0.0f32; res * res];
     for cz in -half..=half {
@@ -298,9 +338,10 @@ pub fn export_to_space(world: &WorldOutput, space_root: &Path) -> Result<ExportS
                 let gz = coords[((cz + half) as usize) * res + z];
                 for x in 0..res {
                     let gx = coords[((cx + half) as usize) * res + x];
-                    // save_chunk_r16 clamps to [0,1] and quantises exactly
-                    // like the loader's inverse expects.
-                    heights[z * res + x] = sampler.height_at(gx, gz) / ceiling;
+                    // Measured up from the band floor. save_chunk_r16 clamps
+                    // to [0,1] and quantises exactly like the loader's
+                    // inverse expects.
+                    heights[z * res + x] = (sampler.height_at(gx, gz) - floor) / grid.height_scale;
                 }
             }
             let r16_path = chunk_r16_path(&terrain_dir, cx as i32, cz as i32);
@@ -310,15 +351,24 @@ pub fn export_to_space(world: &WorldOutput, space_root: &Path) -> Result<ExportS
 
             #[cfg(feature = "image")]
             {
-                let png = encode_chunk_splat_png(&sampler, &coords, cx, cz, half, res)?;
-                let png_path = chunk_splatmap_path(&terrain_dir, cx as i32, cz as i32);
+                let cells = chunk_material_cells(&sampler, &coords, cx, cz, half, res);
+                let png = encode_material_tile_png(&cells, grid.chunk_resolution)
+                    .map_err(|e| format!("export: chunk x{cx}_z{cz}: {e}"))?;
+                let png_path = chunk_matmap_path(&terrain_dir, cx as i32, cz as i32);
                 fs::write(&png_path, &png)
                     .map_err(|e| format!("export: failed to write {:?}: {}", png_path, e))?;
-                summary.splatmaps_written += 1;
+                summary.matmaps_written += 1;
                 summary.bytes_written += png.len() as u64;
             }
         }
     }
+
+    // ── Default layers ──
+    // The layers a previous export wrote belong to the ground it wrote, so
+    // they are replaced even when this world asks for none.
+    let layers = super::default_layers::write_default_layers(world, &grid, space_root)?;
+    summary.layers_written = layers.written;
+    summary.bytes_written += layers.bytes_written;
 
     Ok(summary)
 }
@@ -336,12 +386,15 @@ pub fn export_to_space(world: &WorldOutput, space_root: &Path) -> Result<ExportS
 /// materials), nothing is simulated here: the heights are a constant, so the
 /// write returns in well under a second at the sizes the ribbon offers.
 ///
-/// ## Height floor
-/// The R16 format stores heights NORMALIZED to `[0, 1]` against
-/// `height_scale`, so a terrain surface can never sit below world Y = 0.
-/// A plate authored at `height_m = 0.0` is sculptable UPWARD only — Lower
-/// and Flatten clamp at the floor. Author it at `height_m > 0` to leave
-/// room to carve down into.
+/// ## Height band
+/// All heights here are world-space metres. The R16 format stores heights
+/// NORMALIZED to `[0, 1]` across the band `[height_offset, height_offset +
+/// height_scale]`, so the band is the room later sculpting has: Lower can
+/// dig down to `height_offset` and Raise can build up to the top of the
+/// band, and anything outside it is clamped when the chunks are saved. A
+/// plate at `height_m = 0.0` with `height_offset = -32.0` and
+/// `height_scale = 128.0` sits at world Y = 0 with 32 m to dig and 96 m to
+/// build.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FlatSpec {
     /// Chunk coordinates span `[-half_extent, +half_extent]` on both axes,
@@ -354,14 +407,19 @@ pub struct FlatSpec {
     pub chunk_size: f32,
     /// Samples per chunk side (R16 file = `chunk_resolution^2` u16).
     pub chunk_resolution: u32,
-    /// World Y the flat surface sits at. Must be in `[0, height_scale]`.
+    /// World Y the flat surface sits at. Must be inside the band:
+    /// `height_offset <= height_m <= height_offset + height_scale`.
     pub height_m: f32,
-    /// Vertical ceiling the R16 values normalize against — also the
-    /// headroom later sculpting can raise the surface to.
+    /// World Y of R16 value 0, the deepest later sculpting can dig.
+    /// Written to `[terrain] height_offset`.
+    pub height_offset: f32,
+    /// Range (metres) the R16 values span above `height_offset`, so the
+    /// top of the band is `height_offset + height_scale`.
     pub height_scale: f32,
-    /// Palette slot painted across the whole plate: 0 = Grass, 1 = Rock,
-    /// 2 = Dirt, 3 = Snow. Written as a one-hot splatmap; WITHOUT it the
-    /// mesher sees an all-zero splat cache and renders the plate black.
+    /// Material slot painted across the whole plate, written as a uniform
+    /// matmap: a built-in [`TerrainMaterial`] discriminant (0 = Grass, the
+    /// default, 1 = Rock, 13 = Basalt, ...) or a custom slot 23..=254. Any
+    /// id but `MATERIAL_SLOT_NONE`.
     pub material_slot: u8,
     /// Recorded in `[terrain] seed`. A flat plate's geometry does not use
     /// it; it seeds the mesher's macro colour variation.
@@ -375,8 +433,9 @@ impl Default for FlatSpec {
             chunk_size: 64.0,
             chunk_resolution: EXPORT_CHUNK_RESOLUTION,
             height_m: 0.0,
+            height_offset: 0.0,
             height_scale: 100.0,
-            material_slot: 0,
+            material_slot: TerrainMaterial::Grass as u8,
             seed: 0,
         }
     }
@@ -421,22 +480,31 @@ impl FlatSpec {
                 self.chunk_resolution
             ));
         }
-        if !(self.height_scale > 0.0) {
+        if !(self.height_scale > 0.0) || !self.height_scale.is_finite() {
             return Err(format!(
-                "flat export: height_scale {} must be positive (R16 values normalize against it)",
+                "flat export: height_scale {} must be positive and finite (R16 values normalize \
+                 against it)",
                 self.height_scale
             ));
         }
-        if !(self.height_m >= 0.0) || self.height_m > self.height_scale {
+        if !self.height_offset.is_finite() {
             return Err(format!(
-                "flat export: height_m {} outside [0, height_scale = {}] — the R16 format cannot \
-                 represent a surface below 0 or above the ceiling",
-                self.height_m, self.height_scale
+                "flat export: height_offset {} must be finite",
+                self.height_offset
             ));
         }
-        if self.material_slot > 3 {
+        let ceiling = self.height_offset + self.height_scale;
+        if !(self.height_m >= self.height_offset) || !(self.height_m <= ceiling) {
             return Err(format!(
-                "flat export: material_slot {} outside 0..=3 (the splatmap has four channels)",
+                "flat export: height_m {} outside the band [height_offset = {}, height_offset + \
+                 height_scale = {}]; the R16 format cannot represent a surface below the floor or \
+                 above the ceiling",
+                self.height_m, self.height_offset, ceiling
+            ));
+        }
+        if self.material_slot == MATERIAL_SLOT_NONE {
+            return Err(format!(
+                "flat export: material_slot {} is the \"no material\" id; pick a material slot 0..=254",
                 self.material_slot
             ));
         }
@@ -452,8 +520,9 @@ impl FlatSpec {
 /// Write a flat plate into `<space_root>/Workspace/Terrain/`.
 ///
 /// Deterministic: same spec in, byte-identical files out. Clears stale
-/// `.r16`/`.png` a previous, larger export left behind first, so the
-/// directory afterwards contains EXACTLY this plate.
+/// `.r16`/`.png` a previous, larger export left behind (legacy splatmaps
+/// included), and the previous terrain's `.vbk` volume bricks, first, so
+/// the directory afterwards contains EXACTLY this plate.
 pub fn export_flat_to_space(spec: &FlatSpec, space_root: &Path) -> Result<ExportSummary, String> {
     let grid = spec.grid()?;
 
@@ -465,22 +534,25 @@ pub fn export_flat_to_space(spec: &FlatSpec, space_root: &Path) -> Result<Export
     fs::create_dir_all(&materials_dir)
         .map_err(|e| format!("flat export: failed to create {:?}: {}", materials_dir, e))?;
     #[cfg(feature = "image")]
-    let splat_dir = {
-        let dir = terrain_dir.join("splatmap");
+    {
+        let dir = terrain_dir.join(MATMAP_DIR);
         fs::create_dir_all(&dir)
             .map_err(|e| format!("flat export: failed to create {:?}: {}", dir, e))?;
-        dir
-    };
+    }
 
     clear_stale_files(&chunks_dir, "r16");
-    #[cfg(feature = "image")]
-    clear_stale_files(&splat_dir, "png");
+    clear_stale_material_maps(&terrain_dir);
+    clear_stale_files(&crate::terrain::volume::volume_dir(&terrain_dir), "vbk");
+    // A generated world's default layers go with its ground: its lakes would
+    // otherwise flood their whole footprints on the flat plate. Layers the
+    // user made stay.
+    super::default_layers::clear_generated_layers(space_root);
 
     let mut summary = ExportSummary::default();
 
     // Sea level 0: the template writes `[water] enabled = false`, so a flat
     // plate never comes up with a water plane sitting over it.
-    let toml_text = render_terrain_toml(&grid, spec.seed, 0.0);
+    let toml_text = render_terrain_toml(&grid, spec.seed, 0.0, spec.height_offset);
     let toml_path = terrain_dir.join("_terrain.toml");
     fs::write(&toml_path, toml_text.as_bytes())
         .map_err(|e| format!("flat export: failed to write {:?}: {}", toml_path, e))?;
@@ -495,14 +567,18 @@ pub fn export_flat_to_space(spec: &FlatSpec, space_root: &Path) -> Result<Export
     }
 
     // Every sample is the same normalized height — `save_chunk_r16` quantises
-    // it exactly the way the loader's `raw / 65535.0` inverse expects.
+    // it exactly the way the loader's `raw / 65535.0` inverse expects. It is
+    // measured up from the band floor the toml records as `height_offset`.
     let res = grid.chunk_resolution as usize;
     let half = grid.half_extent as i64;
-    let normalized = spec.height_m / grid.height_scale;
+    let normalized = (spec.height_m - spec.height_offset) / grid.height_scale;
     let heights = vec![normalized; res * res];
 
+    // One uniform matmap serves every chunk: the whole plate is a single
+    // material slot.
     #[cfg(feature = "image")]
-    let png = encode_uniform_splat_png(spec.material_slot, res)?;
+    let png = encode_material_tile_png(&vec![material_cell(spec.material_slot); res * res], grid.chunk_resolution)
+        .map_err(|e| format!("flat export: {e}"))?;
 
     for cz in -half..=half {
         for cx in -half..=half {
@@ -513,10 +589,10 @@ pub fn export_flat_to_space(spec: &FlatSpec, space_root: &Path) -> Result<Export
 
             #[cfg(feature = "image")]
             {
-                let png_path = chunk_splatmap_path(&terrain_dir, cx as i32, cz as i32);
+                let png_path = chunk_matmap_path(&terrain_dir, cx as i32, cz as i32);
                 fs::write(&png_path, &png)
                     .map_err(|e| format!("flat export: failed to write {:?}: {}", png_path, e))?;
-                summary.splatmaps_written += 1;
+                summary.matmaps_written += 1;
                 summary.bytes_written += png.len() as u64;
             }
         }
@@ -525,29 +601,15 @@ pub fn export_flat_to_space(spec: &FlatSpec, space_root: &Path) -> Result<Export
     Ok(summary)
 }
 
-/// Encode a `res x res` RGBA8 splatmap that is one-hot on `slot` — the whole
-/// plate is a single material. Channel bytes sum to 255 per pixel, matching
-/// [`encode_chunk_splat_png`]'s contract.
-///
-/// Load-bearing, not cosmetic: `load_chunks_from_disk` sizes `splat_cache`
-/// whether or not PNGs exist, so the mesher's `has_splat` branch is taken
-/// either way — with no splatmap every weight is zero and the plate renders
-/// black.
-#[cfg(feature = "image")]
-fn encode_uniform_splat_png(slot: u8, res: usize) -> Result<Vec<u8>, String> {
-    let mut raw = vec![0u8; res * res * 4];
-    for px in raw.chunks_exact_mut(4) {
-        px[slot as usize] = 255;
-    }
-    let mut png = Vec::new();
-    {
-        use image::ImageEncoder;
-        let encoder = image::codecs::png::PngEncoder::new(&mut png);
-        encoder
-            .write_image(&raw, res as u32, res as u32, image::ExtendedColorType::Rgba8)
-            .map_err(|e| format!("flat export: failed to encode splat PNG: {e}"))?;
-    }
-    Ok(png)
+/// Remove the material maps a previous terrain left: every `matmap/*.png`,
+/// and every legacy `splatmap/*.png` with the directory itself, which no
+/// exporter writes and the loader would otherwise convert for any chunk
+/// whose matmap is missing. Best effort, like [`clear_stale_files`].
+fn clear_stale_material_maps(terrain_dir: &Path) {
+    clear_stale_files(&terrain_dir.join(MATMAP_DIR), "png");
+    let legacy = terrain_dir.join(LEGACY_SPLATMAP_DIR);
+    clear_stale_files(&legacy, "png");
+    let _ = fs::remove_dir(&legacy);
 }
 
 /// Generated-world coordinate (metres) sampled by each global cache pixel:
@@ -578,17 +640,19 @@ fn clear_stale_files(dir: &Path, ext: &str) {
 /// template: stable field order, no timestamps, `{:?}` float formatting
 /// (shortest round-trip, e.g. `256.0`).
 ///
-/// Takes the two scalars it actually writes rather than a whole
-/// [`WorldSpec`], so the flat-plate exporter ([`export_flat_to_space`])
-/// shares this one template instead of keeping a second copy that could
-/// drift out of sync with what the loader parses.
-fn render_terrain_toml(grid: &ExportGrid, seed: u32, sea_level: f32) -> String {
+/// Takes the scalars it actually writes rather than a whole [`WorldSpec`],
+/// so the flat-plate exporter ([`export_flat_to_space`]) shares this one
+/// template instead of keeping a second copy that could drift out of sync
+/// with what the loader parses. `height_offset` is the world Y of R16
+/// value 0 and must match the band the caller normalized its heights to.
+fn render_terrain_toml(grid: &ExportGrid, seed: u32, sea_level: f32, height_offset: f32) -> String {
     format!(
         r#"# Eustress Engine — Terrain Configuration
 # Generated by the worldgen exporter (deterministic: same world => identical bytes).
 # Heightmaps: chunks/x<cx>_z<cz>.r16 — chunk_resolution^2 little-endian u16,
-#   row-major z-then-x, normalized height (world Y = value/65535 * height_scale).
-# Splat weights: splatmap/x<cx>_z<cz>.png — RGBA channels = [grass, rock, dirt, snow].
+#   row-major z-then-x, normalized height
+#   (world Y = height_offset + value/65535 * height_scale).
+# Materials: matmap/x<cx>_z<cz>.png, RGBA8 per cell = [slot a, slot b, weight of b / 255, 0].
 # Chunk coords are SIGNED and CENTERED: cx, cz in [-N, +N] with
 #   N = ceil(view_distance / chunk_size). The loader re-derives N that way,
 #   so view_distance below is load-bearing — never edit it independently.
@@ -597,6 +661,7 @@ fn render_terrain_toml(grid: &ExportGrid, seed: u32, sea_level: f32) -> String {
 chunk_size = {chunk_size:?}
 chunk_resolution = {chunk_resolution}
 height_scale = {height_scale:?}
+height_offset = {height_offset:?}
 seed = {seed}
 water_level = {water_level:?}
 
@@ -610,7 +675,7 @@ levels = 4
 distances = [100.0, 200.0, 400.0, 800.0]
 
 [materials]
-# Slot index == splatmap channel: 0=R grass, 1=G rock, 2=B dirt, 3=A snow.
+# Slot = the material slot id matmap cells store: 0-22 built-in, 23-254 custom.
 
 [[materials.palette]]
 slot = 0
@@ -641,6 +706,7 @@ color = [0.1, 0.3, 0.6, 0.8]
         chunk_size = grid.chunk_size,
         chunk_resolution = grid.chunk_resolution,
         height_scale = grid.height_scale,
+        height_offset = height_offset,
         seed = seed,
         water_level = sea_level,
         view_distance = grid.view_distance(),
@@ -744,7 +810,6 @@ impl<'a> WorldSampler<'a> {
     }
 
     /// Material id at stitched global sample `(gi, gj)`.
-    #[cfg(feature = "image")]
     #[inline]
     fn grid_material(&self, gi: usize, gj: usize) -> u8 {
         let (rx, ix) = self.region_and_local(gi, self.world.spec.regions_x);
@@ -788,77 +853,104 @@ impl<'a> WorldSampler<'a> {
     }
 }
 
+/// A generated world stitched into one fence-post grid of `width x depth`
+/// samples `cell` metres apart, row-major (`j * width + i`): sample `(i, j)`
+/// sits at generated-world metres `(i * cell, j * cell)`, which the export
+/// places at engine `(i * cell - N * S, j * cell - N * S)`. Shared edge lines
+/// take the lower-index region's sample, like every read [`WorldSampler`]
+/// makes.
+pub(super) struct StitchedWorld {
+    pub(super) width: usize,
+    pub(super) depth: usize,
+    pub(super) cell: f64,
+    /// Height in metres per sample.
+    pub(super) heights: Vec<f32>,
+    /// `TerrainMaterial` discriminant per sample.
+    pub(super) materials: Vec<u8>,
+}
+
+/// Stitch `world`'s regions into one grid (see [`StitchedWorld`]).
+pub(super) fn stitch_world(world: &WorldOutput) -> Result<StitchedWorld, String> {
+    let sampler = WorldSampler::new(world)?;
+    let (width, depth) = (sampler.src_w_x, sampler.src_w_z);
+    let mut heights = Vec::with_capacity(width * depth);
+    let mut materials = Vec::with_capacity(width * depth);
+    for gj in 0..depth {
+        for gi in 0..width {
+            heights.push(sampler.grid_height(gi, gj));
+            materials.push(sampler.grid_material(gi, gj));
+        }
+    }
+    Ok(StitchedWorld { width, depth, cell: sampler.cell, heights, materials })
+}
+
 // ============================================================================
-// Splatmap encoding (feature "image")
+// Material-map cells (feature "image")
 // ============================================================================
 
-/// Encode one chunk's splatmap PNG: RGBA8, `res x res`, channels = splat
-/// buckets `[grass, rock, dirt, snow]`, bytes summing to exactly 255 per
-/// pixel. A fixed 3x3 kernel over neighbouring *cache* pixels (positions
-/// are global, so adjacent chunks blend identically at their border)
-/// softens one-hot material transitions.
+/// 3x3 smoothing kernel over neighbouring cache pixels; weights sum to 16.
 #[cfg(feature = "image")]
-fn encode_chunk_splat_png(
+const MATERIAL_KERNEL: [[u32; 3]; 3] = [[1, 2, 1], [2, 4, 2], [1, 2, 1]];
+
+/// One chunk's material cells, `res x res` row-major: each cache pixel's
+/// two heaviest region materials under [`MATERIAL_KERNEL`] (positions are
+/// global, so adjacent chunks blend identically at their border), via
+/// [`kernel_material_cell`]. The ids are the region's own
+/// `TerrainMaterial` discriminants, so no material collapses onto another.
+#[cfg(feature = "image")]
+fn chunk_material_cells(
     sampler: &WorldSampler<'_>,
     coords: &[f64],
     cx: i64,
     cz: i64,
     half: i64,
     res: usize,
-) -> Result<Vec<u8>, String> {
-    /// 3x3 smoothing kernel; weights sum to 16.
-    const KERNEL: [[u32; 3]; 3] = [[1, 2, 1], [2, 4, 2], [1, 2, 1]];
-    const KERNEL_SUM: u32 = 16;
-
+) -> Vec<MaterialCell> {
     let w = coords.len();
-    let mut raw = vec![0u8; res * res * 4];
+    let mut cells = Vec::with_capacity(res * res);
     for z in 0..res {
         let gp_z = ((cz + half) as usize) * res + z;
         for x in 0..res {
             let gp_x = ((cx + half) as usize) * res + x;
 
-            let mut weights = [0u32; 4];
-            for (dz, row) in KERNEL.iter().enumerate() {
+            // At most nine distinct materials sit under the kernel.
+            let mut weights = [(MATERIAL_SLOT_NONE, 0u32); 9];
+            let mut len = 0;
+            for (dz, row) in MATERIAL_KERNEL.iter().enumerate() {
                 let qz = (gp_z as i64 + dz as i64 - 1).clamp(0, (w - 1) as i64) as usize;
                 for (dx, &k) in row.iter().enumerate() {
                     let qx = (gp_x as i64 + dx as i64 - 1).clamp(0, (w - 1) as i64) as usize;
-                    let id = sampler.material_at(coords[qx], coords[qz]);
-                    weights[TerrainMaterial::from_u8_or_default(id).splat_bucket()] += k;
+                    let slot = TerrainMaterial::from_u8_or_default(sampler.material_at(coords[qx], coords[qz])).to_u8();
+                    match weights[..len].iter_mut().find(|(s, _)| *s == slot) {
+                        Some(entry) => entry.1 += k,
+                        None => {
+                            weights[len] = (slot, k);
+                            len += 1;
+                        }
+                    }
                 }
             }
-
-            // Scale 16 -> 255 with floors, then hand the rounding residue
-            // to the dominant bucket (ties: lowest index) so the channels
-            // sum to exactly 255. All-integer: deterministic.
-            let mut bytes = [0u8; 4];
-            let mut acc: u32 = 0;
-            for c in 0..4 {
-                let v = weights[c] * 255 / KERNEL_SUM;
-                bytes[c] = v as u8;
-                acc += v;
-            }
-            let mut win = 0usize;
-            for c in 1..4 {
-                if weights[c] > weights[win] {
-                    win = c;
-                }
-            }
-            bytes[win] += (255 - acc) as u8;
-
-            let o = (z * res + x) * 4;
-            raw[o..o + 4].copy_from_slice(&bytes);
+            cells.push(kernel_material_cell(&mut weights[..len]));
         }
     }
+    cells
+}
 
-    let mut png = Vec::new();
-    {
-        use image::ImageEncoder;
-        let encoder = image::codecs::png::PngEncoder::new(&mut png);
-        encoder
-            .write_image(&raw, res as u32, res as u32, image::ExtendedColorType::Rgba8)
-            .map_err(|e| format!("export: failed to encode splat PNG for chunk x{cx}_z{cz}: {e}"))?;
+/// The material cell for kernel weights `(slot, weight)`: the heaviest two
+/// (ties to the lower slot), `id_b` weighted by its share of the pair,
+/// floored so the blend stays at or under 127 and the heavier stays first.
+/// All-integer, so the export is deterministic. Reorders `weights`.
+#[cfg(feature = "image")]
+fn kernel_material_cell(weights: &mut [(u8, u32)]) -> MaterialCell {
+    weights.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    match &weights[..] {
+        [] => material_cell(TerrainMaterial::Grass.to_u8()),
+        [(a, _)] => material_cell(*a),
+        [(a, weight_a), (b, weight_b), ..] => {
+            let blend = (*weight_b * 255 / (*weight_a + *weight_b)) as u8;
+            canonical_material_cell(*a, *b, blend)
+        }
     }
-    Ok(png)
 }
 
 // ============================================================================
@@ -894,6 +986,7 @@ mod tests {
             height_scale: 120.0,
             wind_dx: 1.0,
             wind_dz: 0.25,
+            default_layers: true,
         };
         let mut regions = Vec::new();
         let mut recipes = Vec::new();
@@ -996,15 +1089,15 @@ mod tests {
         }
         #[cfg(feature = "image")]
         {
-            assert_eq!(summary.splatmaps_written, 9);
+            assert_eq!(summary.matmaps_written, 9);
             for cz in -1..=1 {
                 for cx in -1..=1 {
-                    assert!(toml_loader::chunk_splatmap_path(&terrain, cx, cz).is_file());
+                    assert!(toml_loader::chunk_matmap_path(&terrain, cx, cz).is_file());
                 }
             }
         }
         #[cfg(not(feature = "image"))]
-        assert_eq!(summary.splatmaps_written, 0);
+        assert_eq!(summary.matmaps_written, 0);
 
         assert_eq!(
             summary.bytes_written,
@@ -1022,11 +1115,17 @@ mod tests {
         let terrain = root.join("Workspace").join("Terrain");
 
         let parsed = toml_loader::load_terrain_toml(&terrain.join("_terrain.toml")).unwrap();
-        let grid = plan_export_grid(&world.spec).unwrap();
+        let mut grid = plan_export_grid(&world.spec).unwrap();
+        let floor = world_height_floor(&world);
+        grid.height_scale -= floor;
 
         assert_eq!(parsed.terrain.chunk_resolution, grid.chunk_resolution);
         assert_eq!(parsed.terrain.chunk_size, grid.chunk_size);
         assert_eq!(parsed.terrain.height_scale, grid.height_scale);
+        assert_eq!(
+            parsed.terrain.height_offset, floor,
+            "generated worlds normalize against a band whose floor is their lowest sample, capped at 0"
+        );
         assert_eq!(parsed.terrain.seed, 42);
         assert_eq!(parsed.terrain.water_level, 0.0);
         assert_eq!(parsed.water.sea_level, 0.0);
@@ -1039,8 +1138,8 @@ mod tests {
         let derived = (parsed.streaming.view_distance / parsed.terrain.chunk_size).ceil() as u32;
         assert_eq!(derived, grid.half_extent);
 
-        // Palette: slot index == splat channel, bucket-named (NOT the
-        // create_default_terrain_toml example, which puts Sand at slot 2).
+        // Palette: the first four built-in material slots, named as their
+        // `TerrainMaterial` discriminants are.
         let slots: Vec<(u8, &str)> = parsed
             .materials
             .palette
@@ -1065,7 +1164,9 @@ mod tests {
         export_to_space(&world, &root).unwrap();
         let terrain = root.join("Workspace").join("Terrain");
 
-        let grid = plan_export_grid(&world.spec).unwrap();
+        let mut grid = plan_export_grid(&world.spec).unwrap();
+        let floor = world_height_floor(&world);
+        grid.height_scale -= floor;
         let sampler = WorldSampler::new(&world).unwrap();
         let coords = cache_pixel_coords(&grid);
         let res = grid.chunk_resolution as usize;
@@ -1082,8 +1183,8 @@ mod tests {
                 let gz = coords[((cz + half) as usize) * res + z];
                 for x in 0..res {
                     let gx = coords[((cx + half) as usize) * res + x];
-                    let expected = sampler.height_at(gx, gz).clamp(0.0, grid.height_scale);
-                    let reconstructed = loaded[z * res + x] * grid.height_scale;
+                    let expected = sampler.height_at(gx, gz).clamp(floor, floor + grid.height_scale);
+                    let reconstructed = floor + loaded[z * res + x] * grid.height_scale;
                     assert!(
                         (reconstructed - expected).abs() <= tolerance,
                         "chunk x{cx}_z{cz} pixel ({x},{z}): loaded {reconstructed} vs sampled {expected}"
@@ -1100,10 +1201,62 @@ mod tests {
                 .unwrap();
         let origin_height = world.region(0, 0).heights[0];
         assert!(
-            (loaded[0] * grid.height_scale - origin_height).abs() <= tolerance,
+            (floor + loaded[0] * grid.height_scale - origin_height).abs() <= tolerance,
             "min-corner pixel must be the world origin sample: {} vs {origin_height}",
-            loaded[0] * grid.height_scale
+            floor + loaded[0] * grid.height_scale
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn seabed_below_zero_survives_the_export() {
+        let world = test_world(3, 1, 256.0, 65, 0);
+        let floor = world_height_floor(&world);
+        // A world with no ground below Y = 0 would leave nothing to check;
+        // then the floor is 0 and the export matches the unshifted band.
+        if floor >= 0.0 {
+            assert_eq!(floor, 0.0);
+            return;
+        }
+        let root = temp_dir("seabed");
+        export_to_space(&world, &root).unwrap();
+        let terrain = root.join("Workspace").join("Terrain");
+
+        let mut grid = plan_export_grid(&world.spec).unwrap();
+        grid.height_scale -= floor;
+        let sampler = WorldSampler::new(&world).unwrap();
+        let coords = cache_pixel_coords(&grid);
+        let res = grid.chunk_resolution as usize;
+        let half = grid.half_extent as i64;
+        let tolerance = grid.height_scale / 65535.0 * 0.5 + grid.height_scale * 1e-6;
+
+        // The deepest written pixel must reconstruct below Y = 0, at its
+        // sampled depth, instead of clamping flat at 0.
+        let mut deepest: Option<(f32, f32)> = None;
+        for cz in -half..=half {
+            for cx in -half..=half {
+                let path = toml_loader::chunk_r16_path(&terrain, cx as i32, cz as i32);
+                let loaded = toml_loader::load_chunk_r16(&path, grid.chunk_resolution).unwrap();
+                for z in 0..res {
+                    let gz = coords[((cz + half) as usize) * res + z];
+                    for x in 0..res {
+                        let gx = coords[((cx + half) as usize) * res + x];
+                        let sampled = sampler.height_at(gx, gz);
+                        if deepest.map_or(true, |(s, _)| sampled < s) {
+                            deepest = Some((sampled, floor + loaded[z * res + x] * grid.height_scale));
+                        }
+                    }
+                }
+            }
+        }
+        let (sampled, reconstructed) = deepest.expect("the export wrote pixels");
+        if sampled < 0.0 {
+            assert!(reconstructed < 0.0, "seabed pixel sampled at {sampled} reloaded at {reconstructed}");
+            assert!(
+                (reconstructed - sampled).abs() <= tolerance,
+                "seabed pixel sampled at {sampled} reloaded at {reconstructed}"
+            );
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1142,44 +1295,105 @@ mod tests {
 
     #[cfg(feature = "image")]
     #[test]
-    fn splatmap_channels_are_bucket_weights_summing_to_255() {
-        // Uniform Sand(4) world: bucket 2 (dirt) one-hot everywhere, even
-        // after smoothing (all neighbours agree).
-        let world = test_world(3, 1, 256.0, 65, 4);
-        let root = temp_dir("splat_uniform");
+    fn matmap_cells_carry_the_region_material_ids() {
+        use std::collections::BTreeMap;
+
+        // Uniform Sand (4) world: every cell is Sand alone, even after the
+        // kernel (all neighbours agree), not a bucket it used to share.
+        let world = test_world(3, 1, 256.0, 65, TerrainMaterial::Sand.to_u8());
+        let root = temp_dir("matmap_uniform");
         export_to_space(&world, &root).unwrap();
         let terrain = root.join("Workspace").join("Terrain");
-        let img = image::open(toml_loader::chunk_splatmap_path(&terrain, 0, 0))
+        let img = image::open(toml_loader::chunk_matmap_path(&terrain, 0, 0))
             .unwrap()
             .to_rgba8();
         assert_eq!(img.dimensions(), (64, 64));
         for pixel in img.pixels() {
-            assert_eq!(
-                pixel.0,
-                [0, 0, 255, 0],
-                "uniform Sand must be one-hot in the dirt bucket (channel B)"
-            );
+            assert_eq!(pixel.0, material_cell(TerrainMaterial::Sand.to_u8()), "uniform Sand stays Sand");
         }
         std::fs::remove_dir_all(&root).ok();
 
-        // Mixed materials (cycling all 23 ids): channels still sum to
-        // exactly 255 on every pixel thanks to residue redistribution.
+        // Every one of the 23 ids, cycling per source sample: each cell must
+        // be the two heaviest region materials under the kernel at that
+        // cache pixel, counted here independently of the exporter.
         let mut world = test_world(2, 1, 256.0, 65, 0);
         for region in &mut world.regions {
             for (i, m) in region.materials.iter_mut().enumerate() {
                 *m = (i % 23) as u8;
             }
         }
-        let root = temp_dir("splat_mixed");
-        export_to_space(&world, &root).unwrap();
+        let root = temp_dir("matmap_mixed");
+        let summary = export_to_space(&world, &root).unwrap();
         let terrain = root.join("Workspace").join("Terrain");
-        let img = image::open(toml_loader::chunk_splatmap_path(&terrain, 0, 0))
-            .unwrap()
-            .to_rgba8();
-        for pixel in img.pixels() {
-            let sum: u32 = pixel.0.iter().map(|&b| b as u32).sum();
-            assert_eq!(sum, 255, "splat weights must sum to exactly 255");
+        let grid = plan_export_grid(&world.spec).unwrap();
+        let sampler = WorldSampler::new(&world).unwrap();
+        let coords = cache_pixel_coords(&grid);
+        let res = grid.chunk_resolution as usize;
+        let half = grid.half_extent as i64;
+        let w = coords.len();
+        let mut seen: std::collections::BTreeSet<u8> = std::collections::BTreeSet::new();
+        for (cx, cz) in [(0i64, 0i64), (-1, 1)] {
+            let img = image::open(toml_loader::chunk_matmap_path(&terrain, cx as i32, cz as i32))
+                .unwrap()
+                .to_rgba8();
+            for z in 0..res {
+                for x in 0..res {
+                    let gz = ((cz + half) as usize) * res + z;
+                    let gx = ((cx + half) as usize) * res + x;
+                    let mut counts: BTreeMap<u8, u32> = BTreeMap::new();
+                    for (dz, row) in [[1u32, 2, 1], [2, 4, 2], [1, 2, 1]].iter().enumerate() {
+                        for (dx, k) in row.iter().enumerate() {
+                            let qz = (gz as i64 + dz as i64 - 1).clamp(0, w as i64 - 1) as usize;
+                            let qx = (gx as i64 + dx as i64 - 1).clamp(0, w as i64 - 1) as usize;
+                            *counts.entry(sampler.material_at(coords[qx], coords[qz])).or_default() += k;
+                        }
+                    }
+                    let mut ranked: Vec<(u8, u32)> = counts.into_iter().collect();
+                    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                    let expected = match ranked.as_slice() {
+                        [(a, _)] => material_cell(*a),
+                        [(a, wa), (b, wb), ..] => canonical_material_cell(*a, *b, (wb * 255 / (wa + wb)) as u8),
+                        [] => unreachable!("the kernel always sees nine samples"),
+                    };
+                    let cell = img.get_pixel(x as u32, z as u32).0;
+                    assert_eq!(cell, expected, "chunk x{cx}_z{cz} pixel ({x}, {z})");
+                    assert!(cell[0] < 23 && (cell[1] < 23 || cell[1] == MATERIAL_SLOT_NONE));
+                    seen.insert(cell[0]);
+                }
+            }
         }
+        assert!(seen.len() > 4, "the matmap keeps more than the four old buckets: {seen:?}");
+
+        // The loader reads the cells back exactly.
+        let parsed = toml_loader::load_terrain_toml(&terrain.join("_terrain.toml")).unwrap();
+        let config = parsed.to_terrain_config();
+        let mut data = crate::terrain::TerrainData::procedural();
+        data.resize_cache(&config);
+        toml_loader::load_chunks_from_disk(&terrain, &config, &mut data);
+        let img = image::open(toml_loader::chunk_matmap_path(&terrain, 0, 0)).unwrap().to_rgba8();
+        let cache_w = data.cache_width as usize;
+        let (x0, z0) = (half as usize * res, half as usize * res);
+        for z in 0..res {
+            for x in 0..res {
+                assert_eq!(data.material_cache[(z0 + z) * cache_w + x0 + x], img.get_pixel(x as u32, z as u32).0);
+            }
+        }
+        assert_eq!(summary.matmaps_written, (grid.chunks_per_axis() * grid.chunks_per_axis()) as usize);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn exports_clear_a_previous_terrains_material_maps() {
+        let root = temp_dir("stale_materials");
+        let terrain = root.join("Workspace").join("Terrain");
+        // A legacy splatmap and an out-of-range matmap from an older terrain.
+        for dir in [LEGACY_SPLATMAP_DIR, MATMAP_DIR] {
+            std::fs::create_dir_all(terrain.join(dir)).unwrap();
+            std::fs::write(terrain.join(dir).join("x9_z9.png"), b"stale").unwrap();
+        }
+        export_flat_to_space(&FlatSpec { half_extent: 1, chunk_resolution: 16, ..Default::default() }, &root).unwrap();
+        assert!(!terrain.join(LEGACY_SPLATMAP_DIR).exists(), "no legacy splatmap outlives an export");
+        assert!(!terrain.join(MATMAP_DIR).join("x9_z9.png").exists());
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1251,12 +1465,16 @@ mod tests {
     #[test]
     fn flat_export_round_trips_to_a_dead_flat_surface() {
         let root = temp_dir("flat_round_trip");
+        // A surface BELOW world Y = 0, inside a band that reaches further
+        // down: the toml must carry the negative offset, or the plate
+        // reloads 32 m too high.
         let spec = FlatSpec {
             half_extent: 2,
             chunk_size: 64.0,
             chunk_resolution: 32,
-            height_m: 25.0,
-            height_scale: 100.0,
+            height_m: -12.5,
+            height_offset: -32.0,
+            height_scale: 128.0,
             material_slot: 0,
             seed: 7,
         };
@@ -1266,6 +1484,7 @@ mod tests {
         // Load back through the SAME path the engine hydrates with.
         let terrain = root.join("Workspace").join("Terrain");
         let toml = toml_loader::load_terrain_toml(&terrain.join("_terrain.toml")).unwrap();
+        assert_eq!(toml.terrain.height_offset, -32.0);
         let config = toml.to_terrain_config();
 
         // view_distance is load-bearing: the loader must re-derive N = 2, or
@@ -1273,7 +1492,8 @@ mod tests {
         assert_eq!(config.chunks_x, 2);
         assert_eq!(config.chunks_z, 2);
         assert_eq!(config.chunk_resolution, 32);
-        assert_eq!(config.height_scale, 100.0);
+        assert_eq!(config.height_scale, 128.0);
+        assert_eq!(config.height_offset, -32.0);
 
         let mut data = crate::terrain::TerrainData::procedural();
         data.resize_cache(&config);
@@ -1281,8 +1501,8 @@ mod tests {
         assert_eq!(loaded.len(), 25);
 
         // Every cache sample is the SAME height, and it is the authored one.
-        // (u16 quantisation: 25/100 * 65535 = 16383.75 -> 16384 -> 0.2500038.)
-        let expected = spec.height_m / spec.height_scale;
+        // (u16 quantisation: 19.5/128 * 65535 = 9983.85 -> 9984 -> 0.1523461.)
+        let expected = (spec.height_m - spec.height_offset) / spec.height_scale;
         let (mut lo, mut hi) = (f32::MAX, f32::MIN);
         for &h in &data.height_cache {
             lo = lo.min(h);
@@ -1295,37 +1515,63 @@ mod tests {
         );
         assert!(
             (lo - expected).abs() < 1.0 / 65535.0,
-            "plate height {lo} != authored {expected}"
+            "plate sample {lo} != authored {expected}"
         );
+
+        // And in world space: the loaded surface is where it was authored,
+        // within half a u16 quantum of the band.
+        let tolerance = 0.5 * spec.height_scale / 65535.0 + 1e-4;
+        let world = config.world_height(lo);
+        assert!(
+            (world - spec.height_m).abs() <= tolerance,
+            "plate reloaded at Y={world}, authored Y={}",
+            spec.height_m
+        );
+        let queried = crate::terrain::height_query::height_at_world(&config, &data, 10.0, -20.0);
+        assert!(
+            (queried - spec.height_m).abs() <= tolerance,
+            "height_at_world reads Y={queried}, authored Y={}",
+            spec.height_m
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
+    #[cfg(feature = "image")]
     #[test]
-    fn flat_export_writes_a_non_black_splatmap() {
-        // Regression: load_chunks_from_disk sizes splat_cache whether or not
-        // PNGs exist, so the mesher's has_splat branch is taken either way.
-        // Without splatmaps every weight is zero and the plate renders black.
-        let root = temp_dir("flat_splat");
+    fn flat_export_writes_a_uniform_matmap_of_its_slot() {
+        let root = temp_dir("flat_matmap");
+        let basalt = TerrainMaterial::Basalt.to_u8();
         let spec = FlatSpec {
             half_extent: 1,
             chunk_resolution: 16,
-            material_slot: 1, // Rock
+            material_slot: basalt,
             ..Default::default()
         };
         let summary = export_flat_to_space(&spec, &root).expect("flat export");
-        assert_eq!(summary.splatmaps_written, 9);
+        assert_eq!(summary.matmaps_written, 9);
 
         let terrain = root.join("Workspace").join("Terrain");
-        let img = image::open(toml_loader::chunk_splatmap_path(&terrain, 0, 0))
-            .expect("splat png")
-            .to_rgba8();
-        for px in img.pixels() {
-            let [r, g, b, a] = px.0;
-            assert_eq!(
-                u32::from(r) + u32::from(g) + u32::from(b) + u32::from(a),
-                255
-            );
-            assert_eq!(g, 255, "slot 1 (rock) should own the whole pixel");
+        for (cx, cz) in [(0, 0), (-1, 1), (1, -1)] {
+            let img = image::open(toml_loader::chunk_matmap_path(&terrain, cx, cz))
+                .expect("matmap png")
+                .to_rgba8();
+            assert_eq!(img.dimensions(), (16, 16));
+            assert!(img.pixels().all(|px| px.0 == material_cell(basalt)), "chunk x{cx}_z{cz}");
         }
+
+        // Loaded back, every cell of the plate is Basalt.
+        let config = toml_loader::load_terrain_toml(&terrain.join("_terrain.toml")).unwrap().to_terrain_config();
+        let mut data = crate::terrain::TerrainData::procedural();
+        data.resize_cache(&config);
+        assert_eq!(toml_loader::load_chunks_from_disk(&terrain, &config, &mut data).len(), 9);
+        assert!(data.has_material_layer());
+        assert!(data.material_cache.iter().all(|cell| *cell == material_cell(basalt)));
+
+        // A custom slot is written as it is.
+        export_flat_to_space(&FlatSpec { material_slot: 200, ..spec }, &root).unwrap();
+        let img = image::open(toml_loader::chunk_matmap_path(&terrain, 0, 0)).unwrap().to_rgba8();
+        assert!(img.pixels().all(|px| px.0 == material_cell(200)));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -1400,9 +1646,16 @@ mod tests {
         }
         .grid()
         .is_err());
-        // ...nor below world Y = 0.
+        // ...nor below the band floor (`height_offset`, 0 by default).
         assert!(FlatSpec {
             height_m: -1.0,
+            ..Default::default()
+        }
+        .grid()
+        .is_err());
+        // A non-finite offset has no band at all.
+        assert!(FlatSpec {
+            height_offset: f32::NAN,
             ..Default::default()
         }
         .grid()
@@ -1414,13 +1667,35 @@ mod tests {
         }
         .grid()
         .is_err());
-        // Only four splat channels exist.
+        // 255 is "no material", not a slot to paint a plate with; every
+        // other id, built-in or custom, is.
         assert!(FlatSpec {
-            material_slot: 4,
+            material_slot: MATERIAL_SLOT_NONE,
             ..Default::default()
         }
         .grid()
         .is_err());
+        for slot in [4u8, 22, 23, 254] {
+            assert!(FlatSpec { material_slot: slot, ..Default::default() }.grid().is_ok(), "slot {slot}");
+        }
         assert!(FlatSpec::default().grid().is_ok());
+        assert_eq!(FlatSpec::default().material_slot, TerrainMaterial::Grass.to_u8());
+    }
+
+    #[test]
+    fn flat_spec_accepts_any_surface_inside_a_band_below_zero() {
+        // The Studio preset's band: floor -32, ceiling -32 + 128 = 96.
+        let band = |height_m: f32| FlatSpec {
+            height_m,
+            height_offset: -32.0,
+            height_scale: 128.0,
+            ..Default::default()
+        };
+        for inside in [-32.0f32, -10.0, 0.0, 50.0, 96.0] {
+            assert!(band(inside).grid().is_ok(), "height_m {inside} is inside [-32, 96]");
+        }
+        for outside in [-32.5f32, -100.0, 96.5, 200.0] {
+            assert!(band(outside).grid().is_err(), "height_m {outside} is outside [-32, 96]");
+        }
     }
 }

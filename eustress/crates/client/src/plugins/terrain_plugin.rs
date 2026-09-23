@@ -4,10 +4,10 @@
 //! Viewer-only: No editing features, optimized for exploration at 60 FPS.
 //!
 //! ## Features
-//! - Async heightmap/splatmap loading
+//! - Async heightmap and material-map loading
 //! - Distance-based LOD with seamless transitions
 //! - Frustum culling for performance
-//! - Physics collisions (via Avian3D trimesh colliders)
+//! - Physics collisions (a static Avian3D heightfield per chunk, at full detail)
 //! - Multi-terrain support via TerrainId
 //!
 //! ## Usage

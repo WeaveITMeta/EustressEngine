@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- TerrainMaterialFill: rock painted on a hillside's steep face, grass on the gentle one. -->
+  <polygon points="1,14 7,3 15,14" fill="#64C896" stroke="#30A060" stroke-width="0.6"/>
+  <polygon points="7,3 10.5,7.8 8.8,14 1,14" fill="#8C8279" stroke="#5E554D" stroke-width="0.6"/>
+  <path d="M4 11 L5.5 10 M6 8 L7.4 7.2 M3 13 L4.6 12.1" stroke="#B8AFA6" stroke-width="0.6" stroke-linecap="round"/>
+</svg>

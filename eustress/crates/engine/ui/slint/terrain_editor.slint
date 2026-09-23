@@ -1,11 +1,23 @@
 // ============================================================================
 // Eustress Engine Studio - Terrain Panel
-// Terrain properties, chunk list, and import/export.
-// Brush tools and settings live in the Terrain ribbon tab toolbar only.
+// Paint material picker, terrain properties, chunk list, and import/export.
+// Brush tools and settings live in the Terrain ribbon tab toolbar; the Paint
+// brush settings there show the same material picker as a swatch grid.
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, ScrollView, Slider, ComboBox, LineEdit } from "std-widgets.slint";
 import { Theme, PanelHeader } from "theme.slint";
+
+// One terrain material slot for the pickers, pushed from Rust
+// (`sync_terrain_materials_to_slint`) off `TerrainMaterialSlots`: the slot
+// id the Paint brush lays down, its display name, the colour it reads as
+// from a distance, and whether the Space defines it (slots 23 and up).
+export struct TerrainMaterialSlotData {
+    slot-id: int,
+    name: string,
+    swatch: color,
+    custom: bool,
+}
 
 // Collapsible section header with chevron
 component SectionRow inherits Rectangle {
@@ -107,12 +119,105 @@ export component ChunkRow inherits Rectangle {
     }
 }
 
+// Material picker row: swatch, name, and a "Custom" tag for Space slots
+component MaterialRow inherits Rectangle {
+    in property <string> label: "";
+    in property <color> swatch;
+    in property <bool> custom: false;
+    in property <bool> selected: false;
+    callback clicked();
+
+    height: 24px;
+    background: root.selected ? Theme.selection-background :
+                row-touch.has-hover ? Theme.button-hover : transparent;
+
+    row-touch := TouchArea { clicked => { root.clicked(); } }
+
+    HorizontalBox {
+        padding-left: 16px;
+        padding-right: 8px;
+        spacing: 8px;
+
+        Rectangle {
+            width: 14px;
+            height: 14px;
+            background: root.swatch;
+            border-radius: 3px;
+            border-width: root.selected ? 2px : 1px;
+            border-color: root.selected ? Theme.accent-eustress : Theme.border-color;
+        }
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.label;
+            color: root.selected ? Theme.text-primary : Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        if root.custom: Text {
+            text: "Custom";
+            color: Theme.text-secondary;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Terrain layer insert button: the class's Explorer icon and a short name
+component LayerButton inherits Rectangle {
+    in property <string> label: "";
+    in property <image> icon;
+    callback clicked();
+
+    height: 28px;
+    horizontal-stretch: 1;
+    background: layer-touch.has-hover ? Theme.button-hover : Theme.button-background;
+    border-radius: 4px;
+
+    layer-touch := TouchArea { clicked => { root.clicked(); } }
+
+    HorizontalBox {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 6px;
+
+        Image {
+            width: 14px;
+            height: 14px;
+            source: root.icon;
+            image-fit: contain;
+            vertical-alignment: center;
+        }
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.label;
+            color: Theme.text-primary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
 export component TerrainEditor inherits Rectangle {
     // Properties
     in property <bool> has-terrain: false;
     in property <bool> edit-mode: false;
     in property <string> current-brush: "raise";
-    
+
+    // Paint material picker: every material slot, the slot the Paint brush
+    // lays down (shown selected) and its name.
+    in property <[TerrainMaterialSlotData]> materials: [];
+    in property <int> paint-material: 0;
+    in property <string> paint-material-name: "Grass";
+    // The built-in material the picked slot starts from. "Add material"
+    // copies only this base, not the slot's own tint, tiling or textures.
+    in property <string> paint-material-base: "Grass";
+    in-out property <string> new-material-name: "";
+
     // Terrain global properties (from _terrain.toml)
     in property <string> terrain-size: "512";
     in property <string> terrain-chunk-size: "64";
@@ -129,6 +234,8 @@ export component TerrainEditor inherits Rectangle {
     in property <string> worldgen-progress: "";
 
     // Section expand states
+    in-out property <bool> section-materials-expanded: true;
+    in-out property <bool> section-layers-expanded: true;
     in-out property <bool> section-properties-expanded: true;
     in-out property <bool> section-chunks-expanded: true;
     in-out property <bool> section-import-export-expanded: true;
@@ -144,7 +251,10 @@ export component TerrainEditor inherits Rectangle {
     callback on-export-heightmap();
     callback on-select-chunk(int);
     callback on-generate-world(string, string); // seed, preset
-    
+    callback on-set-paint-material(int); // slot id
+    callback on-add-material(string); // name, empty lets Rust pick one
+    callback on-insert-layer(string); // layer class name, e.g. "TerrainStamp"
+
     background: Theme.panel-background;
     
     VerticalBox {
@@ -191,13 +301,12 @@ export component TerrainEditor inherits Rectangle {
                 Rectangle { height: 8px; }
                 
                 // ── Flat baseplate ──
-                // These three used to run the FULL worldgen pipeline at a
-                // fixed seed — which is exactly what the Generate World
-                // control below already does, so they were a slow duplicate
-                // wearing a quick-looking label. They now write a dead-level
-                // plate straight to disk and load it in the same frame.
+                // These three write a dead-level plate straight to disk and
+                // load it in the same frame; the Generate World control below
+                // is the slow full worldgen pipeline. The dig and raise
+                // depths are the height band `flat_preset` writes.
                 Text {
-                    text: "Flat baseplate — instant, ready to sculpt";
+                    text: "Flat baseplate: instant, dig 32 m, raise 96 m";
                     color: Theme.text-secondary;
                     font-size: 11px;
                     horizontal-alignment: center;
@@ -268,7 +377,7 @@ export component TerrainEditor inherits Rectangle {
 
                 // ── Generate World (worldgen pipeline) ──
                 Text {
-                    text: "Or generate a full world (rivers, climate, materials) — takes a while";
+                    text: "Or generate a full world (rivers, climate, materials): takes a while";
                     color: Theme.text-secondary;
                     font-size: 11px;
                     horizontal-alignment: center;
@@ -406,7 +515,11 @@ export component TerrainEditor inherits Rectangle {
                                 }
                                 
                                 if root.edit-mode: Text {
-                                    text: root.current-brush.to-uppercase();
+                                    // The 3D brushes carry internal ids; show the ribbon's names.
+                                    text: root.current-brush == "voxeladd" ? "ADD"
+                                        : (root.current-brush == "voxelremove" ? "SUBTRACT"
+                                        : (root.current-brush == "voxelsmooth" ? "SMOOTH 3D"
+                                        : root.current-brush.to-uppercase()));
                                     color: #ffffff80;  // theme-exempt: translucent white label on accent-blue button
                                     font-size: 10px;
                                     vertical-alignment: center;
@@ -418,6 +531,179 @@ export component TerrainEditor inherits Rectangle {
                     }
                 }
                 
+                // ── Paint material section ──
+                // Picking a material also arms the Paint brush (Rust side),
+                // so the next stroke lays it down.
+                SectionRow {
+                    label: "PAINT MATERIAL";
+                    expanded: root.section-materials-expanded;
+                    clicked => { root.section-materials-expanded = !root.section-materials-expanded; }
+                }
+
+                if root.section-materials-expanded: VerticalBox {
+                    padding: 0px;
+                    spacing: 0px;
+
+                    for mat in root.materials: MaterialRow {
+                        label: mat.name;
+                        swatch: mat.swatch;
+                        custom: mat.custom;
+                        selected: mat.slot-id == root.paint-material;
+                        clicked => { root.on-set-paint-material(mat.slot-id); }
+                    }
+
+                    // Add material: a new Space slot that starts as the
+                    // material picked above.
+                    VerticalBox {
+                        padding: 8px;
+                        spacing: 6px;
+
+                        HorizontalBox {
+                            padding: 0px;
+                            spacing: 8px;
+
+                            LineEdit {
+                                horizontal-stretch: 1;
+                                height: 28px;
+                                placeholder-text: "New material name";
+                                text <=> root.new-material-name;
+                                accepted(text) => {
+                                    root.on-add-material(text);
+                                    root.new-material-name = "";
+                                }
+                            }
+
+                            Rectangle {
+                                width: 56px;
+                                height: 28px;
+                                background: add-material-touch.has-hover ? Theme.button-hover : Theme.button-background;
+                                border-radius: 4px;
+
+                                add-material-touch := TouchArea {
+                                    clicked => {
+                                        root.on-add-material(root.new-material-name);
+                                        root.new-material-name = "";
+                                    }
+                                }
+
+                                Text {
+                                    text: "Add";
+                                    color: Theme.text-primary;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "Starts as the built-in " + root.paint-material-base + ". Edit its .mat.toml to change it.";
+                            color: Theme.text-secondary;
+                            font-size: 10px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Separator
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border-color;
+                }
+
+                // ── Layers section ──
+                // Each button inserts a layer instance where the view meets
+                // the ground, through the Insert menu's own action (Rust:
+                // `terrain_layers::plan_insert`). The new layer is selected,
+                // and Properties edits it like any other instance.
+                SectionRow {
+                    label: "LAYERS";
+                    expanded: root.section-layers-expanded;
+                    clicked => { root.section-layers-expanded = !root.section-layers-expanded; }
+                }
+
+                if root.section-layers-expanded: VerticalBox {
+                    padding: 8px;
+                    spacing: 6px;
+
+                    HorizontalBox {
+                        padding: 0px;
+                        spacing: 6px;
+
+                        LayerButton {
+                            label: "Spline";
+                            icon: @image-url("../../assets/icons/terrainspline.svg");
+                            clicked => { root.on-insert-layer("TerrainSpline"); }
+                        }
+                        LayerButton {
+                            label: "Stamp";
+                            icon: @image-url("../../assets/icons/terrainstamp.svg");
+                            clicked => { root.on-insert-layer("TerrainStamp"); }
+                        }
+                    }
+
+                    HorizontalBox {
+                        padding: 0px;
+                        spacing: 6px;
+
+                        LayerButton {
+                            label: "Flatten Pad";
+                            icon: @image-url("../../assets/icons/terrainflattenpad.svg");
+                            clicked => { root.on-insert-layer("TerrainFlattenPad"); }
+                        }
+                        LayerButton {
+                            label: "Noise";
+                            icon: @image-url("../../assets/icons/terrainnoise.svg");
+                            clicked => { root.on-insert-layer("TerrainNoise"); }
+                        }
+                    }
+
+                    HorizontalBox {
+                        padding: 0px;
+                        spacing: 6px;
+
+                        LayerButton {
+                            label: "Material Fill";
+                            icon: @image-url("../../assets/icons/terrainmaterialfill.svg");
+                            clicked => { root.on-insert-layer("TerrainMaterialFill"); }
+                        }
+                        LayerButton {
+                            label: "Spline Point";
+                            icon: @image-url("../../assets/icons/terrainsplinepoint.svg");
+                            clicked => { root.on-insert-layer("TerrainSplinePoint"); }
+                        }
+                    }
+
+                    HorizontalBox {
+                        padding: 0px;
+                        spacing: 6px;
+
+                        LayerButton {
+                            label: "Scatter";
+                            icon: @image-url("../../assets/icons/terrainscatter.svg");
+                            clicked => { root.on-insert-layer("TerrainScatter"); }
+                        }
+                        LayerButton {
+                            label: "Water Body";
+                            icon: @image-url("../../assets/icons/terrainwaterbody.svg");
+                            clicked => { root.on-insert-layer("TerrainWaterBody"); }
+                        }
+                    }
+
+                    Text {
+                        text: "Adds a layer on the ground in view. Scatter covers the whole terrain until it is given a size. Spline Point extends the selected spline.";
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // Separator
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border-color;
+                }
+
                 // ── Properties section ──
                 SectionRow {
                     label: "PROPERTIES";
@@ -434,7 +720,7 @@ export component TerrainEditor inherits Rectangle {
                     PropertyRow { label: "Resolution"; value: root.terrain-resolution; }
                     PropertyRow { label: "Height Scale"; value: root.terrain-height-scale; }
                     PropertyRow { label: "LOD Levels"; value: root.terrain-lod-levels; }
-                    PropertyRow { label: "Material"; value: root.terrain-material; }
+                    PropertyRow { label: "Materials"; value: root.terrain-material; }
                     
                     Rectangle { height: 4px; }
                 }

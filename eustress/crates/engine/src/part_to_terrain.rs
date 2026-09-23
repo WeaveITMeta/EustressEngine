@@ -1,26 +1,30 @@
-//! # Part to Terrain (Phase 1 scaffold)
+//! # Part to Terrain (Phase 1)
 //!
-//! Convert selected parts' geometry to voxel terrain at a chosen
-//! biome / material. The event interface + handler skeleton are
-//! shipped; the actual voxel rasterization needs a deeper dive into
-//! `eustress-common::terrain::{chunk, material}` APIs and lands as a
-//! follow-up PR.
+//! Convert selected parts' footprints into terrain at a chosen material.
 //!
 //! ## v1 scope
 //!
 //! - `PartToTerrainEvent { material, delete_sources, voxel_size }`
 //! - Plugin + handler that:
 //!   * Collects each selected entity's world AABB
-//!   * Logs what WOULD be rasterized (count, aggregate volume)
-//!   * Optionally despawns the source entities (same path as the
-//!     TrashEntities undo variant)
-//!   * **TODO**: write voxels into the terrain grid
+//!   * Raises the terrain heightfield under each footprint to the AABB's
+//!     top and paints the chosen material there, through the shared
+//!     `terrain::height_query` writers
+//!   * Marks the touched chunks in `TerrainDirtyChunks`, which remeshes
+//!     them and rebuilds their colliders
+//!   * Records the terrain change as one undo entry
+//!   * Optionally despawns the source entities. That is a plain despawn:
+//!     it is not part of the undo entry and leaves their files on disk
 //!
-//! Once the voxel-write lands, the public API stays identical — no
-//! refactor at call-sites. This matches how the ribbon/MCP wire
-//! ahead of the full implementation.
+//! The terrain is a heightfield, so a part's volume becomes a raised
+//! column, not voxels: overhangs and caves are out of reach until the
+//! volumetric mesher lands.
 
 use bevy::prelude::*;
+use eustress_common::terrain::height_query::{height_at_world, paint_material_at_world, set_height_at_world};
+use eustress_common::terrain::{
+    TerrainConfig, TerrainData, TerrainDirtyChunks, TerrainEditRecorder, TerrainMaterial, TerrainRoot,
+};
 use crate::selection_box::Selected;
 use crate::math_utils::calculate_rotated_aabb;
 
@@ -30,9 +34,10 @@ use crate::math_utils::calculate_rotated_aabb;
 
 #[derive(Event, Message, Debug, Clone)]
 pub struct PartToTerrainEvent {
-    /// Terrain material label — passed through to the voxel writer.
-    /// Canonical values: "Grass", "Dirt", "Rock", "Sand", "Snow",
-    /// "Water". Unknown values fall back to "Grass".
+    /// Terrain material label: any of the 23 `TerrainMaterial` names
+    /// ("Grass", "Rock", "Sand", "WoodPlanks", ...; case, spaces and
+    /// underscores ignored), plus the aliases "green", "stone" and "brown".
+    /// Unknown values fall back to "Grass".
     pub material: String,
     /// If true, despawn source entities after rasterization.
     pub delete_sources: bool,
@@ -106,20 +111,24 @@ fn handle_part_to_terrain(
         &GlobalTransform,
         Option<&crate::classes::BasePart>,
     ), With<Selected>>,
-    mut terrain_chunks: Query<(
-        &mut eustress_common::terrain::Chunk,
-        &mut eustress_common::terrain::TerrainData,
-    )>,
-    // 0.19: TerrainConfig is a Component (not a Resource), spawned on the terrain
-    // root — read it via a query instead of Res. (This also fixes a latent bug:
-    // nothing ever inserted it as a resource, so the old Res was always None.)
-    terrain_config: Query<&eustress_common::terrain::TerrainConfig>,
+    // The height raster and material map are ONE global cache on the
+    // terrain root, not per chunk: chunk entities carry only a grid position.
+    mut terrain: Query<(Entity, &TerrainConfig, &mut TerrainData), With<TerrainRoot>>,
+    // Optional so this plugin keeps working without `EngineTerrainPlugin`.
+    mut dirty: Option<ResMut<TerrainDirtyChunks>>,
+    mut undo: Option<ResMut<crate::undo::UndoStack>>,
 ) {
     for event in events.read() {
-        let Some(config) = terrain_config.iter().next() else {
-            warn!("🏔 Part to Terrain: no TerrainConfig component — terrain not active");
+        let Ok((root, config, mut data)) = terrain.single_mut() else {
+            warn!("🏔 Part to Terrain: no terrain is active");
             continue;
         };
+        // Procedural terrain has no raster; writing one would flatten every
+        // chunk from noise to the empty cache's floor.
+        if data.height_cache.is_empty() || data.cache_width == 0 || data.cache_height == 0 {
+            warn!("🏔 Part to Terrain: this terrain is procedural (no height raster to raise)");
+            continue;
+        }
 
         // Collect AABBs of the selection.
         let mut aabbs: Vec<(Entity, Vec3, Vec3)> = Vec::new();
@@ -137,91 +146,69 @@ fn handle_part_to_terrain(
             continue;
         }
 
-        let mat_layer = material_label_to_layer(&event.material);
-        let mut affected_chunks = 0usize;
+        let material_slot = material_label_to_slot(&event.material);
+        let mut affected_footprints = 0usize;
         let mut affected_cells = 0usize;
 
-        // For every chunk that overlaps any AABB, raise the heightmap
-        // beneath the AABB footprint to the AABB's max-Y, and paint
-        // the splat-cache cell toward the chosen material.
-        for (chunk, mut data) in terrain_chunks.iter_mut() {
-            let chunk_world_x = chunk.position.x as f32 * config.chunk_size;
-            let chunk_world_z = chunk.position.y as f32 * config.chunk_size;
-            let chunk_min = Vec3::new(chunk_world_x, -1e6, chunk_world_z);
-            let chunk_max = Vec3::new(
-                chunk_world_x + config.chunk_size, 1e6,
-                chunk_world_z + config.chunk_size,
-            );
+        // Raise the ground under each AABB footprint to the AABB's top (never
+        // lower it) and paint the chosen material there. Samples step at
+        // half a raster cell so every cell under the footprint is written,
+        // and the footprint is clipped to the terrain so a huge part cannot
+        // stall the frame writing clamped edge cells over and over.
+        let (terrain_min, terrain_max) = config.footprint_xz();
+        let step = (config.chunk_size / config.chunk_resolution.max(1) as f32 * 0.5).max(1e-3);
 
-            let overlapping: Vec<&(Entity, Vec3, Vec3)> = aabbs.iter().filter(|(_, mn, mx)| {
-                aabb_overlap_xz(*mn, *mx, chunk_min, chunk_max)
-            }).collect();
-            if overlapping.is_empty() { continue; }
+        // The whole conversion is one undo entry. A local recorder keeps it
+        // apart from a brush stroke the shared resource may still hold open.
+        let cell = Vec2::splat(config.chunk_size / config.chunk_resolution.max(1) as f32);
+        let mut recorder = TerrainEditRecorder::default();
+        recorder.begin("Part to Terrain", Some(root), config, &data);
 
-            // Initialize caches if empty.
-            let total_pixels = ((config.chunk_resolution + 1) * (config.chunk_resolution + 1)) as usize;
-            if data.height_cache.is_empty() {
-                data.height_cache = vec![0.0; total_pixels];
-                data.cache_width = config.chunk_resolution + 1;
-                data.cache_height = config.chunk_resolution + 1;
+        for (_, mn, mx) in &aabbs {
+            let lo = Vec2::new(mn.x, mn.z).max(terrain_min);
+            let hi = Vec2::new(mx.x, mx.z).min(terrain_max);
+            if !(lo.is_finite() && hi.is_finite()) || lo.x > hi.x || lo.y > hi.y {
+                continue;
             }
-            if data.splat_cache.len() != total_pixels * 4 {
-                data.splat_cache = vec![0.0; total_pixels * 4];
-                for i in 0..total_pixels {
-                    data.splat_cache[i * 4] = 1.0; // default: all grass
-                }
-            }
-
-            let res = config.chunk_resolution;
-            for z in 0..=res {
-                for x in 0..=res {
-                    let u = x as f32 / res as f32;
-                    let v = z as f32 / res as f32;
-                    let world_x = chunk_world_x + u * config.chunk_size;
-                    let world_z = chunk_world_z + v * config.chunk_size;
-
-                    // Max-Y over every overlapping AABB that contains
-                    // this XZ cell.
-                    let mut new_height: Option<f32> = None;
-                    for (_, mn, mx) in &overlapping {
-                        if world_x >= mn.x && world_x <= mx.x
-                            && world_z >= mn.z && world_z <= mx.z
-                        {
-                            let h = mx.y / config.height_scale.max(1e-3);
-                            new_height = Some(new_height.map_or(h, |cur| cur.max(h)));
-                        }
+            // One cell of margin keeps float rounding on the footprint edge
+            // from leaving a written cell's tile unrecorded.
+            recorder.record_world_rect(config, &data, lo - cell, hi + cell);
+            // Compared and stored at the height Save can keep, so the raised
+            // column survives a save and reopen unchanged.
+            let top = config.clamp_to_saved_band(mx.y);
+            let mut x = lo.x;
+            while x <= hi.x {
+                let mut z = lo.y;
+                while z <= hi.y {
+                    if height_at_world(config, &data, x, z) < top {
+                        set_height_at_world(config, &mut data, x, z, top, 1.0);
                     }
-                    let Some(h) = new_height else { continue };
-
-                    let idx = (z * (res + 1) + x) as usize;
-                    data.height_cache[idx] = h;
-
-                    // Paint splat cache — bump chosen material channel
-                    // to 1.0, zero others.
-                    let splat_idx = idx * 4;
-                    if splat_idx + 3 < data.splat_cache.len() {
-                        for c in 0..4 {
-                            data.splat_cache[splat_idx + c] = if c == mat_layer { 1.0 } else { 0.0 };
-                        }
-                    }
+                    paint_material_at_world(config, &mut data, x, z, material_slot, 1.0);
                     affected_cells += 1;
+                    z += step;
                 }
+                x += step;
             }
-            affected_chunks += 1;
+            affected_footprints += 1;
+            if let Some(dirty) = dirty.as_deref_mut() {
+                dirty.mark_world_rect(config, lo, hi);
+            }
         }
-
-        // Mark touched chunks dirty for mesh + splatmap regen.
-        // `Chunk.dirty = true` re-triggers mesh generation;
-        // `TerrainData.splat_dirty = true` re-uploads the splatmap
-        // texture to the GPU.
-        for (mut chunk, mut data) in terrain_chunks.iter_mut() {
-            chunk.dirty = true;
-            data.splat_dirty = true;
+        if let (Some(edit), Some(undo)) = (recorder.finish(Some(root), &data), undo.as_deref_mut()) {
+            undo.push_labeled(
+                edit.label.clone(),
+                crate::undo::Action::TerrainEdit {
+                    label: edit.label,
+                    root: root.to_bits(),
+                    tiles: edit.tiles,
+                    bricks: edit.bricks,
+                },
+            );
         }
 
         info!(
-            "🏔 Part to Terrain [{}]: {} entities · {:.2}m³ · {} chunks touched · {} vertices raised",
-            event.material, aabbs.len(), total_volume, affected_chunks, affected_cells
+            "🏔 Part to Terrain [{}]: {} entities · {:.2}m³ · {} footprints on the terrain · {} samples written",
+            event.material, aabbs.len(), total_volume, affected_footprints, affected_cells
         );
 
         if event.delete_sources {
@@ -232,21 +219,19 @@ fn handle_part_to_terrain(
     }
 }
 
-fn aabb_overlap_xz(a_mn: Vec3, a_mx: Vec3, b_mn: Vec3, b_mx: Vec3) -> bool {
-    a_mx.x >= b_mn.x && a_mn.x <= b_mx.x
-        && a_mx.z >= b_mn.z && a_mn.z <= b_mx.z
-}
-
-/// Map user-facing material name → splatmap channel (0..3 — the
-/// terrain shader supports 4 blend layers per chunk today).
-fn material_label_to_layer(name: &str) -> usize {
-    match name.to_ascii_lowercase().as_str() {
-        "grass" | "green"   => 0,
-        "dirt"  | "brown"   => 1,
-        "rock"  | "stone"   => 2,
-        "sand"  | "snow"    => 3,
-        _ => 0,
-    }
+/// Map a user-facing material name to its built-in material slot (the
+/// `TerrainMaterial` discriminant): any variant name, plus a few colour
+/// aliases. Unknown names paint Grass.
+fn material_label_to_slot(name: &str) -> u8 {
+    let material = TerrainMaterial::from_name(name).unwrap_or_else(|| {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "green" => TerrainMaterial::Grass,
+            "stone" => TerrainMaterial::Rock,
+            "brown" => TerrainMaterial::Dirt,
+            _ => TerrainMaterial::Grass,
+        }
+    });
+    material.to_u8()
 }
 
 /// Inverse handler — carves a voxel region into a standalone MeshPart.
@@ -273,5 +258,21 @@ fn handle_terrain_to_part(
             "🏔 Terrain to Part: dry-run, AABB {:?}..{:?} ({} cells @ {:.2}m, flatten={})",
             event.aabb_min, event.aabb_max, total_cells, event.voxel_size, event.flatten_source
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn material_labels_name_their_own_slots() {
+        assert_eq!(material_label_to_slot("Sand"), TerrainMaterial::Sand.to_u8());
+        assert_eq!(material_label_to_slot("water"), TerrainMaterial::Water.to_u8());
+        assert_eq!(material_label_to_slot("ICE"), TerrainMaterial::Ice.to_u8());
+        assert_eq!(material_label_to_slot("wood planks"), TerrainMaterial::WoodPlanks.to_u8());
+        assert_eq!(material_label_to_slot("stone"), TerrainMaterial::Rock.to_u8());
+        assert_eq!(material_label_to_slot("brown"), TerrainMaterial::Dirt.to_u8());
+        assert_eq!(material_label_to_slot("unobtainium"), TerrainMaterial::Grass.to_u8());
     }
 }

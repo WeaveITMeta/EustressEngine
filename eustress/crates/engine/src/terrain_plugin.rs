@@ -10,9 +10,12 @@ use bevy::ecs::schedule::common_conditions::resource_equals;
 use eustress_common::terrain::{
     TerrainConfig, TerrainData, TerrainMode, TerrainBrush, BrushMode,
     spawn_terrain, TerrainRoot, Chunk,
-    TerrainHistory,
     AdvancedBrushState,
     TerrainPaintGate,
+    TerrainDirtyChunks,
+    TerrainEditRecorder,
+    TerrainVolume,
+    CsgShape,
 };
 use bevy::window::PrimaryWindow;
 use eustress_common::classes::Terrain;
@@ -36,15 +39,29 @@ impl Plugin for EngineTerrainPlugin {
             .register_type::<Chunk>()
             .init_resource::<eustress_common::terrain::LodUpdateState>()
             .init_resource::<eustress_common::terrain::ChunkSpawnThrottle>()
+            .init_resource::<TerrainDirtyChunks>()
             .add_systems(Update, (
                 eustress_common::terrain::process_terrain_generation_queue,
                 eustress_common::terrain::update_lod_system,
                 eustress_common::terrain::chunk_spawn_system,
                 eustress_common::terrain::chunk_cull_system,
             ).chain())
+            // Rebuilds meshes and colliders for chunks any terrain writer
+            // marked (brush, Part to Terrain, undo, layer bakes). Not gated
+            // on Editor mode: undo and layer edits happen outside it. The same
+            // registration lives in the shared `TerrainPlugin` for the
+            // Client; this engine never adds that plugin, so there is no
+            // double registration.
+            .add_systems(Update, eustress_common::terrain::apply_terrain_dirty_chunks
+                .after(eustress_common::terrain::chunk_cull_system)
+                .after(eustress_common::terrain::terrain_paint_system))
             .init_resource::<TerrainEditorState>()
             .init_resource::<TerrainSelection>()
-            .init_resource::<TerrainHistory>()
+            // Brush strokes record the raster tiles they touch here;
+            // `commit_terrain_stroke` pushes each finished stroke onto the
+            // unified `UndoStack`, so Ctrl+Z undoes terrain like any other
+            // edit.
+            .init_resource::<TerrainEditRecorder>()
             .init_resource::<AdvancedBrushState>()
             .init_resource::<BrushPreviewState>()
             // The brush veto + the brush itself. These used to be left to
@@ -57,7 +74,6 @@ impl Plugin for EngineTerrainPlugin {
                 sync_terrain_class_to_system,
                 handle_editor_shortcuts,
                 update_selection_gizmos,
-                handle_undo_redo_shortcuts,
                 // Chained so the veto is fresh for BOTH consumers this frame:
                 // an unordered tuple would leave the preview circle drawing
                 // (and the brush deciding) off last frame's cursor position.
@@ -70,15 +86,50 @@ impl Plugin for EngineTerrainPlugin {
                 )
                     .chain(),
             ).run_if(resource_equals(TerrainMode::Editor)))
-            // Water plane (Terrain ribbon > Water). Same story as the brush:
-            // the resource and both systems live in the shared terrain
-            // plugin the engine does not add, so `WaterConfig` had no
-            // consumer here at all.
-            .init_resource::<eustress_common::terrain::WaterConfig>()
-            .add_systems(Update, (
-                eustress_common::terrain::water::water_sync_system,
-                eustress_common::terrain::water::water_update_system,
-            ));
+            // Ungated: leaving the terrain editor mid-stroke has to close the
+            // stroke too, and the brush above no longer runs then.
+            .add_systems(Update, commit_terrain_stroke
+                .after(eustress_common::terrain::terrain_paint_system));
+
+        // Material slot table + texture arrays, and the textured terrain
+        // material that draws them: the other half of the shared plugin this
+        // engine does not add. `terrain_disk_load::register` below points the
+        // table at the open Space's Workspace/Terrain.
+        if !app.is_plugin_added::<eustress_common::terrain::TerrainMaterialSlotsPlugin>() {
+            app.add_plugins(eustress_common::terrain::TerrainMaterialSlotsPlugin);
+        }
+        if !app.is_plugin_added::<eustress_common::terrain::TerrainSurfacePlugin>() {
+            app.add_plugins(eustress_common::terrain::TerrainSurfacePlugin);
+        }
+
+        // Terrain layer instances (splines, stamps, flatten pads, noise,
+        // material fills) baked over the base, the third part of the shared
+        // plugin; and, Studio-side, keeping each spline point under the
+        // spline whose folder holds it, and drawing a selected spline (see
+        // `terrain_layers`). The drawing runs after the dirty-chunk pass so
+        // it follows the corridor that pass just baked. Ungated, like the
+        // pass: layers are selected and edited outside the terrain editor.
+        if !app.is_plugin_added::<eustress_common::terrain::TerrainLayersPlugin>() {
+            app.add_plugins(eustress_common::terrain::TerrainLayersPlugin);
+        }
+        app.add_systems(Update, crate::terrain_layers::adopt_points_by_folder);
+        app.add_systems(
+            Update,
+            crate::terrain_layers::draw_spline_gizmos.after(eustress_common::terrain::apply_terrain_dirty_chunks),
+        );
+        // Scatter layers (grass, shrubs, rocks, trees) placed over the
+        // finished ground and streamed around the view: the fourth part of
+        // the shared plugin, same guard. Ungated, like the layers.
+        if !app.is_plugin_added::<eustress_common::terrain::TerrainScatterPlugin>() {
+            app.add_plugins(eustress_common::terrain::TerrainScatterPlugin);
+        }
+        // Water, the fifth part, same guard: the ocean plane the Terrain
+        // ribbon's Water button toggles (`WaterConfig`), the lakes of
+        // `TerrainWaterBody` instances and the water of River splines, all
+        // on the shared water material. Ungated, like the layers.
+        if !app.is_plugin_added::<eustress_common::terrain::TerrainWaterPlugin>() {
+            app.add_plugins(eustress_common::terrain::TerrainWaterPlugin);
+        }
 
         // Disk-terrain auto-loader — on Space open, when
         // `Workspace/Terrain/_terrain.toml` exists (worldgen export or
@@ -186,18 +237,17 @@ fn sync_terrain_class_to_system(
             crate::terrain_disk_load::hydrate_terrain_from_disk(&terrain_dir).ok()
         });
 
-        let (config, data, from_disk) = match disk {
-            Some((config, data, _chunk_files)) => (config, data, true),
-            None => (terrain_class.to_config(), TerrainData::procedural(), false),
+        let from_disk = disk.is_some();
+        let terrain_entity = match disk {
+            Some(terrain) => terrain.spawn(&mut commands, &mut meshes, &mut materials),
+            None => spawn_terrain(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                terrain_class.to_config(),
+                TerrainData::procedural(),
+            ),
         };
-
-        let terrain_entity = spawn_terrain(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            config,
-            data,
-        );
         if from_disk {
             commands
                 .entity(terrain_entity)
@@ -328,11 +378,16 @@ fn sync_terrain_paint_gate(
     }
 }
 
-/// Update brush preview gizmo — renders a circle on the terrain surface at cursor position
+/// Draw the brush preview gizmo at the cursor's terrain hit: a circle on the
+/// surface for the heightfield brushes, or for the 3D brushes the sphere,
+/// box or cylinder the next dab will add, carve or smooth.
 fn update_brush_preview(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    terrain_query: Query<(&TerrainConfig, &TerrainData), With<TerrainRoot>>,
+    terrain_query: Query<
+        (&TerrainConfig, &TerrainData, Option<&TerrainVolume>, Option<&eustress_common::terrain::TerrainBaked>),
+        With<TerrainRoot>,
+    >,
     brush: Res<TerrainBrush>,
     buttons: Res<ButtonInput<MouseButton>>,
     gate: Res<TerrainPaintGate>,
@@ -347,7 +402,9 @@ fn update_brush_preview(
     let Some((camera, camera_transform)) = camera_query.iter().find(|(c, _)| c.order == 0) else {
         return;
     };
-    let Ok((config, data)) = terrain_query.single() else { return };
+    let Ok((config, data, volume, baked)) = terrain_query.single() else { return };
+    // The ground the user sees, layer bake included.
+    let data = eustress_common::terrain::surface_data(data, baked);
 
     // Nothing to preview while the pointer is over editor chrome — and the
     // brush would not paint there either.
@@ -368,12 +425,13 @@ fn update_brush_preview(
         return;
     };
 
-    // Raymarch the REAL heightfield, the same call `terrain_paint_system`
-    // uses to pick its hit point. The old flat Y=0 plane test put the circle
+    // Raymarch the REAL terrain, the same call `terrain_paint_system` uses to
+    // pick its hit point (the whole field, caves included, once the terrain
+    // has volumetric edits). The old flat Y=0 plane test put the circle
     // somewhere the brush was not going to act on any sculpted ground.
-    let Some(hit) =
-        eustress_common::terrain::height_query::raycast_terrain(config, data, ray, 2000.0, 2.0)
-    else {
+    let Some(hit) = eustress_common::terrain::height_query::raycast_terrain_surface(
+        config, data, volume, ray, 2000.0, 2.0,
+    ) else {
         preview.position = None;
         return;
     };
@@ -391,12 +449,23 @@ fn update_brush_preview(
             BrushMode::Smooth => bevy::color::Color::srgba(0.2, 0.6, 1.0, 0.9),
             BrushMode::Flatten => bevy::color::Color::srgba(1.0, 1.0, 0.2, 0.9),
             BrushMode::PaintTexture => bevy::color::Color::srgba(1.0, 0.5, 0.0, 0.9),
+            BrushMode::VoxelAdd => bevy::color::Color::srgba(0.3, 1.0, 0.6, 0.9),
+            BrushMode::VoxelRemove => bevy::color::Color::srgba(1.0, 0.35, 0.35, 0.9),
+            BrushMode::VoxelSmooth => bevy::color::Color::srgba(0.4, 0.8, 1.0, 0.9),
             _ => bevy::color::Color::srgba(1.0, 1.0, 1.0, 0.9),
         }
     } else {
         // Hovering: semi-transparent white
         bevy::color::Color::srgba(1.0, 1.0, 1.0, 0.5)
     };
+
+    // A 3D brush acts on the volume around the hit, not on a patch of ground
+    // under it, so it previews the solid it will change instead of a circle.
+    // The shape comes from the same `voxel_shape` the paint system dabs with.
+    if brush.mode.is_volumetric() {
+        draw_voxel_brush_preview(&mut gizmos, brush.voxel_shape(hit), color);
+        return;
+    }
 
     // Outer brush circle
     gizmos.circle(
@@ -444,29 +513,73 @@ fn update_brush_preview(
     );
 }
 
-/// Handle undo/redo shortcuts for terrain
-fn handle_undo_redo_shortcuts(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut history: ResMut<TerrainHistory>,
-    mut terrain_query: Query<&mut TerrainData, With<TerrainRoot>>,
-) {
-    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    
-    if ctrl && keys.just_pressed(KeyCode::KeyZ) {
-        if let Ok(mut data) = terrain_query.single_mut() {
-            if let Some(snapshot) = history.undo() {
-                data.height_cache = snapshot.height_cache.clone();
-                info!("↩️ Terrain undo");
-            }
+/// Wireframe of the region one 3D brush dab covers, centred on the terrain
+/// hit, with a small cross at the centre so the dab point reads even when the
+/// shape is much larger than the view.
+fn draw_voxel_brush_preview(gizmos: &mut Gizmos, shape: CsgShape, color: bevy::color::Color) {
+    let center = match shape {
+        CsgShape::Sphere { center, radius } => {
+            gizmos.sphere(Isometry3d::new(center, Quat::IDENTITY), radius, color);
+            center
         }
+        CsgShape::AxisBox { center, half_extents } => {
+            gizmos.cube(Transform::from_translation(center).with_scale(half_extents * 2.0), color);
+            center
+        }
+        CsgShape::Cylinder { center, radius, half_height } => {
+            gizmos.primitive_3d(
+                &bevy::math::primitives::Cylinder { radius, half_height },
+                Isometry3d::new(center, Quat::IDENTITY),
+                color,
+            );
+            center
+        }
+    };
+    let (lo, hi) = shape.bounds();
+    let cross = ((hi - lo).max_element() * 0.05).max(0.05);
+    let cross_color = bevy::color::Color::srgba(1.0, 1.0, 1.0, 0.4);
+    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+        gizmos.line(center - axis * cross, center + axis * cross, cross_color);
     }
-    
-    if ctrl && keys.just_pressed(KeyCode::KeyY) {
-        if let Ok(mut data) = terrain_query.single_mut() {
-            if let Some(snapshot) = history.redo() {
-                data.height_cache = snapshot.height_cache.clone();
-                info!("↪️ Terrain redo");
-            }
-        }
+}
+
+/// Close the brush stroke [`TerrainEditRecorder`] holds and push it onto the
+/// unified undo stack as one entry, once the left button is up or the
+/// terrain editor was left mid-stroke. The recorder drops tiles and volume
+/// bricks the stroke did not change, and a stroke that changed nothing
+/// pushes nothing.
+fn commit_terrain_stroke(
+    buttons: Res<ButtonInput<MouseButton>>,
+    mode: Res<TerrainMode>,
+    mut recorder: ResMut<TerrainEditRecorder>,
+    terrain_query: Query<(Entity, &TerrainData, Option<&TerrainVolume>), With<TerrainRoot>>,
+    undo: Option<ResMut<crate::undo::UndoStack>>,
+) {
+    // Read through `Deref` first so idle frames leave the resource unchanged.
+    if !recorder.is_recording() {
+        return;
+    }
+    if buttons.pressed(MouseButton::Left) && *mode == TerrainMode::Editor {
+        return;
+    }
+    let Ok((root, data, volume)) = terrain_query.single() else {
+        // The terrain went away mid-stroke: there is nothing to undo into.
+        recorder.cancel();
+        return;
+    };
+    let volume = volume.unwrap_or(TerrainVolume::empty());
+    let Some(edit) = recorder.finish_with_volume(Some(root), data, volume) else {
+        return;
+    };
+    if let Some(mut undo) = undo {
+        undo.push_labeled(
+            edit.label.clone(),
+            crate::undo::Action::TerrainEdit {
+                label: edit.label,
+                root: root.to_bits(),
+                tiles: edit.tiles,
+                bricks: edit.bricks,
+            },
+        );
     }
 }

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- TerrainScatter: a tree, a rock and grass tufts scattered over the ground. -->
+  <path d="M1 13.5 Q8 11.8 15 13.5 V15 H1 Z" fill="#64C896" stroke="#30A060" stroke-width="0.6" stroke-linejoin="round"/>
+  <rect x="3.6" y="9.4" width="0.9" height="3.4" fill="#8A6A48"/>
+  <polygon points="4.05,2 1.6,7 2.8,7 1.2,10 6.9,10 5.3,7 6.5,7" fill="#3E9A5E" stroke="#2A7044" stroke-width="0.5" stroke-linejoin="round"/>
+  <path d="M9.2 12.9 Q9.6 10.9 11.3 10.6 Q13 10.8 13.2 12.7 Z" fill="#8C8279" stroke="#5E554D" stroke-width="0.5" stroke-linejoin="round"/>
+  <path d="M7.4 12.6 L7 10.6 M7.7 12.5 L8.1 10.2 M8 12.6 L8.9 11" stroke="#30A060" stroke-width="0.5" stroke-linecap="round"/>
+  <path d="M13.9 12.9 L13.7 11.2 M14.2 12.9 L14.7 11.4" stroke="#30A060" stroke-width="0.5" stroke-linecap="round"/>
+</svg>

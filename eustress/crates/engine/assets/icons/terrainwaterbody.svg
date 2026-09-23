@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- TerrainWaterBody: a lake filling a hollow between two banks, up to its level. -->
+  <path d="M1 6 Q3 6.2 4 8.6 Q5.2 12.6 8 12.6 Q10.8 12.6 12 8.6 Q13 6.2 15 6 V15 H1 Z" fill="#64C896" stroke="#30A060" stroke-width="0.6" stroke-linejoin="round"/>
+  <path d="M3.6 8 H12.4 Q11.6 12 8 12 Q4.4 12 3.6 8 Z" fill="#3E8FD8" stroke="#2A6AA8" stroke-width="0.5" stroke-linejoin="round"/>
+  <path d="M5.2 9.4 Q6 9 6.8 9.4 M9.2 10.4 Q10 10 10.8 10.4" stroke="#BFE3FF" stroke-width="0.5" stroke-linecap="round"/>
+  <path d="M8 1.6 Q9.8 4 9.8 5.1 A1.8 1.8 0 0 1 6.2 5.1 Q6.2 4 8 1.6 Z" fill="#3E8FD8" stroke="#2A6AA8" stroke-width="0.5" stroke-linejoin="round"/>
+</svg>

@@ -21,7 +21,7 @@
 //!
 //! This module is engine-free and Bevy-free (the math is plain `Vec<f32>`
 //! / `Vec<u8>`); the engine seam (Phase E) lifts a [`GeneratedRegion`] into
-//! `TerrainData.height_cache` + `splat_cache`.
+//! `TerrainData.height_cache` + `material_cache`.
 
 pub mod noise;
 pub mod hydrology;
@@ -31,6 +31,7 @@ pub mod materials;
 pub mod pipeline;
 pub mod preview;
 pub mod export;
+pub mod default_layers;
 
 /// Parameters for generating ONE region. World coordinates are in engine
 /// units (1 unit = 1 metre). A region is an axis-aligned rectangle of the

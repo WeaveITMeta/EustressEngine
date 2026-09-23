@@ -1,12 +1,16 @@
 //! Level of Detail (LOD) system for terrain chunks
 //!
-//! When `physics` feature is enabled, colliders are updated 1:1 with visual mesh.
+//! LOD only changes a chunk's render mesh. Its collider is always built at
+//! LOD 0 (`collider.rs`) and is never rebuilt on a LOD change. A chunk
+//! holding volumetric edits switches between its marching-cubes mesh at
+//! LOD 0 and its heightfield mesh further out (see `marching`).
 
 use bevy::prelude::*;
-use super::{Chunk, TerrainConfig, TerrainData, TerrainRoot, generate_chunk_mesh};
-
-#[cfg(feature = "physics")]
-use avian3d::prelude::*;
+use super::{
+    Chunk, TerrainBaked, TerrainConfig, TerrainData, TerrainRoot, TerrainVolume, chunk_mesh_cost,
+    generate_chunk_render_mesh, scene_camera_translation, surface_data,
+};
+use super::height_query::height_at_world;
 
 /// Resource to track LOD update state for throttling
 /// 
@@ -40,8 +44,11 @@ pub struct LodUpdateState {
     pub check_interval: f64,
     
     /// Maximum chunks to regenerate meshes per frame
-    /// 
+    ///
     /// Mesh regeneration is expensive. This spreads the work across frames.
+    /// Counted in heightfield chunks: a marching-cubes remesh counts the
+    /// cubes it marches per lattice cell, at least `VOLUMETRIC_CHUNK_COST`
+    /// (see `chunk_mesh_cost`), and the first remesh of a frame always runs.
     /// 
     /// **Recommended values:**
     /// - 8: Fast LOD transitions, may cause frame spikes on large chunks
@@ -81,86 +88,93 @@ impl Default for LodUpdateState {
     }
 }
 
+/// Distance that picks a chunk's LOD: from `viewer` to the nearest point of
+/// the chunk's footprint, at ground height there. Measuring to the footprint
+/// rather than the chunk's corner gives the chunk under a low viewer full
+/// detail; measuring to the ground there lets a camera high above the
+/// terrain see it coarser, since it really is far away.
+pub fn chunk_lod_distance(chunk_pos: IVec2, config: &TerrainConfig, data: &TerrainData, viewer: Vec3) -> f32 {
+    let size = config.chunk_size.max(1e-3);
+    let min_x = chunk_pos.x as f32 * size;
+    let min_z = chunk_pos.y as f32 * size;
+    // max/min rather than `clamp`, which panics on a NaN bound.
+    let nearest_x = viewer.x.max(min_x).min(min_x + size);
+    let nearest_z = viewer.z.max(min_z).min(min_z + size);
+    // Procedural chunks have no raster to read; their noise is anchored at 0.
+    let ground = if data.height_cache.is_empty() {
+        0.0
+    } else {
+        height_at_world(config, data, nearest_x, nearest_z)
+    };
+    Vec3::new(nearest_x, ground, nearest_z).distance(viewer)
+}
+
 /// System to update chunk LOD based on camera distance
-/// 
-/// Throttled to reduce CPU usage with massive terrains.
-/// When `physics` feature is enabled, colliders are regenerated 1:1 with visual mesh.
+///
+/// Throttled to reduce CPU usage with massive terrains. Only the render mesh
+/// changes (through [`generate_chunk_render_mesh`]); colliders stay at LOD 0.
 pub fn update_lod_system(
     mut commands: Commands,
-    camera_query: Query<&GlobalTransform, With<Camera3d>>,
-    terrain_query: Query<(&TerrainConfig, &TerrainData), With<TerrainRoot>>,
-    mut chunk_query: Query<(Entity, &mut Chunk, &GlobalTransform, &Mesh3d)>,
+    cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    terrain_query: Query<(&TerrainConfig, &TerrainData, Option<&TerrainVolume>, Option<&TerrainBaked>), With<TerrainRoot>>,
+    mut chunk_query: Query<(Entity, &mut Chunk)>,
     mut meshes: ResMut<Assets<Mesh>>,
     time: Res<Time>,
     mut lod_state: ResMut<LodUpdateState>,
 ) {
-    let Ok(camera_transform) = camera_query.single() else { return };
-    let Ok((config, data)) = terrain_query.single() else { return };
-    
-    let camera_pos = camera_transform.translation();
+    let Some(camera_pos) = scene_camera_translation(&cameras) else { return };
+    let Ok((config, data, volume, baked)) = terrain_query.single() else { return };
+    let volume = volume.unwrap_or(TerrainVolume::empty());
+    let data = surface_data(data, baked);
+
     let current_time = time.elapsed_secs_f64();
-    
-    // Process any pending updates first (spread across frames)
-    let mut updates_this_frame = 0;
-    while !lod_state.pending_updates.is_empty() && updates_this_frame < lod_state.max_updates_per_frame {
-        let (entity, new_lod) = lod_state.pending_updates.pop().unwrap();
-        
-        if let Ok((_, mut chunk, _, _)) = chunk_query.get_mut(entity) {
-            if chunk.lod != new_lod {
-                let new_mesh_handle = generate_chunk_mesh(
-                    chunk.position,
-                    new_lod,
-                    config,
-                    data,
-                    &mut meshes,
-                );
-                
-                commands.entity(entity).insert(Mesh3d(new_mesh_handle.clone()));
-                
-                // Update physics collider
-                // Requires avian3d physics feature
-                #[cfg(feature = "physics")]
-                {
-                    // TODO: Re-enable when avian3d Collider::trimesh_from_mesh is verified
-                    // if let Some(mesh) = meshes.get(&new_mesh_handle) {
-                    //     if let Some(collider) = Collider::trimesh_from_mesh(mesh) {
-                    //         commands.entity(entity).insert(collider);
-                    //     }
-                    // }
-                }
-                
-                chunk.lod = new_lod;
-                updates_this_frame += 1;
-            }
+
+    // Process pending updates first (spread across frames). The list is
+    // kept sorted farthest-first, so `pop` takes the nearest chunk.
+    let mut spent = 0;
+    while spent < lod_state.max_updates_per_frame {
+        let Some((entity, new_lod)) = lod_state.pending_updates.pop() else { break };
+        let Ok((_, mut chunk)) = chunk_query.get_mut(entity) else { continue };
+        if chunk.lod == new_lod {
+            continue;
         }
+        let new_mesh_handle = generate_chunk_render_mesh(
+            chunk.position,
+            new_lod,
+            config,
+            data,
+            volume,
+            &mut meshes,
+        );
+        commands.entity(entity).try_insert(Mesh3d(new_mesh_handle));
+        chunk.lod = new_lod;
+        spent += chunk_mesh_cost(chunk.position, new_lod, config, data, volume);
     }
-    
+
     // Check if we should scan for LOD changes (throttled)
     let camera_moved = camera_pos.distance(lod_state.last_camera_pos) > lod_state.camera_move_threshold;
     let time_elapsed = current_time - lod_state.last_check >= lod_state.check_interval;
-    
+
     if !camera_moved && !time_elapsed {
         return;
     }
-    
+
     lod_state.last_check = current_time;
     lod_state.last_camera_pos = camera_pos;
-    
-    // Scan chunks for LOD changes and queue updates
-    for (entity, chunk, transform, _mesh) in chunk_query.iter() {
-        let distance = camera_pos.distance(transform.translation());
-        let new_lod = config.lod_for_distance(distance);
-        
-        // Queue update if LOD changed
-        if new_lod != chunk.lod {
-            // Prioritize closer chunks (insert at front for lower LOD = more detail)
-            if new_lod < chunk.lod {
-                lod_state.pending_updates.insert(0, (entity, new_lod));
-            } else {
-                lod_state.pending_updates.push((entity, new_lod));
-            }
-        }
-    }
+
+    // Rebuild the queue from scratch on every scan: entries queued for an
+    // older camera position would otherwise pile up as duplicates and apply
+    // stale LODs.
+    let mut pending: Vec<(Entity, u32, f32)> = chunk_query
+        .iter()
+        .filter_map(|(entity, chunk)| {
+            let distance = chunk_lod_distance(chunk.position, config, data, camera_pos);
+            let new_lod = config.lod_for_distance(distance);
+            (new_lod != chunk.lod).then_some((entity, new_lod, distance))
+        })
+        .collect();
+    pending.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    lod_state.pending_updates = pending.into_iter().map(|(entity, lod, _)| (entity, lod)).collect();
 }
 
 /// Quadtree node for hierarchical LOD (future optimization)

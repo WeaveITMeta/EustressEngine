@@ -11,9 +11,11 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::asset::RenderAssetUsages;
 use noise::{NoiseFn, Perlin, Fbm, MultiFractal};
 use super::{TerrainConfig, TerrainData};
-use super::material::{height_to_color, HeightBlendParams};
+use super::height_query::material_weights_at_uv;
+use super::material::{height_to_color, HeightBlendParams, TerrainMaterial};
+use super::material_slots::TerrainSlotPalette;
 
-// ── Vertex-colour realism knobs (see the baking block in generate_chunk_mesh) ──
+// ── Vertex-colour realism knobs (see the baking block in HeightfieldShading::color) ──
 // Flat per-material base colours read as "painted plastic". Three free,
 // deterministic modulations bake depth into the vertex colour without a texture:
 // curvature ambient-occlusion, slope self-shadow, and macro tonal variation.
@@ -30,74 +32,140 @@ const MACRO_VARIATION: f32 = 0.13;
 /// Patch wavelength of the tonal variation (~11 m).
 const MACRO_FREQ: f32 = 1.0 / 11.0;
 
-// ── Splat-bucket display colours (sRGB) for the vertex-colour blend ──
-// The 4-bucket splat is [grass, rock, dirt, snow]. Bucket 3 conflates
-// snow + water + ice + glacier (see TerrainMaterial::splat_bucket); it's
-// resolved PER-VERTEX by altitude below (peaks → snow, lowlands → water).
-// Temperate worlds are almost all water (rivers/lakes) and essentially no
-// snow, so colouring bucket 3 as flat snow-white made every waterway read as
-// blinding white confetti — water-blue for the lowlands fixes that.
-const BUCKET_GRASS: [f32; 3] = [0.34, 0.52, 0.24];
-const BUCKET_ROCK: [f32; 3] = [0.48, 0.44, 0.40];
-const BUCKET_DIRT: [f32; 3] = [0.55, 0.42, 0.30];
-const BUCKET_SNOW: [f32; 3] = [0.92, 0.93, 0.96];
-const BUCKET_WATER: [f32; 3] = [0.20, 0.40, 0.58];
-/// Fraction of the height band above which bucket-3 reads as snow, not water.
-const SNOW_ALT_FRAC: f32 = 0.72;
-
-/// Bilinearly-sample the 4 splat weights `[grass, rock, dirt, snow]` at a
-/// global height-cache UV. Returns zeros when no splatmap has been loaded
-/// (the mesh then falls back to a height-band colour). Layout:
-/// `splat_cache[pixel*4 + c]`.
+/// sRGB base colour of the material mix at a global height-cache UV: the
+/// bilinear slot weights of the material map (`material_weights_at_uv`)
+/// blending each slot's swatch from `data.slot_palette`, so a Space's
+/// custom slots show in their own colour. A point with no material around
+/// it reads as Grass, so no cell ever renders black.
 ///
-/// Bilinear (not nearest) matters here: `export.rs` already bakes a 3x3
-/// smoothing kernel into the splatmap PNG so material boundaries are soft
-/// gradients, not one-hot steps — but NEAREST sampling re-quantised that
-/// softness back into hard blocks at mesh-vertex resolution, which is what
-/// produced the visibly jagged, non-blending material transitions. Bilinear
-/// interpolation between the 4 nearest cache pixels preserves the gradient.
-fn sample_splat_weights(data: &TerrainData, u: f32, v: f32) -> [f32; 4] {
-    let w = data.cache_width as usize;
-    let h = data.cache_height as usize;
-    if data.splat_cache.is_empty() || w == 0 || h == 0 {
-        return [0.0; 4];
+/// Bilinear (not nearest) matters here: the worldgen export bakes a 3x3
+/// smoothing kernel into its material mixes so boundaries are soft
+/// gradients, and nearest sampling re-quantised that softness back into
+/// hard blocks at mesh-vertex resolution. Bilinear interpolation between the
+/// 4 nearest cells preserves the gradient.
+fn material_mix_srgb(data: &TerrainData, u: f32, v: f32) -> [f32; 3] {
+    let palette = &data.slot_palette;
+    let weights = material_weights_at_uv(data, u, v);
+    if weights.is_empty() {
+        return palette.srgb(TerrainMaterial::Grass.to_u8());
     }
-    let px = u.clamp(0.0, 1.0) * (w.saturating_sub(1)) as f32;
-    let pz = v.clamp(0.0, 1.0) * (h.saturating_sub(1)) as f32;
+    let mut srgb = [0.0f32; 3];
+    for &(slot, weight) in weights.as_slice() {
+        let [r, g, b] = palette.srgb(slot);
+        srgb[0] += r * weight;
+        srgb[1] += g * weight;
+        srgb[2] += b * weight;
+    }
+    srgb
+}
 
-    let x0 = px.floor() as usize;
-    let z0 = pz.floor() as usize;
-    let x1 = (x0 + 1).min(w.saturating_sub(1));
-    let z1 = (z0 + 1).min(h.saturating_sub(1));
-    let fx = px - x0 as f32;
-    let fz = pz - z0 as f32;
+/// The shade every baked terrain vertex colour shares: `ao` times the slope
+/// self-shadow and macro value-noise, so heightfield ground and volumetric
+/// surfaces that meet at a border are lit by one formula.
+///
+/// Every terrain vertex colour is `[base * shade, shade]`: the RGB is what
+/// the vertex-colour `StandardMaterial` draws (an opaque surface ignores
+/// alpha), and the alpha carries the shade alone, so the textured surface
+/// material (`surface_material`) can darken its own albedo by it without
+/// applying the swatch colour a second time.
+fn baked_shade(ao: f32, normal: Vec3, world_x: f32, world_z: f32, seed: u32) -> f32 {
+    let slope_shade = SLOPE_MIN + (1.0 - SLOPE_MIN) * normal.y.clamp(0.0, 1.0);
+    let variation =
+        1.0 + MACRO_VARIATION * hash_noise(world_x * MACRO_FREQ, world_z * MACRO_FREQ, seed ^ 0x9E37);
+    (ao * slope_shade * variation).clamp(0.35, 1.2)
+}
 
-    let sample = |x: usize, z: usize| -> [f32; 4] {
-        let idx = (z * w + x) * 4;
-        if idx + 3 < data.splat_cache.len() {
-            [
-                data.splat_cache[idx],
-                data.splat_cache[idx + 1],
-                data.splat_cache[idx + 2],
-                data.splat_cache[idx + 3],
-            ]
-        } else {
-            [0.0; 4]
+/// What the baked heightfield vertex colour reads, set up once per mesh.
+///
+/// The one definition of how heightfield ground is coloured: the heightfield
+/// mesher calls it for every vertex, and the marching-cubes mesher
+/// (`marching.rs`) calls it for every vertex where the heightfield term of
+/// the terrain field wins, so the two meshes agree along a shared border.
+pub(crate) struct HeightfieldShading<'a> {
+    config: &'a TerrainConfig,
+    data: &'a TerrainData,
+    has_materials: bool,
+    fallback_blend: HeightBlendParams,
+}
+
+impl<'a> HeightfieldShading<'a> {
+    pub(crate) fn new(config: &'a TerrainConfig, data: &'a TerrainData) -> Self {
+        Self {
+            config,
+            data,
+            has_materials: !data.height_cache.is_empty() && data.has_material_layer(),
+            fallback_blend: HeightBlendParams::default(),
         }
-    };
-
-    let s00 = sample(x0, z0);
-    let s10 = sample(x1, z0);
-    let s01 = sample(x0, z1);
-    let s11 = sample(x1, z1);
-
-    let mut out = [0.0f32; 4];
-    for c in 0..4 {
-        let top = s00[c] + (s10[c] - s00[c]) * fx;
-        let bottom = s01[c] + (s11[c] - s01[c]) * fx;
-        out[c] = top + (bottom - top) * fz;
     }
-    out
+
+    /// Linear RGBA of the heightfield surface at one vertex, the baked shade
+    /// in alpha (see [`baked_shade`]). `world_u`, `world_v` is the vertex's
+    /// global height-cache UV, `height` its surface height, `neighbours` the
+    /// surface heights one sample step away at `[-X, +X, -Z, +Z]`, and
+    /// `normal` its unit surface normal.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn color(
+        &self,
+        world_u: f32,
+        world_v: f32,
+        world_x: f32,
+        world_z: f32,
+        height: f32,
+        neighbours: [f32; 4],
+        normal: Vec3,
+    ) -> [f32; 4] {
+        let config = self.config;
+        let [hl, hr, hd, hup] = neighbours;
+
+        // Base material colour. From the material map when the terrain has
+        // one, every slot at its own base colour, else a height-band
+        // fallback so procedural terrain keeps its look. The terrain
+        // StandardMaterial base_color is white, so this vertex colour shows
+        // through directly.
+        let lin = if self.has_materials {
+            let [r, g, b] = material_mix_srgb(self.data, world_u, world_v);
+            Color::srgb(r, g, b).to_linear()
+        } else {
+            height_to_color(height, &self.fallback_blend).to_linear()
+        };
+
+        // Bake cheap realism into the vertex colour (see the knob consts):
+        //  1. curvature AO: Laplacian `mean(neighbours) - h` is >0 in
+        //     concavities (darken for occlusion) and <0 on ridges (lift);
+        //  2. slope shade: scale by `normal.y` (cos slope) for soft cliff
+        //     self-shadow;
+        //  3. macro value-noise: low-frequency world-space patchiness so
+        //     the uniform per-material fill stops reading as flat paint.
+        let laplacian = (hl + hr + hd + hup) * 0.25 - height;
+        let ao = (1.0 - laplacian * AO_STRENGTH).clamp(AO_MIN, RIDGE_MAX);
+        let shade = baked_shade(ao, normal, world_x, world_z, config.seed);
+        [lin.red * shade, lin.green * shade, lin.blue * shade, shade]
+    }
+}
+
+/// Linear RGBA of a vertex on a surface a volumetric edit made (a cave
+/// wall, an overhang): `material`'s swatch in `palette` (its slot is its
+/// discriminant) under the same slope shade and macro variation the
+/// heightfield bakes, the shade in alpha (see [`baked_shade`]). There is no
+/// curvature AO, since there is no height raster there to take a Laplacian
+/// of.
+pub(crate) fn material_vertex_color(
+    palette: &TerrainSlotPalette,
+    material: TerrainMaterial,
+    world_x: f32,
+    world_z: f32,
+    normal: Vec3,
+    seed: u32,
+) -> [f32; 4] {
+    let lin = palette.color(material.to_u8()).to_linear();
+    let shade = baked_shade(1.0, normal, world_x, world_z, seed);
+    [lin.red * shade, lin.green * shade, lin.blue * shade, shade]
+}
+
+/// How far (a negative Y offset) chunk skirts hang below the chunk border:
+/// 5% of the chunk size, at least 2 units.
+pub(crate) fn skirt_depth(chunk_size: f32) -> f32 {
+    -(chunk_size * 0.05).max(2.0)
 }
 
 /// Pre-allocated noise generators for terrain height sampling.
@@ -202,7 +270,58 @@ impl TerrainNoiseContext {
     }
 }
 
-/// Generate mesh for a terrain chunk
+/// World-space surface heights of a chunk's vertex grid at `resolution`,
+/// laid out `z * (resolution + 1) + x`. Vertex `(x, z)` sits at
+/// `(x, z) * chunk_size / resolution` from the chunk entity's corner.
+///
+/// The single definition of where a chunk's ground is: the render mesh takes
+/// its vertex heights from here, and the physics collider (`collider.rs`)
+/// samples it at LOD 0, so what a body stands on cannot drift from what the
+/// full-detail mesh shows.
+pub fn chunk_height_grid(
+    chunk_pos: IVec2,
+    resolution: u32,
+    config: &TerrainConfig,
+    data: &TerrainData,
+) -> Vec<f32> {
+    let resolution = resolution.max(1);
+    let size = config.chunk_size;
+    let stride = (resolution + 1) as usize;
+    let mut heights = Vec::with_capacity(stride * stride);
+
+    let noise = data
+        .height_cache
+        .is_empty()
+        .then(|| TerrainNoiseContext::new(config.seed, config.height_scale));
+    let total_chunks_x = (config.chunks_x * 2 + 1) as f32;
+    let total_chunks_z = (config.chunks_z * 2 + 1) as f32;
+
+    for z in 0..=resolution {
+        for x in 0..=resolution {
+            let u = x as f32 / resolution as f32;
+            let v = z as f32 / resolution as f32;
+            let height = match &noise {
+                Some(ctx) => ctx.sample_height(
+                    chunk_pos.x as f32 * size + u * size,
+                    chunk_pos.y as f32 * size + v * size,
+                ),
+                None => {
+                    let world_u = ((chunk_pos.x as f32 + u + config.chunks_x as f32) / total_chunks_x).clamp(0.0, 1.0);
+                    let world_v = ((chunk_pos.y as f32 + v + config.chunks_z as f32) / total_chunks_z).clamp(0.0, 1.0);
+                    config.world_height(data.sample_height(world_u, world_v))
+                }
+            };
+            heights.push(height);
+        }
+    }
+    heights
+}
+
+/// Generate the heightfield mesh for a terrain chunk.
+///
+/// Systems that mesh chunks call [`super::generate_chunk_render_mesh`]
+/// instead, which draws a chunk holding volumetric edits with marching cubes
+/// at LOD 0 and comes here for everything else.
 pub fn generate_chunk_mesh(
     chunk_pos: IVec2,
     lod: u32,
@@ -225,7 +344,7 @@ pub fn generate_chunk_mesh(
     // Create noise context once per chunk (NOT per vertex)
     let noise_context = TerrainNoiseContext::new(seed, height_scale);
     let use_procedural = data.height_cache.is_empty();
-    let has_splat = !use_procedural && !data.splat_cache.is_empty();
+    let shading = HeightfieldShading::new(config, data);
     let total_chunks_x = (config.chunks_x * 2 + 1) as f32;
     let total_chunks_z = (config.chunks_z * 2 + 1) as f32;
 
@@ -238,7 +357,11 @@ pub fn generate_chunk_mesh(
     let step_m = (size / resolution as f32).max(0.001);
     let du = step_m / terrain_w_m;
     let dv = step_m / terrain_d_m;
-    let fallback_blend = HeightBlendParams::default();
+
+    // Vertex heights come from the shared grid so the LOD-0 collider, which
+    // samples the same function, matches this mesh exactly.
+    let grid = chunk_height_grid(chunk_pos, resolution, config, data);
+    let grid_stride = resolution as usize + 1;
 
     // Height sampling
     for z in 0..=resolution {
@@ -254,12 +377,8 @@ pub fn generate_chunk_mesh(
             let world_u = ((chunk_pos.x as f32 + u + config.chunks_x as f32) / total_chunks_x).clamp(0.0, 1.0);
             let world_v = ((chunk_pos.y as f32 + v + config.chunks_z as f32) / total_chunks_z).clamp(0.0, 1.0);
 
-            // Sample height (procedural or from cached heightmap).
-            let height = if use_procedural {
-                noise_context.sample_height(world_x, world_z)
-            } else {
-                data.sample_height(world_u, world_v) * height_scale
-            };
+            // Surface height (procedural or from the cached heightmap).
+            let height = grid[z as usize * grid_stride + x as usize];
 
             // Local position within chunk
             let local_x = u * size;
@@ -284,61 +403,17 @@ pub fn generate_chunk_mesh(
                 )
             } else {
                 (
-                    data.sample_height((world_u - du).clamp(0.0, 1.0), world_v) * height_scale,
-                    data.sample_height((world_u + du).clamp(0.0, 1.0), world_v) * height_scale,
-                    data.sample_height(world_u, (world_v - dv).clamp(0.0, 1.0)) * height_scale,
-                    data.sample_height(world_u, (world_v + dv).clamp(0.0, 1.0)) * height_scale,
+                    config.world_height(data.sample_height((world_u - du).clamp(0.0, 1.0), world_v)),
+                    config.world_height(data.sample_height((world_u + du).clamp(0.0, 1.0), world_v)),
+                    config.world_height(data.sample_height(world_u, (world_v - dv).clamp(0.0, 1.0))),
+                    config.world_height(data.sample_height(world_u, (world_v + dv).clamp(0.0, 1.0))),
                 )
             };
             let ddx = (hr - hl) / (2.0 * step_m);
             let ddz = (hup - hd) / (2.0 * step_m);
             let nrm = Vec3::new(-ddx, 1.0, -ddz).normalize();
             normals.push(nrm.to_array());
-
-            // Base material colour. From the splatmap (grass/rock/dirt +
-            // snow-or-water) when present, else a height-band fallback so
-            // procedural / splat-less terrain keeps its previous look. Bucket 3
-            // is snow+water conflated by splat_bucket(); resolve it per-vertex
-            // by altitude (peaks → snow, lowlands → water) so rivers/lakes read
-            // as water instead of blinding snow-white. The terrain
-            // StandardMaterial base_color is white, so this vertex colour shows
-            // through directly.
-            let lin = if has_splat {
-                let w = sample_splat_weights(data, world_u, world_v);
-                let sum = (w[0] + w[1] + w[2] + w[3]).max(1e-4);
-                let bucket3 = if height >= height_scale * SNOW_ALT_FRAC {
-                    BUCKET_SNOW
-                } else {
-                    BUCKET_WATER
-                };
-                let cols = [BUCKET_GRASS, BUCKET_ROCK, BUCKET_DIRT, bucket3];
-                let mut srgb = [0.0f32; 3];
-                for (bkt, col) in cols.iter().enumerate() {
-                    let wn = w[bkt] / sum;
-                    srgb[0] += col[0] * wn;
-                    srgb[1] += col[1] * wn;
-                    srgb[2] += col[2] * wn;
-                }
-                Color::srgb(srgb[0], srgb[1], srgb[2]).to_linear()
-            } else {
-                height_to_color(height, &fallback_blend).to_linear()
-            };
-
-            // Bake cheap realism into the vertex colour (see the knob consts):
-            //  1. curvature AO — Laplacian `mean(neighbours) - h` is >0 in
-            //     concavities (darken → occlusion) and <0 on ridges (lift);
-            //  2. slope shade — scale by `nrm.y` (cos slope) for soft cliff
-            //     self-shadow;
-            //  3. macro value-noise — low-frequency world-space patchiness so
-            //     the uniform per-material fill stops reading as flat paint.
-            let laplacian = (hl + hr + hd + hup) * 0.25 - height;
-            let ao = (1.0 - laplacian * AO_STRENGTH).clamp(AO_MIN, RIDGE_MAX);
-            let slope_shade = SLOPE_MIN + (1.0 - SLOPE_MIN) * nrm.y.clamp(0.0, 1.0);
-            let variation = 1.0
-                + MACRO_VARIATION
-                    * hash_noise(world_x * MACRO_FREQ, world_z * MACRO_FREQ, seed ^ 0x9E37);
-            let shade = (ao * slope_shade * variation).clamp(0.35, 1.2);
-            colors.push([lin.red * shade, lin.green * shade, lin.blue * shade, 1.0]);
+            colors.push(shading.color(world_u, world_v, world_x, world_z, height, [hl, hr, hd, hup], nrm));
         }
     }
 
@@ -495,8 +570,7 @@ fn add_skirts(
     size: f32,
     _height_scale: f32,
 ) {
-    // Skirt depth proportional to chunk size (5% of chunk size, minimum 2 units)
-    let skirt_depth = -(size * 0.05).max(2.0);
+    let skirt_depth = skirt_depth(size);
     let stride = resolution + 1;
     let base_vertex_count = positions.len() as u32;
     

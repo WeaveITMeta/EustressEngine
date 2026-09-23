@@ -1,0 +1,44 @@
+# TerrainScatter: grass, shrubs, rocks, trees or a custom mesh scattered over
+# the finished terrain wherever its rules hold. Nothing is baked into the
+# terrain and nothing placed is stored: the same properties always place the
+# same instances, and an edit to the ground places them again. Lives under
+# Workspace/Terrain/Layers.
+#
+# kind: Grass, Shrubs, Rocks, Trees or Custom. tree_type (Trees only):
+# Mixed, Conifer or Broadleaf. mesh_asset (Custom only): a .glb inside the
+# Space folder, relative to it. density is instances per 100 square metres.
+# material is a built-in terrain material name, or "None" for any. Slopes
+# are degrees from horizontal, heights, sizes and radius metres. A size of 0
+# covers the whole terrain along that axis; a radius of 0 uses the kind's
+# streaming distance (grass 120, shrubs 250, rocks 450, trees 1500).
+
+[transform]
+position = [0.0, 0.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[terrain_scatter]
+enabled = true
+order = 0
+kind = "Grass"
+tree_type = "Mixed"
+mesh_asset = ""
+density = 40.0
+min_scale = 0.8
+max_scale = 1.3
+align_to_normal = true
+collide = false
+seed = 1
+material = "None"
+min_slope = 0.0
+max_slope = 35.0
+min_height = -10000.0
+max_height = 10000.0
+avoid_roads = true
+size_x = 0.0
+size_z = 0.0
+radius = 0.0
+
+[metadata]
+class_name = "TerrainScatter"
+archivable = true

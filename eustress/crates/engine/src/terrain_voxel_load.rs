@@ -26,32 +26,33 @@
 //! 2. Decodes each chunk and runs the MULTI-SPAN column extractor
 //!    ([`voxel_extract::fill_terrain_from_chunk`]): for every `(x, z)` column
 //!    it finds the solid spans and writes the TOP surface height (raw studs)
-//!    + the surface material's splat bucket into a `TerrainData`.
-//! 3. Spawns a single `TerrainRoot` entity carrying that `TerrainData` +
-//!    a matching `TerrainConfig`. The EXISTING `chunk_spawn_system`
-//!    (registered in [`crate::terrain_plugin::EngineTerrainPlugin`]) meshes
-//!    and renders it as the camera moves — this loader produces the same
-//!    `height_cache` / `splat_cache` shape that path already consumes, so
-//!    the mesher/renderer is untouched.
+//!    + the surface material's id (its material slot) into a `TerrainData`, and
+//!    records each column's solid extent ([`voxel_extract::VoxelColumns`]).
+//! 3. Decodes the chunks around every cave a second time and carves the air
+//!    under each column's top surface (caves, tunnels, the undersides of
+//!    overhangs) into a `TerrainVolume` ([`voxel_extract::carve_voxel_caves`];
+//!    its module docs cover the lattice alignment and what is left solid).
+//! 4. Spawns a single `TerrainRoot` entity carrying that `TerrainData`, the
+//!    volume and a matching `TerrainConfig`. The EXISTING
+//!    `chunk_spawn_system` (registered in
+//!    [`crate::terrain_plugin::EngineTerrainPlugin`]) meshes and renders it
+//!    as the camera moves.
 //!
-//! ## What renders vs. what is deferred
+//! ## What renders
 //!
-//! - **Renders:** the TOP surface of every voxel column (heightfield) with
-//!   correct per-cell material colour (via `splat_bucket`). Scales by the
-//!   region query (camera-local chunks) once `TODO(stream)` lands.
-//! - **Deferred:** true multi-span CAVE / overhang under-surface geometry.
-//!   The extractor already detects every span per column, but the current
-//!   renderer is a single-surface heightfield, so only the top span's top
-//!   surface meshes. Deep caves render partially (their dominant top
-//!   surface) — acceptable + documented per the SCOPE DECISION. Full
-//!   volumetric meshing (surface-nets / dual-contouring) reading the same
-//!   whole-voxel Fjall store is a later wave.
+//! The TOP surface of every voxel column (heightfield) with correct per-cell
+//! material colour (from the material map), and around every cave a marching
+//! cubes surface at LOD 0 that opens the caves, tunnels and overhang
+//! undersides and colours their walls by voxel material. At coarser LODs
+//! those chunks fall back to the heightfield, so caves are not drawn far
+//! away. Scales by the region query (camera-local chunks) once
+//! `TODO(stream)` lands.
 
 #![cfg(feature = "world-db")]
 
 use bevy::prelude::*;
 use eustress_common::terrain::voxel_extract;
-use eustress_common::terrain::{TerrainConfig, TerrainData, TerrainRoot};
+use eustress_common::terrain::{TerrainConfig, TerrainData, TerrainRoot, TerrainVolume};
 
 use crate::space::file_loader::LoadInProgress;
 use crate::space::space_ops::space_is_migrated;
@@ -78,11 +79,12 @@ pub struct VoxelSourcedTerrain;
 const MAX_CHUNKS_PER_LOAD: usize = 4096;
 
 /// Hard cap on the heightfield half-extent (in chunks). The cache is sized
-/// `(2*radius+1)^2 * 32^2` floats for heights + ×4 for splat, so the radius
-/// drives memory. A single stray far-flung chunk (corrupt coord, or a tiny
-/// detail kilometres from spawn) must not balloon that to gigabytes. At
-/// radius 64 the cache is `(129*32)^2 ≈ 17M` height floats (~68 MB) + splat
-/// (~272 MB) — already generous for any real place; chunks beyond this are
+/// `(2*radius+1)^2 * 32^2` floats for heights + as many four-byte material
+/// cells, so the radius drives memory. A single stray far-flung chunk
+/// (corrupt coord, or a tiny detail kilometres from spawn) must not balloon
+/// that to gigabytes. At radius 64 the cache is `(129*32)^2 ≈ 17M` height
+/// floats (~68 MB) + material cells (~68 MB), already generous for any real
+/// place; chunks beyond this are
 /// skipped + counted (so the log explains a clipped far edge). `TODO(stream)`
 /// makes this moot by only ever sizing the camera neighbourhood.
 const MAX_RADIUS_CHUNKS: u32 = 64;
@@ -177,6 +179,7 @@ fn load_voxel_terrain_on_space_open(
 
     // ── Decode + multi-span fill, per chunk ───────────────────────────
     let mut data = TerrainData::procedural();
+    let mut columns = voxel_extract::VoxelColumns::default();
     let mut filled = 0usize;
     let mut decode_errors = 0usize;
     let mut skipped_oob = 0usize;
@@ -192,6 +195,7 @@ fn load_voxel_terrain_on_space_open(
         match voxel_extract::decode_voxel_chunk(bytes) {
             Ok(chunk) => {
                 voxel_extract::fill_terrain_from_chunk(&mut data, &config, cx, cy, cz, &chunk);
+                columns.record_chunk(cx, cy, cz, &chunk);
                 filled += 1;
             }
             Err(e) => {
@@ -219,15 +223,40 @@ fn load_voxel_terrain_on_space_open(
         return;
     }
 
+    // ── Caves: carve the air under each column's top surface ──────────
+    // Only the chunks around a cave are decoded a second time, and only
+    // once every chunk is in, since a column's top surface can come from
+    // any chunk stacked on it.
+    let mut volume = TerrainVolume::default();
+    let mut caves = voxel_extract::VoxelCaveReport::default();
+    let cave_chunks = columns.cave_chunks();
+    if !cave_chunks.is_empty() {
+        let mut grid = voxel_extract::VoxelGrid::default();
+        for &((cx, cy, cz), ref bytes) in chunks.iter().take(MAX_CHUNKS_PER_LOAD) {
+            let coord = IVec3::new(cx, cy, cz);
+            if !cave_chunks.contains(&coord) {
+                continue;
+            }
+            // A chunk that failed to decode above contributed no surface
+            // or extent either; its cells read as air here too.
+            if let Ok(chunk) = voxel_extract::decode_voxel_chunk(bytes) {
+                grid.insert(coord, chunk);
+            }
+        }
+        caves = voxel_extract::carve_voxel_caves(&config, &data, &columns, &grid, &mut volume);
+    }
+
     // ── Spawn the TerrainRoot the existing mesher/renderer consumes ────
-    // chunk_spawn_system (EngineTerrainPlugin) queries (TerrainConfig,
-    // TerrainData, Children) on TerrainRoot and generates chunk meshes from
-    // `data.height_cache` as the camera moves — unchanged.
+    // chunk_spawn_system (EngineTerrainPlugin) queries the root's config,
+    // raster and volume and meshes each chunk as the camera moves: by
+    // marching cubes at LOD 0 where the volume holds cave bricks, from
+    // `data.height_cache` everywhere else.
     commands.spawn((
         TerrainRoot,
         VoxelSourcedTerrain,
         config,
         data,
+        volume,
         Transform::default(),
         Visibility::default(),
         Name::new("Terrain (imported voxels)"),
@@ -240,10 +269,12 @@ fn load_voxel_terrain_on_space_open(
         skipped_oob,
         radius_chunks,
         truncated = chunks.len() > MAX_CHUNKS_PER_LOAD,
+        cave_points = caves.carved_points,
+        cave_bricks = caves.bricks,
         space = %space_root.0.display(),
-        "voxel-terrain load: imported terrain TOP-surface heightfield built from Fjall voxels \
-         (multi-span detected; under-surface cave geometry deferred to the volumetric mesher) — \
-         TerrainRoot spawned; chunk_spawn_system will mesh it as the camera moves"
+        "voxel-terrain load: imported terrain built from Fjall voxels (top surfaces in the \
+         heightfield, the air under them carved into volume bricks); TerrainRoot spawned, \
+         chunk_spawn_system will mesh it as the camera moves"
     );
 }
 

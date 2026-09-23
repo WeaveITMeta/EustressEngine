@@ -1,0 +1,27 @@
+# TerrainNoise: deterministic fractal noise baked over a rectangle of the
+# terrain. The terrain's own heights stay as they are. Lives under
+# Workspace/Terrain/Layers.
+#
+# The pattern moves and turns with the layer. Sizes, amplitude and falloff
+# are metres, frequency is cycles per metre of the coarsest octave. The same
+# seed and properties always give the same ground.
+
+[transform]
+position = [0.0, 0.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[terrain_noise]
+enabled = true
+order = 0
+size_x = 100.0
+size_z = 100.0
+amplitude = 3.0
+frequency = 0.02
+octaves = 4
+seed = 1
+falloff = 20.0
+
+[metadata]
+class_name = "TerrainNoise"
+archivable = true

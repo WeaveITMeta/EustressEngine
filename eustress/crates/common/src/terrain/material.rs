@@ -1,7 +1,10 @@
-//! Terrain material and shader definitions
+//! Terrain material identity and material definitions
 //!
-//! Provides both StandardMaterial fallback and custom SplatMaterial
-//! for multi-layer texture blending based on splatmap.
+//! The 23 built-in terrain materials, the per-cell material-map encoding the
+//! heightfield stores them in, and the height-band colours procedural
+//! terrain (which has no material map) falls back to. How each slot is
+//! drawn lives in `material_slots`, and the textured material that draws the
+//! map in `surface_material`.
 //!
 //! ## Supported Materials (Wave 9.E — full Roblox terrain set)
 //!
@@ -10,7 +13,7 @@
 //! material identity instead of collapsing onto a handful of buckets.
 //!
 //! The first 8 variants keep their ORIGINAL discriminant values (Grass=0 …
-//! Asphalt=7) — stored voxel/splat data and the importer's
+//! Asphalt=7): stored voxel and material-map data and the importer's
 //! `eustress_material` constants depend on those `u8` values, so they are
 //! frozen. The Roblox extras are appended at 8..=22:
 //!
@@ -36,27 +39,59 @@
 //! survive into terrain rather than being lifted into the separate water
 //! layer; air is simply the absence of a cell and has no enum variant.
 //!
-//! ### splat_cache is still 4 layers (renderer is 9.C, not here)
+//! ## Material slots and the material map
 //!
-//! `TerrainData.splat_cache` is documented as 4 floats per pixel
-//! `[grass, rock, dirt, snow]` and the GPU splat path is not rewritten in this
-//! wave. To let the existing 4-layer renderer keep working while the full
-//! material identity lives in the voxel data, [`TerrainMaterial::splat_bucket`]
-//! maps every one of the 23 materials to one of those 4 indices. Per-material
-//! splat is the renderer's job (Wave 9.C) — see that method's docs.
+//! The heightfield carries per-cell material identity in
+//! `TerrainData.material_cache`: one [`MaterialCell`] per height sample,
+//! `[id_a, id_b, blend_b, reserved]`, where `id_a` and `id_b` are material
+//! SLOTS and `blend_b` is the weight of `id_b` in 1/255 steps. Slots
+//! `0..MATERIAL_COUNT` are the built-in [`TerrainMaterial`] variants by
+//! discriminant, so a stored cell names the same material the voxel data
+//! does. Slots `MATERIAL_COUNT..=254` are a Space's custom materials, and
+//! [`MATERIAL_SLOT_NONE`] (255) is "no material". A cell holding one
+//! material is `[slot, 255, 0, 0]`; writers keep the stronger material in
+//! `id_a` (see [`canonical_material_cell`]), readers accept any `blend_b`.
+//!
+//! On disk the same cells are `Workspace/Terrain/matmap/x{cx}_z{cz}.png`,
+//! RGBA8, one pixel per cell. Every terrain writer (Save, the worldgen and
+//! flat exporters, the heightmap importer) emits a matmap; the old 4-bucket
+//! `splatmap/*.png` is only ever read, converted by
+//! [`legacy_splat_to_material_cell`], and removed by the next Save.
 
 use bevy::prelude::*;
+
+use super::TerrainConfig;
 
 /// Number of distinct [`TerrainMaterial`] variants (Grass=0 … Water=22).
 ///
 /// The discriminants are dense in `0..MATERIAL_COUNT`, so this is both the
 /// variant count and `max_discriminant + 1`. Update this if variants change.
+/// It is also the first custom material slot: slots below it are the
+/// built-in variants.
 pub const MATERIAL_COUNT: usize = 23;
 
-/// Number of splat layers the current renderer blends (Wave 9.C owns the
-/// renderer; until it goes per-material the splatmap stays 4-wide
-/// `[grass, rock, dirt, snow]`). See [`TerrainMaterial::splat_bucket`].
-pub const SPLAT_LAYER_COUNT: usize = 4;
+/// Slot ids a material-map cell can name: a `u8`, so 256, of which
+/// [`MATERIAL_SLOT_NONE`] is reserved.
+pub const MATERIAL_SLOT_COUNT: usize = 256;
+
+/// The slot id meaning "no material": an unused `id_b`, or a cell no writer
+/// has given a material yet (the voxel loader's air columns). Readers skip
+/// it, and a cell with no material at all renders as Grass.
+pub const MATERIAL_SLOT_NONE: u8 = 255;
+
+/// First slot id of a Space's custom materials.
+pub const FIRST_CUSTOM_MATERIAL_SLOT: u8 = MATERIAL_COUNT as u8;
+
+/// One material-map cell: `[id_a, id_b, blend_b, reserved]`. See the module
+/// docs for the encoding.
+pub type MaterialCell = [u8; 4];
+
+/// Fraction of the height band, measured up from `height_offset`, at and
+/// above which the legacy splatmap's fourth bucket (snow, glacier, ice, salt
+/// and water together) means Snow; below it, Water. The rule the old
+/// vertex-colour mesher applied per vertex, kept so converted Spaces look
+/// as they did.
+pub const LEGACY_SNOW_ALTITUDE_FRACTION: f32 = 0.72;
 
 /// Terrain material types for painting.
 ///
@@ -219,36 +254,18 @@ impl TerrainMaterial {
         }
     }
 
-    /// Splat-layer bucket for this material.
-    ///
-    /// The renderer's `splat_cache` is still 4-wide (Wave 9.C owns making it
-    /// per-material). Until then, every one of the 23 materials collapses to
-    /// one of the 4 existing splat layers so the current blend keeps working
-    /// visually while the full material id is preserved losslessly in the
-    /// voxel data:
-    ///
-    /// | bucket | layer | gathers                                            |
-    /// |--------|-------|----------------------------------------------------|
-    /// | 0      | Grass | Grass, LeafyGrass                                  |
-    /// | 1      | Rock  | Rock, Slate, Basalt, CrackedLava, Cobblestone, Limestone, Brick, Concrete, Asphalt, Pavement, WoodPlanks |
-    /// | 2      | Dirt  | Dirt, Mud, Ground, Sand, Sandstone                 |
-    /// | 3      | Snow  | Snow, Glacier, Ice, Salt, Water                    |
-    ///
-    /// TODO(Wave 9.C): replace this 4-bucket clamp with a per-material splat
-    /// weight once the GPU splat path widens beyond `[grass,rock,dirt,snow]`.
-    pub fn splat_bucket(&self) -> usize {
-        match self {
-            // 0 — grass-ish (green vegetation)
-            Self::Grass | Self::LeafyGrass => 0,
-            // 1 — rock/hard-surface (stone, masonry, paving, planks)
-            Self::Rock | Self::Slate | Self::Basalt | Self::CrackedLava
-            | Self::Cobblestone | Self::Limestone | Self::Brick | Self::Concrete
-            | Self::Asphalt | Self::Pavement | Self::WoodPlanks => 1,
-            // 2 — dirt/sand-ish (loose earthy ground)
-            Self::Dirt | Self::Mud | Self::Ground | Self::Sand | Self::Sandstone => 2,
-            // 3 — snow/ice-ish (bright, high-reflect, cold)
-            Self::Snow | Self::Glacier | Self::Ice | Self::Salt | Self::Water => 3,
-        }
+    /// The material named `name`, ignoring case, spaces, underscores and
+    /// hyphens, so "WoodPlanks", "wood planks" and "wood_planks" all match.
+    /// `None` for a name that is not one of the 23 variants.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let squash = |s: &str| -> String {
+            s.chars()
+                .filter(|&c| !matches!(c, ' ' | '_' | '-'))
+                .flat_map(char::to_lowercase)
+                .collect()
+        };
+        let wanted = squash(name);
+        Self::all().iter().copied().find(|m| squash(m.name()) == wanted)
     }
 
     /// Get all material types
@@ -311,71 +328,228 @@ impl TerrainMaterial {
     pub fn from_u8_or_default(id: u8) -> Self {
         Self::from_u8(id).unwrap_or_default()
     }
+}
 
-    /// Convert from a dense layer index (`0..MATERIAL_COUNT`), saturating to
-    /// the default for out-of-range indices.
-    ///
-    /// Equivalent to [`Self::from_u8_or_default`] for `layer < 256`; kept for
-    /// the existing `usize`-indexed `blend_materials` call site.
-    pub fn from_layer(layer: usize) -> Self {
-        u8::try_from(layer)
-            .ok()
-            .and_then(Self::from_u8)
-            .unwrap_or_default()
+// ============================================================================
+// Material-map cells
+// ============================================================================
+
+/// A cell holding `slot` alone.
+#[inline]
+pub fn material_cell(slot: u8) -> MaterialCell {
+    [slot, MATERIAL_SLOT_NONE, 0, 0]
+}
+
+/// The cell for materials `a` and `b` with `b` weighted `blend_b / 255`, in
+/// the form every writer stores: the stronger material in `id_a` (so
+/// `blend_b <= 127`, ties going to `a`), and an unused `id_b` of
+/// [`MATERIAL_SLOT_NONE`] with a zero blend. One form per mix keeps undo
+/// diffs and matmap bytes stable, and lets a reader take `id_a` as the
+/// dominant material without looking at the blend.
+pub fn canonical_material_cell(a: u8, b: u8, blend_b: u8) -> MaterialCell {
+    if a == MATERIAL_SLOT_NONE {
+        return if b == MATERIAL_SLOT_NONE || blend_b == 0 {
+            [MATERIAL_SLOT_NONE, MATERIAL_SLOT_NONE, 0, 0]
+        } else {
+            material_cell(b)
+        };
+    }
+    if b == MATERIAL_SLOT_NONE || b == a || blend_b == 0 {
+        return material_cell(a);
+    }
+    if blend_b == 255 {
+        return material_cell(b);
+    }
+    if blend_b > 127 {
+        [b, a, 255 - blend_b, 0]
+    } else {
+        [a, b, blend_b, 0]
     }
 }
 
-/// Terrain material configuration for splat-based texturing
-#[derive(Clone, Debug)]
-pub struct TerrainMaterialConfig {
-    /// Textures for each material layer (up to 8)
-    pub textures: [Option<Handle<Image>>; 8],
-    
-    /// Splatmap for blending (2 RGBA textures for 8 layers)
-    pub splatmap: Option<Handle<Image>>,
-    pub splatmap2: Option<Handle<Image>>,
-    
-    /// Tiling factor for textures
-    pub texture_scale: f32,
-}
-
-impl Default for TerrainMaterialConfig {
-    fn default() -> Self {
-        Self {
-            textures: Default::default(),
-            splatmap: None,
-            splatmap2: None,
-            texture_scale: 10.0,
+/// The `(slot, weight)` pairs `cell` holds, weights summing to 1 unless the
+/// cell has no material. An unused entry is `(MATERIAL_SLOT_NONE, 0.0)`, and
+/// a pair can carry a zero weight (`blend_b` of 0 or 255 on a hand-made
+/// cell), so consumers skip both. A cell whose `id_a` is none but whose
+/// `id_b` is not gives `id_b` the whole weight.
+pub fn material_cell_weights(cell: MaterialCell) -> [(u8, f32); 2] {
+    const UNUSED: (u8, f32) = (MATERIAL_SLOT_NONE, 0.0);
+    let [a, b, blend, _] = cell;
+    let a_none = a == MATERIAL_SLOT_NONE;
+    let b_none = b == MATERIAL_SLOT_NONE || blend == 0 || b == a;
+    match (a_none, b_none) {
+        (true, true) => [UNUSED, UNUSED],
+        (true, false) => [(b, 1.0), UNUSED],
+        (false, true) => [(a, 1.0), UNUSED],
+        (false, false) => {
+            let wb = blend as f32 / 255.0;
+            [(a, 1.0 - wb), (b, wb)]
         }
     }
 }
 
-/// Create a basic terrain material using StandardMaterial
-/// Use this as fallback when custom shaders aren't needed
-pub fn create_terrain_material(
-    materials: &mut Assets<StandardMaterial>,
-    _config: &TerrainMaterialConfig,
-) -> Handle<StandardMaterial> {
-    materials.add(StandardMaterial {
-        base_color: Color::srgb(0.35, 0.55, 0.25),  // Grass green
-        perceptual_roughness: 0.85,
-        metallic: 0.0,
-        reflectance: 0.2,
-        ..default()
-    })
+/// `cell` after painting `slot` into it at `strength` (0 to 1).
+///
+/// The cell's weights are lerped toward all of `slot` by `strength`, and
+/// then cut back to two materials:
+/// `slot` always stays, with the strongest of the others beside it. Keeping
+/// the painted slot is what makes a stroke converge. A rule keeping the top
+/// two by weight would drop a new material entering a 50/50 mix at a
+/// strength below one third, and repeated dabs would never get it in.
+///
+/// The blend is rounded toward `slot` (down when it is `id_b`'s share and
+/// `slot` is `id_a`, up when `slot` is the weaker `id_b`), so every dab that
+/// moves the weights at all moves the stored cell at least one 1/255 step,
+/// and repeated dabs at any strength end at `slot` alone instead of stalling
+/// on a rounding fixed point. Full strength replaces the cell outright. A
+/// non-positive or NaN strength, or painting "no material", changes nothing.
+pub fn paint_material_cell(cell: MaterialCell, slot: u8, strength: f32) -> MaterialCell {
+    if slot == MATERIAL_SLOT_NONE || !(strength > 0.0) {
+        return cell;
+    }
+    if strength >= 1.0 {
+        return material_cell(slot);
+    }
+    let keep = 1.0 - strength;
+    let mut painted = strength;
+    let mut other: Option<(u8, f32)> = None;
+    for (s, w) in material_cell_weights(cell) {
+        if s == MATERIAL_SLOT_NONE || !(w > 0.0) {
+            continue;
+        }
+        if s == slot {
+            painted += w * keep;
+        } else {
+            let w = w * keep;
+            // Strictly greater, so a tie keeps `id_a`, the cell's first entry.
+            if other.map_or(true, |(_, best)| w > best) {
+                other = Some((s, w));
+            }
+        }
+    }
+    let Some((other_slot, other_weight)) = other else {
+        return material_cell(slot);
+    };
+    let total = painted + other_weight;
+    if painted >= other_weight {
+        let blend = (other_weight / total * 255.0).floor().clamp(0.0, 255.0) as u8;
+        canonical_material_cell(slot, other_slot, blend)
+    } else {
+        let blend = (painted / total * 255.0).ceil().clamp(0.0, 255.0) as u8;
+        canonical_material_cell(other_slot, slot, blend)
+    }
 }
 
-/// Create height-based terrain material with color gradient
-pub fn create_height_gradient_material(
-    materials: &mut Assets<StandardMaterial>,
-) -> Handle<StandardMaterial> {
-    materials.add(StandardMaterial {
-        base_color: Color::srgb(0.4, 0.6, 0.3),  // Base grass
-        perceptual_roughness: 0.8,
-        metallic: 0.0,
-        reflectance: 0.25,
-        ..default()
-    })
+/// Whether the legacy splatmap's fourth bucket means Snow (else Water) for a
+/// cell at world height `world_height`: at or above
+/// [`LEGACY_SNOW_ALTITUDE_FRACTION`] of the band, measured up from
+/// `height_offset`. Multiplied through rather than divided, so a zero
+/// `height_scale` needs no guard, exactly as the old mesher compared it.
+#[inline]
+pub fn legacy_bucket3_is_snow(config: &TerrainConfig, world_height: f32) -> bool {
+    world_height - config.height_offset >= config.height_scale * LEGACY_SNOW_ALTITUDE_FRACTION
+}
+
+/// Convert one legacy splatmap pixel, channel bytes `[grass, rock, dirt,
+/// snow-or-water]`, to a material cell: the two heaviest channels (ties to
+/// the lower channel) become Grass, Rock, Dirt and, for the fourth, Snow
+/// when `bucket3_is_snow` (see [`legacy_bucket3_is_snow`]) or Water, blended
+/// by their relative weight. The third and fourth heaviest channels are
+/// dropped, the same top-two cut the material map makes everywhere. A pixel
+/// with no weight at all is Grass, the default a fresh material layer starts
+/// from.
+pub fn legacy_splat_to_material_cell(bytes: [u8; 4], bucket3_is_snow: bool) -> MaterialCell {
+    let bucket_slot = |bucket: usize| -> u8 {
+        let material = match bucket {
+            0 => TerrainMaterial::Grass,
+            1 => TerrainMaterial::Rock,
+            2 => TerrainMaterial::Dirt,
+            _ if bucket3_is_snow => TerrainMaterial::Snow,
+            _ => TerrainMaterial::Water,
+        };
+        material.to_u8()
+    };
+    let mut order = [0usize, 1, 2, 3];
+    order.sort_by(|&x, &y| bytes[y].cmp(&bytes[x]).then(x.cmp(&y)));
+    let (a, b) = (order[0], order[1]);
+    let (weight_a, weight_b) = (bytes[a] as u32, bytes[b] as u32);
+    if weight_a == 0 {
+        return material_cell(TerrainMaterial::Grass.to_u8());
+    }
+    if weight_b == 0 {
+        return material_cell(bucket_slot(a));
+    }
+    // Floor, and `weight_b <= weight_a`, so the blend stays at or under 127.
+    let blend = (weight_b * 255 / (weight_a + weight_b)) as u8;
+    canonical_material_cell(bucket_slot(a), bucket_slot(b), blend)
+}
+
+/// Material slots and their weights at one point, strongest first, for CPU
+/// consumers (vertex colouring, gameplay queries). Holds up to eight slots,
+/// the most a bilinear read of four two-material cells can name, without
+/// allocating. See `height_query::material_weights_at_world`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SlotWeights {
+    entries: [(u8, f32); 8],
+    len: usize,
+}
+
+impl Default for SlotWeights {
+    fn default() -> Self {
+        Self { entries: [(MATERIAL_SLOT_NONE, 0.0); 8], len: 0 }
+    }
+}
+
+impl SlotWeights {
+    /// Add `weight` to `slot`, merging with an entry already holding it.
+    /// "No material", non-positive and NaN weights are ignored, and a ninth
+    /// distinct slot (impossible from four cells) is dropped.
+    pub fn add(&mut self, slot: u8, weight: f32) {
+        if slot == MATERIAL_SLOT_NONE || !(weight > 0.0) {
+            return;
+        }
+        if let Some(entry) = self.entries[..self.len].iter_mut().find(|(s, _)| *s == slot) {
+            entry.1 += weight;
+        } else if self.len < self.entries.len() {
+            self.entries[self.len] = (slot, weight);
+            self.len += 1;
+        }
+    }
+
+    /// Scale the weights to sum to 1 and order them strongest first (ties:
+    /// lower slot first, so the order is deterministic).
+    pub fn normalize(&mut self) {
+        let sum: f32 = self.entries[..self.len].iter().map(|(_, w)| w).sum();
+        if !(sum > 0.0) {
+            self.len = 0;
+            return;
+        }
+        for entry in &mut self.entries[..self.len] {
+            entry.1 /= sum;
+        }
+        self.entries[..self.len].sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    }
+
+    /// The `(slot, weight)` entries, strongest first after [`Self::normalize`].
+    pub fn as_slice(&self) -> &[(u8, f32)] {
+        &self.entries[..self.len]
+    }
+
+    /// No slot carries any weight: the point has no material layer, or only
+    /// cells without a material around it.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The strongest slot, `None` when [`Self::is_empty`].
+    pub fn dominant(&self) -> Option<u8> {
+        self.as_slice().first().map(|(slot, _)| *slot)
+    }
+
+    /// The weight of `slot`, 0 when it is absent.
+    pub fn weight_of(&self, slot: u8) -> f32 {
+        self.as_slice().iter().find(|(s, _)| *s == slot).map_or(0.0, |(_, w)| *w)
+    }
 }
 
 /// Height-based material blending parameters
@@ -469,54 +643,6 @@ pub fn height_to_color(height: f32, params: &HeightBlendParams) -> Color {
 fn color_to_vec3(color: Color) -> Vec3 {
     let srgba = color.to_srgba();
     Vec3::new(srgba.red, srgba.green, srgba.blue)
-}
-
-/// Get color for a specific material layer
-pub fn material_to_color(material: TerrainMaterial) -> Color {
-    material.base_color()
-}
-
-/// Blend the first 8 materials (by discriminant) according to per-layer
-/// weights — a legacy CPU fallback helper.
-///
-/// `weights[i]` weights `TerrainMaterial::from_layer(i)`, so this covers
-/// discriminants 0..=7 (Grass..=Asphalt). The full 23-material identity lives
-/// in the voxel data; widening this blend to all materials is the renderer's
-/// job (Wave 9.C). Kept for the existing CPU vertex-color path.
-pub fn blend_materials(weights: &[f32; 8]) -> Color {
-    let mut color = Vec3::ZERO;
-    let mut total_weight = 0.0;
-    
-    for (i, &weight) in weights.iter().enumerate() {
-        if weight > 0.0 {
-            let mat = TerrainMaterial::from_layer(i);
-            color += color_to_vec3(mat.base_color()) * weight;
-            total_weight += weight;
-        }
-    }
-    
-    if total_weight > 0.0 {
-        color /= total_weight;
-    } else {
-        color = color_to_vec3(TerrainMaterial::Grass.base_color());
-    }
-    
-    Color::srgb(color.x, color.y, color.z)
-}
-
-/// Terrain shader constants (for future custom material)
-pub mod shader {
-    /// Vertex shader for terrain (placeholder - uses default PBR)
-    pub const TERRAIN_VERTEX: &str = r#"
-        // Standard PBR vertex shader
-        // Custom displacement could be added here
-    "#;
-    
-    /// Fragment shader for terrain splat blending (placeholder)
-    pub const TERRAIN_FRAGMENT: &str = r#"
-        // Splat-based texture blending
-        // Sample 4 textures and blend based on splatmap
-    "#;
 }
 
 // ---------------------------------------------------------------------------
@@ -622,43 +748,152 @@ mod tests {
     }
 
     #[test]
-    fn from_layer_matches_from_u8_and_saturates() {
-        for i in 0..MATERIAL_COUNT {
-            assert_eq!(
-                TerrainMaterial::from_layer(i),
-                TerrainMaterial::from_u8(i as u8).unwrap()
-            );
-        }
-        // Out-of-range layer indices fall back to the default.
-        assert_eq!(TerrainMaterial::from_layer(MATERIAL_COUNT), TerrainMaterial::default());
-        assert_eq!(TerrainMaterial::from_layer(99_999), TerrainMaterial::default());
-    }
-
-    #[test]
-    fn splat_bucket_always_in_range() {
+    fn from_name_matches_every_variant_loosely() {
         for m in TerrainMaterial::all() {
-            let b = m.splat_bucket();
-            assert!(
-                b < SPLAT_LAYER_COUNT,
-                "{m:?} splat_bucket {b} >= {SPLAT_LAYER_COUNT}"
-            );
+            assert_eq!(TerrainMaterial::from_name(m.name()), Some(*m));
+            assert_eq!(TerrainMaterial::from_name(&m.name().to_uppercase()), Some(*m));
+        }
+        assert_eq!(TerrainMaterial::from_name("wood planks"), Some(TerrainMaterial::WoodPlanks));
+        assert_eq!(TerrainMaterial::from_name("cracked_lava"), Some(TerrainMaterial::CrackedLava));
+        assert_eq!(TerrainMaterial::from_name("leafy-grass"), Some(TerrainMaterial::LeafyGrass));
+        assert_eq!(TerrainMaterial::from_name("lava"), None);
+        assert_eq!(TerrainMaterial::from_name(""), None);
+    }
+
+    /// Weight of `slot` in `cell`.
+    fn weight(cell: MaterialCell, slot: u8) -> f32 {
+        material_cell_weights(cell)
+            .iter()
+            .filter(|(s, _)| *s == slot)
+            .map(|(_, w)| *w)
+            .sum()
+    }
+
+    const GRASS: u8 = TerrainMaterial::Grass as u8;
+    const ROCK: u8 = TerrainMaterial::Rock as u8;
+    const SAND: u8 = TerrainMaterial::Sand as u8;
+
+    #[test]
+    fn full_strength_paint_replaces_the_cell() {
+        assert_eq!(paint_material_cell(material_cell(GRASS), ROCK, 1.0), material_cell(ROCK));
+        let mixed = canonical_material_cell(GRASS, SAND, 90);
+        assert_eq!(paint_material_cell(mixed, ROCK, 1.0), material_cell(ROCK));
+        assert_eq!(paint_material_cell(mixed, ROCK, 7.0), material_cell(ROCK), "strength clamps at 1");
+        // A cell with no material takes any paint whole.
+        assert_eq!(paint_material_cell([MATERIAL_SLOT_NONE; 4], SAND, 0.2), material_cell(SAND));
+        // A custom slot paints like a built-in one.
+        assert_eq!(paint_material_cell(material_cell(GRASS), 200, 1.0), material_cell(200));
+    }
+
+    #[test]
+    fn partial_strength_paint_blends_and_repeated_dabs_converge() {
+        let once = paint_material_cell(material_cell(GRASS), ROCK, 0.5);
+        assert!((weight(once, ROCK) - 0.5).abs() <= 1.0 / 255.0 + 1e-6, "{once:?}");
+        assert!((weight(once, GRASS) - 0.5).abs() <= 1.0 / 255.0 + 1e-6, "{once:?}");
+        assert!(once[2] <= 127, "the stronger material is stored first: {once:?}");
+
+        for strength in [0.05f32, 0.3, 0.7] {
+            let mut cell = material_cell(GRASS);
+            let mut previous = weight(cell, ROCK);
+            let mut dabs = 0;
+            while cell != material_cell(ROCK) {
+                cell = paint_material_cell(cell, ROCK, strength);
+                let now = weight(cell, ROCK);
+                assert!(now > previous, "a dab at {strength} did not move {cell:?}");
+                previous = now;
+                dabs += 1;
+                assert!(dabs < 400, "paint at {strength} never converged: {cell:?}");
+            }
         }
     }
 
     #[test]
-    fn splat_buckets_align_with_legacy_four_layers() {
-        // The 4-layer splat order is [grass, rock, dirt, snow]; the original
-        // four materials must still map to their own slot so the existing
-        // renderer is unchanged for legacy terrain.
-        assert_eq!(TerrainMaterial::Grass.splat_bucket(), 0);
-        assert_eq!(TerrainMaterial::Rock.splat_bucket(), 1);
-        assert_eq!(TerrainMaterial::Dirt.splat_bucket(), 2);
-        assert_eq!(TerrainMaterial::Snow.splat_bucket(), 3);
-        // A few representative new materials land in sensible buckets.
-        assert_eq!(TerrainMaterial::LeafyGrass.splat_bucket(), 0);
-        assert_eq!(TerrainMaterial::Basalt.splat_bucket(), 1);
-        assert_eq!(TerrainMaterial::Sand.splat_bucket(), 2);
-        assert_eq!(TerrainMaterial::Ice.splat_bucket(), 3);
+    fn painting_a_third_material_keeps_it_and_the_strongest_other() {
+        // Grass 0.6, Rock 0.4.
+        let mixed = canonical_material_cell(GRASS, ROCK, 102);
+        let painted = paint_material_cell(mixed, SAND, 0.3);
+        let slots: Vec<u8> = material_cell_weights(painted)
+            .iter()
+            .filter(|(s, w)| *s != MATERIAL_SLOT_NONE && *w > 0.0)
+            .map(|(s, _)| *s)
+            .collect();
+        assert_eq!(slots, vec![GRASS, SAND], "Rock, the weakest after the dab, is dropped: {painted:?}");
+        // Grass 0.42 against Sand 0.3, renormalized.
+        assert!((weight(painted, SAND) - 0.3 / 0.72).abs() <= 1.0 / 255.0 + 1e-6);
+
+        // Even a weak dab into an even mix gets the new material in, where
+        // a plain top-two cut would drop it every time.
+        let even = canonical_material_cell(GRASS, ROCK, 127);
+        let weak = paint_material_cell(even, SAND, 0.1);
+        assert!(weight(weak, SAND) > 0.0, "{weak:?}");
+        let mut cell = weak;
+        for _ in 0..400 {
+            cell = paint_material_cell(cell, SAND, 0.1);
+        }
+        assert_eq!(cell, material_cell(SAND));
+    }
+
+    #[test]
+    fn no_op_paints_leave_the_cell_alone() {
+        let cell = canonical_material_cell(GRASS, ROCK, 40);
+        assert_eq!(paint_material_cell(cell, SAND, 0.0), cell);
+        assert_eq!(paint_material_cell(cell, SAND, -1.0), cell);
+        assert_eq!(paint_material_cell(cell, SAND, f32::NAN), cell);
+        assert_eq!(paint_material_cell(cell, MATERIAL_SLOT_NONE, 1.0), cell);
+    }
+
+    #[test]
+    fn canonical_cells_store_the_stronger_material_first() {
+        assert_eq!(canonical_material_cell(GRASS, ROCK, 200), [ROCK, GRASS, 55, 0]);
+        assert_eq!(canonical_material_cell(GRASS, ROCK, 127), [GRASS, ROCK, 127, 0]);
+        assert_eq!(canonical_material_cell(GRASS, ROCK, 0), material_cell(GRASS));
+        assert_eq!(canonical_material_cell(GRASS, ROCK, 255), material_cell(ROCK));
+        assert_eq!(canonical_material_cell(GRASS, GRASS, 90), material_cell(GRASS));
+        assert_eq!(canonical_material_cell(MATERIAL_SLOT_NONE, ROCK, 10), material_cell(ROCK));
+        assert_eq!(material_cell_weights(material_cell(SAND)), [(SAND, 1.0), (MATERIAL_SLOT_NONE, 0.0)]);
+    }
+
+    #[test]
+    fn legacy_splat_pixels_convert_to_their_two_heaviest_buckets() {
+        let snow = TerrainMaterial::Snow.to_u8();
+        let water = TerrainMaterial::Water.to_u8();
+        let dirt = TerrainMaterial::Dirt.to_u8();
+        assert_eq!(legacy_splat_to_material_cell([255, 0, 0, 0], false), material_cell(GRASS));
+        assert_eq!(legacy_splat_to_material_cell([0, 0, 0, 0], true), material_cell(GRASS), "blank is grass");
+        assert_eq!(legacy_splat_to_material_cell([0, 0, 0, 255], true), material_cell(snow));
+        assert_eq!(legacy_splat_to_material_cell([0, 0, 0, 255], false), material_cell(water));
+        // Rock 153, dirt 102: rock first, dirt at 102 / 255 of the pair.
+        assert_eq!(legacy_splat_to_material_cell([0, 153, 102, 0], false), [ROCK, dirt, 102, 0]);
+        // Four channels: the lightest two go, the pair renormalizes.
+        let cell = legacy_splat_to_material_cell([30, 100, 25, 100], false);
+        assert_eq!(cell, [ROCK, water, 127, 0], "ties go to the lower channel first");
+    }
+
+    #[test]
+    fn the_legacy_snow_line_is_a_fraction_of_the_band_above_its_floor() {
+        let config = TerrainConfig { height_offset: -40.0, height_scale: 100.0, ..TerrainConfig::default() };
+        // The snow line is 72 m above the -40 m floor: Y = 32.
+        assert!(legacy_bucket3_is_snow(&config, 32.0));
+        assert!(legacy_bucket3_is_snow(&config, 60.0));
+        assert!(!legacy_bucket3_is_snow(&config, 31.9));
+        assert!(!legacy_bucket3_is_snow(&config, -40.0));
+    }
+
+    #[test]
+    fn slot_weights_merge_normalize_and_order() {
+        let mut weights = SlotWeights::default();
+        assert!(weights.is_empty());
+        weights.add(ROCK, 0.25);
+        weights.add(GRASS, 0.5);
+        weights.add(ROCK, 0.5);
+        weights.add(MATERIAL_SLOT_NONE, 3.0);
+        weights.add(SAND, 0.0);
+        weights.normalize();
+        assert_eq!(weights.as_slice().len(), 2);
+        assert_eq!(weights.dominant(), Some(ROCK));
+        assert!((weights.weight_of(ROCK) - 0.6).abs() < 1e-6);
+        assert!((weights.weight_of(GRASS) - 0.4).abs() < 1e-6);
+        assert_eq!(weights.weight_of(SAND), 0.0);
     }
 
     #[test]

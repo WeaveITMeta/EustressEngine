@@ -1,0 +1,26 @@
+# TerrainMaterialFill: a terrain material painted over a rectangle wherever
+# the finished ground's slope and height fall in range. The terrain's own
+# material map stays as it is. Lives under Workspace/Terrain/Layers.
+#
+# Slopes are degrees from horizontal, heights and sizes metres, both ends
+# included. material is a built-in terrain material name, or "None".
+
+[transform]
+position = [0.0, 0.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[terrain_material_fill]
+enabled = true
+order = 0
+size_x = 100.0
+size_z = 100.0
+material = "Rock"
+min_slope = 30.0
+max_slope = 90.0
+min_height = -10000.0
+max_height = 10000.0
+
+[metadata]
+class_name = "TerrainMaterialFill"
+archivable = true

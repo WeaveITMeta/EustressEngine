@@ -1,0 +1,28 @@
+# TerrainWaterBody: a lake or pond. The ground below the water level that
+# joins the ground under the body's position is filled with water, up to the
+# footprint's edge; higher ground holds the water back. Nothing is baked into
+# the terrain and nothing filled is stored: an edit to the ground fills it
+# again. Nothing collides with the water. Lives under
+# Workspace/Terrain/Layers.
+#
+# level is the height of the water surface above the position, in metres.
+# The position's X and Z are where the flood starts, so it must stand over
+# ground below the water; rotation about Y turns the footprint. Sizes are
+# metres; a size of 0 lets the water spread across the whole terrain along
+# that axis.
+
+[transform]
+position = [0.0, 0.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[terrain_water_body]
+enabled = true
+order = 0
+level = 2.0
+size_x = 100.0
+size_z = 100.0
+
+[metadata]
+class_name = "TerrainWaterBody"
+archivable = true
