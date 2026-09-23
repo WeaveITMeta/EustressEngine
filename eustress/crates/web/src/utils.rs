@@ -72,6 +72,27 @@ pub fn format_duration(ms: u64) -> String {
     }
 }
 
+/// Whole number with thousands separators: 12345 becomes "12,345".
+pub fn format_count(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Bliss at exactly two decimals with thousands separators: 1234.5 becomes
+/// "1,234.50". The ledger stores whole cents, so two decimals is all of it.
+pub fn format_bliss_exact(bls: f64) -> String {
+    let cents = (bls.abs() * 100.0).round() as u64;
+    let sign = if bls < 0.0 && cents > 0 { "-" } else { "" };
+    format!("{sign}{}.{:02}", format_count(cents / 100), cents % 100)
+}
+
 /// Truncate a string to a maximum length with ellipsis.
 pub fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {

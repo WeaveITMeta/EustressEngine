@@ -16678,6 +16678,92 @@ a.experience-card {
     background: linear-gradient(135deg, #3b82f6, #8b5cf6);
 }
 
+.docs-glow.glow-perspective {
+    top: 8%;
+    right: 12%;
+    background: linear-gradient(135deg, #22d3ee, #3b82f6);
+}
+
+/* Perspective page: perspective vs orthographic ray diagram */
+.perspective-figure {
+    margin: var(--space-xl) 0;
+    padding: var(--space-lg);
+    background: rgba(25, 28, 35, 0.6);
+    border: 1px solid rgba(128, 144, 160, 0.15);
+    border-radius: var(--radius-lg);
+}
+
+.perspective-diagram {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-width: 640px;
+    margin: 0 auto;
+}
+
+.perspective-figure figcaption {
+    margin-top: var(--space-md);
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    text-align: center;
+}
+
+.perspective-diagram .pd-title {
+    fill: var(--color-text-primary);
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.perspective-diagram .pd-note {
+    fill: var(--color-text-muted);
+    font-size: 11px;
+}
+
+.perspective-diagram .pd-ray {
+    stroke: rgba(34, 211, 238, 0.55);
+    stroke-width: 1.5;
+}
+
+.perspective-diagram .pd-sight {
+    stroke: rgba(34, 211, 238, 0.35);
+    stroke-width: 1;
+    stroke-dasharray: 4 4;
+}
+
+.perspective-diagram .pd-sight-near {
+    stroke: rgba(59, 130, 246, 0.7);
+}
+
+.perspective-diagram .pd-sight-far {
+    stroke: rgba(139, 92, 246, 0.7);
+}
+
+.perspective-diagram .pd-plane {
+    stroke: rgba(128, 144, 160, 0.7);
+    stroke-width: 2;
+}
+
+.perspective-diagram .pd-near {
+    stroke: #22d3ee;
+    stroke-width: 3;
+    stroke-linecap: round;
+}
+
+.perspective-diagram .pd-eye {
+    fill: #22d3ee;
+}
+
+.perspective-diagram .pd-cube {
+    fill: rgba(59, 130, 246, 0.25);
+    stroke: #3b82f6;
+    stroke-width: 1.5;
+}
+
+.perspective-diagram .pd-cube-far {
+    fill: rgba(139, 92, 246, 0.22);
+    stroke: #8b5cf6;
+}
+
 /* Floating TOC Sidebar */
 .docs-toc {
     position: sticky;
@@ -17315,6 +17401,408 @@ a.experience-card {
     
     .docs-layout {
         padding: 0 var(--space-lg);
+    }
+}
+
+/* =============================================================================
+   LEARN DOCS - shared page components
+   Breadcrumb parts, lists, warning callout, closing call to action, figures
+   and the per-page background glows used by every /docs and /learn page.
+   ============================================================================= */
+
+.docs-breadcrumb .separator {
+    color: var(--color-text-muted);
+    opacity: 0.6;
+}
+
+.docs-breadcrumb .current {
+    color: var(--color-text-secondary);
+}
+
+.docs-list {
+    margin: var(--space-md) 0 var(--space-lg);
+    padding-left: var(--space-xl);
+}
+
+.docs-list li {
+    margin-bottom: var(--space-sm);
+}
+
+.docs-list li strong {
+    color: var(--color-text-primary);
+}
+
+.docs-list li::marker {
+    color: var(--color-accent);
+}
+
+/* Inline code in prose. :where() keeps this below .api-table code and
+   .code-block code, so tables and code blocks keep their own look. */
+.docs-content :where(code) {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.9em;
+    padding: 1px 6px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: var(--radius-sm);
+    color: #93c5fd;
+}
+
+.docs-content :where(pre) code {
+    padding: 0;
+    background: none;
+    border-radius: 0;
+    font-size: var(--text-sm);
+    color: #e2e8f0;
+}
+
+.docs-content .subsection a:not([class]) {
+    color: var(--color-accent);
+    text-decoration: none;
+    border-bottom: 1px solid rgba(59, 130, 246, 0.35);
+}
+
+.docs-content .subsection a:not([class]):hover {
+    border-bottom-color: var(--color-accent);
+}
+
+.callout-warning {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.25);
+}
+
+.callout-warning img {
+    filter: brightness(0) saturate(100%) invert(45%) sepia(80%) saturate(2000%) hue-rotate(335deg);
+}
+
+.future-cta {
+    margin-top: var(--space-xl);
+    padding: var(--space-xl);
+    text-align: center;
+    background: linear-gradient(135deg, rgba(34, 211, 238, 0.08) 0%, rgba(59, 130, 246, 0.1) 50%, rgba(139, 92, 246, 0.08) 100%);
+    border: 1px solid rgba(59, 130, 246, 0.25);
+    border-radius: var(--radius-lg);
+}
+
+.future-cta p {
+    margin: 0 0 var(--space-lg);
+    font-size: var(--text-lg);
+}
+
+.future-cta p strong {
+    color: var(--color-text-primary);
+}
+
+.future-cta .cta-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--space-md);
+}
+
+/* Figures: generic inline SVG diagrams (same look as the Perspective diagram) */
+.docs-figure {
+    margin: var(--space-xl) 0;
+    padding: var(--space-lg);
+    background: rgba(25, 28, 35, 0.6);
+    border: 1px solid rgba(128, 144, 160, 0.15);
+    border-radius: var(--radius-lg);
+}
+
+.docs-diagram {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-width: 680px;
+    margin: 0 auto;
+}
+
+.docs-figure figcaption {
+    margin-top: var(--space-md);
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    text-align: center;
+}
+
+.docs-diagram .dg-title {
+    fill: var(--color-text-primary);
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.docs-diagram .dg-label {
+    fill: var(--color-text-primary);
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.docs-diagram .dg-note {
+    fill: var(--color-text-muted);
+    font-size: 11px;
+}
+
+.docs-diagram .dg-box {
+    fill: rgba(59, 130, 246, 0.15);
+    stroke: #3b82f6;
+    stroke-width: 1.5;
+}
+
+.docs-diagram .dg-box-accent {
+    fill: rgba(34, 211, 238, 0.14);
+    stroke: #22d3ee;
+}
+
+.docs-diagram .dg-box-violet {
+    fill: rgba(139, 92, 246, 0.18);
+    stroke: #8b5cf6;
+}
+
+.docs-diagram .dg-box-muted {
+    fill: rgba(128, 144, 160, 0.08);
+    stroke: rgba(128, 144, 160, 0.55);
+}
+
+.docs-diagram .dg-line {
+    stroke: rgba(128, 144, 160, 0.75);
+    stroke-width: 1.5;
+    fill: none;
+}
+
+.docs-diagram .dg-line-accent {
+    stroke: rgba(34, 211, 238, 0.8);
+}
+
+.docs-diagram .dg-line-dashed {
+    stroke-dasharray: 5 4;
+}
+
+.docs-diagram .dg-arrowhead {
+    fill: rgba(128, 144, 160, 0.85);
+}
+
+.docs-diagram .dg-dot {
+    fill: #22d3ee;
+}
+
+/* Per-page background glows */
+.docs-glow.glow-getting-started { top: 8%; right: 10%; background: linear-gradient(135deg, #3b82f6, #22d3ee); }
+.docs-glow.glow-studio { top: 10%; right: 12%; background: linear-gradient(135deg, #22d3ee, #8b5cf6); }
+.docs-glow.glow-building { top: 12%; right: 8%; background: linear-gradient(135deg, #f59e0b, #3b82f6); }
+.docs-glow.glow-cad { top: 8%; right: 14%; background: linear-gradient(135deg, #14b8a6, #3b82f6); }
+.docs-glow.glow-importing { top: 10%; right: 10%; background: linear-gradient(135deg, #8b5cf6, #22d3ee); }
+.docs-glow.glow-ui { top: 10%; right: 12%; background: linear-gradient(135deg, #ec4899, #8b5cf6); }
+.docs-glow.glow-audio { top: 12%; right: 10%; background: linear-gradient(135deg, #a855f7, #ec4899); }
+.docs-glow.glow-scripting { top: 8%; right: 10%; background: linear-gradient(135deg, #22c55e, #3b82f6); }
+.docs-glow.glow-services { top: 10%; right: 14%; background: linear-gradient(135deg, #64748b, #3b82f6); }
+.docs-glow.glow-simulation { top: 8%; right: 12%; background: linear-gradient(135deg, #22d3ee, #22c55e); }
+.docs-glow.glow-realism { top: 10%; right: 10%; background: linear-gradient(135deg, #f97316, #ef4444); }
+.docs-glow.glow-universes { top: 12%; right: 12%; background: linear-gradient(135deg, #6366f1, #22d3ee); }
+.docs-glow.glow-networking { top: 8%; right: 10%; background: linear-gradient(135deg, #0ea5e9, #6366f1); }
+.docs-glow.glow-publishing { top: 10%; right: 12%; background: linear-gradient(135deg, #3b82f6, #a855f7); }
+.docs-glow.glow-website { top: 10%; right: 10%; background: linear-gradient(135deg, #06b6d4, #3b82f6); }
+.docs-glow.glow-earning { top: 8%; right: 12%; background: linear-gradient(135deg, #eab308, #f97316); }
+.docs-glow.glow-mcp { top: 10%; right: 10%; background: linear-gradient(135deg, #8b5cf6, #3b82f6); }
+.docs-glow.glow-cli { top: 12%; right: 12%; background: linear-gradient(135deg, #22c55e, #14b8a6); }
+.docs-glow.glow-ide { top: 8%; right: 10%; background: linear-gradient(135deg, #3b82f6, #0ea5e9); }
+.docs-glow.glow-lsp { top: 10%; right: 12%; background: linear-gradient(135deg, #8b5cf6, #ec4899); }
+.docs-glow.glow-philosophy { top: 10%; right: 10%; background: linear-gradient(135deg, #f59e0b, #8b5cf6); }
+
+/* Learn index (/learn): newcomer path, tracks and guide cards */
+.learn-jump {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--space-sm);
+    margin-top: var(--space-xl);
+}
+
+.learn-jump .chip {
+    text-decoration: none;
+}
+
+.learn-count {
+    margin-top: var(--space-md);
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+}
+
+.learn-section {
+    position: relative;
+    z-index: 1;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: var(--space-xl) var(--space-2xl);
+    scroll-margin-top: 90px;
+}
+
+.learn-lede {
+    max-width: 720px;
+    margin: 0 0 var(--space-lg);
+    font-size: var(--text-base);
+    color: var(--color-text-muted);
+    line-height: 1.6;
+}
+
+.learn-track {
+    padding-top: var(--space-lg);
+    padding-bottom: var(--space-lg);
+}
+
+.learn-track-header .section-header-industrial {
+    margin-bottom: var(--space-sm);
+}
+
+.learn-path {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: var(--space-md);
+}
+
+.learn-step {
+    display: flex;
+    gap: var(--space-md);
+    height: 100%;
+    padding: var(--space-lg);
+    background: rgba(25, 28, 35, 0.6);
+    border: 1px solid rgba(128, 144, 160, 0.12);
+    border-radius: var(--radius-lg);
+    text-decoration: none;
+    transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.learn-step:hover {
+    border-color: rgba(34, 211, 238, 0.45);
+    transform: translateY(-3px);
+}
+
+.learn-step-num {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: rgba(34, 211, 238, 0.15);
+    color: #22d3ee;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: var(--text-sm);
+    font-weight: 700;
+}
+
+.learn-step-body h3 {
+    margin: 0 0 4px;
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text-primary);
+}
+
+.learn-step-body p {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    line-height: 1.5;
+}
+
+.doc-card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.doc-badge {
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+    background: rgba(139, 92, 246, 0.18);
+    border: 1px solid rgba(139, 92, 246, 0.35);
+    color: #c4b5fd;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+}
+
+.doc-card-meta {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    margin-top: auto;
+    padding-top: var(--space-sm);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    border-top: 1px solid rgba(128, 144, 160, 0.08);
+}
+
+.learn-agents-card {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-lg);
+    padding: var(--space-xl);
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.08) 0%, rgba(59, 130, 246, 0.08) 100%);
+    border: 1px solid rgba(139, 92, 246, 0.25);
+    border-radius: var(--radius-lg);
+}
+
+.learn-agents-icon {
+    width: 36px;
+    height: 36px;
+    flex-shrink: 0;
+    filter: brightness(0) invert(1);
+    opacity: 0.8;
+}
+
+.learn-agents-body h3 {
+    margin: 0 0 var(--space-xs);
+    font-size: var(--text-lg);
+    font-weight: 600;
+    color: var(--color-text-primary);
+}
+
+.learn-agents-body p {
+    margin: 0;
+    color: var(--color-text-secondary);
+    line-height: 1.6;
+}
+
+.learn-agents-body a {
+    color: var(--color-accent);
+    text-decoration: none;
+    border-bottom: 1px solid rgba(59, 130, 246, 0.35);
+}
+
+.learn-resources .resource-icon {
+    filter: brightness(0) invert(1);
+}
+
+@media (max-width: 768px) {
+    .page-learn-industrial .learn-section {
+        padding-left: 0;
+        padding-right: 0;
+    }
+
+    .learn-agents-card {
+        flex-direction: column;
+        padding: var(--space-lg);
+    }
+}
+
+/* Wide reference tables scroll inside the column on narrow screens
+   instead of pushing the page sideways. */
+@media (max-width: 768px) {
+    .docs-content .docs-table {
+        display: block;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .docs-content .docs-table th,
+    .docs-content .docs-table td {
+        padding: var(--space-sm);
+    }
+
+    .future-cta {
+        padding: var(--space-lg);
     }
 }
 

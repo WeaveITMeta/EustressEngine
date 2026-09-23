@@ -12,6 +12,17 @@ use crate::state::AppState;
 /// Experience type alias for gallery display.
 pub type Experience = GalleryExperience;
 
+/// The label for a listing's content rating, as the review sets it.
+fn content_rating_label(rating: Option<&str>) -> &'static str {
+    match rating {
+        Some("all_ages") => "All ages",
+        Some("teen_13") => "13+",
+        Some("mature_17") => "17+",
+        Some("adult_18") => "18+",
+        _ => "Unrated",
+    }
+}
+
 /// Gallery page - browse experiences.
 #[component]
 pub fn GalleryPage() -> impl IntoView {
@@ -278,7 +289,7 @@ fn FeaturedCard(experience: Experience) -> impl IntoView {
     let creator_url = format!("/profile/{}", experience.creator_id);
     let creator_name = experience.creator_name.clone();
     let player_count = experience.player_count;
-    let rating = experience.rating;
+    let rating = content_rating_label(experience.rating.as_deref());
     let tags = experience.tags.clone();
     
     view! {
@@ -306,8 +317,8 @@ fn FeaturedCard(experience: Experience) -> impl IntoView {
                             {format_number(player_count as u64)}
                         </span>
                         <span class="stat-item">
-                            <img src="/assets/icons/star.svg" alt="Rating" class="stat-icon" />
-                            {format!("{:.1}", rating)}
+                            <img src="/assets/icons/shield.svg" alt="Content rating" class="stat-icon" />
+                            {rating}
                         </span>
                     </div>
                 </div>
@@ -333,7 +344,7 @@ fn ExperienceCard(experience: Experience) -> impl IntoView {
     let creator_url = format!("/profile/{}", experience.creator_id);
     let creator_name = experience.creator_name.clone();
     let player_count = experience.player_count;
-    let rating = experience.rating;
+    let rating = content_rating_label(experience.rating.as_deref());
     
     view! {
         <div class="exp-card-industrial">
@@ -359,8 +370,8 @@ fn ExperienceCard(experience: Experience) -> impl IntoView {
                             {format_number(player_count as u64)}
                         </span>
                         <span>
-                            <img src="/assets/icons/star.svg" alt="Rating" class="stat-icon-sm" />
-                            {format!("{:.1}", rating)}
+                            <img src="/assets/icons/shield.svg" alt="Content rating" class="stat-icon-sm" />
+                            {rating}
                         </span>
                     </div>
                 </div>

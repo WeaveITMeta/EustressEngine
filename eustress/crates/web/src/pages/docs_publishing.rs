@@ -1,17 +1,12 @@
 // =============================================================================
-// Eustress Web - Publishing Documentation Page (Industrial Design)
+// Eustress Web - Publishing Documentation Page
 // =============================================================================
-// Comprehensive publishing documentation with floating TOC
-// Covers: publishing flow, Identity.toml, Cloudflare R2, simulation pages,
-// versioning, Forge servers, discovery, and content guidelines.
+// Publishing: how Studio packages a Universe, uploads it to eustress.dev and
+// submits it for review, and what the website shows once review decides.
 // =============================================================================
 
 use leptos::prelude::*;
 use crate::components::{CentralNav, Footer};
-
-// -----------------------------------------------------------------------------
-// Table of Contents Data
-// -----------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq)]
 struct TocSection {
@@ -32,85 +27,121 @@ fn get_toc() -> Vec<TocSection> {
             id: "overview",
             title: "Overview",
             subsections: vec![
-                TocSubsection { id: "overview-intro", title: "Introduction" },
-                TocSubsection { id: "overview-workflow", title: "Publish Workflow" },
-                TocSubsection { id: "overview-requirements", title: "Requirements" },
+                TocSubsection { id: "overview-what", title: "What Publishing Does" },
+                TocSubsection { id: "overview-needs", title: "Before You Publish" },
             ],
         },
         TocSection {
-            id: "prepare",
-            title: "Prepare to Publish",
+            id: "studio",
+            title: "Publish from Studio",
             subsections: vec![
-                TocSubsection { id: "prepare-identity", title: "Identity.toml" },
-                TocSubsection { id: "prepare-metadata", title: "Simulation Metadata" },
-                TocSubsection { id: "prepare-thumbnail", title: "Thumbnail & Media" },
-                TocSubsection { id: "prepare-age-rating", title: "Age Rating" },
+                TocSubsection { id: "studio-open", title: "Opening the Dialog" },
+                TocSubsection { id: "studio-fields", title: "The Publish Dialog" },
+                TocSubsection { id: "studio-progress", title: "While It Uploads" },
             ],
         },
         TocSection {
-            id: "flow",
-            title: "Publishing Flow",
+            id: "upload",
+            title: "What Gets Uploaded",
             subsections: vec![
-                TocSubsection { id: "flow-packaging", title: "Packaging" },
-                TocSubsection { id: "flow-upload", title: "Upload to R2" },
-                TocSubsection { id: "flow-integrity", title: "Content-Addressable Storage" },
-                TocSubsection { id: "flow-status", title: "Publish Status" },
+                TocSubsection { id: "upload-package", title: "The Package" },
+                TocSubsection { id: "upload-steps", title: "Upload and Storage" },
+                TocSubsection { id: "upload-files", title: "Files Publishing Writes" },
             ],
         },
         TocSection {
-            id: "simulation-page",
-            title: "Simulation Page",
+            id: "review",
+            title: "Review",
             subsections: vec![
-                TocSubsection { id: "simulation-page-url", title: "URL Structure" },
-                TocSubsection { id: "simulation-page-layout", title: "Page Layout" },
-                TocSubsection { id: "simulation-page-analytics", title: "Analytics" },
+                TocSubsection { id: "review-inputs", title: "What Review Reads" },
+                TocSubsection { id: "review-ladder", title: "The Review Ladder" },
+                TocSubsection { id: "review-outcomes", title: "Outcomes and Ratings" },
             ],
         },
         TocSection {
-            id: "versioning",
-            title: "Updates & Versioning",
+            id: "web",
+            title: "On the Website",
             subsections: vec![
-                TocSubsection { id: "versioning-republish", title: "Re-Publishing" },
-                TocSubsection { id: "versioning-history", title: "Version History" },
-                TocSubsection { id: "versioning-rollback", title: "Rollback" },
+                TocSubsection { id: "web-gallery", title: "The Gallery" },
+                TocSubsection { id: "web-listing", title: "Listing and Play Pages" },
+                TocSubsection { id: "web-projects", title: "Your Projects" },
             ],
         },
         TocSection {
-            id: "forge",
-            title: "Forge Servers",
+            id: "updates",
+            title: "Updates",
             subsections: vec![
-                TocSubsection { id: "forge-overview", title: "How Forge Works" },
-                TocSubsection { id: "forge-scaling", title: "Auto-Scaling" },
-                TocSubsection { id: "forge-regions", title: "Regions & Latency" },
+                TocSubsection { id: "updates-again", title: "Publishing Again" },
+                TocSubsection { id: "updates-space", title: "Updating One Space" },
             ],
         },
         TocSection {
-            id: "discovery",
-            title: "Discovery",
+            id: "roadmap",
+            title: "What's Next",
             subsections: vec![
-                TocSubsection { id: "discovery-tags", title: "Tags & Categories" },
-                TocSubsection { id: "discovery-search", title: "Search & Featured" },
-                TocSubsection { id: "discovery-trending", title: "Trending Algorithm" },
-            ],
-        },
-        TocSection {
-            id: "guidelines",
-            title: "Content Guidelines",
-            subsections: vec![
-                TocSubsection { id: "guidelines-allowed", title: "What's Allowed" },
-                TocSubsection { id: "guidelines-moderation", title: "AI Moderation" },
-                TocSubsection { id: "guidelines-dmca", title: "DMCA Process" },
-                TocSubsection { id: "guidelines-tos", title: "Terms of Service" },
+                TocSubsection { id: "roadmap-listing", title: "Updating a Listing" },
+                TocSubsection { id: "roadmap-review", title: "Review Goes Live" },
+                TocSubsection { id: "roadmap-play", title: "Playing Published Worlds" },
             ],
         },
     ]
 }
 
-// -----------------------------------------------------------------------------
-// Main Component
-// -----------------------------------------------------------------------------
+/// The publish path from Studio to the Gallery: five stops, and the rule that
+/// decides the last one.
+#[component]
+fn PublishFlowDiagram() -> impl IntoView {
+    view! {
+        <figure class="docs-figure">
+            <svg class="docs-diagram" viewBox="0 0 640 200" role="img"
+                aria-label="Studio saves and packages the Universe, the Eustress API creates a listing, Cloudflare R2 stores the package, review reads the dossier and four captured views, and the Gallery shows the listing only after review approves it and it is marked Public.">
+                <defs>
+                    <marker id="publish-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                        markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                        <path d="M 0 0 L 10 5 L 0 10 z" class="dg-arrowhead"></path>
+                    </marker>
+                </defs>
 
-/// Publishing documentation page with floating TOC.
+                <text x="10" y="40" class="dg-title">"Publish Universe"</text>
+
+                <rect x="10" y="70" width="100" height="60" rx="8" class="dg-box dg-box-accent"></rect>
+                <text x="60" y="96" class="dg-label" text-anchor="middle">"Studio"</text>
+                <text x="60" y="116" class="dg-note" text-anchor="middle">"save, package"</text>
+
+                <line x1="110" y1="100" x2="138" y2="100" class="dg-line" marker-end="url(#publish-arrow)"></line>
+
+                <rect x="140" y="70" width="100" height="60" rx="8" class="dg-box"></rect>
+                <text x="190" y="96" class="dg-label" text-anchor="middle">"API"</text>
+                <text x="190" y="116" class="dg-note" text-anchor="middle">"new listing"</text>
+
+                <line x1="240" y1="100" x2="268" y2="100" class="dg-line" marker-end="url(#publish-arrow)"></line>
+
+                <rect x="270" y="70" width="100" height="60" rx="8" class="dg-box"></rect>
+                <text x="320" y="96" class="dg-label" text-anchor="middle">"R2"</text>
+                <text x="320" y="116" class="dg-note" text-anchor="middle">"stores the .pak"</text>
+
+                <line x1="370" y1="100" x2="398" y2="100" class="dg-line" marker-end="url(#publish-arrow)"></line>
+
+                <rect x="400" y="70" width="100" height="60" rx="8" class="dg-box dg-box-violet"></rect>
+                <text x="450" y="96" class="dg-label" text-anchor="middle">"Review"</text>
+                <text x="450" y="116" class="dg-note" text-anchor="middle">"dossier, views"</text>
+
+                <line x1="500" y1="100" x2="528" y2="100" class="dg-line" marker-end="url(#publish-arrow)"></line>
+
+                <rect x="530" y="70" width="100" height="60" rx="8" class="dg-box"></rect>
+                <text x="580" y="96" class="dg-label" text-anchor="middle">"Gallery"</text>
+                <text x="580" y="116" class="dg-note" text-anchor="middle">"if approved"</text>
+
+                <text x="320" y="170" class="dg-note" text-anchor="middle">"A listing is served only when review approved it and you marked it Public"</text>
+            </svg>
+            <figcaption>
+                "Studio does the packaging and uploads; the API decides what the Gallery shows."
+            </figcaption>
+        </figure>
+    }
+}
+
+/// Publishing documentation page.
 #[component]
 pub fn DocsPublishingPage() -> impl IntoView {
     let active_section = RwSignal::new("overview".to_string());
@@ -119,14 +150,12 @@ pub fn DocsPublishingPage() -> impl IntoView {
         <div class="page page-docs">
             <CentralNav active="learn".to_string() />
 
-            // Background
             <div class="docs-bg">
                 <div class="docs-grid-overlay"></div>
                 <div class="docs-glow glow-publishing"></div>
             </div>
 
             <div class="docs-layout">
-                // Floating TOC Sidebar
                 <aside class="docs-toc">
                     <div class="toc-header">
                         <img src="/assets/icons/upload.svg" alt="Publishing" class="toc-icon" />
@@ -170,9 +199,7 @@ pub fn DocsPublishingPage() -> impl IntoView {
                     </div>
                 </aside>
 
-                // Main Content
                 <main class="docs-content">
-                    // Hero
                     <header class="docs-hero">
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
@@ -181,779 +208,516 @@ pub fn DocsPublishingPage() -> impl IntoView {
                         </div>
                         <h1 class="docs-title">"Publishing"</h1>
                         <p class="docs-subtitle">
-                            "Ship your simulation to the world. One-click publish from the engine to the
-                            eustress.dev gallery, where players discover and play your creation instantly.
-                            No server setup, no deployment pipelines, no infrastructure to manage."
+                            "Publishing uploads a Universe from Studio to eustress.dev. Studio packages the
+                            Universe folder into one compressed file, creates a listing for it and submits it
+                            for review, and the Gallery lists it once review approves it and you have marked it
+                            Public."
                         </p>
                         <div class="docs-meta">
                             <span class="meta-item">
                                 <img src="/assets/icons/clock.svg" alt="Time" />
-                                "20 min read"
+                                "13 min read"
                             </span>
                             <span class="meta-item">
-                                <img src="/assets/icons/code.svg" alt="Level" />
-                                "Beginner"
+                                <img src="/assets/icons/cube.svg" alt="Level" />
+                                "Intermediate"
                             </span>
                             <span class="meta-item">
                                 <img src="/assets/icons/check.svg" alt="Updated" />
-                                "v0.16.1"
+                                "Updated Sep 2026"
                             </span>
                         </div>
                     </header>
 
-                    // ─────────────────────────────────────────────────────
-                    // 1. Overview
-                    // ─────────────────────────────────────────────────────
+                    // =========================================================
+                    // OVERVIEW
+                    // =========================================================
                     <section id="overview" class="docs-section">
-                        <h2 class="section-anchor">"1. Overview"</h2>
+                        <h2 class="section-title">
+                            <span class="section-number">"01"</span>
+                            "Overview"
+                        </h2>
 
-                        <div id="overview-intro" class="docs-block">
-                            <h3>"Introduction"</h3>
+                        <div id="overview-what" class="subsection">
+                            <h3>"What Publishing Does"</h3>
                             <p>
-                                "Publishing is the final step between building your simulation and sharing it
-                                with players worldwide. Eustress makes this as simple as clicking a button in
-                                the engine. Your simulation is packaged, uploaded, and listed in the gallery
-                                automatically — no CI/CD pipelines, no manual server provisioning, no app store
-                                review queues."
+                                "Publishing takes the Universe you are working in, with every Space inside it,
+                                and stores it on eustress.dev under a listing: a name, a description, a genre and
+                                a thumbnail. You do it from one dialog in Studio. The Eustress API at
+                                api.eustress.dev keeps the listing record and stores the package in Cloudflare R2."
                             </p>
-                            <div class="docs-callout info">
-                                <strong>"Key Concept:"</strong>
-                                " When you publish, the engine packages your entire simulation into a content-addressable
-                                bundle and uploads it to Cloudflare R2. Players worldwide can discover and join your
-                                simulation within seconds of publish completion."
-                            </div>
+                            <PublishFlowDiagram />
                             <p>
-                                "The Eustress gallery at eustress.dev is where players browse, search, and launch
-                                simulations. Every published simulation gets its own page with description, screenshots,
-                                ratings, and live player counts. Think of it as a global arcade — your simulation is
-                                one button press away from being in it."
+                                "Publishing stores a Universe so people can find it. It does not start servers or
+                                host sessions; where multiplayer stands is covered on the "
+                                <a href="/docs/networking">"Networking"</a>" page."
                             </p>
                         </div>
 
-                        <div id="overview-workflow" class="docs-block">
-                            <h3>"Publish Workflow"</h3>
-                            <p>"The end-to-end publish process has four stages:"</p>
-                            <ol class="docs-list numbered">
-                                <li><strong>"Prepare"</strong>" — Configure Identity.toml and simulation metadata"</li>
-                                <li><strong>"Package"</strong>" — Engine bundles .eustress/ directory with all assets"</li>
-                                <li><strong>"Upload"</strong>" — Bundle is pushed to Cloudflare R2 via api.eustress.dev"</li>
-                                <li><strong>"Live"</strong>" — Simulation appears in the gallery and is playable"</li>
+                        <div id="overview-needs" class="subsection">
+                            <h3>"Before You Publish"</h3>
+                            <ul class="docs-list">
+                                <li><strong>"An open Space"</strong>": publishing starts from the Space you have open and packages the Universe that contains it."</li>
+                                <li><strong>"An Eustress account"</strong>": registering on eustress.dev checks a government ID and your age, then gives you an identity file named "<code>"eustress-<username>.toml"</code>"."</li>
+                                <li><strong>"A Studio sign-in"</strong>": choose Sign In on the ribbon, browse to your identity file and press Sign In with Identity. Studio signs a challenge from the API with the file's Ed25519 private key and receives the session token that every publish request carries."</li>
+                            </ul>
+                            <div class="callout callout-info">
+                                <img src="/assets/icons/help.svg" alt="Info" />
+                                <div>
+                                    <strong>"The age check reads your document"</strong>
+                                    <p>
+                                        "The minimum age is 18, raised where the local age of majority is higher:
+                                        19 in Canada and South Korea, 20 in Thailand, and 21 in Singapore,
+                                        Indonesia, the United Arab Emirates and Egypt. The check uses the date of
+                                        birth read from your ID document, not the one you type, and an unreadable
+                                        date is refused rather than guessed. If your computer has no usable
+                                        camera, registration shows a QR code that opens the phone capture page, "
+                                        <code>"/verify"</code>", with your session attached."
+                                    </p>
+                                </div>
+                            </div>
+                            <div class="callout callout-advanced">
+                                <img src="/assets/icons/settings.svg" alt="Advanced" />
+                                <div>
+                                    <strong>"Signing in offline leaves you unable to publish"</strong>
+                                    <p>
+                                        "If the API cannot be reached when you sign in, Studio still shows you as
+                                        signed in with a local identity, but the API refuses requests without a
+                                        session token, so a publish fails at its first step. Sign in again once
+                                        you are online."
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    // =========================================================
+                    // PUBLISH FROM STUDIO
+                    // =========================================================
+                    <section id="studio" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"02"</span>
+                            "Publish from Studio"
+                        </h2>
+
+                        <div id="studio-open" class="subsection">
+                            <h3>"Opening the Dialog"</h3>
+                            <p>"Both publish commands are in the File menu:"</p>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Command"</th><th>"Shortcut"</th><th>"What it packages"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td>"Publish Universe"</td><td><code>"Ctrl+P"</code></td><td>"The whole Universe folder, every Space in it"</td></tr>
+                                    <tr><td>"Publish Space"</td><td><code>"Ctrl+Shift+P"</code></td><td>"Only the open Space, as an update to a published Universe"</td></tr>
+                                </tbody>
+                            </table>
+                            <p>
+                                "The Roblox keymap preset gives "<code>"Ctrl+Shift+P"</code>" to the Properties
+                                filter and moves Publish Space to "<code>"Ctrl+Alt+Shift+P"</code>". Use Publish
+                                Universe for now: Publish Space depends on a listing id that Studio does not record
+                                yet, as "<a href="#updates-space">"Updating One Space"</a>" explains."
+                            </p>
+                        </div>
+
+                        <div id="studio-fields" class="subsection">
+                            <h3>"The Publish Dialog"</h3>
+                            <p>
+                                "The dialog's left side lists the files that will be packaged, with the open Space
+                                marked "<em>"primary"</em>". The right side holds the listing:"
+                            </p>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Field"</th><th>"What it does"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td>"Simulation Name"</td><td>"The listing name. It starts as the Universe folder's name, and Publish stays disabled while it is empty."</td></tr>
+                                    <tr><td>"Description"</td><td>"The listing description."</td></tr>
+                                    <tr><td>"Genre"</td><td>"All, Adventure, Building, Comedy, Fighting, FPS, Horror, Medieval, Military, Naval, RPG, Sci-Fi, Sports, Town and City, or Western."</td></tr>
+                                    <tr><td>"Public"</td><td>"On by default. On: "<em>"Anyone can play"</em>", once review approves. Off: "<em>"Only you can access"</em>"."</td></tr>
+                                    <tr><td>"Share Source"</td><td>"Allow source access and reuse. Studio records the choice in the Space's publish manifest and in the review dossier; the listing on the website does not carry it yet."</td></tr>
+                                </tbody>
+                            </table>
+                            <p>
+                                "A line under the fields names the storage target, Cloudflare R2. The button reads
+                                Publish, and Publishing while the upload runs."
+                            </p>
+                        </div>
+
+                        <div id="studio-progress" class="subsection">
+                            <h3>"While It Uploads"</h3>
+                            <p>
+                                "Publish saves the Space first, shows "<em>"Publishing Universe... packaging all
+                                Spaces and uploading."</em>" and does the rest on a background thread, so you can
+                                keep working. Three problems stop it before anything is uploaded:"
+                            </p>
+                            <ul class="docs-list">
+                                <li><strong>"No open Space"</strong>": "<em>"Publish requires an open Space folder."</em></li>
+                                <li><strong>"No session"</strong>": "<em>"Sign in to publish."</em></li>
+                                <li><strong>"A Website reference that does not resolve"</strong>": the message names the reference and the nearest candidates. See "<a href="/docs/website">"Website Service"</a>"."</li>
+                            </ul>
+                            <p>
+                                "Studio does not show the outcome in the editor yet. The final line goes to the
+                                engine log, "<code>"~/.eustress_engine/logs/engine-<pid>.log"</code>": "
+                                <code>"Published successfully:"</code>" followed by the listing id and a summary of
+                                the review, or "<code>"Publish failed:"</code>" followed by the reason. The
+                                Projects page on eustress.dev shows the same status."
+                            </p>
+                        </div>
+                    </section>
+
+                    // =========================================================
+                    // WHAT GETS UPLOADED
+                    // =========================================================
+                    <section id="upload" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"03"</span>
+                            "What Gets Uploaded"
+                        </h2>
+
+                        <div id="upload-package" class="subsection">
+                            <h3>"The Package"</h3>
+                            <p>
+                                "A package is a "<code>".pak"</code>" file: a tar archive of the Universe folder,
+                                compressed with zstd at level 3. Studio archives the folder as it sits on disk, so
+                                the package holds every Space with its files and database, plus the Universe's "
+                                <code>".eustress"</code>" metadata. It leaves out:"
+                            </p>
+                            <ul class="docs-list">
+                                <li><strong>"Development folders"</strong>": "<code>".git"</code>", "<code>"node_modules"</code>" and "<code>"target"</code></li>
+                                <li><strong>"Operating system files"</strong>": "<code>".DS_Store"</code>", "<code>"Thumbs.db"</code>" and "<code>"desktop.ini"</code></li>
+                                <li><strong>"Temporary files"</strong>": anything ending in "<code>".lock"</code>" or "<code>".tmp"</code></li>
+                            </ul>
+                            <p>
+                                "Studio hashes the finished package with BLAKE3 and sends the hash with the
+                                listing as its content id, in the form "<code>"blake3:<hex>"</code>". The API
+                                records it, but de-duplicates on its own fingerprint of the stored object, because
+                                a hash a client sends is only a claim."
+                            </p>
+                        </div>
+
+                        <div id="upload-steps" class="subsection">
+                            <h3>"Upload and Storage"</h3>
+                            <ol class="numbered-list">
+                                <li>
+                                    <strong>"Create the listing."</strong>
+                                    " Studio sends the name, description, genre, Public setting and content id.
+                                    The API answers with a new listing id and starts the listing as pending
+                                    review. Every listing records 10 as its player limit."
+                                </li>
+                                <li>
+                                    <strong>"Upload the package."</strong>
+                                    " Packages under 100 MB go up in one request; larger ones go up in 95 MB
+                                    parts. The API stores the file in Cloudflare R2 at "
+                                    <code>"universes/<id>/universe.pak"</code>" and refuses a single-request
+                                    upload above 500 MB."
+                                </li>
+                                <li>
+                                    <strong>"Upload the Website manifest"</strong>
+                                    ", when the Space has a Website service. If this upload fails, the publish
+                                    fails, so a website never keeps showing numbers from the previous publish."
+                                </li>
+                                <li>
+                                    <strong>"Upload the thumbnail."</strong>
+                                    " The first of "<code>"thumbnail.png"</code>", "<code>"thumbnail.webp"</code>
+                                    " and "<code>"thumbnail.jpg"</code>" found in the Universe's "
+                                    <code>".eustress"</code>" folder, up to 5 MB."
+                                </li>
+                                <li>
+                                    <strong>"Submit for review."</strong>
+                                    " Covered in the next section. If submission does not go through, the
+                                    listing stays pending while the package is already stored."
+                                </li>
                             </ol>
-                        </div>
-
-                        <div id="overview-requirements" class="docs-block">
-                            <h3>"Requirements"</h3>
-                            <p>"Before you can publish, ensure the following:"</p>
-                            <div class="feature-grid">
-                                <div class="feature-card">
-                                    <h4>"Eustress Account"</h4>
-                                    <p>"Registered developer account on eustress.dev with verified email."</p>
-                                </div>
-                                <div class="feature-card">
-                                    <h4>"Identity.toml"</h4>
-                                    <p>"Developer identity file in your project root with valid auth credentials."</p>
-                                </div>
-                                <div class="feature-card">
-                                    <h4>"Simulation Metadata"</h4>
-                                    <p>"Name, description, thumbnail, tags, and category configured."</p>
-                                </div>
-                                <div class="feature-card">
-                                    <h4>"Age Rating"</h4>
-                                    <p>"Self-assessed content rating (Everyone, Teen, Mature)."</p>
+                            <div class="callout callout-advanced">
+                                <img src="/assets/icons/settings.svg" alt="Advanced" />
+                                <div>
+                                    <strong>"Frame the shot before you press Publish"</strong>
+                                    <p>
+                                        "Unless "<code>".eustress/thumbnail.png"</code>" was written in the last 5
+                                        minutes, Studio captures the viewport, scales it to 512 by 288 pixels and
+                                        saves it there, replacing the file. Because the PNG is uploaded ahead of
+                                        any WebP or JPEG, the thumbnail is normally whatever the viewport shows
+                                        when you publish."
+                                    </p>
                                 </div>
                             </div>
+                        </div>
+
+                        <div id="upload-files" class="subsection">
+                            <h3>"Files Publishing Writes"</h3>
+                            <p>"A publish leaves these files behind, all of them inside the Universe folder:"</p>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"File"</th><th>"Location"</th><th>"Holds"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td><code>"thumbnail.png"</code></td><td>"Universe "<code>".eustress/"</code></td><td>"The viewport capture, 512 by 288"</td></tr>
+                                    <tr><td><code>".last_publish_hash"</code></td><td>"Universe "<code>".eustress/"</code></td><td>"The BLAKE3 hash of the last uploaded package"</td></tr>
+                                    <tr><td><code>"moderation-dossier.json"</code></td><td>"Universe "<code>".eustress/"</code></td><td>"The evidence review reads"</td></tr>
+                                    <tr><td><code>"capture-0.png"</code>" to "<code>"capture-3.png"</code></td><td>"Universe "<code>".eustress/moderation/"</code></td><td>"The review views"</td></tr>
+                                    <tr><td><code>"publish.toml"</code>", "<code>"publish-journal.toml"</code>", "<code>"sync.toml"</code></td><td>"Space "<code>".eustress/"</code></td><td>"The listing fields and visibility you chose, and publish checkpoints"</td></tr>
+                                </tbody>
+                            </table>
                         </div>
                     </section>
 
-                    // ─────────────────────────────────────────────────────
-                    // 2. Prepare to Publish
-                    // ─────────────────────────────────────────────────────
-                    <section id="prepare" class="docs-section">
-                        <h2 class="section-anchor">"2. Prepare to Publish"</h2>
+                    // =========================================================
+                    // REVIEW
+                    // =========================================================
+                    <section id="review" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"04"</span>
+                            "Review"
+                        </h2>
 
-                        <div id="prepare-identity" class="docs-block">
-                            <h3>"Identity.toml"</h3>
+                        <div id="review-inputs" class="subsection">
+                            <h3>"What Review Reads"</h3>
                             <p>
-                                "Your Identity.toml file is the developer identity that ties your simulation to your
-                                eustress.dev account. It lives at the root of your project directory and is created
-                                automatically when you sign in through the engine."
+                                "Review is the gate between an upload and the Gallery. It never runs your
+                                Universe: Studio builds the evidence from the live scene while it publishes, and
+                                the API judges that."
                             </p>
-                            <pre class="code-block"><code>{"# Identity.toml — Developer Identity
-# Auto-generated by the Eustress engine on first sign-in.
-# Do NOT share this file or commit it to version control.
-
-[identity]
-developer_id = \"dev_8f3a2b1c4d5e6f70\"
-display_name = \"StudioName\"
-email = \"dev@example.com\"
-
-[auth]
-token = \"eus_tok_...\"
-expires_at = \"2026-12-31T23:59:59Z\"
-
-[profile]
-avatar_url = \"https://eustress.dev/avatars/dev_8f3a2b1c.png\"
-verified = true"}</code></pre>
-                            <div class="docs-callout warning">
-                                <strong>"Security:"</strong>
-                                " Never commit Identity.toml to version control. It contains your auth token.
-                                The default .gitignore template already excludes it."
-                            </div>
-                        </div>
-
-                        <div id="prepare-metadata" class="docs-block">
-                            <h3>"Simulation Metadata"</h3>
-                            <p>
-                                "Simulation metadata is configured in your project's Simulation.toml file. This
-                                defines how your simulation appears in the gallery."
-                            </p>
-                            <pre class="code-block"><code>{"# Simulation.toml — Simulation Metadata
-
-[simulation]
-name = \"Crystal Caverns\"
-description = \"Explore procedurally generated crystal caves with friends.\"
-version = \"1.0.0\"
-
-[simulation.gallery]
-category = \"Adventure\"
-tags = [\"exploration\", \"multiplayer\", \"procedural\", \"caves\"]
-max_players = 16
-thumbnail = \"assets/gallery/thumbnail.png\"
-
-[simulation.screenshots]
-images = [
-    \"assets/gallery/screen1.png\",
-    \"assets/gallery/screen2.png\",
-    \"assets/gallery/screen3.png\",
-]"}</code></pre>
-                            <div class="api-table">
-                                <div class="api-row">
-                                    <code>"name"</code>
-                                    <span>"Display name in the gallery. 3-64 characters, must be unique."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"description"</code>
-                                    <span>"Short description shown on the simulation card. Max 280 characters."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"version"</code>
-                                    <span>"Semantic version string. Incremented automatically on re-publish."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"category"</code>
-                                    <span>"Primary category: Adventure, Simulation, Strategy, Social, Creative, Horror, Racing, RPG."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"tags"</code>
-                                    <span>"Up to 8 searchable tags. Lowercase, alphanumeric, hyphens allowed."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"max_players"</code>
-                                    <span>"Maximum concurrent players per server instance. Range: 1-100."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"thumbnail"</code>
-                                    <span>"Path to 16:9 thumbnail image. Minimum 1280x720, PNG or WebP."</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div id="prepare-thumbnail" class="docs-block">
-                            <h3>"Thumbnail & Media"</h3>
-                            <p>"Your thumbnail is the first thing players see. Make it count."</p>
-                            <div class="feature-grid">
-                                <div class="feature-card">
-                                    <h4>"Thumbnail"</h4>
-                                    <p>"1280x720 minimum, 16:9 aspect ratio. PNG or WebP. No text overlays — the gallery adds your title."</p>
-                                </div>
-                                <div class="feature-card">
-                                    <h4>"Screenshots"</h4>
-                                    <p>"Up to 10 screenshots, 1920x1080 recommended. Show diverse gameplay moments."</p>
-                                </div>
-                                <div class="feature-card">
-                                    <h4>"Icon"</h4>
-                                    <p>"Optional 512x512 square icon. Used in search results and player's library."</p>
-                                </div>
-                                <div class="feature-card">
-                                    <h4>"Video"</h4>
-                                    <p>"Optional 30-second gameplay trailer. MP4, max 50MB. Auto-plays on hover in gallery."</p>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div id="prepare-age-rating" class="docs-block">
-                            <h3>"Age Rating"</h3>
-                            <p>
-                                "Every simulation must declare a content rating. This is self-assessed but subject to
-                                review by the moderation system."
-                            </p>
-                            <div class="api-table">
-                                <div class="api-row">
-                                    <code>"Everyone"</code>
-                                    <span>"Suitable for all ages. No violence, no mature themes, no user-generated text chat."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"Teen"</code>
-                                    <span>"Mild cartoon violence, competitive gameplay, moderated text chat allowed."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"Mature"</code>
-                                    <span>"Realistic violence, complex themes, unmoderated voice chat. Age verification required."</span>
-                                </div>
-                            </div>
-                            <pre class="code-block"><code>{"# In Simulation.toml
-[simulation.rating]
-content_rating = \"Teen\"
-descriptors = [\"mild-violence\", \"online-interactions\"]"}</code></pre>
-                        </div>
-                    </section>
-
-                    // ─────────────────────────────────────────────────────
-                    // 3. Publishing Flow
-                    // ─────────────────────────────────────────────────────
-                    <section id="flow" class="docs-section">
-                        <h2 class="section-anchor">"3. Publishing Flow"</h2>
-
-                        <div id="flow-packaging" class="docs-block">
-                            <h3>"Packaging"</h3>
-                            <p>
-                                "When you click Publish in the engine, the first step is packaging. The engine
-                                collects everything needed to run your simulation into the .eustress/ directory."
-                            </p>
-                            <pre class="code-block"><code>{".eustress/
-  manifest.json        # Package manifest with hashes
-  simulation.wasm      # Compiled simulation logic
-  assets/
-    models/            # 3D models (glTF, compressed)
-    textures/          # Textures (KTX2, basis-compressed)
-    audio/             # Audio files (Opus-encoded)
-    scenes/            # Scene definitions
-  Simulation.toml      # Metadata (copied from project root)
-  thumbnail.webp       # Gallery thumbnail (optimized)"}</code></pre>
-                            <div class="docs-callout info">
-                                <strong>"Optimization:"</strong>
-                                " The packaging step automatically compresses textures to KTX2/Basis,
-                                encodes audio to Opus, and strips unused assets. A 2GB project directory
-                                typically packages down to 200-400MB."
-                            </div>
-                        </div>
-
-                        <div id="flow-upload" class="docs-block">
-                            <h3>"Upload to R2"</h3>
-                            <p>
-                                "The packaged bundle is uploaded to Cloudflare R2 via the api.eustress.dev endpoint.
-                                Uploads are chunked and resumable — if your connection drops mid-upload, the engine
-                                picks up where it left off."
-                            </p>
-                            <pre class="code-block"><code>{"// Internal upload flow (simplified)
-// You don't write this code — the engine handles it automatically.
-
-POST api.eustress.dev/v1/publish/init
-  -> { upload_id, presigned_urls[] }
-
-PUT r2.eustress.dev/chunks/{upload_id}/{chunk_n}
-  -> { etag }
-
-POST api.eustress.dev/v1/publish/finalize
-  -> { simulation_id, version, gallery_url }"}</code></pre>
                             <ul class="docs-list">
-                                <li><strong>"Chunked uploads"</strong>" — 8MB chunks with parallel upload (4 concurrent)"</li>
-                                <li><strong>"Resumable"</strong>" — Drop your connection and resume later, no re-upload"</li>
-                                <li><strong>"Progress bar"</strong>" — Real-time upload progress in the engine UI"</li>
-                                <li><strong>"Compression"</strong>" — Chunks are zstd-compressed before upload, saving 30-50% bandwidth"</li>
+                                <li><strong>"The dossier"</strong>": a measured digest of the scene (counts, bounds, hierarchy, how varied its materials and colors are, how much is left at defaults, how many parts duplicate each other), the text people will read, the scripts, the asset names, and any links or contact details found in them."</li>
+                                <li><strong>"Views of the scene"</strong>": the off-screen AI camera captures the scene from several angles while the upload runs, framing all of it."</li>
                             </ul>
                         </div>
 
-                        <div id="flow-integrity" class="docs-block">
-                            <h3>"Content-Addressable Storage"</h3>
+                        <div id="review-ladder" class="subsection">
+                            <h3>"The Review Ladder"</h3>
+                            <p>"The API runs the cheapest checks first, and each layer decides how much of the next one runs:"</p>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Layer"</th><th>"Reads"</th><th>"Can decide"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td>"L0 Deterministic"</td><td>"The stored package and the dossier digest"</td><td>"Reuse the decision already made on an identical package; flag empty or default-only scenes"</td></tr>
+                                    <tr><td>"L1 Text classifier (Jev, from TypeSafe)"</td><td>"The dossier text"</td><td>"Quarantine, hold, reject or ask for changes; it never approves"</td></tr>
+                                    <tr><td>"L2a Judge (xAI Grok)"</td><td>"The views and a case summary"</td><td>"Approve, reject or hold under the Eustress AI Guardian Policy, version 1.2"</td></tr>
+                                    <tr><td>"L2b Agent"</td><td>"The case record and the moderation playbook"</td><td>"Settle gray-band cases through guarded tools, in at most 4 rounds"</td></tr>
+                                    <tr><td>"L3 People"</td><td>"Everything"</td><td>"Every hold and quarantine, every legal-lane call, and appeals the agent does not settle"</td></tr>
+                                </tbody>
+                            </table>
                             <p>
-                                "Every file in the bundle is stored by its BLAKE3 hash. This provides three
-                                key guarantees:"
+                                "Two rules are enforced in code rather than in prompts: nothing is listed without
+                                a recorded decision, and no model can approve content in a hard category. Those
+                                categories are sexual content involving minors, terrorism or extremist promotion,
+                                planning of mass-casualty attacks, intimate or sexual imagery of real people
+                                shared without consent, and doxxing or targeted harassment. Only a person can clear
+                                them."
                             </p>
-                            <div class="feature-grid">
-                                <div class="feature-card">
-                                    <h4>"Integrity"</h4>
-                                    <p>"Every byte is verified. Corrupted uploads are detected and rejected immediately."</p>
-                                </div>
-                                <div class="feature-card">
-                                    <h4>"Deduplication"</h4>
-                                    <p>"Shared assets across versions are stored once. Re-publishing with minor changes uploads only the diff."</p>
-                                </div>
-                                <div class="feature-card">
-                                    <h4>"Immutability"</h4>
-                                    <p>"Published content cannot be silently altered. The hash is the identity."</p>
+                            <div class="callout callout-info">
+                                <img src="/assets/icons/help.svg" alt="Info" />
+                                <div>
+                                    <strong>"Deployment status"</strong>
+                                    <p>
+                                        "As of September 2026 this review gate is built and tested in code but not
+                                        yet deployed to the live API. "<a href="#roadmap-review">"Review Goes Live"</a>
+                                        " lists the remaining steps."
+                                    </p>
                                 </div>
                             </div>
-                            <pre class="code-block"><code>{"// manifest.json (generated during packaging)
-{
-  \"simulation_id\": \"sim_7a3f2e1b\",
-  \"version\": \"1.2.0\",
-  \"files\": {
-    \"simulation.wasm\": {
-      \"hash\": \"blake3:a1b2c3d4e5f6...\",
-      \"size\": 4218432
-    },
-    \"assets/textures/terrain.ktx2\": {
-      \"hash\": \"blake3:f6e5d4c3b2a1...\",
-      \"size\": 8392704
-    }
-  },
-  \"total_size\": 314572800,
-  \"published_at\": \"2026-04-03T12:00:00Z\"
-}"}</code></pre>
                         </div>
 
-                        <div id="flow-status" class="docs-block">
-                            <h3>"Publish Status"</h3>
-                            <p>"After upload completes, your simulation goes through a brief processing pipeline:"</p>
-                            <ol class="docs-list numbered">
-                                <li><strong>"Uploaded"</strong>" — All chunks received and verified"</li>
-                                <li><strong>"Processing"</strong>" — Asset validation, thumbnail generation, metadata indexing"</li>
-                                <li><strong>"Screening"</strong>" — Automated content moderation scan (typically under 60 seconds)"</li>
-                                <li><strong>"Live"</strong>" — Simulation is visible in the gallery and playable"</li>
-                            </ol>
-                            <div class="docs-callout info">
-                                <strong>"Typical Time:"</strong>
-                                " From clicking Publish to Live status takes 2-5 minutes depending on bundle size.
-                                You receive a notification in the engine when your simulation goes live."
-                            </div>
+                        <div id="review-outcomes" class="subsection">
+                            <h3>"Outcomes and Ratings"</h3>
+                            <p>"Studio polls the outcome for about 18 seconds and puts it in the summary line of the log:"</p>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Status"</th><th>"Meaning"</th><th>"Summary in the log"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td><code>"approved"</code></td><td>"Passed review. Listed in the Gallery if Public; otherwise only you can open it."</td><td><em>"listed in the Gallery"</em>" with the rating, or "<em>"approved, private"</em></td></tr>
+                                    <tr><td><code>"rejected"</code></td><td>"Not listed, with a suggested edit."</td><td><em>"not listed"</em>" and the edit"</td></tr>
+                                    <tr><td><code>"changes_requested"</code></td><td>"Reads as directed at children under 13. Remove off-platform links, contact details, personal-data collection and chance-based or real-money mechanics, or describe it for an older audience."</td><td><em>"changes requested before listing"</em></td></tr>
+                                    <tr><td><code>"held"</code></td><td>"Waiting for a person."</td><td><em>"held for human review"</em></td></tr>
+                                    <tr><td><code>"quarantined"</code></td><td>"Under legal review. Nobody but an administrator can download it, and publishing from your account pauses until a person releases it."</td><td><em>"under legal review"</em></td></tr>
+                                    <tr><td><code>"pending"</code></td><td>"No decision yet."</td><td><em>"review pending"</em></td></tr>
+                                </tbody>
+                            </table>
+                            <p>
+                                "An approved listing carries one of four ratings: "<code>"all_ages"</code>", "
+                                <code>"teen_13"</code>", "<code>"mature_17"</code>" or "<code>"adult_18"</code>
+                                ", with "<code>"teen_13"</code>" when the judge gives none. The API accepts one
+                                open appeal at a time for a listing that was rejected, held, quarantined or asked
+                                for changes, with 10 to 2,000 characters of explanation. The website has no appeal
+                                form yet."
+                            </p>
                         </div>
                     </section>
 
-                    // ─────────────────────────────────────────────────────
-                    // 4. Simulation Page
-                    // ─────────────────────────────────────────────────────
-                    <section id="simulation-page" class="docs-section">
-                        <h2 class="section-anchor">"4. Simulation Page"</h2>
+                    // =========================================================
+                    // ON THE WEBSITE
+                    // =========================================================
+                    <section id="web" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"05"</span>
+                            "On the Website"
+                        </h2>
 
-                        <div id="simulation-page-url" class="docs-block">
-                            <h3>"URL Structure"</h3>
+                        <div id="web-gallery" class="subsection">
+                            <h3>"The Gallery"</h3>
                             <p>
-                                "Every published simulation gets a permanent URL on eustress.dev. The URL uses
-                                the simulation's unique identifier, which is assigned on first publish and never changes."
+                                "The "<a href="/gallery">"Gallery"</a>" lists a simulation only when two things are
+                                true: you marked it Public, and review approved it. The same rule gates the listing
+                                page, the package download, the play request and the thumbnail. The Gallery's API
+                                returns eligible listings newest first. Its featured shelf holds approved listings
+                                that review marked as featured, either through the judge's quality grade or when a
+                                reviewer approves, and never one rated "<code>"adult_18"</code>"."
                             </p>
-                            <pre class="code-block"><code>{"https://eustress.dev/simulation/sim_7a3f2e1b
-
-# URL anatomy:
-# eustress.dev       — Platform root
-# /simulation/       — Simulation namespace
-# sim_7a3f2e1b       — Unique simulation ID (stable across versions)"}</code></pre>
-                            <p>
-                                "You can also set a custom slug after your first publish, giving you a friendlier URL:"
-                            </p>
-                            <pre class="code-block"><code>{"https://eustress.dev/simulation/crystal-caverns"}</code></pre>
                         </div>
 
-                        <div id="simulation-page-layout" class="docs-block">
-                            <h3>"Page Layout"</h3>
-                            <p>"Your simulation page displays everything players need to decide whether to play:"</p>
-                            <div class="api-table">
-                                <div class="api-row">
-                                    <code>"Hero Banner"</code>
-                                    <span>"Your thumbnail displayed at full width with a Play button overlay."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"Description"</code>
-                                    <span>"Full description with markdown support. Up to 4000 characters."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"Screenshots"</code>
-                                    <span>"Carousel of up to 10 screenshots. Click to expand fullscreen."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"Ratings"</code>
-                                    <span>"Community star rating (1-5) and written reviews."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"Player Count"</code>
-                                    <span>"Real-time count of active players. Updates every 30 seconds."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"Developer Info"</code>
-                                    <span>"Your studio name, avatar, and link to your other simulations."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"Version History"</code>
-                                    <span>"Changelog entries for each published version."</span>
-                                </div>
-                            </div>
+                        <div id="web-listing" class="subsection">
+                            <h3>"Listing and Play Pages"</h3>
+                            <p>
+                                "Each listing has a page at "<code>"eustress.dev/simulation/<id>"</code>" with its
+                                name, creator, description and visit count. The API returns a listing that is not
+                                approved only to its author and to administrators; anyone else gets the same
+                                not-found answer as for an id that does not exist."
+                            </p>
+                            <p>
+                                "The listing page's Play Now button opens a dialog titled "
+                                <em>"Eustress Player Required"</em>", with a download link and a Try Again button
+                                that opens an "<code>"eustress://play/<id>"</code>" link. No Eustress program
+                                registers that link yet, so it does not open the simulation. "
+                                <code>"eustress.dev/play/<id>"</code>" counts a visit (the number the listing
+                                shows) and asks the API for a running server. No server registers itself today, so
+                                that page reports that no server is available."
+                            </p>
                         </div>
 
-                        <div id="simulation-page-analytics" class="docs-block">
-                            <h3>"Analytics"</h3>
+                        <div id="web-projects" class="subsection">
+                            <h3>"Your Projects"</h3>
                             <p>
-                                "Your developer dashboard at eustress.dev/dashboard provides analytics for each
-                                published simulation:"
+                                "The Projects page on eustress.dev lists everything you have published, with a
+                                status badge:"
                             </p>
-                            <ul class="docs-list">
-                                <li><strong>"Daily Active Players"</strong>" — Unique players per day over the last 30 days"</li>
-                                <li><strong>"Session Duration"</strong>" — Average time spent per play session"</li>
-                                <li><strong>"Retention"</strong>" — Day-1, Day-7, Day-30 return rates"</li>
-                                <li><strong>"Geography"</strong>" — Player distribution by region"</li>
-                                <li><strong>"Performance"</strong>" — Server tick rate, memory usage, crash reports"</li>
-                                <li><strong>"Ratings"</strong>" — Rating distribution and recent reviews"</li>
-                            </ul>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Badge"</th><th>"Review states"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td>"Published"</td><td>"Approved and Public, so listed in the Gallery"</td></tr>
+                                    <tr><td>"Under Review"</td><td>"Pending, classifying, held, appealed, quarantined or changes requested"</td></tr>
+                                    <tr><td>"Draft"</td><td>"Rejected, ready to fix and publish again; a private listing that passed review also shows here"</td></tr>
+                                </tbody>
+                            </table>
                         </div>
                     </section>
 
-                    // ─────────────────────────────────────────────────────
-                    // 5. Updates & Versioning
-                    // ─────────────────────────────────────────────────────
-                    <section id="versioning" class="docs-section">
-                        <h2 class="section-anchor">"5. Updates & Versioning"</h2>
+                    // =========================================================
+                    // UPDATES
+                    // =========================================================
+                    <section id="updates" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"06"</span>
+                            "Updates"
+                        </h2>
 
-                        <div id="versioning-republish" class="docs-block">
-                            <h3>"Re-Publishing"</h3>
+                        <div id="updates-again" class="subsection">
+                            <h3>"Publishing Again"</h3>
                             <p>
-                                "To update your simulation, simply click Publish again. The engine detects that
-                                this simulation has been published before and performs a delta upload — only new
-                                or changed files are transmitted."
+                                "Every Publish Universe creates a new listing with a new id, and review judges it
+                                from the start. The earlier listing stays where it is, and the API numbers every
+                                listing version 1."
                             </p>
-                            <pre class="code-block"><code>{"// Delta upload behavior:
-// Version 1.0.0 — Full upload: 300MB
-// Version 1.1.0 — Changed 3 textures, 1 script: uploads only 12MB
-// Version 1.2.0 — New audio files added: uploads only 45MB
-//
-// Content-addressable storage means unchanged files are never re-uploaded."}</code></pre>
-                            <div class="docs-callout info">
-                                <strong>"Automatic Versioning:"</strong>
-                                " The version in Simulation.toml is auto-incremented on each publish if you
-                                haven't manually changed it. Patch version bumps by default (1.0.0 -> 1.0.1)."
+                            <div class="callout callout-advanced">
+                                <img src="/assets/icons/settings.svg" alt="Advanced" />
+                                <div>
+                                    <strong>"Publishing again creates a second listing"</strong>
+                                    <p>
+                                        "Studio does not keep the listing id after a publish, so it cannot update
+                                        the listing it made last time, and the API has no route to delete or
+                                        unpublish a listing. Publish when a version is ready for people to see,
+                                        rather than after every change."
+                                    </p>
+                                </div>
                             </div>
                         </div>
 
-                        <div id="versioning-history" class="docs-block">
-                            <h3>"Version History"</h3>
+                        <div id="updates-space" class="subsection">
+                            <h3>"Updating One Space"</h3>
                             <p>
-                                "Every publish creates an immutable version snapshot. Players always get the latest
-                                version when they join, but the full history is preserved on the server."
+                                "Publish Space is built to update one Space of a published Universe: it packages
+                                only the open Space's folder, uploads it to "
+                                <code>"universes/<id>/spaces/<name>.pak"</code>" beside the Universe package, and
+                                returns the listing to pending review, because the content that people see has
+                                changed."
                             </p>
-                            <pre class="code-block"><code>{"# Version history for Crystal Caverns
-#
-# v1.2.0  2026-04-03  Added underwater caves biome
-# v1.1.0  2026-03-20  Multiplayer voice chat, new crystal types
-# v1.0.1  2026-03-15  Fixed spawning bug near lava pools
-# v1.0.0  2026-03-10  Initial release"}</code></pre>
                             <p>
-                                "Players automatically receive the latest version. There is no manual update button —
-                                when a player joins, they always get the current version. If they are in an active
-                                session when you publish, they continue on the old version until they rejoin."
+                                "Before it opens the dialog, Publish Space looks for the listing id ("
+                                <code>"experience_id"</code>") in the Universe's "<code>".eustress/sync.toml"</code>
+                                " and stops with "<em>"Publish the Universe first before publishing individual
+                                Spaces."</em>" when it is missing. Studio does not write that id after a Universe
+                                publish yet, so the check stops every Space publish today."
                             </p>
-                        </div>
-
-                        <div id="versioning-rollback" class="docs-block">
-                            <h3>"Rollback"</h3>
-                            <p>
-                                "Shipped a broken update? Roll back to any previous version from the developer dashboard
-                                or directly from the engine."
-                            </p>
-                            <pre class="code-block"><code>{"// Rollback via the engine CLI
-eustress publish rollback --to 1.1.0
-
-// Or from the dashboard:
-// eustress.dev/dashboard/sim_7a3f2e1b/versions
-// Click \"Activate\" on any previous version"}</code></pre>
-                            <div class="docs-callout warning">
-                                <strong>"Note:"</strong>
-                                " Rollback is instant because all previous versions are preserved in R2.
-                                No re-upload required. New players immediately get the rolled-back version."
-                            </div>
                         </div>
                     </section>
 
-                    // ─────────────────────────────────────────────────────
-                    // 6. Forge Servers
-                    // ─────────────────────────────────────────────────────
-                    <section id="forge" class="docs-section">
-                        <h2 class="section-anchor">"6. Forge Servers"</h2>
+                    // =========================================================
+                    // WHAT'S NEXT
+                    // =========================================================
+                    <section id="roadmap" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"07"</span>
+                            "What's Next"
+                        </h2>
 
-                        <div id="forge-overview" class="docs-block">
-                            <h3>"How Forge Works"</h3>
+                        <div id="roadmap-listing" class="subsection">
+                            <h3>"Updating a Listing"</h3>
                             <p>
-                                "Forge is the Eustress server fleet. When a player clicks Play on your simulation,
-                                a Forge server spins up automatically via HashiCorp Nomad. You don't provision servers,
-                                configure networking, or manage infrastructure. Forge handles all of it."
+                                "The storage plan will keep the listing id after a publish, so the next Publish
+                                updates the same listing instead of creating another, and it will move the publish
+                                manifests to the Universe root. The same work will regenerate files from the
+                                WorldDb at publish time and replace the exclusion list with an allowlist of what a
+                                package may contain. Its test: republishing an unchanged Space will produce a
+                                byte-identical package."
                             </p>
-                            <div class="feature-grid">
-                                <div class="feature-card">
-                                    <h4>"Zero Configuration"</h4>
-                                    <p>"No server setup. No Docker, no Kubernetes, no SSH. Publish and it just works."</p>
-                                </div>
-                                <div class="feature-card">
-                                    <h4>"Scale to Zero"</h4>
-                                    <p>"No players? No servers running. No cost when idle. Servers spin up on demand."</p>
-                                </div>
-                                <div class="feature-card">
-                                    <h4>"Scale to Thousands"</h4>
-                                    <p>"Viral moment? Forge scales automatically. Thousands of concurrent servers across regions."</p>
-                                </div>
-                                <div class="feature-card">
-                                    <h4>"Sub-Second Startup"</h4>
-                                    <p>"WASM-based servers start in under 500ms. Players never wait in a loading queue."</p>
-                                </div>
-                            </div>
                         </div>
 
-                        <div id="forge-scaling" class="docs-block">
-                            <h3>"Auto-Scaling"</h3>
-                            <p>"Forge scaling is driven by player demand:"</p>
-                            <ol class="docs-list numbered">
-                                <li><strong>"Player clicks Play"</strong>" — Matchmaking finds an existing server with room, or requests a new one"</li>
-                                <li><strong>"Nomad schedules allocation"</strong>" — New server binary is placed on the nearest available node"</li>
-                                <li><strong>"Server boots"</strong>" — WASM simulation loads from R2 cache, starts in under 500ms"</li>
-                                <li><strong>"Player connects"</strong>" — QUIC connection established, game begins"</li>
-                                <li><strong>"Server drains"</strong>" — When the last player leaves, server stays warm for 5 minutes, then shuts down"</li>
-                            </ol>
-                            <pre class="code-block"><code>{"// Scaling behavior (you don't configure this — it's automatic)
-//
-// 0 players   -> 0 servers   (scale to zero)
-// 1 player    -> 1 server    (cold start ~500ms)
-// 50 players  -> 4 servers   (max_players=16 per server)
-// 500 players -> 32 servers  (spread across 3 regions)
-// 5000 players -> 313 servers (spread across all regions)"}</code></pre>
+                        <div id="roadmap-review" class="subsection">
+                            <h3>"Review Goes Live"</h3>
+                            <p>
+                                "Deploying the review gate comes next: setting its classifier key, reviewing older
+                                listings that predate the gate (25 per nightly run, oldest first, hidden until
+                                then), working the first held cases by hand, and calibrating the thresholds on real
+                                publishes. After that, the API will compute its own scene digest from the uploaded
+                                package, and perceptual hashes of the review views will block re-uploads of removed
+                                content."
+                            </p>
                         </div>
 
-                        <div id="forge-regions" class="docs-block">
-                            <h3>"Regions & Latency"</h3>
+                        <div id="roadmap-play" class="subsection">
+                            <h3>"Playing Published Worlds"</h3>
                             <p>
-                                "Forge servers are deployed across global regions. Players are automatically
-                                routed to the lowest-latency region."
+                                "Opening a published simulation from the website is the last phase of the
+                                multiplayer plan: play links that open the Player, servers that register their
+                                address, and single-use join tokens. The phases are listed on the "
+                                <a href="/docs/networking#roadmap-phases">"Networking"</a>" page."
                             </p>
-                            <div class="api-table">
-                                <div class="api-row">
-                                    <code>"us-east"</code>
-                                    <span>"Ashburn, Virginia, USA"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"us-west"</code>
-                                    <span>"Los Angeles, California, USA"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"eu-west"</code>
-                                    <span>"London, United Kingdom"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"eu-central"</code>
-                                    <span>"Frankfurt, Germany"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"asia-east"</code>
-                                    <span>"Tokyo, Japan"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"asia-southeast"</code>
-                                    <span>"Singapore"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"oceania"</code>
-                                    <span>"Sydney, Australia"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"south-america"</code>
-                                    <span>"Sao Paulo, Brazil"</span>
+                            <div class="future-cta">
+                                <p><strong>"Publish from Studio today. Updates in place and playable listings come next."</strong></p>
+                                <div class="cta-buttons">
+                                    <a href="/download" class="btn-primary-glow">"Download Eustress"</a>
+                                    <a href="/docs/website" class="btn-secondary-steel">"Website Service Docs"</a>
                                 </div>
                             </div>
                         </div>
                     </section>
 
-                    // ─────────────────────────────────────────────────────
-                    // 7. Discovery
-                    // ─────────────────────────────────────────────────────
-                    <section id="discovery" class="docs-section">
-                        <h2 class="section-anchor">"7. Discovery"</h2>
-
-                        <div id="discovery-tags" class="docs-block">
-                            <h3>"Tags & Categories"</h3>
-                            <p>
-                                "Tags and categories are the primary way players find your simulation. Choose them
-                                carefully — they directly impact your visibility in search and browse results."
-                            </p>
-                            <div class="api-table">
-                                <div class="api-row">
-                                    <code>"Adventure"</code>
-                                    <span>"Exploration, quests, open-world, story-driven experiences."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"Simulation"</code>
-                                    <span>"Physics sandboxes, life sims, management, building."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"Strategy"</code>
-                                    <span>"Real-time or turn-based strategy, tower defense, resource management."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"Social"</code>
-                                    <span>"Hangout spaces, virtual events, social hubs."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"Creative"</code>
-                                    <span>"Art tools, music makers, sandbox building."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"Horror"</code>
-                                    <span>"Survival horror, psychological horror, co-op scares."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"Racing"</code>
-                                    <span>"Vehicles, racing, flight simulators."</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"RPG"</code>
-                                    <span>"Role-playing, character progression, loot, dungeons."</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div id="discovery-search" class="docs-block">
-                            <h3>"Search & Featured"</h3>
-                            <p>
-                                "The gallery supports full-text search across simulation names, descriptions, and tags.
-                                Results are ranked by relevance, with active player count as a tiebreaker."
-                            </p>
-                            <ul class="docs-list">
-                                <li><strong>"Search"</strong>" — Full-text search with typo tolerance and synonym matching"</li>
-                                <li><strong>"Browse"</strong>" — Filter by category, rating, player count, or age rating"</li>
-                                <li><strong>"Featured"</strong>" — Curated weekly rotation selected by the Eustress team"</li>
-                                <li><strong>"New & Notable"</strong>" — Recently published simulations with strong early ratings"</li>
-                                <li><strong>"Top Rated"</strong>" — Highest-rated simulations with minimum review threshold"</li>
-                            </ul>
-                            <div class="docs-callout info">
-                                <strong>"Getting Featured:"</strong>
-                                " The Featured rotation is curated by the Eustress team. High-quality simulations
-                                with strong player retention and positive ratings are considered. No application
-                                process — we discover and feature organically."
-                            </div>
-                        </div>
-
-                        <div id="discovery-trending" class="docs-block">
-                            <h3>"Trending Algorithm"</h3>
-                            <p>
-                                "The Trending section surfaces simulations with rapidly growing player bases.
-                                The algorithm considers:"
-                            </p>
-                            <ul class="docs-list">
-                                <li><strong>"Player velocity"</strong>" — Rate of new player joins over the last 24 hours"</li>
-                                <li><strong>"Active ratio"</strong>" — Current players vs. peak players (engagement signal)"</li>
-                                <li><strong>"Session length"</strong>" — Average session duration (quality signal)"</li>
-                                <li><strong>"Rating momentum"</strong>" — Recent ratings trend (improving or declining)"</li>
-                                <li><strong>"Freshness"</strong>" — Recency of last update (active development bonus)"</li>
-                            </ul>
-                            <p>
-                                "Trending recalculates hourly. A small simulation with 10 players today and 200 players
-                                tomorrow will rank higher than an established simulation with steady 5000 players.
-                                The algorithm rewards growth, not absolute size."
-                            </p>
-                        </div>
-                    </section>
-
-                    // ─────────────────────────────────────────────────────
-                    // 8. Content Guidelines
-                    // ─────────────────────────────────────────────────────
-                    <section id="guidelines" class="docs-section">
-                        <h2 class="section-anchor">"8. Content Guidelines"</h2>
-
-                        <div id="guidelines-allowed" class="docs-block">
-                            <h3>"What's Allowed"</h3>
-                            <p>
-                                "Eustress is an open platform. Most content is welcome as long as it respects
-                                other players and complies with applicable law."
-                            </p>
-                            <div class="comparison-cards">
-                                <div class="lang-card soul">
-                                    <h4>"Allowed"</h4>
-                                    <ul class="docs-list">
-                                        <li>"Original creative works"</li>
-                                        <li>"Competitive and cooperative gameplay"</li>
-                                        <li>"Stylized or cartoon violence (with appropriate rating)"</li>
-                                        <li>"Social and educational experiences"</li>
-                                        <li>"Fan-made content with original assets"</li>
-                                        <li>"Mature themes with correct age rating"</li>
-                                    </ul>
-                                </div>
-                                <div class="lang-card">
-                                    <h4>"Not Allowed"</h4>
-                                    <ul class="docs-list">
-                                        <li>"Harassment, bullying, or hate speech"</li>
-                                        <li>"Content exploiting minors"</li>
-                                        <li>"Copyright-infringing assets"</li>
-                                        <li>"Real-money gambling"</li>
-                                        <li>"Malware, exploits, or data harvesting"</li>
-                                        <li>"Impersonation of real individuals"</li>
-                                    </ul>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div id="guidelines-moderation" class="docs-block">
-                            <h3>"AI Moderation"</h3>
-                            <p>
-                                "Every simulation is scanned by an AI moderation system during the publish pipeline.
-                                The system checks for:"
-                            </p>
-                            <ul class="docs-list">
-                                <li><strong>"Asset scanning"</strong>" — Textures and models checked for prohibited content"</li>
-                                <li><strong>"Text analysis"</strong>" — In-simulation text, UI strings, and metadata reviewed"</li>
-                                <li><strong>"Behavior analysis"</strong>" — Scripting patterns checked for malicious behavior"</li>
-                                <li><strong>"Rating verification"</strong>" — Content compared against declared age rating"</li>
-                            </ul>
-                            <div class="docs-callout warning">
-                                <strong>"False Positives:"</strong>
-                                " If your simulation is incorrectly flagged, you can appeal through the developer
-                                dashboard. Human review is completed within 24 hours."
-                            </div>
-                        </div>
-
-                        <div id="guidelines-dmca" class="docs-block">
-                            <h3>"DMCA Process"</h3>
-                            <p>
-                                "Eustress complies with the Digital Millennium Copyright Act. If you believe a
-                                simulation infringes on your copyright:"
-                            </p>
-                            <ol class="docs-list numbered">
-                                <li><strong>"File a claim"</strong>" — Submit a DMCA takedown notice via eustress.dev/legal/dmca"</li>
-                                <li><strong>"Review"</strong>" — Our legal team reviews the claim within 48 hours"</li>
-                                <li><strong>"Action"</strong>" — Infringing content is removed and the developer notified"</li>
-                                <li><strong>"Counter-notice"</strong>" — Developers can file a counter-notice if they believe the claim is invalid"</li>
-                            </ol>
-                            <p>
-                                "Repeat infringers face permanent account suspension. We take intellectual property
-                                rights seriously."
-                            </p>
-                        </div>
-
-                        <div id="guidelines-tos" class="docs-block">
-                            <h3>"Terms of Service"</h3>
-                            <p>
-                                "By publishing on Eustress, you agree to the Developer Terms of Service. Key points:"
-                            </p>
-                            <ul class="docs-list">
-                                <li><strong>"You retain ownership"</strong>" — Your simulation remains your intellectual property"</li>
-                                <li><strong>"License grant"</strong>" — You grant Eustress a license to host, distribute, and cache your content"</li>
-                                <li><strong>"Takedown rights"</strong>" — You can unpublish your simulation at any time"</li>
-                                <li><strong>"Content responsibility"</strong>" — You are responsible for the content of your simulation"</li>
-                                <li><strong>"Revenue terms"</strong>" — See the Earning documentation for monetization terms"</li>
-                            </ul>
-                            <div class="docs-callout info">
-                                <strong>"Full Terms:"</strong>
-                                " Read the complete Developer Terms of Service at eustress.dev/legal/developer-tos.
-                                The terms are written in plain English — no legal obfuscation."
-                            </div>
-                        </div>
-                    </section>
-
-                    // Navigation footer
                     <nav class="docs-nav-footer">
-                        <a href="/docs/audio" class="nav-prev">
+                        <a href="/docs/networking" class="nav-prev">
                             <img src="/assets/icons/arrow-left.svg" alt="Previous" />
                             <div>
                                 <span class="nav-label">"Previous"</span>
-                                <span class="nav-title">"Audio"</span>
+                                <span class="nav-title">"Networking"</span>
                             </div>
                         </a>
-                        <a href="/docs/earning" class="nav-next">
+                        <a href="/docs/website" class="nav-next">
                             <div>
                                 <span class="nav-label">"Next"</span>
-                                <span class="nav-title">"Earning"</span>
+                                <span class="nav-title">"Website Service"</span>
                             </div>
                             <img src="/assets/icons/arrow-right.svg" alt="Next" />
                         </a>

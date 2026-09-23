@@ -1,28 +1,34 @@
 # Eustress Engine
 
-> Eustress is a source-available simulation and data platform built in Rust. Model the real world, from a battery cell to a power grid, drive it with real data, run a year of simulation per second, and let AI agents work inside the same Spaces you do.
+> Eustress is a source-available simulation and data platform built in Rust. Model the real world, from a battery cell to a power grid, drive it with real data, compress time for clock-driven models by up to a year per second, and let AI agents work inside the same Spaces you do.
 
-Eustress ships as a desktop application for Windows, macOS and Linux with an editor, a play mode, scripting in Luau and Rune, and an MCP server so agents can drive the engine directly. The web platform at eustress.dev holds accounts, publishing, the marketplace and the Bliss ledger. The 3D scene and the entity component system underneath are implementation details; the product is the simulation and the data it produces.
+Eustress ships as a desktop application for Windows, macOS and Linux with an editor (Studio), a play mode, scripting in Rune and Luau, a command line and headless runtime, and an MCP server so agents can drive the engine directly. The web platform at eustress.dev holds accounts, publishing, the marketplace and the Bliss ledger. The 3D scene and the entity component system underneath are implementation details; the product is the simulation and the data it produces.
 
 The source is public at https://github.com/WeaveITMeta/EustressEngine under PolyForm Shield 1.0.0. That is a source-available license, which is a different thing from an open source license: anyone can read, build and use it, and it may not be used to build a competing product.
 
 ## Docs
 
-- [Getting Started](https://eustress.dev/docs/getting-started)
-- [Scripting System](https://eustress.dev/docs/scripting): Soul, the Rune API, ECS patterns, events and messages
-- [Services](https://eustress.dev/docs/services)
-- [Simulation System](https://eustress.dev/docs/simulation): running, stepping and reading simulations
-- [Physics System](https://eustress.dev/docs/physics)
-- [Building](https://eustress.dev/docs/building)
-- [Networking System](https://eustress.dev/docs/networking): QUIC transport, state replication, server authority, remote events
-- [UI Systems](https://eustress.dev/docs/ui): in-world and on-screen interfaces
-- [Audio System](https://eustress.dev/docs/audio): sound components, spatial audio, music and effects
-- [The Realism Platform](https://eustress.dev/docs/realism): STEM, industry, economics and rapid prototyping uses
-- [Universes](https://eustress.dev/docs/universes): how Universes, Spaces and publishing relate
-- [Publishing](https://eustress.dev/docs/publishing): taking a Space public
-- [Earning on Eustress](https://eustress.dev/docs/earning): contribution types, earning Bliss (BLS), Tickets (TKT)
-- [The Eustress Philosophy](https://eustress.dev/docs/philosophy): why the platform is built this way
+Every guide describes what Eustress Engine does today and ends with a What's Next section for work that is planned.
+
+- [Getting Started](https://eustress.dev/docs/getting-started): install, create a Universe and a Space, add a part, press Play, save, and run a first script
+- [Studio](https://eustress.dev/docs/studio): the editor; Explorer and its search language, Properties, Insert Object, selection, tools and snapping, undo and History, shortcuts, saving, modes and MindSpace
+- [Building](https://eustress.dev/docs/building): parts and their properties in meters, Models and Folders, booleans, the material library and .mat.toml, terrain, lights and atmosphere, large Spaces
+- [Perspective](https://eustress.dev/docs/perspective): 2D and 3D views, perspective and orthographic projection, switching without converting the world
+- [CAD](https://eustress.dev/docs/cad): parametric parts on the truck B-rep kernel; feature trees, variables, booleans, assemblies and export
+- [Importing](https://eustress.dev/docs/importing): Roblox places, glTF and GLB models, USD, Gaussian splats, images and video
+- [UI Systems](https://eustress.dev/docs/ui): ScreenGui and BillboardGui interfaces for the people inside a Space
+- [Audio](https://eustress.dev/docs/audio): the Sound object, SoundService, formats, and where audio playback stands
+- [Scripting](https://eustress.dev/docs/scripting): Rune, Luau and SoulScript; where scripts live, when they run, and the API they reach
+- [Services](https://eustress.dev/docs/services): every service a Space starts with, its role and its properties
+- [Physics](https://eustress.dev/docs/physics): Avian rigid bodies at 60 Hz in SI units, colliders, joints, queries, characters, deformation and fracture
+- [Simulation](https://eustress.dev/docs/simulation): the simulation clock and time scale, running and stepping, watchpoints, breakpoints, recordings and experiments
+- [Realism](https://eustress.dev/docs/realism): the physical-law libraries (materials, thermodynamics, electrochemistry) and a worked battery case study
+- [Universes](https://eustress.dev/docs/universes): how a Space is stored (files, the WorldDb, git history), branching, the op-log, and several engines on one Universe
+- [Networking](https://eustress.dev/docs/networking): what runs in one process today, the authority rules in code, and the multiplayer plan
+- [Publishing](https://eustress.dev/docs/publishing): publishing a Universe from Studio, the package, review, the Gallery and listing pages
 - [Website Service](https://eustress.dev/docs/website): let a website read live values out of a published Space
+- [Earning](https://eustress.dev/docs/earning): how contributions are scored, the daily Bliss (BLS) emission, the USD treasury drip, and Tickets (TKT)
+- [Philosophy](https://eustress.dev/docs/philosophy): why the platform is built this way, and the mechanism behind each principle
 
 ## Website Service (Markdown)
 
@@ -32,9 +38,10 @@ The source is public at https://github.com/WeaveITMeta/EustressEngine under Poly
 
 ## Agents and tooling
 
-- [MCP Server](https://eustress.dev/learn/mcp): the Model Context Protocol server that lets an agent create, inspect and simulate inside a Space
-- [IDE Integration](https://eustress.dev/learn/ide): editing scripts from an external editor
-- [Rune LSP](https://eustress.dev/learn/lsp): language server for Rune scripts
+- [MCP Server](https://eustress.dev/learn/mcp): the Model Context Protocol server that lets an agent create, inspect and simulate inside a Space, with its full tool inventory and access classes
+- [CLI & Headless](https://eustress.dev/learn/cli): the eustress command line (open, instances, close, bridge, run) and running Spaces with no window
+- [IDE Integration](https://eustress.dev/learn/ide): editing scripts from an external editor, with the Rune extension for VS Code-compatible editors
+- [Rune LSP](https://eustress.dev/learn/lsp): the eustress-lsp language server for Rune scripts, over stdio or TCP
 - [Learn](https://eustress.dev/learn): the full learning index
 
 ## Product

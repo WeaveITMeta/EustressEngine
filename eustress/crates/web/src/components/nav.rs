@@ -143,6 +143,10 @@ pub fn CentralNav(
                                                 <img src="/assets/icons/user.svg" alt="Profile" />
                                                 "Profile"
                                             </a>
+                                            <a href="/purchases" class="dropdown-item">
+                                                <img src="/assets/icons/receipt.svg" alt="Purchases" />
+                                                "Purchases"
+                                            </a>
                                             <a href="/settings" class="dropdown-item">
                                                 <img src="/assets/icons/settings.svg" alt="Settings" />
                                                 "Settings"
@@ -303,6 +307,15 @@ pub fn CentralNav(
                                                 <circle cx="12" cy="7" r="4"></circle>
                                             </svg>
                                             "Profile"
+                                        </a>
+                                        <a href="/purchases" class="drawer-user-link" on:click=move |_| close_menu()>
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                <path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"></path>
+                                                <path d="M8 8h8"></path>
+                                                <path d="M8 12h8"></path>
+                                                <path d="M8 16h5"></path>
+                                            </svg>
+                                            "Purchases"
                                         </a>
                                         <a href="/friends" class="drawer-user-link" on:click=move |_| close_menu()>
                                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

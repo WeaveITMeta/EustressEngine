@@ -18,28 +18,33 @@
   <url><loc>https://eustress.dev/cookies</loc></url>
   <url><loc>https://eustress.dev/dmca</loc></url>
   <url><loc>https://eustress.dev/docs/getting-started</loc></url>
-  <url><loc>https://eustress.dev/docs/scripting</loc></url>
-  <url><loc>https://eustress.dev/docs/networking</loc></url>
-  <url><loc>https://eustress.dev/docs/physics</loc></url>
+  <url><loc>https://eustress.dev/docs/studio</loc></url>
   <url><loc>https://eustress.dev/docs/building</loc></url>
+  <url><loc>https://eustress.dev/docs/perspective</loc></url>
+  <url><loc>https://eustress.dev/docs/cad</loc></url>
+  <url><loc>https://eustress.dev/docs/importing</loc></url>
   <url><loc>https://eustress.dev/docs/ui</loc></url>
+  <url><loc>https://eustress.dev/docs/audio</loc></url>
+  <url><loc>https://eustress.dev/docs/scripting</loc></url>
   <url><loc>https://eustress.dev/docs/services</loc></url>
+  <url><loc>https://eustress.dev/docs/physics</loc></url>
   <url><loc>https://eustress.dev/docs/simulation</loc></url>
   <url><loc>https://eustress.dev/docs/realism</loc></url>
-  <url><loc>https://eustress.dev/docs/audio</loc></url>
+  <url><loc>https://eustress.dev/docs/universes</loc></url>
+  <url><loc>https://eustress.dev/docs/networking</loc></url>
   <url><loc>https://eustress.dev/docs/publishing</loc></url>
+  <url><loc>https://eustress.dev/docs/website</loc></url>
   <url><loc>https://eustress.dev/docs/earning</loc></url>
   <url><loc>https://eustress.dev/docs/philosophy</loc></url>
-  <url><loc>https://eustress.dev/docs/universes</loc></url>
-  <url><loc>https://eustress.dev/docs/website</loc></url>
   <url><loc>https://eustress.dev/download</loc></url>
   <url><loc>https://eustress.dev/downloads/player</loc></url>
   <url><loc>https://eustress.dev/gallery</loc></url>
   <url><loc>https://eustress.dev/leaderboard</loc></url>
   <url><loc>https://eustress.dev/learn</loc></url>
+  <url><loc>https://eustress.dev/learn/mcp</loc></url>
+  <url><loc>https://eustress.dev/learn/cli</loc></url>
   <url><loc>https://eustress.dev/learn/ide</loc></url>
   <url><loc>https://eustress.dev/learn/lsp</loc></url>
-  <url><loc>https://eustress.dev/learn/mcp</loc></url>
   <url><loc>https://eustress.dev/license</loc></url>
   <url><loc>https://eustress.dev/marketplace</loc></url>
   <url><loc>https://eustress.dev/premium</loc></url>
