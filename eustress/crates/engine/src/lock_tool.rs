@@ -157,10 +157,12 @@ fn lock_tool_toggle_click(
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    mut parts: Query<(&mut BasePart, &Name)>,
+    mut parts: Query<(&mut BasePart, &Name, Option<&eustress_common::classes::Instance>)>,
     instance_files: Query<&crate::space::instance_loader::InstanceFile>,
     spatial_query: SpatialQuery,
     auth: Option<Res<crate::auth::AuthState>>,
+    // A mis-click in paint mode is an edit like any other: undoable.
+    mut undo_stack: ResMut<crate::undo::UndoStack>,
 ) {
     let Some(state) = studio_state else { return };
     // Lock and Anchor are the same gesture over different flags, so one
@@ -174,10 +176,18 @@ fn lock_tool_toggle_click(
 
     let Some(entity) = cursor_part(&ui_focus, &viewport_bounds, &windows, &cameras, &spatial_query)
     else { return };
-    let Ok((mut bp, name)) = parts.get_mut(entity) else { return };
+    let Ok((mut bp, name, instance)) = parts.get_mut(entity) else { return };
 
     let now_set = !flag.read(&bp);
     flag.write(&mut bp, now_set);
+    if let Some(instance) = instance {
+        undo_stack.push(crate::undo::Action::ChangeProperty {
+            id: instance.id,
+            property: flag.property_name().to_string(),
+            old_value: crate::undo::PropertyValueSnapshot::Bool(!now_set),
+            new_value: crate::undo::PropertyValueSnapshot::Bool(now_set),
+        });
+    }
     info!(
         "{} '{}' is now {}",
         flag.log_icon(now_set),
@@ -199,6 +209,14 @@ pub enum PaintFlag {
 }
 
 impl PaintFlag {
+    /// The property name property-undo applies (`undo::apply_property_value_to_entity`).
+    fn property_name(self) -> &'static str {
+        match self {
+            PaintFlag::Locked => "Locked",
+            PaintFlag::Anchored => "Anchored",
+        }
+    }
+
     fn read(self, bp: &BasePart) -> bool {
         match self {
             PaintFlag::Locked => bp.locked,
@@ -235,10 +253,13 @@ impl PaintFlag {
 /// locked. Fires only on the frame the tool is entered.
 fn unlock_all_on_entry(
     mut studio_state: Option<ResMut<StudioState>>,
-    mut all_parts: Query<(Entity, &mut BasePart, &Name)>,
+    mut all_parts: Query<(Entity, &mut BasePart, &Name, Option<&eustress_common::classes::Instance>)>,
     instance_files: Query<&crate::space::instance_loader::InstanceFile>,
     auth: Option<Res<crate::auth::AuthState>>,
     mut prev_tool: Local<Tool>,
+    // Unlock All touches every locked part in the Space; one undo step
+    // relocks exactly those.
+    mut undo_stack: ResMut<crate::undo::UndoStack>,
 ) {
     let Some(ref mut state) = studio_state else { return };
     let current = state.current_tool;
@@ -249,16 +270,30 @@ fn unlock_all_on_entry(
     if current != Tool::Unlock || previous == Tool::Unlock { return; }
 
     let mut count = 0u32;
-    for (entity, mut bp, name) in all_parts.iter_mut() {
+    let mut relock: Vec<(u32, crate::undo::PropertyValueSnapshot)> = Vec::new();
+    for (entity, mut bp, name, instance) in all_parts.iter_mut() {
         if !bp.locked { continue; }
         bp.locked = false;
         count += 1;
+        if let Some(instance) = instance {
+            relock.push((instance.id, crate::undo::PropertyValueSnapshot::Bool(true)));
+        }
         // Keep the per-part log at debug — on a huge Space an INFO per part is
         // a log-I/O stall; the aggregate below is the signal.
         debug!("🔓 '{}' unlocked (Unlock All)", name.as_str());
         persist_flag(entity, PaintFlag::Locked, false, &instance_files, &auth);
     }
     info!("🔓 Unlock All: unlocked {} part(s) in the Space", count);
+    if !relock.is_empty() {
+        undo_stack.push_labeled(
+            format!("Unlock All ({} part{})", relock.len(), if relock.len() == 1 { "" } else { "s" }),
+            crate::undo::Action::ChangePropertyMulti {
+                entities: relock,
+                property: "Locked".to_string(),
+                new_value: crate::undo::PropertyValueSnapshot::Bool(false),
+            },
+        );
+    }
 
     // One-shot action — return to Select.
     state.current_tool = Tool::Select;

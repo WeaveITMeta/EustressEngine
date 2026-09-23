@@ -22,7 +22,7 @@ use crate::gizmo_tools::TransformGizmoGroup;
 use crate::math_utils::{
     ray_plane_intersection, ray_to_line_segment_distance, calculate_rotated_aabb,
     find_surface_with_physics, find_surface_under_cursor_with_normal,
-    calculate_surface_offset, snap_to_grid, snap_to_grid_in_frame,
+    calculate_surface_offset,
 };
 
 // ============================================================================
@@ -81,6 +81,14 @@ pub struct MoveToolState {
     pub group_bounds_min: Vec3,
     pub group_bounds_max: Vec3,
     pub selected_count: usize,
+    /// The press has travelled past the dead zone and the drag moves things.
+    /// Until then a press on a handle or on the part is only a click.
+    pub drag_live: bool,
+    /// Cursor position when the drag went live, for the drag-start fade.
+    pub live_start_cursor: Vec2,
+    /// Free drag: the leader's offset from absolute surface placement when
+    /// the drag went live, faded out so the part does not jump at the start.
+    pub jump_offset: Option<Vec3>,
 }
 
 impl Default for MoveToolState {
@@ -105,6 +113,9 @@ impl Default for MoveToolState {
             group_bounds_min: Vec3::ZERO,
             group_bounds_max: Vec3::ZERO,
             selected_count: 0,
+            drag_live: false,
+            live_start_cursor: Vec2::ZERO,
+            jump_offset: None,
         }
     }
 }
@@ -157,13 +168,14 @@ impl Plugin for MoveToolPlugin {
         // `.after(...)` inside a `.chain()` tuple breaks the system-
         // set trait bounds in Bevy 0.18, so the chain ordering alone
         // carries the constraint.
+        // Editor input: idle during a Play session.
         app.init_resource::<MoveToolState>()
             .add_systems(Update, (
                 manage_tool_activation,
                 handle_move_interaction,
                 enforce_drag_collisions,
                 finalize_numeric_input_on_move,
-            ).chain());
+            ).chain().run_if(crate::play_mode::editor_input_enabled));
     }
 }
 
@@ -282,10 +294,7 @@ fn draw_move_gizmos(
 
     // --- Camera-distance-scaled handle length ---
     let Some((_, cam_gt, projection)) = cameras.iter().find(|(c, _, _)| c.order == 0) else { return };
-    let fov = match projection {
-        Projection::Perspective(p) => p.fov,
-        _ => std::f32::consts::FRAC_PI_4,
-    };
+    let fov = crate::camera_controller::gizmo_fov(projection, cam_gt.translation(), center);
     // Pure camera distance, matching `move_handles::sync_move_handle_root`
     // (`dist * tan(fov/2) * SCREEN_FRACTION`, SCREEN_FRACTION = 0.16 — the
     // same value `camera_scale_factor` uses). The MESH handles spawned by
@@ -367,6 +376,8 @@ pub struct MoveToolInputs<'w> {
     pub keys: Res<'w, ButtonInput<KeyCode>>,
     pub viewport_bounds: Option<Res<'w, crate::ui::ViewportBounds>>,
     pub auth: Option<Res<'w, crate::auth::AuthState>>,
+    /// Ctrl+Z pressed mid-drag: cancel the drag instead of undoing.
+    pub cancel: ResMut<'w, crate::drag_guard::DragCancelRequest>,
 }
 
 /// Snap-related queries + resources. Bundled for the same reason as
@@ -423,32 +434,24 @@ fn handle_move_interaction(
     // Destructure the bundles so the rest of the body uses the same
     // local names (and same types — `Res<T>` / `Option<Res<T>>`) as
     // before the SystemParam grouping, keeping the diff minimal.
-    let MoveToolInputs { settings, studio_state, mouse, keys, viewport_bounds, auth } = inputs;
+    let MoveToolInputs { settings, studio_state, mouse, keys, viewport_bounds, auth, mut cancel } = inputs;
     let MoveToolSnapCtx { spatial_query, geom_snap, smart_guides, snap_candidates_q } = snap;
 
-    // A mouse RELEASE always ends a drag, wherever the cursor happens to be.
+    // A drag ends when the button is up, however that came about.
     //
-    // Every guard below can skip the rest of this system — the tool going
+    // Every guard below can skip the rest of this system: the tool going
     // inactive, the cursor leaving the window, the cursor leaving the viewport
-    // rect. The release branch lives past all of them, so releasing outside the
-    // viewport (or switching tools mid-drag) left `dragged_axis` /
-    // `dragged_plane` / `free_drag` set forever. `select_tool`'s marquee reads
-    // exactly those three as `handle_grabbed`, so box-select then aborted on
-    // every press with `handle=true` and never recovered — not even on a tool
-    // change, because `!state.active` returns before any clear could run.
-    //
-    // Releasing the button is unambiguous: it cannot mean "still dragging",
-    // whatever the cursor is over. So the latch is dropped here, first, before
-    // anything can early-return. The full release branch further down still
-    // does the real work (undo entry, `BeingDragged` cleanup) on the normal
-    // path where the guards pass.
-    if mouse.just_released(MouseButton::Left) && !state.active {
-        state.dragged_axis = None;
-        state.dragged_plane = None;
-        state.free_drag = false;
-    }
+    // rect. A drag released over a panel, released where this system never
+    // saw the event, or interrupted by a tool switch must still end, or its
+    // latch stays set (box-select reads `dragged_axis` / `dragged_plane` /
+    // `free_drag` as `handle_grabbed` and aborts every press) and the move is
+    // never recorded. So a latched drag with the button up, or with the tool
+    // switched away, goes straight to the release branch and COMMITS: one
+    // undo step, the pose saved, `BeingDragged` dropped.
+    let latched = state.dragged_axis.is_some() || state.dragged_plane.is_some() || state.free_drag;
+    let release_now = latched && (!state.active || !mouse.pressed(MouseButton::Left));
 
-    if !state.active { return; }
+    if !state.active && !release_now { return; }
 
     // Read the transform mode once for this frame. World mode uses
     // literal world axes; Local mode rotates the gizmo (and therefore
@@ -461,11 +464,14 @@ fn handle_move_interaction(
 
     // Escape cancels an in-progress drag and restores all affected
     // entities' pre-drag transforms. Matches Blender / Maya convention.
-    if keys.just_pressed(KeyCode::Escape) {
+    if keys.just_pressed(KeyCode::Escape) || cancel.pending() {
         let was_dragging = state.dragged_axis.is_some()
             || state.dragged_plane.is_some()
             || state.free_drag;
         if was_dragging {
+            cancel.consume();
+            state.drag_live = false;
+            state.jump_offset = None;
             // Restore each entity's pre-drag transform.
             for (entity, _, mut transform, bp_opt) in query.iter_mut() {
                 if let Some(pos) = state.initial_positions.get(&entity).copied() {
@@ -520,7 +526,7 @@ fn handle_move_interaction(
     // Is a drag underway, in ANY of the three grab modes?
     let drag_in_progress =
         state.dragged_axis.is_some() || state.dragged_plane.is_some() || state.free_drag;
-    let released = mouse.just_released(MouseButton::Left);
+    let released = mouse.just_released(MouseButton::Left) || release_now;
 
     // Losing the cursor (alt-tab, cursor off-window) must not strand a drag.
     // The release branch at the bottom needs no cursor at all — it reads
@@ -598,10 +604,7 @@ fn handle_move_interaction(
         }
         if cnt == 0 { return; }
         let c = (bmin + bmax) * 0.5;
-        let fov = match projection {
-            Projection::Perspective(p) => p.fov,
-            _ => std::f32::consts::FRAC_PI_4,
-        };
+        let fov = crate::camera_controller::gizmo_fov(projection, camera_transform.translation(), c);
         // Hit-zone length MUST equal the length the visible handles are
         // drawn at, or clicks land where nothing is rendered. The visible
         // handles are the meshes from `move_handles`, which size purely by
@@ -770,7 +773,23 @@ fn handle_move_interaction(
     }
 
     // ---- Mouse Held ----
-    else if mouse.pressed(MouseButton::Left) {
+    else if mouse.pressed(MouseButton::Left) && !release_now {
+        // A press only becomes a drag once the cursor has travelled past the
+        // dead zone: a click on a handle or on the part moves nothing and
+        // records nothing (see `drag_guard`).
+        if !state.drag_live {
+            let dead_zone = if state.free_drag {
+                crate::drag_guard::BODY_DRAG_THRESHOLD_PX
+            } else {
+                crate::drag_guard::HANDLE_DEAD_ZONE_PX
+            };
+            if (cursor_pos - state.drag_start_pos).length() < dead_zone {
+                return;
+            }
+            state.drag_live = true;
+            state.live_start_cursor = cursor_pos;
+            state.jump_offset = None;
+        }
         if let Some(normal_axis) = state.dragged_plane {
             // Plane-constrained drag — two-axis simultaneous movement.
             let plane_normal = state.drag_rotation * normal_axis.to_vec3();
@@ -881,6 +900,9 @@ fn handle_move_interaction(
                 }
             }
         } else if state.free_drag {
+            // How much of the drag-start offset still applies (measured on
+            // screen, before `cursor_pos` is reused for the world target).
+            let fade = crate::drag_guard::jump_fade((cursor_pos - state.live_start_cursor).length());
             // Free drag — surface snapping (same as select tool)
             // Exclude selected entities AND their children (adornments) from raycast
             // Everything that moves with the drag, to the last descendant. A
@@ -980,6 +1002,16 @@ fn handle_move_interaction(
                 }
             };
             let cursor_pos = if cursor_pos.is_finite() { cursor_pos } else { leader_initial };
+            // Start where the part already is: the first placement's offset
+            // from the part's real position fades out over the first stretch
+            // of travel (a forced vertex/edge/face snap is exact, so it is
+            // left alone).
+            let cursor_pos = if snap_override.is_none() {
+                let jump = *state.jump_offset.get_or_insert(leader_initial - cursor_pos);
+                cursor_pos + jump * fade
+            } else {
+                cursor_pos
+            };
 
             // ── Step 2: OBB-proximity face contact ─────────────────────────────
             // At the cursor-derived position, sweep the dragged OBB against all
@@ -1071,30 +1103,23 @@ fn handle_move_interaction(
             } else { target_pos };
 
             // ── Step 4: grid snap (face-frame when touching a surface) ─────────
-            // When resting against a surface, snap in the TARGET part's local
-            // frame so the grid aligns with the face's edges — not world XYZ.
-            // snap_to_grid_in_frame already preserves the normal-axis component
-            // so no additional flush-normal correction is needed after it.
+            // Snap by the part's lower corner, in the touched face's own frame
+            // when there is one (world axes otherwise), keeping the component
+            // along the surface normal so the part stays flush. Grid-sized
+            // parts sit edge to edge, and a part already on the grid is not
+            // nudged off it the moment it is picked up.
             let final_target = if settings.snap_enabled {
                 if let Some(n) = effective_normal {
-                    if let Some((frame_origin, frame_rot)) = snap_frame {
-                        // Face-frame snap: grid aligned to target part's surface axes.
-                        snap_to_grid_in_frame(
-                            target_pos, frame_origin, frame_rot, n, settings.snap_size,
-                        )
-                    } else {
-                        // Cursor-raycast hit only — world-space tangent snap + flush normal.
-                        let snapped = snap_to_grid(target_pos, settings.snap_size);
-                        let nn = n.normalize();
-                        let flush = nn * target_pos.dot(nn);
-                        let tangent = snapped - nn * snapped.dot(nn);
-                        tangent + flush
-                    }
+                    let (frame_origin, frame_rot) = snap_frame.unwrap_or((Vec3::ZERO, Quat::IDENTITY));
+                    crate::math_utils::snap_part_by_corner(
+                        target_pos, leader_size, leader_rot, frame_origin, frame_rot, Some(n), settings.snap_size,
+                    )
                 } else {
-                    // Free-air drag — world-space snap, prevent downward burial.
-                    let snapped = snap_to_grid(target_pos, settings.snap_size);
-                    let min_y = target_pos.y;
-                    Vec3::new(snapped.x, snapped.y.max(min_y), snapped.z)
+                    // Free-air drag: world grid, never burying the part.
+                    let snapped = crate::math_utils::snap_part_by_corner(
+                        target_pos, leader_size, leader_rot, Vec3::ZERO, Quat::IDENTITY, None, settings.snap_size,
+                    );
+                    Vec3::new(snapped.x, snapped.y.max(target_pos.y), snapped.z)
                 }
             } else {
                 target_pos
@@ -1176,7 +1201,7 @@ fn handle_move_interaction(
     }
 
     // ---- Mouse Released ----
-    else if mouse.just_released(MouseButton::Left) {
+    else if mouse.just_released(MouseButton::Left) || release_now {
         let was_dragging = state.dragged_axis.is_some()
             || state.dragged_plane.is_some()
             || state.free_drag;
@@ -1187,7 +1212,10 @@ fn handle_move_interaction(
             for (entity, _, transform, _) in query.iter() {
                 if let Some(initial_pos) = state.initial_positions.get(&entity) {
                     if let Some(initial_rot) = state.initial_rotations.get(&entity) {
-                        if (*initial_pos - transform.translation).length() > 0.001 {
+                        // Rotation counts too: align-to-normal turns the part.
+                        let moved = (*initial_pos - transform.translation).length() > 0.001
+                            || initial_rot.angle_between(transform.rotation) > 0.001;
+                        if moved {
                             old_transforms.push((entity.to_bits(), initial_pos.to_array(), initial_rot.to_array()));
                             new_transforms.push((entity.to_bits(), transform.translation.to_array(), transform.rotation.to_array()));
                         }
@@ -1195,8 +1223,37 @@ fn handle_move_interaction(
                 }
             }
 
-            if !old_transforms.is_empty() {
-                undo_stack.push(crate::undo::Action::TransformEntities { old_transforms, new_transforms });
+            // BillboardGui labels move by `units_offset`, not the Transform.
+            let mut old_offsets = Vec::new();
+            let mut new_offsets = Vec::new();
+            for (entity, initial) in state.initial_units_offsets.iter() {
+                if let Ok(bg) = billboards.get(*entity) {
+                    let now = Vec3::from_array(bg.units_offset);
+                    if (now - *initial).length() > 0.001 {
+                        old_offsets.push((entity.to_bits(), initial.to_array()));
+                        new_offsets.push((entity.to_bits(), bg.units_offset));
+                    }
+                }
+            }
+
+            let moved = old_transforms.len() + old_offsets.len();
+            if moved > 0 {
+                let mut steps = Vec::new();
+                if !old_transforms.is_empty() {
+                    steps.push(crate::undo::Action::TransformEntities { old_transforms, new_transforms });
+                }
+                if !old_offsets.is_empty() {
+                    steps.push(crate::undo::Action::BillboardOffsets { old_offsets, new_offsets });
+                }
+                let action = if steps.len() == 1 {
+                    steps.remove(0)
+                } else {
+                    crate::undo::Action::Batch { actions: steps }
+                };
+                undo_stack.push_labeled(
+                    format!("Move {} object{}", moved, if moved == 1 { "" } else { "s" }),
+                    action,
+                );
             }
 
             // Write updated transforms back to TOML (file-system-first persistence).
@@ -1236,6 +1293,9 @@ fn handle_move_interaction(
         state.initial_rotations.clear();
         state.initial_world.clear();
         state.moving_set.clear();
+        state.initial_units_offsets.clear();
+        state.drag_live = false;
+        state.jump_offset = None;
     }
 }
 
@@ -1329,6 +1389,9 @@ fn finalize_numeric_input_on_move(
         state.initial_rotations.clear();
         state.initial_world.clear();
         state.moving_set.clear();
+        state.initial_units_offsets.clear();
+        state.drag_live = false;
+        state.jump_offset = None;
     }
 }
 
@@ -1373,6 +1436,14 @@ pub fn detect_axis_hit(
         // Rotate the canonical axis into the gizmo's frame so hit detection
         // lines up with the rotated arrows in Local mode.
         let dir = rotation * axis.to_vec3();
+        // An axis pointing straight down the view ray draws as a dot on the
+        // gizmo's centre and cannot be dragged along. Without this it won
+        // every click near the centre (its tip is the handle nearest the
+        // camera), so in a Front or 2D view grabbing the X or Y arrow close
+        // to the middle started a depth drag instead.
+        if dir.dot(*ray.direction).abs() > 0.995 {
+            continue;
+        }
         for sign in [1.0_f32, -1.0] {
             let seg_end = center + dir * handle_len * sign;
             let dist = ray_to_line_segment_distance(ray.origin, *ray.direction, center, seg_end);
@@ -1656,4 +1727,6 @@ fn snapshot_world_poses(
         state.group_bounds_max = bounds_max;
     }
     state.moving_set = crate::math_utils::moving_set(state.initial_world.keys().copied(), children);
+    state.drag_live = false;
+    state.jump_offset = None;
 }

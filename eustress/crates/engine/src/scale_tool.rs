@@ -38,6 +38,8 @@ pub struct ScaleToolState {
     pub dragged_entity: Option<Entity>,
     pub initial_scales: std::collections::HashMap<Entity, Vec3>,
     pub initial_positions: std::collections::HashMap<Entity, Vec3>,
+    /// The press has travelled past the dead zone and the handle resizes.
+    pub drag_live: bool,
     /// World pose of every selected entity at drag start, so a one-sided
     /// resize moves a parented part correctly in world space.
     pub initial_world: std::collections::HashMap<Entity, (Vec3, Quat)>,
@@ -125,6 +127,8 @@ struct ScaleToolExtras<'w, 's> {
     // box. Route the release size through the feature tree instead.
     cad_parts: Query<'w, 's, &'static crate::cad_plugin::CadPart>,
     cad_set_variable: MessageWriter<'w, crate::cad_plugin::CadSetVariableEvent>,
+    /// Ctrl+Z pressed mid-drag: cancel the drag instead of undoing.
+    cancel: ResMut<'w, crate::drag_guard::DragCancelRequest>,
 }
 
 impl Plugin for ScaleToolPlugin {
@@ -135,11 +139,14 @@ impl Plugin for ScaleToolPlugin {
         app.init_resource::<ScaleToolState>()
             .add_message::<ResizePartEvent>()
             .add_systems(Update, (
-                handle_scale_interaction,
+                // Editor input: idle during a Play session.
+                handle_scale_interaction.run_if(crate::play_mode::editor_input_enabled),
                 // Numeric-input commit — applies typed size exactly and
                 // finalizes the drag. Runs after cursor-driven drag so
                 // Enter wins over any in-progress cursor delta.
-                finalize_numeric_input_on_scale.after(handle_scale_interaction),
+                finalize_numeric_input_on_scale
+                    .after(handle_scale_interaction)
+                    .run_if(crate::play_mode::editor_input_enabled),
                 // Absolute-resize handler for `ResizePartEvent` (emitted
                 // by the Properties-panel paste path + future tools).
                 handle_resize_part_events,
@@ -151,6 +158,14 @@ impl Plugin for ScaleToolPlugin {
     }
 }
 
+/// The size (and transform scale) an entity's collider was last rebuilt
+/// for by [`rebuild_collider_on_size_change`].
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct ColliderBuiltForSize {
+    pub size: Vec3,
+    pub scale: Vec3,
+}
+
 /// Rebuild the Avian `Collider` in-place whenever an entity's
 /// `BasePart.size` changes — scale-tool drag, Properties-panel type-in,
 /// paste-props, MCP resize, undo/redo, any write-back from disk. Without
@@ -160,17 +175,34 @@ impl Plugin for ScaleToolPlugin {
 ///
 /// Only runs for entities that already have a `Collider` — we never
 /// add physics to a part that was spawned without `can_collide`.
+///
+/// `Changed<BasePart>` also fires for colour, transparency and material
+/// writes (a script tweening a part touches it every frame), so the size
+/// the collider was last built for is remembered and anything else is
+/// skipped.
 fn rebuild_collider_on_size_change(
     mut commands: Commands,
     changed: Query<
-        (Entity, &crate::classes::BasePart, Option<&crate::classes::Part>, &Transform),
+        (
+            Entity,
+            &crate::classes::BasePart,
+            Option<&crate::classes::Part>,
+            &Transform,
+            Option<&ColliderBuiltForSize>,
+        ),
         (Changed<crate::classes::BasePart>, With<avian3d::prelude::Collider>),
     >,
 ) {
     use avian3d::prelude::Collider;
     use crate::classes::PartType;
 
-    for (entity, base_part, part_opt, transform) in changed.iter() {
+    for (entity, base_part, part_opt, transform, built) in changed.iter() {
+        if built.map_or(false, |b| b.size == base_part.size && b.scale == transform.scale) {
+            continue;
+        }
+        commands
+            .entity(entity)
+            .insert(ColliderBuiltForSize { size: base_part.size, scale: transform.scale });
         // Sanitise dimensions first — a degenerate 0 / negative / non-finite
         // size would panic Avian's collider builder on the next physics step.
         let safe_size = Vec3::new(
@@ -384,7 +416,14 @@ fn handle_scale_interaction(
     // space and the pose is written back in its own parent's frame.
     parent_transforms: Query<&GlobalTransform, Without<Selected>>,
 ) {
-    if !state.active {
+    // A drag ends when the button is up, however that came about: released
+    // over a panel, released where this system never saw it, or the tool
+    // switched away mid-drag. It goes to the release branch and commits one
+    // undo step; staying latched would lose the step and leave the parts
+    // marked `BeingDragged`, which keeps the disk writer off them.
+    let latched = state.dragged_axis.is_some();
+    let release_now = latched && (!state.active || !mouse.pressed(MouseButton::Left));
+    if !state.active && !release_now {
         // Clear stale hover state so the gizmo doesn't briefly flash a
         // hover color on the first frame after the scale tool is
         // re-activated.
@@ -404,8 +443,10 @@ fn handle_scale_interaction(
         .unwrap_or(crate::ui::TransformMode::World);
 
     // Escape cancels an in-progress scale and restores pre-drag sizes.
-    if keys.just_pressed(KeyCode::Escape) {
+    if keys.just_pressed(KeyCode::Escape) || extras.cancel.pending() {
         if state.dragged_axis.is_some() {
+            extras.cancel.consume();
+            state.drag_live = false;
             for (entity, _, mut transform, basepart_opt, _, _, _) in query.iter_mut() {
                 if let Some(initial_size) = state.initial_scales.get(&entity).copied() {
                     if let Some(mut bp) = basepart_opt {
@@ -436,7 +477,7 @@ fn handle_scale_interaction(
     // `dragged_axis` set forever (box-select reads it as `handle=true`) and
     // skipped the `ScaleEntities` undo push. See the same fix in `move_tool`.
     let drag_in_progress = state.dragged_axis.is_some();
-    let released = mouse.just_released(MouseButton::Left);
+    let released = mouse.just_released(MouseButton::Left) || release_now;
     let cursor_pos = match window.cursor_position() {
         Some(p) => p,
         None if released || drag_in_progress => Vec2::ZERO,
@@ -462,11 +503,6 @@ fn handle_scale_interaction(
 
     let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
 
-    let fov = match projection {
-        Projection::Perspective(p) => p.fov,
-        _ => std::f32::consts::FRAC_PI_4,
-    };
-
     // Snapshot the selected entities so we can re-use the same data
     // for hover detection and click-to-drag without re-iterating the
     // query (and to side-step Bevy's `iter().map().clone()` constraints).
@@ -485,7 +521,7 @@ fn handle_scale_interaction(
         ray.origin,
         *ray.direction,
         camera_transform.translation(),
-        fov,
+        projection,
         transform_mode,
         &selected_snapshot,
     );
@@ -502,6 +538,7 @@ fn handle_scale_interaction(
     if mouse.just_pressed(MouseButton::Left) {
         if let Some((axis, group_center, _group_extent, rotation)) = pick {
             state.dragged_axis = Some(axis);
+            state.drag_live = false;
             // Store drag rotation for consistency with dragged delta math.
             // Unused inside scale_tool today (drag is camera-relative), but
             // future extensions (numeric input, undo label) may need it.
@@ -528,9 +565,17 @@ fn handle_scale_interaction(
                 state.initial_mouse_world = ray.origin + *ray.direction * t;
             }
         }
-    } else if mouse.pressed(MouseButton::Left) {
+    } else if mouse.pressed(MouseButton::Left) && !release_now {
         if let Some(axis) = state.dragged_axis {
             let delta_screen = cursor_pos - state.drag_start_pos;
+            // Nothing resizes until the cursor leaves the dead zone, so a
+            // click on a handle (or a hand that twitches) records nothing.
+            if !state.drag_live {
+                if delta_screen.length() < crate::drag_guard::HANDLE_DEAD_ZONE_PX {
+                    return;
+                }
+                state.drag_live = true;
+            }
             let drag_distance = delta_screen.length();
             let base_sensitivity = 0.015;
             let progressive_factor = 1.0 + drag_distance * 0.002;
@@ -682,7 +727,7 @@ fn handle_scale_interaction(
                 }
             }
         }
-    } else if mouse.just_released(MouseButton::Left) {
+    } else if mouse.just_released(MouseButton::Left) || release_now {
         if state.dragged_axis.is_some() && !state.initial_scales.is_empty() {
             let mut old_states: Vec<(u64, [f32; 3], [f32; 3])> = Vec::new();
             let mut new_states: Vec<(u64, [f32; 3], [f32; 3])> = Vec::new();
@@ -1239,7 +1284,7 @@ fn pick_scale_handle(
     ray_origin: Vec3,
     ray_direction: Vec3,
     cam_position: Vec3,
-    fov: f32,
+    projection: &Projection,
     transform_mode: crate::ui::TransformMode,
     selected: &[(Vec3, Quat, Vec3)],
 ) -> Option<(ScaleAxis, Vec3, Vec3, Quat)> {
@@ -1260,6 +1305,7 @@ fn pick_scale_handle(
     let group_center = (bounds_min + bounds_max) * 0.5;
     let group_extent = (bounds_max - bounds_min) * 0.5;
 
+    let fov = crate::camera_controller::gizmo_fov(projection, cam_position, group_center);
     let cam_dist = (group_center - cam_position).length().max(0.1);
     let screen_scale = cam_dist * (fov * 0.5).tan() * SCREEN_FRACTION;
 

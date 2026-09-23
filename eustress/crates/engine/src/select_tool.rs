@@ -40,14 +40,11 @@ use crate::rendering::BevySelectionManager;
 use crate::math_utils::{
     calculate_rotated_aabb, ray_plane_intersection, ray_obb_intersection,
     calculate_surface_offset as math_calculate_surface_offset,
-    snap_to_grid as math_snap_to_grid,
-    snap_to_grid_in_frame as math_snap_to_grid_in_frame,
     face_snap_offset as math_face_snap_offset,
     FACE_SNAP_THRESHOLD,
 };
 
 /// Drag threshold in pixels - must move this far to start dragging
-const DRAG_THRESHOLD: f32 = 5.0;
 
 /// Box selection threshold - must drag this far to start box select (in pixels)
 const BOX_SELECT_THRESHOLD: f32 = 3.0;
@@ -118,6 +115,16 @@ pub struct SelectToolState {
     /// The selection plus every descendant: never a surface for the drag.
     pub moving_set: std::collections::HashSet<Entity>,
     pub selected_count: usize,
+    /// Where the leader sat relative to absolute surface placement when the
+    /// drag went live; faded out over the first stretch of travel so the
+    /// part does not jump when a drag starts (see `drag_guard`).
+    pub jump_offset: Option<Vec3>,
+    /// Cursor position when the drag went live, for that fade.
+    pub live_start_cursor: Vec2,
+    /// Local poses of mind-map neighbours before they started drifting with
+    /// a node drag, so the drag's one undo step (or a cancel) puts them back
+    /// as well.
+    pub neighbor_initial: std::collections::HashMap<Entity, (Vec3, Quat)>,
 }
 
 impl Default for SelectToolState {
@@ -147,6 +154,9 @@ impl Default for SelectToolState {
             initial_world: std::collections::HashMap::new(),
             moving_set: std::collections::HashSet::new(),
             selected_count: 0,
+            jump_offset: None,
+            live_start_cursor: Vec2::ZERO,
+            neighbor_initial: std::collections::HashMap::new(),
         }
     }
 }
@@ -188,8 +198,12 @@ impl Plugin for SelectToolPlugin {
         app
             .init_resource::<SelectToolState>()
             .init_resource::<BoxSelectionState>()
+            // Editor input: idle during a Play session (the game owns the
+            // mouse; a click to shoot must not select or drag the scene).
             .add_systems(Update, (
                 handle_drag_distance_wheel
+                    .before(handle_select_drag),
+                rotate_tilt_shortcuts
                     .before(handle_select_drag),
                 handle_select_drag
                     .after(crate::ui::slint_ui::update_slint_ui_focus)
@@ -198,10 +212,15 @@ impl Plugin for SelectToolPlugin {
                 handle_box_selection
                     .after(sync_neighbor_drift),
                 debug_drag_gizmos.after(handle_box_selection),
-            ))
+            ).run_if(crate::play_mode::editor_input_enabled))
             // render_box_selection uses NonSend<SlintUiState> — must run separately
             // to avoid blocking the chain on main thread exclusivity
-            .add_systems(Update, render_box_selection.after(handle_box_selection));
+            .add_systems(
+                Update,
+                render_box_selection
+                    .after(handle_box_selection)
+                    .run_if(crate::play_mode::editor_input_enabled),
+            );
     }
 }
 
@@ -305,6 +324,9 @@ fn sync_neighbor_drift(
             continue;
         }
         let Ok(mut t) = transforms.get_mut(entity) else { continue };
+        // First touch this drag: remember where the neighbour was, so the
+        // drag's undo step (or a cancel) can put it back.
+        state.neighbor_initial.entry(entity).or_insert((t.translation, t.rotation));
         let current = t.translation;
         let rest_length = *state
             .drag_neighbor_rest_lengths
@@ -366,21 +388,30 @@ fn handle_select_drag(
     // Terrain sculpt mode owns the left button in the viewport — see the
     // stand-down guard below.
     terrain_mode: Option<Res<eustress_common::terrain::TerrainMode>>,
-    input: (Res<ButtonInput<MouseButton>>, Res<ButtonInput<KeyCode>>),
+    // Mouse, keys, and the mid-drag cancel request (Ctrl+Z while dragging).
+    input: (Res<ButtonInput<MouseButton>>, Res<ButtonInput<KeyCode>>, ResMut<crate::drag_guard::DragCancelRequest>),
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
     // Support both PartEntity (legacy) and Instance (modern) components
     mut selected_query: Query<(Entity, &mut Transform, &GlobalTransform, Option<&PartEntity>, Option<&Instance>, Option<&mut BasePart>), With<Selected>>,
     all_parts_query: Query<(Entity, &GlobalTransform, &Mesh3d, Option<&PartEntity>, Option<&Instance>, Option<&BasePart>), Without<Selected>>,
     // Query for children of selected entities (for Model support)
-    hierarchy_queries: (Query<&Children>, Query<&ChildOf>),
+    // Children, parents, and the unselected transforms that mind-map
+    // neighbours drift in (restored on cancel, recorded on commit).
+    hierarchy_queries: (Query<&Children>, Query<&ChildOf>, Query<&mut Transform, Without<Selected>>),
     // Detects "is the dragged entity a mind-map/annotation node" — has a
     // BillboardGui child — which selects camera-relative free-space
     // dragging. See `SelectToolState.drag_is_billboard_node` for why this
     // replaced a modifier-key trigger.
     billboard_query: Query<&crate::classes::BillboardGui>,
     spatial_query: SpatialQuery,
-    settings_and_undo: (Res<crate::editor_settings::EditorSettings>, ResMut<crate::undo::UndoStack>),
+    // The 2D working plane (`None` in 3D): a 2D drag slides along it.
+    settings_and_undo: (
+        Res<crate::editor_settings::EditorSettings>,
+        ResMut<crate::undo::UndoStack>,
+        Commands,
+        Option<Res<crate::camera_controller::ActiveViewPlane>>,
+    ),
     // Tool states to check if clicking on handles
     tool_states: (Res<crate::move_tool::MoveToolState>, Res<crate::scale_tool::ScaleToolState>, Res<crate::rotate_tool::RotateToolState>),
     // For writing transform back to TOML after drag
@@ -390,9 +421,10 @@ fn handle_select_drag(
     global_transforms: Query<&GlobalTransform>,
 ) {
     let Some(studio_state) = studio_state else { return };
-    let (mouse, keys) = input;
-    let (children_query, parent_query) = hierarchy_queries;
-    let (editor_settings, mut undo_stack) = settings_and_undo;
+    let (mouse, keys, mut cancel) = input;
+    let (children_query, parent_query, mut neighbor_transforms) = hierarchy_queries;
+    let (editor_settings, mut undo_stack, mut commands, view_plane) = settings_and_undo;
+    let plane_2d = view_plane.as_deref().and_then(|p| p.0);
     let (move_state, scale_state, rotate_state) = tool_states;
     // Active with Select, Move, Scale, or Rotate tools
     let drag_enabled = matches!(
@@ -400,11 +432,32 @@ fn handle_select_drag(
         Tool::Select | Tool::Move | Tool::Scale | Tool::Rotate
     );
     
-    if !drag_enabled {
-        if state.dragging {
-            state.dragging = false;
-            state.dragged_entity = None;
+    // ── Finish or cancel a drag before any guard below can return ──
+    //
+    // A drag ends exactly one of two ways: committed (one undo step, poses
+    // saved, markers dropped) or cancelled (everything put back, nothing
+    // recorded). Returning early with the drag still latched is how
+    // accidental moves escaped undo: release over a panel or outside the
+    // window, switch tools mid-drag, and the next press overwrote the grab
+    // snapshot without ever recording the move.
+    if state.dragging {
+        let typing = ui_focus.as_ref().map(|f| f.text_input_focused).unwrap_or(false);
+        if cancel.pending() || (!typing && keys.just_pressed(KeyCode::Escape)) {
+            cancel.consume();
+            cancel_select_drag(&mut state, &mut selected_query, &mut neighbor_transforms, &mut commands);
+            return;
         }
+        let terrain_owns_button = terrain_mode
+            .as_deref()
+            .copied()
+            .is_some_and(|m| m == eustress_common::terrain::TerrainMode::Editor);
+        if !drag_enabled || terrain_owns_button || !mouse.pressed(MouseButton::Left) {
+            commit_select_drag(&mut state, &selected_query, &neighbor_transforms, &mut undo_stack, &instance_files, &mut commands);
+            return;
+        }
+    }
+
+    if !drag_enabled {
         return;
     }
 
@@ -418,13 +471,9 @@ fn handle_select_drag(
         .copied()
         .is_some_and(|m| m == eustress_common::terrain::TerrainMode::Editor)
     {
-        if state.dragging {
-            state.dragging = false;
-            state.dragged_entity = None;
-        }
         return;
     }
-    
+
     // Block input when Slint UI has focus (mouse is over UI panels)
     if let Some(ui_focus) = ui_focus {
         if ui_focus.has_focus {
@@ -464,10 +513,11 @@ fn handle_select_drag(
                 let center = (bounds_min + bounds_max) * 0.5;
                 
                 // MUST match move_tool.rs camera_scale_factor exactly!
-                let fov = match projection {
-                    Projection::Perspective(p) => p.fov,
-                    _ => std::f32::consts::FRAC_PI_4,
-                };
+                let fov = crate::camera_controller::gizmo_fov(
+                    projection,
+                    camera_transform.translation(),
+                    center,
+                );
                 let cam_dist = (center - camera_transform.translation()).length().max(0.1);
                 let scale = cam_dist * (fov * 0.5).tan() * 0.16;
                 let handle_length = scale * 1.0;
@@ -602,9 +652,7 @@ fn handle_select_drag(
         // PRIORITY: When Move tool is active, it handles ALL dragging
         // Cancel any select_tool drag and let move_tool take over
         if move_state.active && studio_state.current_tool == Tool::Move {
-            state.dragging = false;
-            state.drag_started = false;
-            state.dragged_entity = None;
+            cancel_select_drag(&mut state, &mut selected_query, &mut neighbor_transforms, &mut commands);
             return;
         }
         // The Scale or Rotate tool engaged a handle on the same press: it
@@ -612,22 +660,29 @@ fn handle_select_drag(
         // systems write the transform every frame, and the part stuttered
         // between the two answers.
         if scale_state.dragged_axis.is_some() || rotate_state.dragged_axis.is_some() {
-            state.dragging = false;
-            state.drag_started = false;
-            state.dragged_entity = None;
+            cancel_select_drag(&mut state, &mut selected_query, &mut neighbor_transforms, &mut commands);
             return;
         }
-        
-        // Check if we've exceeded the drag threshold
+
+        // A press is a click until the cursor travels past the threshold:
+        // nothing moves and no undo step is recorded before then.
         if !state.drag_started {
             let drag_distance = (cursor_pos - state.initial_cursor_pos).length();
-            if drag_distance < DRAG_THRESHOLD {
-                return; // Not enough movement yet - don't start dragging
+            if drag_distance < crate::drag_guard::BODY_DRAG_THRESHOLD_PX {
+                return;
             }
-            // Threshold exceeded - start actual dragging
             state.drag_started = true;
+            state.live_start_cursor = cursor_pos;
+            state.jump_offset = None;
+            // Hold the automatic disk writer off while the part is in
+            // motion; the commit writes the final pose once.
+            for entity in state.initial_world.keys() {
+                if let Ok(mut ec) = commands.get_entity(*entity) {
+                    ec.insert(crate::space::instance_loader::BeingDragged);
+                }
+            }
         }
-        
+
         // Continue dragging (only if threshold was exceeded)
         if state.drag_started {
             if let Some(dragged_entity) = state.dragged_entity {
@@ -667,7 +722,10 @@ fn handle_select_drag(
                 // ordinary Parts, which still behave exactly as before.
                 // Billboard nodes always fall into the `else` branch, where
                 // the camera-relative plane is selected below.
-                let surface_hit = if state.drag_is_billboard_node {
+                // A 2D view skips surfaces too: the surface under the cursor
+                // is whatever sits BEHIND the part, and landing on it would
+                // move the part in depth, which in 2D is its layer order.
+                let surface_hit = if state.drag_is_billboard_node || plane_2d.is_some() {
                     None
                 } else {
                     // Part boxes first ("what you see is the snap surface"),
@@ -764,7 +822,24 @@ fn handle_select_drag(
                     state.debug_hit_point = None;
                     state.debug_hit_normal = None;
 
-                    if state.drag_is_billboard_node {
+                    if let Some(plane) = plane_2d {
+                        // ── 2D: slide across the view plane ─────────────
+                        // The plane through the part's own depth, facing
+                        // the camera: the grabbed point follows the cursor
+                        // across the screen and the depth stays exactly
+                        // where it was. Grid snap below then runs in the
+                        // world frame with the depth axis held, the same
+                        // way a surface drag holds its surface normal.
+                        surface_frame = Some((Quat::IDENTITY, Vec3::ZERO, plane.normal));
+                        match ray_plane_intersection(ray.origin, *ray.direction, initial_leader_pos, plane.normal) {
+                            Some(t) => {
+                                let cursor_world = ray.origin + *ray.direction * t;
+                                let target = cursor_world - grab_offset_world;
+                                target + plane.normal * (initial_leader_pos - target).dot(plane.normal)
+                            }
+                            None => initial_leader_pos,
+                        }
+                    } else if state.drag_is_billboard_node {
                         // ── Camera-relative free-space drag ──────────────
                         // Hold the part at a FIXED DISTANCE from the camera,
                         // like leading it on a rope. The plane is rebuilt
@@ -826,6 +901,14 @@ fn handle_select_drag(
                 // Guard: reject NaN/infinity positions that crash the physics engine
                 let target_pos = if target_pos.is_finite() { target_pos } else { initial_leader_pos };
 
+                // Start where the part already is: the first placement's
+                // offset from the part's real position fades out over the
+                // first stretch of travel, so a drag never opens with a
+                // jump (see `drag_guard`).
+                let fade = crate::drag_guard::jump_fade((cursor_pos - state.live_start_cursor).length());
+                let jump = *state.jump_offset.get_or_insert(initial_leader_pos - target_pos);
+                let target_pos = target_pos + jump * fade;
+
                 // No rotation change during drag
                 let rotation_delta = Quat::IDENTITY;
 
@@ -850,19 +933,23 @@ fn handle_select_drag(
                 // 3. No snap (snap_enabled = false) — use the raw
                 //    target_pos unchanged.
                 let final_target_pos = if editor_settings.snap_enabled {
-                    let grab_world = target_pos + grab_offset_world;
-                    let snapped_grab = if let Some((tgt_rot, tgt_center, surf_n)) = surface_frame {
-                        math_snap_to_grid_in_frame(
-                            grab_world,
-                            tgt_center,
-                            tgt_rot,
-                            surf_n,
-                            editor_settings.snap_size,
-                        )
-                    } else {
-                        math_snap_to_grid(grab_world, editor_settings.snap_size)
+                    // Snap by the part's lower corner in the surface's own
+                    // frame (the world grid over empty space), not by the
+                    // grabbed point: an aligned part stays aligned when it
+                    // is picked up, and grid-sized parts sit edge to edge.
+                    let (frame_rot, frame_origin, frame_normal) = match surface_frame {
+                        Some((rot, origin, normal)) => (rot, origin, Some(normal)),
+                        None => (Quat::IDENTITY, Vec3::ZERO, None),
                     };
-                    let mut center = snapped_grab - grab_offset_world;
+                    let mut center = crate::math_utils::snap_part_by_corner(
+                        target_pos,
+                        leader_size,
+                        initial_leader_rot,
+                        frame_origin,
+                        frame_rot,
+                        frame_normal,
+                        editor_settings.snap_size,
+                    );
                     // **Anti-clipping guard.** If we have a surface frame,
                     // the grid-snap may have rounded the grabbed-point's
                     // Y onto a grid line that doesn't sit on the surface
@@ -941,147 +1028,283 @@ fn handle_select_drag(
                 }
             }
         }
-    } else if mouse.just_released(MouseButton::Left) {
-        // Record undo action if we actually dragged (threshold exceeded)
-        if state.drag_started && !state.initial_positions.is_empty() {
-            // Collect old and new transforms for undo
-            let mut old_transforms: Vec<(u64, [f32; 3], [f32; 4])> = Vec::new();
-            let mut new_transforms: Vec<(u64, [f32; 3], [f32; 4])> = Vec::new();
-            
-            for (entity, transform, _, _, _, _) in selected_query.iter() {
-                if let Some(initial_pos) = state.initial_positions.get(&entity) {
-                    if let Some(initial_rot) = state.initial_rotations.get(&entity) {
-                        // Only record if position or rotation actually changed
-                        let pos_changed = (*initial_pos - transform.translation).length() > 0.001;
-                        let rot_changed = initial_rot.angle_between(transform.rotation) > 0.001;
-                        
-                        if pos_changed || rot_changed {
-                            old_transforms.push((
-                                entity.to_bits(),
-                                initial_pos.to_array(),
-                                initial_rot.to_array(),
-                            ));
-                            new_transforms.push((
-                                entity.to_bits(),
-                                transform.translation.to_array(),
-                                transform.rotation.to_array(),
-                            ));
-                        }
-                    }
-                }
-            }
-            
-            // Push to undo stack if there were actual changes
-            if !old_transforms.is_empty() {
-                undo_stack.push(crate::undo::Action::TransformEntities {
-                    old_transforms,
-                    new_transforms,
-                });
-            }
-
-            // Write updated transforms back to TOML (file-system-first persistence)
-            for (entity, transform, _, _, _, _) in selected_query.iter() {
-                if let Ok(inst_file) = instance_files.get(entity) {
-                    if let Ok(mut def) = crate::space::instance_loader::load_instance_definition(&inst_file.toml_path) {
-                        def.transform.position = [transform.translation.x, transform.translation.y, transform.translation.z];
-                        def.transform.rotation = [transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w];
-                        def.metadata.last_modified = chrono::Utc::now().to_rfc3339();
-                        let _ = crate::space::instance_loader::write_instance_definition(&inst_file.toml_path, &def);
-                    }
-                }
-            }
-        }
-
-        state.dragging = false;
-        state.drag_started = false;
-        state.dragged_entity = None;
-        state.initial_positions.clear();
-        state.initial_rotations.clear();
-        state.initial_world.clear();
-        state.moving_set.clear();
-        state.selected_count = 0;
-        // Reset group bounds
-        state.group_center = Vec3::ZERO;
-        state.group_bounds_min = Vec3::ZERO;
-        state.group_bounds_max = Vec3::ZERO;
-        state.group_size = Vec3::ONE;
-        // Reset smoothing state
-        state.last_target_position = Vec3::ZERO;
-        state.last_surface_normal = Vec3::Y;
-        state.last_hit_entity = None;
     }
     
-    // Ctrl+R / Ctrl+T rotate + tilt on the current selection. Works
-    // for single AND multi-selection; the multi-select path rotates the
-    // whole group around its averaged centroid so the cluster pivots as
-    // one rigid body instead of each part spinning in place. Previously
-    // this was gated behind `state.dragging`, which meant the user had
-    // to hold a drag to make rotation fire — painful for "select then
-    // rotate" workflows. The outer `ui_focus` check above already
-    // blocks firing when a text field has focus, so we don't have to
-    // re-guard typing here.
-    //
-    // We accept raw `R` / `T` AND Ctrl+R / Ctrl+T: the keybindings
-    // dispatcher fires `Action::RotateY90` on Ctrl+R but has no match
-    // arm, so this handler is the only responder. Matching on raw R/T
-    // in addition to the Ctrl form preserves the legacy in-drag
-    // behaviour without forcing modifier-held state.
-    let rotate_pressed = keys.just_pressed(KeyCode::KeyR);
-    let tilt_pressed = keys.just_pressed(KeyCode::KeyT);
-    if rotate_pressed || tilt_pressed {
-        // Skip children of already-selected entities: they turn with their
-        // parent. Everything here is in WORLD space, written back through
-        // each entity's parent, so a group spanning several parents pivots
-        // as one rigid body.
-        let selected_entities: std::collections::HashSet<Entity> =
-            selected_query.iter().map(|(e, ..)| e).collect();
-        let mut group_center = Vec3::ZERO;
-        let mut count = 0;
-        for (entity, _, global, _, _, _) in selected_query.iter() {
-            if has_selected_ancestor(entity, &selected_entities, &parent_query) { continue; }
-            group_center += global.translation();
-            count += 1;
-        }
-        if count == 0 {
-            return;
-        }
-        group_center /= count as f32;
-        let mut delta = Quat::IDENTITY;
-        if rotate_pressed {
-            delta = Quat::from_rotation_y(90.0_f32.to_radians()) * delta;
-        }
-        if tilt_pressed {
-            delta = Quat::from_rotation_z(90.0_f32.to_radians()) * delta;
-        }
-        for (entity, mut transform, global, _, _, basepart_opt) in selected_query.iter_mut() {
-            if has_selected_ancestor(entity, &selected_entities, &parent_query) { continue; }
-            let world = global.compute_transform();
-            let world_pos = group_center + delta * (world.translation - group_center);
-            let world_rot = delta * world.rotation;
-            let parent_gt = parent_query
-                .get(entity)
-                .ok()
-                .and_then(|c| global_transforms.get(c.parent()).ok());
-            let (local_pos, local_rot) =
-                crate::math_utils::world_to_local_pose(parent_gt, world_pos, world_rot);
-            transform.translation = local_pos;
-            transform.rotation = local_rot;
-            if let Some(mut bp) = basepart_opt {
-                bp.cframe.translation = local_pos;
-                bp.cframe.rotation = local_rot;
+    // `+` / `-` nudging lives only in `keybindings.rs::handle_nudge_keys`,
+    // which has a first-press plus auto-repeat timer and records one undo
+    // step per hold. A second, per-frame handler here would move a part
+    // several units for a single tap.
+}
+
+/// Finish a Select-tool drag as ONE undo step covering everything it moved,
+/// mind-map neighbours that drifted along included; write the final poses
+/// to disk; drop the drag markers. A press that never crossed the threshold
+/// moved nothing and records nothing.
+fn commit_select_drag(
+    state: &mut SelectToolState,
+    selected_query: &Query<(Entity, &mut Transform, &GlobalTransform, Option<&PartEntity>, Option<&Instance>, Option<&mut BasePart>), With<Selected>>,
+    neighbors: &Query<&mut Transform, Without<Selected>>,
+    undo_stack: &mut crate::undo::UndoStack,
+    instance_files: &Query<&crate::space::instance_loader::InstanceFile>,
+    commands: &mut Commands,
+) {
+    if state.drag_started && !state.initial_positions.is_empty() {
+        let mut old_transforms: Vec<(u64, [f32; 3], [f32; 4])> = Vec::new();
+        let mut new_transforms: Vec<(u64, [f32; 3], [f32; 4])> = Vec::new();
+        let mut record = |entity: Entity, before: (Vec3, Quat), after: &Transform| {
+            let moved = (before.0 - after.translation).length() > 0.001
+                || before.1.angle_between(after.rotation) > 0.001;
+            if moved {
+                old_transforms.push((entity.to_bits(), before.0.to_array(), before.1.to_array()));
+                new_transforms.push((entity.to_bits(), after.translation.to_array(), after.rotation.to_array()));
             }
-            // Keep the drag caches in sync so a drag in flight does not
-            // snap the rotation back next frame.
-            state.initial_positions.insert(entity, local_pos);
-            state.initial_rotations.insert(entity, local_rot);
-            state.initial_world.insert(entity, (world_pos, world_rot));
+        };
+        for (entity, transform, ..) in selected_query.iter() {
+            if let (Some(p), Some(r)) = (state.initial_positions.get(&entity), state.initial_rotations.get(&entity)) {
+                record(entity, (*p, *r), transform);
+            }
+        }
+        for (entity, before) in state.neighbor_initial.iter() {
+            if let Ok(transform) = neighbors.get(*entity) {
+                record(*entity, *before, transform);
+            }
+        }
+        let moved = old_transforms.len();
+        if moved > 0 {
+            undo_stack.push_labeled(
+                format!("Drag {} object{}", moved, if moved == 1 { "" } else { "s" }),
+                crate::undo::Action::TransformEntities { old_transforms, new_transforms },
+            );
+        }
+
+        // Write updated transforms back to TOML (file-system-first persistence)
+        for (entity, transform, ..) in selected_query.iter() {
+            if let Ok(inst_file) = instance_files.get(entity) {
+                if let Ok(mut def) = crate::space::instance_loader::load_instance_definition(&inst_file.toml_path) {
+                    def.transform.position = transform.translation.to_array();
+                    def.transform.rotation = transform.rotation.to_array();
+                    def.metadata.last_modified = chrono::Utc::now().to_rfc3339();
+                    let _ = crate::space::instance_loader::write_instance_definition(&inst_file.toml_path, &def);
+                }
+            }
         }
     }
-    // `+` / `-` nudging lives in `keybindings.rs::nudge_selection_system`
-    // exclusively — that handler uses a proper first-press + auto-repeat
-    // timer. A duplicate `pressed()`-based handler used to live here and
-    // fired once per frame while the key was held, producing a double-
-    // or N-unit jump for every tap. Removed.
+    release_select_drag(state, commands);
+}
+
+/// Put back everything a Select-tool drag moved, neighbours included, and
+/// end it without an undo step: Escape, or Ctrl+Z while the button is held.
+fn cancel_select_drag(
+    state: &mut SelectToolState,
+    selected_query: &mut Query<(Entity, &mut Transform, &GlobalTransform, Option<&PartEntity>, Option<&Instance>, Option<&mut BasePart>), With<Selected>>,
+    neighbors: &mut Query<&mut Transform, Without<Selected>>,
+    commands: &mut Commands,
+) {
+    if state.drag_started {
+        for (entity, mut transform, _, _, _, base_part) in selected_query.iter_mut() {
+            let (Some(p), Some(r)) = (state.initial_positions.get(&entity).copied(), state.initial_rotations.get(&entity).copied()) else {
+                continue;
+            };
+            transform.translation = p;
+            transform.rotation = r;
+            if let Some(mut bp) = base_part {
+                bp.cframe.translation = p;
+                bp.cframe.rotation = r;
+            }
+        }
+        for (entity, (p, r)) in state.neighbor_initial.iter() {
+            if let Ok(mut transform) = neighbors.get_mut(*entity) {
+                transform.translation = *p;
+                transform.rotation = *r;
+            }
+        }
+    }
+    release_select_drag(state, commands);
+}
+
+/// Drop the drag markers and reset every piece of per-drag state.
+fn release_select_drag(state: &mut SelectToolState, commands: &mut Commands) {
+    if state.drag_started {
+        for entity in state.initial_world.keys() {
+            if let Ok(mut ec) = commands.get_entity(*entity) {
+                ec.remove::<crate::space::instance_loader::BeingDragged>();
+            }
+        }
+    }
+    state.dragging = false;
+    state.drag_started = false;
+    state.dragged_entity = None;
+    state.initial_positions.clear();
+    state.initial_rotations.clear();
+    state.initial_world.clear();
+    state.moving_set.clear();
+    state.selected_count = 0;
+    state.neighbor_initial.clear();
+    state.jump_offset = None;
+    state.group_center = Vec3::ZERO;
+    state.group_bounds_min = Vec3::ZERO;
+    state.group_bounds_max = Vec3::ZERO;
+    state.group_size = Vec3::ONE;
+    state.last_target_position = Vec3::ZERO;
+    state.last_surface_normal = Vec3::Y;
+    state.last_hit_entity = None;
+}
+
+/// Ctrl+R turns the selection 90 degrees about Y and Ctrl+T tilts it 90
+/// degrees about Z. The bound shortcuts arrive as menu actions, so a rebind,
+/// the Roblox keymap, or the bridge's `invoke_action` all reach this; the
+/// shortcut dispatcher already ignores keys typed into a text field. While a
+/// part is being dragged, plain R and T do the same to the dragged part, as
+/// in Roblox Studio; outside a drag they are ordinary letters and move
+/// nothing (they used to spin the selection on any keypress, with no undo).
+///
+/// A turn outside a drag is one undo step. A turn during a drag rotates the
+/// drag's own snapshot, so it lands in the drag's single undo step.
+fn rotate_tilt_shortcuts(
+    mut menu_events: MessageReader<crate::ui::MenuActionEvent>,
+    keys: Res<ButtonInput<KeyCode>>,
+    ui_focus: Option<Res<SlintUIFocus>>,
+    mut select_state: ResMut<SelectToolState>,
+    mut move_state: ResMut<crate::move_tool::MoveToolState>,
+    mut selected: Query<(Entity, &mut Transform, &GlobalTransform, Option<&mut BasePart>), With<Selected>>,
+    parent_query: Query<&ChildOf>,
+    parent_globals: Query<&GlobalTransform, Without<Selected>>,
+    mut undo_stack: ResMut<crate::undo::UndoStack>,
+) {
+    use crate::keybindings::Action;
+    let quarter = std::f32::consts::FRAC_PI_2;
+    let mut turn = Quat::IDENTITY;
+    let mut verb = "";
+    for event in menu_events.read() {
+        match event.action {
+            Action::RotateY90 => {
+                turn = Quat::from_rotation_y(quarter) * turn;
+                verb = "Rotate";
+            }
+            Action::TiltZ90 => {
+                turn = Quat::from_rotation_z(quarter) * turn;
+                verb = "Tilt";
+            }
+            _ => {}
+        }
+    }
+
+    let select_dragging = select_state.dragging && select_state.drag_started;
+    let move_dragging = move_state.free_drag;
+    let typing = ui_focus.as_ref().map(|f| f.text_input_focused).unwrap_or(false)
+        || crate::ui::slint_ui::OVERLAY_INPUT_FOCUSED.load(std::sync::atomic::Ordering::Relaxed);
+    let modifier_held = keys.any_pressed([
+        KeyCode::ControlLeft, KeyCode::ControlRight,
+        KeyCode::AltLeft, KeyCode::AltRight,
+        KeyCode::ShiftLeft, KeyCode::ShiftRight,
+        KeyCode::SuperLeft, KeyCode::SuperRight,
+    ]);
+    if (select_dragging || move_dragging) && !typing && !modifier_held {
+        if keys.just_pressed(KeyCode::KeyR) {
+            turn = Quat::from_rotation_y(quarter) * turn;
+            verb = "Rotate";
+        }
+        if keys.just_pressed(KeyCode::KeyT) {
+            turn = Quat::from_rotation_z(quarter) * turn;
+            verb = "Tilt";
+        }
+    }
+    if verb.is_empty() {
+        return;
+    }
+
+    if select_dragging {
+        let s = &mut *select_state;
+        turn_drag_snapshot(&mut s.initial_world, s.dragged_entity, &mut s.group_bounds_min, &mut s.group_bounds_max, turn);
+        return;
+    }
+    if move_dragging {
+        let m = &mut *move_state;
+        turn_drag_snapshot(&mut m.initial_world, m.dragged_entity, &mut m.group_bounds_min, &mut m.group_bounds_max, turn);
+        return;
+    }
+
+    // Outside a drag: turn the selection about its centre, in world space,
+    // writing each pose back through its own parent.
+    let selected_set: std::collections::HashSet<Entity> = selected.iter().map(|(e, ..)| e).collect();
+    let mut center = Vec3::ZERO;
+    let mut count = 0usize;
+    for (entity, _, global, _) in selected.iter() {
+        if has_selected_ancestor(entity, &selected_set, &parent_query) {
+            continue;
+        }
+        center += global.translation();
+        count += 1;
+    }
+    if count == 0 {
+        return;
+    }
+    center /= count as f32;
+    let mut old_transforms = Vec::new();
+    let mut new_transforms = Vec::new();
+    for (entity, mut transform, global, base_part) in selected.iter_mut() {
+        if has_selected_ancestor(entity, &selected_set, &parent_query) {
+            continue;
+        }
+        let world = global.compute_transform();
+        let world_pos = center + turn * (world.translation - center);
+        let world_rot = (turn * world.rotation).normalize();
+        let parent_gt = parent_query
+            .get(entity)
+            .ok()
+            .and_then(|c| parent_globals.get(c.parent()).ok());
+        let (local_pos, local_rot) = crate::math_utils::world_to_local_pose(parent_gt, world_pos, world_rot);
+        old_transforms.push((entity.to_bits(), transform.translation.to_array(), transform.rotation.to_array()));
+        transform.translation = local_pos;
+        transform.rotation = local_rot;
+        if let Some(mut bp) = base_part {
+            bp.cframe.translation = local_pos;
+            bp.cframe.rotation = local_rot;
+        }
+        new_transforms.push((entity.to_bits(), local_pos.to_array(), local_rot.to_array()));
+    }
+    let n = old_transforms.len();
+    if n > 0 {
+        undo_stack.push_labeled(
+            format!("{} 90° ({} object{})", verb, n, if n == 1 { "" } else { "s" }),
+            crate::undo::Action::TransformEntities { old_transforms, new_transforms },
+        );
+    }
+}
+
+/// Turn a drag's world snapshot (and the group's box) about its leader. The
+/// drag re-places everything from this snapshot on its next frame.
+fn turn_drag_snapshot(
+    poses: &mut std::collections::HashMap<Entity, (Vec3, Quat)>,
+    leader: Option<Entity>,
+    bounds_min: &mut Vec3,
+    bounds_max: &mut Vec3,
+    turn: Quat,
+) {
+    let have_bounds = bounds_min.x <= bounds_max.x;
+    let pivot = leader
+        .and_then(|e| poses.get(&e))
+        .map(|(p, _)| *p)
+        .unwrap_or(if have_bounds { (*bounds_min + *bounds_max) * 0.5 } else { Vec3::ZERO });
+    for (pos, rot) in poses.values_mut() {
+        *pos = pivot + turn * (*pos - pivot);
+        *rot = (turn * *rot).normalize();
+    }
+    if have_bounds {
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for i in 0..8 {
+            let corner = Vec3::new(
+                if i & 1 == 0 { bounds_min.x } else { bounds_max.x },
+                if i & 2 == 0 { bounds_min.y } else { bounds_max.y },
+                if i & 4 == 0 { bounds_min.z } else { bounds_max.z },
+            );
+            let turned = pivot + turn * (corner - pivot);
+            lo = lo.min(turned);
+            hi = hi.max(turned);
+        }
+        *bounds_min = lo;
+        *bounds_max = hi;
+    }
 }
 
 /// True when any ancestor of `entity` is in `selected`: such an entity moves

@@ -142,10 +142,7 @@ fn sync_rotate_handle_root(
     let Some((_, cam_gt, projection)) = cameras.iter().find(|(c, _, _)| c.order == 0) else {
         return;
     };
-    let fov = match projection {
-        Projection::Perspective(p) => p.fov,
-        _ => std::f32::consts::FRAC_PI_4,
-    };
+    let fov = crate::camera_controller::gizmo_fov(projection, cam_gt.translation(), group.center);
     let cam_dist = (group.center - cam_gt.translation()).length().max(0.1);
     let min_screen_size = cam_dist * (fov * 0.5).tan() * MIN_SCREEN_FRACTION;
 

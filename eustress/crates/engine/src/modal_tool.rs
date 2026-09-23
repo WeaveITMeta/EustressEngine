@@ -633,7 +633,7 @@ impl Plugin for ModalToolPlugin {
                 step_back_modal_tool_system,
                 run_active_modal_tool,
                 sync_tool_options_bar_state,
-            ).chain());
+            ).chain().run_if(crate::play_mode::editor_input_enabled));
     }
 }
 

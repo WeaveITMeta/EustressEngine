@@ -8,9 +8,24 @@ use std::path::{Path, PathBuf};
 
 use crate::parts::{PartData, PartType};
 use crate::rendering::BevyPartManager;
+use eustress_common::terrain::{TerrainBrickDelta, TerrainTileDelta, TerrainTileSide};
 
-/// Maximum number of undo/redo actions to keep
-const MAX_HISTORY_SIZE: usize = 100;
+/// Maximum number of undo/redo actions to keep. Deep enough that a slip
+/// noticed well after the fact (an accidental drag an hour of nudges ago)
+/// can still be walked back. Most entries are a few small vectors; terrain
+/// entries are also bounded by [`MAX_TERRAIN_HISTORY_BYTES`].
+const MAX_HISTORY_SIZE: usize = 500;
+
+/// Raster and brick bytes the terrain entries in the history may hold
+/// together. A terrain entry carries whole-tile (and whole-brick) before and
+/// after snapshots, so a few hundred broad strokes on a high-resolution
+/// raster would reach gigabytes under the entry count alone. The oldest
+/// entries go first once this is exceeded.
+const MAX_TERRAIN_HISTORY_BYTES: usize = 256 * 1024 * 1024;
+
+/// Consecutive coalescing pushes with the same key within this window merge
+/// into one undo step (holding a nudge key, rolling the resize wheel).
+const COALESCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(1200);
 
 /// Action types that can be undone/redone
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +201,13 @@ pub enum Action {
         new_states: Vec<(u64, [f32; 3], [f32; 3])>,
     },
 
+    /// Move-tool drags of BillboardGui labels change `units_offset` rather
+    /// than the Transform. Entity bits with the offset before and after.
+    BillboardOffsets {
+        old_offsets: Vec<(u64, [f32; 3])>,
+        new_offsets: Vec<(u64, [f32; 3])>,
+    },
+
     /// Delete entities — files moved to .eustress/trash/ for recovery.
     /// Undo moves them back and triggers a space reload.
     TrashEntities {
@@ -332,6 +354,40 @@ pub enum Action {
     CadMateCreate {
         spec_json: String,
     },
+
+    /// Change one field of a class whose properties live in a TOML-section
+    /// field table (`ParticleSimulation`, `ParticleSpecies`, the terrain layer
+    /// classes). Keyed by the instance file, which survives restarts and
+    /// entity churn; the values are the field's own text form, as the
+    /// Properties panel shows it.
+    ChangeClassField {
+        toml_path: PathBuf,
+        property: String,
+        old_text: String,
+        new_text: String,
+    },
+
+    /// A terrain edit: one brush stroke, one Part to Terrain stamp.
+    /// Holds only the cache tiles the edit changed, each with its heights and
+    /// material cells before and after, and for the 3D brushes the volume
+    /// bricks it changed, each before and after
+    /// (`eustress_common::terrain::TerrainEditRecorder` builds both). Undo
+    /// writes the before side into the live `TerrainRoot`, redo the after
+    /// side. Both refuse a terrain other than the one edited (a Space
+    /// switch, a preset, worldgen or an import spawns a new root entity,
+    /// even at the same raster size) or one whose raster or volume lattice
+    /// changed size since.
+    TerrainEdit {
+        /// What the History panel and the undo toast show.
+        label: String,
+        /// `Entity::to_bits()` of the `TerrainRoot` the edit was recorded on.
+        #[serde(default)]
+        root: u64,
+        tiles: Vec<TerrainTileDelta>,
+        /// Empty for an edit that only wrote the raster.
+        #[serde(default)]
+        bricks: Vec<TerrainBrickDelta>,
+    },
 }
 
 /// Snapshot of a property value for undo/redo
@@ -465,6 +521,9 @@ impl Action {
             Action::CreateBinaryInstance { .. }   => "create",
             Action::CadTreeEdit { .. }            => "cad",
             Action::CadMateCreate { .. }          => "create",
+            Action::ChangeClassField { .. }       => "property",
+            Action::BillboardOffsets { .. }       => "move",
+            Action::TerrainEdit { .. }            => "terrain",
         }
     }
 
@@ -515,6 +574,25 @@ impl Action {
             Action::CreateBinaryInstance { .. } => "Create object".to_string(),
             Action::CadTreeEdit { verb, .. } => verb.clone(),
             Action::CadMateCreate { .. } => "Create mate".to_string(),
+            Action::ChangeClassField { property, .. } => format!("Change {}", property),
+            Action::BillboardOffsets { old_offsets, .. } => format!(
+                "Move {} label{}",
+                old_offsets.len(),
+                if old_offsets.len() == 1 { "" } else { "s" },
+            ),
+            Action::TerrainEdit { label, .. } => label.clone(),
+        }
+    }
+
+    /// Raster and brick bytes a terrain entry holds, 0 for every other
+    /// action. What [`MAX_TERRAIN_HISTORY_BYTES`] is measured in.
+    fn terrain_bytes(&self) -> usize {
+        match self {
+            Action::TerrainEdit { tiles, bricks, .. } => {
+                tiles.iter().map(TerrainTileDelta::byte_len).sum::<usize>()
+                    + bricks.iter().map(TerrainBrickDelta::byte_len).sum::<usize>()
+            }
+            _ => 0,
         }
     }
 
@@ -602,6 +680,9 @@ pub struct UndoStack {
     /// Events queued for the `"history.<kind>"` Eustress Stream topic
     /// but not yet drained. `history_stream.rs` drains + clears.
     pending_stream: Vec<PendingHistoryStreamEvent>,
+    /// Key and time of the top entry when it was pushed by
+    /// [`UndoStack::push_coalesced`]; `None` once anything else happens.
+    coalesce: Option<(&'static str, std::time::Instant)>,
 }
 
 impl UndoStack {
@@ -618,7 +699,62 @@ impl UndoStack {
         self.push_internal(action, Some(label.into()));
     }
 
+    /// Push, or fold into the previous step when that step was pushed with
+    /// the same `key` under [`COALESCE_WINDOW`] ago, is still the newest
+    /// applied entry, and moved the same entities. The merged step keeps the
+    /// original "before" and takes the new "after", so holding a nudge key
+    /// or rolling the resize wheel is one Ctrl+Z, not forty.
+    pub fn push_coalesced(&mut self, key: &'static str, label: impl Into<String>, action: Action) {
+        let fresh = self.coalesce.is_some_and(|(k, at)| k == key && at.elapsed() < COALESCE_WINDOW)
+            && self.current_index == self.history.len()
+            && self.current_index > 0;
+        if fresh {
+            let top = self.current_index - 1;
+            let merged = match (self.history.get_mut(top), &action) {
+                (
+                    Some(Action::TransformEntities { old_transforms, new_transforms }),
+                    Action::TransformEntities { new_transforms: next, .. },
+                ) if same_entities(old_transforms.iter().map(|t| t.0), next.iter().map(|t| t.0)) => {
+                    let _ = old_transforms;
+                    *new_transforms = next.clone();
+                    true
+                }
+                (
+                    Some(Action::ScaleEntities { old_states, new_states }),
+                    Action::ScaleEntities { new_states: next, .. },
+                ) if same_entities(old_states.iter().map(|t| t.0), next.iter().map(|t| t.0)) => {
+                    let _ = old_states;
+                    *new_states = next.clone();
+                    true
+                }
+                _ => false,
+            };
+            if merged {
+                // A folded step is still new work. The sequence moves so the
+                // unsaved marker (title asterisk, exit prompt) and the
+                // activity tracker see it, and stream subscribers, who see
+                // every mutation in order, get the step's new state.
+                self.push_sequence = self.push_sequence.wrapping_add(1);
+                if let Some(step) = self.history.get(top) {
+                    let kind = step.topic_kind();
+                    self.pending_stream.push(PendingHistoryStreamEvent {
+                        topic: format!("history.{}", kind),
+                        kind,
+                        description: step.description(),
+                        label: self.labels.get(top).cloned().flatten(),
+                        sequence: self.push_sequence,
+                    });
+                }
+                self.coalesce = Some((key, std::time::Instant::now()));
+                return;
+            }
+        }
+        self.push_internal(action, Some(label.into()));
+        self.coalesce = Some((key, std::time::Instant::now()));
+    }
+
     fn push_internal(&mut self, action: Action, label: Option<String>) {
+        self.coalesce = None;
         // Remove any actions after current index (they were undone)
         self.history.truncate(self.current_index);
         self.labels.truncate(self.current_index);
@@ -640,12 +776,18 @@ impl UndoStack {
         self.history.push_back(action);
         self.labels.push_back(label);
 
-        // Maintain max size
-        if self.history.len() > MAX_HISTORY_SIZE {
-            self.history.pop_front();
+        // Maintain the entry and terrain byte budgets, oldest first. The
+        // newest entry always stays, even when it alone is over budget.
+        self.current_index = self.history.len();
+        let mut terrain_bytes: usize = self.history.iter().map(Action::terrain_bytes).sum();
+        while self.history.len() > 1
+            && (self.history.len() > MAX_HISTORY_SIZE || terrain_bytes > MAX_TERRAIN_HISTORY_BYTES)
+        {
+            if let Some(old) = self.history.pop_front() {
+                terrain_bytes = terrain_bytes.saturating_sub(old.terrain_bytes());
+            }
             self.labels.pop_front();
-        } else {
-            self.current_index += 1;
+            self.current_index -= 1;
         }
     }
 
@@ -684,6 +826,7 @@ impl UndoStack {
         if self.current_index > index {
             self.current_index -= 1;
         }
+        self.coalesce = None;
         removed
     }
 
@@ -699,6 +842,7 @@ impl UndoStack {
         // action. To keep `target` applied we stop when the cursor
         // equals `target + 1`.
         let stop = target.saturating_add(1);
+        self.coalesce = None;
         while self.current_index > stop && self.current_index > 0 {
             self.current_index -= 1;
             if let Some(action) = self.history.get(self.current_index).cloned() {
@@ -734,6 +878,7 @@ impl UndoStack {
     
     /// Get the action to undo (if any)
     pub fn undo(&mut self) -> Option<Action> {
+        self.coalesce = None;
         if self.can_undo() {
             self.current_index -= 1;
             self.history.get(self.current_index).cloned()
@@ -744,6 +889,7 @@ impl UndoStack {
     
     /// Get the action to redo (if any)
     pub fn redo(&mut self) -> Option<Action> {
+        self.coalesce = None;
         if self.can_redo() {
             let action = self.history.get(self.current_index).cloned();
             self.current_index += 1;
@@ -766,9 +912,59 @@ impl UndoStack {
     /// Clear the entire history
     pub fn clear(&mut self) {
         self.history.clear();
+        self.labels.clear();
+        self.coalesce = None;
         self.current_index = 0;
     }
-    
+
+    /// Re-express the heights held by every terrain entry recorded on the
+    /// terrain root `root` (`Entity::to_bits()`), after Save moved that
+    /// terrain's height band from `from` to `to`. The entries hold raw
+    /// normalized raster samples, which stand for other world heights under
+    /// the new band, so undo and redo would otherwise restore the wrong
+    /// ground. Entries in the redo region are included.
+    pub fn rebase_terrain_heights(
+        &mut self,
+        root: u64,
+        from: eustress_common::terrain::HeightBand,
+        to: eustress_common::terrain::HeightBand,
+    ) {
+        fn rebase(
+            action: &mut Action,
+            root: u64,
+            from: eustress_common::terrain::HeightBand,
+            to: eustress_common::terrain::HeightBand,
+        ) {
+            match action {
+                Action::TerrainEdit { root: edited, tiles, .. } if *edited == root => {
+                    eustress_common::terrain::rebase_tile_heights(tiles, from, to);
+                }
+                Action::Batch { actions } => {
+                    for inner in actions.iter_mut() {
+                        rebase(inner, root, from, to);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for action in self.history.iter_mut() {
+            rebase(action, root, from, to);
+        }
+    }
+
+    /// Whether the applied history (not the redo region) holds a terrain edit
+    /// of the terrain root `root` (`Entity::to_bits()`).
+    pub fn has_terrain_edits(&self, root: u64) -> bool {
+        fn edits(action: &Action, root: u64) -> bool {
+            match action {
+                Action::TerrainEdit { root: edited, .. } => *edited == root,
+                Action::Batch { actions } => actions.iter().any(|inner| edits(inner, root)),
+                _ => false,
+            }
+        }
+        self.history.iter().take(self.current_index).any(|action| edits(action, root))
+    }
+
     /// Get the description of the last action (for UI display)
     pub fn last_action_description(&self) -> Option<String> {
         if self.current_index > 0 {
@@ -820,12 +1016,17 @@ impl Plugin for UndoPlugin {
             .add_message::<RedoEvent>()
             .add_message::<UndoSingleEvent>()
             .add_message::<RevertToEvent>()
+            .add_message::<HistoryJumpEvent>()
+            .init_resource::<crate::drag_guard::DragCancelRequest>()
+            .add_systems(First, assign_runtime_instance_ids)
             .add_systems(Update, (
                 handle_undo_events,
                 handle_redo_events,
                 handle_undo_single_events,
                 handle_revert_to_events,
-            ));
+                handle_history_jump_events,
+            ))
+            .add_systems(Last, crate::drag_guard::age_drag_cancel_request);
     }
 }
 
@@ -839,21 +1040,30 @@ pub fn handle_undo_events(world: &mut World) {
     if events.is_empty() {
         return;
     }
-    
+
+    // Ctrl+Z while a drag is still held means "not that": cancel the drag
+    // and put everything back. Popping the history instead would undo an
+    // unrelated earlier step while the drag carried on and committed on
+    // release, turning one slip into two.
+    if cancel_live_drag(world) {
+        return;
+    }
+
     let mut undo_stack = world.resource_mut::<UndoStack>();
     let actions: Vec<_> = events.iter().filter_map(|_| undo_stack.undo()).collect();
     drop(undo_stack);
-    
+
     let had_actions = !actions.is_empty();
-    
-    for action in actions {
+
+    for action in &actions {
         info!("Undoing: {}", action.description());
-        apply_undo_ecs(&action, world);
-        
+        apply_undo_ecs(action, world);
+
         let mut notifications = world.resource_mut::<crate::notifications::NotificationManager>();
         notifications.info(format!("↶ Undid: {}", action.description()));
     }
-    
+    reselect_after(&actions, world);
+
     // Show warning if there was nothing to undo
     if !events.is_empty() && !had_actions {
         let mut notifications = world.resource_mut::<crate::notifications::NotificationManager>();
@@ -871,21 +1081,26 @@ fn handle_redo_events(world: &mut World) {
     if events.is_empty() {
         return;
     }
-    
+
+    if cancel_live_drag(world) {
+        return;
+    }
+
     let mut undo_stack = world.resource_mut::<UndoStack>();
     let actions: Vec<_> = events.iter().filter_map(|_| undo_stack.redo()).collect();
     drop(undo_stack);
-    
+
     let had_actions = !actions.is_empty();
-    
-    for action in actions {
+
+    for action in &actions {
         info!("Redoing: {}", action.description());
-        apply_redo_ecs(&action, world);
-        
+        apply_redo_ecs(action, world);
+
         let mut notifications = world.resource_mut::<crate::notifications::NotificationManager>();
         notifications.info(format!("↷ Redid: {}", action.description()));
     }
-    
+    reselect_after(&actions, world);
+
     // Show warning if there was nothing to redo
     if !events.is_empty() && !had_actions {
         let mut notifications = world.resource_mut::<crate::notifications::NotificationManager>();
@@ -896,13 +1111,24 @@ fn handle_redo_events(world: &mut World) {
 /// Handle `UndoSingleEvent`: apply the inverse of a single entry at
 /// `index` and remove it from the stack. Other history entries keep
 /// their meaning — this is "reverse this one change, leave the rest".
+/// Terrain edits are the exception: one that a later edit overlaps is
+/// refused (see [`terrain_undo_single_blocker`]).
 pub fn handle_undo_single_events(world: &mut World) {
     let mut events = world.resource_mut::<Messages<UndoSingleEvent>>();
     let targets: Vec<usize> = events.drain().map(|e| e.index).collect();
     drop(events);
     if targets.is_empty() { return; }
+    if refuse_during_terrain_stroke(world) {
+        return;
+    }
 
     for idx in targets {
+        if let Some(reason) = terrain_undo_single_blocker(world.resource::<UndoStack>(), idx) {
+            if let Some(mut notifications) = world.get_resource_mut::<crate::notifications::NotificationManager>() {
+                notifications.warning(reason);
+            }
+            continue;
+        }
         let action = {
             let mut stack = world.resource_mut::<UndoStack>();
             stack.take_at(idx)
@@ -912,6 +1138,7 @@ pub fn handle_undo_single_events(world: &mut World) {
         apply_undo_ecs(&action, world);
         let mut notifications = world.resource_mut::<crate::notifications::NotificationManager>();
         notifications.info(format!("↶ Reversed: {}", action.description()));
+        reselect_after(std::slice::from_ref(&action), world);
     }
 }
 
@@ -923,6 +1150,9 @@ pub fn handle_revert_to_events(world: &mut World) {
     let targets: Vec<usize> = events.drain().map(|e| e.target).collect();
     drop(events);
     if targets.is_empty() { return; }
+    if refuse_during_terrain_stroke(world) {
+        return;
+    }
 
     for target in targets {
         let actions = {
@@ -934,10 +1164,259 @@ pub fn handle_revert_to_events(world: &mut World) {
             info!("Revert: {}", action.description());
             apply_undo_ecs(action, world);
         }
+        reselect_after(&actions, world);
         let mut notifications = world.resource_mut::<crate::notifications::NotificationManager>();
         if count > 0 {
             notifications.info(format!("↶ Reverted {} change{}", count, if count == 1 { "" } else { "s" }));
         }
+    }
+}
+
+/// Jump the history so the entry at `target` is the newest one applied:
+/// undo back to it, or redo forward to it. What clicking a row in the
+/// History panel means.
+#[derive(Message)]
+pub struct HistoryJumpEvent {
+    pub target: usize,
+}
+
+pub fn handle_history_jump_events(world: &mut World) {
+    let mut events = world.resource_mut::<Messages<HistoryJumpEvent>>();
+    let targets: Vec<usize> = events.drain().map(|e| e.target).collect();
+    drop(events);
+    for target in targets {
+        if cancel_live_drag(world) {
+            return;
+        }
+        let want = target.saturating_add(1);
+        let current = world.resource::<UndoStack>().current_index();
+        let mut touched: Vec<Action> = Vec::new();
+        if want < current {
+            let actions = world.resource_mut::<UndoStack>().drain_until(target);
+            for action in &actions {
+                apply_undo_ecs(action, world);
+            }
+            touched = actions;
+        } else if want > current {
+            loop {
+                let next = {
+                    let mut stack = world.resource_mut::<UndoStack>();
+                    if stack.current_index() >= want { None } else { stack.redo() }
+                };
+                let Some(action) = next else { break };
+                apply_redo_ecs(&action, world);
+                touched.push(action);
+            }
+        }
+        if !touched.is_empty() {
+            reselect_after(&touched, world);
+        }
+    }
+}
+
+/// If a viewport drag is held, ask its tool to cancel it and report `true`;
+/// the caller then leaves the history alone. See [`crate::drag_guard`]. A
+/// held terrain brush stroke also reports `true`, without cancelling it (see
+/// [`refuse_during_terrain_stroke`]).
+fn cancel_live_drag(world: &mut World) -> bool {
+    if refuse_during_terrain_stroke(world) {
+        return true;
+    }
+    if !crate::drag_guard::drag_in_progress(world) {
+        return false;
+    }
+    if let Some(mut request) = world.get_resource_mut::<crate::drag_guard::DragCancelRequest>() {
+        request.request();
+    }
+    if let Some(mut notifications) = world.get_resource_mut::<crate::notifications::NotificationManager>() {
+        notifications.info("Drag cancelled");
+    }
+    true
+}
+
+/// A terrain brush stroke is still held. Its recorder has already
+/// snapshotted the tiles it touched, so a history step applied now would
+/// land inside those snapshots and come back when the stroke is undone.
+fn terrain_stroke_open(world: &World) -> bool {
+    world
+        .get_resource::<eustress_common::terrain::TerrainEditRecorder>()
+        .is_some_and(|recorder| recorder.is_recording())
+}
+
+/// Refuse a history step while a terrain stroke is held, telling the user
+/// why. The stroke is not finished here: the button is still down, so the
+/// brush would open a new stroke next frame and keep sculpting after the
+/// step. The request is dropped rather than replayed once the stroke ends.
+fn refuse_during_terrain_stroke(world: &mut World) -> bool {
+    if !terrain_stroke_open(world) {
+        return false;
+    }
+    if let Some(mut notifications) = world.get_resource_mut::<crate::notifications::NotificationManager>() {
+        notifications.info("Finish the terrain stroke first");
+    }
+    true
+}
+
+/// Why the terrain edit at `index` cannot be reversed on its own by "Undo
+/// This Event", or `None` when it can (or is not a terrain edit).
+///
+/// Terrain undo writes whole tiles back (`apply_terrain_tiles`) and whole
+/// volume bricks back (`apply_terrain_bricks`), so reversing an edit out of
+/// order would erase every later edit sharing one of its tiles or bricks,
+/// and undoing that later edit afterwards would bring this one back. Later
+/// entries in the redo region count too: redoing one would also restore
+/// this edit's changes into the shared tiles or bricks. An edit that
+/// allocated the material layer drops the whole layer on undo, taking every
+/// later paint with it, and a later allocation or drop changes the layer
+/// this edit's material side was recorded against.
+fn terrain_undo_single_blocker(stack: &UndoStack, index: usize) -> Option<String> {
+    let Some(Action::TerrainEdit { root, tiles, bricks, .. }) = stack.history.get(index) else {
+        return None;
+    };
+    if index >= stack.current_index {
+        return Some("This terrain edit is already undone".to_string());
+    }
+    let same_tile = |a: &TerrainTileDelta, b: &TerrainTileDelta| {
+        a.tile == b.tile
+            && a.resolution == b.resolution
+            && a.cache_width == b.cache_width
+            && a.cache_height == b.cache_height
+    };
+    let touches_materials = |ts: &[TerrainTileDelta]| ts.iter().any(TerrainTileDelta::touches_materials);
+    let changes_material_layout = |ts: &[TerrainTileDelta]| ts.iter().any(TerrainTileDelta::changes_material_layout);
+    let this_touches = touches_materials(tiles.as_slice());
+    let this_layout = changes_material_layout(tiles.as_slice());
+    let blocked = stack.history.iter().skip(index + 1).any(|later| match later {
+        Action::TerrainEdit { root: later_root, tiles: later_tiles, bricks: later_bricks, .. }
+            if later_root == root =>
+        {
+            later_tiles.iter().any(|lt| tiles.iter().any(|t| same_tile(t, lt)))
+                || later_bricks.iter().any(|lb| bricks.iter().any(|b| b.coord == lb.coord))
+                || (this_layout && touches_materials(later_tiles.as_slice()))
+                || (this_touches && changes_material_layout(later_tiles.as_slice()))
+        }
+        _ => false,
+    });
+    blocked.then(|| "Terrain edits can only be undone in order: a later edit changed the same terrain".to_string())
+}
+
+/// Whether two id lists name the same entities, order aside.
+fn same_entities(a: impl Iterator<Item = u64>, b: impl Iterator<Item = u64>) -> bool {
+    let mut a: Vec<u64> = a.collect();
+    let mut b: Vec<u64> = b.collect();
+    a.sort_unstable();
+    b.sort_unstable();
+    a == b
+}
+
+/// Entity for a runtime instance id, never for the "unassigned" 0.
+fn find_instance(world: &mut World, id: u32) -> Option<Entity> {
+    if id == 0 {
+        return None;
+    }
+    let mut query = world.query::<(Entity, &crate::classes::Instance)>();
+    query.iter(world).find(|(_, inst)| inst.id == id).map(|(e, _)| e)
+}
+
+/// The entities an action changed, for selecting them after undo or redo.
+fn affected_entities(action: &Action, world: &mut World, out: &mut Vec<Entity>) {
+    match action {
+        Action::TransformEntities { old_transforms, .. } => {
+            out.extend(old_transforms.iter().map(|(bits, _, _)| Entity::from_bits(*bits)));
+        }
+        Action::ScaleEntities { old_states, .. } => {
+            out.extend(old_states.iter().map(|(bits, _, _)| Entity::from_bits(*bits)));
+        }
+        Action::BillboardOffsets { old_offsets, .. } => {
+            out.extend(old_offsets.iter().map(|(bits, _)| Entity::from_bits(*bits)));
+        }
+        Action::ChangeProperty { id, .. } => {
+            out.extend(find_instance(world, *id));
+        }
+        Action::ChangePropertyMulti { entities, .. } => {
+            for (id, _) in entities {
+                out.extend(find_instance(world, *id));
+            }
+        }
+        Action::Batch { actions } => {
+            for inner in actions {
+                affected_entities(inner, world, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Select what an undo or redo just changed, so the user sees which parts
+/// moved back (and the gizmo sits on them), the way an accidental change is
+/// usually noticed and checked. Actions that touch no part leave the
+/// selection alone.
+fn reselect_after(actions: &[Action], world: &mut World) {
+    let mut entities = Vec::new();
+    for action in actions {
+        affected_entities(action, world, &mut entities);
+    }
+    entities.retain(|e| world.get_entity(*e).is_ok());
+    entities.sort_unstable();
+    entities.dedup();
+    if entities.is_empty() {
+        return;
+    }
+    let ids: Vec<String> = entities
+        .iter()
+        .map(|e| format!("{}v{}", e.index(), e.generation()))
+        .collect();
+    if let Some(selection) = world.get_resource::<crate::selection_sync::SelectionSyncManager>() {
+        selection.0.read().set_selected(ids);
+    }
+}
+
+/// Apply BillboardGui `units_offset` values recorded by a Move-tool drag.
+fn set_billboard_offsets(world: &mut World, offsets: &[(u64, [f32; 3])]) {
+    for (bits, offset) in offsets {
+        let entity = Entity::from_bits(*bits);
+        if let Some(mut billboard) = world.get_mut::<crate::classes::BillboardGui>(entity) {
+            billboard.units_offset = *offset;
+        }
+    }
+}
+
+/// Next id handed to an instance that arrives without one. Starts high so it
+/// never collides with the small sequential ids legacy scene files carry.
+static NEXT_RUNTIME_INSTANCE_ID: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(1 << 30);
+
+/// Give every live instance a unique `Instance.id`.
+///
+/// Property, tag, attribute and parameter undo find their entity by this id,
+/// but every instance loaded from a Space arrived with id 0, so undo applied
+/// the old value to whichever instance the query met first: undoing a colour
+/// change could recolour an unrelated part and leave the edited one as it
+/// was, and undoing Alt+A could unanchor something else entirely. A paste
+/// that copies its source's id gets a fresh one too.
+///
+/// The id is runtime identity only (it is not saved), so it is written with
+/// change detection bypassed; marking every instance changed on load would
+/// wake every `Changed<Instance>` consumer for nothing.
+pub fn assign_runtime_instance_ids(
+    mut added: Query<(Entity, &mut crate::classes::Instance), Added<crate::classes::Instance>>,
+    live: Query<(), With<crate::classes::Instance>>,
+    mut owners: Local<std::collections::HashMap<u32, Entity>>,
+) {
+    use std::sync::atomic::Ordering;
+    for (entity, mut instance) in added.iter_mut() {
+        let id = instance.id;
+        let taken = owners
+            .get(&id)
+            .is_some_and(|&owner| owner != entity && live.contains(owner));
+        let id = if id == 0 || taken {
+            let fresh = NEXT_RUNTIME_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
+            instance.bypass_change_detection().id = fresh;
+            fresh
+        } else {
+            id
+        };
+        owners.insert(id, entity);
     }
 }
 
@@ -1039,6 +1518,9 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
         Action::RemoveTag { id, tag } => {
             // Undo remove = add back
             add_tag_to_entity(*id, tag, world);
+        }
+        Action::BillboardOffsets { old_offsets, .. } => {
+            set_billboard_offsets(world, old_offsets);
         }
         Action::TransformEntities { old_transforms, .. } => {
             // Restore old transforms
@@ -1314,6 +1796,9 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
         Action::CadTreeEdit { entity_bits, old_toml, .. } => {
             apply_cad_tree_toml(world, *entity_bits, old_toml);
         }
+        Action::ChangeClassField { toml_path, property, old_text, .. } => {
+            crate::particles::bridge::apply_class_field_text(world, toml_path, property, old_text);
+        }
         Action::CadMateCreate { spec_json } => {
             // Undo create = despawn the joint entity matching the spec.
             // Matched by content, not stored id — redo recreates the
@@ -1336,9 +1821,131 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
                 }
             }
         }
+        Action::TerrainEdit { label, root, tiles, bricks } => {
+            apply_terrain_edit(world, label, *root, tiles, bricks, TerrainTileSide::Before);
+        }
         _ => {
             warn!("Undo not yet implemented for: {}", action.description());
         }
+    }
+}
+
+/// Write one side of a `TerrainEdit` into the live terrain: the before side
+/// for undo, the after side for redo. The written chunks, plus a ring of
+/// neighbours, and the box the written bricks cover are marked for remesh
+/// and re-collide. A terrain other than the one edited (another
+/// `TerrainRoot` entity, as after a Space switch or a regenerate), or one
+/// whose raster or volume lattice no longer matches the recorded one, is
+/// left untouched with a warning, never written out of bounds.
+fn apply_terrain_edit(
+    world: &mut World,
+    label: &str,
+    root: u64,
+    tiles: &[TerrainTileDelta],
+    bricks: &[TerrainBrickDelta],
+    side: TerrainTileSide,
+) {
+    use eustress_common::terrain::{TerrainConfig, TerrainData, TerrainDirtyChunks, TerrainRoot, TerrainVolume};
+
+    let verb = match side {
+        TerrainTileSide::Before => "undo",
+        TerrainTileSide::After => "redo",
+    };
+    // The config is cloned out so the terrain borrow ends with this statement,
+    // before the dirty-chunk resource is fetched. The root check runs before
+    // anything is written, so a refused entry leaves the terrain and its
+    // saved state alone.
+    let mut query = world.query_filtered::<
+        (Entity, &TerrainConfig, &mut TerrainData, Option<&mut TerrainVolume>),
+        With<TerrainRoot>,
+    >();
+    let outcome = match query.single_mut(world) {
+        Ok((entity, _, _, _)) if entity.to_bits() != root => {
+            Err("the terrain was replaced since the edit".to_string())
+        }
+        Ok((_, config, mut data, volume)) => {
+            // `into_inner` flags the volume changed, so it is only taken when
+            // there are bricks to write into it.
+            let volume = volume.filter(|_| !bricks.is_empty()).map(Mut::into_inner);
+            write_terrain_edit_side(config, &mut data, volume, tiles, bricks, side)
+                .map(|(applied, volume_edit)| (config.clone(), applied, volume_edit))
+        }
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => Err("there is no terrain".to_string()),
+        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            Err("more than one terrain is loaded".to_string())
+        }
+    };
+    match outcome {
+        Ok((config, applied, volume_edit)) => {
+            if let Some(mut dirty) = world.get_resource_mut::<TerrainDirtyChunks>() {
+                applied.mark_dirty(&config, &mut dirty);
+                dirty.mark_volume_edit(&config, &volume_edit);
+            }
+            mark_terrain_unsaved(world);
+            info!(
+                "Terrain {verb}: '{label}' wrote {} tile(s) and {} volume brick(s)",
+                tiles.len(),
+                bricks.len()
+            );
+        }
+        Err(reason) => {
+            warn!("Terrain {verb} of '{label}' skipped: {reason}");
+            if let Some(mut notifications) = world.get_resource_mut::<crate::notifications::NotificationManager>() {
+                notifications.warning(format!("Could not {verb} '{label}': {reason}"));
+            }
+        }
+    }
+}
+
+/// Write `side` of an edit's tiles into `data` and its bricks into `volume`.
+/// Every check (the volume lattice, the raster layout) runs before the first
+/// write, so a refused edit leaves both the raster and the volume as they
+/// were. `volume` may be `None` only when there are no bricks.
+fn write_terrain_edit_side(
+    config: &eustress_common::terrain::TerrainConfig,
+    data: &mut eustress_common::terrain::TerrainData,
+    volume: Option<&mut eustress_common::terrain::TerrainVolume>,
+    tiles: &[TerrainTileDelta],
+    bricks: &[TerrainBrickDelta],
+    side: TerrainTileSide,
+) -> Result<(eustress_common::terrain::AppliedTerrainTiles, eustress_common::terrain::VolumeEdit), String> {
+    use eustress_common::terrain::{apply_terrain_bricks, apply_terrain_tiles, check_terrain_bricks, AppliedTerrainTiles, VolumeEdit};
+
+    check_terrain_bricks(config, bricks)?;
+    if volume.is_none() && !bricks.is_empty() {
+        return Err("the terrain has no volume to restore its bricks into".to_string());
+    }
+    // `apply_terrain_tiles` checks the raster layout before it writes, and
+    // the brick check above cannot fail again below, so both halves land or
+    // neither does. An edit of the volume alone never touches the raster.
+    let applied = if tiles.is_empty() {
+        AppliedTerrainTiles::default()
+    } else {
+        apply_terrain_tiles(config, data, tiles, side)?
+    };
+    let volume_edit = match volume {
+        Some(volume) if !bricks.is_empty() => apply_terrain_bricks(config, volume, bricks, side)?,
+        _ => VolumeEdit::default(),
+    };
+    Ok((applied, volume_edit))
+}
+
+/// Keep the Space marked unsaved after a terrain undo or redo.
+///
+/// The unsaved marker compares the undo stack's push sequence with the one
+/// recorded at the last save, and undo or redo does not move that sequence.
+/// Entity edits persist to the world database as they happen, so that is
+/// enough for them, but terrain rasters reach disk only when the Space is
+/// saved (`save_terrain_to_disk`). Without this, undoing a stroke right
+/// after a save would leave memory and disk different with no asterisk and
+/// no exit prompt.
+fn mark_terrain_unsaved(world: &mut World) {
+    let sequence = world.get_resource::<UndoStack>().map(|stack| stack.sequence()).unwrap_or(0);
+    if let Some(mut state) = world.get_resource_mut::<crate::ui::StudioState>() {
+        if state.saved_undo_sequence == sequence {
+            state.saved_undo_sequence = sequence.wrapping_sub(1);
+        }
+        state.has_unsaved_changes = true;
     }
 }
 
@@ -1876,6 +2483,9 @@ fn apply_redo_ecs(action: &Action, world: &mut World) {
             // Redo remove = remove
             remove_tag_from_entity(*id, tag, world);
         }
+        Action::BillboardOffsets { new_offsets, .. } => {
+            set_billboard_offsets(world, new_offsets);
+        }
         Action::TransformEntities { new_transforms, .. } => {
             // Apply new transforms
             for (entity_bits, new_pos, new_rot) in new_transforms {
@@ -2065,6 +2675,9 @@ fn apply_redo_ecs(action: &Action, world: &mut World) {
         Action::CadTreeEdit { entity_bits, new_toml, .. } => {
             apply_cad_tree_toml(world, *entity_bits, new_toml);
         }
+        Action::ChangeClassField { toml_path, property, new_text, .. } => {
+            crate::particles::bridge::apply_class_field_text(world, toml_path, property, new_text);
+        }
         Action::CadMateCreate { spec_json } => {
             // Redo create = re-fire the creation event with recording
             // off, so `handle_create_mate` doesn't push a duplicate
@@ -2072,6 +2685,9 @@ fn apply_redo_ecs(action: &Action, world: &mut World) {
             if let Ok(spec) = serde_json::from_str::<crate::cad_assembly::MateSpec>(spec_json) {
                 world.write_message(spec.to_event(false));
             }
+        }
+        Action::TerrainEdit { label, root, tiles, bricks } => {
+            apply_terrain_edit(world, label, *root, tiles, bricks, TerrainTileSide::After);
         }
         _ => {
             warn!("Redo not yet implemented for: {}", action.description());
@@ -2086,7 +2702,7 @@ fn apply_property_value_to_entity(id: u32, property: &str, value: &PropertyValue
     // Find entity by Instance ID
     let entity = {
         let mut query = world.query::<(Entity, &Instance)>();
-        query.iter(world).find(|(_, inst)| inst.id == id).map(|(e, _)| e)
+        query.iter(world).find(|(_, inst)| id != 0 && inst.id == id).map(|(e, _)| e)
     };
     
     let Some(entity) = entity else {
@@ -2242,7 +2858,7 @@ fn apply_parameters_to_entity(id: u32, params_json: &str, world: &mut World) {
     // Find entity by Instance ID
     let entity = {
         let mut query = world.query::<(Entity, &Instance)>();
-        query.iter(world).find(|(_, inst)| inst.id == id).map(|(e, _)| e)
+        query.iter(world).find(|(_, inst)| id != 0 && inst.id == id).map(|(e, _)| e)
     };
     
     let Some(entity) = entity else {
@@ -2314,7 +2930,7 @@ fn apply_folder_domain(id: u32, domain: Option<String>, source_override: Option<
     
     let entity = {
         let mut query = world.query::<(Entity, &Instance)>();
-        query.iter(world).find(|(_, inst)| inst.id == id).map(|(e, _)| e)
+        query.iter(world).find(|(_, inst)| id != 0 && inst.id == id).map(|(e, _)| e)
     };
     
     let Some(entity) = entity else {
@@ -2338,7 +2954,7 @@ fn apply_folder_sync_config(id: u32, config_json: Option<String>, world: &mut Wo
     
     let entity = {
         let mut query = world.query::<(Entity, &Instance)>();
-        query.iter(world).find(|(_, inst)| inst.id == id).map(|(e, _)| e)
+        query.iter(world).find(|(_, inst)| id != 0 && inst.id == id).map(|(e, _)| e)
     };
     
     let Some(entity) = entity else {
@@ -2367,7 +2983,7 @@ fn apply_attributes_to_entity(id: u32, attrs_json: &str, world: &mut World) {
     
     let entity = {
         let mut query = world.query::<(Entity, &Instance)>();
-        query.iter(world).find(|(_, inst)| inst.id == id).map(|(e, _)| e)
+        query.iter(world).find(|(_, inst)| id != 0 && inst.id == id).map(|(e, _)| e)
     };
     
     let Some(entity) = entity else {
@@ -2397,7 +3013,7 @@ fn add_attribute_to_entity(id: u32, key: &str, value_json: &str, world: &mut Wor
     
     let entity = {
         let mut query = world.query::<(Entity, &Instance)>();
-        query.iter(world).find(|(_, inst)| inst.id == id).map(|(e, _)| e)
+        query.iter(world).find(|(_, inst)| id != 0 && inst.id == id).map(|(e, _)| e)
     };
     
     let Some(entity) = entity else {
@@ -2423,7 +3039,7 @@ fn remove_attribute_from_entity(id: u32, key: &str, world: &mut World) {
     
     let entity = {
         let mut query = world.query::<(Entity, &Instance)>();
-        query.iter(world).find(|(_, inst)| inst.id == id).map(|(e, _)| e)
+        query.iter(world).find(|(_, inst)| id != 0 && inst.id == id).map(|(e, _)| e)
     };
     
     let Some(entity) = entity else {
@@ -2447,7 +3063,7 @@ fn apply_tags_to_entity(id: u32, tag_list: Vec<String>, world: &mut World) {
     
     let entity = {
         let mut query = world.query::<(Entity, &Instance)>();
-        query.iter(world).find(|(_, inst)| inst.id == id).map(|(e, _)| e)
+        query.iter(world).find(|(_, inst)| id != 0 && inst.id == id).map(|(e, _)| e)
     };
     
     let Some(entity) = entity else {
@@ -2470,7 +3086,7 @@ fn add_tag_to_entity(id: u32, tag: &str, world: &mut World) {
     
     let entity = {
         let mut query = world.query::<(Entity, &Instance)>();
-        query.iter(world).find(|(_, inst)| inst.id == id).map(|(e, _)| e)
+        query.iter(world).find(|(_, inst)| id != 0 && inst.id == id).map(|(e, _)| e)
     };
     
     let Some(entity) = entity else {
@@ -2494,7 +3110,7 @@ fn remove_tag_from_entity(id: u32, tag: &str, world: &mut World) {
     
     let entity = {
         let mut query = world.query::<(Entity, &Instance)>();
-        query.iter(world).find(|(_, inst)| inst.id == id).map(|(e, _)| e)
+        query.iter(world).find(|(_, inst)| id != 0 && inst.id == id).map(|(e, _)| e)
     };
     
     let Some(entity) = entity else {
@@ -2751,4 +3367,78 @@ fn apply_redo(_action: &Action, _part_manager: &BevyPartManager) {
         }
     }
     */
+}
+
+#[cfg(test)]
+mod coalesce_tests {
+    use super::*;
+
+    fn moved(bits: u64, from: f32, to: f32) -> Action {
+        Action::TransformEntities {
+            old_transforms: vec![(bits, [from, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])],
+            new_transforms: vec![(bits, [to, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])],
+        }
+    }
+
+    #[test]
+    fn held_nudges_fold_into_one_step() {
+        let mut stack = UndoStack::default();
+        stack.push_coalesced("nudge", "Nudge", moved(7, 0.0, 1.0));
+        stack.push_coalesced("nudge", "Nudge", moved(7, 1.0, 2.0));
+        stack.push_coalesced("nudge", "Nudge", moved(7, 2.0, 3.0));
+        assert_eq!(stack.history().len(), 1);
+        match stack.history().front() {
+            Some(Action::TransformEntities { old_transforms, new_transforms }) => {
+                assert_eq!(old_transforms[0].1[0], 0.0, "keeps the first before");
+                assert_eq!(new_transforms[0].1[0], 3.0, "takes the last after");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_different_key_or_entity_starts_a_new_step() {
+        let mut stack = UndoStack::default();
+        stack.push_coalesced("nudge", "Nudge", moved(7, 0.0, 1.0));
+        stack.push_coalesced("wheel", "Resize", moved(7, 1.0, 2.0));
+        stack.push_coalesced("wheel", "Resize", moved(8, 0.0, 1.0));
+        assert_eq!(stack.history().len(), 3);
+    }
+
+    #[test]
+    fn undo_ends_coalescing() {
+        let mut stack = UndoStack::default();
+        stack.push_coalesced("nudge", "Nudge", moved(7, 0.0, 1.0));
+        let _ = stack.undo();
+        stack.push_coalesced("nudge", "Nudge", moved(7, 0.0, 5.0));
+        assert_eq!(stack.history().len(), 1);
+        assert_eq!(stack.current_index(), 1);
+        match stack.history().front() {
+            Some(Action::TransformEntities { new_transforms, .. }) => assert_eq!(new_transforms[0].1[0], 5.0),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clear_drops_labels_too() {
+        let mut stack = UndoStack::default();
+        stack.push_labeled("First", moved(1, 0.0, 1.0));
+        stack.clear();
+        stack.push(moved(2, 0.0, 1.0));
+        assert_eq!(stack.label_at(0), None);
+    }
+
+    #[test]
+    fn a_folded_step_still_counts_as_new_work() {
+        let mut stack = UndoStack::default();
+        stack.push_coalesced("nudge", "Nudge", moved(7, 0.0, 1.0));
+        let after_first = stack.sequence();
+        stack.push_coalesced("nudge", "Nudge", moved(7, 1.0, 2.0));
+        assert_eq!(stack.history().len(), 1);
+        assert!(stack.sequence() > after_first, "a nudge after a save must mark the Space unsaved");
+        let events = stack.drain_pending_stream();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].sequence, stack.sequence());
+        assert_eq!(events[1].label.as_deref(), Some("Nudge"));
+    }
 }

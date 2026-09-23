@@ -152,6 +152,82 @@ ghosted too. Causes found in code, and what changed:
    (`group_support_distance`), not just the leader, so a taller companion no
    longer sinks; face-frame grid snapping and edge snapping are unchanged.
 
+## Undo and accidental changes (2026-09-22)
+
+Every path that moves, resizes or re-flags a part was checked against two
+questions: can it happen by accident, and does one Ctrl+Z take it back.
+
+1. Slips are harder to make (`drag_guard.rs`).
+   - A press becomes a drag only past a dead zone: 6 px on a part's body,
+     3 px on a Move, Rotate or Scale handle. A click, or a hand that twitches
+     while clicking, moves nothing and records nothing.
+   - Surface placement is absolute, so on its first frame a body drag threw
+     the part to where the ray behind it met the ground. The start offset is
+     captured when the drag goes live and fades out over 140 px of travel.
+   - Escape cancels any drag and restores what it touched. Ctrl+Z, Redo or a
+     History row click while the button is held does the same, instead of
+     reaching into the history while the drag carries on.
+   - Plain R and T turned the selection on any keypress, with no undo and no
+     text-field check. They now act only during a Select or Move drag, as in
+     Roblox Studio. Ctrl+R and Ctrl+T arrive through the keymap, so rebinds
+     and the Roblox preset apply, and each turn is one undo step.
+   - Grid snap moved the grab point, which knocked aligned parts off the
+     grid. It now snaps the part's lower corner in the surface frame
+     (`math_utils::snap_part_by_corner`): an aligned part stays put and odd
+     sizes land edge-on-grid.
+2. Drags that ended without an undo step.
+   - Each tool latched its drag and waited to see the release. Releasing over
+     a panel or outside the window, or switching tools mid-drag, left the
+     latch set, recorded nothing and kept `BeingDragged` on the parts, which
+     holds the disk writer off. A latched drag now ends as soon as the button
+     is up or the tool is inactive, and commits one labelled step ("Drag 3
+     objects", "Move 2 objects", "Rotate 1 object").
+   - The Move tool ignored rotation on release (align-to-surface turns the
+     part) and never recorded BillboardGui offsets. It records both in one
+     step (`Action::BillboardOffsets`).
+   - A Select drag includes the mind-map neighbours that drift along with it,
+     and cancelling restores them.
+3. Edits that had no undo: keyboard lift and settle, the Ctrl+Shift+Alt wheel
+   resize, a typed Size in Properties, Lock and Anchor paint clicks, and Unlock
+   All. Each records a step. Held keys and wheel rolls repeating within 1.2 s
+   fold into one step (`UndoStack::push_coalesced`), so one Ctrl+Z undoes the
+   whole hold.
+4. Undo that was partial or hit the wrong part.
+   - Every instance loaded from a Space had `Instance.id` 0, and property,
+     tag, attribute and parameter undo find their entity by that id: undoing
+     a colour change recoloured whichever part the query met first. Instances
+     get a unique runtime id on spawn (`undo::assign_runtime_instance_ids`),
+     and no resolver matches 0.
+   - A typed Position or Rotation moves every selected part, but its undo step
+     covered only the primary. It covers every part moved.
+   - Resize Align undo restored position only. It restores size too.
+   - Settle could land on the part's own children, and lift used local Y, so
+     a part inside a rotated Model rose sideways. Both work in world space and
+     exclude the moving set.
+5. History.
+   - Ctrl+Z stepped the edit history and a separate selection history at once,
+     so one keypress reverted a selection and an unrelated edit. Undo and Redo
+     walk the edit history only, and select what they changed.
+   - A History row click jumped the selection history with an edit-history
+     index. It jumps the edit history to that row, backward or forward
+     (`HistoryJumpEvent`).
+   - Rows show the label the tool pushed, so the gesture behind each step is
+     visible.
+   - The limit is 500 steps (was 100); Clear empties the labels as well.
+   - A folded step counts as new work, so the unsaved marker and the history
+     stream see it.
+6. Undo that never reached disk. The disk writer skipped any file written in
+   the last two seconds, the window that stops the file watcher reloading the
+   engine's own writes, so an undo right after a drag came back on reload, and
+   Rotate drags (which rely on the writer) were never saved. The writer holds
+   such changes and writes the latest state once the window passes, and picks
+   an entity up as soon as a drag removes `BeingDragged`.
+
+Known gaps: the wheel resize also scales a part's child BillboardGui label,
+and undo restores the part but not the label. Parts that leave the selection
+mid-drag (a script or the bridge clearing it) are not in that drag's step.
+Status: source only; compile and live test pending.
+
 ## Already ahead of Roblox
 
 - Group delta for multi-select Position and Rotation (Roblox collapses every

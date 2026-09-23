@@ -1656,16 +1656,29 @@ impl ModalTool for ResizeAlign {
         // Persist to source's TOML so the resize survives reload.
         persist_transform_and_size_to_toml(world, source, new_size);
 
-        // Undo: record size+position transition. UndoStack's existing
-        // TransformEntities captures only position/rotation; size is a
-        // BasePart field. Use the Spawn/Resize Phase-1 ResizePart
-        // variant when it lands. For v1 we record position only so at
-        // least Ctrl+Z partially reverts.
+        // Undo: size AND position, so Ctrl+Z returns the part to its old
+        // extent (a position-only step left it stretched). CAD parts resize
+        // through their feature tree, whose own history covers the size, so
+        // only their position is recorded here.
+        let is_cad = world.get::<crate::cad_plugin::CadPart>(source).is_some();
         if let Some(mut undo) = world.get_resource_mut::<crate::undo::UndoStack>() {
-            undo.push(crate::undo::Action::TransformEntities {
-                old_transforms: vec![(source.to_bits(), src_t.translation.to_array(), src_t.rotation.to_array())],
-                new_transforms: vec![(source.to_bits(), new_translation.to_array(), src_t.rotation.to_array())],
-            });
+            if is_cad {
+                undo.push_labeled(
+                    "Resize Align",
+                    crate::undo::Action::TransformEntities {
+                        old_transforms: vec![(source.to_bits(), src_t.translation.to_array(), src_t.rotation.to_array())],
+                        new_transforms: vec![(source.to_bits(), new_translation.to_array(), src_t.rotation.to_array())],
+                    },
+                );
+            } else {
+                undo.push_labeled(
+                    "Resize Align",
+                    crate::undo::Action::ScaleEntities {
+                        old_states: vec![(source.to_bits(), src_t.translation.to_array(), source_size.to_array())],
+                        new_states: vec![(source.to_bits(), new_translation.to_array(), new_size.to_array())],
+                    },
+                );
+            }
         }
 
         info!("🔁 Resize Align ({}): {:?} size {:?} → {:?}",
