@@ -55,6 +55,8 @@ pub struct SpaceCharacterPolicy {
     pub rigs: HashMap<AvatarIdentity, RigDefinition>,
     /// For a body option without a replacement of its own.
     pub fallback: Option<RigDefinition>,
+    /// Heights (metres) the Space sets, by rig id.
+    pub heights: HashMap<String, f32>,
     /// The movement verbs every avatar starts with.
     pub abilities: AvatarAbilities,
 }
@@ -65,6 +67,9 @@ struct CharacterFile {
     #[serde(default)]
     label: Option<String>,
     body: String,
+    /// Metres; clamped to the engine's body range.
+    #[serde(default)]
+    height: Option<f32>,
     #[serde(default)]
     animations: CharacterClips,
     #[serde(default)]
@@ -144,12 +149,17 @@ impl SpaceCharacterPolicy {
                 continue;
             };
             match read_rig(&path, stem, option.unwrap_or(AvatarIdentity::Male)) {
-                Ok(rig) => match option {
+                Ok((rig, height)) => {
+                    if let Some(h) = height {
+                        policy.heights.insert(rig.id.clone(), h);
+                    }
+                    match option {
                     Some(identity) => {
                         policy.rigs.insert(identity, rig);
                     }
-                    None => policy.fallback = Some(rig),
-                },
+                        None => policy.fallback = Some(rig),
+                    }
+                }
                 Err(e) => warnings.push(format!("{name}: {e}")),
             }
         }
@@ -167,18 +177,22 @@ impl SpaceCharacterPolicy {
         rig.identity = identity;
         fill_default_clips(&mut rig, identity);
         let mut out = descriptor.clone();
+        if let (Some(h), false) = (self.heights.get(&rig.id), identity == AvatarIdentity::Robot) {
+            use eustress_avatar_schema::{MAX_HEIGHT_M, MIN_HEIGHT_M};
+            out.morphs.height = eustress_avatar_schema::Norm01::new((h - MIN_HEIGHT_M) / (MAX_HEIGHT_M - MIN_HEIGHT_M));
+        }
         out.rig = Some(rig);
         match out.validate() {
             Ok(()) => out,
             Err(e) => {
-                warn!("avatar: the Space's {} character is unusable ({e}); using the default", identity.label());
+                tracing::warn!("avatar: the Space's {} character is unusable ({e}); using the default", identity.label());
                 descriptor
             }
         }
     }
 }
 
-fn read_rig(path: &Path, stem: &str, identity: AvatarIdentity) -> Result<RigDefinition, String> {
+fn read_rig(path: &Path, stem: &str, identity: AvatarIdentity) -> Result<(RigDefinition, Option<f32>), String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let file: CharacterFile = toml::from_str(&text).map_err(|e| e.to_string())?;
     let clip = |c: &Option<String>| c.as_deref().map(asset_path).unwrap_or_default();
@@ -201,7 +215,7 @@ fn read_rig(path: &Path, stem: &str, identity: AvatarIdentity) -> Result<RigDefi
     let mut check = rig.clone();
     fill_default_clips(&mut check, identity);
     check.validate()?;
-    Ok(rig)
+    Ok((rig, file.height.filter(|h| h.is_finite() && *h > 0.0)))
 }
 
 #[cfg(test)]
