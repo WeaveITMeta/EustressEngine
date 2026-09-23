@@ -5,6 +5,7 @@
 
 import { HorizontalBox, VerticalBox, ScrollView, Slider, LineEdit } from "std-widgets.slint";
 import { Theme, IconButton, ToolbarSeparator } from "theme.slint";
+import { TerrainMaterialSlotData } from "terrain_editor.slint";
 
 // An "Eustress Mode" entry for the Modes dropdown (id/name/icon-id pushed
 // from Rust's ModeRegistry). `icon-id` is one of the small compile-time
@@ -130,11 +131,17 @@ component BrushSettingsModal inherits PopupWindow {
     in property <float> brush-size: 10.0;
     in property <float> brush-strength: 0.5;
     in property <string> brush-falloff: "smooth";
-    
+    // Paint only: the material picker, a swatch grid of every slot with the
+    // painted one outlined (names are in the Terrain panel's list).
+    in property <[TerrainMaterialSlotData]> materials: [];
+    in property <int> paint-material: 0;
+    in property <string> paint-material-name: "";
+
     callback size-changed(float);
     callback strength-changed(float);
     callback falloff-changed(string);
-    
+    callback material-changed(int);
+
     width: 220px;
     
     Rectangle {
@@ -270,6 +277,50 @@ component BrushSettingsModal inherits PopupWindow {
                             font-size: 10px;
                             horizontal-alignment: center;
                             vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // Material picker (Paint only). Seven 28px cells fill the
+            // modal's 196px content width exactly, so no padding here.
+            if root.brush-name == "Paint": VerticalBox {
+                padding: 0px;
+                spacing: 4px;
+
+                HorizontalBox {
+                    padding: 0px;
+                    Text {
+                        text: "Material";
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: root.paint-material-name;
+                        color: Theme.text-primary;
+                        font-size: 11px;
+                        horizontal-alignment: right;
+                        overflow: elide;
+                    }
+                }
+
+                Rectangle {
+                    height: Math.ceil(root.materials.length / 7) * 28px;
+
+                    for mat[i] in root.materials: Rectangle {
+                        x: Math.mod(i, 7) * 28px;
+                        y: Math.floor(i / 7) * 28px;
+                        width: 24px;
+                        height: 24px;
+                        background: mat.swatch;
+                        border-radius: 4px;
+                        border-width: mat.slot-id == root.paint-material ? 2px : 1px;
+                        border-color: mat.slot-id == root.paint-material ? Theme.accent-eustress
+                            : (swatch-touch.has-hover ? Theme.text-primary : Theme.border-color);
+
+                        swatch-touch := TouchArea {
+                            clicked => { root.material-changed(mat.slot-id); }
                         }
                     }
                 }
@@ -464,6 +515,11 @@ export component Ribbon inherits Rectangle {
     // looked identical to an unarmed one.
     in property <string> current-terrain-brush: "";
     in property <bool> terrain-edit-mode: false;
+    // Terrain material picker for the Paint brush settings, pushed from Rust
+    // off TerrainMaterialSlots / TerrainBrush (same feed as the Terrain panel).
+    in property <[TerrainMaterialSlotData]> terrain-materials: [];
+    in property <int> terrain-paint-material: 0;
+    in property <string> terrain-paint-material-name: "";
     /// Data-driven Insert-menu catalog — every creatable registered class,
     /// grouped by category, fed from Rust (`set_insert_classes`). Drives
     /// the dynamic section of the Insert dropdown below the pinned items.
@@ -635,7 +691,16 @@ export component Ribbon inherits Rectangle {
     
     // View callbacks
     callback on-focus-selection();
-    
+    // Perspective: one command string per choice, parsed in Rust by
+    // `camera_controller::ViewCommand::parse` ("2d", "3d",
+    // "toggle-projection", "top", "frame-all", ...).
+    callback on-set-view-mode(string);
+    // Current Perspective, for the View menu's markers.
+    in property <string> view-dimension: "3d";
+    in property <string> view-projection: "perspective";
+    // Saved viewpoints of the open Space, listed under View > VIEWPOINTS.
+    in property <[string]> viewpoint-names: [];
+
     // Network callbacks
     callback on-start-server();
     callback on-stop-server();
@@ -654,6 +719,7 @@ export component Ribbon inherits Rectangle {
     callback on-spawn-terrain(string);
     callback on-toggle-terrain-edit();
     callback on-set-terrain-brush(string);
+    callback on-set-terrain-paint-material(int);
     callback on-import-heightmap();
     callback on-export-heightmap();
     callback on-brush-size-changed(float);
@@ -1267,6 +1333,48 @@ export component Ribbon inherits Rectangle {
                                 DropdownSeparator {}
                                 DropdownHeader { label: "CAMERA"; }
                                 DropdownItem { label: "Focus Selection"; shortcut: "F"; clicked => { root.on-focus-selection(); } }
+                                DropdownItem { label: "Frame All"; shortcut: "Num ."; clicked => { root.on-set-view-mode("frame-all"); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "PERSPECTIVE"; }
+                                DropdownItem {
+                                    label: root.view-dimension == "3d" ? "3D View  [on]" : "3D View";
+                                    shortcut: "Alt+3";
+                                    icon: @image-url("../../assets/icons/ui/view-3d.svg");
+                                    clicked => { root.on-set-view-mode("3d"); }
+                                }
+                                DropdownItem {
+                                    label: root.view-dimension == "2d" ? "2D View  [on]" : "2D View";
+                                    shortcut: "Alt+2";
+                                    icon: @image-url("../../assets/icons/ui/view-2d.svg");
+                                    clicked => { root.on-set-view-mode("2d"); }
+                                }
+                                // 2D is always orthographic, so the switch is 3D-only.
+                                DropdownItem {
+                                    label: root.view-projection == "orthographic" ? "Switch to Perspective" : "Switch to Orthographic";
+                                    shortcut: "5";
+                                    enabled: root.view-dimension == "3d";
+                                    icon: root.view-projection == "orthographic"
+                                        ? @image-url("../../assets/icons/ui/view-perspective.svg")
+                                        : @image-url("../../assets/icons/ui/view-orthographic.svg");
+                                    clicked => { root.on-set-view-mode("toggle-projection"); }
+                                }
+                                DropdownItem { label: "Top"; shortcut: "Num 8"; clicked => { root.on-set-view-mode("top"); } }
+                                DropdownItem { label: "Front"; shortcut: "Num 2"; clicked => { root.on-set-view-mode("front"); } }
+                                DropdownItem { label: "Right"; shortcut: "Num 6"; clicked => { root.on-set-view-mode("right"); } }
+                                DropdownItem { label: "Left"; shortcut: "Num 4"; clicked => { root.on-set-view-mode("left"); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "VIEWPOINTS"; }
+                                // Saves the whole view, 2D/3D and projection
+                                // included, as the next "Viewpoint N".
+                                DropdownItem {
+                                    label: "Save Viewpoint";
+                                    icon: @image-url("../../assets/icons/ui/camera.svg");
+                                    clicked => { root.on-set-view-mode("viewpoint-save"); }
+                                }
+                                for viewpoint in root.viewpoint-names: DropdownItem {
+                                    label: viewpoint;
+                                    clicked => { root.on-set-view-mode("viewpoint:" + viewpoint); }
+                                }
                             }
                         }
                     }
@@ -1345,6 +1453,7 @@ export component Ribbon inherits Rectangle {
                                                 : item.category == "Lighting" ? @image-url("../../assets/icons/lighting.svg")
                                                 : item.category == "Constraints" ? @image-url("../../assets/icons/weldconstraint.svg")
                                                 : item.category == "Effects" ? @image-url("../../assets/icons/particleemitter.svg")
+                                                : item.category == "Simulation" ? @image-url("../../assets/icons/particlesimulation.svg")
                                                 : item.category == "Audio" ? @image-url("../../assets/icons/sound.svg")
                                                 : item.category == "GUI" ? @image-url("../../assets/icons/screengui.svg")
                                                 : item.category == "Scripting" ? @image-url("../../assets/icons/script.svg")
@@ -1620,6 +1729,8 @@ export component Ribbon inherits Rectangle {
                                 DropdownItem { label: "Smooth"; shortcut: "3"; clicked => { root.on-set-terrain-brush("smooth"); } }
                                 DropdownItem { label: "Flatten"; shortcut: "4"; clicked => { root.on-set-terrain-brush("flatten"); } }
                                 DropdownItem { label: "Paint"; shortcut: "5"; clicked => { root.on-set-terrain-brush("paint"); } }
+                                DropdownItem { label: "Add (3D)"; clicked => { root.on-set-terrain-brush("voxeladd"); } }
+                                DropdownItem { label: "Subtract (3D)"; clicked => { root.on-set-terrain-brush("voxelremove"); } }
                                 DropdownSeparator {}
                                 DropdownHeader { label: "ASSETS"; }
                                 DropdownItem { label: "Import Heightmap..."; clicked => { root.on-import-heightmap(); } }
@@ -2946,6 +3057,7 @@ export component Ribbon inherits Rectangle {
                 ToolGroup {
                     label: "Effects";
                     IconButton { icon: @image-url("../../assets/icons/particleemitter.svg"); label: "Particles"; tooltip: "Insert Particles"; tint: Theme.accent-purple; clicked => { root.on-menu-action("insert:particleemitter"); } }
+                    IconButton { icon: @image-url("../../assets/icons/particlesimulation.svg"); label: "Particle Sim"; tooltip: "Insert Particle Simulation (fluids, electrons, conduction)"; tint: Theme.accent-purple; clicked => { root.on-menu-action("insert:ParticleSimulation"); } }
                     IconButton { icon: @image-url("../../assets/icons/pointlight.svg"); label: "Point"; tooltip: "Insert PointLight"; tint: Theme.accent-yellow; clicked => { root.on-menu-action("insert:pointlight"); } }
                     IconButton { icon: @image-url("../../assets/icons/spotlight.svg"); label: "Spot"; tooltip: "Insert SpotLight"; tint: Theme.accent-yellow; clicked => { root.on-menu-action("insert:spotlight"); } }
                     IconButton { icon: @image-url("../../assets/icons/sound.svg"); label: "Sound"; tooltip: "Insert Sound"; tint: Theme.cat-data; clicked => { root.on-menu-action("insert:sound"); } }
@@ -3021,11 +3133,12 @@ export component Ribbon inherits Rectangle {
                     IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Small"; tooltip: "Small Terrain (128m)"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("small"); } }
                     IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Medium"; tooltip: "Medium Terrain (512m)"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("medium"); } }
                     IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Large"; tooltip: "Large Terrain (2km)"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("large"); } }
-                    // Flat baseplate — a dead-level sculptable plate, written
+                    // Flat baseplate: a dead-level sculptable plate, written
                     // straight to disk. Small/Medium/Large above run the full
                     // worldgen pipeline (rivers, climate, materials) and take
-                    // a while; this one returns immediately.
-                    IconButton { icon: @image-url("../../assets/icons/ui/array-grid.svg"); label: "Flat"; tooltip: "Flat baseplate terrain (576 m, sculptable) — instant, no rivers or biomes"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("flat"); } }
+                    // a while; this one returns immediately. The dig and raise
+                    // depths are the height band `flat_preset` writes.
+                    IconButton { icon: @image-url("../../assets/icons/ui/array-grid.svg"); label: "Flat"; tooltip: "Flat baseplate (576 m): instant, dig down 32 m or raise 96 m"; tint: Theme.accent-green; clicked => { root.on-spawn-terrain("flat"); } }
                 }
                 GroupDivider {}
                 
@@ -3133,7 +3246,7 @@ export component Ribbon inherits Rectangle {
                             root.show-brush-settings = true;
                             brush-settings-modal.show();
                         }
-                        long-pressed => { 
+                        long-pressed => {
                             root.settings-brush-name = "Flatten";
                             root.settings-modal-x = flatten-btn.absolute-position.x;
                             root.settings-modal-y = flatten-btn.absolute-position.y + flatten-btn.height;
@@ -3141,10 +3254,57 @@ export component Ribbon inherits Rectangle {
                             brush-settings-modal.show();
                         }
                     }
+                    // 3D brushes: they edit the terrain volume, so they can
+                    // build overhangs and arches (Add) or dig caves and
+                    // tunnels (Subtract) that one height per column cannot.
+                    voxel-add-btn := IconButton {
+                        icon: @image-url("../../assets/icons/ui/csg-union.svg");
+                        label: "Add";
+                        tooltip: "Add terrain in 3D (overhangs, arches) | Hold or right-click for settings";
+                        tint: Theme.accent-green;
+                        selected: root.current-terrain-brush == "voxeladd";
+                        clicked => { root.on-set-terrain-brush("voxeladd"); }
+                        right-clicked => {
+                            root.settings-brush-name = "Add";
+                            root.settings-modal-x = voxel-add-btn.absolute-position.x;
+                            root.settings-modal-y = voxel-add-btn.absolute-position.y + voxel-add-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                        long-pressed => {
+                            root.settings-brush-name = "Add";
+                            root.settings-modal-x = voxel-add-btn.absolute-position.x;
+                            root.settings-modal-y = voxel-add-btn.absolute-position.y + voxel-add-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                    }
+                    voxel-subtract-btn := IconButton {
+                        icon: @image-url("../../assets/icons/ui/csg-subtract.svg");
+                        label: "Subtract";
+                        tooltip: "Carve caves and tunnels in 3D | Hold or right-click for settings";
+                        tint: Theme.accent-orange;
+                        selected: root.current-terrain-brush == "voxelremove";
+                        clicked => { root.on-set-terrain-brush("voxelremove"); }
+                        right-clicked => {
+                            root.settings-brush-name = "Subtract";
+                            root.settings-modal-x = voxel-subtract-btn.absolute-position.x;
+                            root.settings-modal-y = voxel-subtract-btn.absolute-position.y + voxel-subtract-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                        long-pressed => {
+                            root.settings-brush-name = "Subtract";
+                            root.settings-modal-x = voxel-subtract-btn.absolute-position.x;
+                            root.settings-modal-y = voxel-subtract-btn.absolute-position.y + voxel-subtract-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                    }
                     paint-btn := IconButton { 
                         icon: @image-url("../../assets/icons/ui/palette.svg"); 
                         label: "Paint"; 
-                        tooltip: "Paint (5) | Hold or right-click for settings"; 
+                        tooltip: "Paint (5) | Hold or right-click for material and settings";
                         tint: Theme.accent-purple; 
                         selected: root.current-terrain-brush == "paint";
                         clicked => { root.on-set-terrain-brush("paint"); }
@@ -3534,8 +3694,12 @@ export component Ribbon inherits Rectangle {
         brush-size: root.brush-size;
         brush-strength: root.brush-strength;
         brush-falloff: root.brush-falloff;
-        
-        size-changed(val) => { 
+        materials: root.terrain-materials;
+        paint-material: root.terrain-paint-material;
+        paint-material-name: root.terrain-paint-material-name;
+
+        material-changed(slot) => { root.on-set-terrain-paint-material(slot); }
+        size-changed(val) => {
             root.brush-size = val;
             root.on-brush-size-changed(val);
         }

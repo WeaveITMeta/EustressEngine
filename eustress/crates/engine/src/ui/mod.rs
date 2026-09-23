@@ -22,6 +22,10 @@ use crate::commands::{SelectionManager, TransformManager};
 pub mod slint_ui;
 /// Data-driven Insert-menu catalog (ClassRegistry → grouped descriptors).
 pub mod insert_classes;
+pub mod particle_sim_panel;
+/// The editor camera's Perspective (2D/3D, projection, axis view) into the
+/// tab-bar ViewSelector and the View menu.
+pub mod perspective_hud;
 pub mod explorer_query;
 pub mod slint_native;
 pub mod slint_bridge;
@@ -32,7 +36,7 @@ pub mod rune_bindings;
 pub mod rune_ecs_bindings;
 
 // Core modules that don't depend on egui
-mod file_dialogs;
+pub mod file_dialogs;
 pub mod file_event_handler;
 mod spawn_events;
 mod menu_events;
@@ -305,6 +309,10 @@ pub struct StudioState {
     /// only tracks whether a git snapshot has recorded them since, which is
     /// what the title asterisk and the exit prompt mean.
     pub saved_undo_sequence: u64,
+    /// The user was told this Space's terrain edits cannot be saved yet (a
+    /// migrated Space), so autosave does not repeat the warning every
+    /// interval. A manual Save and a Space switch clear it.
+    pub terrain_unsaved_warned: bool,
     /// Short status shown in the File menu: "Snapshot 12:03", "Autosaved
     /// 12:08", or "No snapshot yet".
     pub snapshot_status: String,
@@ -448,6 +456,7 @@ impl Default for StudioState {
             has_unsaved_changes: false,
             show_exit_confirmation: false,
             saved_undo_sequence: 0,
+            terrain_unsaved_warned: false,
             snapshot_status: "No snapshot yet".to_string(),
             show_insert_object_dialog: false,
             insert_target_name: "Workspace".to_string(),
@@ -658,6 +667,9 @@ pub struct SlintUIFocus {
     pub focused_entity: Option<Entity>,
     /// Name of ScreenGui button that was clicked this frame (consumed by script dispatch)
     pub gui_clicked_button: Option<String>,
+    /// The clicked button's entity, so Luau can fire `MouseButton1Click` on
+    /// the right instance when several buttons share a name.
+    pub gui_clicked_entity: Option<Entity>,
 }
 
 #[derive(Resource)]

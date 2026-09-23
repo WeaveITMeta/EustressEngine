@@ -427,15 +427,26 @@ fn setup_grid_gizmo_config(
 
 /// Draw grid overlay in viewport - follows camera on X/Z plane
 /// Origin axes (red X, blue Z) stay fixed at world origin
+///
+/// An orthographic axis view (every 2D view, and Front/Top/Right... in 3D
+/// orthographic) sees the ground edge-on and gets `view_grid`'s grid in its
+/// own plane instead.
 fn draw_grid_overlay(
     mut gizmos: Gizmos,
     settings: Res<EditorSettings>,
     camera_query: Query<&Transform, With<Camera3d>>,
+    editor_cameras: Query<&crate::camera_controller::EustressCamera>,
 ) {
     if !settings.show_grid {
         return;
     }
-    
+    if editor_cameras
+        .iter()
+        .any(|cam| crate::view_grid::orthographic_axis_view(cam).is_some())
+    {
+        return;
+    }
+
     // Get camera position to center grid around it
     let camera_pos = camera_query.iter().next()
         .map(|t| t.translation)
@@ -519,25 +530,24 @@ fn draw_grid_overlay(
 /// editor) already knows, and piggybacks on git's delta compression
 /// so autosaves cost effectively nothing on disk past the first one.
 ///
-/// The Space's live on-disk state is already authoritative (every tool
-/// edits TOML files directly via `write_instance_changes_system`) —
-/// autosave only needs to capture a commit boundary, not re-derive the
-/// scene from the ECS. That also makes autosave a no-op when nothing's
-/// changed since the last tick, which is the common case while the
-/// user is just looking around.
+/// Entity edits already reach disk as they happen (every tool edits TOML
+/// files directly via `write_instance_changes_system`), so for them autosave
+/// only needs to capture a commit boundary. Terrain is the exception: brush,
+/// road, Part to Terrain and volume edits live in memory until
+/// `save_terrain_to_disk` writes them, so when the terrain itself changed
+/// since its last save the autosave writes it through that same function
+/// Save uses before it commits. Nothing changed makes autosave a no-op,
+/// which is the common case while the user is just looking around.
+///
+/// The work runs as a queued command, which gets the whole `World` the
+/// terrain save needs.
 fn auto_save_scene_system(
+    mut commands: Commands,
     time: Res<Time>,
     settings: Res<EditorSettings>,
     mut auto_save: ResMut<AutoSaveState>,
-    mut notifications: ResMut<crate::notifications::NotificationManager>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
     auth: Option<Res<crate::auth::AuthState>>,
-    // The title asterisk and the exit prompt count edits since the last
-    // snapshot; an autosave is one.
-    mut snapshot_state: (
-        Option<ResMut<crate::ui::StudioState>>,
-        Option<Res<crate::undo::UndoStack>>,
-    ),
 ) {
     // Skip if auto-save is disabled
     if !settings.auto_save_enabled || settings.auto_save_interval <= 0.0 {
@@ -567,6 +577,26 @@ fn auto_save_scene_system(
     let identity = auth
         .as_deref()
         .and_then(git_identity_from_auth);
+
+    auto_save.last_save = Some(std::time::Instant::now());
+    commands.queue(move |world: &mut World| autosave_space(world, space_path, identity));
+}
+
+/// One autosave: write the terrain when it changed since its last save,
+/// commit the Space to git off the main thread, and record the snapshot for
+/// the title asterisk and the exit prompt.
+fn autosave_space(world: &mut World, space_path: PathBuf, identity: Option<GitIdentity>) {
+    // Read before the snapshot below resets it. Terrain undo and redo push
+    // the saved sequence back (`mark_terrain_unsaved`), so they count too.
+    let sequence = world.get_resource::<crate::undo::UndoStack>().map(|undo| undo.sequence());
+    let unsaved = match (world.get_resource::<crate::ui::StudioState>(), sequence) {
+        (Some(state), Some(sequence)) => state.has_unsaved_changes || state.saved_undo_sequence != sequence,
+        _ => true,
+    };
+    // Only terrain edits need the whole-terrain rewrite; entity edits are
+    // already on disk and just need the git commit below.
+    let terrain_unsaved = crate::ui::file_event_handler::terrain_changed_since_save(world, unsaved)
+        && crate::ui::file_event_handler::save_terrain_to_disk(world);
 
     // Dispatch the git work to a background thread. `git add -A` +
     // commit can hit the filesystem harder than we want to pay for on
@@ -600,13 +630,16 @@ fn auto_save_scene_system(
         }
     });
 
-    auto_save.last_save = Some(std::time::Instant::now());
-    if let (Some(state), undo) = (snapshot_state.0.as_mut(), snapshot_state.1.as_ref()) {
-        state.saved_undo_sequence = undo.map(|u| u.sequence()).unwrap_or(0);
-        state.has_unsaved_changes = false;
+    // The title asterisk and the exit prompt count edits since the last
+    // snapshot; an autosave is one. Terrain edits that did not reach storage
+    // keep the Space unsaved, the saved sequence left one behind as a
+    // terrain undo leaves it, since the UI sync derives the marker from it.
+    if let Some(mut state) = world.get_resource_mut::<crate::ui::StudioState>() {
+        let sequence = sequence.unwrap_or(0);
+        state.saved_undo_sequence = if terrain_unsaved { sequence.wrapping_sub(1) } else { sequence };
+        state.has_unsaved_changes = terrain_unsaved;
         state.snapshot_status = format!("Autosaved {}", chrono::Local::now().format("%H:%M"));
     }
-    let _ = &notifications; // toast now reported truthfully from the git thread
 }
 
 pub(crate) enum GitAutosave {

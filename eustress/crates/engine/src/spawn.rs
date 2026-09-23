@@ -131,7 +131,7 @@ pub fn spawn_part_glb(
     // Compute UV tiling from part size at spawn time so the first frame
     // renders with correct texture density. The material_sync system
     // will keep this in sync on subsequent BasePart / Transform changes.
-    let uv_transform = crate::material_sync::compute_uv_transform_from_size(size);
+    let uv_transform = crate::material_sync::compute_uv_transform_from_size(size, part.shape);
 
     let material = materials.add(StandardMaterial {
         base_color: base_part.color,
@@ -419,10 +419,11 @@ pub fn spawn_point_light(
     commands.spawn((
         PointLight {
             color: light.color,
-            intensity: light.brightness, // Lumens — physically based
+            // Lumens — physically based; a disabled light emits nothing.
+            intensity: if light.enabled { light.brightness } else { 0.0 },
             range: light.range,
             radius: light.radius, // Spherical area light radius
-            shadow_maps_enabled: light.shadows,
+            shadow_maps_enabled: light.shadows && light.enabled,
             ..default()
         },
         transform,
@@ -447,11 +448,12 @@ pub fn spawn_spot_light(
     commands.spawn((
         SpotLight {
             color: light.color,
-            intensity: light.brightness, // Lumens — physically based
+            // Lumens — physically based; a disabled light emits nothing.
+            intensity: if light.enabled { light.brightness } else { 0.0 },
             range: light.range,
             inner_angle: (light.angle * 0.85).to_radians(),
             outer_angle: light.angle.to_radians(),
-            shadow_maps_enabled: light.shadows,
+            shadow_maps_enabled: light.shadows && light.enabled,
             ..default()
         },
         transform,
@@ -476,9 +478,9 @@ pub fn spawn_surface_light(
     commands.spawn((
         PointLight {
             color: light.color,
-            intensity: light.brightness * 500.0,
+            intensity: if light.enabled { light.brightness * 500.0 } else { 0.0 },
             range: light.range,
-            shadow_maps_enabled: light.shadows,
+            shadow_maps_enabled: light.shadows && light.enabled,
             ..default()
         },
         transform,

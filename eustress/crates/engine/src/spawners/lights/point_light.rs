@@ -81,6 +81,8 @@ impl ClassSpawner for PointLightSpawner {
         let range = props.get_f32("light.range").unwrap_or(60.0);
         let radius = props.get_f32("light.radius").unwrap_or(0.0);
         let shadows = props.get_bool("light.shadows").unwrap_or(true);
+        // Roblox `Light.Enabled`; a disabled light emits nothing.
+        let enabled = props.get_bool("light.enabled").unwrap_or(true);
         let texture = props
             .get_string("appearance.texture")
             .filter(|s| !s.is_empty())
@@ -92,10 +94,10 @@ impl ClassSpawner for PointLightSpawner {
             .spawn((
                 PointLight {
                     color,
-                    intensity: brightness,
+                    intensity: if enabled { brightness } else { 0.0 },
                     range,
                     radius,
-                    shadow_maps_enabled: shadows,
+                    shadow_maps_enabled: shadows && enabled,
                     ..default()
                 },
                 transform,
@@ -113,6 +115,7 @@ impl ClassSpawner for PointLightSpawner {
                     range,
                     radius,
                     shadows,
+                    enabled,
                     texture,
                 },
                 Name::new(name),
@@ -449,6 +452,7 @@ mod tests {
                     range: 42.0,
                     radius: 0.5,
                     shadows: true,
+                    enabled: true,
                     texture: None,
                 },
                 Name::new("Lamp"),

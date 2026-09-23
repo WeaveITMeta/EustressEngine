@@ -231,7 +231,14 @@ fn main() {
     // asset watcher is gated on the `file_watcher` cargo feature (not enabled
     // here — hot-reload uses the engine's own `notify` watcher), so no
     // writer/watcher is needed.
-    let space_root = space::default_space_root();
+    //
+    // The launch Space is the one the arguments open (`--space`, `--open`, a
+    // `.eustress` launch file, `--universe`), else the one the settings
+    // remember. It becomes `SpaceRoot` before any plugin is built, so the
+    // streaming tier and the plugins that load Space files in `build`
+    // (purchase orders, manufacturing) read the Space that is actually open.
+    let space_root = args.launch_space_root().unwrap_or_else(space::default_space_root);
+    app.insert_resource(space::SpaceRoot(space_root.clone()));
     eustress_engine::app_core::register_asset_sources(&mut app, &space_root);
 
     app // Bevy plugins with optimized window settings
@@ -377,10 +384,8 @@ fn main() {
         .add_plugins(PlayModeUiPlugin)
         // Script analyzer (Rune diagnostics + symbol index on AsyncComputeTaskPool)
         .add_plugins(script_editor::ScriptAnalysisPlugin)
-        // Runtime snapshot — writes live play-state + sim values to
-        // `<universe>/.eustress/runtime-snapshot.json` at 4 Hz so the
-        // LSP (separate process) can surface live values in hover.
-        .add_plugins(script_editor::runtime_snapshot::RuntimeSnapshotPlugin)
+        // (The runtime snapshot the LSP reads for live hover values comes in
+        // with add_core_sim_plugins above.)
         // LSP child-process launcher — spawns `eustress-lsp --tcp` so
         // external IDEs can connect to a live server while Studio is up.
         // No-op if the companion binary isn't on disk.
@@ -395,6 +400,9 @@ fn main() {
         .add_plugins(eustress_engine::moderation_dossier::PublishCapturePlugin)
         // Slint UI (software renderer overlay)
         .add_plugins(ui::slint_ui::SlintUiPlugin)
+        // Camera Perspective (2D/3D, projection, axis view) → tab-bar
+        // ViewSelector + View menu. After SlintUiPlugin: reads SlintUiState.
+        .add_plugins(ui::perspective_hud::PerspectiveHudPlugin)
         // Studio auth + Bliss node — starts the local Bliss node API.
         // Must come after SlintUiPlugin (which owns `auth_poll_system`;
         // this plugin deliberately does not re-register it).

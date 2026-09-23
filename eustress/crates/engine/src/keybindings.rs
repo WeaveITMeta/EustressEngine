@@ -74,7 +74,11 @@ pub enum Action {
     ViewFront,             // Front view (Numpad 2)
     ViewSideLeft,          // Left side view (Numpad 4)
     ViewSideRight,         // Right side view (Numpad 6)
-    
+    ViewMode2D,            // 2D view: orthographic, locked to an axis plane (Alt+2)
+    ViewMode3D,            // 3D view (Alt+3)
+    SaveViewpoint,         // Save the current view as the next "Viewpoint N" (no default chord)
+    NextViewpoint,         // Go to the next saved viewpoint (no default chord)
+
     // Snapping
     SnapMode1,      // 1 unit snapping (1 key)
     SnapMode2,      // 0.2 unit snapping (2 key)
@@ -185,6 +189,10 @@ impl Action {
             Action::ViewFront => "Front View",
             Action::ViewSideLeft => "Left Side View",
             Action::ViewSideRight => "Right Side View",
+            Action::ViewMode2D => "2D View",
+            Action::ViewMode3D => "3D View",
+            Action::SaveViewpoint => "Save Viewpoint",
+            Action::NextViewpoint => "Next Viewpoint",
             Action::SnapMode1 => "Snap Mode: 1m",
             Action::SnapMode2 => "Snap Mode: 0.2m",
             Action::SnapModeOff => "Snap Mode: Off",
@@ -477,6 +485,13 @@ impl Default for KeyBindings {
         bindings.insert(Action::ViewFront, KeyBinding::new(KeyCode::Numpad2));             // Numpad 2 for front view
         bindings.insert(Action::ViewSideLeft, KeyBinding::new(KeyCode::Numpad4));          // Numpad 4 for left side view
         bindings.insert(Action::ViewSideRight, KeyBinding::new(KeyCode::Numpad6));         // Numpad 6 for right side view
+        // Top-row 5 as well: most keyboards have no numpad.
+        alternates.entry(Action::ViewPerspectiveToggle).or_default()
+            .push(KeyBinding::new(KeyCode::Digit5));
+        // 2D / 3D. Alt+digit is free (bare 1/2/3 are the snap modes, Ctrl+1/2/3
+        // the panels) and reads as the mode it enters.
+        bindings.insert(Action::ViewMode2D, KeyBinding::new(KeyCode::Digit2).with_alt());
+        bindings.insert(Action::ViewMode3D, KeyBinding::new(KeyCode::Digit3).with_alt());
         
         // Snapping shortcuts
         bindings.insert(Action::SnapMode1, KeyBinding::new(KeyCode::Digit1));    // 1 for 1 unit snapping
@@ -719,7 +734,8 @@ impl Plugin for KeyBindingsPlugin {
                     .after(crate::ui::slint_ui::update_slint_ui_focus),
                 handle_menu_action_events.after(dispatch_keyboard_shortcuts),
                 handle_nudge_keys
-                    .after(crate::ui::slint_ui::update_slint_ui_focus),
+                    .after(crate::ui::slint_ui::update_slint_ui_focus)
+                    .run_if(crate::play_mode::editor_input_enabled),
             ));
     }
 }
@@ -753,6 +769,8 @@ const DISPATCHED_ACTIONS: &[Action] = &[
     Action::FocusSelection,
     Action::ViewPerspectiveToggle, Action::ViewTop, Action::ViewFront,
     Action::ViewSideLeft, Action::ViewSideRight,
+    Action::ViewMode2D, Action::ViewMode3D,
+    Action::SaveViewpoint, Action::NextViewpoint,
     Action::SnapMode1, Action::SnapMode2, Action::SnapModeOff,
     Action::LiftSelection, Action::SettleSelection,
     Action::RotateY90, Action::TiltZ90,
@@ -765,6 +783,15 @@ const DISPATCHED_ACTIONS: &[Action] = &[
     Action::ToolPathArray,
     Action::InsertObject, Action::PasteInto,
     Action::FocusExplorerSearch, Action::FocusPropertiesFilter,
+];
+
+/// The shortcuts that stay live during a Play session: the session controls
+/// and the panel toggles. Everything else in [`DISPATCHED_ACTIONS`] edits or
+/// persists the scene, so it waits for Stop.
+const PLAY_SESSION_ACTIONS: &[Action] = &[
+    Action::PlayWithCharacter, Action::PauseResume, Action::PlaySolo, Action::StopPlay,
+    Action::ToggleExplorer, Action::ToggleProperties, Action::ToggleOutput,
+    Action::ToggleCommandBar,
 ];
 
 /// Actions that are dispatched but deliberately have NO default chord.
@@ -790,6 +817,10 @@ const ALLOWED_UNBOUND: &[Action] = &[
     Action::CSGSeparate,
     // A ribbon toggle; reachable over the bridge and rebindable, no chord by default.
     Action::ToggleCollisions,
+    // In the View menu and over the bridge; rebindable, no chord by default:
+    // every free single chord near the view keys is already taken.
+    Action::SaveViewpoint,
+    Action::NextViewpoint,
 ];
 
 /// Reads keyboard input each frame and dispatches tool changes + MenuActionEvents.
@@ -805,6 +836,7 @@ fn dispatch_keyboard_shortcuts(
     // tool owns the cursor does it fall through to delete-selection below.
     // DRAFTING_UX.md Law 1: one owner per keypress, innermost first.
     active_modal_tool: Option<Res<crate::modal_tool::ActiveModalTool>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
 ) {
     // Block keyboard shortcuts when a text input has focus or overlay modal is open
     // (typing in Properties, Settings dialog, Workshop chat, etc.)
@@ -818,6 +850,21 @@ fn dispatch_keyboard_shortcuts(
     }
     let Some(mut studio_state) = studio_state else { return };
     let Some(bindings) = bindings else { return };
+
+    // While a Play session runs, the keyboard belongs to the game: only the
+    // session controls and the panel toggles stay live. Delete, Undo, tool
+    // switching, snap modes, Save and the rest would edit (or persist) the
+    // scene the game is playing in.
+    if !crate::play_mode::editor_input_enabled(play_state) {
+        for action in PLAY_SESSION_ACTIONS.iter().copied() {
+            if bindings.check(action, &keys) {
+                info!("⌨️ Shortcut (Play): {:?}", action);
+                menu_events.write(crate::ui::MenuActionEvent::new(action));
+                return;
+            }
+        }
+        return;
+    }
 
     // Tool switching — directly update StudioState for instant response
     if bindings.check(Action::SelectTool, &keys) {
@@ -1021,8 +1068,8 @@ fn handle_menu_action_events(
     ),
 ) {
     let (
-        ref mut undo_events,
-        ref mut redo_events,
+        ref mut _selection_undo_events,
+        ref mut _selection_redo_events,
         ref mut frame_events,
         ref mut go_to_camera_events,
         ref mut copy_events,
@@ -1076,15 +1123,15 @@ fn handle_menu_action_events(
             Action::OpenFile   => { file_events.write(crate::ui::FileEvent::OpenScene); }
             Action::SaveSceneAs => { file_events.write(crate::ui::FileEvent::SaveSceneAs); }
 
-            // Undo/Redo — fire both event types:
-            // UndoCommandEvent → CommandHistory (selection undo)
-            // UndoEvent → UndoStack (transform undo)
+            // Undo/Redo walk the ONE edit history (UndoStack, the one the
+            // History panel shows). They used to also step the separate
+            // selection history, so a single Ctrl+Z reverted a selection
+            // AND an unrelated edit, and a Ctrl+Z meant to get a selection
+            // back undid real work. Undo now re-selects what it changed.
             Action::Undo => {
-                undo_events.write(crate::commands::UndoCommandEvent);
                 undo_action_events.write(crate::undo::UndoEvent);
             }
             Action::Redo => {
-                redo_events.write(crate::commands::RedoCommandEvent);
                 redo_action_events.write(crate::undo::RedoEvent);
             }
 
@@ -2168,6 +2215,14 @@ pub struct NudgeContext<'w, 's> {
         With<crate::selection_box::Selected>,
     >,
     pub spatial: avian3d::prelude::SpatialQuery<'w, 's>,
+    /// Every nudge is one undo step (a held key folds into one).
+    pub undo: ResMut<'w, crate::undo::UndoStack>,
+    /// Children, parents and parents' world transforms: nudges move in
+    /// world space, skip parts carried by a selected ancestor, and never
+    /// settle a part onto its own children.
+    pub children: Query<'w, 's, &'static Children>,
+    pub parents: Query<'w, 's, &'static ChildOf>,
+    pub parent_globals: Query<'w, 's, &'static GlobalTransform, Without<crate::selection_box::Selected>>,
 }
 
 fn handle_nudge_keys(
@@ -2203,11 +2258,75 @@ fn handle_nudge_keys(
         &mut timer.settle_held, &mut timer.settle_timer,
     );
 
+    if !lift_fire && !settle_fire {
+        return;
+    }
+    let before: Vec<(Entity, Vec3, Quat)> = ctx
+        .selected
+        .iter()
+        .map(|(e, t, _, _)| (e, t.translation, t.rotation))
+        .collect();
     if lift_fire {
-        lift_selection(&mut ctx.selected, snap);
+        lift_selection(&mut ctx, snap);
     }
     if settle_fire {
         settle_selection(&mut ctx, snap);
+    }
+    record_nudge(&mut ctx, &before, if lift_fire { "Lift" } else { "Settle" });
+}
+
+/// Record a nudge as an undo step. A held key repeats every few frames;
+/// the repeats fold into the one step (`push_coalesced`), so one Ctrl+Z
+/// undoes the whole hold, however long.
+fn record_nudge(ctx: &mut NudgeContext, before: &[(Entity, Vec3, Quat)], verb: &str) {
+    let mut old_transforms = Vec::new();
+    let mut new_transforms = Vec::new();
+    for (entity, pos, rot) in before {
+        let Ok((_, t, _, _)) = ctx.selected.get(*entity) else { continue };
+        if (t.translation - *pos).length() > 1e-5 || t.rotation.angle_between(*rot) > 1e-5 {
+            old_transforms.push((entity.to_bits(), pos.to_array(), rot.to_array()));
+            new_transforms.push((entity.to_bits(), t.translation.to_array(), t.rotation.to_array()));
+        }
+    }
+    let n = old_transforms.len();
+    if n == 0 {
+        return;
+    }
+    ctx.undo.push_coalesced(
+        "nudge",
+        format!("{} {} object{}", verb, n, if n == 1 { "" } else { "s" }),
+        crate::undo::Action::TransformEntities { old_transforms, new_transforms },
+    );
+}
+
+/// True when an ancestor of `entity` is also selected: it moves with that
+/// ancestor and must not be nudged a second time.
+fn carried_by_selection(
+    entity: Entity,
+    selected: &std::collections::HashSet<Entity>,
+    parents: &Query<&ChildOf>,
+) -> bool {
+    let mut current = entity;
+    while let Ok(child_of) = parents.get(current) {
+        let parent = child_of.parent();
+        if selected.contains(&parent) {
+            return true;
+        }
+        current = parent;
+    }
+    false
+}
+
+/// Write a world-space position for `entity` back through its parent.
+fn place_world(ctx: &mut NudgeContext, entity: Entity, world_pos: Vec3, world_rot: Quat) {
+    let parent_gt = ctx
+        .parents
+        .get(entity)
+        .ok()
+        .and_then(|c| ctx.parent_globals.get(c.parent()).ok());
+    let (local_pos, _) = crate::math_utils::world_to_local_pose(parent_gt, world_pos, world_rot);
+    if let Ok((_, mut t, _, _)) = ctx.selected.get_mut(entity) {
+        t.translation = local_pos;
     }
 }
 
@@ -2244,21 +2363,22 @@ fn nudge_should_fire(
     false
 }
 
-/// Simple lift: every selected entity moves up by `snap` on +Y.
-fn lift_selection(
-    selected: &mut Query<
-        (
-            Entity,
-            &mut Transform,
-            &GlobalTransform,
-            Option<&crate::classes::BasePart>,
-        ),
-        With<crate::selection_box::Selected>,
-    >,
-    snap: f32,
-) {
-    for (_, mut t, _, _) in selected.iter_mut() {
-        t.translation.y += snap;
+/// Simple lift: every selected entity moves up by `snap` in WORLD +Y,
+/// written back through its parent, so a part inside a rotated Model still
+/// rises straight up. Parts carried by a selected ancestor move with it.
+fn lift_selection(ctx: &mut NudgeContext, snap: f32) {
+    let selected: std::collections::HashSet<Entity> = ctx.selected.iter().map(|(e, ..)| e).collect();
+    let moves: Vec<(Entity, Vec3, Quat)> = ctx
+        .selected
+        .iter()
+        .filter(|(e, ..)| !carried_by_selection(*e, &selected, &ctx.parents))
+        .map(|(e, _, gt, _)| {
+            let world = gt.compute_transform();
+            (e, world.translation + Vec3::Y * snap, world.rotation)
+        })
+        .collect();
+    for (entity, world_pos, world_rot) in moves {
+        place_world(ctx, entity, world_pos, world_rot);
     }
 }
 
@@ -2278,32 +2398,42 @@ fn settle_selection(ctx: &mut NudgeContext, snap: f32) {
     // Snapshot the selected set before mutating — we need to call
     // `ctx.spatial` while still being able to write back to
     // `ctx.selected`, and Bevy queries don't allow that simultaneously.
-    let mut snapshot: Vec<(Entity, Vec3, f32)> = Vec::new();
+    let selected: std::collections::HashSet<Entity> = ctx.selected.iter().map(|(e, ..)| e).collect();
+    // The downward ray must never find the part itself: its own children
+    // (a MeshPart's mesh node, a Model's parts) are excluded with it, or a
+    // settle "lands" on the part's own geometry and goes nowhere.
+    let moving = crate::math_utils::moving_set(selected.iter().copied(), &ctx.children);
+    let filter = avian3d::prelude::SpatialQueryFilter::default()
+        .with_excluded_entities(moving.iter().copied());
+    let mut snapshot: Vec<(Entity, Vec3, Quat, f32)> = Vec::new();
     for (entity, _, gt, bp) in ctx.selected.iter() {
-        let center = gt.translation();
-        let half_height = bp.map(|b| b.size.y * 0.5).unwrap_or(0.5);
-        snapshot.push((entity, center, half_height));
+        if carried_by_selection(entity, &selected, &ctx.parents) {
+            continue;
+        }
+        let world = gt.compute_transform();
+        // Half the part's height as it stands, rotation included.
+        let half_height = bp
+            .map(|b| {
+                let (lo, hi) = crate::math_utils::calculate_rotated_aabb(world.translation, b.size * 0.5, world.rotation);
+                (hi.y - lo.y) * 0.5
+            })
+            .unwrap_or(0.5);
+        snapshot.push((entity, world.translation, world.rotation, half_height));
     }
 
-    for (entity, center, half_height) in snapshot {
+    for (entity, center, rotation, half_height) in snapshot {
         // Cast straight down from the part's current center so we can
         // see how far the support surface is below the part's bottom.
         let support_y_world = {
             let Ok(down) = Dir3::new(Vec3::NEG_Y) else { continue };
-            let hits = ctx.spatial.ray_hits(
-                center,
-                down,
-                10_000.0,
-                16,
-                true,
-                &avian3d::prelude::SpatialQueryFilter::default(),
-            );
-            // Skip the part's own collider — first non-self hit is the
-            // real support surface (or `None` if the part is hovering
-            // over empty space).
+            let hits = ctx.spatial.ray_hits(center, down, 10_000.0, 16, true, &filter);
+            // The nearest surface below (hits arrive in no particular
+            // order), or `None` if the part is hovering over empty space.
             hits.into_iter()
-                .find(|h| h.entity != entity)
-                .map(|h| center.y - h.distance)
+                .map(|h| h.distance)
+                .filter(|d| d.is_finite())
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|d| center.y - d)
         };
 
         // Where the part *would* land if we just stepped down by `snap`.
@@ -2326,12 +2456,8 @@ fn settle_selection(ctx: &mut NudgeContext, snap: f32) {
             None => stepped_center_y,
         };
 
-        // Apply via world-space delta so parented entities resolve the
-        // local-Y change correctly.
-        if let Ok((_, mut tf, gt, _)) = ctx.selected.get_mut(entity) {
-            let cur_world_y = gt.translation().y;
-            tf.translation.y += new_center_y - cur_world_y;
-        }
+        // World-space target, written back through the parent.
+        place_world(ctx, entity, Vec3::new(center.x, new_center_y, center.z), rotation);
     }
 }
 

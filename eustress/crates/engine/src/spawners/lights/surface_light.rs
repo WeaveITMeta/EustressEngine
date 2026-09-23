@@ -96,6 +96,8 @@ impl ClassSpawner for SurfaceLightSpawner {
             .unwrap_or(defaults.face.as_str())
             .to_string();
         let shadows = props.get_bool("light.shadows").unwrap_or(defaults.shadows);
+        // Roblox `Light.Enabled`; a disabled light emits nothing.
+        let enabled = props.get_bool("light.enabled").unwrap_or(defaults.enabled);
         let texture = props
             .get_string("appearance.texture")
             .filter(|s| !s.is_empty())
@@ -152,6 +154,7 @@ impl ClassSpawner for SurfaceLightSpawner {
                 range,
                 face: face.clone(),
                 shadows,
+                enabled,
                 texture,
             },
             Name::new(name),
@@ -166,9 +169,9 @@ impl ClassSpawner for SurfaceLightSpawner {
             p.spawn((
                 PointLight {
                     color,
-                    intensity: brightness * AREA_LIGHT_BRIGHTNESS_SCALE,
+                    intensity: if enabled { brightness * AREA_LIGHT_BRIGHTNESS_SCALE } else { 0.0 },
                     range,
-                    shadow_maps_enabled: shadows,
+                    shadow_maps_enabled: shadows && enabled,
                     ..default()
                 },
                 light_transform,
@@ -489,6 +492,7 @@ mod tests {
                     range: 12.0,
                     face: "Top".to_string(),
                     shadows: true,
+                    enabled: true,
                     texture: None,
                 },
                 Name::new("Wall"),

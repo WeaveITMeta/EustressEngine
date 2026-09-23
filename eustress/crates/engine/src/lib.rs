@@ -41,6 +41,8 @@ pub mod foot_ik;
 pub mod physics_constraints;
 pub mod play_mode;
 pub mod play_mode_runtime;
+/// Scripts drive the running scene through the live DataModel tree.
+pub mod play_datamodel;
 pub mod script_editor;
 pub mod lsp_launcher;
 // `engine_bridge` is compiled as a BIN-LOCAL module (see main.rs) so its
@@ -57,7 +59,10 @@ pub mod studio_modes;
 pub mod tool_metadata;
 pub mod usage_telemetry;
 pub mod undo;
+/// Dead zones, drag-start offset and mid-drag cancel shared by the viewport tools.
+pub mod drag_guard;
 pub mod camera_controller;
+pub mod view_grid;
 // Government opportunity capture (SAM.gov + Grants.gov). Gated with the
 // `data` feature because it builds on `eustress_data`'s HTTP seam and
 // Connector materialization rather than carrying a second copy of either.
@@ -126,6 +131,9 @@ pub mod transform_space;
 pub mod default_scene;
 pub mod startup;
 pub mod terrain_plugin;
+/// Engine side of the terrain layer classes: spawning their components from
+/// TOML, hot reload, undo replay, spline-point adoption and Insert placement.
+pub mod terrain_layers;
 // Disk-terrain auto-loader — legacy/disk Spaces hydrate `Workspace/Terrain/`
 // (worldgen export + heightmap import R16/toml format) on Space open.
 // UNGATED sibling of the world-db voxel loader below.

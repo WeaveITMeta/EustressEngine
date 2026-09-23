@@ -3061,6 +3061,24 @@ export component PropertiesPanel inherits Rectangle {
                         find-material-by-key(key, current-idx) => { root.on-find-material-by-key(key, current-idx) }
                     }
 
+                    // Choice — the same dropdown, fed the class's own option
+                    // list (e.g. ParticleSimulation boundaries, particle
+                    // presets). No type-ahead: the material lookup does not
+                    // know these names, so arrows and clicks pick.
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type == "choice": MaterialDropdown {
+                        label: prop.name;
+                        value: prop.value;
+                        options: prop.options;
+                        editable: prop.editable;
+                        description: prop.description;
+                        learn-url: prop.learn-url;
+                        show-help-icons: root.show-help-icons;
+                        value-changed(val) => { root.on-property-changed(prop.name, val); }
+                        open-learn-url(url) => { root.on-open-learn-url(url); }
+                        focus-changed(focused) => { root.on-input-focus-changed(focused); }
+                        find-material-by-key(key, current-idx) => { current-idx }
+                    }
+
                     if !prop.is-header && !prop.section-collapsed && prop.property-type == "slider": SliderRow {
                         label: prop.name;
                         value: prop.value.to-float();
@@ -3076,7 +3094,7 @@ export component PropertiesPanel inherits Rectangle {
                     }
 
                     // String / float / int / enum — generic row
-                    if !prop.is-header && !prop.section-collapsed && prop.property-type != "vec2" && prop.property-type != "vec3" && prop.property-type != "rotation" && prop.property-type != "color" && prop.property-type != "brickcolor" && prop.property-type != "bool" && prop.property-type != "material" && prop.property-type != "unit" && prop.property-type != "udim2" && prop.property-type != "slider": PropRow {
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type != "vec2" && prop.property-type != "vec3" && prop.property-type != "rotation" && prop.property-type != "color" && prop.property-type != "brickcolor" && prop.property-type != "bool" && prop.property-type != "material" && prop.property-type != "unit" && prop.property-type != "choice" && prop.property-type != "udim2" && prop.property-type != "slider": PropRow {
                         label: prop.name;
                         value: prop.value;
                         prop-type: prop.property-type;

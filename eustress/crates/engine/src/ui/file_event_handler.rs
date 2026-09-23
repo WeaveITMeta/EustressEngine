@@ -320,16 +320,23 @@ fn do_save_space(world: &mut World) {
     }
 
     space_ops::save_space(world);
-    save_terrain_to_disk(world);
+    // A manual Save repeats the unsaved-terrain warning autosave keeps quiet.
+    if let Some(mut state) = world.get_resource_mut::<crate::ui::StudioState>() {
+        state.terrain_unsaved_warned = false;
+    }
+    let terrain_unsaved = save_terrain_to_disk(world);
 
     // The title asterisk and the exit prompt count edits since this point.
+    // Terrain edits that did not reach storage keep the Space unsaved: the
+    // UI sync derives the marker from the saved sequence every frame, so the
+    // sequence is left one behind, as a terrain undo does.
     let sequence = world
         .get_resource::<crate::undo::UndoStack>()
         .map(|u| u.sequence())
         .unwrap_or(0);
     if let Some(mut state) = world.get_resource_mut::<crate::ui::StudioState>() {
-        state.saved_undo_sequence = sequence;
-        state.has_unsaved_changes = false;
+        state.saved_undo_sequence = if terrain_unsaved { sequence.wrapping_sub(1) } else { sequence };
+        state.has_unsaved_changes = terrain_unsaved;
         state.snapshot_status = format!("Snapshot {}", chrono::Local::now().format("%H:%M"));
     }
 
@@ -369,50 +376,314 @@ fn do_save_space(world: &mut World) {
         });
     }
 
-    // Provide feedback
+    // Provide feedback. The terrain save has already said what it could not
+    // write.
     if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
-        n.success("Space saved. All TOML files up to date.");
+        if terrain_unsaved {
+            n.info("Space saved, except its terrain edits.");
+        } else {
+            n.success("Space saved. All TOML files up to date.");
+        }
     }
 }
 
-/// Persist the active terrain's height data to `Workspace/Terrain/*.r16`.
+/// Persist the active terrain to `Workspace/Terrain/`: heights to
+/// `chunks/*.r16`, the material map to `matmap/*.png` and the volumetric
+/// edits (caves, overhangs) to `volume/*.vbk`, the files
+/// `hydrate_terrain_from_disk` reads back on open. Brush, road, Part to
+/// Terrain and volume edits live only in memory until this runs.
 ///
-/// `toml_loader::save_chunks_to_disk` has existed since terrain export
-/// shipped but had ZERO call sites anywhere in the codebase (confirmed by
-/// repo-wide grep) — every brush edit and, without this, every road-tool
-/// terrain conform would be silently lost on the next Space reload, because
-/// nothing ever wrote `height_cache` back to the `.r16` files
-/// `hydrate_terrain_from_disk` reads on open. Manual Save is not a hot path,
-/// so this saves the FULL chunk span (not a dirty-tracked subset) — simpler
-/// and can't miss a chunk whose mesh-regen `dirty` flag was already cleared
-/// by the time Save runs. Splat (material paint) is not yet round-tripped —
-/// only height; `save_chunks_to_disk` has no splat counterpart today.
-fn save_terrain_to_disk(world: &mut World) {
-    let Some(space_root) = world.get_resource::<crate::space::SpaceRoot>().map(|r| r.0.clone()) else {
-        return;
-    };
-    let mut query = world.query_filtered::<(
-        &eustress_common::terrain::TerrainConfig,
-        &eustress_common::terrain::TerrainData,
-    ), With<eustress_common::terrain::TerrainRoot>>();
-    let Ok((config, data)) = query.single(world) else {
-        return; // No active terrain this Space — nothing to persist.
+/// Save is not a hot path, so both raster layers are written for the full
+/// `±chunks_x` by `±chunks_z` span rather than a dirty subset, which cannot
+/// miss a chunk whose remesh flag was already cleared. Writing the matmaps
+/// removes the legacy `splatmap/*.png` files a Space from an older build
+/// had, which the loader converted on open. A terrain with no material
+/// layer writes heights only and leaves any material files on disk alone.
+/// Every brick is written and brick files the volume no longer has are
+/// deleted, so an undone or cleared edit cannot come back on reload.
+/// A failed write is toasted, because the Space-saved toast that follows
+/// would otherwise tell the user their sculpting or paint reached disk.
+///
+/// R16 samples are normalized to the config's height band and clamped to
+/// it, so when a cached height lies outside the band (a raster of raw world
+/// heights, whose unit-scale zero-offset config the edit-time clamp lets
+/// through, or any write that bypassed `clamp_to_saved_band`) the band is
+/// widened first: `_terrain.toml` gets the new `height_offset` and `height_scale`,
+/// the root's config and raster move to that band with every world height
+/// unchanged, and so do the other copies of the raster (undo entries, an
+/// open stroke, the road baseline). If the toml cannot be rewritten the
+/// band stays, the save clamps as before, and the failure is toasted.
+///
+/// Autosave runs this too, when the terrain changed since its last save
+/// ([`terrain_changed_since_save`]). Nothing is written while a Space loads,
+/// when the root has no height raster (procedural terrain: its R16 files
+/// would be zeros and its empty volume would delete every brick on disk) or
+/// in a migrated Space, whose terrain is read from the world database on
+/// open, never from `Workspace/Terrain`.
+///
+/// Returns `true` when terrain edits did not reach storage: a write failed,
+/// or a migrated Space holds edits it cannot save yet (warned once until the
+/// next manual Save or Space switch). Callers keep the Space marked unsaved
+/// then, so the title asterisk and the exit prompt still ask.
+pub(crate) fn save_terrain_to_disk(world: &mut World) -> bool {
+    use eustress_common::terrain::{
+        rebase_height_band, toml_loader, HeightBand, TerrainConfig, TerrainData, TerrainEditRecorder,
+        TerrainRoot, TerrainVolume,
     };
 
+    /// Put back the band and raster a band move replaced.
+    fn restore_band(config: &mut TerrainConfig, data: &mut TerrainData, heights: Vec<f32>, from: HeightBand) {
+        data.height_cache = heights;
+        config.height_offset = from.offset;
+        config.height_scale = from.scale;
+    }
+
+    let Some(space_root) = world.get_resource::<crate::space::SpaceRoot>().map(|r| r.0.clone()) else {
+        return false;
+    };
+    // Mid-switch or mid-load the TerrainRoot may still be the outgoing
+    // Space's, or not yet this one's.
+    if world
+        .get_resource::<crate::space::file_loader::LoadInProgress>()
+        .is_some_and(|l| l.active)
+    {
+        return false;
+    }
+    // A migrated Space's terrain is read from its world database on every
+    // open (`terrain_voxel_load`); neither the disk loader nor the class
+    // sync reads `Workspace/Terrain` there, so a copy written here would be
+    // loose files nothing loads. Its edits cannot be saved yet, which the
+    // user must hear rather than be told the Space saved.
+    if space_ops::space_is_migrated(&space_root) {
+        let root = world.query_filtered::<Entity, With<TerrainRoot>>().iter(world).next();
+        let edited = root.is_some_and(|root| {
+            world
+                .get_resource::<crate::undo::UndoStack>()
+                .is_some_and(|undo| undo.has_terrain_edits(root.to_bits()))
+        });
+        if !edited {
+            return false;
+        }
+        let warned = world
+            .get_resource::<crate::ui::StudioState>()
+            .is_some_and(|state| state.terrain_unsaved_warned);
+        if !warned {
+            warn!("Terrain: migrated Space, terrain edits are not saved to the world database yet");
+            if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+                n.warning("Terrain edits in this Space are not saved yet: they will be lost when it is reopened.");
+            }
+            if let Some(mut state) = world.get_resource_mut::<crate::ui::StudioState>() {
+                state.terrain_unsaved_warned = true;
+            }
+        }
+        return true;
+    }
+    {
+        let mut query = world.query_filtered::<&TerrainData, With<TerrainRoot>>();
+        match query.single(world) {
+            // Procedural terrain has no raster (the brush refuses to edit
+            // one), so an R16 write would be all zeros and the empty volume
+            // would delete every .vbk brick on disk.
+            Ok(data) if data.height_cache.is_empty() => return false,
+            Ok(_) => {}
+            // No active terrain this Space, nothing to persist.
+            Err(_) => return false,
+        }
+    }
     let terrain_dir = space_root.join("Workspace").join("Terrain");
+    let mut failures: Vec<String> = Vec::new();
+
+    // Ahead of the band move, so this early return can never follow a
+    // committed toml.
     if let Err(e) = std::fs::create_dir_all(&terrain_dir) {
         warn!("save_terrain_to_disk: could not create {:?}: {}", terrain_dir, e);
-        return;
+        if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+            n.warning(format!("Terrain was not saved (could not create {}: {e})", terrain_dir.display()));
+        }
+        return true;
     }
 
-    let chunk_positions: Vec<IVec2> = (-(config.chunks_x as i32)..=config.chunks_x as i32)
+    // A band move stages every chunk in the new band first, commits the toml
+    // only once every chunk is staged, and renames the chunks into place
+    // after it, so the R16 files and the file that says how to read them
+    // never disagree. A failure before the toml commit puts the old band
+    // back in memory and the save carries on in it, clamping as before.
+    let mut heights_committed = false;
+    let band_move = {
+        let mut query = world.query_filtered::<(Entity, &mut TerrainConfig, &mut TerrainData), With<TerrainRoot>>();
+        let Ok((root, mut config, mut data)) = query.single_mut(world) else {
+            return false;
+        };
+        match config.band_covering(&data) {
+            None => None,
+            Some(wanted) => {
+                // The band the toml will read back, found without writing
+                // it. Without a toml nothing reads the heights back, so the
+                // wanted band stands.
+                let toml_path = terrain_dir.join("_terrain.toml");
+                let read_back = match std::fs::read_to_string(&toml_path) {
+                    Ok(text) => toml_loader::rewrite_height_band(&text, wanted).map(|(_, band)| band),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(wanted),
+                    Err(error) => Err(format!("Failed to read terrain TOML {:?}: {}", toml_path, error)),
+                };
+                match read_back {
+                    Err(e) => {
+                        warn!("save_terrain_to_disk: height range: {}", e);
+                        failures.push(format!("height range: {e}"));
+                        None
+                    }
+                    Ok(to) => {
+                        let before = data.height_cache.clone();
+                        let from = rebase_height_band(&mut config, &mut data, to);
+                        let chunk_positions = terrain_chunk_positions(&config);
+                        match toml_loader::stage_chunks_to_disk(&terrain_dir, &config, &data, &chunk_positions) {
+                            Err(e) => {
+                                restore_band(&mut config, &mut data, before, from);
+                                warn!("save_terrain_to_disk: heights: {}", e);
+                                failures.push(format!("heights: {e}"));
+                                None
+                            }
+                            Ok(staged) => match toml_loader::write_height_band_to_toml(&terrain_dir, wanted) {
+                                Err(e) => {
+                                    toml_loader::discard_staged_chunks(&staged);
+                                    restore_band(&mut config, &mut data, before, from);
+                                    warn!("save_terrain_to_disk: height range: {}", e);
+                                    failures.push(format!("height range: {e}"));
+                                    None
+                                }
+                                Ok(_) => {
+                                    // The toml reads back `to` now, the band
+                                    // memory holds. A failed rename leaves the
+                                    // chunks to the plain write below.
+                                    match toml_loader::commit_staged_chunks(&staged) {
+                                        Ok(saved) => {
+                                            heights_committed = true;
+                                            info!("💾 Terrain: saved {} chunk heightmaps to {:?}", saved, terrain_dir);
+                                        }
+                                        Err(e) => warn!("save_terrain_to_disk: heights: {}", e),
+                                    }
+                                    // Every world height stayed put and the
+                                    // material map names each cell's material
+                                    // outright, so no chunk needs a remesh.
+                                    Some((root, from, to))
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    };
+    if let Some((root, from, to)) = band_move {
+        if let Some(mut undo) = world.get_resource_mut::<crate::undo::UndoStack>() {
+            undo.rebase_terrain_heights(root.to_bits(), from, to);
+        }
+        if let Some(mut recorder) = world.get_resource_mut::<TerrainEditRecorder>() {
+            recorder.rebase_heights(Some(root), from, to);
+        }
+        // The layer bake holds normalized heights in the base's band too.
+        if let Some(mut baked) = world.get_mut::<eustress_common::terrain::TerrainBaked>(root) {
+            baked.rebase_heights(from, to);
+        }
+        info!(
+            "Terrain: widened the saved height range from {:.2}..{:.2} m to {:.2}..{:.2} m so no height is clamped",
+            from.world(0.0),
+            from.world(1.0),
+            to.world(0.0),
+            to.world(1.0)
+        );
+    }
+
+    let mut query = world.query_filtered::<(&TerrainConfig, &TerrainData, Option<&TerrainVolume>), With<TerrainRoot>>();
+    let Ok((config, data, volume)) = query.single(world) else {
+        return false;
+    };
+    let volume = volume.unwrap_or(TerrainVolume::empty());
+
+    let chunk_positions = terrain_chunk_positions(config);
+
+    // A committed band move already wrote every chunk.
+    if !heights_committed {
+        match toml_loader::save_chunks_to_disk(&terrain_dir, config, data, &chunk_positions) {
+            Ok(saved) => info!("💾 Terrain: saved {} chunk heightmaps to {:?}", saved, terrain_dir),
+            Err(e) => {
+                warn!("save_terrain_to_disk: heights: {}", e);
+                failures.push(format!("heights: {e}"));
+            }
+        }
+    }
+
+    if data.material_cache.is_empty() {
+        info!("Terrain: no material layer, saved heights only");
+    } else {
+        // eustress-common built without its `image` feature has no PNG
+        // encoder; this call then returns an Err naming that, and it is
+        // reported like any other failure instead of dropping the paint.
+        match toml_loader::save_material_chunks_to_disk(&terrain_dir, config, data, &chunk_positions) {
+            Ok(saved) => info!("Terrain: saved {} chunk material maps to {:?}", saved, terrain_dir),
+            Err(e) => {
+                warn!("save_terrain_to_disk: material paint: {}", e);
+                failures.push(format!("material paint: {e}"));
+            }
+        }
+    }
+
+    match eustress_common::terrain::save_volume_bricks(&terrain_dir, config, volume) {
+        Ok(report) if report.written > 0 || report.removed > 0 => info!(
+            "Terrain: saved {} volume bricks and removed {} stale ones in {:?}",
+            report.written, report.removed, terrain_dir
+        ),
+        Ok(_) => {}
+        Err(e) => {
+            warn!("save_terrain_to_disk: volume: {}", e);
+            failures.push(format!("caves and overhangs: {e}"));
+        }
+    }
+
+    if failures.is_empty() {
+        // A band move above stamped the raster with this same tick, and a
+        // tick equal to the saved one is not newer, so the save does not
+        // count as a change of its own.
+        let tick = world.change_tick();
+        world.insert_resource(TerrainSavedTick(Some(tick)));
+        false
+    } else {
+        // The tick stays, so the next autosave tries again.
+        if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+            n.warning(format!("Terrain was not fully saved ({})", failures.join("; ")));
+        }
+        true
+    }
+}
+
+/// Every chunk of the terrain's `±chunks_x` by `±chunks_z` grid.
+fn terrain_chunk_positions(config: &eustress_common::terrain::TerrainConfig) -> Vec<IVec2> {
+    (-(config.chunks_x as i32)..=config.chunks_x as i32)
         .flat_map(|gx| (-(config.chunks_z as i32)..=config.chunks_z as i32).map(move |gz| IVec2::new(gx, gz)))
-        .collect();
+        .collect()
+}
 
-    match eustress_common::terrain::toml_loader::save_chunks_to_disk(&terrain_dir, config, data, &chunk_positions) {
-        Ok(saved) => info!("💾 Terrain: saved {} chunk heightmaps to {:?}", saved, terrain_dir),
-        Err(e) => warn!("save_terrain_to_disk: {}", e),
-    }
+/// World change tick at the end of the last `save_terrain_to_disk` that wrote
+/// everything. `None` until the first full save of this session.
+#[derive(Resource, Default)]
+pub(crate) struct TerrainSavedTick(pub Option<bevy::ecs::change_detection::Tick>);
+
+/// True when the terrain root's raster or volume changed after the last full
+/// save, so autosave skips the whole-terrain rewrite for edits that never
+/// touched terrain. Before any full save this session, `fallback` (the
+/// global unsaved marker) decides.
+pub(crate) fn terrain_changed_since_save(world: &mut World, fallback: bool) -> bool {
+    use eustress_common::terrain::{TerrainData, TerrainRoot, TerrainVolume};
+    let Some(saved) = world.get_resource::<TerrainSavedTick>().and_then(|t| t.0) else {
+        return fallback;
+    };
+    let now = world.change_tick();
+    let mut query = world.query_filtered::<(Ref<TerrainData>, Option<Ref<TerrainVolume>>), With<TerrainRoot>>();
+    let Ok((data, volume)) = query.single(world) else {
+        return false;
+    };
+    data.last_changed().is_newer_than(saved, now)
+        || volume.is_some_and(|volume| volume.last_changed().is_newer_than(saved, now))
 }
 
 /// Prompt for a new Space folder name + parent, copy the current Space
@@ -677,7 +948,7 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
 
 /// Resource holding the Arc to the publish progress (for UI polling).
 #[derive(Resource)]
-struct PublishProgressHandle(std::sync::Arc<std::sync::Mutex<PublishProgress>>);
+pub struct PublishProgressHandle(pub std::sync::Arc<std::sync::Mutex<PublishProgress>>);
 
 /// Capture a thumbnail from the current viewport and save to .eustress/thumbnail.png.
 /// Spawns a Screenshot entity — Bevy captures the primary window next frame,

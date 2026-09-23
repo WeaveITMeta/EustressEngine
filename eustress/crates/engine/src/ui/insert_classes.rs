@@ -90,6 +90,14 @@ pub fn category_for(class: ClassName) -> &'static str {
         | VelocityMotor | NoCollisionConstraint | RigidConstraint | LineForce
         | AnimationConstraint => "Constraints",
 
+        // ── Physical simulations ──
+        ParticleSimulation | ParticleSpecies => "Simulation",
+
+        // ── Non-destructive terrain layers (placed under
+        // Workspace/Terrain/Layers whatever is selected) ──
+        TerrainSpline | TerrainSplinePoint | TerrainStamp | TerrainFlattenPad
+        | TerrainNoise | TerrainMaterialFill | TerrainScatter | TerrainWaterBody => "Terrain",
+
         // ── Effects / post-FX / VFX ──
         ParticleEmitter | Beam | Decal | BloomEffect | BlurEffect
         | DepthOfFieldEffect | ColorCorrectionEffect | ColorGradingEffect
@@ -170,15 +178,17 @@ fn category_rank(category: &str) -> u8 {
         "Lighting" => 2,
         "Constraints" => 3,
         "Effects" => 4,
-        "Audio" => 5,
-        "GUI" => 6,
-        "Scripting" => 7,
-        "Values" => 8,
-        "Interaction" => 9,
-        "Animation" => 10,
-        "Meshes" => 11,
-        "Data" => 12,
-        "Other" => 13,
+        "Simulation" => 5,
+        "Terrain" => 6,
+        "Audio" => 7,
+        "GUI" => 8,
+        "Scripting" => 9,
+        "Values" => 10,
+        "Interaction" => 11,
+        "Animation" => 12,
+        "Meshes" => 13,
+        "Data" => 14,
+        "Other" => 15,
         _ => 100,
     }
 }
@@ -291,6 +301,16 @@ mod tests {
         let rows = build_catalog(classes.into_iter(), |c| c == "Part");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].class_name, "Part");
+    }
+
+    #[test]
+    fn terrain_layers_group_under_terrain_after_simulation() {
+        let classes = [ClassName::TerrainStamp, ClassName::ParticleSimulation, ClassName::TerrainSplinePoint];
+        let rows = build_catalog(classes.into_iter(), |_| true);
+        let categories: Vec<&str> = rows.iter().map(|r| r.category.as_str()).collect();
+        assert_eq!(categories, ["Simulation", "Terrain", "Terrain"]);
+        assert!(rows[1].show_header && !rows[2].show_header);
+        assert_eq!(default_service_for("Terrain"), "Workspace");
     }
 
     #[test]

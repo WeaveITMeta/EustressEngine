@@ -576,11 +576,12 @@ fn sync_entity_metadata(
         (Entity, Option<&Name>, Option<&eustress_common::classes::BasePart>),
         (
             Or<(With<Name>, With<eustress_common::classes::BasePart>)>,
+            // `Changed<T>` is also true the frame `T` is added, so the former
+            // `Added<Name>` / `Added<BasePart>` arms matched nothing extra and
+            // doubled the tick checks of the every-frame fast path below.
             Or<(
                 Changed<Name>,
                 Changed<eustress_common::classes::BasePart>,
-                Added<Name>,
-                Added<eustress_common::classes::BasePart>,
             )>,
         ),
     >,

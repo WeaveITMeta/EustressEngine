@@ -48,7 +48,10 @@ import { TimelineFilterModal, TimelineTagRow } from "timeline_filter_modal.slint
 import { DataChartView, ChartPoint } from "data_chart.slint";
 import { DataGrid, DataGridRow } from "data_grid.slint";
 // New components for complete egui parity
-import { TerrainEditor } from "terrain_editor.slint";
+import { TerrainEditor, TerrainMaterialSlotData } from "terrain_editor.slint";
+// Rust builds the terrain material picker rows, so the struct needs bindings
+// (same re-export requirement as Theme/ThemeData above).
+export { TerrainMaterialSlotData }
 import { SettingsDialog, ThemeEntry } from "settings.slint";
 import { NetworkPanel } from "network_panel.slint";
 import { FindDialog } from "find_dialog.slint";
@@ -533,6 +536,15 @@ export component StudioWindow inherits Window {
     in-out property <string> terrain-chunk-count: "0";
     in-out property <string> terrain-material: "Default";
 
+    // Terrain material picker (Terrain panel + Paint brush settings), pushed
+    // from `sync_terrain_materials_to_slint`: every defined slot, the slot
+    // the Paint brush lays down with its name, and the built-in material that
+    // slot starts from (what "Add material" copies).
+    in property <[TerrainMaterialSlotData]> terrain-materials: [];
+    in-out property <int> terrain-paint-material: 0;
+    in-out property <string> terrain-paint-material-name: "Grass";
+    in-out property <string> terrain-paint-material-base: "Grass";
+
     // Generate World (worldgen pipeline) state
     in-out property <string> worldgen-seed: "42";
     in-out property <string> worldgen-preset: "medium";
@@ -743,6 +755,23 @@ export component StudioWindow inherits Window {
     
     // View mode
     in-out property <string> view-mode: "perspective";
+
+    // Perspective: the editor camera's 2D/3D mode, projection and axis view,
+    // pushed every change by `ui::perspective_hud::sync_perspective_to_slint`
+    // and shown by the tab-bar ViewSelector and the View menu. Changes go
+    // back through `set-view-mode`.
+    in-out property <string> view-dimension: "3d";
+    in-out property <string> view-projection: "perspective";
+    in-out property <string> view-axis: "custom";
+    in-out property <string> view-label: "User Perspective";
+    in-out property <string> view-scale: "";
+    in-out property <float> view-fov: 70;
+    // Saved viewpoints of the open Space, for the View menu's list; pushed
+    // by `ui::perspective_hud` from `saved_viewpoints::ViewpointNames`.
+    in-out property <[string]> viewpoint-names: [];
+    // Room the ViewSelector takes at the right of the tab bar. It only shows
+    // while the Space tab is active, and gives the space back otherwise.
+    property <length> view-selector-width: root.active-tab-type == "scene" ? 282px : 0px;
     
     // Play mode state
     in-out property <string> play-state: "stopped"; // stopped, playing, paused
@@ -1314,6 +1343,8 @@ export component StudioWindow inherits Window {
     callback generate-world(string, string); // seed, preset — full worldgen pipeline
     callback toggle-terrain-edit-mode();
     callback set-terrain-brush(string);
+    callback set-terrain-paint-material(int); // material slot id
+    callback add-terrain-material(string); // new material name
     callback import-heightmap();
     callback export-heightmap();
     
@@ -1431,6 +1462,10 @@ export component StudioWindow inherits Window {
             // other tool button does.
             current-terrain-brush: root.terrain-brush;
             terrain-edit-mode: root.terrain-edit-mode;
+            // Paint brush settings show the material picker too.
+            terrain-materials: root.terrain-materials;
+            terrain-paint-material: root.terrain-paint-material;
+            terrain-paint-material-name: root.terrain-paint-material-name;
             // Eustress Modes — mode list + active id/icon + data-driven
             // ribbon-tab subset, all pushed from Rust's ModeRegistry.
             available-modes: root.available-modes;
@@ -1589,6 +1624,10 @@ export component StudioWindow inherits Window {
             
             // View
             on-focus-selection => { root.focus-selected(); }
+            view-dimension: root.view-dimension;
+            view-projection: root.view-projection;
+            viewpoint-names: root.viewpoint-names;
+            on-set-view-mode(command) => { root.set-view-mode(command); }
             
             // Play
             on-play-solo => { root.play-solo(); }
@@ -1618,6 +1657,7 @@ export component StudioWindow inherits Window {
             on-spawn-terrain(size) => { root.generate-terrain(size); }
             on-toggle-terrain-edit => { root.toggle-terrain-edit-mode(); }
             on-set-terrain-brush(brush) => { root.set-terrain-brush(brush); }
+            on-set-terrain-paint-material(slot) => { root.set-terrain-paint-material(slot); }
             on-import-heightmap => { root.import-heightmap(); }
             on-export-heightmap => { root.export-heightmap(); }
             
@@ -1973,6 +2013,10 @@ export component StudioWindow inherits Window {
                             terrain-lod-levels: root.terrain-lod-levels;
                             terrain-chunk-count: root.terrain-chunk-count;
                             terrain-material: root.terrain-material;
+                            materials: root.terrain-materials;
+                            paint-material: root.terrain-paint-material;
+                            paint-material-name: root.terrain-paint-material-name;
+                            paint-material-base: root.terrain-paint-material-base;
                             worldgen-seed <=> root.worldgen-seed;
                             worldgen-preset <=> root.worldgen-preset;
                             worldgen-busy: root.worldgen-busy;
@@ -1980,6 +2024,11 @@ export component StudioWindow inherits Window {
                             on-toggle-edit-mode() => { root.toggle-terrain-edit-mode(); }
                             on-generate-terrain(size) => { root.generate-terrain(size); }
                             on-generate-world(seed, preset) => { root.generate-world(seed, preset); }
+                            on-set-paint-material(slot) => { root.set-terrain-paint-material(slot); }
+                            on-add-material(name) => { root.add-terrain-material(name); }
+                            // The Insert menu's action: layer placement and
+                            // the undo step are the same wherever it starts.
+                            on-insert-layer(class-name) => { root.menu-action("insert:" + class-name); }
                             on-import-heightmap() => { root.import-heightmap(); }
                             on-export-heightmap() => { root.export-heightmap(); }
                         }
@@ -2089,6 +2138,25 @@ export component StudioWindow inherits Window {
                         }
                     }
                     
+                    // === Perspective control (left of the UI toggle) ===
+                    // 2D | 3D and the current view, opening the Perspective
+                    // menu. In the tab bar rather than over the viewport so it
+                    // never hides the scene or swallows a click meant for a
+                    // part; only while the Space tab shows, since it drives
+                    // the 3D camera.
+                    if root.active-tab-type == "scene": ViewSelector {
+                        x: parent.width - 36px - root.view-selector-width;
+                        y: 0px;
+                        width: root.view-selector-width;
+                        dimension: root.view-dimension;
+                        projection: root.view-projection;
+                        view-axis: root.view-axis;
+                        view-label: root.view-label;
+                        view-scale: root.view-scale;
+                        fov: root.view-fov;
+                        set-view-mode(command) => { root.set-view-mode(command); }
+                    }
+
                     // === Tab strip (between Home and UI toggle) ===
                     // Wrapped in Rectangle so the drag-overlay TouchArea can be positioned
                     // absolutely on top of the entire strip — this is the only way in Slint
@@ -2096,7 +2164,7 @@ export component StudioWindow inherits Window {
                     tab-strip := Rectangle {
                         x: 36px;
                         y: 0px;
-                        width: parent.width - 72px;
+                        width: parent.width - 72px - root.view-selector-width;
                         height: 35px;
                         // Opaque tab-bar background. Without this the strip is
                         // transparent, so the empty area to the right of the
@@ -2649,9 +2717,12 @@ export component StudioWindow inherits Window {
                         width: elem.width * 1px;
                         height: elem.height * 1px;
                         visible: elem.visible;
-                        background: rgba(elem.bg-r * 255, elem.bg-g * 255, elem.bg-b * 255, elem.bg-a * 255);
+                        // `rgba()` takes channels in 0..255 but alpha in 0..1:
+                        // alpha scaled by 255 turned every translucent
+                        // element fully opaque.
+                        background: rgba(elem.bg-r * 255, elem.bg-g * 255, elem.bg-b * 255, elem.bg-a);
                         border-width: elem.border-size * 1px;
-                        border-color: rgba(elem.border-r * 255, elem.border-g * 255, elem.border-b * 255, elem.border-a * 255);
+                        border-color: rgba(elem.border-r * 255, elem.border-g * 255, elem.border-b * 255, elem.border-a);
                         border-radius: elem.corner-radius * 1px;
                         clip: elem.clip-children;
 
@@ -2668,12 +2739,15 @@ export component StudioWindow inherits Window {
                             width: 100%;
                             height: 100%;
                             text: elem.text;
-                            color: rgba(elem.text-r * 255, elem.text-g * 255, elem.text-b * 255, elem.text-a * 255);
+                            color: rgba(elem.text-r * 255, elem.text-g * 255, elem.text-b * 255, elem.text-a);
                             font-size: max(elem.font-size * 1px, 8px);
                             horizontal-alignment: elem.text-align == "left" ? left :
                                                   elem.text-align == "right" ? right : center;
                             vertical-alignment: center;
-                            overflow: elide;
+                            // A box tall enough for two lines wraps its text;
+                            // a one-line box keeps it on one line.
+                            wrap: elem.height > elem.font-size * 1.9 ? word-wrap : no-wrap;
+                            overflow: elem.height > elem.font-size * 1.9 ? clip : elide;
                         }
                     }
 
@@ -2700,10 +2774,12 @@ export component StudioWindow inherits Window {
                             drop-shadow-color: Theme.border-glow-color;
                         }
 
-                        // Layout Preset Selector (top-left)
+                        // Layout Preset Selector (top-left). Editor chrome:
+                        // hidden while a game runs so it never covers its HUD.
                         LayoutPresetSelector {
                             x: 8px;
                             y: 8px;
+                            visible: root.play-state == "stopped";
                             current-preset-index: root.current-layout-preset;
                             dropdown-open: root.show-layout-dropdown;
 
@@ -2873,8 +2949,9 @@ export component StudioWindow inherits Window {
                             }
                         }
 
-                        // Performance Overlay (top-right)
-                        if root.show-performance-overlay: PerformanceOverlay {
+                        // Performance Overlay (top-right), editor only for the
+                        // same reason.
+                        if root.show-performance-overlay && root.play-state == "stopped": PerformanceOverlay {
                             x: parent.width - self.width - 8px;
                             y: 8px;
                             fps: root.current-fps;
@@ -2900,8 +2977,20 @@ export component StudioWindow inherits Window {
 
                         // Snap status — hidden (accessible via keybinds 1/2/3)
                         
-                        // Play mode indicator with simulation clock
-                        if root.play-state != "stopped": Rectangle {
+                        // While a game runs its HUD owns the viewport: the
+                        // play state shows as a thin border instead of a
+                        // banner over the top of the screen.
+                        if root.play-state == "playing": Rectangle {
+                            width: 100%;
+                            height: 100%;
+                            background: transparent;
+                            border-width: 2px;
+                            border-color: Theme.accent-green;
+                        }
+
+                        // Paused: the game is frozen, so the full indicator
+                        // with the simulation clock returns.
+                        if root.play-state == "paused": Rectangle {
                             x: (parent.width - self.width) / 2;
                             y: 8px;
                             width: 320px;

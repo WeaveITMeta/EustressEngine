@@ -156,11 +156,19 @@ impl Plugin for StudioPluginSystem {
 
 /// Advance the simulation clock and sync with LightingService.
 /// Only advances when PlayModeState is Playing — sun stays static during editing.
+///
+/// The clock follows other writers of the time of day rather than overriding
+/// them. A script setting `Lighting.ClockTime` moves `LightingService` between
+/// this system's writes; when the service no longer holds the value written
+/// here last, the clock adopts the new time and keeps ticking from it.
+/// Overwriting it instead put the sun back every frame, so a scripted dusk
+/// flipped between day and night several times a second and never stuck.
 fn advance_sim_clock(
     time: Res<Time>,
     mut clock: ResMut<SimClock>,
     lighting: Option<ResMut<eustress_common::services::LightingService>>,
     play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut last_written: Local<Option<f32>>,
 ) {
     // Only tick the simulation clock during play mode
     let is_playing = play_state.as_ref()
@@ -180,6 +188,9 @@ fn advance_sim_clock(
         if clock.current == 0.0 && clock.frame_count == 0 {
             clock.current = lighting.time_of_day as f64 * 24.0 * 3600.0;
         }
+        if last_written.is_some_and(|v| (lighting.time_of_day - v).abs() > 0.0001) {
+            clock.current = lighting.time_of_day as f64 * 24.0 * 3600.0;
+        }
         clock.tick(time.delta_secs());
 
         let sim_hours = (clock.current / 3600.0) % 24.0;
@@ -190,7 +201,9 @@ fn advance_sim_clock(
         } else {
             lighting.bypass_change_detection();
         }
+        *last_written = Some(lighting.time_of_day);
     } else {
+        *last_written = None;
         lighting.bypass_change_detection();
     }
 }
@@ -262,7 +275,13 @@ fn handle_plugin_action_events(
     child_of_query: Query<&ChildOf>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
     mut file_registry: Option<ResMut<crate::space::file_loader::SpaceFileRegistry>>,
-    loaded_from_file: Query<&crate::space::LoadedFromFile>,
+    // Space files: which file each entity loaded from, and the open Space new
+    // folders are written into. Bundled because this system is at Bevy's
+    // 16-param ceiling.
+    space_files: (
+        Query<&crate::space::LoadedFromFile>,
+        Option<Res<crate::space::SpaceRoot>>,
+    ),
     mut instance_files: Query<&mut crate::space::instance_loader::InstanceFile>,
     mut explorer_state: Option<ResMut<crate::ui::slint_ui::UnifiedExplorerState>>,
     // Mark our own writes so the file watcher's debounce skips them.
@@ -279,6 +298,7 @@ fn handle_plugin_action_events(
     }
     let Some(selection_manager) = selection_manager else { return };
     use crate::classes::{Instance, ClassName, BillboardGui, TextLabel};
+    let (loaded_from_file, space_root_res) = (&space_files.0, &space_files.1);
 
     for event in events.read() {
         info!("🔌 Processing plugin action: {}", event.action_id);
@@ -417,7 +437,7 @@ fn handle_plugin_action_events(
                     if lff.path.is_dir() { lff.path.clone() }
                     else { lff.path.parent().unwrap_or(lff.path.as_path()).to_path_buf() }
                 } else {
-                    crate::space::default_space_root().join("Workspace")
+                    crate::space::open_space_root(space_root_res.as_deref()).join("Workspace")
                 };
 
                 let bb_dir = part_dir.join(&safe_name);
@@ -688,7 +708,7 @@ fn handle_plugin_action_events(
             }
             "mindspace:save" => {
                 // Save all BillboardGui entities to TOML on disk
-                let space_root = crate::space::default_space_root();
+                let space_root = crate::space::open_space_root(space_root_res.as_deref());
                 let starter_gui = space_root.join("StarterGui");
                 if let Err(e) = std::fs::create_dir_all(&starter_gui) {
                     warn!("Failed to create StarterGui directory: {}", e);

@@ -72,6 +72,14 @@ pub enum PlayModeState {
     Paused,
 }
 
+/// Run condition for the editor's own input handlers (selection, tools,
+/// gizmos, shortcuts): they listen only outside a Play session, so the keys
+/// and clicks that play a game never select, drag or delete the scene.
+/// True in apps with no Play mode at all.
+pub fn editor_input_enabled(state: Option<Res<State<PlayModeState>>>) -> bool {
+    state.map_or(true, |s| *s.get() == PlayModeState::Editing)
+}
+
 /// Play mode type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlayModeType {
@@ -981,7 +989,14 @@ fn handle_stop_play(
         if play_mode_despawned > 0 {
             info!("🎮 Despawned {} play mode entities (character/camera)", play_mode_despawned);
         }
-        
+
+        // The avatar belongs to the avatar runtime (`SpawnedByAvatarRuntime`),
+        // which neither query above matches, and the runtime tears down the
+        // body and its camera itself. Left standing, it and its camera outlived
+        // Stop, and the next Play added a second pair: the character binding
+        // then flipped between the two bodies every few seconds.
+        despawn_avatars.write(eustress_common::avatar::DespawnAllAvatars);
+
         // Clean up runtime tracking
         cleanup_play_mode_entities(&mut commands, &mut runtime);
         play_mode.player_character = None;
@@ -1671,6 +1686,17 @@ impl Plugin for PlayModeCorePlugin {
         // Add the runtime plugin for play mode specific handling
         app.add_plugins(crate::play_mode_runtime::PlayModeRuntimePlugin);
 
+        // Luau (and the tree Rune reads) against the live scene. Seeding runs
+        // after the GUI snapshot, so Stop restores the StarterGui it hides,
+        // and before physics activation, so hidden templates stay put.
+        app.add_plugins(crate::play_datamodel::PlayDataModelPlugin);
+        app.add_systems(
+            OnEnter(PlayModeState::Playing),
+            crate::play_datamodel::seed::seed_session
+                .after(snapshot_gui_on_play)
+                .before(activate_physics_for_unanchored_parts),
+        );
+
         app
             // State
             .init_state::<PlayModeState>()
@@ -1700,6 +1726,11 @@ impl Plugin for PlayModeCorePlugin {
             .init_resource::<crate::soul::rune_play::RunePlayBridges>()
             .add_systems(Startup, crate::soul::rune_api::register_engine_rune_modules)
 
+            // The open Space's characters and movement switches, refreshed as
+            // Play starts so the avatar requested that frame is dressed by them.
+            .init_resource::<eustress_common::avatar::space_character::SpaceCharacterPolicy>()
+            .add_systems(Update, load_space_characters.before(PlayModeSystems))
+
             // Message-driven play/pause/stop handlers — see PlayModeSystems doc.
             .add_systems(Update, (
                 handle_start_play,
@@ -1723,17 +1754,9 @@ impl Plugin for PlayModeCorePlugin {
             // PlayModeState::Playing, so scripts behave identically in each).
             .add_systems(OnEnter(PlayModeState::Playing), crate::soul::rune_play::start_rune_session
                 .after(crate::soul::rune_api::compile_scripts_on_play))
-            // Luau analogue of compile_scripts_on_play: spawn each Luau script
-            // body as a live scheduler coroutine (task.wait / Heartbeat / input
-            // become real). Runs after Rune compile so ordering is deterministic.
-            .add_systems(OnEnter(PlayModeState::Playing), crate::soul::rune_api::start_luau_scripts_on_play
-                .after(crate::soul::rune_api::compile_scripts_on_play))
             .add_systems(OnEnter(PlayModeState::Playing), snapshot_gui_on_play)
             .add_systems(OnExit(PlayModeState::Playing), deactivate_physics_for_parts)
             .add_systems(OnExit(PlayModeState::Playing), stop_play_server_if_server_mode)
-            // Tear down live Luau coroutines / connections so Stop fully stops
-            // script activity and the next Play starts from a clean VM.
-            .add_systems(OnExit(PlayModeState::Playing), crate::soul::rune_api::stop_luau_scripts_on_exit)
             // on_exit() on all scripts before cleanup (Godot-style _exit_tree).
             // Goes through `stop_rune_session` rather than the bare
             // `run_script_exit` so `on_exit` runs with the script bridges still
@@ -1779,19 +1802,6 @@ impl Plugin for PlayModeCorePlugin {
             .add_systems(Update, crate::soul::rune_api::drain_script_errors_to_output)
             .add_systems(Update, (
                 crate::soul::rune_api::hot_recompile_dirty_rune_scripts,
-                crate::soul::rune_api::hot_reload_dirty_luau_scripts,
-                // Pump keyboard/mouse into UserInputService (live IsKeyDown +
-                // InputBegan/Ended/Changed) before the frame driver, so input
-                // pressed this frame is visible in the same Heartbeat tick.
-                eustress_common::luau::sync_luau_input
-                    .after(crate::soul::rune_api::hot_reload_dirty_luau_scripts),
-                // Heartbeat of the live Luau VM: advance the coroutine scheduler
-                // and fire RunService.Stepped/RenderStepped/Heartbeat each frame.
-                eustress_common::luau::drive_luau_frame
-                    .after(eustress_common::luau::sync_luau_input),
-                // Translate Avian collisions into Luau Touched/TouchEnded.
-                crate::soul::rune_api::read_luau_collisions
-                    .after(eustress_common::luau::drive_luau_frame),
                 // Keep the live-hierarchy + tag snapshots the `Instance`
                 // handle API resolves against fresh. Change-gated, so a
                 // static scene costs one empty query.
@@ -1847,7 +1857,106 @@ impl Plugin for PlayModeUiPlugin {
             // because that window is a single system by design.
             .add_systems(Update, dispatch_gui_button_clicks
                 .after(crate::soul::rune_play::drive_rune_frame)
-                .run_if(in_state(PlayModeState::Playing)));
+                .run_if(in_state(PlayModeState::Playing)))
+            // `--play`: Play with the character once the Space has loaded.
+            .add_systems(Update, play_on_launch.before(PlayModeSystems));
+    }
+}
+
+/// Refresh [`SpaceCharacterPolicy`] from the open Space as Play starts:
+/// `StarterPlayer/Characters/*.rig.toml` (its own body per body option) and
+/// StarterPlayer's movement switches (`JumpEnabled`, `ClimbingEnabled`, ...,
+/// stored snake_case in `_service.toml`). Updated in place, before
+/// `handle_start_play` requests the avatar, so that request sees it.
+///
+/// [`SpaceCharacterPolicy`]: eustress_common::avatar::space_character::SpaceCharacterPolicy
+fn load_space_characters(
+    mut starts: MessageReader<StartPlayEvent>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    services: Query<&crate::space::service_loader::ServiceComponent>,
+    mut policy: ResMut<eustress_common::avatar::space_character::SpaceCharacterPolicy>,
+) {
+    use crate::space::service_loader::PropertyValue;
+    use eustress_common::avatar::abilities::AvatarAbilities;
+    use eustress_common::avatar::space_character::SpaceCharacterPolicy;
+
+    if starts.read().count() == 0 {
+        return;
+    }
+    let Some(root) = space_root else { return };
+    let (mut loaded, warnings) = SpaceCharacterPolicy::load(&root.0);
+    for w in &warnings {
+        warn!("avatar: StarterPlayer/Characters/{w}");
+    }
+    // `_service.toml` stores properties snake_case: ClimbingEnabled -> climbing_enabled.
+    let snake = |name: &str| {
+        let mut out = String::with_capacity(name.len() + 4);
+        for (i, c) in name.chars().enumerate() {
+            if c.is_ascii_uppercase() {
+                if i > 0 {
+                    out.push('_');
+                }
+                out.push(c.to_ascii_lowercase());
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    };
+    if let Some(sp) = services.iter().find(|s| s.class_name == "StarterPlayer") {
+        for name in AvatarAbilities::PROPERTIES {
+            let value = sp.properties.get(&snake(name)).or_else(|| sp.properties.get(name));
+            if let Some(PropertyValue::Bool(on)) = value {
+                loaded.abilities.set(name, *on);
+            }
+        }
+    }
+    let off: Vec<&str> = AvatarAbilities::PROPERTIES
+        .iter()
+        .copied()
+        .filter(|n| loaded.abilities.get(n) == Some(false))
+        .collect();
+    info!(
+        "avatar: Space characters: {} body option(s){}{}",
+        loaded.rigs.len(),
+        if loaded.fallback.is_some() { " plus a default" } else { "" },
+        if off.is_empty() { String::new() } else { format!("; off: {}", off.join(", ")) },
+    );
+    *policy = loaded;
+}
+
+/// `eustress-engine --play`: start Play with the character once the Space
+/// has finished loading (its scripts included), as if F5 were pressed. The
+/// flag used to be parsed and never read.
+fn play_on_launch(
+    args: Option<Res<crate::startup::StartupArgs>>,
+    load: Option<Res<crate::space::file_loader::LoadInProgress>>,
+    state: Res<State<PlayModeState>>,
+    mut seen_loading: Local<bool>,
+    mut done: Local<bool>,
+    mut start_writer: MessageWriter<StartPlayEvent>,
+) {
+    if *done {
+        return;
+    }
+    if !args.is_some_and(|a| a.play_mode) {
+        *done = true;
+        return;
+    }
+    // `active` is false before the load begins as well as after it settles,
+    // so wait to have seen it true first.
+    let loading = load.is_some_and(|l| l.active);
+    if loading {
+        *seen_loading = true;
+        return;
+    }
+    if !*seen_loading {
+        return;
+    }
+    *done = true;
+    if matches!(state.get(), PlayModeState::Editing) {
+        info!("▶️ --play: starting Play with the character");
+        start_writer.write(StartPlayEvent { play_type: PlayModeType::WithCharacter });
     }
 }
 
@@ -2175,11 +2284,15 @@ pub struct PlayModePhysicsActivated;
 #[derive(Component)]
 pub struct SpawnedDuringPlayMode;
 
-/// Activate physics for unanchored parts when entering play mode
+/// Activate physics for unanchored parts when entering play mode. Parts in
+/// storage services (hidden for the session) stay static.
 fn activate_physics_for_unanchored_parts(
     mut commands: Commands,
     mut physics_time: ResMut<Time<Physics>>,
-    parts_query: Query<(Entity, &BasePart, Option<&avian3d::prelude::Collider>), (With<Part>, Without<PlayModeCharacter>)>,
+    parts_query: Query<
+        (Entity, &BasePart, Option<&avian3d::prelude::Collider>),
+        (With<Part>, Without<PlayModeCharacter>, Without<crate::play_datamodel::HiddenForPlay>),
+    >,
 ) {
     physics_time.unpause();
     info!("⚡ Physics simulation started");

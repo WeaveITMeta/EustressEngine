@@ -13,8 +13,6 @@
 use bevy::prelude::*;
 use std::collections::HashMap;
 
-#[cfg(feature = "webview")]
-use bevy::winit::WinitWindows;
 
 /// Bevy plugin for wry-based web browser tabs
 pub struct WebViewPlugin;
@@ -36,6 +34,19 @@ pub struct WebViewManager {
     pub initialized: bool,
 }
 
+/// Live page state written by wry's callbacks and read by `sync_webviews`.
+///
+/// wry fires `on_page_load` / `document_title_changed` on the UI thread from
+/// inside WebView2's message handling, where the Bevy world is not reachable,
+/// so they write here and the system copies it across each frame. Without
+/// this, `loading` was set once at creation and never cleared: the progress
+/// bar ran forever and the address bar kept its Stop button instead of Reload.
+#[derive(Default)]
+pub struct PageSignals {
+    pub loading: bool,
+    pub title: Option<String>,
+}
+
 /// State for a single WebView instance
 pub struct WebViewInstance {
     /// Current URL
@@ -50,6 +61,8 @@ pub struct WebViewInstance {
     pub can_go_forward: bool,
     /// Whether the WebView is currently visible
     pub visible: bool,
+    /// Written by wry's page-load and title callbacks; see `PageSignals`.
+    pub signals: std::sync::Arc<std::sync::Mutex<PageSignals>>,
     /// The wry WebView handle (only available with webview feature)
     #[cfg(feature = "webview")]
     pub webview: Option<wry::WebView>,
@@ -64,6 +77,7 @@ impl Default for WebViewInstance {
             can_go_back: false,
             can_go_forward: false,
             visible: false,
+            signals: std::sync::Arc::new(std::sync::Mutex::new(PageSignals::default())),
             #[cfg(feature = "webview")]
             webview: None,
         }
@@ -76,12 +90,29 @@ impl WebViewManager {
     pub fn create_webview(&mut self, tab_index: usize, url: &str, window: &winit::window::Window) {
         use wry::WebViewBuilder;
 
+        let signals = std::sync::Arc::new(std::sync::Mutex::new(PageSignals {
+            loading: url != "about:blank",
+            title: None,
+        }));
+        let on_load = signals.clone();
+        let on_title = signals.clone();
+
         let webview_result = WebViewBuilder::new()
             .with_url(url)
             .with_visible(true)
             .with_bounds(wry::Rect {
                 position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(0.0, 0.0)),
                 size: wry::dpi::Size::Logical(wry::dpi::LogicalSize::new(800.0, 600.0)),
+            })
+            .with_on_page_load_handler(move |event, _url| {
+                if let Ok(mut s) = on_load.lock() {
+                    s.loading = matches!(event, wry::PageLoadEvent::Started);
+                }
+            })
+            .with_document_title_changed_handler(move |title| {
+                if let Ok(mut s) = on_title.lock() {
+                    s.title = Some(title);
+                }
             })
             .build_as_child(window);
 
@@ -92,6 +123,7 @@ impl WebViewManager {
                     title: url.to_string(),
                     loading: url != "about:blank",
                     visible: true,
+                    signals,
                     webview: Some(webview),
                     ..Default::default()
                 };
@@ -218,8 +250,6 @@ fn sync_webviews(
     mut webview_mgr: NonSendMut<WebViewManager>,
     mut state: Option<ResMut<super::StudioState>>,
     #[cfg(feature = "webview")]
-    winit_windows: Option<NonSend<WinitWindows>>,
-    #[cfg(feature = "webview")]
     primary_window: Query<Entity, With<bevy::window::PrimaryWindow>>,
     #[cfg(feature = "webview")]
     viewport_bounds: Option<Res<super::ViewportBounds>>,
@@ -241,14 +271,37 @@ fn sync_webviews(
     // Create WebView instances for tabs that don't have one yet
     #[cfg(feature = "webview")]
     if let Some(idx) = active_web_idx {
+        // Bevy 0.19 keeps winit windows in the `bevy::winit::WINIT_WINDOWS`
+        // thread-local and never inserts `WinitWindows` as a resource. This
+        // system used to take `Option<NonSend<WinitWindows>>`, which still
+        // compiled but was `None` on every frame, so the WebView was never
+        // created: the tab strip and address bar drew, the page area stayed
+        // empty, and nothing was logged. `NonSendMut<WebViewManager>` pins this
+        // system to the main thread, which is the thread whose copy of the
+        // thread-local bevy_winit fills in.
+        let primary = primary_window.single().ok();
         if !webview_mgr.views.contains_key(&idx) {
-            if let Some(ref winit) = winit_windows {
-                if let Ok(entity) = primary_window.single() {
-                    if let Some(winit_window) = winit.get_window(entity) {
-                        let url = state.center_tabs.get(idx).map(|t| t.url.as_str()).unwrap_or("about:blank");
-                        webview_mgr.create_webview(idx, url, winit_window);
+            match primary {
+                Some(entity) => {
+                    let url = state
+                        .center_tabs
+                        .get(idx)
+                        .map(|t| t.url.clone())
+                        .unwrap_or_else(|| "about:blank".to_string());
+                    let created = bevy::winit::WINIT_WINDOWS.with_borrow(|windows| {
+                        match windows.get_window(entity) {
+                            Some(winit_window) => {
+                                webview_mgr.create_webview(idx, &url, winit_window);
+                                true
+                            }
+                            None => false,
+                        }
+                    });
+                    if !created {
+                        warn!("Web tab {} is active but the primary window has no winit window yet; retrying next frame", idx);
                     }
                 }
+                None => warn!("Web tab {} is active but there is no primary window", idx),
             }
         }
         // Update bounds to match viewport area.
@@ -266,10 +319,11 @@ fn sync_webviews(
         // Same physical-vs-logical trap `ViewportBounds::contains_logical`
         // exists to prevent for cursor hit-testing.
         if let Some(ref vb) = viewport_bounds {
-            let scale = winit_windows
-                .as_ref()
-                .and_then(|w| primary_window.single().ok().and_then(|e| w.get_window(e)))
-                .map(|w| w.scale_factor())
+            let scale = primary
+                .and_then(|e| {
+                    bevy::winit::WINIT_WINDOWS
+                        .with_borrow(|w| w.get_window(e).map(|w| w.scale_factor()))
+                })
                 .unwrap_or(1.0)
                 .max(0.0001);
             webview_mgr.set_bounds(
@@ -334,6 +388,18 @@ fn sync_webviews(
         .map(|(i, _)| i)
         .collect();
     webview_mgr.views.retain(|k, _| valid_indices.contains(k));
+
+    // Pull what wry's callbacks reported since last frame.
+    for view in webview_mgr.views.values_mut() {
+        let (loading, title) = match view.signals.lock() {
+            Ok(s) => (s.loading, s.title.clone()),
+            Err(_) => continue,
+        };
+        view.loading = loading;
+        if let Some(t) = title.filter(|t| !t.is_empty()) {
+            view.title = t;
+        }
+    }
 
     // Sync WebView state back to tab data
     for (idx, view) in webview_mgr.views.iter() {

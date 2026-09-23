@@ -53,6 +53,8 @@ impl ClassSpawner for SpotLightSpawner {
         let range = props.get_f32("light.range").unwrap_or(defaults.range);
         let angle_deg = props.get_f32("light.angle").unwrap_or(defaults.angle);
         let shadows = props.get_bool("light.shadows").unwrap_or(defaults.shadows);
+        // Roblox `Light.Enabled`; a disabled light emits nothing.
+        let enabled = props.get_bool("light.enabled").unwrap_or(defaults.enabled);
         let texture = props
             .get_string("appearance.texture")
             .filter(|s| !s.is_empty())
@@ -69,11 +71,11 @@ impl ClassSpawner for SpotLightSpawner {
             .spawn((
                 SpotLight {
                     color,
-                    intensity: brightness,
+                    intensity: if enabled { brightness } else { 0.0 },
                     range,
                     inner_angle: inner_rad,
                     outer_angle: outer_rad,
-                    shadow_maps_enabled: shadows,
+                    shadow_maps_enabled: shadows && enabled,
                     ..default()
                 },
                 transform,
@@ -91,6 +93,7 @@ impl ClassSpawner for SpotLightSpawner {
                     range,
                     angle: angle_deg,
                     shadows,
+                    enabled,
                     texture,
                 },
                 Name::new(name),
@@ -360,6 +363,7 @@ mod tests {
                     range: 30.0,
                     angle: 60.0,
                     shadows: true,
+                    enabled: true,
                     texture: None,
                 },
                 Name::new("Stage"),

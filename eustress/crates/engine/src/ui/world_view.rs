@@ -1683,15 +1683,19 @@ pub fn regenerate_meshes(
     
     for (entity, basepart, part_opt, _mesh3d) in query.iter() {
         let size = basepart.size;
-        // Use half-extents for collider (Avian uses half-size)
-        let half = size * 0.5;
+        // Colliders take FULL dimensions, exactly like the meshes beside them.
+        // Avian 0.7's `Collider::cuboid(x, y, z)` and `Collider::cylinder(radius,
+        // height)` halve internally; this block used to pre-halve with a
+        // `half = size * 0.5` (on the mistaken note "Avian uses half-size"), so
+        // every part resized through the Properties panel got a collider HALF
+        // its visible size, and cylinders got radius and height swapped.
         
         // Regenerate mesh and collider based on part type
         let (new_mesh, new_collider) = if let Some(part) = part_opt {
             match part.shape {
                 crate::classes::PartType::Block => (
                     meshes.add(Cuboid::from_size(size)),
-                    Collider::cuboid(half.x, half.y, half.z),
+                    Collider::cuboid(size.x, size.y, size.z),
                 ),
                 crate::classes::PartType::Ball => (
                     meshes.add(Sphere::new(size.x / 2.0)),
@@ -1699,17 +1703,17 @@ pub fn regenerate_meshes(
                 ),
                 crate::classes::PartType::Cylinder => (
                     meshes.add(Cylinder::new(size.x / 2.0, size.y)),
-                    Collider::cylinder(size.y / 2.0, size.x / 2.0),
+                    Collider::cylinder(size.x / 2.0, size.y),
                 ),
                 _ => (
                     meshes.add(Cuboid::from_size(size)),
-                    Collider::cuboid(half.x, half.y, half.z),
+                    Collider::cuboid(size.x, size.y, size.z),
                 ),
             }
         } else {
             (
                 meshes.add(Cuboid::from_size(size)),
-                Collider::cuboid(half.x, half.y, half.z),
+                Collider::cuboid(size.x, size.y, size.z),
             )
         };
         
