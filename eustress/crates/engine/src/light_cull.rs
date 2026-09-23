@@ -10,10 +10,11 @@
 //! that cost, by ranking lights by distance to the **order-0** (window)
 //! camera and:
 //!
-//! - **Shadows:** only the nearest [`SHADOW_LIGHT_BUDGET`] keep
-//!   `shadow_maps_enabled = true`; all others have shadows turned off. This is
-//!   the single biggest lever — it collapses thousands of shadow maps to a
-//!   few dozen.
+//! - **Shadows:** a light casts only if it was AUTHORED to (`shadows` on its
+//!   Eustress light class), and of those only the nearest
+//!   [`SHADOW_LIGHT_BUDGET`] keep `shadow_maps_enabled = true`. This is the
+//!   single biggest lever — it collapses thousands of shadow maps to a few
+//!   dozen — and it never adds a shadow the author switched off.
 //! - **Active intensity:** only the nearest [`ACTIVE_LIGHT_BUDGET`] *and*
 //!   within a hysteresis radius keep their authored intensity. Lights that
 //!   fall outside are dimmed to `intensity = 0.0` so they drop out of the
@@ -96,26 +97,90 @@ pub struct CullGate {
     frames_since_run: u32,
 }
 
+
+/// A light's AUTHORED shadow flag, stashed the first time the culler (or the
+/// load-time budget) meets a light that has no Eustress light class to read
+/// the flag from (a raw Bevy light spawned by some other path). Class-backed
+/// lights read the flag straight from `EustressPointLight` /
+/// `EustressSpotLight` / `SurfaceLight`, so they never get one.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct AuthoredLightShadows(pub bool);
+
+/// The authored shadow flag of a point-emitting light, if it can be known
+/// without guessing: from its class component, else from an earlier stash.
+/// A light switched off (`enabled = false`) never casts.
+fn authored_point_shadows(
+    class: Option<&eustress_common::classes::EustressPointLight>,
+    surface: Option<&eustress_common::classes::SurfaceLight>,
+    stash: Option<&AuthoredLightShadows>,
+) -> Option<bool> {
+    class
+        .map(|c| c.shadows && c.enabled)
+        .or_else(|| surface.map(|s| s.shadows && s.enabled))
+        .or_else(|| stash.map(|s| s.0))
+}
+
+/// The authored shadow flag of a spot light (class, else stash).
+fn authored_spot_shadows(
+    class: Option<&eustress_common::classes::EustressSpotLight>,
+    stash: Option<&AuthoredLightShadows>,
+) -> Option<bool> {
+    class.map(|c| c.shadows && c.enabled).or_else(|| stash.map(|s| s.0))
+}
+
+/// Whether a light is switched on. Only class-backed lights can be off; the
+/// light sync keeps an off light at zero intensity with no shadow map, so
+/// the culler leaves it alone (dimming one would stash its zero intensity
+/// and "restore" darkness after the user switches it back on).
+fn light_enabled(
+    point: Option<&eustress_common::classes::EustressPointLight>,
+    spot: Option<&eustress_common::classes::EustressSpotLight>,
+    surface: Option<&eustress_common::classes::SurfaceLight>,
+) -> bool {
+    point.map_or(true, |c| c.enabled)
+        && spot.map_or(true, |c| c.enabled)
+        && surface.map_or(true, |s| s.enabled)
+}
+
 /// Rank lights by distance to the order-0 camera and apply the shadow +
 /// intensity budgets. See the module docs for the policy.
 ///
+/// Shadows follow the AUTHORED flag. A light authored with `shadows = false`
+/// never casts, and [`SHADOW_LIGHT_BUDGET`] ranks only the lights authored
+/// with shadows. This used to hand shadows to the nearest 32 lights whatever
+/// they were authored with: Super Station's 49 lights are all authored
+/// `shadows = false`, and that rendered ~150 cube-face shadow maps every
+/// frame (158 render views, a 490 ms render thread) for shadows the scene
+/// had switched off.
+///
 /// `Local<CullGate>` keeps the cadence/movement state without a registered
-/// resource. Both light queries are `Option`-free `&GlobalTransform` reads
-/// plus a `&mut` on the light component.
+/// resource. A light is only written when its state actually changes, so an
+/// evaluation that changes nothing marks nothing `Changed`.
+#[allow(clippy::type_complexity)]
 pub fn cull_lights_to_nearest(
     mut gate: Local<CullGate>,
     cameras: Query<(&Camera, &GlobalTransform)>,
-    mut point_lights: Query<
-        (Entity, &GlobalTransform, &mut PointLight, Option<&OriginalLightIntensity>),
-    >,
-    mut spot_lights: Query<
-        (Entity, &GlobalTransform, &mut SpotLight, Option<&OriginalLightIntensity>),
-    >,
+    mut point_lights: Query<(
+        Entity,
+        &GlobalTransform,
+        &mut PointLight,
+        Option<&OriginalLightIntensity>,
+        Option<&eustress_common::classes::EustressPointLight>,
+        Option<&eustress_common::classes::SurfaceLight>,
+        Option<&AuthoredLightShadows>,
+    )>,
+    mut spot_lights: Query<(
+        Entity,
+        &GlobalTransform,
+        &mut SpotLight,
+        Option<&OriginalLightIntensity>,
+        Option<&eustress_common::classes::EustressSpotLight>,
+        Option<&AuthoredLightShadows>,
+    )>,
     mut commands: Commands,
 ) {
-    // ── Find the order-0 (window) camera. The AI camera is order -1 and
-    //    the Slint overlay / other cameras are not order 0, so this only
-    //    ever tracks the editor viewport camera. ────────────────────────
+    // Order-0 camera = the window/editor camera (the AI camera is order 1,
+    // the Slint overlay is order 100). Cull relative to what the user sees.
     let Some(cam_pos) = cameras
         .iter()
         .find(|(c, _)| c.order == 0)
@@ -124,8 +189,6 @@ pub fn cull_lights_to_nearest(
         return; // no main camera yet (early boot) — try again next frame
     };
 
-    // ── Cadence gate: run on meaningful camera movement OR every
-    //    FORCE_INTERVAL_FRAMES, whichever first. ─────────────────────────
     gate.frames_since_run = gate.frames_since_run.saturating_add(1);
     let moved_enough = match gate.last_camera_pos {
         Some(prev) => prev.distance_squared(cam_pos) >= CAMERA_MOVE_DEADZONE_SQ,
@@ -137,47 +200,68 @@ pub fn cull_lights_to_nearest(
     gate.frames_since_run = 0;
     gate.last_camera_pos = Some(cam_pos);
 
-    // ── Gather (entity, distance²) for every light, tagged by kind, then
-    //    rank by distance. A `Vec` sort of a few thousand entries is cheap
-    //    versus one shadow-map pass; we only do it on the gated cadence. ──
     #[derive(Clone, Copy)]
     enum Kind {
         Point,
         Spot,
     }
-    let mut ranked: Vec<(f32, Entity, Kind)> =
+
+    // Gather (distance², entity, kind, authored shadows). A light with no
+    // class component and no stash is met for the first time: nothing has
+    // changed its shadow flag yet (the load-time budget stashes before it
+    // turns one off), so its live flag IS the authored one; stash it.
+    let mut ranked: Vec<(f32, Entity, Kind, bool)> =
         Vec::with_capacity(point_lights.iter().len() + spot_lights.iter().len());
-    for (e, gt, _, _) in point_lights.iter() {
-        ranked.push((gt.translation().distance_squared(cam_pos), e, Kind::Point));
+    for (e, gt, light, _, class, surface, stash) in point_lights.iter() {
+        if !light_enabled(class, None, surface) {
+            continue;
+        }
+        let authored = match authored_point_shadows(class, surface, stash) {
+            Some(a) => a,
+            None => {
+                commands
+                    .entity(e)
+                    .insert(AuthoredLightShadows(light.shadow_maps_enabled));
+                light.shadow_maps_enabled
+            }
+        };
+        ranked.push((gt.translation().distance_squared(cam_pos), e, Kind::Point, authored));
     }
-    for (e, gt, _, _) in spot_lights.iter() {
-        ranked.push((gt.translation().distance_squared(cam_pos), e, Kind::Spot));
+    for (e, gt, light, _, class, stash) in spot_lights.iter() {
+        if !light_enabled(None, class, None) {
+            continue;
+        }
+        let authored = match authored_spot_shadows(class, stash) {
+            Some(a) => a,
+            None => {
+                commands
+                    .entity(e)
+                    .insert(AuthoredLightShadows(light.shadow_maps_enabled));
+                light.shadow_maps_enabled
+            }
+        };
+        ranked.push((gt.translation().distance_squared(cam_pos), e, Kind::Spot, authored));
     }
-    // Ascending by distance². `total_cmp` is finite-safe (NaN positions sort
-    // last rather than panicking the comparator).
+    // Nearest first. `total_cmp` handles any NaN deterministically.
     ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     let on_radius_sq = ACTIVE_ON_RADIUS_M * ACTIVE_ON_RADIUS_M;
     let off_radius_sq = ACTIVE_OFF_RADIUS_M * ACTIVE_OFF_RADIUS_M;
 
-    // Apply per-rank policy. `rank` is the distance order across BOTH light
-    // kinds, so the global nearest-N budgets are honoured.
-    for (rank, (dist_sq, entity, kind)) in ranked.iter().enumerate() {
-        let want_shadows = rank < SHADOW_LIGHT_BUDGET;
+    // The shadow budget ranks only lights authored to cast shadows.
+    let mut shadow_rank = 0usize;
+    for (rank, (dist_sq, entity, kind, authored_shadows)) in ranked.iter().enumerate() {
+        let want_shadows = *authored_shadows && shadow_rank < SHADOW_LIGHT_BUDGET;
+        if *authored_shadows {
+            shadow_rank += 1;
+        }
         let within_active_rank = rank < ACTIVE_LIGHT_BUDGET;
-
         match kind {
             Kind::Point => {
-                if let Ok((_, _, light, original)) = point_lights.get_mut(*entity) {
-                    // Deref the change-detection `Mut` to a plain `&mut` once so
-                    // the two field args below are disjoint borrows, not two
-                    // full `&mut light` borrows through `DerefMut`.
-                    let light = light.into_inner();
-                    apply_light_policy(
-                        &mut commands,
-                        *entity,
-                        &mut light.shadow_maps_enabled,
-                        &mut light.intensity,
+                if let Ok((_, _, mut light, original, _, _, _)) = point_lights.get_mut(*entity) {
+                    let d = decide_light_policy(
+                        light.shadow_maps_enabled,
+                        light.intensity,
                         original.copied(),
                         want_shadows,
                         within_active_rank,
@@ -185,19 +269,22 @@ pub fn cull_lights_to_nearest(
                         on_radius_sq,
                         off_radius_sq,
                     );
+                    if light.shadow_maps_enabled != d.shadows {
+                        light.shadow_maps_enabled = d.shadows;
+                    }
+                    if light.intensity != d.intensity {
+                        light.intensity = d.intensity;
+                    }
+                    if let Some(v) = d.stash_intensity {
+                        commands.entity(*entity).insert(OriginalLightIntensity(v));
+                    }
                 }
             }
             Kind::Spot => {
-                if let Ok((_, _, light, original)) = spot_lights.get_mut(*entity) {
-                    // Deref the change-detection `Mut` to a plain `&mut` once so
-                    // the two field args below are disjoint borrows, not two
-                    // full `&mut light` borrows through `DerefMut`.
-                    let light = light.into_inner();
-                    apply_light_policy(
-                        &mut commands,
-                        *entity,
-                        &mut light.shadow_maps_enabled,
-                        &mut light.intensity,
+                if let Ok((_, _, mut light, original, _, _)) = spot_lights.get_mut(*entity) {
+                    let d = decide_light_policy(
+                        light.shadow_maps_enabled,
+                        light.intensity,
                         original.copied(),
                         want_shadows,
                         within_active_rank,
@@ -205,6 +292,15 @@ pub fn cull_lights_to_nearest(
                         on_radius_sq,
                         off_radius_sq,
                     );
+                    if light.shadow_maps_enabled != d.shadows {
+                        light.shadow_maps_enabled = d.shadows;
+                    }
+                    if light.intensity != d.intensity {
+                        light.intensity = d.intensity;
+                    }
+                    if let Some(v) = d.stash_intensity {
+                        commands.entity(*entity).insert(OriginalLightIntensity(v));
+                    }
                 }
             }
         }
@@ -226,93 +322,108 @@ pub fn cull_lights_to_nearest(
 /// zero steady-state cost. It does not distance-rank (it keeps the first
 /// `budget` casters it visits) — the proper nearest-N ranking is applied by
 /// `cull_lights_to_nearest` on its cadence; this only guarantees the COUNT can
-/// never exceed the budget on any single frame.
+/// never exceed the budget on any single frame. Before it turns off a light
+/// that has no class component to read the authored flag from, it stashes
+/// the flag, so the culler never mistakes a budget cut for an authored `false`.
+#[allow(clippy::type_complexity)]
 pub fn enforce_shadow_budget(
     load: Option<Res<crate::space::file_loader::LoadInProgress>>,
-    mut point_lights: Query<&mut PointLight>,
-    mut spot_lights: Query<&mut SpotLight>,
+    mut point_lights: Query<(
+        Entity,
+        &mut PointLight,
+        Option<&eustress_common::classes::EustressPointLight>,
+        Option<&eustress_common::classes::SurfaceLight>,
+        Option<&AuthoredLightShadows>,
+    )>,
+    mut spot_lights: Query<(
+        Entity,
+        &mut SpotLight,
+        Option<&eustress_common::classes::EustressSpotLight>,
+        Option<&AuthoredLightShadows>,
+    )>,
+    mut commands: Commands,
 ) {
     // Only needed while lights are still streaming in.
     if !load.map_or(false, |l| l.active) {
         return;
     }
     let mut kept = 0usize;
-    for mut light in point_lights.iter_mut() {
+    for (e, mut light, class, surface, stash) in point_lights.iter_mut() {
         if light.shadow_maps_enabled {
             if kept < SHADOW_LIGHT_BUDGET {
                 kept += 1;
             } else {
+                if authored_point_shadows(class, surface, stash).is_none() {
+                    commands.entity(e).insert(AuthoredLightShadows(true));
+                }
                 light.shadow_maps_enabled = false;
             }
         }
     }
-    for mut light in spot_lights.iter_mut() {
+    for (e, mut light, class, stash) in spot_lights.iter_mut() {
         if light.shadow_maps_enabled {
             if kept < SHADOW_LIGHT_BUDGET {
                 kept += 1;
             } else {
+                if authored_spot_shadows(class, stash).is_none() {
+                    commands.entity(e).insert(AuthoredLightShadows(true));
+                }
                 light.shadow_maps_enabled = false;
             }
         }
     }
 }
 
+/// What the policy wants a light to be.
+struct LightDecision {
+    shadows: bool,
+    intensity: f32,
+    /// The authored intensity to stash the first time a light is dimmed.
+    stash_intensity: Option<f32>,
+}
+
 /// Shared per-light decision used by both the point and spot branches.
 ///
-/// `shadows` / `intensity` are `&mut` into the live light component.
-/// `original` is the stashed authored intensity (if this light was ever
-/// dimmed before). The function decides the new shadow + intensity state and,
-/// when it first needs to dim a light, inserts [`OriginalLightIntensity`] via
-/// `commands` so the authored value can be restored later.
+/// `shadows` / `intensity` are the light's live values. `original` is the
+/// stashed authored intensity (if this light was ever dimmed before). The
+/// caller writes back only the fields that differ, and inserts
+/// [`OriginalLightIntensity`] when `stash_intensity` is set, so the authored
+/// value can be restored later.
 #[allow(clippy::too_many_arguments)]
-fn apply_light_policy(
-    commands: &mut Commands,
-    entity: Entity,
-    shadows: &mut bool,
-    intensity: &mut f32,
+fn decide_light_policy(
+    shadows: bool,
+    intensity: f32,
     original: Option<OriginalLightIntensity>,
     want_shadows: bool,
     within_active_rank: bool,
     dist_sq: f32,
     on_radius_sq: f32,
     off_radius_sq: f32,
-) {
-    // Shadows: cheap boolean, no hysteresis needed (toggling a shadow map on
-    // costs a frame's render but not a flicker artifact). Only mutate on an
-    // actual change so we don't spuriously mark the component Changed.
-    if *shadows != want_shadows {
-        *shadows = want_shadows;
-    }
-
+) -> LightDecision {
+    let _ = shadows; // shadows need no hysteresis: the budget decides directly
     // Authored intensity: the value we restore TO. If we already stashed one,
     // that is the source of truth; otherwise the live value is still authored.
-    let authored = original.map(|o| o.0).unwrap_or(*intensity);
+    let authored = original.map(|o| o.0).unwrap_or(intensity);
 
     // Current on/off state inferred from the live intensity: a light we
     // previously dimmed reads ~0 (and carries an OriginalLightIntensity).
-    let currently_off = original.is_some() && *intensity <= f32::EPSILON;
+    let currently_off = original.is_some() && intensity <= f32::EPSILON;
 
     // Desired state with hysteresis:
     //   - turn ON  only when within the nearest set AND inside the ON radius
     //   - turn OFF only when outside the nearest set OR beyond the OFF radius
     //   - otherwise hold (dead-zone) to avoid flicker.
+    let mut out = LightDecision { shadows: want_shadows, intensity, stash_intensity: None };
     if currently_off {
-        let should_turn_on = within_active_rank && dist_sq <= on_radius_sq;
-        if should_turn_on {
-            *intensity = authored;
+        if within_active_rank && dist_sq <= on_radius_sq {
+            out.intensity = authored;
         }
-        // else: stay off (still out of range / out of rank).
-    } else {
-        let should_turn_off = !within_active_rank || dist_sq > off_radius_sq;
-        if should_turn_off {
-            // Stash the authored intensity once so we can restore it exactly.
-            if original.is_none() {
-                commands
-                    .entity(entity)
-                    .insert(OriginalLightIntensity(*intensity));
-            }
-            *intensity = 0.0;
+    } else if !within_active_rank || dist_sq > off_radius_sq {
+        // Stash the authored intensity once so we can restore it exactly.
+        if original.is_none() {
+            out.stash_intensity = Some(intensity);
         }
-        // else: stay on at authored intensity (no write needed).
+        out.intensity = 0.0;
     }
+    out
 }

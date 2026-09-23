@@ -117,6 +117,13 @@ impl Plugin for SkyAtmospherePlugin {
                         .after(attach_sky_to_cameras)
                         .after(poll_star_field_build),
                 ),
+            )
+            // Bevy's sky shaders assume a perspective camera; see
+            // `orthographic_sky`. No-op without a renderer.
+            .add_systems(
+                Update,
+                super::orthographic_sky::patch_sky_shaders
+                    .run_if(resource_exists::<Assets<bevy::shader::Shader>>),
             );
     }
 }
@@ -1047,7 +1054,7 @@ fn fade_star_field(
     active: Res<ActiveSkyMode>,
     lighting: Res<LightingService>,
     sun: Query<&SunClass, With<SunMarker>>,
-    mut cameras: Query<&mut Skybox, With<SkyCamera>>,
+    mut cameras: Query<(&mut Skybox, Option<&Projection>), With<SkyCamera>>,
 ) {
     if active.0 == SkyMode::Skybox {
         // An authored cubemap sets its own brightness; it is not a star field.
@@ -1065,7 +1072,15 @@ fn fade_star_field(
     let night = ((3.0 - elevation) / 9.0).clamp(0.0, 1.0);
     let brightness = sky.star_brightness * night * night;
 
-    for mut skybox in cameras.iter_mut() {
+    for (mut skybox, projection) in cameras.iter_mut() {
+        // An orthographic view's rays are parallel, so every pixel would show
+        // the one texel of the star map straight ahead: black, or a star
+        // flooding the view as the camera turns. It shows none.
+        let brightness = if matches!(projection, Some(Projection::Orthographic(_))) {
+            0.0
+        } else {
+            brightness
+        };
         if (skybox.brightness - brightness).abs() > 0.5 {
             skybox.brightness = brightness;
         }

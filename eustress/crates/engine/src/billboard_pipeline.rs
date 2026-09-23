@@ -46,6 +46,11 @@
 //!   `billboard_face_camera` system that did `Quat::from_rotation_arc` per
 //!   billboard per frame is no longer needed — the shader generates the
 //!   quad's vertex positions in clip space directly from `view.clip_from_world`.
+//! - **Instanced draws**. Every billboard is an instance of the one shared
+//!   quad; its placement, atlas tile and depth bias are per-instance vertex
+//!   attributes. Each billboard is still its own sorted phase item, and after
+//!   the sort every run of adjacent billboards draws with one call
+//!   (`batch_billboard_instances`).
 //!
 //! ## Components consumed
 //!
@@ -77,9 +82,10 @@
 //! Main world spawns: `(Mesh3d, BillboardMesh, BillboardAtlasTexture, BillboardUv,
 //! BillboardDepth, Transform, Visibility, Billboard)`. The `Mesh3d` is what makes Bevy's
 //! `VisibleEntities` pick it up (we filter by `With<Billboard>` later).
-//! `extract_billboards` copies the components into the render world; the
-//! pipeline + draw functions take it from there. No `StandardMaterial`,
-//! no `MeshMaterial3d`, no `face_camera` CPU system.
+//! `extract_billboards` gathers every visible billboard into the render
+//! world's `ExtractedBillboards` list; queueing, batching and drawing read that
+//! list. No `StandardMaterial`, no `MeshMaterial3d`, no `face_camera` CPU
+//! system.
 
 use bevy::asset::{AssetId, Assets, Handle};
 // `RenderVisibleEntities` was used here to filter billboards via the
@@ -93,13 +99,10 @@ use bevy::ecs::query::ROQueryItem;
 use bevy::ecs::system::{lifetimeless::*, SystemParamItem};
 use bevy::image::BevyDefault;
 use bevy::math::Mat4;
-use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
+use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology, VertexBufferLayout};
 use bevy::render::mesh::{RenderMesh, RenderMeshBufferInfo, allocator::MeshAllocator};
 use bevy::prelude::*;
-use bevy::render::extract_component::{
-    ComponentUniforms, DynamicUniformIndex, ExtractComponent, ExtractComponentPlugin,
-    UniformComponentPlugin,
-};
+use bevy::render::extract_component::ExtractComponent;
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_phase::{
     AddRenderCommand, DrawFunctions, PhaseItemExtraIndex, RenderCommand,
@@ -108,13 +111,14 @@ use bevy::render::render_phase::{
 use bevy::render::render_resource::{
     BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
     BindingResource, BindingType, BlendComponent, BlendFactor, BlendOperation, BlendState,
-    BufferBindingType, ColorTargetState, ColorWrites, CompareFunction, DepthStencilState,
+    BufferBindingType, BufferUsages, ColorTargetState, ColorWrites, CompareFunction, DepthStencilState,
     FragmentState, FrontFace, MultisampleState, PipelineCache, PolygonMode, PrimitiveState,
     RenderPipelineDescriptor, SamplerBindingType, ShaderStages, ShaderType,
     SpecializedMeshPipeline, SpecializedMeshPipelineError, SpecializedMeshPipelines,
     TextureFormat, TextureSampleType, TextureViewDimension, VertexState,
+    RawBufferVec, VertexAttribute, VertexFormat, VertexStepMode,
 };
-use bevy::render::renderer::RenderDevice;
+use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::sync_world::{MainEntity, RenderEntity};
 use bevy::render::texture::GpuImage;
 use bevy::render::camera::ExtractedCamera; // 0.19: hdr moved off ExtractedView onto ExtractedCamera
@@ -146,10 +150,8 @@ use bevy::render::{Extract, Render, RenderApp, RenderSystems, ExtractSchedule};
 ///
 /// Required components, all on the main-world entity:
 /// - `Transform` + `Visibility`: standard Bevy renderable scaffolding.
-/// - `SyncToRenderWorld` (Bevy 0.18+) — without it the main-world entity
-///   has no matching render-world counterpart, so `extract_billboards`'s
-///   `try_insert_batch` warns "entity does not exist" every frame and
-///   rendering silently no-ops.
+/// - `SyncToRenderWorld` (Bevy 0.18+) — gives the billboard a render-world
+///   counterpart, which its `Transparent3d` phase item names.
 /// - `NoFrustumCulling` — billboards have no meaningful static `Aabb`
 ///   (the on-screen quad is built per-frame in the vertex shader from
 ///   camera basis vectors). Without `NoFrustumCulling`, Bevy's
@@ -270,20 +272,38 @@ pub struct BillboardUniform {
     pub transform: Mat4,
 }
 
-#[derive(Component, Clone, Copy)]
-pub struct RenderBillboardMesh {
-    pub id: AssetId<Mesh>,
+/// One visible billboard, as extracted for this frame.
+#[derive(Clone, Copy)]
+pub struct ExtractedBillboard {
+    render_entity: Entity,
+    main_entity: MainEntity,
+    instance: BillboardInstance,
+    translation: Vec3,
+    depth: bool,
+    lock_axis: Option<BillboardLockAxis>,
+    mesh: AssetId<Mesh>,
+    image: AssetId<Image>,
 }
 
-#[derive(Component, Clone, Copy)]
-pub struct RenderBillboardImage {
-    pub id: AssetId<Image>,
+/// Every visible billboard this frame, in extraction order. A billboard's
+/// phase item carries its index here in `extra_index`
+/// (`PhaseItemExtraIndex::DynamicOffset`), so queueing, batching and drawing
+/// read one flat list. Per-entity render-world components cost a component
+/// insert per billboard per frame to set up and a lookup per billboard per
+/// step to read, on a list that is rebuilt every frame anyway.
+#[derive(Resource, Default)]
+pub struct ExtractedBillboards {
+    items: Vec<ExtractedBillboard>,
 }
 
-#[derive(Component, Clone, Copy)]
-pub struct RenderBillboard {
-    pub depth: BillboardDepth,
-    pub lock_axis: Option<BillboardLockAxis>,
+impl ExtractedBillboards {
+    /// The billboard a phase item was queued for.
+    fn of(&self, item: &Transparent3d) -> Option<&ExtractedBillboard> {
+        match &item.extra_index {
+            PhaseItemExtraIndex::DynamicOffset(index) => self.items.get(*index as usize),
+            _ => None,
+        }
+    }
 }
 
 // ============================================================================
@@ -295,9 +315,58 @@ pub struct BillboardImageBindGroups {
     values: bevy::platform::collections::HashMap<AssetId<Image>, BindGroup>,
 }
 
+/// One billboard's per-instance vertex data (vertex buffer 1, step mode
+/// Instance). The layout matches `Vertex` locations 2 to 7 in
+/// `billboard.wgsl`.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct BillboardInstance {
+    /// Model matrix, by columns.
+    model: [[f32; 4]; 4],
+    /// Atlas tile: `uv_min` in xy, `uv_max` in zw.
+    uv_rect: [f32; 4],
+    /// x: depth bias in metres (`BillboardUv::z_bias`); yzw unused.
+    params: [f32; 4],
+}
+
+impl BillboardInstance {
+    fn new(uniform: &BillboardUniform, uv: &BillboardUv) -> Self {
+        Self {
+            model: uniform.transform.to_cols_array_2d(),
+            uv_rect: [uv.uv_min.x, uv.uv_min.y, uv.uv_max.x, uv.uv_max.y],
+            params: [uv.z_bias, 0.0, 0.0, 0.0],
+        }
+    }
+
+    /// Six `vec4<f32>` attributes at shader locations 2 to 7.
+    fn layout() -> VertexBufferLayout {
+        VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as u64,
+            step_mode: VertexStepMode::Instance,
+            attributes: (0..6u32)
+                .map(|i| VertexAttribute {
+                    format: VertexFormat::Float32x4,
+                    offset: u64::from(i) * 16,
+                    shader_location: 2 + i,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Every billboard instance drawn this frame, across all views, in draw
+/// order. Rebuilt each frame by `batch_billboard_instances`.
 #[derive(Resource)]
-pub struct BillboardBindGroup {
-    value: BindGroup,
+pub struct BillboardInstanceBuffer {
+    instances: RawBufferVec<BillboardInstance>,
+}
+
+impl Default for BillboardInstanceBuffer {
+    fn default() -> Self {
+        Self {
+            instances: RawBufferVec::new(BufferUsages::VERTEX),
+        }
+    }
 }
 
 #[derive(Component)]
@@ -352,10 +421,8 @@ impl BillboardPipelineKey {
 #[derive(Resource, Clone)]
 pub struct BillboardPipeline {
     view_layout: BindGroupLayout,
-    billboard_layout: BindGroupLayout,
     texture_layout: BindGroupLayout,
     view_layout_desc: BindGroupLayoutDescriptor,
-    billboard_layout_desc: BindGroupLayoutDescriptor,
     texture_layout_desc: BindGroupLayoutDescriptor,
     /// Strong handle to the embedded `billboard.wgsl`. Loaded in the
     /// plugin's `finish()` once the AssetServer is available, then
@@ -396,30 +463,6 @@ impl FromWorld for BillboardPipeline {
             },
             count: None,
         }];
-        let billboard_entries = vec![
-            BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::VERTEX,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: true,
-                    min_binding_size: Some(BillboardUniform::min_size()),
-                },
-                count: None,
-            },
-            BindGroupLayoutEntry {
-                binding: 1,
-                // Vertex stage reads `z_bias` for depth biasing; fragment
-                // stage reads `uv_min/uv_max` for atlas sampling.
-                visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: true,
-                    min_binding_size: Some(BillboardUv::min_size()),
-                },
-                count: None,
-            },
-        ];
         let texture_entries = vec![
             BindGroupLayoutEntry {
                 binding: 0,
@@ -440,7 +483,6 @@ impl FromWorld for BillboardPipeline {
         ];
 
         let view_layout = render_device.create_bind_group_layout("billboard_view_layout", &view_entries);
-        let billboard_layout = render_device.create_bind_group_layout("billboard_layout", &billboard_entries);
         let texture_layout = render_device.create_bind_group_layout("billboard_texture_layout", &texture_entries);
 
         // Strong handle pre-registered in the main world's
@@ -454,15 +496,10 @@ impl FromWorld for BillboardPipeline {
 
         Self {
             view_layout,
-            billboard_layout,
             texture_layout,
             view_layout_desc: BindGroupLayoutDescriptor {
                 label: "billboard_view_layout".into(),
                 entries: view_entries,
-            },
-            billboard_layout_desc: BindGroupLayoutDescriptor {
-                label: "billboard_layout".into(),
-                entries: billboard_entries,
             },
             texture_layout_desc: BindGroupLayoutDescriptor {
                 label: "billboard_texture_layout".into(),
@@ -511,13 +548,14 @@ impl SpecializedMeshPipeline for BillboardPipeline {
             label: Some("billboard_pipeline".into()),
             layout: vec![
                 self.view_layout_desc.clone(),
-                self.billboard_layout_desc.clone(),
                 self.texture_layout_desc.clone(),
             ],
             vertex: VertexState {
                 shader: self.shader_handle.clone(),
                 entry_point: Some("vertex".into()),
-                buffers: vec![vertex_buffer_layout],
+                // Buffer 0: the shared quad. Buffer 1: one `BillboardInstance`
+                // per billboard, so a run of billboards is one draw.
+                buffers: vec![vertex_buffer_layout, BillboardInstance::layout()],
                 shader_defs: shader_defs.clone(),
             },
             fragment: Some(FragmentState {
@@ -606,14 +644,12 @@ fn calculate_billboard_uniform(
     BillboardUniform { transform: matrix }
 }
 
-/// Extract billboard entities into the render world.
+/// Extract visible billboards into `ExtractedBillboards`.
 ///
-/// Bevy 0.18 separated main-world and render-world entity IDs entirely.
-/// `SyncToRenderWorld` (set via `Billboard`'s `#[require]`) tells Bevy to
-/// spawn a corresponding render-world entity and store its ID on the
-/// main-world entity as `RenderEntity`. We query `RenderEntity` here so
-/// `try_insert_batch` targets the render-world counterpart — passing the
-/// main-world `Entity` would warn "entity does not exist" every frame.
+/// Bevy separates main-world and render-world entity IDs. `SyncToRenderWorld`
+/// (set via `Billboard`'s `#[require]`) keeps a render-world counterpart for
+/// each billboard and stores its ID on the main-world entity as
+/// `RenderEntity`; a billboard's phase item names that render entity.
 ///
 /// Visibility filter uses `InheritedVisibility` (the post-parent-chain
 /// user-facing visibility) rather than `ViewVisibility` (which requires
@@ -623,44 +659,42 @@ fn calculate_billboard_uniform(
 /// billboard is too far / too close" by toggling `Visibility::Hidden`,
 /// which propagates into `InheritedVisibility`.
 pub fn extract_billboards(
-    mut commands: Commands,
-    mut previous_len: Local<usize>,
+    mut extracted: ResMut<ExtractedBillboards>,
     query: Extract<
-        Query<(
-            &RenderEntity,
-            &InheritedVisibility,
-            &GlobalTransform,
-            &Transform,
-            &BillboardMesh,
-            &BillboardAtlasTexture,
-            &BillboardUv,
-            Option<&BillboardDepth>,
-            Option<&BillboardLockAxis>,
-        ), With<Billboard>>,
+        Query<
+            (
+                Entity,
+                &RenderEntity,
+                &InheritedVisibility,
+                &GlobalTransform,
+                &Transform,
+                &BillboardMesh,
+                &BillboardAtlasTexture,
+                &BillboardUv,
+                Option<&BillboardDepth>,
+                Option<&BillboardLockAxis>,
+            ),
+            With<Billboard>,
+        >,
     >,
 ) {
-    let mut batch: Vec<(Entity, _)> = Vec::with_capacity(*previous_len);
-    for (render_entity, inherited, global_tf, transform, mesh, texture, uv, depth, lock_axis) in &query {
-        if !inherited.get() { continue; }
+    extracted.items.clear();
+    for (entity, render_entity, inherited, global_tf, transform, mesh, texture, uv, depth, lock_axis) in &query {
+        if !inherited.get() {
+            continue;
+        }
         let uniform = calculate_billboard_uniform(global_tf, transform, lock_axis);
-        let depth_val = depth.copied().unwrap_or_default();
-        batch.push((
-            render_entity.id(),
-            (
-                Billboard,
-                uniform,
-                *uv,
-                RenderBillboardMesh { id: mesh.0.id() },
-                RenderBillboardImage { id: texture.0.id() },
-                RenderBillboard {
-                    depth: depth_val,
-                    lock_axis: lock_axis.copied(),
-                },
-            ),
-        ));
+        extracted.items.push(ExtractedBillboard {
+            render_entity: render_entity.id(),
+            main_entity: MainEntity::from(entity),
+            instance: BillboardInstance::new(&uniform, uv),
+            translation: uniform.transform.col(3).truncate(),
+            depth: depth.copied().unwrap_or_default().0,
+            lock_axis: lock_axis.copied(),
+            mesh: mesh.0.id(),
+            image: texture.0.id(),
+        });
     }
-    *previous_len = batch.len();
-    commands.try_insert_batch(batch);
 }
 
 // ============================================================================
@@ -687,25 +721,71 @@ pub fn prepare_billboard_view_bind_groups(
     }
 }
 
-pub fn prepare_billboard_bind_group(
-    mut commands: Commands,
+/// Merge each run of consecutive billboards in the sorted `Transparent3d`
+/// phase into one instanced draw.
+///
+/// Billboards stay individual phase items, so they sort against every other
+/// transparent item exactly as before. After the sort, adjacent billboard
+/// items that share a pipeline, mesh and atlas texture become one draw: the
+/// run's first item gets a `batch_range` covering all of its instances, and
+/// the sorted-phase renderer skips the rest of the run after drawing it. The
+/// instances are written in the same order, so blending order within a run
+/// is unchanged. A draw per billboard cost the render thread about 5 us
+/// each, and a label-heavy Space draws several thousand.
+fn batch_billboard_instances(
+    mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
+    draw_functions: Res<DrawFunctions<Transparent3d>>,
+    extracted: Res<ExtractedBillboards>,
+    mut buffer: ResMut<BillboardInstanceBuffer>,
     render_device: Res<RenderDevice>,
-    pipeline: Res<BillboardPipeline>,
-    uniforms: Res<ComponentUniforms<BillboardUniform>>,
-    uv_uniforms: Res<ComponentUniforms<BillboardUv>>,
+    render_queue: Res<RenderQueue>,
 ) {
-    let Some(binding) = uniforms.uniforms().binding() else { return };
-    let Some(uv_binding) = uv_uniforms.uniforms().binding() else { return };
-    commands.insert_resource(BillboardBindGroup {
-        value: render_device.create_bind_group(
-            Some("billboard_bind_group"),
-            &pipeline.billboard_layout,
-            &[
-                BindGroupEntry { binding: 0, resource: binding },
-                BindGroupEntry { binding: 1, resource: uv_binding },
-            ],
-        ),
-    });
+    buffer.instances.clear();
+    let Some(draw_billboard) = draw_functions.read().get_id::<DrawBillboard>() else {
+        return;
+    };
+    for phase in phases.values_mut() {
+        let len = phase.items.len();
+        let mut start = 0;
+        while start < len {
+            let Some((_, first)) = phase.items.get_index(start) else { break };
+            if first.draw_function != draw_billboard {
+                start += 1;
+                continue;
+            }
+            let pipeline = first.pipeline;
+            let Some(first_billboard) = extracted.of(first) else {
+                // No extracted billboard behind it: skip the item rather
+                // than draw a different billboard's instance in its place.
+                if let Some((_, item)) = phase.items.get_index_mut(start) {
+                    item.batch_range = 0..0;
+                }
+                start += 1;
+                continue;
+            };
+            let (mesh, image) = (first_billboard.mesh, first_billboard.image);
+            let base = buffer.instances.len() as u32;
+            let mut end = start;
+            while end < len {
+                let Some((_, item)) = phase.items.get_index(end) else { break };
+                if item.draw_function != draw_billboard || item.pipeline != pipeline {
+                    break;
+                }
+                let Some(billboard) = extracted.of(item) else { break };
+                if billboard.mesh != mesh || billboard.image != image {
+                    break;
+                }
+                buffer.instances.push(billboard.instance);
+                end += 1;
+            }
+            let count = (end - start) as u32;
+            if let Some((_, item)) = phase.items.get_index_mut(start) {
+                item.batch_range = base..base + count;
+            }
+            start = end;
+        }
+    }
+    buffer.instances.write_buffer(&render_device, &render_queue);
 }
 
 // ============================================================================
@@ -731,18 +811,11 @@ pub fn queue_billboards(
         // its main texture format drives the SURFACE_BGRA pipeline-key bit.
         Option<&bevy::render::view::ViewTarget>,
     )>,
-    // All billboards in the render world (from `extract_billboards`).
-    // Visibility was already filtered there via `InheritedVisibility`, so
-    // every entity here should be drawn. We use `MainEntity` to populate
-    // `Transparent3d::entity` (Bevy 0.18 phase items carry both).
-    billboards: Query<(
-        Entity,
-        &MainEntity,
-        &BillboardUniform,
-        &RenderBillboardMesh,
-        &RenderBillboardImage,
-        &RenderBillboard,
-    )>,
+    // Visibility was already filtered at extraction via `InheritedVisibility`.
+    // Billboards bypass `RenderVisibleEntities`: Bevy's `check_visibility`
+    // tracks specific render classes (Mesh3d, Sprite, …) and doesn't know
+    // our `Billboard` marker, so it would never list them.
+    extracted: Res<ExtractedBillboards>,
 ) {
     // Clear the bind-group cache each frame. When the atlas grows
     // (`BillboardAtlas::try_grow`), the underlying GpuImage is rebuilt
@@ -751,58 +824,69 @@ pub fn queue_billboards(
     // every frame is cheap (we share one atlas, so it's a single
     // `create_bind_group` call) and guarantees correctness on resize.
     image_bind_groups.values.clear();
+    let draw_billboard = transparent_draw_functions.read().id::<DrawBillboard>();
 
     for (_view_entity, view, extracted_camera, msaa, view_target) in views.iter() {
-        // Bevy 0.18: `ViewSortedRenderPhases` is keyed by
-        // `RetainedViewEntity` (a stable identifier that survives the
-        // main→render extract roundtrip), not the render-world Entity.
-        // Pull it from `ExtractedView.retained_view_entity`.
+        // `ViewSortedRenderPhases` is keyed by `RetainedViewEntity` (stable
+        // across the main→render extract), not the render-world Entity.
         let Some(transparent_phase) = transparent_phases.get_mut(&view.retained_view_entity) else { continue };
-        let draw_billboard = transparent_draw_functions
-            .read()
-            .get_id::<DrawBillboard>()
-            .unwrap();
         let rangefinder = view.rangefinder3d();
-        let msaa_samples: u32 = msaa.copied().unwrap_or_default().samples();
 
-        // Iterate all extracted billboards directly. We bypass
-        // `RenderVisibleEntities` because Bevy's `check_visibility`
-        // system tracks specific render classes (Mesh3d, Sprite, …) and
-        // doesn't know about our custom `Billboard` marker — the entity
-        // would never appear in `RenderVisibleEntities::iter::<With<Billboard>>()`
-        // and rendering would silently no-op. Visibility was already
-        // filtered in `extract_billboards` via `InheritedVisibility`.
-        for (entity, main_entity, uniform, mesh, image, billboard) in billboards.iter() {
-            let Some(gpu_image) = gpu_images.get(image.id) else { continue };
-            let Some(gpu_mesh) = gpu_meshes.get(mesh.id) else { continue };
+        let mut view_key =
+            BillboardPipelineKey::from_msaa_samples(msaa.copied().unwrap_or_default().samples());
+        if extracted_camera.map_or(false, |c| c.hdr) {
+            view_key |= BillboardPipelineKey::HDR;
+        }
+        // Key on the view's ACTUAL attachment format: non-HDR views can
+        // render straight to the Bgra8 swapchain surface, and a pipeline
+        // built for Rgba8 there is a fatal wgpu validation error (the
+        // "engine closes itself 5s after load" crash).
+        if view_target.map_or(false, |t| t.main_texture_format() == TextureFormat::Bgra8UnormSrgb) {
+            view_key |= BillboardPipelineKey::SURFACE_BGRA;
+        }
+        // A handful of variants serve every billboard: specialize each
+        // (key, mesh) pair once per view, not once per billboard.
+        let mut specialized: Vec<(
+            BillboardPipelineKey,
+            AssetId<Mesh>,
+            bevy::render::render_resource::CachedRenderPipelineId,
+        )> = Vec::new();
 
-            let mut key = BillboardPipelineKey::from_msaa_samples(msaa_samples);
-            if billboard.depth.0 { key |= BillboardPipelineKey::DEPTH; }
+        for (index, billboard) in extracted.items.iter().enumerate() {
+            let Some(gpu_image) = gpu_images.get(billboard.image) else { continue };
+            let Some(gpu_mesh) = gpu_meshes.get(billboard.mesh) else { continue };
+
+            let mut key = view_key;
+            if billboard.depth {
+                key |= BillboardPipelineKey::DEPTH;
+            }
             if let Some(lock) = billboard.lock_axis {
-                if lock.y_axis { key |= BillboardPipelineKey::LOCK_Y; }
-                if lock.rotation { key |= BillboardPipelineKey::LOCK_ROTATION; }
+                if lock.y_axis {
+                    key |= BillboardPipelineKey::LOCK_Y;
+                }
+                if lock.rotation {
+                    key |= BillboardPipelineKey::LOCK_ROTATION;
+                }
             }
-            if extracted_camera.map_or(false, |c| c.hdr) { key |= BillboardPipelineKey::HDR; }
-            // Key on the view's ACTUAL attachment format: non-HDR views can
-            // render straight to the Bgra8 swapchain surface, and a pipeline
-            // built for Rgba8 there is a fatal wgpu validation error (the
-            // "engine closes itself 5s after load" crash).
-            if view_target
-                .map_or(false, |t| t.main_texture_format() == TextureFormat::Bgra8UnormSrgb)
-            {
-                key |= BillboardPipelineKey::SURFACE_BGRA;
-            }
-
-            let pipeline_id = match pipelines.specialize(&pipeline_cache, &pipeline, key, &gpu_mesh.layout) {
-                Ok(id) => id,
-                Err(err) => { error!("billboard pipeline specialize failed: {:?}", err); continue; }
+            let cached = specialized
+                .iter()
+                .find(|(k, mesh, _)| *k == key && *mesh == billboard.mesh)
+                .map(|(_, _, id)| *id);
+            let pipeline_id = match cached {
+                Some(id) => id,
+                None => match pipelines.specialize(&pipeline_cache, &pipeline, key, &gpu_mesh.layout) {
+                    Ok(id) => {
+                        specialized.push((key, billboard.mesh, id));
+                        id
+                    }
+                    Err(err) => {
+                        error!("billboard pipeline specialize failed: {:?}", err);
+                        continue;
+                    }
+                },
             };
 
-            // Distance for back-to-front sort. Pull world-space translation
-            // from the model matrix's 4th column (the w_axis).
-            let distance = rangefinder.distance(&uniform.transform.col(3).truncate());
-
-            image_bind_groups.values.entry(image.id).or_insert_with(|| {
+            image_bind_groups.values.entry(billboard.image).or_insert_with(|| {
                 render_device.create_bind_group(
                     Some("billboard_texture_bind_group"),
                     &pipeline.texture_layout,
@@ -813,21 +897,19 @@ pub fn queue_billboards(
                 )
             });
 
-            // Bevy 0.18: `entity` is `(Entity, MainEntity)` and `indexed`
-            // is required so phase sorting knows the draw call shape.
-            // 0.19: SortedRenderPhase::add -> add_transient (per-frame items);
-            // Transparent3d gained `sorting_info` (distance is derived from it).
+            // Back-to-front by distance. `extra_index` names this billboard
+            // in `ExtractedBillboards` for the batch and draw steps.
             transparent_phase.add_transient(Transparent3d {
                 sorting_info: bevy::core_pipeline::core_3d::TransparentSortingInfo3d::Sorted {
-                    mesh_center: uniform.transform.col(3).truncate(),
+                    mesh_center: billboard.translation,
                     depth_bias: 0.0,
                 },
                 pipeline: pipeline_id,
-                entity: (entity, *main_entity),
+                entity: (billboard.render_entity, billboard.main_entity),
                 draw_function: draw_billboard,
                 batch_range: 0..1,
-                extra_index: PhaseItemExtraIndex::None,
-                distance,
+                extra_index: PhaseItemExtraIndex::DynamicOffset(index as u32),
+                distance: rangefinder.distance(&billboard.translation),
                 indexed: true,
             });
         }
@@ -856,49 +938,23 @@ impl<const I: usize> RenderCommand<Transparent3d> for SetBillboardViewBindGroup<
     }
 }
 
-pub struct SetBillboardBindGroup<const I: usize>;
-impl<const I: usize> RenderCommand<Transparent3d> for SetBillboardBindGroup<I> {
-    type Param = SRes<BillboardBindGroup>;
-    type ViewQuery = ();
-    type ItemQuery = (
-        Read<DynamicUniformIndex<BillboardUniform>>,
-        Read<DynamicUniformIndex<BillboardUv>>,
-    );
-
-    fn render<'w>(
-        _item: &Transparent3d,
-        _view: ROQueryItem<'w, '_, Self::ViewQuery>,
-        indices: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
-        bg: SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
-        let Some((bb_index, uv_index)) = indices else {
-            return RenderCommandResult::Failure("billboard dynamic index missing".into());
-        };
-        // Two dynamic offsets, in declared binding order (binding 0 first,
-        // binding 1 second).
-        pass.set_bind_group(I, &bg.into_inner().value, &[bb_index.index(), uv_index.index()]);
-        RenderCommandResult::Success
-    }
-}
-
 pub struct SetBillboardTextureBindGroup<const I: usize>;
 impl<const I: usize> RenderCommand<Transparent3d> for SetBillboardTextureBindGroup<I> {
-    type Param = SRes<BillboardImageBindGroups>;
+    type Param = (SRes<BillboardImageBindGroups>, SRes<ExtractedBillboards>);
     type ViewQuery = ();
-    type ItemQuery = Read<RenderBillboardImage>;
+    type ItemQuery = ();
 
     fn render<'w>(
-        _item: &Transparent3d,
+        item: &Transparent3d,
         _view: ROQueryItem<'w, '_, Self::ViewQuery>,
-        texture: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
-        groups: SystemParamItem<'w, '_, Self::Param>,
+        _entity: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
+        (groups, extracted): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let Some(texture) = texture else {
-            return RenderCommandResult::Failure("billboard image missing".into());
+        let Some(billboard) = extracted.into_inner().of(item) else {
+            return RenderCommandResult::Failure("billboard not extracted".into());
         };
-        let Some(bg) = groups.into_inner().values.get(&texture.id) else {
+        let Some(bg) = groups.into_inner().values.get(&billboard.image) else {
             return RenderCommandResult::Failure("billboard texture bind group missing".into());
         };
         pass.set_bind_group(I, bg, &[]);
@@ -911,41 +967,53 @@ impl<const I: usize> RenderCommand<Transparent3d> for SetBillboardTextureBindGro
 /// to get the actual `Buffer` + `range` for vertex and index data.
 pub struct DrawBillboardMesh;
 impl RenderCommand<Transparent3d> for DrawBillboardMesh {
-    type Param = (SRes<RenderAssets<RenderMesh>>, SRes<MeshAllocator>);
+    type Param = (
+        SRes<RenderAssets<RenderMesh>>,
+        SRes<MeshAllocator>,
+        SRes<BillboardInstanceBuffer>,
+        SRes<ExtractedBillboards>,
+    );
     type ViewQuery = ();
-    type ItemQuery = Read<RenderBillboardMesh>;
+    type ItemQuery = ();
 
     fn render<'w>(
-        _item: &Transparent3d,
+        item: &Transparent3d,
         _view: ROQueryItem<'w, '_, Self::ViewQuery>,
-        mesh: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
-        (meshes, mesh_allocator): SystemParamItem<'w, '_, Self::Param>,
+        _entity: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
+        (meshes, mesh_allocator, instances, extracted): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let Some(mesh) = mesh else {
-            return RenderCommandResult::Failure("billboard mesh missing".into());
+        let Some(billboard) = extracted.into_inner().of(item) else {
+            return RenderCommandResult::Failure("billboard not extracted".into());
         };
+        let mesh_id = billboard.mesh;
         let meshes = meshes.into_inner();
         let mesh_allocator = mesh_allocator.into_inner();
-        let Some(gpu_mesh) = meshes.get(mesh.id) else {
+        let Some(gpu_mesh) = meshes.get(mesh_id) else {
             return RenderCommandResult::Failure("billboard gpu mesh not ready".into());
         };
-        let Some(vertex_slice) = mesh_allocator.mesh_vertex_slice(&mesh.id) else {
+        let Some(vertex_slice) = mesh_allocator.mesh_vertex_slice(&mesh_id) else {
             return RenderCommandResult::Failure("billboard vertex slab missing".into());
         };
+        let Some(instance_buffer) = instances.into_inner().instances.buffer() else {
+            return RenderCommandResult::Failure("billboard instance buffer missing".into());
+        };
+        // This item's run of billboards (see `batch_billboard_instances`).
+        let instance_range = item.batch_range.clone();
         pass.set_vertex_buffer(0, vertex_slice.buffer.slice(..));
+        pass.set_vertex_buffer(1, instance_buffer.slice(..));
         match &gpu_mesh.buffer_info {
             RenderMeshBufferInfo::Indexed { count, index_format } => {
-                let Some(index_slice) = mesh_allocator.mesh_index_slice(&mesh.id) else {
+                let Some(index_slice) = mesh_allocator.mesh_index_slice(&mesh_id) else {
                     return RenderCommandResult::Failure("billboard index slab missing".into());
                 };
                 pass.set_index_buffer(index_slice.buffer.slice(..), *index_format);
                 // Indices are drawn from the slab's element range, not
                 // 0..count, since multiple meshes can share a slab.
-                pass.draw_indexed(index_slice.range.start..(index_slice.range.start + *count), vertex_slice.range.start as i32, 0..1);
+                pass.draw_indexed(index_slice.range.start..(index_slice.range.start + *count), vertex_slice.range.start as i32, instance_range);
             }
             RenderMeshBufferInfo::NonIndexed => {
-                pass.draw(vertex_slice.range.clone(), 0..1);
+                pass.draw(vertex_slice.range.clone(), instance_range);
             }
         }
         RenderCommandResult::Success
@@ -955,8 +1023,7 @@ impl RenderCommand<Transparent3d> for DrawBillboardMesh {
 pub type DrawBillboard = (
     SetItemPipeline,
     SetBillboardViewBindGroup<0>,
-    SetBillboardBindGroup<1>,
-    SetBillboardTextureBindGroup<2>,
+    SetBillboardTextureBindGroup<1>,
     DrawBillboardMesh,
 );
 
@@ -1031,10 +1098,6 @@ impl Plugin for BillboardPipelinePlugin {
         app.sub_app_mut(RenderApp).insert_resource(BillboardShaderHandle(shader_handle));
 
         app.add_plugins((
-            ExtractComponentPlugin::<BillboardDepth>::default(),
-            ExtractComponentPlugin::<BillboardLockAxis>::default(),
-            UniformComponentPlugin::<BillboardUniform>::default(),
-            UniformComponentPlugin::<BillboardUv>::default(),
             // Per-tile atlas uploads staged by billboard_gui's
             // `upload_atlas_to_gpu`; written by `write_billboard_atlas_tiles`
             // below via direct `write_texture` (no Image-asset mutation → no
@@ -1047,6 +1110,8 @@ impl Plugin for BillboardPipelinePlugin {
         let render_app = app.sub_app_mut(RenderApp);
         render_app
             .init_resource::<BillboardImageBindGroups>()
+            .init_resource::<BillboardInstanceBuffer>()
+            .init_resource::<ExtractedBillboards>()
             .init_resource::<SpecializedMeshPipelines<BillboardPipeline>>()
             .add_render_command::<Transparent3d, DrawBillboard>()
             .add_systems(ExtractSchedule, extract_billboards)
@@ -1054,8 +1119,9 @@ impl Plugin for BillboardPipelinePlugin {
                 Render,
                 (
                     queue_billboards.in_set(RenderSystems::Queue),
+                    // After the phase sort, so a run is adjacent in draw order.
+                    batch_billboard_instances.in_set(RenderSystems::PrepareResourcesBatchPhases),
                     prepare_billboard_view_bind_groups.in_set(RenderSystems::PrepareBindGroups),
-                    prepare_billboard_bind_group.in_set(RenderSystems::PrepareBindGroups),
                     // After PrepareAssets (GpuImage current, incl. post-grow
                     // recreation); queue-ordered writes land before draws.
                     write_billboard_atlas_tiles.in_set(RenderSystems::PrepareResources),

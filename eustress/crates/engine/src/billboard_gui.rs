@@ -435,6 +435,12 @@ impl BillboardAtlas {
     #[inline] pub fn atlas_w_px(&self) -> u32 { self.cols * TILE_W }
     #[inline] pub fn atlas_h_px(&self) -> u32 { Self::atlas_h_px_for_rows(self.rows) }
     #[inline] pub fn total_slots(&self) -> u32 { self.cols * self.rows }
+    /// Whether `try_grow` can still succeed. Growth doubles the row count,
+    /// so the atlas stops at the last power of two that fits `max_dim`
+    /// (64 rows at 16384 px), short of `max_dim / TILE_H`.
+    #[inline] pub fn can_grow(&self) -> bool {
+        Self::atlas_h_px_for_rows(self.rows.saturating_mul(2)) <= self.max_dim
+    }
 
     /// Compute UV bounds in atlas-relative `[0,1]` for a tile slot.
     fn slot_uv(&self, slot: u32) -> (Vec2, Vec2) {
@@ -802,6 +808,8 @@ fn spawn_billboard_render_state(
     mut atlas_full_warned: Local<bool>,
     // The single shared billboard quad mesh, allocated on first use.
     mut shared_quad: Local<Option<Handle<Mesh>>>,
+    // Whether the "renders scaled to fit its tile" hint has been logged.
+    mut scaled_noted: Local<bool>,
 ) {
     // Near-camera gate. A billboard outside this radius is never repainted by
     // `update_and_render_billboards` (same BILLBOARD_ALLOC_RADIUS), so
@@ -818,6 +826,24 @@ fn spawn_billboard_render_state(
         .iter()
         .find(|(_, c)| c.order == 0)
         .map(|(gt, _)| gt.translation());
+
+    // A full atlas that cannot grow grants nothing: the loop below would
+    // stop at its first visible candidate. Return before gathering and
+    // sorting the in-range candidates, which on a label-heavy Space is
+    // thousands of lookups every frame for no grant. A slot that frees
+    // (eviction or despawn) makes the next frame allocate as before.
+    if atlas.free_slots.is_empty() && !atlas.can_grow() {
+        if !*atlas_full_warned {
+            warn!(
+                "\u{1FAA7} billboard atlas full ({} slots, {} px max) \u{2014} \
+                 near-camera billboards beyond capacity won't render until \
+                 a slot frees; far billboards are deferred until in range",
+                atlas.total_slots(), atlas.max_dim,
+            );
+            *atlas_full_warned = true;
+        }
+        return;
+    }
 
     // NEAREST-FIRST allocation. Under pressure (more in-radius billboards than
     // free atlas slots) the scarce slots MUST go to the billboards closest to
@@ -880,7 +906,7 @@ fn spawn_billboard_render_state(
         // `error!` per orphan per frame — ~16.5K log lines/frame, the bulk of
         // this system's 34 ms in a DEBUG build. A freed slot (despawn /
         // distance churn) re-arms allocation next frame.
-        if atlas.free_slots.is_empty() && atlas.rows >= atlas.max_dim / TILE_H {
+        if atlas.free_slots.is_empty() && !atlas.can_grow() {
             if !*atlas_full_warned {
                 warn!(
                     "\u{1FAA7} billboard atlas full ({} slots, {} px max) \u{2014} \
@@ -900,9 +926,21 @@ fn spawn_billboard_render_state(
         // `content_scale` at raster time) rather than cropped or
         // magnified; the billboard still spawns at its correct world size.
         let (w, h, content_scale) = clamped_canvas_size(raw_w_px, raw_h_px);
+        // An authoring hint, not a fault: the sign keeps its world size and
+        // only its raster is scaled into the tile. Every slot grant repeats
+        // it (a billboard is re-granted each time it comes back into
+        // range), so it is logged once per session at info and per
+        // billboard at debug.
         if content_scale < 1.0 {
-            warn!(
-                "🪧 billboard {:?}: size {:.0}×{:.0}px exceeds tile {}×{} — content scaled to {:.1}%",
+            if !*scaled_noted {
+                *scaled_noted = true;
+                info!(
+                    "🪧 billboards larger than the {}×{} px atlas tile render scaled to fit it (first: {:?}, {:.0}×{:.0}px at {:.1}%); each one is logged at debug level",
+                    TILE_W, TILE_H, entity, raw_w_px, raw_h_px, content_scale * 100.0,
+                );
+            }
+            debug!(
+                "🪧 billboard {:?}: size {:.0}×{:.0}px exceeds tile {}×{}; content scaled to {:.1}%",
                 entity, raw_w_px, raw_h_px, TILE_W, TILE_H, content_scale * 100.0,
             );
         }
@@ -1141,6 +1179,12 @@ fn recycle_offscreen_billboard_slots(
     // slotted set as the camera moves (a real bug)?
     time: Res<Time>,
     mut diag_timer: Local<f32>,
+    // Change probes for the skip below.
+    moved: Query<(), (With<BillboardGuiMarker>, Changed<GlobalTransform>)>,
+    changed_markers: Query<(), Changed<BillboardGuiMarker>>,
+    mut freed: RemovedComponents<BillboardAtlasTile>,
+    mut despawned: RemovedComponents<BillboardGuiMarker>,
+    mut last_pass: Local<RecyclePass>,
 ) {
     // No camera yet (startup) → keep whatever was allocated so first labels show.
     let Some(cam_pos) = cameras
@@ -1150,6 +1194,33 @@ fn recycle_offscreen_billboard_slots(
     else {
         return;
     };
+
+    // Skip the ranking while nothing it reads has changed. The last full
+    // pass left every slot on the nearest billboards; with the camera within
+    // 1 cm of where that pass ran, no billboard moved, changed (a grant
+    // re-arms the marker), spawned or despawned, no slot freed and the atlas
+    // the same size, this pass would evict nothing. A full pass ranks every
+    // slotted and in-range billboard, thousands on a label-heavy Space. The
+    // 2 s diagnostic frame always runs in full.
+    *diag_timer += time.delta_secs();
+    let diag_due = *diag_timer >= 2.0;
+    let camera_moved = last_pass
+        .camera
+        .map_or(true, |at| at.distance_squared(cam_pos) > 0.01 * 0.01);
+    let inputs_changed = camera_moved
+        || last_pass.total_slots != atlas.total_slots()
+        || !moved.is_empty()
+        || !changed_markers.is_empty()
+        || !freed.is_empty()
+        || !despawned.is_empty();
+    freed.clear();
+    despawned.clear();
+    if !inputs_changed && !diag_due {
+        return;
+    }
+    last_pass.camera = Some(cam_pos);
+    last_pass.total_slots = atlas.total_slots();
+
     const RENDER_RADIUS_SQ: f32 = BILLBOARD_ALLOC_RADIUS * BILLBOARD_ALLOC_RADIUS;
     // 360² — hysteresis band beyond the 300² alloc/render radius, so a billboard
     // hovering at the boundary can't thrash allocate↔evict every frame.
@@ -1221,8 +1292,7 @@ fn recycle_offscreen_billboard_slots(
         }
     }
 
-    *diag_timer += time.delta_secs();
-    if *diag_timer >= 2.0 {
+    if diag_due {
         *diag_timer = 0.0;
         // Count via the grid, not a full-world scan (the old diag itself
         // was an O(all-billboards) pass every 2 s).
@@ -1260,6 +1330,13 @@ fn recycle_offscreen_billboard_slots(
             crate::billboard_pipeline::BillboardLockAxis,
         )>();
     }
+}
+
+/// Inputs of the last full `recycle_offscreen_billboard_slots` pass.
+#[derive(Default)]
+struct RecyclePass {
+    camera: Option<Vec3>,
+    total_slots: u32,
 }
 
 fn zero_tile_in_atlas(cpu_buf: &mut [u8], slot: u32, atlas_w_px: u32, cols: u32) {
@@ -1579,6 +1656,44 @@ fn collect_subtree(
     }
 }
 
+/// Counters for `update_and_render_billboards`, reported every 10 s so a
+/// profile of the pass can be attributed: how often a GUI change invalidated
+/// every label (`epoch_bumps`), how many labels were flattened and hashed
+/// (`evaluated`), painted (`rasterized`) or held back by the per-frame raster
+/// budget before (`fresh_deferred`) or after (`changed_deferred`) that work.
+#[derive(Default)]
+struct BillboardPassStats {
+    since: Option<std::time::Instant>,
+    frames: u64,
+    epoch_bumps: u64,
+    evaluated: u64,
+    rasterized: u64,
+    fresh_deferred: u64,
+    changed_deferred: u64,
+}
+
+impl BillboardPassStats {
+    fn maybe_report(&mut self) {
+        let since = *self.since.get_or_insert_with(std::time::Instant::now);
+        if since.elapsed() < std::time::Duration::from_secs(10) {
+            return;
+        }
+        if self.evaluated + self.fresh_deferred + self.epoch_bumps > 0 {
+            info!(
+                "🪧 billboard pass, last {:.0}s / {} frames: {} epoch bumps, {} labels evaluated, {} painted, {} fresh deferred before evaluation, {} changed deferred after",
+                since.elapsed().as_secs_f32(),
+                self.frames,
+                self.epoch_bumps,
+                self.evaluated,
+                self.rasterized,
+                self.fresh_deferred,
+                self.changed_deferred
+            );
+        }
+        *self = Self { since: Some(std::time::Instant::now()), ..Self::default() };
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update_and_render_billboards(
     mut text_state: NonSendMut<BillboardTextState>,
@@ -1607,7 +1722,10 @@ fn update_and_render_billboards(
     mut removed_gui: RemovedComponents<GuiElementDisplay>,
     mut epoch: Local<u64>,
     mut painted_at: Local<std::collections::HashMap<Entity, u64>>,
+    mut stats: Local<BillboardPassStats>,
 ) {
+    stats.frames += 1;
+    stats.maybe_report();
     // Cull billboard rebuilds to the near-camera vicinity. VS imports ~17K
     // billboards; collecting + hashing every one each frame cost ~208 ms (31%
     // of the frame). Only billboards within this radius of the order-0 camera
@@ -1624,6 +1742,7 @@ fn update_and_render_billboards(
     // every painted billboard skips at one HashMap lookup.
     if !changed_gui.is_empty() || removed_gui.read().count() > 0 {
         *epoch = epoch.wrapping_add(1);
+        stats.epoch_bumps += 1;
     }
 
     // Parent→children index, built lazily ONCE per pass and only when at
@@ -1672,6 +1791,17 @@ fn update_and_render_billboards(
         if handle.last_label_hash != 0 && painted_at.get(&entity) == Some(&*epoch) {
             continue;
         }
+        // A fresh tile (`last_label_hash == 0`) always needs a raster. Once
+        // this frame's raster budget is spent it would be flattened, hashed
+        // and then deferred anyway, so defer it before that work: with a
+        // backlog of unpainted labels in range (thousands on a large
+        // MindSpace), every frame flattened and hashed the whole backlog to
+        // paint six of them.
+        if handle.last_label_hash == 0 && rasters_this_frame >= max_rasters {
+            stats.fresh_deferred += 1;
+            continue;
+        }
+        stats.evaluated += 1;
         let children_of =
             child_index.get_or_insert_with(|| build_gui_child_index(&gui_elements));
         let mut flat: Vec<FlatElem> = Vec::new();
@@ -1727,9 +1857,11 @@ fn update_and_render_billboards(
         // epoch — so un-stamp it, and the next frame picks it up first.
         if rasters_this_frame >= max_rasters {
             painted_at.remove(&entity);
+            stats.changed_deferred += 1;
             continue;
         }
         rasters_this_frame += 1;
+        stats.rasterized += 1;
         handle.last_label_hash = hash;
 
         // Render this billboard into a temporary tile-sized pixmap, then

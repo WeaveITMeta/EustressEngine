@@ -2,9 +2,9 @@
 //!
 //! One system:
 //! 1. `optimize_loaded_meshes` — runs once per mesh asset after GLB load
-//!    (gated by `on_message::<AssetEvent<Mesh>>` so it only runs on frames
-//!    that actually emit mesh events). Applies vertex cache opt, overdraw opt,
-//!    and vertex fetch reorder. Cost: ~0.1-2ms per mesh.
+//!    (and again after a hot-reload), inside a per-frame time budget.
+//!    Applies vertex cache opt, overdraw opt, and vertex fetch reorder.
+//!    Cost: ~0.1-2ms per mesh.
 //!
 //! All optimizations work on standard GLB meshes — no format changes needed.
 
@@ -44,6 +44,12 @@ struct OptimizedMeshTracker {
     /// Meshes seen but not yet optimised: the per-frame budget carries the
     /// rest over instead of doing every new mesh the frame it lands.
     pending: std::collections::VecDeque<AssetId<Mesh>>,
+    /// Meshes this system has just rewritten. Writing through `get_mut`
+    /// queues a `Modified` event, which the render world needs to upload the
+    /// new buffers; when that event comes back here it is our own write, so
+    /// it must not queue the mesh again. Each mesh over the triangle floor
+    /// would otherwise be optimised and re-uploaded every frame, forever.
+    echoes: std::collections::HashSet<AssetId<Mesh>>,
 }
 
 /// Minimum triangle count to bother optimizing. Primitives (cube=12, sphere=~480)
@@ -67,13 +73,23 @@ fn optimize_loaded_meshes(
 ) {
     for event in mesh_events.read() {
         let id = match event {
-            AssetEvent::Added { id } | AssetEvent::Modified { id } => *id,
+            AssetEvent::Added { id } => *id,
+            AssetEvent::Modified { id } => {
+                // Our own write coming back: the mesh is already optimised.
+                if tracker.echoes.remove(id) {
+                    continue;
+                }
+                // Re-optimize on any other modification (hot-reload)
+                tracker.processed.remove(id);
+                *id
+            }
+            AssetEvent::Removed { id } => {
+                tracker.processed.remove(id);
+                tracker.echoes.remove(id);
+                continue;
+            }
             _ => continue,
         };
-        // Re-optimize on modification (hot-reload)
-        if matches!(event, AssetEvent::Modified { .. }) {
-            tracker.processed.remove(&id);
-        }
         if !tracker.processed.contains(&id) {
             tracker.pending.push_back(id);
         }
@@ -117,6 +133,7 @@ fn optimize_loaded_meshes(
         let Some(mut mesh) = meshes.get_mut(id) else { continue };
         optimize_mesh_in_place(&mut mesh);
         tracker.processed.insert(id);
+        tracker.echoes.insert(id);
     }
 }
 

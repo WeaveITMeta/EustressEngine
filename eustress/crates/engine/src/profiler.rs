@@ -94,7 +94,7 @@ pub struct ProfilerPlugin;
 // also echoed to the log.
 
 /// Read `EUSTRESS_PROFILE` exactly once; capture is armed iff it is non-empty.
-fn phase_armed() -> bool {
+pub(crate) fn phase_armed() -> bool {
     static ARMED: OnceLock<bool> = OnceLock::new();
     *ARMED.get_or_init(|| {
         std::env::var_os("EUSTRESS_PROFILE")
@@ -106,7 +106,7 @@ fn phase_armed() -> bool {
 /// Phase-profiler window length in frames (env `EUSTRESS_PROFILE_FRAMES`,
 /// default 1 — dump every frame, ideal when a single frame already costs
 /// seconds).
-fn phase_window() -> u64 {
+pub(crate) fn phase_window() -> u64 {
     static W: OnceLock<u64> = OnceLock::new();
     *W.get_or_init(|| {
         std::env::var("EUSTRESS_PROFILE_FRAMES")
@@ -330,8 +330,20 @@ mod enabled {
     const REPORT_SVG: &str = "eustress_profile.svg";
     /// Default rolling window length in frames.
     const DEFAULT_WINDOW_FRAMES: u64 = 120;
-    /// How many rows to put in the text/SVG report.
+    /// How many rows to put in the text/SVG report, unless
+    /// `EUSTRESS_PROFILE_TOP` asks for more (the long tail of small systems
+    /// can add up to a large share of the frame).
     const REPORT_TOP_N: usize = 60;
+    fn report_top_n() -> usize {
+        static N: OnceLock<usize> = OnceLock::new();
+        *N.get_or_init(|| {
+            std::env::var("EUSTRESS_PROFILE_TOP")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(REPORT_TOP_N)
+        })
+    }
     /// How many rows to echo into the engine log.
     const LOG_TOP_N: usize = 20;
 
@@ -365,7 +377,14 @@ mod enabled {
     struct Tally {
         total: Duration,
         calls: u64,
+        /// The part of `total` spent on the main thread. Systems holding a
+        /// NonSend resource (Slint, the billboard atlas) all run there, one
+        /// after another, so this column is the serial part of the frame.
+        main: Duration,
     }
+
+    /// The thread that builds the app and runs the main schedule.
+    static MAIN_THREAD: OnceLock<std::thread::ThreadId> = OnceLock::new();
 
     struct ProfilerState {
         /// Whether `EUSTRESS_PROFILE` armed capture. When false every hot-path
@@ -492,6 +511,9 @@ mod enabled {
                 let tally = map.entry(name).or_default();
                 tally.total += elapsed;
                 tally.calls += 1;
+                if MAIN_THREAD.get() == Some(&std::thread::current().id()) {
+                    tally.main += elapsed;
+                }
             }
         }
     }
@@ -504,6 +526,7 @@ mod enabled {
     /// unrelated spans at zero. When capture is not armed the filter rejects
     /// even the system spans, collapsing the layer to a no-op.
     pub fn custom_layer(_app: &mut App) -> Option<BoxedLayer> {
+        let _ = MAIN_THREAD.set(std::thread::current().id());
         let st = state().clone();
         let armed = st.is_armed();
         if armed {
@@ -599,9 +622,14 @@ mod enabled {
         text.push_str(&format!(
             "Mean summed system-time per frame: {mean_frame_ms:.2} ms (sum across overlapping threads)\n",
         ));
+        let main_all: Duration = rows.iter().map(|(_, t)| t.main).sum();
+        text.push_str(&format!(
+            "Main-thread system time per frame: {:.2} ms (serial: NonSend systems and whatever else the main thread ran)\n",
+            main_all.as_secs_f64() * 1000.0 / window_frames as f64,
+        ));
         text.push_str("rank  total_ms   avg_ms/frame   %frame   calls   system\n");
         text.push_str("----  --------   ------------   ------   -----   ------\n");
-        for (i, (name, tally)) in rows.iter().take(REPORT_TOP_N).enumerate() {
+        for (i, (name, tally)) in rows.iter().take(report_top_n()).enumerate() {
             let total_ms = tally.total.as_secs_f64() * 1000.0;
             let avg_ms = total_ms / window_frames as f64;
             let pct = (avg_ms / denom_ms) * 100.0;
@@ -612,6 +640,19 @@ mod enabled {
                 avg_ms,
                 pct,
                 tally.calls,
+                name,
+            ));
+        }
+
+        // Main-thread systems by their main-thread time: the serial chain.
+        let mut on_main: Vec<&(String, Tally)> =
+            rows.iter().filter(|(_, t)| !t.main.is_zero()).collect();
+        on_main.sort_by(|a, b| b.1.main.cmp(&a.1.main));
+        text.push_str("\nmain-thread  ms/frame   system\n");
+        for (name, tally) in on_main.iter().take(60) {
+            text.push_str(&format!(
+                "             {:>8.3}   {}\n",
+                tally.main.as_secs_f64() * 1000.0 / window_frames as f64,
                 name,
             ));
         }

@@ -36,12 +36,8 @@ pub use eustress_common::plugins::lighting_plugin::{SharedLightingPlugin, StarFi
 pub struct LightingServiceOwner;
 
 /// P2 two-tier (Update-bound lag fix): exclude residency-streamed binary-ECS
-/// parts from `hydrate_lighting_entities`' four `Added<Instance>` queries.
+/// parts from `hydrate_lighting_entities`' candidate query.
 ///
-/// On Vehicle Simulator ~120K cold `BinaryEcsInstance` parts are streamed in.
-/// Bevy's `Added<Instance>` query still O(N)-visits the whole matching
-/// archetype every frame to read change-ticks; with the residency churn that
-/// visit was the measured top Update cost (~the lighting half of the spike).
 /// A binary streamed part is ALWAYS an authored Part — it can NEVER be a
 /// Star/Moon/Sky/Atmosphere (those come from `Lighting/*.instance.toml` via
 /// the file loader, never from the binary `entities` partition), so excluding
@@ -87,9 +83,11 @@ impl Plugin for LightingPlugin {
             // class names that lack their real Bevy components and attaches
             // DirectionalLight, SunMarker, SunClass, MoonMarker, etc.
             // This is the authoritative path for per-Space lighting.
-            // `Added<Instance>` is tick-based, so the bulk-load tick only
-            // batches the five per-frame archetype walks (9 ms per frame on
-            // Super Station's drain); nothing is missed.
+            // Candidates arrive through an `Add<Instance>` observer that queues
+            // only lighting classes; the system drains that queue. The bulk-
+            // load tick just batches the drain; nothing is missed.
+            .init_resource::<PendingLightingHydration>()
+            .add_observer(queue_lighting_hydration)
             .add_systems(Update, hydrate_lighting_entities.run_if(crate::space::file_loader::ui_sync_tick))
             // Sync Sun class properties with LightingService
             .add_systems(Update, sync_sun_with_lighting_service)
@@ -152,33 +150,83 @@ fn sun_shadow_distance() -> f32 {
 /// - **Sky → Sky component**
 /// - **Atmosphere → Atmosphere + EustressAtmosphere**
 ///
-/// Runs every `Update` frame; cheap no-op when all entities are hydrated
-/// (the `Without<>` filter ensures empty query iteration).
+/// Entities whose `Instance` was just added with a class this module
+/// hydrates. Filled by [`queue_lighting_hydration`], drained by
+/// [`hydrate_lighting_entities`].
+#[derive(Resource, Default)]
+pub struct PendingLightingHydration(Vec<Entity>);
+
+/// `Add<Instance>` observer: queue the rare lighting-class entities. The
+/// hydration used to find them with five `Added<Instance>` queries, and
+/// `Added` is checked per entity, not per archetype, so every frame paid
+/// ~5 × the live instance count in tick comparisons: 29 ms per frame at
+/// steady state on Super Station's ~136K instances, for a Space whose
+/// lighting entities were all hydrated in its first second.
+fn queue_lighting_hydration(
+    add: On<bevy::ecs::lifecycle::Add, Instance>,
+    instances: Query<&Instance>,
+    mut pending: ResMut<PendingLightingHydration>,
+) {
+    let entity = add.event().entity;
+    let Ok(instance) = instances.get(entity) else { return };
+    if matches!(
+        instance.class_name,
+        ClassName::Star
+            | ClassName::Moon
+            | ClassName::Sky
+            | ClassName::Atmosphere
+            | ClassName::ReflectionProbe
+    ) {
+        pending.0.push(entity);
+    }
+}
+
+/// Drains the queue each run; a no-op when nothing lighting-classed was
+/// spawned since the last run. The per-class `Has<marker>` checks keep it
+/// idempotent: an entity is only hydrated while it still lacks its marker.
 fn hydrate_lighting_entities(
     mut commands: Commands,
     lighting: Res<LightingService>,
-    // PERF: gate on `Added<Instance>` so this only inspects entities the frame
-    // they are spawned by the file loader (which inserts `Instance` exactly once
-    // per entity). Without the `Added` gate these `Without<marker>` queries match
-    // ~every one of the ~110K live entities (Instance is universal), so the
-    // system re-scanned the whole scene every step (~880K rows/frame, ~44ms x2).
-    // The `Without<marker>` filters are kept for idempotency: a celestial entity
-    // is only hydrated while it still lacks its marker, so re-spawns are safe.
-    // Star entities that have Instance but lack SunMarker (not yet hydrated).
-    // `NotBinaryStreamed` (P2) drops the ~120K streamed binary parts that can
+    mut pending: ResMut<PendingLightingHydration>,
+    // `NotBinaryStreamed` (P2) drops the streamed binary parts, which can
     // never be a lighting class — see the type alias above.
-    unhydrated_sun: Query<(Entity, &Instance), (Added<Instance>, Without<SunMarker>, Without<MoonMarker>, NotBinaryStreamed)>,
-    // Moon entities that have Instance but lack MoonMarker
-    unhydrated_moon: Query<(Entity, &Instance), (Added<Instance>, Without<MoonMarker>, Without<SunMarker>, NotBinaryStreamed)>,
-    // Sky entities that lack Sky component
-    unhydrated_sky: Query<(Entity, &Instance), (Added<Instance>, Without<Sky>, NotBinaryStreamed)>,
-    // Atmosphere entities that lack EustressAtmosphere component
-    unhydrated_atmo: Query<(Entity, &Instance), (Added<Instance>, Without<EustressAtmosphere>, NotBinaryStreamed)>,
-    // ReflectionProbe entities that lack the probe component
-    unhydrated_probe: Query<(Entity, &Instance), (Added<Instance>, Without<ReflectionProbeComponent>, NotBinaryStreamed)>,
+    candidates: Query<
+        (
+            &Instance,
+            Has<SunMarker>,
+            Has<MoonMarker>,
+            Has<Sky>,
+            Has<EustressAtmosphere>,
+            Has<ReflectionProbeComponent>,
+        ),
+        NotBinaryStreamed,
+    >,
 ) {
+    if pending.0.is_empty() {
+        return;
+    }
+    let queued = std::mem::take(&mut pending.0);
+    let mut unhydrated_sun: Vec<(Entity, &Instance)> = Vec::new();
+    let mut unhydrated_moon: Vec<(Entity, &Instance)> = Vec::new();
+    let mut unhydrated_sky: Vec<(Entity, &Instance)> = Vec::new();
+    let mut unhydrated_atmo: Vec<(Entity, &Instance)> = Vec::new();
+    let mut unhydrated_probe: Vec<(Entity, &Instance)> = Vec::new();
+    for entity in queued {
+        let Ok((instance, sun, moon, sky, atmo, probe)) = candidates.get(entity) else {
+            continue; // despawned, or a streamed binary part
+        };
+        match instance.class_name {
+            ClassName::Star if !sun && !moon => unhydrated_sun.push((entity, instance)),
+            ClassName::Moon if !moon && !sun => unhydrated_moon.push((entity, instance)),
+            ClassName::Sky if !sky => unhydrated_sky.push((entity, instance)),
+            ClassName::Atmosphere if !atmo => unhydrated_atmo.push((entity, instance)),
+            ClassName::ReflectionProbe if !probe => unhydrated_probe.push((entity, instance)),
+            _ => {}
+        }
+    }
+
     // ── Star → Sun (DirectionalLight + SunMarker + SunClass) ──────────
-    for (entity, instance) in unhydrated_sun.iter() {
+    for (entity, instance) in unhydrated_sun {
         if instance.class_name != ClassName::Star { continue; }
 
         info!("☀️ Hydrating Sun entity {:?} from Lighting/ TOML", entity);
@@ -253,7 +301,7 @@ fn hydrate_lighting_entities(
     }
 
     // ── Moon → DirectionalLight + MoonMarker + MoonClass ──────────────
-    for (entity, instance) in unhydrated_moon.iter() {
+    for (entity, instance) in unhydrated_moon {
         if instance.class_name != ClassName::Moon { continue; }
 
         info!("🌙 Hydrating Moon entity {:?} from Lighting/ TOML", entity);
@@ -274,7 +322,7 @@ fn hydrate_lighting_entities(
     }
 
     // ── Sky → Sky component ───────────────────────────────────────────
-    for (entity, instance) in unhydrated_sky.iter() {
+    for (entity, instance) in unhydrated_sky {
         if instance.class_name != ClassName::Sky { continue; }
 
         info!("�️ Hydrating Sky entity {:?} from Lighting/ TOML", entity);
@@ -285,7 +333,7 @@ fn hydrate_lighting_entities(
     }
 
     // ── Atmosphere → Atmosphere + EustressAtmosphere ──────────────────
-    for (entity, instance) in unhydrated_atmo.iter() {
+    for (entity, instance) in unhydrated_atmo {
         if instance.class_name != ClassName::Atmosphere { continue; }
 
         info!("🌫️ Hydrating Atmosphere entity {:?} from Lighting/ TOML", entity);
@@ -304,7 +352,7 @@ fn hydrate_lighting_entities(
     // Lighting, and is deliberately selectable so it can be placed and sized.
     // `hydrate_reflection_probes` in the reflections plugin turns the component
     // into bevy's `LightProbe` plus a filtered environment map.
-    for (entity, instance) in unhydrated_probe.iter() {
+    for (entity, instance) in unhydrated_probe {
         if instance.class_name != ClassName::ReflectionProbe { continue; }
 
         info!("🪞 Hydrating ReflectionProbe entity {:?}", entity);

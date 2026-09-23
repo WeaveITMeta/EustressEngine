@@ -68,20 +68,20 @@ fn sync_point_lights(
     >,
 ) {
     for (entity, light, existing) in &mut query {
-        let intensity = light.brightness * LUMENS_PER_BRIGHTNESS;
+        let intensity = if light.enabled { light.brightness * LUMENS_PER_BRIGHTNESS } else { 0.0 };
         if let Some(mut pl) = existing {
             pl.color = light.color;
             pl.intensity = intensity;
             pl.range = light.range;
             pl.radius = light.radius;
-            pl.shadow_maps_enabled = light.shadows;
+            pl.shadow_maps_enabled = light.shadows && light.enabled;
         } else {
             commands.entity(entity).insert(PointLight {
                 color: light.color,
                 intensity,
                 range: light.range,
                 radius: light.radius,
-                shadow_maps_enabled: light.shadows,
+                shadow_maps_enabled: light.shadows && light.enabled,
                 ..default()
             });
         }
@@ -98,7 +98,7 @@ fn sync_spot_lights(
     >,
 ) {
     for (entity, light, existing) in &mut query {
-        let intensity = light.brightness * LUMENS_PER_BRIGHTNESS;
+        let intensity = if light.enabled { light.brightness * LUMENS_PER_BRIGHTNESS } else { 0.0 };
         let outer_angle = light.angle.to_radians();
         let inner_angle = (light.angle * 0.85).to_radians();
         if let Some(mut sl) = existing {
@@ -107,7 +107,7 @@ fn sync_spot_lights(
             sl.range = light.range;
             sl.inner_angle = inner_angle;
             sl.outer_angle = outer_angle;
-            sl.shadow_maps_enabled = light.shadows;
+            sl.shadow_maps_enabled = light.shadows && light.enabled;
         } else {
             commands.entity(entity).insert(SpotLight {
                 color: light.color,
@@ -115,7 +115,7 @@ fn sync_spot_lights(
                 range: light.range,
                 inner_angle,
                 outer_angle,
-                shadow_maps_enabled: light.shadows,
+                shadow_maps_enabled: light.shadows && light.enabled,
                 ..default()
             });
         }
@@ -161,18 +161,18 @@ fn sync_surface_lights(
     mut query: Query<(Entity, &SurfaceLight, Option<&mut PointLight>), Changed<SurfaceLight>>,
 ) {
     for (entity, light, existing) in &mut query {
-        let intensity = light.brightness * LUMENS_PER_BRIGHTNESS;
+        let intensity = if light.enabled { light.brightness * LUMENS_PER_BRIGHTNESS } else { 0.0 };
         if let Some(mut pl) = existing {
             pl.color = light.color;
             pl.intensity = intensity;
             pl.range = light.range;
-            pl.shadow_maps_enabled = light.shadows;
+            pl.shadow_maps_enabled = light.shadows && light.enabled;
         } else {
             commands.entity(entity).insert(PointLight {
                 color: light.color,
                 intensity,
                 range: light.range,
-                shadow_maps_enabled: light.shadows,
+                shadow_maps_enabled: light.shadows && light.enabled,
                 ..default()
             });
         }
