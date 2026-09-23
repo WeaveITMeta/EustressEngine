@@ -32,7 +32,16 @@ def generate_corner_wedge_glb():
     indices = []
     
     def add_tri(v0, v1, v2, normal):
-        """Add a triangle with the given normal."""
+        """Add a triangle with the given outward normal, wound counter-clockwise
+        about it: glTF front faces are CCW, so a clockwise triangle is culled
+        when seen from outside."""
+        e1 = [v1[i] - v0[i] for i in range(3)]
+        e2 = [v2[i] - v0[i] for i in range(3)]
+        cross = (e1[1] * e2[2] - e1[2] * e2[1],
+                 e1[2] * e2[0] - e1[0] * e2[2],
+                 e1[0] * e2[1] - e1[1] * e2[0])
+        if sum(cross[i] * normal[i] for i in range(3)) < 0:
+            v1, v2 = v2, v1
         base = len(vertices)
         vertices.extend([v0, v1, v2])
         normals.extend([normal, normal, normal])
