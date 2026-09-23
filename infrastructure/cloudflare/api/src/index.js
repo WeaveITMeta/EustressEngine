@@ -26,6 +26,7 @@
 
 /// Model used for document verification, background screening, and search.
 import { handleAvatar } from './avatar.mjs';
+import { handlePurchases, resolveAttribution, payableCreator, recordPurchase, cleanProductId, cleanText, LIMITS as PURCHASE_LIMITS } from './purchases.mjs';
 import {
   handleModerationRoute, sweepModeration, isListable, canServe, publicModeration,
   POLICY_HASH_ANCHORED, MODERATION_VERSION, POLICY_VERSION,
@@ -857,6 +858,14 @@ export default {
         return handleTicketSpend(request, env, cors);
       if (url.pathname === '/api/tickets/history' && request.method === 'GET')
         return handleTicketHistory(request, env, cors);
+
+      // Purchases: the signed-in account's own receipts for Tickets and Bliss
+      // spend. Bearer-gated and origin-pinned; there is no route that takes
+      // someone else's account id.
+      if (url.pathname === '/api/purchases' && request.method === 'GET')
+        return handlePurchases(request, env, cors, { verifyAuth, json, blissUnit: BLISS_UNIT });
+      if (url.pathname === '/api/purchases/summary' && request.method === 'GET')
+        return handlePurchases(request, env, cors, { verifyAuth, json, blissUnit: BLISS_UNIT }, { summaryOnly: true });
 
       // Stripe
       if (url.pathname === '/api/stripe/checkout' && request.method === 'POST')
@@ -2252,6 +2261,13 @@ async function handleHealth(env, cors) {
 // ═══════════════════════════════════════════════════════════════════════════
 // JWT (using Web Crypto HMAC-SHA256)
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// True when the request carries a non-empty Bearer credential. Distinguishes
+/// "no token" (anonymous) from "a token we could not verify" (reject), which a
+/// null `verifyAuth` result alone cannot.
+function presentedBearer(request) {
+  return /^Bearer\s+\S+/i.test(request.headers.get('Authorization') || '');
+}
 
 async function createJwt(userId, secret) {
   const header = { alg: 'HS256', typ: 'JWT' };
@@ -4007,9 +4023,27 @@ async function handleTicketSpend(request, env, cors) {
   const userId = await verifyAuth(request, env);
   if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
 
-  const { product_id, price, developer_id } = await request.json();
-  if (!product_id || !price || price <= 0)
+  const { product_id, price, developer_id, simulation_id, title, icon } =
+    await request.json().catch(() => ({}));
+  const productId = cleanProductId(product_id);
+  // Whole Tickets only. A fractional or string price left a fractional or NaN
+  // balance behind, and every receipt total below is an integer sum.
+  if (!productId || !Number.isSafeInteger(price) || price <= 0)
     return json({ error: 'Invalid product or price' }, 400, cors);
+
+  // Who is paid, and who the buyer's receipt says they supported. With a
+  // simulation that is its author, and a developer_id that disagrees is
+  // refused, so no caller can route a creator's 70% to another account. An
+  // unknown developer is refused too, where it used to let the sale through
+  // and quietly pay no one.
+  const attribution = await resolveAttribution(env, { simulation_id, creator_id: developer_id });
+  if (attribution.error) return json({ error: attribution.error }, attribution.status, cors);
+  // Pay only a creator the server resolved from a simulation. Without one, the
+  // developer_id above is the caller's claim and must never move money.
+  const payable = payableCreator(attribution);
+  if (payable.error) return json({ error: payable.error }, payable.status, cors);
+  const creatorId = payable.creator_id;
+  const displayTitle = cleanText(title, PURCHASE_LIMITS.title) || `Product ${productId}`;
 
   // Get buyer
   const buyerData = await env.USERS.get(`user:${userId}`);
@@ -4028,13 +4062,13 @@ async function handleTicketSpend(request, env, cors) {
   buyer.ticket_balance = balance - price;
   await env.USERS.put(`user:${userId}`, JSON.stringify(buyer));
 
-  // Credit developer (if provided)
-  if (developer_id) {
-    const devData = await env.USERS.get(`user:${developer_id}`);
+  // Credit the creator (if the sale has one)
+  if (creatorId) {
+    const devData = await env.USERS.get(`user:${creatorId}`);
     if (devData) {
       const dev = JSON.parse(devData);
       dev.ticket_balance = (dev.ticket_balance || 0) + devCut;
-      await env.USERS.put(`user:${developer_id}`, JSON.stringify(dev));
+      await env.USERS.put(`user:${creatorId}`, JSON.stringify(dev));
     }
   }
 
@@ -4045,14 +4079,15 @@ async function handleTicketSpend(request, env, cors) {
   await env.INVENTORY.put(`txn:${userId}:${Date.now()}`, JSON.stringify({
     id: txnId, user_id: userId, type: 'spend', amount: -price,
     balance_after: buyer.ticket_balance, currency: 'TKT',
-    product_id, developer_id, description: `Purchased product ${product_id}`, timestamp: now,
+    product_id: productId, developer_id: creatorId, simulation_id: attribution.simulation_id,
+    description: `Purchased ${displayTitle}`, timestamp: now,
   }), { expirationTtl: 86400 * 365 * 3 });
 
   // A sale is VERIFIED value: credit the creator BLS contribution score so
   // the daily distribution pays them for impact, not just for hours logged.
-  if (developer_id && devCut > 0) {
+  if (creatorId && devCut > 0) {
     const vDay = new Date().toISOString().split('T')[0];
-    const vKey = `contrib:${vDay}:${developer_id}`;
+    const vKey = `contrib:${vDay}:${creatorId}`;
     const vRaw = await env.INVENTORY.get(vKey);
     const vRec = vRaw ? JSON.parse(vRaw)
       : { total_score: 0, by_type: {}, by_seconds: {}, count: 0 };
@@ -4066,17 +4101,31 @@ async function handleTicketSpend(request, env, cors) {
     await env.INVENTORY.put(dtKey, String(dtPrev + vScore), { expirationTtl: 86400 * 7 });
   }
 
-  if (developer_id) {
-    await env.INVENTORY.put(`txn:${developer_id}:${Date.now()}`, JSON.stringify({
-      id: crypto.randomUUID(), user_id: developer_id, type: 'dev_payout', amount: devCut,
-      currency: 'TKT', product_id, counterparty_id: userId,
-      description: `Sale: product ${product_id} (70% of ${price} TKT)`, timestamp: now,
+  if (creatorId) {
+    await env.INVENTORY.put(`txn:${creatorId}:${Date.now()}`, JSON.stringify({
+      id: crypto.randomUUID(), user_id: creatorId, type: 'dev_payout', amount: devCut,
+      currency: 'TKT', product_id: productId, simulation_id: attribution.simulation_id,
+      counterparty_id: userId,
+      description: `Sale: ${displayTitle} (70% of ${price} TKT)`, timestamp: now,
     }), { expirationTtl: 86400 * 365 * 3 });
   }
 
+  // The buyer's receipt, keyed by the same id as their txn: entry. Written
+  // after the money has moved, so a receipt never describes a spend that did
+  // not happen; if this write fails the spend stands and the txn: log still
+  // records it.
+  try {
+    await recordPurchase(env, userId, {
+      id: txnId, ts: now, currency: 'TKT', units: price, title: displayTitle, icon,
+      product_id: productId, attribution, ref: txnId,
+    });
+  } catch (e) {
+    console.error(`purchase receipt for txn ${txnId} was not written:`, e);
+  }
+
   return json({
-    success: true, price, developer_cut: devCut, platform_cut: platformCut,
-    buyer_balance: buyer.ticket_balance,
+    success: true, price, developer_cut: creatorId ? devCut : 0, platform_cut: creatorId ? platformCut : price,
+    buyer_balance: buyer.ticket_balance, purchase_id: txnId,
   }, 200, cors);
 }
 
@@ -4119,6 +4168,16 @@ async function handleNodeHeartbeat(request, env, cors) {
   // still accepted for node telemetry (the `node:` key below), but they carry
   // no user-scoped effects.
   const user_id = await verifyAuth(request, env);
+
+  // A token that was PRESENTED but did not verify -- expired after its 72
+  // hours, or forged -- is an auth failure, not an anonymous beat. Answering it
+  // with 200 and `bliss_balance: 0` made the engine overwrite the user's real
+  // balance with 0.00 and clear its 401 latch ("the witness answered for this
+  // account"), so a signed-out engine flip-flopped between rejected and fine.
+  // Beats with no Authorization header at all stay anonymous telemetry.
+  if (!user_id && presentedBearer(request)) {
+    return json({ error: 'Session expired or invalid; sign in again' }, 401, cors);
+  }
 
   await env.SOCIAL.put(`node:${node_id}`, JSON.stringify({
     node_id, mode: mode || 'light', players: players || 0,
@@ -5661,22 +5720,35 @@ async function ledgerSpend(env, userId, { amount_minor, purpose, ref }) {
     return { ok: false, error: 'Insufficient balance', balance_minor: balance, required_minor: amount };
   }
 
+  // The entry key carries the time of the call, so ledgerAppend's own
+  // duplicate check never matches a retry: every retry is a new key. The
+  // marker is what makes a reference spend once. KV has no compare-and-set,
+  // so two calls racing inside the same instant can still both land; a
+  // sequential retry cannot.
+  const marker = ref ? `spendref:${userId}:${ref}` : null;
+  if (marker && await env.PAYOUTS.get(marker)) {
+    return { ok: false, error: 'Duplicate spend reference', balance_minor: balance };
+  }
+
   const id = ref ? `spend-${ref}` : `spend-${crypto.randomUUID()}`;
+  const ts = new Date().toISOString();
   const wrote = await ledgerAppend(env, userId, {
     amount_minor: -amount,
     kind: 'spend',
     ref: purpose,
     id,
+    ts,
   });
   if (!wrote) {
     return { ok: false, error: 'Duplicate spend reference', balance_minor: balance };
   }
+  if (marker) await env.PAYOUTS.put(marker, `entry:${userId}:${ts}:${id}`);
 
   // Burned, not transferred — emission stays the only mint.
   const burned = parseInt(await env.PAYOUTS.get('bliss:burned_minor') || '0', 10);
   await env.PAYOUTS.put('bliss:burned_minor', String(burned + amount));
 
-  return { ok: true, spent_minor: amount, balance_minor: balance - amount };
+  return { ok: true, spent_minor: amount, balance_minor: balance - amount, entry_id: id, ts };
 }
 
 async function handleLedgerSpend(request, env, cors) {
@@ -5684,12 +5756,24 @@ async function handleLedgerSpend(request, env, cors) {
   if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
 
   const body = await request.json().catch(() => ({}));
-  const { amount, purpose, ref } = body;
+  const { amount, purpose, ref, simulation_id, creator_id, product_id, title, icon } = body;
   const amountMinor = toMinor(amount);
   if (!Number.isFinite(amountMinor) || amountMinor <= 0)
     return json({ error: 'amount must be a positive number of BLS' }, 400, cors);
+  // Both land in KV: `purpose` in the ledger entry, `ref` in its key and
+  // marker. Unbounded, either could make the write fail after the checks.
+  const purposeText = cleanText(purpose, PURCHASE_LIMITS.title);
+  if (!purposeText) return json({ error: 'purpose required' }, 400, cors);
+  if (ref !== undefined && ref !== null && !(typeof ref === 'string' && /^[A-Za-z0-9_.:-]{1,100}$/.test(ref)))
+    return json({ error: 'ref must be 1 to 100 letters, digits, or _ . : -' }, 400, cors);
 
-  const res = await ledgerSpend(env, userId, { amount_minor: amountMinor, purpose, ref });
+  // Bliss is burned rather than paid to anyone, so this is attribution only:
+  // it is what lets the buyer see which creator and simulation the spend went
+  // to. It is still resolved first, so a bad reference refuses the spend.
+  const attribution = await resolveAttribution(env, { simulation_id, creator_id });
+  if (attribution.error) return json({ error: attribution.error }, attribution.status, cors);
+
+  const res = await ledgerSpend(env, userId, { amount_minor: amountMinor, purpose: purposeText, ref });
   if (!res.ok) {
     const status = res.error === 'Insufficient balance' ? 402
       : res.error === 'Duplicate spend reference' ? 409 : 400;
@@ -5698,11 +5782,27 @@ async function handleLedgerSpend(request, env, cors) {
       balance: res.balance_minor !== undefined ? fromMinor(res.balance_minor) : undefined,
     }, status, cors);
   }
+
+  // Written after the ledger entry, for the same reason as the Tickets path:
+  // the ledger is the record of what happened, the receipt describes it.
+  let purchaseId = null;
+  try {
+    const receipt = await recordPurchase(env, userId, {
+      ts: res.ts, currency: 'BLS', units: res.spent_minor,
+      title: cleanText(title, PURCHASE_LIMITS.title) || purposeText, icon,
+      product_id: cleanProductId(product_id), attribution, ref: res.entry_id,
+    });
+    purchaseId = receipt.id;
+  } catch (e) {
+    console.error(`purchase receipt for ledger entry ${res.entry_id} was not written:`, e);
+  }
+
   return json({
     ok: true,
     spent: fromMinor(res.spent_minor),
     balance: fromMinor(res.balance_minor),
     balance_display: formatBliss(res.balance_minor),
+    purchase_id: purchaseId,
   }, 200, cors);
 }
 

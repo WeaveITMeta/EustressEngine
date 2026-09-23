@@ -34,8 +34,16 @@ pub struct GalleryExperience {
     pub like_count: u64,
     #[serde(alias = "max_players", default)]
     pub player_count: u32,
+    /// Content rating as the Worker sends it: `"all_ages"`, `"teen_13"`,
+    /// `"mature_17"`, `"adult_18"`, or `null` when unrated.
+    ///
+    /// This was typed `f32`, as though it were a star score. The Worker always
+    /// emits the key (`m.rating || null`), and `#[serde(default)]` only covers an
+    /// ABSENT field -- a present string fails as "expected f32", and a present
+    /// `null` fails too on a non-Option. One bad card fails the whole `Vec`, so
+    /// every Gallery response failed to parse.
     #[serde(default)]
-    pub rating: f32,
+    pub rating: Option<String>,
     #[serde(default)]
     pub genre: String,
     #[serde(default)]

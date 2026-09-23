@@ -15,6 +15,7 @@ pub mod gallery;
 pub mod marketplace;
 pub mod presence_ws;
 pub mod projects;
+pub mod purchases;
 
 pub use auth::*;
 pub use community::*;
@@ -23,6 +24,7 @@ pub use gallery::*;
 pub use marketplace::*;
 pub use presence_ws::*;
 pub use projects::*;
+pub use purchases::*;
 
 use gloo_net::http::{Request, RequestBuilder, Response};
 use gloo_storage::Storage;

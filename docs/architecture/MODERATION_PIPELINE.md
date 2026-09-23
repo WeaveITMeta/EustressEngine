@@ -65,6 +65,21 @@ Jev returns typed, calibrated answers (a probability for a yes/no, a distributio
 
 The cost lever is therefore the funnel, not the per-call price: obviously-junk and obviously-harmful publishes never reach Grok, republishes of an already-decided .pak never reach either model, and the judge call is short because the text reasoning was already done.
 
+### What the triage layer has to satisfy
+
+The classifier slot has four requirements, and they are what any replacement is measured against:
+
+1. **It must read the dossier.** The state budget is 72K characters, about 18K tokens, and the parts that decide a case (script source, GUI and dialogue strings) are the bulk of it. A classifier that sees only the listing name and a few digest numbers is doing the metadata-only review policy v1.2 forbids.
+2. **It must be calibrated, not merely accurate.** Every threshold in section 6 is a probability: `hard_quarantine` 0.85, `csam_hold` 0.20, `soft_reject` 0.80. A model with a worse expected calibration error moves all of them at once, and in the legal lane that is the one error we cannot take in either direction.
+3. **It must work zero-shot on our battery.** The 28 questions are written against this policy, and there is no labelled corpus yet; the first one is what the human queue and the appeals produce.
+4. **It must run where the pipeline runs**, which is a Cloudflare Worker, and it must not hand user-authored content to anyone who retains or trains on it. The KYC path sets `store: false` on every xAI call for the same reason.
+
+**Open-weight alternatives** (Convai's Laya is the closest: same Choice/Score/Noul shape, Apache-2.0, 421M ModernBERT-large) meet 4 in principle and currently fail 1 through 3: 512 to 1,024 tokens of context on the published checkpoints, 0.362 accuracy zero-shot against a 0.318 random and 0.461 majority-class baseline on their own benchmark, and ECE 0.213 against Jev's 0.144. Their own model card is direct about it: "a fast base to specialise, not a zero-shot decision engine," and the fine-tuned variant that reaches 0.766 is trained on four synthetic workflows none of which is spatial-content moderation.
+
+That makes the migration path a fine-tune, not a swap, and the pipeline is already shaped to produce its input: every held case, every human decision and every overturned appeal is a labelled example of our battery. The swap seam is `jevEvaluate` plus `normalizeAnswers` (moderation.mjs), one call site; the decision policy consumes normalized answers and does not care who produced them. What a second implementation would need beyond the adapter is a question battery that fits a small context, and a fresh threshold calibration, because thresholds tuned against one model's calibration do not transfer to another's.
+
+This matters beyond cost. A single hosted classifier is the same single-vendor exposure `DECENTRALIZATION_PLAN.md` section 7 already records for the Judge, and an open-weight model that can be pinned and self-hosted is the eventual answer for both lanes.
+
 ## 4. The dossier (engine side)
 
 The engine builds `.eustress/moderation-dossier.json` inside `do_publish`, from the live World, before the upload thread starts. `dossier_version` is 1.
@@ -158,9 +173,15 @@ Where the savings come from, in order: (1) the digest, which makes A impossible 
 
 The second thing Jev buys is not on the bill: the model that reads the author's untrusted text cannot be prompted into an action, and the model that can act reads a typed case record. Column B has to trust Grok to ignore instructions embedded in scripts; column C does not.
 
+### Where the remaining cost is, and the one lever on it
+
+Jev is 2 to 3% of a publish. The judge and the agent are the other 97%, so the classifier is not where savings live: removing it entirely would save about $9 per 10,000 publishes out of roughly $300, and cost the funnel that keeps the judge cheap.
+
+The lever that does move the bill is the judge's prompt shape. `grokJudge` sends one stable block first (role, policy text, standing rules: ~4.5K tokens, byte-identical on every call), then the captures, then the per-case block. That ordering is load-bearing: a prompt cache can only reuse a prefix, and leading with per-publish image bytes, as an earlier shape did, makes every call a full-price call. At $2.00/M against $0.50/M cached, the stable prefix is worth about $0.0067 per judge call, or roughly $54 per 10,000 publishes, which is six times the entire Jev bill. A test asserts the prefix is identical across two different publishes, because the saving is silently lost the moment anything per-case moves in front of it.
+
 ### Steady-state targets
 
-After calibration: at most 15% of publishes reach the agent; republishes and empty scenes reach nothing; the judge call stays under 12K input tokens (the policy text is a stable prefix and qualifies for the cached rate, which takes the judge to ~$0.012). A publish that costs more than ten cents is an appeal or an audit, and both are bounded by the four-round limit.
+After calibration: at most 15% of publishes reach the agent; republishes and empty scenes reach nothing; the judge call stays under 12K input tokens, of which the cacheable prefix is about 4.5K, taking a warm judge call to roughly $0.012. A publish that costs more than ten cents is an appeal or an audit, and both are bounded by the four-round limit.
 
 ## 10. The biggest problems in moderating infinite worlds, and what this does about each
 

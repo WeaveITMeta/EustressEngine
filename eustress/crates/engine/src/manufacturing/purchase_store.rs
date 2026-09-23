@@ -513,24 +513,43 @@ impl PurchaseOrderRegistry {
 // Plugin
 // ============================================================================
 
-/// Loads the open Space's purchase orders at startup.
+/// Loads the open Space's purchase orders at startup, and again whenever
+/// another Space is opened, so orders are read from and written to the Space
+/// that is open.
 pub struct PurchaseOrderPlugin;
 
 impl Plugin for PurchaseOrderPlugin {
     fn build(&self, app: &mut App) {
-        let root = crate::space::default_space_root();
-        let registry = PurchaseOrderRegistry::load(&root);
+        let registry = PurchaseOrderRegistry::load(&crate::space::open_space_root_of(app));
+        registry.log_loaded();
+        app.insert_resource(registry)
+            .add_systems(Update, follow_open_space);
+    }
+}
 
+impl PurchaseOrderRegistry {
+    fn log_loaded(&self) {
         tracing::info!(
             "PurchaseOrderPlugin loaded: {} RFQs, {} orders, next reference {} (from {})",
-            registry.rfq_count(),
-            registry.order_count(),
-            format_order_reference(registry.next_sequence),
-            root.join(ORDERS_DIR).display(),
+            self.rfq_count(),
+            self.order_count(),
+            format_order_reference(self.next_sequence),
+            self.root.join(ORDERS_DIR).display(),
         );
-
-        app.insert_resource(registry);
     }
+}
+
+/// Reload the purchase orders when another Space is opened.
+fn follow_open_space(
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    mut registry: ResMut<PurchaseOrderRegistry>,
+) {
+    let Some(space_root) = space_root else { return };
+    if !space_root.is_changed() || registry.root == space_root.0 {
+        return;
+    }
+    *registry = PurchaseOrderRegistry::load(&space_root.0);
+    registry.log_loaded();
 }
 
 // ============================================================================

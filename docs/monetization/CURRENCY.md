@@ -20,8 +20,9 @@
 2. [Bliss (BLS) — Earned](#bliss-bls--earned)
 3. [Tickets (TKT) — Purchased](#tickets-tkt--purchased)
 4. [The Treasury](#the-treasury)
-5. [Implementation Map](#implementation-map)
-6. [Child Safety](#child-safety)
+5. [Spending and Receipts](#spending-and-receipts)
+6. [Implementation Map](#implementation-map)
+7. [Child Safety](#child-safety)
 
 ---
 
@@ -153,6 +154,55 @@ contributor; the return is ecosystem growth, not extraction.
 
 ---
 
+## Spending and Receipts
+
+Both currencies are spent through the Worker, and every spend writes a receipt
+only the buyer can read. The receipts are what the spending card on a person's
+own profile and the `/purchases` page show: the title, icon and amount of each
+purchase, the simulation it happened in, and the creator it supported.
+
+| Spend | Endpoint | Where it goes |
+|---|---|---|
+| Tickets | `POST /api/tickets/spend` | 70% to the creator, 30% to the platform |
+| Bliss | `POST /api/ledger/spend` | Burned; nobody is paid |
+
+Both accept the same attribution, all of it optional:
+
+| Field | Meaning |
+|---|---|
+| `simulation_id` | The published simulation the purchase happened in. The server reads its author as the creator. |
+| `developer_id` (Tickets), `creator_id` (Bliss) | The creator when there is no simulation. With a simulation it must be the author, or the spend is refused. |
+| `title` | What was bought, as the buyer should read it. Defaults to `Product {product_id}` for Tickets and to the `purpose` for Bliss. |
+| `icon` | An image Eustress serves: `https://*.eustress.dev/...` or `/assets/...`. Any other URL is dropped, because the buyer's browser would fetch it. |
+| `product_id` | The engine's product id, a number or a short slug. Required for Tickets. |
+
+What the Worker enforces:
+
+- A Tickets `price` is a whole number.
+- Attribution is resolved before any money moves. An unknown simulation or
+  creator (404), or a creator who did not publish the simulation (400),
+  refuses the spend.
+- A Bliss spend that carries a `ref` spends once: a later call with the same
+  `ref` gets 409. Two calls racing within the same instant can still both
+  land, because KV has no compare-and-set.
+
+Receipts live in the `INVENTORY` namespace as
+`purchase:{buyer}:{inverted ms}:{id}`, with the display fields in KV metadata so
+one `list()` reads a thousand of them, newest first. Two routes read them, both
+for the bearer's own account and neither taking an account id:
+
+- `GET /api/purchases` returns every receipt with totals per creator and per
+  simulation.
+- `GET /api/purchases/summary` returns the totals alone.
+
+Tickets and Bliss are never added together. Every total carries both.
+
+**Not wired yet:** in-simulation purchasing. `MarketplaceService:PromptPurchase`
+in Luau and Rune logs the request and calls neither endpoint, so until it does,
+receipts come only from direct calls to the two spend routes.
+
+---
+
 ## Implementation Map
 
 | Piece | Location |
@@ -162,6 +212,8 @@ contributor; the return is ecosystem growth, not extraction.
 | Witness ledger + crons | [`infrastructure/cloudflare/api/src/index.js`](../../infrastructure/cloudflare/api/src/index.js) |
 | Canonical economics | crates.io `bliss-core` 0.1.1 `economics.rs` |
 | Public dashboard | [`web/src/pages/bliss.rs`](../../eustress/crates/web/src/pages/bliss.rs) |
+| Spend receipts and purchase history | [`infrastructure/cloudflare/api/src/purchases.mjs`](../../infrastructure/cloudflare/api/src/purchases.mjs) |
+| Purchases page, profile spending card | [`web/src/pages/purchases.rs`](../../eustress/crates/web/src/pages/purchases.rs), [`web/src/pages/profile.rs`](../../eustress/crates/web/src/pages/profile.rs) |
 
 **Honest framing for external audiences:** this is currently an off-chain,
 trust-based ledger running on a single Cloudflare Worker with KV storage. There

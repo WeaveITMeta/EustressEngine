@@ -1,0 +1,677 @@
+/* =============================================================================
+   Purchases page, and the spending card on the account holder's profile
+   =============================================================================
+   Built on the Wallet Ledger's look (/bliss/history), since the two pages sit
+   side by side: the same card surface, uppercase labels and tabular figures.
+   Tickets read in the neutral of the nav's Ticket chip, Bliss in Bliss gold,
+   and selection in the Eustress green.
+   ============================================================================= */
+
+.page-purchases {
+    --purchases-surface: rgba(20, 22, 30, 0.72);
+    --purchases-line: rgba(128, 144, 160, 0.18);
+    --purchases-line-soft: rgba(128, 144, 160, 0.1);
+    --purchases-label: rgba(190, 205, 212, 0.55);
+    --purchases-sub: rgba(200, 214, 220, 0.7);
+    --purchases-bls: var(--color-bliss-gold, #ffd700);
+    --purchases-accent: var(--color-eustress-green, #3cba54);
+    --purchases-accent-dim: var(--color-eustress-green-dim, rgba(60, 186, 84, 0.14));
+}
+
+.purchases-wrap {
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 108px 24px 72px;
+}
+
+/* Header */
+.purchases-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 28px;
+}
+
+.purchases-head h1 {
+    font-size: 30px;
+    margin: 0 0 6px;
+    letter-spacing: -0.01em;
+}
+
+.purchases-sub {
+    margin: 0;
+    max-width: 62ch;
+    color: var(--purchases-sub);
+    font-size: 14px;
+    line-height: 1.55;
+}
+
+.purchases-back {
+    font-size: 13px;
+    color: var(--purchases-accent);
+    text-decoration: none;
+    border: 1px solid rgba(60, 186, 84, 0.35);
+    border-radius: var(--radius-full, 999px);
+    padding: 7px 14px;
+    white-space: nowrap;
+}
+
+.purchases-back:hover {
+    background: var(--purchases-accent-dim);
+}
+
+/* Cards and states */
+.purchases-card {
+    background: var(--purchases-surface);
+    border: 1px solid var(--purchases-line);
+    border-radius: 14px;
+    padding: 20px 22px;
+    margin-bottom: 16px;
+    min-width: 0;
+}
+
+.purchases-center {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    text-align: center;
+    padding: 36px 22px;
+}
+
+.purchases-center p,
+.purchases-hint {
+    margin: 0;
+    color: var(--purchases-sub);
+}
+
+.purchases-error p {
+    margin: 0;
+    color: var(--color-danger, #f85149);
+}
+
+.purchases-note {
+    margin: -4px 0 16px;
+    font-size: 12.5px;
+    color: var(--purchases-sub);
+}
+
+/* Totals */
+.purchases-hero {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 24px;
+    background: var(--purchases-surface);
+    border: 1px solid var(--purchases-line);
+    border-radius: 14px;
+    padding: 24px 26px;
+    margin-bottom: 16px;
+}
+
+.purchases-totals {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 36px;
+}
+
+.purchases-label {
+    display: block;
+    font-size: 10.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--purchases-label);
+}
+
+.purchases-total-value {
+    display: block;
+    font-size: clamp(28px, 4.5vw, 40px);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+    margin-top: 4px;
+}
+
+.purchases-total-bls .purchases-total-value {
+    color: var(--purchases-bls);
+}
+
+.purchases-unit {
+    font-size: 0.42em;
+    font-weight: 500;
+    color: rgba(190, 205, 212, 0.6);
+    margin-left: 0.4em;
+    letter-spacing: 0.05em;
+}
+
+.purchases-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 28px;
+}
+
+.purchases-stat-value {
+    display: block;
+    font-size: 17px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    margin-top: 3px;
+}
+
+/* Creator and simulation groupings */
+.purchases-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 16px;
+}
+
+.purchases-card-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.purchases-h2 {
+    font-size: 11.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--purchases-label);
+    margin: 0;
+    font-weight: 600;
+}
+
+.purchases-count {
+    font-size: 12px;
+    color: var(--purchases-sub);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.purchases-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(13, 17, 23, 0.6);
+    border: 1px solid var(--purchases-line);
+    border-radius: 10px;
+    padding: 0 12px;
+    margin-bottom: 10px;
+}
+
+.purchases-search:focus-within {
+    border-color: rgba(60, 186, 84, 0.55);
+    box-shadow: 0 0 0 3px rgba(60, 186, 84, 0.12);
+}
+
+.purchases-search img {
+    width: 15px;
+    height: 15px;
+    opacity: 0.6;
+    flex: none;
+}
+
+.purchases-search input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: 0;
+    outline: 0;
+    color: var(--color-text-primary, #f0f6fc);
+    font: inherit;
+    font-size: 14px;
+    padding: 10px 0;
+}
+
+.purchases-search input::placeholder {
+    color: rgba(190, 205, 212, 0.45);
+}
+
+.purchases-groups,
+.purchases-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.purchases-groups {
+    max-height: 420px;
+    overflow-y: auto;
+    margin: 0 -6px;
+    padding: 0 6px;
+}
+
+.purchases-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 10px;
+    margin: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.purchases-group:hover {
+    background: rgba(128, 144, 160, 0.08);
+}
+
+.purchases-group:focus-visible {
+    outline: 2px solid var(--purchases-accent);
+    outline-offset: 1px;
+}
+
+.purchases-group.is-active {
+    background: var(--purchases-accent-dim);
+    border-color: rgba(60, 186, 84, 0.4);
+}
+
+.purchases-group-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+}
+
+.purchases-group-name {
+    font-size: 14px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.purchases-group-meta {
+    font-size: 12px;
+    color: var(--purchases-sub);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.purchases-avatar {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    flex: none;
+    border-radius: 50%;
+    background: rgba(60, 186, 84, 0.16);
+    color: var(--purchases-accent);
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.purchases-avatar.is-none {
+    background: rgba(128, 144, 160, 0.12);
+    color: var(--purchases-label);
+}
+
+.purchases-avatar img {
+    width: 16px;
+    height: 16px;
+    opacity: 0.75;
+}
+
+.purchases-none {
+    padding: 14px 10px;
+    color: var(--purchases-sub);
+    font-size: 13.5px;
+}
+
+/* Icons: a purchase's own picture, a simulation thumbnail, or a currency mark */
+.purchases-icon {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    flex: none;
+    border-radius: 10px;
+    overflow: hidden;
+    background: rgba(128, 144, 160, 0.1);
+    border: 1px solid var(--purchases-line-soft);
+}
+
+.purchases-icon img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.purchases-icon img.purchases-icon-mark {
+    width: 20px;
+    height: 20px;
+    object-fit: contain;
+    opacity: 0.85;
+}
+
+.purchases-group .purchases-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+}
+
+/* Amounts */
+.purchases-amounts {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 2px 10px;
+    flex: none;
+    font-variant-numeric: tabular-nums;
+}
+
+.purchases-amount {
+    font-size: 13.5px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.purchases-amount .purchases-unit {
+    font-size: 0.78em;
+}
+
+.purchases-amount-bls {
+    color: var(--purchases-bls);
+}
+
+/* Every purchase */
+.purchases-focus {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 12px;
+    margin-bottom: 10px;
+    border-radius: 10px;
+    background: var(--purchases-accent-dim);
+    font-size: 13px;
+}
+
+.purchases-focus span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.purchases-focus-clear {
+    flex: none;
+    background: transparent;
+    border: 1px solid rgba(60, 186, 84, 0.45);
+    border-radius: var(--radius-full, 999px);
+    color: var(--purchases-accent);
+    font: inherit;
+    font-size: 12.5px;
+    padding: 4px 12px;
+    cursor: pointer;
+}
+
+.purchases-focus-clear:hover {
+    background: rgba(60, 186, 84, 0.12);
+}
+
+.purchases-item {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--purchases-line-soft);
+}
+
+.purchases-item:last-child {
+    border-bottom: 0;
+}
+
+.purchases-item-main {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+    flex: 1;
+}
+
+.purchases-item-title {
+    font-size: 14.5px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.purchases-item-sub {
+    font-size: 12.5px;
+    color: var(--purchases-sub);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.purchases-dot {
+    margin: 0 6px;
+}
+
+.purchases-link {
+    color: inherit;
+    text-decoration: none;
+    border-bottom: 1px solid rgba(190, 205, 212, 0.25);
+}
+
+.purchases-link:hover {
+    color: var(--color-text-primary, #f0f6fc);
+    border-bottom-color: currentColor;
+}
+
+.purchases-item-side {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 3px;
+    flex: none;
+}
+
+.purchases-item-date {
+    font-size: 12px;
+    color: var(--purchases-label);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.purchases-more {
+    display: block;
+    width: 100%;
+    margin-top: 12px;
+    padding: 10px;
+    background: rgba(128, 144, 160, 0.08);
+    border: 1px solid var(--purchases-line);
+    border-radius: 10px;
+    color: var(--color-text-primary, #f0f6fc);
+    font: inherit;
+    font-size: 13.5px;
+    cursor: pointer;
+}
+
+.purchases-more:hover {
+    background: rgba(128, 144, 160, 0.14);
+}
+
+/* Nothing bought yet */
+.purchases-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 10px;
+    padding: 40px 22px;
+}
+
+.purchases-empty h2 {
+    margin: 4px 0 0;
+    font-size: 18px;
+}
+
+.purchases-empty p {
+    margin: 0;
+    max-width: 52ch;
+    color: var(--purchases-sub);
+    font-size: 14px;
+    line-height: 1.55;
+}
+
+.purchases-empty-icon {
+    width: 40px;
+    height: 40px;
+    opacity: 0.8;
+}
+
+@media (max-width: 860px) {
+    .purchases-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 560px) {
+    /* `.page` already pads 24px a side; the wrap adding its own on top left
+       phones with 40px gutters and names truncated to a few letters. */
+    .purchases-wrap {
+        padding: 92px 0 56px;
+    }
+
+    .purchases-hero {
+        padding: 20px 18px;
+    }
+
+    .purchases-totals {
+        gap: 24px;
+    }
+
+    .purchases-stats {
+        gap: 16px 24px;
+    }
+
+    .purchases-card {
+        padding: 16px;
+    }
+
+    .purchases-item {
+        align-items: flex-start;
+    }
+
+    /* Stacked amounts leave the name, which is what a row is found by, the
+       width of the row. */
+    .purchases-amounts {
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 0;
+    }
+}
+
+/* -----------------------------------------------------------------------------
+   Profile: the account holder's spending
+   ----------------------------------------------------------------------------- */
+
+.profile-spend {
+    margin-bottom: var(--space-2xl, 48px);
+    padding: 20px 22px;
+    background: rgba(20, 22, 30, 0.72);
+    border: 1px solid rgba(128, 144, 160, 0.18);
+    border-radius: 14px;
+}
+
+.profile-spend-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 14px;
+}
+
+.profile-spend-head h2 {
+    margin: 0;
+    font-size: 11.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: rgba(190, 205, 212, 0.55);
+    font-weight: 600;
+}
+
+.profile-spend-private {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: rgba(200, 214, 220, 0.7);
+}
+
+.profile-spend-private img {
+    width: 14px;
+    height: 14px;
+    opacity: 0.75;
+}
+
+.profile-spend-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px 40px;
+    margin-bottom: 16px;
+}
+
+.profile-spend-label {
+    display: block;
+    font-size: 10.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: rgba(190, 205, 212, 0.55);
+}
+
+.profile-spend-value {
+    display: block;
+    margin-top: 4px;
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-text-primary, #f0f6fc);
+}
+
+.profile-spend-stat-bls .profile-spend-value {
+    color: var(--color-bliss-gold, #ffd700);
+}
+
+.profile-spend-unit {
+    font-size: 0.46em;
+    font-weight: 500;
+    margin-left: 0.4em;
+    letter-spacing: 0.05em;
+    color: rgba(190, 205, 212, 0.6);
+}
+
+.profile-spend-error {
+    margin: 0 0 16px;
+    color: rgba(200, 214, 220, 0.7);
+    font-size: 14px;
+}
+
+.profile-spend-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13.5px;
+    color: var(--color-eustress-green, #3cba54);
+    text-decoration: none;
+}
+
+.profile-spend-link:hover {
+    text-decoration: underline;
+}
