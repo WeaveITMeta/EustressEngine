@@ -1,5 +1,9 @@
-# Decal — Surface texture overlay (child of BasePart)
-# Bevy: Custom decal material on face
+# Decal: an image projected onto the surfaces under it.
+# On a BasePart it covers the face named by `face`. Standing on its own (under
+# the Workspace, like a decal placed on the terrain) it projects from its own
+# Transform: its X and Z scale are its footprint, and `face` is not used.
+# Bevy: ForwardDecal. It lands on surfaces up to `depth_fade_factor` metres off
+# its plane, fading out toward that distance.
 
 [decal]
 texture = ""
@@ -7,6 +11,7 @@ color = [255, 255, 255]
 transparency = 0.0
 face = "Front"
 z_index = 0
+depth_fade_factor = 1.0
 
 [metadata]
 class_name = "Decal"
