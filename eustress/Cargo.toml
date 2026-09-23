@@ -21,6 +21,7 @@ members = [
     "crates/spatial-llm",
     "crates/geo",
     "crates/texture-gen",
+    "crates/particle-sim",
     "crates/workshop",
     "crates/tools",
     "crates/bridge-client",

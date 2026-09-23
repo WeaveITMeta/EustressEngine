@@ -17,6 +17,7 @@
 
 use bevy::prelude::*;
 use eustress_common::space_read::{read_space_parts, spawn_space_parts};
+use eustress_common::terrain::layer_instances::{read_layer_instances, spawn_layer_instances};
 use std::path::PathBuf;
 
 /// Where the Space came from, so the rest of the shell can tell whether it is
@@ -53,7 +54,7 @@ pub fn space_is_available() -> bool {
     resolve_space().is_some()
 }
 
-fn resolve_space() -> Option<PathBuf> {
+pub(crate) fn resolve_space() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("EUSTRESS_SPACE") {
         let p = PathBuf::from(p);
         return p.join("Workspace").is_dir().then_some(p);
@@ -96,6 +97,20 @@ fn open_space(
     }
 
     let spawned = spawn_space_parts(&mut commands, &mut meshes, &mut materials, &geo);
+
+    // Terrain layers (roads, stamps, pads, noise, material fills), scatter
+    // layers and water bodies are instances too; the shared terrain plugin
+    // bakes the layers over whatever terrain the Space spawns, and places
+    // the scatter and floods the water bodies on the result.
+    let (layers, layer_problems) = read_layer_instances(&root);
+    for problem in &layer_problems {
+        warn!("space: terrain layer {problem}");
+    }
+    let layer_entities = spawn_layer_instances(&mut commands, &layers);
+    if layer_entities > 0 {
+        info!("space: {layer_entities} terrain layer instances");
+    }
+
     open.root = Some(root.clone());
     open.parts = spawned;
     open.skipped = geo.skipped_total();

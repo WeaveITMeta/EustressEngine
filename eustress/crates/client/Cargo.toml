@@ -33,6 +33,11 @@ bevy = { workspace = true, features = [
     "bevy_color",
     "default_font",
     "bevy_asset",
+    # Audio: the Player had NO audio system at all -- neither `bevy_audio` nor
+    # a decoder, since the workspace sets `default-features = false`. Same pair
+    # as the Studio engine so a Space sounds identical in both shells.
+    "bevy_audio",
+    "audio-all-formats",
     "png",
     "hdr",
     "ktx2",

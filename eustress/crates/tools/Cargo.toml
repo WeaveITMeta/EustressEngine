@@ -49,6 +49,11 @@ base64 = "0.22"
 # `get_sim_value` / `list_sim_values` can report snapshot age.
 chrono = { workspace = true }
 
+# Sim IPC paths + instance registry — the sim tools address one engine among
+# several on a Universe through its per-instance queue and snapshot, whose
+# paths the engine and these tools share from one definition. Std-only.
+eustress-bridge-client = { path = "../bridge-client" }
+
 # Git tool implementations shell out to `git`; no native dep needed.
 # The spatial / physics / simulation tool groups are also filesystem +
 # snapshot-reading only, so they don't pull in Bevy or Rapier here.

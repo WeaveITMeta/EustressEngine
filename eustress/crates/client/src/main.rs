@@ -59,6 +59,20 @@ pub fn build_app(scene_path: Option<PathBuf>) -> App {
     // audit findings were this one omission.
     eustress_common::avatar::boot::register_avatar_asset_sources(&mut app);
 
+    // `space://` resolves against the Space `space_world` opens, the same
+    // folder its terrain and scatter layer instances are read from. Custom
+    // scatter layers (and any Space mesh) load through this source; only the
+    // engine shell registered it, so those loads failed here. The Client opens
+    // at most one Space, resolved at launch, so a plain file source rooted
+    // there is enough (the engine needs a swappable reader only because Studio
+    // switches Spaces at runtime).
+    if let Some(space_root) = systems::space_world::resolve_space() {
+        app.register_asset_source(
+            "space",
+            bevy::asset::io::AssetSourceBuilder::platform_default(&space_root.to_string_lossy(), None),
+        );
+    }
+
     app
         // Core Bevy plugins
         .add_plugins(DefaultPlugins

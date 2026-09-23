@@ -52,10 +52,14 @@ pub mod entity_tools;
 pub mod file_tools;
 pub mod git_tools;
 pub mod memory_tools;
+pub mod particle_sim_tools;
 pub mod physics_tools;
 pub mod script_tools;
 pub mod shell_tools;
 pub mod simulation_tools;
+/// Which engine a simulation tool targets, and the per-instance files it
+/// talks to it through. Shared by the simulation tools.
+pub mod sim_ipc;
 pub mod spatial_tools;
 pub mod universe_tools;
 pub mod website_tools;
@@ -90,6 +94,10 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(entity_tools::QueryEntitiesTool);
     registry.register(entity_tools::UpdateEntityTool);
     registry.register(entity_tools::DeleteEntityTool);
+
+    // Particle simulations (fluids, charged particles, conduction): author
+    // and inspect ParticleSimulation / ParticleSpecies files.
+    registry.register(particle_sim_tools::ParticleSimulationTool);
 
     // Parametric CAD (feature-tree CadPart) — write path…
     registry.register(cad_tools::CadCreatePartTool);

@@ -63,6 +63,9 @@ pub mod sim_record;
 #[cfg(feature = "streaming")]
 pub mod sim_stream;
 pub mod classes;
+// The live instance tree scripts read and write during Play: one tree shared
+// by the Luau and Rune bindings and synced with the ECS each frame.
+pub mod datamodel;
 // The sealed avatar runtime — one character implementation shared by Studio
 // Play Mode and the Client. See `avatar::AvatarRuntimePlugin` for why this
 // replaces the convention-based `plugins::SharedCharacterPlugin`.

@@ -148,6 +148,28 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
 
         // --- Destructive: removes or irreversibly mutates ---------------
         "delete_entity" | "git_commit" | "git_branch" => Destructive,
+        // Dispatches any live editor action by name, and Delete and Cut are
+        // among them, so it is gated exactly like delete_entity.
+        "invoke_action" => Destructive,
+        // The same reasoning covers the rest of the UI-driving family: each can
+        // reach ANY control. `ui_click` presses whatever is at a coordinate,
+        // `ui_sequence` chains clicks and tool picks, and `invoke_mode_tool` runs
+        // any ribbon tool's real handler -- Delete and Publish included. Filed
+        // as Write, any of them would bypass the Destructive tier that
+        // `delete_entity` sits behind.
+        "ui_click" | "ui_sequence" | "invoke_mode_tool" => Destructive,
+        // Uploads the open Space to the PUBLIC gallery: irreversible and
+        // outward-facing. Deliberately NOT Network, even though it leaves the
+        // machine. The MCP server grants Network to anyone holding
+        // EUSTRESS_MODERATOR_TOKEN, a credential that exists so a moderator can
+        // work the review queue; filed as Network, that review credential would
+        // silently double as publish rights. `capability_of` returns ONE class,
+        // so it gets the one no unrelated token hands out, and it fails closed
+        // for every MCP caller.
+        "publish_space" => Destructive,
+        // Presses keys and buttons in a running game: it changes the live
+        // session, never the Space on disk.
+        "play_input" => Write,
 
         // --- Network: leaves the machine --------------------------------
         "http_request" | "image_to_code" | "image_to_geometry" | "document_to_code" => Network,
@@ -158,6 +180,7 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         // --- Write: creates or modifies inside the Space ----------------
         "create_entity"
         | "update_entity"
+        | "particle_simulation"
         | "insert_gaussian_splats"
         | "write_file"
         | "create_script"
@@ -203,7 +226,19 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         // Website service authoring writes TOML inside the Space.
         | "website_setup"
         | "website_add_reference"
-        | "demote_entity" => Write,
+        | "demote_entity"
+        // MCP-server bridge tools (mcp-server/src/shared_registry.rs) that
+        // change state. Selection and the active tool are the USER's live
+        // editor state -- they drive the gizmos and the Properties panel --
+        // so they are Write rather than observation, and a read-only peer may
+        // not move them.
+        | "select_entity"
+        | "equip_tool"
+        | "data_bind"
+        | "data_unbind"
+        | "export_instances_toml"
+        // Switches the live mode/discipline and persists it to editor settings.
+        | "set_mode" => Write,
 
         // Removing a Reference deletes an instance folder.
         "website_remove_reference" => Destructive,
@@ -279,7 +314,24 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "get_conversation"
         | "suggest_contextual_edits"
         | "suggest_swap_template"
-        | "suggest_tool_defaults" => Read,
+        | "suggest_tool_defaults"
+        // MCP-server bridge tools. The server registers these on top of this
+        // crate's baseline, outside `every_registered_tool_is_classified`
+        // below, which is how all twelve shipped unclassified and were
+        // refused at dispatch; the server now guards its own registry. The
+        // three pose tools only aim the AI's OWN off-screen camera, which
+        // never displaces the user's view, so they are observation.
+        | "ai_camera_capture"
+        | "ai_camera_frame"
+        | "ai_camera_orbit"
+        | "ai_camera_set_pose"
+        | "capture_viewport"
+        | "data_bindings"
+        // Observation only. `publish_status` reports readiness and progress
+        // WITHOUT publishing.
+        | "list_modes"
+        | "list_mode_tools"
+        | "publish_status" => Read,
 
         _ => return None,
     })

@@ -80,6 +80,9 @@ eustress-bliss = { path = "../bliss" }
 eustress-stream-node = { path = "../stream-node", optional = true }
 # Parametric BRep + Studio Boolean (Drafting tab CSG)
 eustress-cad = { path = "../cad" }
+# Mip chains for material maps as they load (the crate's binary generates
+# the bundled material library).
+texture-gen = { path = "../texture-gen" }
 # Shared tool registry — single source of truth for MCP tool
 # definitions + handlers. The engine enables the `bevy` feature so
 # `ToolRegistry` derives `Resource`; the MCP server depends on this
@@ -119,6 +122,13 @@ bevy = { workspace = true, default-features = false, features = [
     "bevy_gltf",
     "bevy_scene",
     "bevy_audio",
+    # REQUIRED for any sound to play. `bevy_audio` alone is the playback
+    # system with NO decoders: `default-features = false` (workspace) also
+    # drops Bevy's default `vorbis`, so every audio asset failed to decode and
+    # nothing played. Bevy's own bundle rather than a hand-picked list, so a
+    # user-imported .ogg / .wav / .mp3 / .flac / .m4a all load, and the set
+    # tracks upstream if Bevy reshuffles its decoders.
+    "audio-all-formats",
     "bevy_state",
     "default_font",
     "bevy_asset",
@@ -379,6 +389,8 @@ core = [
     "forge",
     "bliss",
     "clipboard",
+    # Luau in Play. See the `luau` feature below.
+    "luau",
     # LSP server ships inside the engine bundle. `cargo build --release`
     # produces BOTH `eustress-engine` AND `eustress-lsp` automatically —
     # same binary install, no separate download required for external
@@ -407,6 +419,13 @@ core = [
 # ── Individual feature gates ──────────────────────────────────────────────────
 # Rune scripting with VM pooling and ECS bindings
 realism-scripting = []
+# Luau in Play and hot-reload. REQUIRED even though `eustress-common` is
+# already built with its own `luau` feature above: a `#[cfg(feature = "luau")]`
+# in THIS crate's source checks THIS crate's features, not common's. With no
+# `luau` here every gated block in `soul/rune_api.rs` compiled to its no-op
+# fallback, so Luau hot-reload, the Play-start spawn, and `Touched` never ran
+# even though mlua was linked and ready.
+luau = ["eustress-common/luau"]
 # Wry webview support (Windows/macOS/Linux)
 webview = ["wry"]
 # EustressStream streaming: scene deltas, simulation results, iteration history, Rune audit trail.
