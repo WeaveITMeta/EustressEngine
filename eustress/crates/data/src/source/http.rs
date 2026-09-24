@@ -26,7 +26,6 @@
 //! cannot regress that way.
 
 use std::fmt;
-use std::sync::Arc;
 
 use crate::{DataError, Result};
 
@@ -212,14 +211,18 @@ impl HttpTransport for UnavailableTransport {
 }
 
 /// The default transport for a source built with `new`.
-pub(super) fn default_transport() -> Arc<dyn HttpTransport> {
+///
+/// Gated with its callers: every provider that builds on a default transport
+/// parses JSON and so lives behind `import`.
+#[cfg(feature = "import")]
+pub(super) fn default_transport() -> std::sync::Arc<dyn HttpTransport> {
     #[cfg(feature = "http")]
     {
-        Arc::new(UreqTransport::default())
+        std::sync::Arc::new(UreqTransport::default())
     }
     #[cfg(not(feature = "http"))]
     {
-        Arc::new(UnavailableTransport)
+        std::sync::Arc::new(UnavailableTransport)
     }
 }
 

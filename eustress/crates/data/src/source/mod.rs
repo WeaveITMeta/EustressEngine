@@ -224,16 +224,36 @@ pub trait DataSource: Send + Sync {
 pub fn open(config: SourceConfig) -> Result<Box<dyn DataSource>> {
     Ok(match config.kind {
         SourceKind::Csv => Box::new(csv::CsvSource::new(config)),
-        SourceKind::Rest => Box::new(rest::RestSource::new(config)?),
-        SourceKind::GraphQl => Box::new(graphql::GraphQlSource::new(config)?),
         SourceKind::Postgres => Box::new(postgres::PostgresSource::new(config)?),
         SourceKind::S3 => Box::new(s3::S3Source::new(config)?),
+        // These providers parse JSON over the HTTP seam, so their modules
+        // exist only with `import`. Each arm is gated with its module, and the
+        // catch-all below stands in for them when the feature is off: a build
+        // such as eustress-data-store's (`parquet` only) must still compile,
+        // and a request for one of these providers must say what is missing.
+        #[cfg(feature = "import")]
+        SourceKind::Rest => Box::new(rest::RestSource::new(config)?),
+        #[cfg(feature = "import")]
+        SourceKind::GraphQl => Box::new(graphql::GraphQlSource::new(config)?),
+        #[cfg(feature = "import")]
         SourceKind::Firebase => Box::new(firebase::FirebaseSource::new(config)?),
+        #[cfg(feature = "import")]
         SourceKind::Supabase => Box::new(supabase::SupabaseSource::new(config)?),
+        #[cfg(feature = "import")]
         SourceKind::AzureBlob => Box::new(azure::AzureBlobSource::new(config)?),
+        #[cfg(feature = "import")]
         SourceKind::Oracle => Box::new(oracle::OracleSource::new(config)?),
+        #[cfg(feature = "import")]
         SourceKind::Neo4j => Box::new(graphdb::Neo4jSource::new(config)?),
+        #[cfg(feature = "import")]
         SourceKind::Neptune => Box::new(graphdb::NeptuneSource::new(config)?),
+        #[cfg(not(feature = "import"))]
+        other => {
+            return Err(DataError::Schema(format!(
+                "{} sources need the `import` feature of eustress-data, which this build does not enable",
+                other.as_str()
+            )))
+        }
     })
 }
 
