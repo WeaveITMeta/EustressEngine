@@ -187,8 +187,9 @@ component BrushSettingsModal inherits PopupWindow {
                 }
                 
                 Slider {
+                    // TerrainBrush's radius range (the `[` / `]` keys stop at 50).
                     minimum: 1.0;
-                    maximum: 100.0;
+                    maximum: 50.0;
                     value: root.brush-size;
                     changed(val) => { root.size-changed(val); }
                 }
@@ -706,6 +707,10 @@ export component Ribbon inherits Rectangle {
     callback on-stop-server();
     callback on-show-forge-connect();
     callback on-show-network-panel();
+    callback on-allocate-forge-server();
+    callback on-find();
+    // A control whose backend is not built; the host explains why.
+    callback on-unbuilt-feature(string);
     callback on-show-stress-test();
     
     // Data callbacks
@@ -1287,6 +1292,7 @@ export component Ribbon inherits Rectangle {
                                 DropdownItem { label: "Delete"; shortcut: "Del"; clicked => { root.on-delete(); } }
                                 DropdownSeparator {}
                                 DropdownItem { label: "Select All"; shortcut: "Ctrl+A"; clicked => { root.on-select-all(); } }
+                                DropdownItem { label: "Find & Replace..."; shortcut: "Ctrl+F"; clicked => { root.on-find(); } }
                                 DropdownSeparator {}
                                 DropdownItem { label: "Group"; shortcut: "Ctrl+G"; clicked => { root.on-group(); } }
                                 DropdownItem { label: "Ungroup"; shortcut: "Ctrl+U"; clicked => { root.on-ungroup(); } }
@@ -1328,7 +1334,7 @@ export component Ribbon inherits Rectangle {
                                 DropdownItem { label: root.show-properties ? "Properties  [on]" : "Properties  [off]"; shortcut: "Ctrl+2"; clicked => { root.show-properties = !root.show-properties; } }
                                 DropdownItem { label: root.show-output ? "Output  [on]" : "Output  [off]"; shortcut: "Ctrl+3"; clicked => { root.show-output = !root.show-output; } }
                                 DropdownItem { label: root.show-assets ? "Assets  [on]" : "Assets  [off]"; shortcut: "Ctrl+4"; clicked => { root.show-assets = !root.show-assets; } }
-                                DropdownItem { label: root.show-collaboration ? "Collaborate  [on]" : "Collaborate  [off]"; shortcut: "Ctrl+5"; clicked => { root.show-collaboration = !root.show-collaboration; } }
+                                DropdownItem { label: "Collaborate"; shortcut: "Ctrl+Shift+L"; clicked => { root.on-unbuilt-feature("collaboration"); } }
                                 DropdownItem { label: root.show-command-bar ? "Command Bar  [on]" : "Command Bar  [off]"; shortcut: "Ctrl+K"; clicked => { root.show-command-bar = !root.show-command-bar; } }
                                 DropdownSeparator {}
                                 DropdownHeader { label: "CAMERA"; }
@@ -1619,7 +1625,7 @@ export component Ribbon inherits Rectangle {
                                 DropdownSeparator {}
                                 DropdownHeader { label: "FORGE CLOUD"; }
                                 DropdownItem { label: "Connect to Forge..."; clicked => { root.on-show-forge-connect(); } }
-                                DropdownItem { label: "Allocate Server"; clicked => { root.on-plugin-action("network:forge-allocate"); } }
+                                DropdownItem { label: "Allocate Server"; clicked => { root.on-allocate-forge-server(); } }
                                 DropdownSeparator {}
                                 DropdownHeader { label: "BENCHMARK"; }
                                 DropdownItem { label: "Network Panel"; clicked => { root.on-show-network-panel(); } }
@@ -3455,7 +3461,7 @@ export component Ribbon inherits Rectangle {
 
                 ToolGroup {
                     label: "Connect";
-                    IconButton { icon: @image-url("../../assets/icons/ui/link.svg"); label: "Connect"; tooltip: "Connect Nodes (Ctrl+K)"; tint: Theme.accent-green; clicked => { root.on-plugin-action("mindspace:connect"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/link.svg"); label: "Connect"; tooltip: "Connect the selected nodes (the first one picked is the hub)"; tint: Theme.accent-green; clicked => { root.on-plugin-action("mindspace:connect"); } }
                 }
                 GroupDivider {}
 

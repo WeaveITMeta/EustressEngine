@@ -398,7 +398,6 @@ export component ServicesBrowserPanel inherits Rectangle {
 
     // ---- Callbacks ----
     callback open-service-url(string);
-    callback service-selected(int);
 
     background: Theme.panel-background;
 
@@ -485,7 +484,6 @@ export component ServicesBrowserPanel inherits Rectangle {
                             selected: idx == root.selected-index;
                             clicked => {
                                 root.selected-index = idx;
-                                root.service-selected(idx);
                             }
                         }
 
@@ -508,7 +506,6 @@ export component ServicesBrowserPanel inherits Rectangle {
                             selected: idx == root.selected-index;
                             clicked => {
                                 root.selected-index = idx;
-                                root.service-selected(idx);
                             }
                         }
 
@@ -531,7 +528,6 @@ export component ServicesBrowserPanel inherits Rectangle {
                             selected: idx == root.selected-index;
                             clicked => {
                                 root.selected-index = idx;
-                                root.service-selected(idx);
                             }
                         }
 
@@ -554,7 +550,6 @@ export component ServicesBrowserPanel inherits Rectangle {
                             selected: idx == root.selected-index;
                             clicked => {
                                 root.selected-index = idx;
-                                root.service-selected(idx);
                             }
                         }
 
@@ -577,7 +572,6 @@ export component ServicesBrowserPanel inherits Rectangle {
                             selected: idx == root.selected-index;
                             clicked => {
                                 root.selected-index = idx;
-                                root.service-selected(idx);
                             }
                         }
                     }

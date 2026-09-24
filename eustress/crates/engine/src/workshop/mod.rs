@@ -143,6 +143,11 @@ pub enum MessageRole {
     Artifact,
     /// Error message
     Error,
+    /// A note from the Workshop about the conversation rather than a turn in
+    /// it: "Stopped", or which approvals a reply skipped. Rendered as a muted
+    /// centred line, never sent to the model, and terminal for dispatch, so a
+    /// Stop cannot be undone by the loop picking itself straight back up.
+    Notice,
 }
 
 impl MessageRole {
@@ -155,6 +160,7 @@ impl MessageRole {
             MessageRole::Approval => "approval",
             MessageRole::Artifact => "artifact",
             MessageRole::Error => "error",
+            MessageRole::Notice => "notice",
         }
     }
 }
@@ -886,6 +892,51 @@ impl IdeationPipeline {
         id
     }
 
+    /// Add a notice: a muted line about the conversation itself, such as
+    /// "Stopped". See [`MessageRole::Notice`] for why it is terminal for
+    /// dispatch and never reaches the model.
+    pub fn add_notice_message(&mut self, content: String) -> u32 {
+        let id = self.next_message_id;
+        self.next_message_id += 1;
+        self.messages.push(ChatMessage {
+            id,
+            role: MessageRole::Notice,
+            content,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            ..Default::default()
+        });
+        self.dirty = true;
+        id
+    }
+
+    /// Close out every agentic tool call that still has no result and is in
+    /// one of `statuses`: mark it Skipped and give it `note` as its result.
+    /// Returns how many it touched.
+    ///
+    /// Every `tool_use` the model emitted needs a matching `tool_result` on the
+    /// next turn or the provider rejects the whole conversation. Anything that
+    /// abandons tool calls, Stop or a reply that redirects instead of
+    /// approving, therefore has to answer them explicitly rather than leave
+    /// them hanging.
+    pub fn skip_unanswered_tool_calls(&mut self, statuses: &[McpCommandStatus], note: &str) -> usize {
+        let mut touched = 0;
+        for msg in self.messages.iter_mut() {
+            let is_open_call = msg.mcp_method.as_deref() == Some("tool_use")
+                && msg.tool_use_id.is_some()
+                && msg.tool_result.is_none()
+                && msg.mcp_status.as_ref().is_some_and(|s| statuses.contains(s));
+            if is_open_call {
+                msg.tool_result = Some(note.to_string());
+                msg.mcp_status = Some(McpCommandStatus::Skipped);
+                touched += 1;
+            }
+        }
+        if touched > 0 {
+            self.dirty = true;
+        }
+        touched
+    }
+
     /// Stamp which model produced a message — provenance for cost accounting
     /// and multi-model sessions. Call with the id `add_system_message`
     /// returned, right after adding an assistant/advisor turn.
@@ -1020,6 +1071,49 @@ pub struct WorkshopSendMessageEvent {
     pub image_png: Option<Vec<u8>>,
 }
 
+/// Messages the user sent while the agent was mid-turn, oldest first.
+///
+/// A message sent during a turn used to go straight into the conversation,
+/// ahead of the reply it was waiting on. The reply then landed after it, the
+/// dispatch guard saw the assistant as the last to speak, and the message was
+/// never answered. Holding it here until the turn ends keeps the conversation
+/// in order and gets every message a reply.
+///
+/// A `static` rather than a resource for the same reason as the attach strip's
+/// staging in `slint_ui.rs`: the × on a queued chip removes entries from inside
+/// the Slint action match, which does not take this module's resources.
+static QUEUED_MESSAGES: std::sync::Mutex<std::collections::VecDeque<WorkshopSendMessageEvent>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+fn queued_messages() -> std::sync::MutexGuard<'static, std::collections::VecDeque<WorkshopSendMessageEvent>> {
+    // A poisoned lock still holds a valid queue; losing the user's messages
+    // to an unrelated panic would be worse than reading it.
+    QUEUED_MESSAGES.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// One-line previews of the queued messages, for the chips above the input.
+pub fn queued_message_previews() -> Vec<String> {
+    queued_messages()
+        .iter()
+        .map(|m| {
+            let line = m.content.split_whitespace().collect::<Vec<_>>().join(" ");
+            match (m.image_png.is_some(), line.is_empty()) {
+                (true, true) => "(image)".to_string(),
+                (true, false) => format!("(image) {line}"),
+                (false, _) => line,
+            }
+        })
+        .collect()
+}
+
+/// Drop the queued message at `index`, if there is one.
+pub fn remove_queued_message(index: usize) {
+    let mut queue = queued_messages();
+    if index < queue.len() {
+        queue.remove(index);
+    }
+}
+
 /// Fired when user approves an MCP command
 #[derive(Message, Debug, Clone)]
 pub struct WorkshopApproveMcpEvent {
@@ -1104,8 +1198,63 @@ fn handle_send_message(
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
     space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
+    // Optional so a missing resource degrades to "never busy" instead of
+    // Bevy skipping this system, which would silently kill every send.
+    claude_tasks: Option<Res<claude_bridge::WorkshopClaudeTasks>>,
 ) {
-    for event in events.read() {
+    // A turn is running while a model call is in flight or an approved tool
+    // is still executing. Messages that arrive then wait in the queue; see
+    // `QUEUED_MESSAGES` for what went wrong when they did not.
+    let turn_running = claude_tasks.as_ref().is_some_and(|t| t.is_busy())
+        || pipeline.messages.iter().any(|m| {
+            m.mcp_method.as_deref() == Some("tool_use")
+                && m.tool_result.is_none()
+                && matches!(
+                    m.mcp_status,
+                    Some(McpCommandStatus::Approved) | Some(McpCommandStatus::Running)
+                )
+        });
+
+    let incoming: Vec<WorkshopSendMessageEvent> = events.read().cloned().collect();
+    let mut batch: Vec<WorkshopSendMessageEvent> = {
+        let mut queue = queued_messages();
+        if turn_running {
+            queue.extend(incoming);
+            return;
+        }
+        // Queued messages also wait out an approval. They were written before
+        // the user saw what Workshop wants to do next, so letting them release
+        // now would answer a request the user has not read.
+        if pipeline.awaiting_tool_approval && incoming.is_empty() {
+            return;
+        }
+        queue.drain(..).collect()
+    };
+    batch.extend(incoming);
+    if batch.is_empty() {
+        return;
+    }
+
+    // A reply while tool calls wait for approval is a redirect: skip them and
+    // tell the model so, which lets it read the reply as the answer to what it
+    // asked instead of treating its own calls as silently dropped. One step
+    // for the user, where approving-then-correcting used to take two.
+    if pipeline.awaiting_tool_approval {
+        let skipped = pipeline.skip_unanswered_tool_calls(
+            &[McpCommandStatus::Pending],
+            "Not run. The user replied instead of approving; their message follows.",
+        );
+        pipeline.awaiting_tool_approval = false;
+        if skipped > 0 {
+            pipeline.add_notice_message(if skipped == 1 {
+                "Skipped the waiting action to follow your reply.".to_string()
+            } else {
+                format!("Skipped {skipped} waiting actions to follow your reply.")
+            });
+        }
+    }
+
+    for event in batch {
         let content = event.content.trim().to_string();
         // An image on its own is a legitimate message ("what is wrong with
         // this?"). Bailing on empty text alone silently swallowed those.
@@ -1175,18 +1324,32 @@ fn handle_send_message(
             }
         }
 
-        // Check if API key is available
-        let has_key = match (&global_settings, &space_settings) {
-            (Some(global), Some(space)) => {
-                !space.effective_api_key(global).is_empty()
-            }
-            _ => false,
+        // The key for the model that will answer, not always the Anthropic
+        // one. This checked Anthropic only, which predates the multi-provider
+        // picker: someone with just an xAI or OpenAI key who picked Grok or
+        // Astra was told "no API key" on every message and could never chat,
+        // even though the dispatch path resolves their key correctly.
+        let model = global_settings
+            .as_ref()
+            .map(|g| g.effective_workshop_model())
+            .unwrap_or_default();
+        let has_key = match model.provider() {
+            crate::soul::Provider::Anthropic => match (&global_settings, &space_settings) {
+                (Some(global), Some(space)) => !space.effective_api_key(global).is_empty(),
+                _ => false,
+            },
+            provider => global_settings
+                .as_ref()
+                .and_then(|g| g.key_for_provider(provider))
+                .is_some(),
         };
 
         if !has_key {
-            pipeline.add_error_message(
-                "No API key configured. Open Soul Settings to add your BYOK key.".to_string()
-            );
+            pipeline.add_error_message(format!(
+                "{} needs your {} API key. Add it in Settings > Soul, then send again.",
+                model.display_name(),
+                model.provider().key_label()
+            ));
             continue;
         }
 
@@ -1229,7 +1392,17 @@ fn handle_approve_mcp(
     mut tasks: ResMut<ToolDispatchTasks>,
 ) {
     for event in events.read() {
-        pipeline.update_mcp_status(event.message_id, McpCommandStatus::Running);
+        // An agentic tool_use card is dispatched right here, so it goes
+        // straight to Running. A pipeline step card (normalize, artifact)
+        // stays Approved: `dispatch_normalize_request` and
+        // `dispatch_artifact_requests` run exactly the cards in that state.
+        let is_tool_use = pipeline.messages.iter()
+            .find(|m| m.id == event.message_id)
+            .is_some_and(|m| m.mcp_method.as_deref() == Some("tool_use"));
+        pipeline.update_mcp_status(
+            event.message_id,
+            if is_tool_use { McpCommandStatus::Running } else { McpCommandStatus::Approved },
+        );
         info!("Workshop: MCP command {} approved → dispatching async", event.message_id);
 
         // Extract the tool-use metadata from the approved card.
@@ -1852,6 +2025,9 @@ impl Plugin for WorkshopPlugin {
                 handle_claude_error,
                 handle_set_mode,
                 gauntlet::handle_set_gauntlet,
+                // Last in the chain so a Stop lands before `dispatch_chat_request`
+                // (ordered after this set) looks at the conversation this frame.
+                claude_bridge::apply_workshop_stop,
             ).chain().after(crate::ui::SlintSystems::Drain).in_set(WorkshopCoreSystems))
             // Poll background tool dispatch threads (non-blocking approve)
             .add_systems(Update, poll_tool_dispatches.after(WorkshopCoreSystems))

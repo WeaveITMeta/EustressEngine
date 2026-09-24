@@ -19,11 +19,22 @@ use eustress_forge_sdk::{
     types::Region,
 };
 
+/// What a background Forge call reports back to the main thread.
+enum ForgeOutcome {
+    Connected,
+    ConnectFailed(String),
+    Deployed(DeploymentInfo),
+    DeployFailed(String),
+}
+
 /// Bevy Resource holding the Forge connection state.
 #[derive(Resource)]
 pub struct ForgeState {
     /// The authenticated Forge client (None if not connected)
     client: Arc<Mutex<Option<ForgeClient>>>,
+    /// Results posted by the connect / deploy threads, applied to this
+    /// state by `apply_forge_outcomes` on the main thread.
+    outcomes: Arc<Mutex<Vec<ForgeOutcome>>>,
     /// Current connection status
     pub status: ForgeConnectionStatus,
     /// Last error message
@@ -46,6 +57,7 @@ impl Default for ForgeState {
     fn default() -> Self {
         Self {
             client: Arc::new(Mutex::new(None)),
+            outcomes: Arc::new(Mutex::new(Vec::new())),
             status: ForgeConnectionStatus::Disconnected,
             error: None,
             deployment: None,
@@ -54,12 +66,62 @@ impl Default for ForgeState {
     }
 }
 
+impl ForgeState {
+    /// Drop the client and forget the deployment.
+    pub fn disconnect(&mut self) {
+        *self.client.lock() = None;
+        self.status = ForgeConnectionStatus::Disconnected;
+        self.error = None;
+        self.deployment = None;
+    }
+}
+
 /// Plugin that registers ForgeState and the connection/allocation systems.
 pub struct ForgePlugin;
 
 impl Plugin for ForgePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ForgeState>();
+        app.init_resource::<ForgeState>()
+            .add_systems(Update, apply_forge_outcomes);
+    }
+}
+
+/// Apply what the background threads reported: connection status, errors,
+/// and allocated deployments, each echoed to the Output console.
+fn apply_forge_outcomes(
+    mut forge: ResMut<ForgeState>,
+    mut output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
+) {
+    let outcomes = std::mem::take(&mut *forge.outcomes.lock());
+    for outcome in outcomes {
+        match outcome {
+            ForgeOutcome::Connected => {
+                forge.status = ForgeConnectionStatus::Connected;
+                forge.error = None;
+                if let Some(out) = output.as_mut() {
+                    out.info(format!("Connected to Forge at {}", forge.url));
+                }
+            }
+            ForgeOutcome::ConnectFailed(e) => {
+                forge.status = ForgeConnectionStatus::Failed;
+                if let Some(out) = output.as_mut() {
+                    out.error(format!("Forge connection failed: {e}"));
+                }
+                forge.error = Some(e);
+            }
+            ForgeOutcome::Deployed(info) => {
+                if let Some(out) = output.as_mut() {
+                    out.info(format!("Forge server allocated: deployment {} ({})", info.id, info.status));
+                }
+                forge.deployment = Some(info);
+            }
+            ForgeOutcome::DeployFailed(e) => {
+                if let Some(out) = output.as_mut() {
+                    out.error(format!("Forge server allocation failed: {e}"));
+                }
+                forge.error = Some(e);
+            }
+        }
     }
 }
 
@@ -70,41 +132,47 @@ pub fn connect_to_forge(
     url: &str,
     api_key: &str,
 ) {
-    forge_state.status = ForgeConnectionStatus::Connecting;
+    let url = url.trim().to_string();
+    forge_state.url = url.clone();
     forge_state.error = None;
-    forge_state.url = url.to_string();
+    if url.is_empty() {
+        forge_state.status = ForgeConnectionStatus::Failed;
+        forge_state.error = Some("Enter the Forge server URL.".to_string());
+        return;
+    }
+    forge_state.status = ForgeConnectionStatus::Connecting;
 
     let client_arc = forge_state.client.clone();
-    let url = url.to_string();
+    let outcomes = forge_state.outcomes.clone();
     let api_key = api_key.to_string();
 
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build();
-
-        match rt {
-            Ok(rt) => {
-                rt.block_on(async {
-                    match ForgeClient::new(&url).await {
-                        Ok(mut client) => {
-                            if !api_key.is_empty() {
-                                if let Err(e) = client.authenticate(&api_key).await {
-                                    tracing::error!("Forge auth failed: {}", e);
-                                    return;
-                                }
+        let outcome = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt.block_on(async {
+                match ForgeClient::new(&url).await {
+                    Ok(mut client) => {
+                        if !api_key.is_empty() {
+                            if let Err(e) = client.authenticate(&api_key).await {
+                                tracing::error!("Forge auth failed: {}", e);
+                                return ForgeOutcome::ConnectFailed(format!("authentication failed: {e}"));
                             }
-                            tracing::info!("Connected to Forge at {}", url);
-                            *client_arc.lock() = Some(client);
                         }
-                        Err(e) => {
-                            tracing::error!("Forge connection failed: {}", e);
-                        }
+                        tracing::info!("Connected to Forge at {}", url);
+                        *client_arc.lock() = Some(client);
+                        ForgeOutcome::Connected
                     }
-                });
+                    Err(e) => {
+                        tracing::error!("Forge connection failed: {}", e);
+                        ForgeOutcome::ConnectFailed(format!("could not reach {url}: {e}"))
+                    }
+                }
+            }),
+            Err(e) => {
+                tracing::error!("Failed to create tokio runtime for Forge: {}", e);
+                ForgeOutcome::ConnectFailed(format!("could not start the network runtime: {e}"))
             }
-            Err(e) => tracing::error!("Failed to create tokio runtime for Forge: {}", e),
-        }
+        };
+        outcomes.lock().push(outcome);
     });
 }
 
@@ -117,6 +185,7 @@ pub fn allocate_server(
     region: Region,
 ) {
     let client_arc = forge_state.client.clone();
+    let outcomes = forge_state.outcomes.clone();
     let sim_id = sim_id.to_string();
 
     let client_guard = client_arc.lock();
@@ -154,14 +223,19 @@ pub fn allocate_server(
                                 "Forge deployment created: {} (status: {})",
                                 info.id, info.status
                             );
+                            outcomes.lock().push(ForgeOutcome::Deployed(info));
                         }
                         Err(e) => {
                             tracing::error!("Forge deployment failed: {}", e);
+                            outcomes.lock().push(ForgeOutcome::DeployFailed(e.to_string()));
                         }
                     }
                 });
             }
-            Err(e) => tracing::error!("Failed to create tokio runtime for Forge: {}", e),
+            Err(e) => {
+                tracing::error!("Failed to create tokio runtime for Forge: {}", e);
+                outcomes.lock().push(ForgeOutcome::DeployFailed(format!("could not start the network runtime: {e}")));
+            }
         }
     });
 }

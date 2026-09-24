@@ -94,9 +94,18 @@ pub(crate) const TILE_W: u32 = 192;
 /// `canvas_h / TILE_H`.
 pub(crate) const TILE_H: u32 = 192;
 
-/// Uniform shrink factor that fits a `raw_w_px × raw_h_px` canvas inside a
-/// `TILE_W × TILE_H` tile. `1.0` when the canvas already fits (the common
-/// case — most authored billboards are well under 192 px/stud-equivalent).
+/// Uniform factor that fits a `raw_w_px × raw_h_px` canvas to a
+/// `TILE_W × TILE_H` tile: below `1.0` shrinks an oversized canvas into the
+/// tile, above `1.0` supersamples a small one up to fill it.
+///
+/// **Why small labels are supersampled.** A billboard's world size is
+/// `raw_px / PIXELS_PER_METER`, so a label sized to sit beside a 0.6 m node
+/// (0.75 × 0.25 m) is a 38 × 12 px canvas. Rasterized at that size its text
+/// shapes at 8-9 px and is magnified many times on screen, which reads as a
+/// blur. Every slot is a full tile whatever the canvas uses, so filling the
+/// tile costs no atlas space: the same label rasterizes at 192 × 61 px with
+/// 45 px glyphs. [`MAX_SUPERSAMPLE`] bounds the factor for sliver-thin
+/// canvases, whose other axis would otherwise ask for an extreme ratio.
 ///
 /// **Why uniform, not per-axis.** The tile clamp used to be two independent
 /// `.min()`s — `w.min(TILE_W)`, `h.min(TILE_H)` — which squashes a wide,
@@ -124,8 +133,12 @@ pub(crate) const TILE_H: u32 = 192;
 fn tile_content_scale(raw_w_px: f32, raw_h_px: f32) -> f32 {
     (TILE_W as f32 / raw_w_px.max(1.0))
         .min(TILE_H as f32 / raw_h_px.max(1.0))
-        .min(1.0)
+        .min(MAX_SUPERSAMPLE)
 }
+
+/// Upper bound on [`tile_content_scale`]'s supersampling. 8× takes a 24 px
+/// wide label to the full 192 px tile width.
+const MAX_SUPERSAMPLE: f32 = 8.0;
 
 /// Canvas pixel dimensions actually rasterized into the atlas tile, plus
 /// the [`tile_content_scale`] used to get there. `raw_w_px × raw_h_px`
@@ -525,8 +538,9 @@ pub struct BillboardAtlasTile {
 pub struct BillboardRenderHandle {
     pub width: u32,
     pub height: u32,
-    /// [`tile_content_scale`] for this billboard's current size — `1.0`
-    /// unless the canvas exceeds the tile budget. Layout in
+    /// [`tile_content_scale`] for this billboard's current size — below
+    /// `1.0` when the canvas exceeds the tile, above `1.0` when a small
+    /// canvas is supersampled to fill it. Layout in
     /// `update_and_render_billboards` runs in TRUE (unclamped) pixel space
     /// and `render_element` / `render_text` apply this factor only at the
     /// final raster step; see `tile_content_scale`'s doc comment.
@@ -921,10 +935,10 @@ fn spawn_billboard_render_state(
 
         let raw_w_px = marker.size[0].max(1.0);
         let raw_h_px = marker.size[1].max(1.0);
-        // Uniform clamp to tile size — see `tile_content_scale` doc
-        // comment. Oversized content renders smaller/blurrier (scaled by
-        // `content_scale` at raster time) rather than cropped or
-        // magnified; the billboard still spawns at its correct world size.
+        // Uniform fit to the tile — see `tile_content_scale` doc comment.
+        // Oversized content renders scaled down and small content is
+        // supersampled (both via `content_scale` at raster time) rather
+        // than cropped; the billboard still spawns at its correct world size.
         let (w, h, content_scale) = clamped_canvas_size(raw_w_px, raw_h_px);
         // An authoring hint, not a fault: the sign keeps its world size and
         // only its raster is scaled into the tile. Every slot grant repeats

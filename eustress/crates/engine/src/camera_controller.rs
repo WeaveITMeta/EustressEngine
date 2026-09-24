@@ -1343,10 +1343,10 @@ fn eustress_camera_controls(
     }
 
     // Block ALL camera input when ANY modal dialog is open.
-    // Consume events to prevent buildup, then return early.
+    // Consume events to prevent buildup, then return early. These flags
+    // mirror the Slint dialog properties each frame (`sync_dialog_state`).
     let modal_open = studio_state.as_ref().map_or(false, |s| {
         s.show_settings_window
-            || s.show_soul_settings_window
             || s.show_keybindings_window
             || s.show_publish_dialog
             || s.show_forge_connect_window
@@ -1956,19 +1956,17 @@ fn publish_active_view_plane(
     }
 }
 
-/// Hide the moon and star billboards whenever the view is not plain
-/// perspective.
+/// Hide the sky billboards (the moon's disc and the cloud dome) whenever the
+/// view is not plain perspective.
 ///
-/// They sit a few kilometres out along their sky direction and are sized for
-/// a perspective camera. Orthographic has no "far away" (the moon would draw
-/// as a 400 m disc wherever the view points at it), and the narrow field of
-/// view in the middle of the dolly zoom would magnify them.
+/// They sit out along their sky direction and are sized for a perspective
+/// camera. Orthographic has no "far away" (the moon would draw as a
+/// kilometre-wide disc wherever the view points at it, and the clouds' rays
+/// would all be parallel), and the narrow field of view in the middle of the
+/// dolly zoom would magnify them.
 fn hide_sky_billboards_in_orthographic(
     cameras: Query<&EustressCamera, With<Camera3d>>,
-    mut sky: Query<
-        &mut Visibility,
-        Or<(With<crate::shaders::StarFieldRoot>, With<crate::shaders::MoonDiscMarker>)>,
-    >,
+    mut sky: Query<&mut Visibility, With<eustress_common::plugins::sky_atmosphere::SkyBillboard>>,
 ) {
     let flat = cameras.iter().next().is_some_and(|cam| cam.ortho_blend > 0.0);
     let want = if flat { Visibility::Hidden } else { Visibility::Inherited };

@@ -134,6 +134,8 @@ pub enum Action {
     // over; the Roblox keymap preset covers the chords that differ.
     /// Ctrl+I: searchable class picker that inserts under the selection.
     InsertObject,
+    /// Ctrl+F: find objects in the scene by name, and rename them.
+    FindReplace,
     /// Ctrl+Shift+V: paste as children of the primary selection.
     PasteInto,
     /// Ctrl+Shift+X: put the keyboard in the Explorer search box.
@@ -222,6 +224,7 @@ impl Action {
             Action::ToolGridArray => "Grid Array",
             Action::ToolPathArray => "Path Array",
             Action::InsertObject => "Insert Object",
+            Action::FindReplace => "Find & Replace",
             Action::PasteInto => "Paste Into",
             Action::FocusExplorerSearch => "Search Explorer",
             Action::FocusPropertiesFilter => "Filter Properties",
@@ -431,6 +434,7 @@ impl Default for KeyBindings {
         // Ctrl+I is Insert Object in Roblox Studio; Invert moves to Ctrl+Shift+I.
         bindings.insert(Action::InvertSelection, KeyBinding::new(KeyCode::KeyI).with_ctrl().with_shift());
         bindings.insert(Action::InsertObject, KeyBinding::new(KeyCode::KeyI).with_ctrl());
+        bindings.insert(Action::FindReplace, KeyBinding::new(KeyCode::KeyF).with_ctrl());
         bindings.insert(Action::PasteInto, KeyBinding::new(KeyCode::KeyV).with_ctrl().with_shift());
         bindings.insert(Action::FocusExplorerSearch, KeyBinding::new(KeyCode::KeyX).with_ctrl().with_shift());
         // Roblox uses Ctrl+Shift+P here, which Eustress gives to Publish Space;
@@ -781,7 +785,7 @@ const DISPATCHED_ACTIONS: &[Action] = &[
     Action::ToolResizeAlign, Action::ToolMaterialFlip,
     Action::ToolLinearArray, Action::ToolRadialArray, Action::ToolGridArray,
     Action::ToolPathArray,
-    Action::InsertObject, Action::PasteInto,
+    Action::InsertObject, Action::PasteInto, Action::FindReplace,
     Action::FocusExplorerSearch, Action::FocusPropertiesFilter,
 ];
 
@@ -1146,7 +1150,9 @@ fn handle_menu_action_events(
             Action::Paste => { studio_state.pending_paste = true; }
 
             // Command bar
-            Action::ToggleCommandBar => { /* Handled by Slint UI directly */ }
+            Action::ToggleCommandBar => {
+                studio_state.toggle_command_bar_pulse = studio_state.toggle_command_bar_pulse.wrapping_add(1);
+            }
 
             // Focus camera on selection (F key)
             // Reads from SelectionSyncManager directly so it works even on the same
@@ -1880,6 +1886,9 @@ fn handle_menu_action_events(
                 studio_state.show_insert_object_dialog = true;
             }
             Action::PasteInto => { studio_state.pending_paste_into = true; }
+            Action::FindReplace => {
+                studio_state.open_find_pulse = studio_state.open_find_pulse.wrapping_add(1);
+            }
             Action::FocusExplorerSearch => {
                 studio_state.show_explorer = true;
                 studio_state.focus_explorer_search_pulse =

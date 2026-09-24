@@ -20,8 +20,9 @@
 //! 4. do_new_space       — scaffold EEP folder + switch to it
 //! 5. do_open_space      — folder picker → reload
 //! 6. do_save_space      — write ECS → TOML files
-//! 7. do_open_legacy     — backwards-compat: binary .eustress import
-//! 8. do_publish         — stub (not yet implemented)
+//! 7. do_publish         — sign-in check, manifests, site bake, thumbnail,
+//!                         moderation capture, background upload, review
+//! 9. do_import_asset    — images, video, Gaussian splats, Roblox places
 
 use bevy::prelude::*;
 use bevy::ecs::message::MessageReader;
@@ -72,7 +73,7 @@ pub enum FileAction {
     SaveSpace,
     /// Save Space As: pick a new folder name, then save
     SaveSpaceAs,
-    /// Publish stub
+    /// Publish to the gallery (after the Publish dialog)
     Publish(PublishRequest),
     /// Import a media asset (image / video / model). Source is the
     /// user-picked absolute path. Handler dispatches by extension to
@@ -300,7 +301,7 @@ fn do_open_space_path(world: &mut World, path: PathBuf) {
 /// <timestamp>` message authored under the logged-in user when present.
 /// The commit runs on a background thread so the editor doesn't hitch
 /// while git touches the disk.
-fn do_save_space(world: &mut World) {
+pub(crate) fn do_save_space(world: &mut World) {
     let space_path = world
         .get_resource::<crate::space::SpaceRoot>()
         .map(|r| r.0.clone());
@@ -817,13 +818,26 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
         return;
     };
 
-    // Prepare local manifests
-    if let Err(e) = prepare_publish_manifests(&space_root, request) {
+    // Prepare local manifests, in the Universe's `.eustress/` where the
+    // Publish dialog reads them back.
+    if let Err(e) = prepare_publish_manifests(&universe_root, request) {
         if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
             n.error(format!("Publish preparation failed: {}", e));
         }
         return;
     }
+
+    // What the export reads, taken here where the World is: the open Space's
+    // live database and every Space of the Universe.
+    let plan = match publish_plan(world, &space_root) {
+        Ok(plan) => plan,
+        Err(e) => {
+            if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+                n.error(format!("Publish stopped: {}", e));
+            }
+            return;
+        }
+    };
 
     // Bake the Website manifest, if this Space has a Website service.
     //
@@ -897,24 +911,19 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
     let progress_for_thread = progress.clone();
     world.insert_resource(PublishProgressHandle(progress));
 
-    // Package + upload in a background thread
+    // Export + upload in a background thread
     let request = request.clone();
     let is_space_only = request.space_only;
-    let space_root_clone = space_root.clone();
     std::thread::spawn(move || {
         let mut dossier = dossier;
-        let result = if request.space_only {
-            execute_space_upload(&space_root_clone, &universe_root, &request, &token, &progress_for_thread)
-        } else {
-            execute_publish_upload(&universe_root, &request, &token, &progress_for_thread, pending_manifest)
-        };
+        let result = execute_publish_upload(&plan, &universe_root, &request, &token, &progress_for_thread, pending_manifest);
         match result {
             Ok(sim_id) => {
                 // The listing exists and the content is stored. Review is a
                 // separate step so a capture that never lands, or an API that
                 // is briefly down, degrades to "review pending" rather than
                 // failing a publish whose bytes are already up.
-                let summary = match submit_for_review(&sim_id, &token, &universe_root, &mut dossier, &capture_status, !request.space_only, &progress_for_thread) {
+                let summary = match submit_for_review(&sim_id, &token, &universe_root, &mut dossier, &capture_status, true, &progress_for_thread) {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::warn!("Review submission incomplete for {}: {}", sim_id, e);
@@ -926,6 +935,13 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
                 p.percent = 100.0;
                 p.complete = true;
                 tracing::info!("Published successfully: {} ({})", sim_id, p.stage);
+            }
+            Err(e) if e == NO_CHANGES => {
+                let mut p = progress_for_thread.lock().unwrap();
+                p.stage = e;
+                p.percent = 100.0;
+                p.complete = true;
+                tracing::info!("Publish skipped: nothing changed since the last publish");
             }
             Err(e) => {
                 let mut p = progress_for_thread.lock().unwrap();
@@ -939,11 +955,33 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
 
     if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
         if is_space_only {
-            n.info("Publishing Space... packaging and uploading.");
+            n.info("Publishing Space: baking it and uploading what changed.");
         } else {
-            n.info("Publishing Universe... packaging all Spaces and uploading.");
+            n.info("Publishing Universe: baking every Space and uploading what changed.");
         }
     }
+}
+
+/// What a publish exports, gathered on the main thread.
+#[cfg(feature = "world-db")]
+type PublishPlan = crate::space::echk_publish::ExportPlan;
+#[cfg(not(feature = "world-db"))]
+type PublishPlan = ();
+
+#[cfg(feature = "world-db")]
+use crate::space::echk_publish::NO_CHANGES;
+#[cfg(not(feature = "world-db"))]
+const NO_CHANGES: &str = "No changes since the last publish";
+
+#[cfg(feature = "world-db")]
+fn publish_plan(world: &World, space_root: &Path) -> Result<PublishPlan, String> {
+    // Called right after `do_save_space`, so the export waits for the tree.
+    crate::space::echk_publish::plan_export(world, space_root, true)
+}
+
+#[cfg(not(feature = "world-db"))]
+fn publish_plan(_world: &World, _space_root: &Path) -> Result<PublishPlan, String> {
+    Err("Publishing exports the Space's database, and this build has no world-db feature.".into())
 }
 
 /// Resource holding the Arc to the publish progress (for UI polling).
@@ -1048,147 +1086,54 @@ fn set_progress(handle: &ProgressHandle, stage: &str, percent: f32) {
     }
 }
 
-/// Package the Universe into a .pak and upload to the API.
-/// Runs on a background thread. Returns the simulation ID on success.
+/// Export the Universe as `.echk`, upload the chunks the API lacks, and
+/// commit the world to the Universe's listing ([`crate::space::echk_publish`]).
+/// A Space-only publish swaps just the open Space into the published world.
+/// Runs on a background thread. Returns the listing id.
+#[cfg(feature = "world-db")]
 fn execute_publish_upload(
+    plan: &PublishPlan,
     universe_root: &std::path::Path,
     request: &PublishRequest,
     token: &str,
     progress: &ProgressHandle,
     pending_manifest: Option<crate::website::PendingManifest>,
 ) -> Result<String, String> {
-    // Step 1: Package the entire Universe into a .pak (tar + zstd)
-    set_progress(progress, "Packaging Universe...", 5.0);
-    let pak_bytes = package_universe_to_pak(universe_root)?;
-    let pak_size_mb = pak_bytes.len() as f64 / 1_048_576.0;
-    tracing::info!("Packaged {:.1} MB .pak", pak_size_mb);
+    use crate::space::echk_publish::{publish, Listing};
 
-    // Step 1b: Check hash against last published — skip upload if unchanged
-    let pak_hash = blake3::hash(&pak_bytes).to_hex().to_string();
-    let hash_path = universe_root.join(".eustress").join(".last_publish_hash");
-    if let Ok(last_hash) = std::fs::read_to_string(&hash_path) {
-        if last_hash.trim() == pak_hash {
-            tracing::info!("Universe unchanged since last publish (hash match), skipping upload");
-            set_progress(progress, "No changes to publish", 100.0);
-            return Err("No changes since last publish".to_string());
-        }
-    }
-
-    set_progress(progress, "Creating listing...", 15.0);
-
-    // Step 2: Create listing via POST /api/simulations/publish
-    let experience_name = if request.experience_name.trim().is_empty() {
-        universe_root.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Untitled".to_string())
-    } else {
-        request.experience_name.clone()
+    let listing = Listing {
+        name: if request.experience_name.trim().is_empty() {
+            universe_root
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Untitled".to_string())
+        } else {
+            request.experience_name.trim().to_string()
+        },
+        description: request.description.trim().to_string(),
+        genre: if request.genre.trim().is_empty() { "All".to_string() } else { request.genre.trim().to_string() },
+        is_public: request.is_public,
     };
-
-    let publish_body = serde_json::json!({
-        "name": experience_name,
-        "description": request.description,
-        "genre": request.genre,
-        "max_players": 10,
-        // The author's intent; the Gallery lists it only once review approves.
-        "is_public": request.is_public,
-        // The chain-facing content id. The API records it but dedups on its
-        // own R2 etag, since this value is ours to assert.
-        "content_root": format!("blake3:{}", pak_hash),
-    });
-
-    let resp = ureq::post(&format!("{}/api/simulations/publish", PUBLISH_API))
-        .set("Authorization", &format!("Bearer {}", token))
-        .set("Content-Type", "application/json")
-        .send_string(&publish_body.to_string())
-        .map_err(|e| format!("Create listing failed: {}", e))?;
-
-    let resp_body: serde_json::Value = resp.into_json()
-        .map_err(|e| format!("Parse listing response: {}", e))?;
-
-    let sim_id = resp_body["id"].as_str()
-        .ok_or("Missing simulation ID in response")?
-        .to_string();
-
-    tracing::info!("Created listing: {}", sim_id);
-    set_progress(progress, "Uploading Universe...", 25.0);
-
-    // Step 3: Upload .pak — single PUT for <100MB, multipart for larger
-    const MULTIPART_THRESHOLD: usize = 100 * 1024 * 1024; // 100MB
-    const CHUNK_SIZE: usize = 95 * 1024 * 1024; // 95MB per part (under Worker 100MB limit)
-
-    if pak_bytes.len() < MULTIPART_THRESHOLD {
-        // Single PUT upload
-        ureq::put(&format!("{}/api/simulations/{}/space", PUBLISH_API, sim_id))
-            .set("Authorization", &format!("Bearer {}", token))
-            .set("Content-Type", "application/octet-stream")
-            .send_bytes(&pak_bytes)
-            .map_err(|e| format!("Space upload failed: {}", e))?;
-        tracing::info!("Universe .pak uploaded (single PUT)");
-    } else {
-        // Multipart upload for large Universes
-        tracing::info!("Large .pak ({:.1} MB) — using multipart upload", pak_bytes.len() as f64 / 1_048_576.0);
-
-        // Create multipart upload
-        let create_resp = ureq::post(&format!("{}/api/simulations/{}/space/multipart/create", PUBLISH_API, sim_id))
-            .set("Authorization", &format!("Bearer {}", token))
-            .call()
-            .map_err(|e| format!("Multipart create failed: {}", e))?;
-        let create_body: serde_json::Value = create_resp.into_json()
-            .map_err(|e| format!("Parse multipart create: {}", e))?;
-        let upload_id = create_body["upload_id"].as_str()
-            .ok_or("Missing upload_id")?.to_string();
-
-        // Upload chunks
-        let mut parts: Vec<serde_json::Value> = Vec::new();
-        let total_parts = (pak_bytes.len() + CHUNK_SIZE - 1) / CHUNK_SIZE;
-
-        for (i, chunk) in pak_bytes.chunks(CHUNK_SIZE).enumerate() {
-            let part_number = i + 1;
-            let pct = 30.0 + (part_number as f32 / total_parts as f32) * 55.0;
-            set_progress(progress, &format!("Uploading part {}/{}...", part_number, total_parts), pct);
-            tracing::info!("Uploading part {}/{} ({:.1} MB)", part_number, total_parts, chunk.len() as f64 / 1_048_576.0);
-
-            let part_resp = ureq::put(&format!(
-                "{}/api/simulations/{}/space/multipart/part?upload_id={}&part_number={}",
-                PUBLISH_API, sim_id, upload_id, part_number
-            ))
-                .set("Authorization", &format!("Bearer {}", token))
-                .set("Content-Type", "application/octet-stream")
-                .send_bytes(chunk)
-                .map_err(|e| format!("Part {} upload failed: {}", part_number, e))?;
-
-            let part_body: serde_json::Value = part_resp.into_json()
-                .map_err(|e| format!("Parse part {} response: {}", part_number, e))?;
-
-            parts.push(serde_json::json!({
-                "part_number": part_number,
-                "etag": part_body["etag"].as_str().unwrap_or(""),
-            }));
-        }
-
-        // Complete multipart upload
-        let complete_body = serde_json::json!({
-            "upload_id": upload_id,
-            "parts": parts,
-            "total_size": pak_bytes.len(),
-        });
-        ureq::post(&format!("{}/api/simulations/{}/space/multipart/complete", PUBLISH_API, sim_id))
-            .set("Authorization", &format!("Bearer {}", token))
-            .set("Content-Type", "application/json")
-            .send_string(&complete_body.to_string())
-            .map_err(|e| format!("Multipart complete failed: {}", e))?;
-
-        tracing::info!("Universe .pak uploaded (multipart, {} parts)", parts.len());
-    }
+    let published = publish(plan, token, &listing, request.space_only, &|stage: &str, percent: f32| {
+        set_progress(progress, stage, percent)
+    })?;
+    let sim_id = published.sim_id.clone();
+    tracing::info!(
+        "Published {}: {} of {} chunks uploaded ({:.1} of {:.1} MB)",
+        sim_id,
+        published.uploaded,
+        published.chunks,
+        published.uploaded_bytes as f64 / 1_048_576.0,
+        published.bytes as f64 / 1_048_576.0
+    );
 
     // ── Website manifest ────────────────────────────────────────────────────
-    // After the .pak, because the manifest describes a publish that has to
-    // exist first, and its publish_hash is the hash of that .pak.
+    // After the world, because the manifest describes a publish that has to
+    // exist first, and its publish_hash is the hash of the world's manifest.
     if let Some(pending) = pending_manifest {
         set_progress(progress, "Publishing website manifest...", 88.0);
 
-        let baked = pending.finalize(&sim_id, &pak_hash);
+        let baked = pending.finalize(&sim_id, &published.publish_hash);
         let body = baked
             .manifest_json()
             .map_err(|e| format!("Website manifest serialize failed: {}", e))?;
@@ -1212,7 +1157,7 @@ fn execute_publish_upload(
                 );
             }
             Err(e) => {
-                // Fail the publish. A .pak whose manifest did not upload leaves
+                // Fail the publish. A world whose manifest did not upload leaves
                 // every consumer serving the PREVIOUS numbers while the Space
                 // says otherwise, which is the drift this feature exists to end.
                 return Err(format!(
@@ -1246,12 +1191,20 @@ fn execute_publish_upload(
         }
     }
 
-    // Save hash for duplicate detection on next publish
-    let _ = std::fs::create_dir_all(universe_root.join(".eustress"));
-    let _ = std::fs::write(&hash_path, &pak_hash);
-
     set_progress(progress, "Uploaded", 92.0);
     Ok(sim_id)
+}
+
+#[cfg(not(feature = "world-db"))]
+fn execute_publish_upload(
+    _plan: &PublishPlan,
+    _universe_root: &std::path::Path,
+    _request: &PublishRequest,
+    _token: &str,
+    _progress: &ProgressHandle,
+    _pending_manifest: Option<crate::website::PendingManifest>,
+) -> Result<String, String> {
+    Err("Publishing exports the Space's database, and this build has no world-db feature.".into())
 }
 
 /// How long the upload thread waits for the capture orbit before submitting
@@ -1274,8 +1227,8 @@ fn submit_for_review(
     universe_root: &Path,
     dossier: &mut crate::moderation_dossier::Dossier,
     capture_status: &std::sync::Arc<std::sync::Mutex<crate::moderation_dossier::CaptureStatus>>,
-    // A full publish binds the dossier to the .pak it just hashed; a Space-only
-    // update leaves content_root empty rather than citing the stale Universe hash.
+    // Binds the dossier to the world manifest the publish just committed,
+    // whose hash `.last_publish_hash` now holds.
     bind_content_root: bool,
     progress: &ProgressHandle,
 ) -> Result<String, String> {
@@ -1371,118 +1324,9 @@ fn submit_for_review(
     Ok(summary)
 }
 
-/// Publish a single Space incrementally to an already-published Universe.
-/// Packages just the Space folder and uploads via PUT /api/simulations/{id}/spaces/{name}.
-fn execute_space_upload(
-    space_root: &std::path::Path,
-    universe_root: &std::path::Path,
-    request: &PublishRequest,
-    token: &str,
-    progress: &ProgressHandle,
-) -> Result<String, String> {
-    // Get the experience_id from sync.toml
-    let sync_path = universe_root.join(".eustress").join("sync.toml");
-    let sync_manifest = eustress_common::load_toml_file::<eustress_common::SyncManifest>(&sync_path)
-        .map_err(|e| format!("Load sync.toml: {}", e))?;
-    let sim_id = sync_manifest.remote.experience_id
-        .ok_or("Universe not published yet — publish the Universe first")?;
-
-    let space_name = space_root.file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "default".to_string());
-
-    set_progress(progress, &format!("Packaging Space '{}'...", space_name), 10.0);
-
-    // Package just this Space folder
-    let pak_bytes = package_universe_to_pak(space_root)?;
-    let pak_size_mb = pak_bytes.len() as f64 / 1_048_576.0;
-    tracing::info!("Packaged Space '{}': {:.1} MB", space_name, pak_size_mb);
-
-    set_progress(progress, &format!("Uploading Space '{}'...", space_name), 40.0);
-
-    // Upload to PUT /api/simulations/{id}/spaces/{name}
-    let encoded_name = urlencoding::encode(&space_name);
-    ureq::put(&format!("{}/api/simulations/{}/spaces/{}", PUBLISH_API, sim_id, encoded_name))
-        .set("Authorization", &format!("Bearer {}", token))
-        .set("Content-Type", "application/octet-stream")
-        .send_bytes(&pak_bytes)
-        .map_err(|e| format!("Space upload failed: {}", e))?;
-
-    set_progress(progress, "Complete", 100.0);
-    tracing::info!("Space '{}' published to Universe {}", space_name, sim_id);
-    Ok(sim_id)
-}
-
-/// Package an entire Universe folder into a zstd-compressed tar archive (.pak).
-///
-/// Includes:
-/// - All Spaces (spaces/Space1/, spaces/Space2/, ...)
-/// - universe.toml
-/// - knowledge/ folder (recordings, training data)
-/// - .eustress/ metadata (publish manifests, config)
-///
-/// Excludes:
-/// - .git/ (version control)
-/// - node_modules/
-/// - target/ (build artifacts)
-/// - Temporary/lock files
-fn package_universe_to_pak(universe_root: &std::path::Path) -> Result<Vec<u8>, String> {
-    let mut tar_bytes = Vec::new();
-    {
-        let mut tar_builder = tar::Builder::new(&mut tar_bytes);
-
-        fn walk_dir(
-            builder: &mut tar::Builder<&mut Vec<u8>>,
-            dir: &std::path::Path,
-            base: &std::path::Path,
-        ) -> Result<(), String> {
-            let entries = std::fs::read_dir(dir)
-                .map_err(|e| format!("Read dir {:?}: {}", dir, e))?;
-
-            for entry in entries {
-                let entry = entry.map_err(|e| format!("Dir entry: {}", e))?;
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-
-                // Skip version control, build artifacts, temp files
-                if name == ".git" || name == "node_modules" || name == "target" {
-                    continue;
-                }
-                // Skip OS junk
-                if name == ".DS_Store" || name == "Thumbs.db" || name == "desktop.ini" {
-                    continue;
-                }
-                // Skip lock files
-                if name.ends_with(".lock") || name.ends_with(".tmp") {
-                    continue;
-                }
-
-                let rel = path.strip_prefix(base).unwrap_or(&path);
-
-                if path.is_dir() {
-                    walk_dir(builder, &path, base)?;
-                } else {
-                    builder.append_path_with_name(&path, rel)
-                        .map_err(|e| format!("Add {:?}: {}", rel, e))?;
-                }
-            }
-            Ok(())
-        }
-
-        walk_dir(&mut tar_builder, universe_root, universe_root)?;
-        tar_builder.finish().map_err(|e| format!("Finalize tar: {}", e))?;
-    }
-
-    // Compress with zstd (level 3 — good balance of speed and size)
-    let compressed = zstd::encode_all(std::io::Cursor::new(&tar_bytes), 3)
-        .map_err(|e| format!("Zstd compress: {}", e))?;
-
-    Ok(compressed)
-}
-
-fn prepare_publish_manifests(space_root: &Path, request: &PublishRequest) -> Result<(), String> {
+fn prepare_publish_manifests(project_root: &Path, request: &PublishRequest) -> Result<(), String> {
     let now = Utc::now().to_rfc3339();
-    let project_dir = space_root.join(".eustress");
+    let project_dir = project_root.join(".eustress");
     let publish_path = project_dir.join("publish.toml");
     let journal_path = project_dir.join("publish-journal.toml");
     let sync_path = project_dir.join("sync.toml");
@@ -1495,7 +1339,7 @@ fn prepare_publish_manifests(space_root: &Path, request: &PublishRequest) -> Res
         .unwrap_or_default();
 
     let experience_name = if request.experience_name.trim().is_empty() {
-        space_root
+        project_root
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "Untitled".to_string())
@@ -2079,8 +1923,10 @@ fn do_import_roblox_place(world: &mut World, source: PathBuf) {
     //     GDPR-portable place data — and can be disabled by setting
     //     `EUSTRESS_ROBLOX_NO_NETWORK=1`. The whole chain is wrapped in a
     //     CachingFetcher under `<Universe>/assets/.rbx_cache/` so re-imports
-    //     don't re-fetch. A `.ROBLOSECURITY` cookie can be supplied via
-    //     `EUSTRESS_ROBLOSECURITY` for auth-gated assets (never logged).
+    //     don't re-fetch. Auth-gated assets need a credential: an Open Cloud
+    //     API key in `EUSTRESS_ROBLOX_API_KEY` or a `.ROBLOSECURITY` cookie in
+    //     `EUSTRESS_ROBLOSECURITY` (never logged); `NetworkFetcher::from_env`
+    //     picks it, the same way the `rbx_import` batch bin does.
     let asset_fetcher: Option<std::sync::Arc<dyn eustress_roblox_import::AssetFetcher>> = {
         use eustress_roblox_assets::{ChainFetcher, LocalFolderFetcher, NetworkFetcher};
         let mut chain = ChainFetcher::new();
@@ -2094,14 +1940,15 @@ fn do_import_roblox_place(world: &mut World, source: PathBuf) {
             .map(|v| v.trim().is_empty() || v == "0" || v.eq_ignore_ascii_case("false"))
             .unwrap_or(true);
         if network_on {
-            match std::env::var("EUSTRESS_ROBLOSECURITY") {
-                Ok(tok) if !tok.trim().is_empty() => {
-                    chain.push(std::sync::Arc::new(NetworkFetcher::with_cookie(tok)));
-                }
-                _ => {
-                    chain.push(std::sync::Arc::new(NetworkFetcher::new()));
-                }
+            let network = NetworkFetcher::from_env();
+            if !network.is_authenticated() {
+                warn!(
+                    "Roblox import: no credential set, so gated meshes, textures and sounds will be missing. Set {} or {}.",
+                    eustress_roblox_assets::API_KEY_ENV,
+                    eustress_roblox_assets::COOKIE_ENV
+                );
             }
+            chain.push(std::sync::Arc::new(network));
         }
         if chain.is_empty() {
             // No sources at all (network disabled + no local dir) — keep the

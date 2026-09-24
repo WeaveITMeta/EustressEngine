@@ -31,8 +31,6 @@ pub mod slint_native;
 pub mod slint_bridge;
 pub mod viewport_context_menu;
 pub mod floating_windows;
-pub mod runtime_ui;
-pub mod rune_bindings;
 pub mod rune_ecs_bindings;
 
 // Core modules that don't depend on egui
@@ -40,11 +38,9 @@ pub mod file_dialogs;
 pub mod file_event_handler;
 mod spawn_events;
 mod menu_events;
-mod world_view;
 pub mod webview;
 pub mod file_icons;
 pub mod center_tabs;
-pub mod monaco_bridge;
 /// Purchase orders and RFQs into the Slint procurement panels, and the panel
 /// callbacks back into the Odoo state machine.
 pub mod procurement_bridge;
@@ -61,9 +57,6 @@ pub use spawn_events::{
     ImportTerrainEvent, ExportTerrainEvent,
 };
 pub use menu_events::MenuActionEvent;
-pub use world_view::{UIWorldSnapshot, UIActionQueue, UIAction, WorldViewPlugin};
-pub use runtime_ui::{RuntimeUIPlugin, RuntimeUIManager, UIEvent, GuiElement};
-pub use rune_bindings::{UIBindings, RuneUIBindingsPlugin};
 pub use rune_ecs_bindings::{ECSBindings, RuneECSBindingsPlugin};
 
 // ============================================================================
@@ -270,7 +263,6 @@ pub struct StudioState {
     pub show_output: bool,
     pub show_keybindings_window: bool,
     pub show_terrain_editor: bool,
-    pub show_soul_settings_window: bool,
     pub current_tool: Tool,
     pub transform_mode: TransformMode,
     pub play_solo_requested: bool,
@@ -347,6 +339,14 @@ pub struct StudioState {
     pub pending_build_entity: Option<Entity>,
     pub pending_close_tab: Option<i32>,
     pub pending_reorder: Option<(i32, i32)>,
+    /// Line (1-based) the Problems panel asked the script editor to show,
+    /// applied once the target tab's content is in the editor.
+    pub pending_script_jump_line: Option<i32>,
+    /// Bumped by Ctrl+K; `sync_bevy_to_slint` flips the command bar once
+    /// per bump.
+    pub toggle_command_bar_pulse: u32,
+    /// Bumped by Ctrl+F; `sync_bevy_to_slint` opens Find & Replace.
+    pub open_find_pulse: u32,
     pub script_editor_content: String,
     pub script_content_dirty: bool,
 
@@ -415,7 +415,6 @@ impl Default for StudioState {
             show_output: true,
             show_keybindings_window: false,
             show_terrain_editor: false,
-            show_soul_settings_window: false,
             current_tool: Tool::Select,
             transform_mode: TransformMode::World,
             play_solo_requested: false,
@@ -479,6 +478,9 @@ impl Default for StudioState {
             pending_build_entity: None,
             pending_close_tab: None,
             pending_reorder: None,
+            pending_script_jump_line: None,
+            toggle_command_bar_pulse: 0,
+            open_find_pulse: 0,
             script_editor_content: String::new(),
             script_content_dirty: false,
             completion_items: Vec::new(),

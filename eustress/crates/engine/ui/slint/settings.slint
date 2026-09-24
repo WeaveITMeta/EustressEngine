@@ -111,9 +111,12 @@ export component SettingsDialog inherits Rectangle {
 
     // Soul settings
     in-out property <string> soul-api-key: "";
-    in-out property <bool> soul-use-global-key: true;
+    // Shown only once Test Connection has accepted the stored key.
     in property <bool> soul-api-key-valid: false;
     in property <string> soul-error-message: "";
+    // Test Connection: one line per provider, and whether a test is running.
+    in property <string> soul-test-status: "";
+    in property <bool> soul-test-running: false;
     // xAI (Grok) key — global-only, no per-space override, so no
     // corresponding "use global key" toggle like the Anthropic key has.
     in-out property <string> soul-xai-api-key: "";
@@ -656,50 +659,6 @@ export component SettingsDialog inherits Rectangle {
 
                             Text {
                                 width: 148px;
-                                text: "Use Global API Key";
-                                color: Theme.text-secondary;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                            }
-
-                            Rectangle {
-                                width: 36px;
-                                height: 18px;
-                                border-radius: 9px;
-                                background: root.soul-use-global-key ? Theme.accent-blue : Theme.button-background;
-                                y: (28px - self.height) / 2;
-
-                                TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.soul-use-global-key = !root.soul-use-global-key; }
-                                }
-
-                                Rectangle {
-                                    x: root.soul-use-global-key ? 18px : 2px;
-                                    y: 2px;
-                                    width: 14px; height: 14px;
-                                    border-radius: 7px;
-                                    background: white;
-                                    animate x { duration: 120ms; easing: ease-out; }
-                                }
-                            }
-
-                            Text {
-                                text: root.soul-use-global-key ? "On" : "Off";
-                                color: root.soul-use-global-key ? Theme.text-primary : Theme.text-secondary;
-                                font-size: 10px;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        Rectangle { height: 4px; }
-
-                        HorizontalBox {
-                            spacing: 8px;
-                            height: 28px;
-
-                            Text {
-                                width: 148px;
                                 text: "API Key";
                                 color: Theme.text-secondary;
                                 font-size: 11px;
@@ -837,12 +796,13 @@ export component SettingsDialog inherits Rectangle {
                                 border-color: test-soul-ta.has-hover ? Theme.accent-blue : Theme.border-color;
 
                                 test-soul-ta := TouchArea {
-                                    mouse-cursor: pointer;
+                                    enabled: !root.soul-test-running;
+                                    mouse-cursor: root.soul-test-running ? default : pointer;
                                     clicked => { root.on-test-soul-connection(); }
                                 }
 
                                 Text {
-                                    text: "Test Connection";
+                                    text: root.soul-test-running ? "Testing..." : "Test Connection";
                                     color: test-soul-ta.has-hover ? Theme.accent-blue : Theme.text-primary;
                                     font-size: 11px;
                                     font-weight: 600;
@@ -851,6 +811,10 @@ export component SettingsDialog inherits Rectangle {
                                 }
                             }
                         }
+
+                        // One line per provider: OK, rejected, unreachable,
+                        // or not set. Tests the keys typed above, saved or not.
+                        if root.soul-test-status != "": SettingsHint { text: root.soul-test-status; }
                     }
                 }
 

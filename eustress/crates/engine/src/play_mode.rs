@@ -1747,7 +1747,6 @@ impl Plugin for PlayModeCorePlugin {
 
             // Systems that run when entering/exiting play mode
             .add_systems(OnEnter(PlayModeState::Playing), activate_physics_for_unanchored_parts)
-            .add_systems(OnEnter(PlayModeState::Playing), start_play_server_if_server_mode)
             .add_systems(OnEnter(PlayModeState::Playing), crate::soul::rune_api::compile_scripts_on_play)
             // Fresh `Instance::new()` registry + clean raycast state per Play
             // session (both Play-with-character and Run — they share
@@ -1756,7 +1755,6 @@ impl Plugin for PlayModeCorePlugin {
                 .after(crate::soul::rune_api::compile_scripts_on_play))
             .add_systems(OnEnter(PlayModeState::Playing), snapshot_gui_on_play)
             .add_systems(OnExit(PlayModeState::Playing), deactivate_physics_for_parts)
-            .add_systems(OnExit(PlayModeState::Playing), stop_play_server_if_server_mode)
             // on_exit() on all scripts before cleanup (Godot-style _exit_tree).
             // Goes through `stop_rune_session` rather than the bare
             // `run_script_exit` so `on_exit` runs with the script bridges still
@@ -2498,31 +2496,5 @@ fn restore_gui_on_stop(
     commands.remove_resource::<GuiPlaySnapshot>();
 }
 
-// ============================================================================
-// Play Server Integration
-// ============================================================================
-
-/// Start the in-process play server when entering play mode with Server type
-fn start_play_server_if_server_mode(
-    play_mode: Res<PlayMode>,
-    mut start_server: MessageWriter<crate::play_server::StartPlayServerMessage>,
-) {
-    if play_mode.play_type == PlayModeType::Server {
-        info!("🖥️ Starting in-process play server...");
-        start_server.write(crate::play_server::StartPlayServerMessage {
-            port: 0, // Auto-allocate port
-            max_players: 8,
-        });
-    }
-}
-
-/// Stop the in-process play server when exiting play mode
-fn stop_play_server_if_server_mode(
-    play_mode: Res<PlayMode>,
-    mut stop_server: MessageWriter<crate::play_server::StopPlayServerMessage>,
-) {
-    if play_mode.play_type == PlayModeType::Server {
-        info!("🛑 Stopping in-process play server...");
-        stop_server.write(crate::play_server::StopPlayServerMessage);
-    }
-}
+// Multiplayer hosting is not a play-mode type: Start Server (F9) hosts the
+// Space and enters Play with a character. See `crate::multiplayer`.

@@ -274,6 +274,10 @@ export component ExplorerPanel inherits Rectangle {
                         selected: node.selected;
                         show: node.visible;
                         node-id: node.id;
+                        // Keep the plus button clear of the vertical
+                        // scrollbar, which is 14px wide and shown only while
+                        // the tree is taller than the panel.
+                        right-inset: tree-scroll.viewport-height > tree-scroll.visible-height ? 14px : 0px;
                         // drop-target is driven by drag-target-id which is
                         // set in drag-moved below (math-based row resolver
                         // using visible-node-ids + scroll offset). No

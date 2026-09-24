@@ -4,20 +4,11 @@
 // ============================================================================
 
 import { LineEdit, ScrollView, CheckBox, TextEdit } from "std-widgets.slint";
-import { Theme, LogEntry } from "theme.slint";
+import { Theme } from "theme.slint";
 
-// Log entry data
-export struct LogData {
-    id: int,
-    level: string,
-    timestamp: string,
-    message: string,
-    source: string,
-}
 
 export component OutputConsole inherits Rectangle {
     // Properties
-    in property <[LogData]> logs: [];
     in-out property <bool> show-info: true;
     in-out property <bool> show-warnings: true;
     in-out property <bool> show-errors: true;

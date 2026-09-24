@@ -520,3 +520,87 @@ fn cleanup_removed_soulscripts(
         info!("🗑️ SoulScript entity {:?} removed, cleaned up module", entity);
     }
 }
+
+
+// ============================================================================
+// API key check (Settings > Soul > Test Connection)
+// ============================================================================
+
+/// How one provider answered a key check.
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeyProbeOutcome {
+    NotSet,
+    Ok,
+    /// The key was accepted but the account is rate limited right now.
+    RateLimited,
+    /// The provider refused the key (xAI answers a bad key with 400, the
+    /// others with 401 or 403).
+    Rejected(u16),
+    ProviderError(u16),
+    Unreachable(String),
+}
+
+/// One provider's result.
+#[derive(Debug, Clone)]
+pub struct KeyProbe {
+    /// "Anthropic", "xAI" or "OpenAI".
+    pub provider: &'static str,
+    pub outcome: KeyProbeOutcome,
+    pub millis: u128,
+}
+
+impl KeyProbe {
+    /// A key the provider accepted (rate limiting included).
+    pub fn accepted(&self) -> bool {
+        matches!(self.outcome, KeyProbeOutcome::Ok | KeyProbeOutcome::RateLimited)
+    }
+
+    pub fn failed(&self) -> bool {
+        matches!(
+            self.outcome,
+            KeyProbeOutcome::Rejected(_) | KeyProbeOutcome::ProviderError(_) | KeyProbeOutcome::Unreachable(_)
+        )
+    }
+
+    pub fn summary(&self) -> String {
+        match &self.outcome {
+            KeyProbeOutcome::NotSet => format!("{}: not set", self.provider),
+            KeyProbeOutcome::Ok => format!("{}: OK ({} ms)", self.provider, self.millis),
+            KeyProbeOutcome::RateLimited => format!("{}: key accepted, rate limited right now", self.provider),
+            KeyProbeOutcome::Rejected(code) => format!("{}: key rejected (HTTP {code})", self.provider),
+            KeyProbeOutcome::ProviderError(code) => format!("{}: provider error (HTTP {code})", self.provider),
+            KeyProbeOutcome::Unreachable(e) => format!("{}: unreachable ({e})", self.provider),
+        }
+    }
+}
+
+/// Check a key by listing the provider's models: a free, read-only request
+/// that spends no tokens. Blocking; call it off the main thread. The key is
+/// sent only to its own provider and never appears in the result.
+pub fn probe_api_key(provider: &'static str, key: &str) -> KeyProbe {
+    let key = key.trim();
+    if key.is_empty() {
+        return KeyProbe { provider, outcome: KeyProbeOutcome::NotSet, millis: 0 };
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
+    let request = match provider {
+        "Anthropic" => agent
+            .get("https://api.anthropic.com/v1/models?limit=1")
+            .set("x-api-key", key)
+            .set("anthropic-version", "2023-06-01"),
+        "xAI" => agent.get("https://api.x.ai/v1/models").set("Authorization", &format!("Bearer {key}")),
+        _ => agent.get("https://api.openai.com/v1/models").set("Authorization", &format!("Bearer {key}")),
+    };
+    let started = std::time::Instant::now();
+    let outcome = match request.call() {
+        Ok(_) => KeyProbeOutcome::Ok,
+        Err(ureq::Error::Status(429, _)) => KeyProbeOutcome::RateLimited,
+        Err(ureq::Error::Status(code @ (400 | 401 | 403), _)) => KeyProbeOutcome::Rejected(code),
+        Err(ureq::Error::Status(code, _)) => KeyProbeOutcome::ProviderError(code),
+        Err(e) => KeyProbeOutcome::Unreachable(e.to_string()),
+    };
+    KeyProbe { provider, outcome, millis: started.elapsed().as_millis() }
+}

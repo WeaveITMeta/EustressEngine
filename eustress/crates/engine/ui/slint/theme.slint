@@ -888,6 +888,10 @@ export component TreeItem inherits Rectangle {
     // The plus button at the row's right edge, shown on hover: insert a
     // new object under this node (Roblox's per-row insert affordance).
     callback insert-requested();
+    // Width the parent's scrollbar covers at the row's right edge. The
+    // standard ScrollView draws its vertical bar over the content, so the
+    // plus button and the label end this far in from the edge.
+    in property <length> right-inset: 0px;
 
     // Internal: latched from pointer-event on mouse-down, read by clicked
     property <bool> pe-ctrl: false;
@@ -992,7 +996,7 @@ export component TreeItem inherits Rectangle {
     if !root.renaming: Text {
         x: 4px + root.depth * 16px + 16px + 20px;
         y: 0px;
-        width: root.width - (4px + root.depth * 16px + 16px + 20px + 4px) - (row-touch.has-hover ? 20px : 0px);
+        width: root.width - (4px + root.depth * 16px + 16px + 20px + 4px) - root.right-inset - (row-touch.has-hover ? 20px : 0px);
         height: 22px;
         text: root.label;
         color: Theme.text-primary;
@@ -1003,7 +1007,7 @@ export component TreeItem inherits Rectangle {
 
     // Per-row insert button, visible while the row is hovered.
     if row-touch.has-hover && !root.renaming: Rectangle {
-        x: root.width - 20px;
+        x: root.width - 20px - root.right-inset;
         y: 3px;
         width: 16px;
         height: 16px;
@@ -1057,70 +1061,3 @@ export component TreeItem inherits Rectangle {
     }
 }
 
-// Log entry component for output console
-export component LogEntry inherits Rectangle {
-    in property <string> level: "info";
-    in property <string> timestamp: "";
-    in property <string> message: "";
-
-    callback ctrl-clicked(string);
-
-    height: 20px;
-    background: log-touch.has-hover ? Theme.tab-hover : transparent;
-
-    log-touch := TouchArea {
-        mouse-cursor: pointer;
-        pointer-event(event) => {
-            if event.kind == PointerEventKind.up && event.button == PointerEventButton.left && event.modifiers.control {
-                root.ctrl-clicked(root.message);
-            }
-        }
-    }
-    
-    // Level indicator SVG icon
-    Image {
-        x: 8px;
-        y: 2px;
-        width: 16px;
-        height: 16px;
-        source: root.level == "error" ? @image-url("../../assets/icons/ui/error.svg") :
-                root.level == "warning" ? @image-url("../../assets/icons/ui/warning.svg") :
-                root.level == "debug" ? @image-url("../../assets/icons/ui/debug.svg") :
-                @image-url("../../assets/icons/ui/info.svg");
-        image-fit: contain;
-    }
-    
-    // Timestamp — read-only selectable
-    TextInput {
-        x: 28px;
-        y: 2px;
-        width: 70px;
-        height: 16px;
-        text: root.timestamp;
-        color: Theme.text-secondary;
-        font-size: 10px;
-        read-only: true;
-        single-line: true;
-        wrap: no-wrap;
-        selection-background-color: Theme.selection-background;
-        selection-foreground-color: Theme.text-primary;
-    }
-
-    // Message — read-only selectable so users can copy log lines
-    TextInput {
-        x: 102px;
-        y: 2px;
-        width: root.width - 110px;
-        height: 16px;
-        text: root.message;
-        color: root.level == "error" ? Theme.output-error :
-               root.level == "warning" ? Theme.output-warning :
-               root.level == "debug" ? Theme.output-debug : Theme.output-info;
-        font-size: 12px;
-        read-only: true;
-        single-line: true;
-        wrap: no-wrap;
-        selection-background-color: Theme.selection-background;
-        selection-foreground-color: Theme.text-primary;
-    }
-}

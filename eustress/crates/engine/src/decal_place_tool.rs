@@ -880,9 +880,12 @@ use eustress_common::classes::{BasePart, Face, Texture};
 /// so Properties-panel edits (StudsPerTileU/V, OffsetStudsU/V, Face, Color,
 /// Transparency) and part resizes reflect in real time. The quad mesh +
 /// material are created lazily on first sight (the loader only attaches the
-/// `Texture` component). Textures are rare + user-placed, so recomputing
-/// unconditionally is cheap and avoids missing parent-size changes that a
-/// `Changed<Texture>` gate wouldn't catch.
+/// `Texture` component). The placement is recomputed every frame, so a parent
+/// resize that a `Changed<Texture>` gate would miss still shows, but the
+/// transform and the material are only WRITTEN when they differ: an imported
+/// place can hold tens of thousands of textures (Vehicle Simulator has
+/// 27,858), and an unconditional write re-propagated every one of their
+/// transforms and re-uploaded every one of their materials each frame.
 fn sync_texture_surfaces(
     parents: Query<&BasePart>,
     mut q: Query<(
@@ -896,24 +899,35 @@ fn sync_texture_surfaces(
     mut materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
     mut commands: Commands,
+    mut quad: Local<Option<Handle<Mesh>>>,
 ) {
     for (entity, texture, child_of, mat_opt, mut tf) in q.iter_mut() {
+        // No image, nothing to draw: Roblox shows nothing for a texture whose
+        // image is missing, and loading "" only logs an asset error.
+        if texture.texture.is_empty() {
+            continue;
+        }
         let Ok(parent_bp) = parents.get(child_of.parent()) else { continue };
         let size = parent_bp.size;
         let (translation, rotation, dims) = face_placement(parse_face(&texture.face), size);
 
         // Position + size the quad on the face (local to the parent part).
-        *tf = Transform {
+        let placed = Transform {
             translation,
             rotation,
             scale: Vec3::new(dims.x.max(0.01), dims.y.max(0.01), 1.0),
         };
+        if *tf != placed {
+            *tf = placed;
+        }
 
-        // Lazily build the quad mesh + Repeat-sampled material.
+        // Lazily build the Repeat-sampled material on the shared unit quad.
         let mat_handle = match mat_opt {
             Some(m) => m.0.clone(),
             None => {
-                let mesh = meshes.add(Rectangle::new(1.0, 1.0));
+                let mesh = quad
+                    .get_or_insert_with(|| meshes.add(Rectangle::new(1.0, 1.0)))
+                    .clone();
                 let tex = asset_server.load_with_settings(
                     texture.texture.clone(),
                     |s: &mut ImageLoaderSettings| {
@@ -940,19 +954,27 @@ fn sync_texture_surfaces(
             }
         };
 
-        // Live UV tiling + tint. Tiles = face extent ÷ studs-per-tile.
-        if let Some(mut mat) = materials.get_mut(&mat_handle) {
-            let spu = texture.studs_per_tile_u.max(0.01);
-            let spv = texture.studs_per_tile_v.max(0.01);
-            let tiles = Vec2::new(dims.x / spu, dims.y / spv);
-            let offset = Vec2::new(texture.offset_studs_u / spu, texture.offset_studs_v / spv);
-            mat.uv_transform = Affine2::from_scale_angle_translation(tiles, 0.0, offset);
-            mat.base_color = Color::srgba(
-                texture.color3[0],
-                texture.color3[1],
-                texture.color3[2],
-                (1.0 - texture.transparency).clamp(0.0, 1.0),
-            );
+        // Live UV tiling + tint. Tiles = face extent ÷ studs-per-tile (both in
+        // meters, despite the field name).
+        let spu = texture.studs_per_tile_u.max(0.01);
+        let spv = texture.studs_per_tile_v.max(0.01);
+        let tiles = Vec2::new(dims.x / spu, dims.y / spv);
+        let offset = Vec2::new(texture.offset_studs_u / spu, texture.offset_studs_v / spv);
+        let uv = Affine2::from_scale_angle_translation(tiles, 0.0, offset);
+        let tint = Color::srgba(
+            texture.color3[0],
+            texture.color3[1],
+            texture.color3[2],
+            (1.0 - texture.transparency).clamp(0.0, 1.0),
+        );
+        let stale = materials
+            .get(&mat_handle)
+            .is_some_and(|m| m.uv_transform != uv || m.base_color != tint);
+        if stale {
+            if let Some(mut mat) = materials.get_mut(&mat_handle) {
+                mat.uv_transform = uv;
+                mat.base_color = tint;
+            }
         }
     }
 }

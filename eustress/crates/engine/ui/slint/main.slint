@@ -8,7 +8,7 @@ import { Ribbon, SavedIdentityData, InsertClassData, RecentSpaceEntry, PluginSec
 import { ExplorerPanel, TreeNode } from "explorer.slint";
 import { PropertiesPanel, PropertyData, HoneycombCell } from "properties.slint";
 import { TagChip, TagSuggestion } from "tags_editor.slint";
-import { OutputConsole, LogData } from "output.slint";
+import { OutputConsole } from "output.slint";
 import { CommandBar, ScriptOutputEntry } from "command_bar.slint";
 import { Toolbox } from "toolbox.slint";
 import { AssetManager, AssetNode } from "asset_manager.slint";
@@ -36,7 +36,7 @@ export { Theme, ThemeData }
 // doesn't generate Rust bindings, only `export` does.
 export { ModeData, RibbonTabData, ThemeEntry, SubmodeData, CustomTabSectionData, CustomTabToolData }
 // Dock layout system
-import { LayoutPresetSelector, LayoutDropdownMenu, AdvancedTabBar, PerformanceOverlay, DockZoneIndicator, ThemeEditor, LayoutPreset, DockTab, DockZone } from "dock_layout.slint";
+import { LayoutPresetSelector, LayoutDropdownMenu, PerformanceOverlay, ThemeEditor, LayoutPreset } from "dock_layout.slint";
 import { ToolOptionsBar, ToolOptionControlData } from "tool_options_bar.slint";
 import { ToolPanel } from "tool_panel.slint";
 import { FloatingNumericInput } from "floating_numeric_input.slint";
@@ -45,7 +45,7 @@ import { ToastUndo } from "toast_undo.slint";
 import { TimelinePanel, TimelineTrackData, TimelineMarkerData, TimelineFilterChipData } from "timeline_panel.slint";
 import { TimelineFilterModal, TimelineTagRow } from "timeline_filter_modal.slint";
 // Data Platform surfaces (Chart viewer tab + Data Grid bottom-panel tab).
-import { DataChartView, ChartPoint } from "data_chart.slint";
+import { DataChartView, ChartPoint, ChartPoint3 } from "data_chart.slint";
 import { DataGrid, DataGridRow } from "data_grid.slint";
 // New components for complete egui parity
 import { TerrainEditor, TerrainMaterialSlotData } from "terrain_editor.slint";
@@ -54,13 +54,13 @@ import { TerrainEditor, TerrainMaterialSlotData } from "terrain_editor.slint";
 export { TerrainMaterialSlotData }
 import { SettingsDialog, ThemeEntry } from "settings.slint";
 import { NetworkPanel } from "network_panel.slint";
-import { FindDialog } from "find_dialog.slint";
+import { FindDialog, SearchResultData } from "find_dialog.slint";
 import { ServiceProperties } from "service_properties.slint";
 // Modal dialogs
 import { SimulationSettingsDialog, WatchpointData, SimOutputBinding } from "simulation_settings.slint";
 import { ForgeConnectDialog } from "forge_connect.slint";
 import { StressTestDialog } from "stress_test.slint";
-import { DataSourcesDialog } from "data_sources.slint";
+import { DataSourcesDialog, DataSourceEntry } from "data_sources.slint";
 import { DomainsDialog, DomainEntry } from "domains_dialog.slint";
 import { GlobalVariablesDialog, GlobalVariableEntry } from "global_variables_dialog.slint";
 import { KeybindingsDialog, ShortcutEntry } from "keybindings.slint";
@@ -264,7 +264,6 @@ export component StudioWindow inherits Window {
     in-out property <string> about-version: "0.4.0";
     in-out property <string> about-commit: "";
     in-out property <string> about-build-date: "";
-    in-out property <bool> show-soul-settings-dialog: false;
     in-out property <bool> show-exit-confirmation: false;
     in-out property <bool> show-settings-dialog: false;
     in-out property <int> settings-active-tab: 0;
@@ -315,6 +314,21 @@ export component StudioWindow inherits Window {
     in property <[CustomTabSectionData]> custom-tab-sections: [];
     in property <[CustomTabToolData]> custom-tab-tools: [];
     in-out property <bool> show-find-dialog: false;
+    // Find & Replace: typed values (two-way with the dialog) and Rust's results.
+    in-out property <string> find-search-text: "";
+    in-out property <string> find-replace-text: "";
+    in-out property <bool> find-case-sensitive: false;
+    in-out property <bool> find-whole-word: false;
+    in-out property <bool> find-use-regex: false;
+    in property <[SearchResultData]> find-results: [];
+    in property <int> find-current-result: -1;
+    in property <int> find-total-results: 0;
+    callback find-search();
+    callback find-step(int);
+    callback find-select-result(int);
+    callback find-replace-one();
+    callback find-replace-all();
+    callback find-closed();
     in-out property <bool> show-new-universe-dialog: false;
     in-out property <string> new-universe-name: "";
     in-out property <bool> show-new-space-dialog: false;
@@ -437,6 +451,18 @@ export component StudioWindow inherits Window {
     // panel's `if right-tab-index == 3` teardown. The host swaps this value
     // per Workshop session.
     in-out property <length> workshop-chat-scroll-y: 0px;
+    // Whether the chat follows new output. Held here beside the scroll offset
+    // for the same reason: the panel is rebuilt on every dock-tab switch.
+    in-out property <bool>   workshop-chat-stick-bottom: true;
+    // Live agent state, pushed by the host only when it changes.
+    in-out property <bool>   workshop-agent-busy: false;
+    in-out property <string> workshop-agent-activity: "";
+    in-out property <int>    workshop-pending-approvals: 0;
+    in-out property <[string]> workshop-queued-messages: [];
+    // Key for the selected model's provider, not just the Anthropic key.
+    in-out property <bool>   workshop-chat-key-valid: true;
+    in-out property <string> workshop-chat-key-hint: "";
+    in-out property <string> workshop-last-prompt: "";
     in-out property <image>  workshop-attached-image;
     in-out property <bool>   workshop-has-attached-image: false;
 
@@ -487,7 +513,6 @@ export component StudioWindow inherits Window {
     in property <[ServiceBrowserEntry]> services-browser-entries: [];
     in-out property <int> services-browser-selected: 0;
     callback services-browser-open-url(string);
-    callback services-browser-selected-changed(int);
 
     // ---- Procurement: RFQ Builder + Purchase Order Tracker ----
     // Both read the same Space-wide order registry. `procurement-rfqs` is the
@@ -497,6 +522,7 @@ export component StudioWindow inherits Window {
     in property <[PurchaseOrderRow]> procurement-rfqs: [];
     in property <[PurchaseOrderRow]> procurement-orders: [];
     in property <[ManufacturerOption]> procurement-manufacturers: [];
+    in property <[string]> procurement-manufacturer-names: [];
     in-out property <int> procurement-rfq-selected: -1;
     in-out property <int> procurement-order-selected: -1;
     in-out property <int> procurement-vendor-index: 0;
@@ -523,9 +549,14 @@ export component StudioWindow inherits Window {
     in-out property <bool> has-terrain: false;
     in-out property <bool> terrain-edit-mode: false;
     in-out property <string> terrain-brush: "raise";
-    in-out property <float> terrain-brush-size: 10.0;
-    in-out property <float> terrain-brush-strength: 0.5;
-    in-out property <float> terrain-brush-falloff: 0.5;
+    // Live terrain brush, read back from `TerrainBrush` (radius, strength,
+    // and the nearest falloff preset: "linear" | "smooth" | "sharp").
+    in-out property <float> terrain-brush-size: 8.0;
+    in-out property <float> terrain-brush-strength: 0.2;
+    in-out property <string> terrain-brush-falloff: "smooth";
+    callback brush-size-changed(float);
+    callback brush-strength-changed(float);
+    callback brush-falloff-changed(string);
     
     // Terrain config properties (from _terrain.toml, synced from TerrainConfig)
     in-out property <string> terrain-size: "512";
@@ -556,6 +587,11 @@ export component StudioWindow inherits Window {
     in-out property <bool> forge-connected: false;
     in-out property <string> forge-server-url: "https://forge.eustress.dev";
     in-out property <string> forge-api-key: "";
+    in-out property <bool> forge-remember-credentials: true;
+    // Pushed from `ForgeState` by `sync_dialog_state`.
+    in-out property <bool> forge-connecting: false;
+    in-out property <string> forge-status-message: "";
+    in-out property <string> forge-error-message: "";
 
     // Account and sync state
     in-out property <string> account-name: "Guest";
@@ -785,7 +821,6 @@ export component StudioWindow inherits Window {
     in-out property <bool> has-unsaved-changes: false;
     
     // Output console log data (pushed from Bevy each frame)
-    in-out property <[LogData]> output-logs: [];
     in-out property <string> output-all-text: "";
     in-out property <string> output-source-filter: "all";
     in-out property <bool> output-show-info: true;
@@ -862,6 +897,11 @@ export component StudioWindow inherits Window {
     // machine until the user makes an API call themselves.
     in-out property <string> soul-api-key: "";
     in-out property <bool> soul-api-key-valid: false;
+    // Settings > Soul > Test Connection.
+    in-out property <string> soul-error-message: "";
+    in-out property <string> soul-test-status: "";
+    in-out property <bool> soul-test-running: false;
+    callback soul-test-connection();
     callback soul-api-key-saved();
     // xAI (Grok) key — same save button/callback as the Anthropic key
     // above; both get committed together on "on-save".
@@ -1082,13 +1122,6 @@ export component StudioWindow inherits Window {
     /// Secondary line: AABB dimensions, e.g. "4.00 × 2.00 × 1.50".
     in-out property <string> selection-summary-bounds: "";
     
-    // Floating panels
-    in-out property <bool> has-floating-panels: false;
-    
-    // Drag-drop docking state
-    in-out property <bool> is-dragging-panel: false;
-    in-out property <DockZone> active-dock-zone: DockZone.center;
-    
     // Viewport dimensions (reported to Bevy for camera viewport clipping)
     // Bound to viewport-sizer which always exists inside center-content's VerticalLayout.
     // Uses absolute-position for correct window-absolute coordinates.
@@ -1158,6 +1191,11 @@ export component StudioWindow inherits Window {
     in-out property <[string]> chart-x-ticks;
     in-out property <[string]> chart-y-ticks;
     in-out property <[ChartPoint]> chart-points;
+    in-out property <[ChartPoint3]> chart-points3;
+    in-out property <string> chart-x3-label;
+    in-out property <string> chart-y3-label;
+    in-out property <string> chart-z3-label;
+    in-out property <string> chart-color3-label;
     in-out property <string> chart-xmin-in;
     in-out property <string> chart-xmax-in;
     in-out property <string> chart-ymin-in;
@@ -1174,12 +1212,16 @@ export component StudioWindow inherits Window {
     
     // Tab drag-and-drop reorder state
     in-out property <int> tab-drag-source: -1;   // Index of tab being dragged (-1 = none)
-    in-out property <int> tab-drag-target: -1;    // Drop target index (-1 = none)
+    // Drop SLOT: the gap before tab k, or `center-tabs.length` for the gap
+    // after the last tab. -1 = none. This is exactly what the caret shows and
+    // what `reorder-center-tab` receives.
+    in-out property <int> tab-drag-target: -1;
     in-out property <bool> tab-dragging: false;
-    // Mouse-x relative to the tab strip start (updated by overlay TouchArea each frame)
+    // Pointer x relative to the tab strip, written by the dragged tab.
     in-out property <length> tab-drag-x: 0px;
-    // Width of the pinned Space1 tab (used as offset when computing drop index)
-    in-out property <length> tab-strip-space1-width: 80px;
+    // False once the pointer leaves the strip's band vertically: releasing
+    // there cancels the drag instead of dropping.
+    in-out property <bool> tab-drag-inside: true;
     in-out property <string> scene-tab-name: "Space";
     
     // Left panel tab
@@ -1316,7 +1358,7 @@ export component StudioWindow inherits Window {
     callback reopen-closed-tab();
     callback select-center-tab(int);
     callback script-content-changed(string);
-    callback reorder-center-tab(int, int); // (from-index, to-index)
+    callback reorder-center-tab(int, int); // (from-index, drop slot: the gap before that index)
     callback toggle-mode(int);             // Toggle summary/code for SoulScript tab at index
     
     // Tab context menu actions
@@ -1325,6 +1367,7 @@ export component StudioWindow inherits Window {
     callback close-all-tabs();              // Close all closable tabs
     callback copy-tab-path(int);            // Copy tab file path to clipboard
     callback reveal-tab-in-explorer(int);   // Reveal tab's file in explorer panel
+    callback sort-center-tabs(string);      // "name" or "type"; the Space tab stays first
     
     // Web browser navigation
     callback open-web-tab(string);          // Open URL in new tab
@@ -1354,11 +1397,12 @@ export component StudioWindow inherits Window {
     callback connect-forge();
     callback disconnect-forge();
     callback allocate-forge-server();
+    // Controls whose backend is not built: Rust answers with a notification.
+    callback unbuilt-feature(string);
     callback spawn-synthetic-clients(int);
     callback disconnect-all-clients();
     
     // Simulation settings
-    callback apply-simulation-settings();
     callback save-simulation-settings();
     callback add-sim-watchpoint();
     callback remove-sim-watchpoint(int);
@@ -1367,15 +1411,39 @@ export component StudioWindow inherits Window {
 
     // Data menu
     callback open-global-sources();
+    // Data > Manage Global Sources: the Connectors Rust lists, the add form
+    // (two-way with the dialog), and what each row's buttons ask for.
+    in property <[DataSourceEntry]> data-sources: [];
+    in-out property <string> data-source-new-name: "";
+    in-out property <string> data-source-new-type: "REST";
+    in-out property <string> data-source-new-url: "";
+    in-out property <bool> data-source-adding: false;
+    callback data-source-add();
+    callback data-source-remove(int);
+    callback data-source-edit(int);
+    callback data-source-test(int);
     callback open-domains();
     callback open-global-variables();
     callback open-sync-domain();
+    // Data > Sync Domain to Object Type: what Rust offers, and the answers
+    // (two-way with the dialog).
+    in property <[string]> sync-domain-domains: [];
+    in property <[string]> sync-domain-fields: [];
+    in property <string> sync-domain-status: "";
+    in property <bool> sync-domain-busy: false;
+    in-out property <string> sync-domain-selected: "";
+    in-out property <string> sync-domain-class: "Part";
+    in-out property <string> sync-domain-layout: "Grid";
+    in-out property <string> sync-domain-name-field: "";
+    in-out property <string> sync-domain-color-field: "";
+    in-out property <bool> sync-domain-show-billboard: false;
+    in-out property <string> sync-domain-billboard-field: "";
+    callback sync-domain-picked(string);
+    callback sync-domain-preview(float, float, float);
+    callback sync-domain-run(float, float, float);
     callback add-data-source(string);
     
     // MindSpace / Plugins
-    callback toggle-mindspace();
-    callback mindspace-add-label();
-    callback mindspace-connect();
     callback plugin-action(string);
     callback open-url(string);
     callback menu-action(string);
@@ -1411,6 +1479,11 @@ export component StudioWindow inherits Window {
     callback workshop-model-changed(string); // user picked a different model
     callback workshop-gauntlet-toggled(bool); // user flipped the AAA verify-loop mode
     callback workshop-auto-toggled(bool);     // user flipped auto-approve
+    callback workshop-stop-agent();           // Stop button or Escape while a turn runs
+    callback workshop-approve-all();          // run every tool call waiting for approval
+    callback workshop-skip-all();             // skip every tool call waiting for approval
+    callback workshop-remove-queued(int);     // drop one queued message by index
+    callback workshop-copy-text(string);      // copy a message, tool input or result
     /// Close a session tab in the Workshop panel. Host removes the
     /// session from the in-memory list and optionally deletes the
     /// folder under SoulService/Workshop/ (policy TBD — for now
@@ -1422,21 +1495,16 @@ export component StudioWindow inherits Window {
     callback workshop-reorder-tab(string /* session_id */, int /* target_index */);
 
     // Settings / Panels
-    callback open-settings();
-    callback open-find();
     // Help icon setting changes (fired immediately from Settings dialog)
     callback help-icons-changed(bool);
     callback help-opens-in-tab-changed(bool);
     
     // Dock Layout System Callbacks
-    callback apply-layout-preset(int);
     callback save-layout-to-file();
     callback load-layout-from-file();
-    callback reset-layout-to-default();
     callback toggle-theme-editor();
     callback apply-theme-settings(bool, bool, float); // dark-mode, high-contrast, ui-scale
     callback detach-panel-to-window(string);
-    callback dock-panel(string, DockZone);
     
     // Native Window Integration Callbacks
     // These are called when viewport bounds change so Bevy can reposition its window
@@ -1466,6 +1534,9 @@ export component StudioWindow inherits Window {
             terrain-materials: root.terrain-materials;
             terrain-paint-material: root.terrain-paint-material;
             terrain-paint-material-name: root.terrain-paint-material-name;
+            brush-size <=> root.terrain-brush-size;
+            brush-strength <=> root.terrain-brush-strength;
+            brush-falloff <=> root.terrain-brush-falloff;
             // Eustress Modes — mode list + active id/icon + data-driven
             // ribbon-tab subset, all pushed from Rust's ModeRegistry.
             available-modes: root.available-modes;
@@ -1640,17 +1711,29 @@ export component StudioWindow inherits Window {
             on-start-server => { root.start-server(); }
             on-stop-server => { root.stop-server(); }
             on-show-forge-connect => { root.show-forge-connect-dialog = true; }
-            on-show-network-panel => { root.show-network-panel = true; }
+            on-show-network-panel => { root.unbuilt-feature("network-panel"); }
+            on-unbuilt-feature(id) => { root.unbuilt-feature(id); }
+            on-find => {
+                root.show-find-dialog = true;
+                root.find-search();
+            }
+            on-allocate-forge-server => { root.allocate-forge-server(); }
             on-show-stress-test => { root.show-stress-test-dialog = true; }
             
             // Data — set the dialog property directly, exactly like every other
             // menu section above. Routing these through Rust set a StudioState
             // bool that nothing bridged back to these properties, so the dialog
             // never appeared while the bool latched the camera off for good.
-            on-show-global-sources => { root.show-global-sources-window = true; }
+            on-show-global-sources => {
+                root.show-global-sources-window = true;
+                root.open-global-sources();
+            }
             on-show-domains => { root.show-domains-window = true; }
             on-show-global-variables => { root.show-global-variables-window = true; }
-            on-show-sync-domain => { root.show-sync-domain-dialog = true; }
+            on-show-sync-domain => {
+                root.show-sync-domain-dialog = true;
+                root.open-sync-domain();
+            }
             on-add-data-source(source-type) => { root.add-data-source(source-type); }
             
             // Terrain
@@ -1658,6 +1741,9 @@ export component StudioWindow inherits Window {
             on-toggle-terrain-edit => { root.toggle-terrain-edit-mode(); }
             on-set-terrain-brush(brush) => { root.set-terrain-brush(brush); }
             on-set-terrain-paint-material(slot) => { root.set-terrain-paint-material(slot); }
+            on-brush-size-changed(v) => { root.brush-size-changed(v); }
+            on-brush-strength-changed(v) => { root.brush-strength-changed(v); }
+            on-brush-falloff-changed(v) => { root.brush-falloff-changed(v); }
             on-import-heightmap => { root.import-heightmap(); }
             on-export-heightmap => { root.export-heightmap(); }
             
@@ -2158,14 +2244,25 @@ export component StudioWindow inherits Window {
                     }
 
                     // === Tab strip (between Home and UI toggle) ===
-                    // Wrapped in Rectangle so the drag-overlay TouchArea can be positioned
-                    // absolutely on top of the entire strip — this is the only way in Slint
-                    // to receive moved() events that cross multiple tab boundaries.
+                    // A Rectangle rather than a bare layout so the drag ghost and
+                    // the overflow button can sit on top of the tabs, and so the
+                    // strip clips: tabs never paint over the controls beside it.
                     tab-strip := Rectangle {
                         x: 36px;
                         y: 0px;
                         width: parent.width - 72px - root.view-selector-width;
                         height: 35px;
+                        clip: true;
+                        // Tabs shrink evenly to share the strip, like browser
+                        // tabs, down to `min-tab-width` (icon, a few letters,
+                        // close button). Past that they overflow, and the
+                        // chevron at the right end lists every tab.
+                        property <length> min-tab-width: 96px;
+                        property <length> overflow-button-width: 28px;
+                        property <length> tab-room: self.width - space1-tab.width;
+                        property <length> tab-fit: root.center-tabs.length > 0
+                            ? self.tab-room / root.center-tabs.length : 200px;
+                        property <bool> tabs-overflow: self.tab-fit < self.min-tab-width;
                         // Opaque tab-bar background. Without this the strip is
                         // transparent, so the empty area to the right of the
                         // tabs (and the gaps around the pinned tab / new-tab /
@@ -2183,7 +2280,7 @@ export component StudioWindow inherits Window {
                         alignment: start;
                         
                         // Pinned Space1 tab (always first, never closable)
-                        Rectangle {
+                        space1-tab := Rectangle {
                             width: space1-label.preferred-width + 24px;
                             height: 35px;
                             background: (root.center-active-tab == 0 && root.active-tab-type != "chart") ? Theme.panel-background :
@@ -2233,11 +2330,29 @@ export component StudioWindow inherits Window {
                         
                         // Dynamic tabs (script + web) with drag-and-drop reorder
                         for tab[index] in root.center-tabs: Rectangle {
-                            width: tab.tab-type == "web" ? 200px : 180px;
+                            width: min(tab.tab-type == "web" ? 200px : 180px, max(tab-strip.min-tab-width, tab-strip.tab-fit));
                             height: 35px;
                             background: root.center-active-tab == index + 1
                                 ? Theme.panel-background
                                 : (tab-hover.has-hover ? Theme.tab-hover : Theme.background-secondary);
+                            // The tab being dragged stays in place as a faded
+                            // placeholder, so the gap it leaves is visible.
+                            opacity: root.tab-dragging && root.tab-drag-source == index ? 0.4 : 1.0;
+
+                            // Drop slot while the pointer is over THIS tab,
+                            // from its real laid-out geometry: the left half
+                            // is the gap before it, the right half the gap
+                            // after it. Tabs differ in width (web 200px, the
+                            // rest 180px), so no fixed-pitch division can
+                            // find the tab under the pointer.
+                            property <int> drag-slot: !root.tab-dragging ? -1
+                                : (root.tab-drag-x < self.x || root.tab-drag-x >= self.x + self.width) ? -1
+                                : (root.tab-drag-x < self.x + self.width / 2 ? index : index + 1);
+                            changed drag-slot => {
+                                if self.drag-slot >= 0 {
+                                    root.tab-drag-target = self.drag-slot;
+                                }
+                            }
                             
                             // Active tab indicator (blue top border — VS Code style)
                             if root.center-active-tab == index + 1: Rectangle {
@@ -2246,10 +2361,15 @@ export component StudioWindow inherits Window {
                                 background: Theme.accent-blue;
                             }
                             
-                            // Drop indicator line (left edge) when dragging over
-                            if root.tab-dragging && root.tab-drag-target == index && root.tab-drag-source != index: Rectangle {
+                            // Drop caret on the left edge. Hidden for the two
+                            // gaps beside the dragged tab: dropping there is
+                            // a no-op, and a caret would promise a move.
+                            if root.tab-dragging && root.tab-drag-inside
+                                && root.tab-drag-target == index
+                                && index != root.tab-drag-source
+                                && index != root.tab-drag-source + 1: Rectangle {
                                 x: -1px;
-                                width: 2px;
+                                width: 3px;
                                 height: parent.height;
                                 background: Theme.accent-blue;
                             }
@@ -2273,11 +2393,32 @@ export component StudioWindow inherits Window {
                                         root.select-center-tab(index + 1);
                                     }
                                 }
+                                // This TouchArea holds the pointer grab from
+                                // press to release, so it keeps receiving
+                                // moved() even when the pointer is over other
+                                // tabs or off the strip. It therefore drives
+                                // the whole drag; a separate overlay appearing
+                                // mid-drag never receives a single event.
                                 moved => {
                                     // Start drag after 5px horizontal movement
                                     if self.left-down && !root.tab-dragging && abs(self.mouse-x - self.press-x) > 5px {
                                         root.tab-drag-source = index;
+                                        root.tab-drag-target = -1;
                                         root.tab-dragging = true;
+                                    }
+                                    if root.tab-dragging {
+                                        let px = self.absolute-position.x + self.mouse-x - tab-strip.absolute-position.x;
+                                        let py = self.absolute-position.y + self.mouse-y - tab-strip.absolute-position.y;
+                                        root.tab-drag-x = px;
+                                        root.tab-drag-inside = py > -40px && py < tab-strip.height + 40px;
+                                        // Past either end of the tab run, the
+                                        // first or last gap. Over a tab, the
+                                        // tab's own drag-slot binding decides.
+                                        if px < space1-tab.x + space1-tab.width {
+                                            root.tab-drag-target = 0;
+                                        } else if px >= tabs-filler.x {
+                                            root.tab-drag-target = root.center-tabs.length;
+                                        }
                                     }
                                 }
                                 pointer-event(event) => {
@@ -2287,6 +2428,18 @@ export component StudioWindow inherits Window {
                                     }
                                     if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
                                         self.left-down = false;
+                                        if root.tab-dragging {
+                                            if root.tab-drag-inside
+                                                && root.tab-drag-target >= 0
+                                                && root.tab-drag-target != index
+                                                && root.tab-drag-target != index + 1 {
+                                                root.reorder-center-tab(index, root.tab-drag-target);
+                                            }
+                                            root.tab-dragging = false;
+                                            root.tab-drag-source = -1;
+                                            root.tab-drag-target = -1;
+                                            root.tab-drag-inside = true;
+                                        }
                                     }
                                     if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
                                         root.tab-context-menu-index = index;
@@ -2419,59 +2572,48 @@ export component StudioWindow inherits Window {
                             }
                         }
                         
-                        // Drop indicator at end (when dragging past last tab)
-                        if root.tab-dragging && root.tab-drag-target >= root.center-tabs.length: Rectangle {
-                            width: 2px;
+                        // Drop caret after the last tab. Hidden when the
+                        // last tab is the one being dragged (a no-op drop).
+                        if root.tab-dragging && root.tab-drag-inside
+                            && root.tab-drag-target >= root.center-tabs.length
+                            && root.tab-drag-source != root.center-tabs.length - 1: Rectangle {
+                            width: 3px;
                             height: 35px;
                             background: Theme.accent-blue;
                         }
-                        
-                        // Fill remaining space
-                        Rectangle { horizontal-stretch: 1; }
+
+                        // Fill remaining space. Its x is where the tab run
+                        // ends, which the drag uses for the last gap.
+                        tabs-filler := Rectangle { horizontal-stretch: 1; }
                     } // end HorizontalLayout
 
-                    // ── Drag overlay ─────────────────────────────────────────
-                    // A single full-width TouchArea on top of all dynamic tabs.
-                    // It is the ONLY place that tracks moved() during a drag so
-                    // the event is never lost when the pointer crosses tab edges.
-                    // Space1 tab (~80px) is skipped; dynamic tabs are 180/200px wide.
-                    if root.tab-drag-source >= 0: TouchArea {
-                        x: root.tab-strip-space1-width; // start after pinned Space1
-                        y: 0px;
-                        width: parent.width - root.tab-strip-space1-width;
+                    // ── Overflow button ──────────────────────────────────────
+                    // Only when the tabs no longer fit: opaque, so it covers
+                    // the clipped tail, and it opens a list of every tab.
+                    if tab-strip.tabs-overflow: Rectangle {
+                        x: parent.width - tab-strip.overflow-button-width;
+                        width: tab-strip.overflow-button-width;
                         height: parent.height;
-                        mouse-cursor: move;
+                        background: overflow-touch.has-hover ? Theme.tab-hover : Theme.background-secondary;
 
-                        moved => {
-                            // Begin drag after 5px threshold
-                            if !root.tab-dragging && abs(self.mouse-x - self.pressed-x) > 5px {
-                                root.tab-dragging = true;
-                            }
-                            if root.tab-dragging {
-                                // Compute which tab slot the pointer is over from mouse-x
-                                // Each dynamic tab is ~190px wide on average (mix of 180/200)
-                                // We iterate via a step approximation — good enough for reorder UX
-                                let raw-idx = floor((self.mouse-x) / 190px);
-                                let clamped = max(0, min(raw-idx, root.center-tabs.length));
-                                root.tab-drag-target = clamped;
-                                root.tab-drag-x = self.mouse-x;
-                            }
+                        Rectangle {
+                            x: 0px;
+                            width: 1px;
+                            height: parent.height;
+                            background: Theme.border-color;
                         }
-
-                        pointer-event(event) => {
-                            if event.kind == PointerEventKind.up && event.button == PointerEventButton.left {
-                                if root.tab-dragging && root.tab-drag-source != root.tab-drag-target && root.tab-drag-target >= 0 {
-                                    root.reorder-center-tab(root.tab-drag-source, root.tab-drag-target);
-                                }
-                                root.tab-dragging = false;
-                                root.tab-drag-source = -1;
-                                root.tab-drag-target = -1;
-                            }
+                        Image {
+                            width: 12px;
+                            height: 12px;
+                            source: @image-url("../../assets/icons/ui/chevron-down.svg");
+                            image-fit: contain;
+                            colorize: Theme.text-secondary;
+                        }
+                        overflow-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { tab-overflow-menu.show(); }
                         }
                     }
-
-                    // Drag overlay removed — drag initiation is now handled by per-tab
-                    // tab-hover TouchAreas for proper hover feedback on close buttons.
 
                     // ── Drag ghost ───────────────────────────────────────────
                     // Translucent copy of the tab being dragged, carried under
@@ -2481,32 +2623,28 @@ export component StudioWindow inherits Window {
                     // the full-width drag overlay above keeps receiving every
                     // moved() event.
                     //
-                    // `tab-drag-x` is measured from the drag overlay's origin,
-                    // which starts AFTER the pinned Space1 tab — so the strip-
-                    // relative position adds `tab-strip-space1-width` back.
-                    // Bounds-checked on `tab-drag-source` because the model can
-                    // shrink mid-drag (a tab closing elsewhere) and indexing
-                    // past the end would be a hard error.
+                    // `tab-drag-x` is strip-relative. Bounds-checked on
+                    // `tab-drag-source` because the model can shrink mid-drag
+                    // (a tab closing elsewhere) and indexing past the end
+                    // would be a hard error.
                     if root.tab-dragging
                         && root.tab-drag-source >= 0
                         && root.tab-drag-source < root.center-tabs.length: Rectangle {
-                        width: 180px;
+                        width: root.center-tabs[root.tab-drag-source].tab-type == "web" ? 200px : 180px;
                         height: 35px;
                         y: 0px;
                         // Centre under the cursor, clamped inside the strip so
                         // the ghost can't slide off either end.
                         x: min(
-                            max(
-                                root.tab-strip-space1-width + root.tab-drag-x - self.width / 2,
-                                0px,
-                            ),
+                            max(root.tab-drag-x - self.width / 2, 0px),
                             max(0px, parent.width - self.width),
                         );
                         background: Theme.panel-background.with-alpha(0.92);
                         border-width: 1px;
                         border-color: Theme.accent-blue;
                         border-radius: 4px;
-                        opacity: 0.9;
+                        // Dims when a release here would cancel the drag.
+                        opacity: root.tab-drag-inside ? 0.9 : 0.45;
                         drop-shadow-blur: 8px;
                         drop-shadow-color: #00000066;
 
@@ -2537,9 +2675,77 @@ export component StudioWindow inherits Window {
 
                     } // end tab-strip Rectangle
                     
+                    // Every open tab, for when the strip overflows. Scrolls
+                    // past about 16 rows.
+                    tab-overflow-menu := PopupWindow {
+                        x: tab-strip.x + tab-strip.width - self.width;
+                        y: 35px;
+                        width: 260px;
+                        height: min(root.center-tabs.length * 28px + 8px, 16 * 28px + 8px);
+
+                        Rectangle {
+                            background: Theme.dialog-background;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Theme.border-color;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: Theme.shadow-float;
+
+                            Flickable {
+                                x: 4px;
+                                y: 4px;
+                                width: parent.width - 8px;
+                                height: parent.height - 8px;
+                                viewport-height: root.center-tabs.length * 28px;
+
+                                for tab[i] in root.center-tabs: Rectangle {
+                                    y: i * 28px;
+                                    width: parent.width;
+                                    height: 28px;
+                                    border-radius: 3px;
+                                    background: root.center-active-tab == i + 1 ? Theme.selection-background
+                                        : (overflow-row-touch.has-hover ? Theme.button-hover : transparent);
+
+                                    overflow-row-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            root.center-active-tab = i + 1;
+                                            root.select-center-tab(i + 1);
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        spacing: 8px;
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: tab.name;
+                                            color: root.center-active-tab == i + 1 ? Theme.text-primary : Theme.text-secondary;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        if tab.dirty: VerticalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                width: 6px;
+                                                height: 6px;
+                                                border-radius: 3px;
+                                                background: Theme.text-primary;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Tab context menu (PopupWindow positioned relative to tab-bar)
                     tab-ctx-menu := PopupWindow {
-                        x: root.tab-context-menu-x;
+                        // The x recorded on right-click is strip-relative; this
+                        // popup lives in the strip's parent, where the strip
+                        // starts at `tab-strip.x`.
+                        x: tab-strip.x + root.tab-context-menu-x;
                         y: root.tab-context-menu-y;
                         width: 220px;
                         
@@ -2610,7 +2816,8 @@ export component StudioWindow inherits Window {
                                 }
 
                                 // Close to the Right
-                                if root.tab-context-menu-index >= 0: Rectangle {
+                                if root.tab-context-menu-index >= 0
+                                    && root.tab-context-menu-index < root.center-tabs.length - 1: Rectangle {
                                     height: 28px;
                                     background: ctx-right-touch.has-hover ? Theme.button-hover : transparent;
                                     border-radius: 3px;
@@ -2646,8 +2853,11 @@ export component StudioWindow inherits Window {
                                     }
                                 }
 
-                                // Reveal in Explorer
-                                if root.tab-context-menu-index >= 0: Rectangle {
+                                // Reveal in Explorer: selects the tab's instance,
+                                // so only tabs backed by one (scripts) offer it.
+                                if root.tab-context-menu-index >= 0
+                                    && root.tab-context-menu-index < root.center-tabs.length
+                                    && root.center-tabs[root.tab-context-menu-index].entity-id >= 0: Rectangle {
                                     height: 28px;
                                     background: ctx-reveal-touch.has-hover ? Theme.button-hover : transparent;
                                     border-radius: 3px;
@@ -2660,6 +2870,41 @@ export component StudioWindow inherits Window {
                                         spacing: 8px;
                                         Image { width: 14px; height: 14px; source: @image-url("../../assets/icons/folder.svg"); image-fit: contain; colorize: Theme.text-secondary; vertical-alignment: center; }
                                         Text { text: "Reveal in Explorer"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                                    }
+                                }
+
+                                // Sort: only meaningful with two or more tabs.
+                                if root.center-tabs.length >= 2: Rectangle { height: 1px; background: Theme.border-color; }
+
+                                if root.center-tabs.length >= 2: Rectangle {
+                                    height: 28px;
+                                    background: ctx-sort-name-touch.has-hover ? Theme.button-hover : transparent;
+                                    border-radius: 3px;
+                                    ctx-sort-name-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.sort-center-tabs("name"); }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 8px; padding-right: 10px;
+                                        spacing: 8px;
+                                        Image { width: 14px; height: 14px; source: @image-url("../../assets/icons/ui/list.svg"); image-fit: contain; colorize: Theme.text-secondary; vertical-alignment: center; }
+                                        Text { text: "Sort by Name"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                                    }
+                                }
+
+                                if root.center-tabs.length >= 2: Rectangle {
+                                    height: 28px;
+                                    background: ctx-sort-type-touch.has-hover ? Theme.button-hover : transparent;
+                                    border-radius: 3px;
+                                    ctx-sort-type-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.sort-center-tabs("type"); }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 8px; padding-right: 10px;
+                                        spacing: 8px;
+                                        Image { width: 14px; height: 14px; source: @image-url("../../assets/icons/ui/filter.svg"); image-fit: contain; colorize: Theme.text-secondary; vertical-alignment: center; }
+                                        Text { text: "Sort by Type"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
                                     }
                                 }
                             }
@@ -2686,6 +2931,23 @@ export component StudioWindow inherits Window {
                                 if root.center-active-tab >= root.center-tabs.length + 1 {
                                     root.center-active-tab = root.center-tabs.length;
                                 }
+                            }
+                            return accept;
+                        }
+                        // Ctrl+Shift+PageUp / PageDown: move the active tab one
+                        // place left / right. The Space tab (0) never moves.
+                        // Slots: the gap before dynamic tab k is k, so for the
+                        // active dynamic tab a = center-active-tab - 1, left is
+                        // slot a - 1 and right is slot a + 2.
+                        if event.modifiers.control && event.modifiers.shift && event.text == Key.PageUp {
+                            if root.center-active-tab >= 2 {
+                                root.reorder-center-tab(root.center-active-tab - 1, root.center-active-tab - 2);
+                            }
+                            return accept;
+                        }
+                        if event.modifiers.control && event.modifiers.shift && event.text == Key.PageDown {
+                            if root.center-active-tab >= 1 && root.center-active-tab < root.center-tabs.length {
+                                root.reorder-center-tab(root.center-active-tab - 1, root.center-active-tab + 1);
                             }
                             return accept;
                         }
@@ -3172,7 +3434,6 @@ export component StudioWindow inherits Window {
                         services: root.services-browser-entries;
                         selected-index <=> root.services-browser-selected;
                         open-service-url(url) => { root.services-browser-open-url(url); }
-                        service-selected(idx) => { root.services-browser-selected-changed(idx); }
                     }
 
                     // RFQ Builder — Business > Supply Chain > Procurement &
@@ -3182,6 +3443,7 @@ export component StudioWindow inherits Window {
                         height: parent.height;
                         rfqs: root.procurement-rfqs;
                         manufacturers: root.procurement-manufacturers;
+                        manufacturer-names: root.procurement-manufacturer-names;
                         selected-index <=> root.procurement-rfq-selected;
                         vendor-index <=> root.procurement-vendor-index;
 
@@ -3248,6 +3510,11 @@ export component StudioWindow inherits Window {
                         x-ticks: root.chart-x-ticks;
                         y-ticks: root.chart-y-ticks;
                         points: root.chart-points;
+                        points3: root.chart-points3;
+                        x3-label: root.chart-x3-label;
+                        y3-label: root.chart-y3-label;
+                        z3-label: root.chart-z3-label;
+                        color3-label: root.chart-color3-label;
                         xmin-in <=> root.chart-xmin-in;
                         xmax-in <=> root.chart-xmax-in;
                         ymin-in <=> root.chart-ymin-in;
@@ -3759,6 +4026,21 @@ export component StudioWindow inherits Window {
 
                             // Per-session chat scroll position
                             chat-scroll-y <=> root.workshop-chat-scroll-y;
+                            chat-stick-bottom <=> root.workshop-chat-stick-bottom;
+
+                            // Live agent state + the controls that act on it
+                            agent-busy: root.workshop-agent-busy;
+                            agent-activity: root.workshop-agent-activity;
+                            pending-approvals: root.workshop-pending-approvals;
+                            queued-messages: root.workshop-queued-messages;
+                            chat-key-valid: root.workshop-chat-key-valid;
+                            chat-key-hint: root.workshop-chat-key-hint;
+                            last-prompt: root.workshop-last-prompt;
+                            on-stop-agent() => { root.workshop-stop-agent(); }
+                            on-approve-all() => { root.workshop-approve-all(); }
+                            on-skip-all() => { root.workshop-skip-all(); }
+                            on-remove-queued(index) => { root.workshop-remove-queued(index); }
+                            on-copy-text(text) => { root.workshop-copy-text(text); }
                         }
 
                         if root.right-tab-index == 4: ProblemsPanel {
@@ -3814,7 +4096,6 @@ export component StudioWindow inherits Window {
                 height: parent.height;
                 panel-mode <=> root.bottom-panel-mode;
                 set-panel-mode(mode) => { root.set-bottom-panel(mode); }
-                logs: root.output-logs;
                 all-text: root.output-all-text;
                 source-filter <=> root.output-source-filter;
                 show-info <=> root.output-show-info;
@@ -3827,7 +4108,6 @@ export component StudioWindow inherits Window {
                 // Without the latter, the next sync push re-floods the
                 // panel with every entry we "cleared" a moment earlier.
                 on-clear => {
-                    root.output-logs = [];
                     root.output-all-text = "";
                     root.clear-script-output();
                 }
@@ -3954,15 +4234,14 @@ export component StudioWindow inherits Window {
                 root.output-height = preset.output-height * 1px;
                 root.left-tab-index = preset.left-tab-index;
                 root.right-tab-index = preset.right-tab-index;
-                root.apply-layout-preset(root.current-layout-preset);
                 root.show-layout-dropdown = false;
             }
             load-layout-from-file => {
                 root.load-layout-from-file();
                 root.show-layout-dropdown = false;
             }
-            reset-to-factory => {
-                root.reset-layout-to-default();
+            save-layout-to-file => {
+                root.save-layout-to-file();
                 root.show-layout-dropdown = false;
             }
             close => { root.show-layout-dropdown = false; }
@@ -4105,6 +4384,10 @@ export component StudioWindow inherits Window {
         help-opens-in-tab <=> root.help-opens-in-tab;
         soul-api-key <=> root.soul-api-key;
         soul-api-key-valid: root.soul-api-key-valid;
+        soul-error-message: root.soul-error-message;
+        soul-test-status: root.soul-test-status;
+        soul-test-running: root.soul-test-running;
+        on-test-soul-connection => { root.soul-test-connection(); }
         soul-xai-api-key <=> root.soul-xai-api-key;
         soul-openai-api-key <=> root.soul-openai-api-key;
         notifications-enabled <=> root.notifications-enabled;
@@ -4224,13 +4507,34 @@ export component StudioWindow inherits Window {
     
     // Find dialog
     if root.show-find-dialog: FindDialog {
-        on-close => { root.show-find-dialog = false; }
+        search-text <=> root.find-search-text;
+        replace-text <=> root.find-replace-text;
+        case-sensitive <=> root.find-case-sensitive;
+        whole-word <=> root.find-whole-word;
+        use-regex <=> root.find-use-regex;
+        results: root.find-results;
+        current-result: root.find-current-result;
+        total-results: root.find-total-results;
+        on-search => { root.find-search(); }
+        on-find-next => { root.find-step(1); }
+        on-find-previous => { root.find-step(-1); }
+        on-replace => { root.find-replace-one(); }
+        on-replace-all => { root.find-replace-all(); }
+        on-select-result(row) => { root.find-select-result(row); }
+        on-close => {
+            root.show-find-dialog = false;
+            root.find-closed();
+        }
     }
     
     // Forge connect dialog
     if root.show-forge-connect-dialog: ForgeConnectDialog {
         server-url <=> root.forge-server-url;
         api-key <=> root.forge-api-key;
+        remember-credentials <=> root.forge-remember-credentials;
+        connecting: root.forge-connecting;
+        status-message: root.forge-status-message;
+        error-message: root.forge-error-message;
         on-connect => { root.connect-forge(); }
         on-close => { root.show-forge-connect-dialog = false; }
     }
@@ -4258,12 +4562,37 @@ export component StudioWindow inherits Window {
     
     // Data sources dialog
     if root.show-global-sources-window: DataSourcesDialog {
-        on-close => { root.show-global-sources-window = false; }
+        sources: root.data-sources;
+        new-source-name <=> root.data-source-new-name;
+        new-source-type <=> root.data-source-new-type;
+        new-source-url <=> root.data-source-new-url;
+        adding-source <=> root.data-source-adding;
+        on-add-source => { root.data-source-add(); }
+        on-remove-source(row) => { root.data-source-remove(row); }
+        on-edit-source(row) => { root.data-source-edit(row); }
+        on-test-source(row) => { root.data-source-test(row); }
+        on-close => {
+            root.show-global-sources-window = false;
+            root.data-source-adding = false;
+        }
     }
     
     // Sync domain dialog
     if root.show-sync-domain-dialog: SyncDomainDialog {
-        on-sync => { root.show-sync-domain-dialog = false; }
+        available-domains: root.sync-domain-domains;
+        available-fields: root.sync-domain-fields;
+        preview-status: root.sync-domain-status;
+        busy: root.sync-domain-busy;
+        selected-domain <=> root.sync-domain-selected;
+        target-class <=> root.sync-domain-class;
+        layout <=> root.sync-domain-layout;
+        name-field <=> root.sync-domain-name-field;
+        color-field <=> root.sync-domain-color-field;
+        show-billboard <=> root.sync-domain-show-billboard;
+        billboard-field <=> root.sync-domain-billboard-field;
+        changed selected-domain => { root.sync-domain-picked(self.selected-domain); }
+        on-preview => { root.sync-domain-preview(self.spacing-x, self.spacing-y, self.spacing-z); }
+        on-sync => { root.sync-domain-run(self.spacing-x, self.spacing-y, self.spacing-z); }
         on-close => { root.show-sync-domain-dialog = false; }
     }
 

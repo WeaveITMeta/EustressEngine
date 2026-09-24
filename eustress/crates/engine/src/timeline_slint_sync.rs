@@ -3,8 +3,9 @@
 //! Reflects `TimelineState` + `TimelineFilter` + `BottomPanelMode`
 //! into the main.slint properties (`timeline-tracks`,
 //! `timeline-markers`, `timeline-kind-chips`, `timeline-filter-rows`,
-//! `bottom-panel-mode`). Drains the matching Slint callbacks back
-//! into Bevy events.
+//! `bottom-panel-mode`), and applies the panel's own callbacks (kind
+//! chips, search, the tag filter window, marker clicks) back onto
+//! `TimelineFilter` and the selection.
 //!
 //! ## Why a separate module
 //!
@@ -27,10 +28,132 @@ pub struct TimelineSlintSyncPlugin;
 
 impl Plugin for TimelineSlintSyncPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (
-            sync_bottom_panel_mode,
-            sync_timeline_to_slint,
-        ));
+        app.init_resource::<TimelineUiQueue>()
+            .init_resource::<TimelineMarkerEvents>()
+            .add_systems(Update, (
+                register_timeline_callbacks,
+                apply_timeline_ui_actions,
+                sync_bottom_panel_mode,
+                sync_timeline_to_slint,
+            ).chain());
+    }
+}
+
+/// What the Timeline panel and its tag filter window ask for.
+enum TimelineUiAction {
+    ToggleKind(String),
+    Search(String),
+    OpenFilter,
+    CloseFilter,
+    ToggleTag(String),
+    ShowAllTags(bool),
+    MarkerClicked(i32),
+}
+
+/// Filled by the Slint callbacks, drained by `apply_timeline_ui_actions`.
+#[derive(Resource, Default)]
+struct TimelineUiQueue(std::sync::Arc<std::sync::Mutex<Vec<TimelineUiAction>>>);
+
+/// The event behind each marker last pushed to Slint, in marker order, so a
+/// click on marker `ix` resolves to its event: (index into
+/// `TimelineState::events`, timestamp). The timestamp re-checks the slot,
+/// because the ring drops its oldest event whenever a new one arrives.
+#[derive(Resource, Default)]
+struct TimelineMarkerEvents(Vec<(usize, f64)>);
+
+/// Hook the panel's callbacks once the Slint window exists.
+fn register_timeline_callbacks(
+    slint_context: Option<NonSend<crate::ui::SlintUiState>>,
+    queue: Res<TimelineUiQueue>,
+    mut registered: Local<bool>,
+) {
+    if *registered { return; }
+    let Some(slint_context) = slint_context else { return };
+    let ui = &slint_context.window;
+
+    fn push(q: &std::sync::Arc<std::sync::Mutex<Vec<TimelineUiAction>>>, action: TimelineUiAction) {
+        if let Ok(mut pending) = q.lock() {
+            pending.push(action);
+        }
+    }
+    let q = queue.0.clone();
+    ui.on_timeline_kind_toggled(move |kind| push(&q, TimelineUiAction::ToggleKind(kind.to_string())));
+    let q = queue.0.clone();
+    ui.on_timeline_search_changed(move |text| push(&q, TimelineUiAction::Search(text.to_string())));
+    let q = queue.0.clone();
+    ui.on_timeline_open_filter_modal(move || push(&q, TimelineUiAction::OpenFilter));
+    let q = queue.0.clone();
+    ui.on_timeline_close_filter_modal(move || push(&q, TimelineUiAction::CloseFilter));
+    let q = queue.0.clone();
+    ui.on_timeline_filter_row_toggled(move |tag| push(&q, TimelineUiAction::ToggleTag(tag.to_string())));
+    let q = queue.0.clone();
+    ui.on_timeline_select_all_tags(move || push(&q, TimelineUiAction::ShowAllTags(true)));
+    let q = queue.0.clone();
+    ui.on_timeline_deselect_all_tags(move || push(&q, TimelineUiAction::ShowAllTags(false)));
+    let q = queue.0.clone();
+    ui.on_timeline_marker_clicked(move |ix| push(&q, TimelineUiAction::MarkerClicked(ix)));
+    *registered = true;
+}
+
+/// Apply the panel's requests: filter toggles and search go to
+/// `TimelineFilter` (the sync below re-renders from it), and a marker click
+/// selects the event's source entity and prints the event to Output.
+fn apply_timeline_ui_actions(
+    queue: Res<TimelineUiQueue>,
+    state: Option<Res<TimelineState>>,
+    filter: Option<ResMut<TimelineFilter>>,
+    marker_events: Res<TimelineMarkerEvents>,
+    selection: Option<Res<crate::rendering::BevySelectionManager>>,
+    mut output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
+) {
+    let actions: Vec<TimelineUiAction> = match queue.0.lock() {
+        Ok(mut pending) if !pending.is_empty() => std::mem::take(&mut *pending),
+        _ => return,
+    };
+    let (Some(state), Some(mut filter)) = (state, filter) else { return };
+
+    for action in actions {
+        match action {
+            TimelineUiAction::ToggleKind(kind) => {
+                if let Some(kind) = TimelineEventKind::from_str(&kind) {
+                    let visible = filter.kind_visible.entry(kind).or_insert(true);
+                    *visible = !*visible;
+                }
+            }
+            TimelineUiAction::Search(text) => filter.search = text,
+            TimelineUiAction::OpenFilter => filter.modal_open = true,
+            TimelineUiAction::CloseFilter => filter.modal_open = false,
+            TimelineUiAction::ToggleTag(tag) => {
+                let visible = filter.tag_visible.entry(tag).or_insert(true);
+                *visible = !*visible;
+            }
+            TimelineUiAction::ShowAllTags(show) => {
+                // Every row the filter window lists: one per primary tag,
+                // "untagged" included.
+                for event in state.events.iter() {
+                    filter.tag_visible.insert(event.primary_tag().to_string(), show);
+                }
+            }
+            TimelineUiAction::MarkerClicked(ix) => {
+                let Some(&(slot, timestamp)) = usize::try_from(ix).ok().and_then(|ix| marker_events.0.get(ix)) else {
+                    continue;
+                };
+                let event = state.events.get(slot)
+                    .filter(|e| e.timestamp == timestamp)
+                    .or_else(|| state.events.iter().find(|e| e.timestamp == timestamp));
+                let Some(event) = event else { continue };
+                if let (Some(entity), Some(selection)) = (event.source_entity, selection.as_ref()) {
+                    selection.0.write().set_selected(vec![crate::entity_utils::entity_to_id_string(entity)]);
+                }
+                if let Some(out) = output.as_mut() {
+                    let payload = event.payload.as_ref().map(|p| format!("  {p}")).unwrap_or_default();
+                    out.info(format!(
+                        "Timeline · {:.3}s · {} · {} · [{}]{}",
+                        event.timestamp, event.kind.as_str(), event.label, event.tags.join(", "), payload,
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -64,6 +187,7 @@ fn sync_timeline_to_slint(
     state: Option<Res<TimelineState>>,
     filter: Option<Res<TimelineFilter>>,
     mode: Option<Res<BottomPanelMode>>,
+    mut marker_events: ResMut<TimelineMarkerEvents>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let Some(state) = state else { return };
@@ -83,13 +207,14 @@ fn sync_timeline_to_slint(
     let mut per_tag_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let mut kind_count: [u32; 3] = [0, 0, 0];
     let mut markers: Vec<TimelineMarkerData> = Vec::new();
+    marker_events.0.clear();
 
     // Track-index assignment — order of first-appearance per tag,
     // stable across frames while the event set is append-only.
     let mut tag_to_index: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
     let mut next_ix: i32 = 0;
 
-    for event in state.events.iter() {
+    for (slot, event) in state.events.iter().enumerate() {
         let tag = event.primary_tag().to_string();
         *per_tag_count.entry(tag.clone()).or_insert(0) += 1;
         kind_count[match event.kind {
@@ -106,6 +231,7 @@ fn sync_timeline_to_slint(
             i
         });
         let t_norm = ((event.timestamp - t_min) / span).clamp(0.0, 1.0) as f32;
+        marker_events.0.push((slot, event.timestamp));
         markers.push(TimelineMarkerData {
             t: t_norm,
             track_index: ix,

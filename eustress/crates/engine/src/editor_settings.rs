@@ -20,7 +20,6 @@
 #![allow(dead_code)]
 
 use bevy::prelude::*;
-use bevy::gizmos::config::{GizmoConfigStore, DefaultGizmoConfigGroup};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -361,8 +360,6 @@ impl Plugin for EditorSettingsPlugin {
         app
             .insert_resource(EditorSettings::load())
             .init_resource::<AutoSaveState>()
-            .add_systems(Startup, setup_grid_gizmo_config)
-            .add_systems(Update, draw_grid_overlay)
             .add_systems(Update, auto_save_settings)
             .add_systems(Update, auto_save_scene_system)
             .add_systems(Update, track_recent_spaces);
@@ -413,108 +410,6 @@ fn auto_save_settings(
             eprintln!("❌ Failed to save editor settings: {}", e);
         }
     }
-}
-
-/// Configure grid gizmos — normal depth testing so grid renders at ground level
-fn setup_grid_gizmo_config(
-    mut config_store: ResMut<GizmoConfigStore>,
-) {
-    let (config, _) = config_store.config_mut::<DefaultGizmoConfigGroup>();
-    // depth_bias = 0.0: normal depth testing. Grid lines at y=0.01 render
-    // on the ground plane. Positive = towards camera in Bevy 0.18 reversed-Z.
-    config.depth_bias = 0.0;
-}
-
-/// Draw grid overlay in viewport - follows camera on X/Z plane
-/// Origin axes (red X, blue Z) stay fixed at world origin
-///
-/// An orthographic axis view (every 2D view, and Front/Top/Right... in 3D
-/// orthographic) sees the ground edge-on and gets `view_grid`'s grid in its
-/// own plane instead.
-fn draw_grid_overlay(
-    mut gizmos: Gizmos,
-    settings: Res<EditorSettings>,
-    camera_query: Query<&Transform, With<Camera3d>>,
-    editor_cameras: Query<&crate::camera_controller::EustressCamera>,
-) {
-    if !settings.show_grid {
-        return;
-    }
-    if editor_cameras
-        .iter()
-        .any(|cam| crate::view_grid::orthographic_axis_view(cam).is_some())
-    {
-        return;
-    }
-
-    // Get camera position to center grid around it
-    let camera_pos = camera_query.iter().next()
-        .map(|t| t.translation)
-        .unwrap_or(Vec3::ZERO);
-    
-    let grid_size = settings.grid_size;  // Spacing between grid lines
-    let grid_half_extent = 100.0;  // How far the grid extends from camera
-    let grid_divisions = (grid_half_extent * 2.0 / grid_size) as i32;
-    
-    // Snap grid center to grid increments so lines don't jitter when camera moves
-    let grid_center_x = (camera_pos.x / grid_size).round() * grid_size;
-    let grid_center_z = (camera_pos.z / grid_size).round() * grid_size;
-    
-    // Render grid slightly above ground (y = 0.01) to prevent z-fighting
-    let grid_y = 0.01;
-    
-    // Grid line color
-    let grid_color = Color::srgba(0.4, 0.4, 0.4, 0.5);
-    
-    // Draw grid lines centered around camera position
-    for i in 0..=grid_divisions {
-        let offset = (i as f32 * grid_size) - grid_half_extent;
-        
-        // Lines parallel to X axis (running along X, at different Z positions)
-        let z_pos = grid_center_z + offset;
-        gizmos.line(
-            Vec3::new(grid_center_x - grid_half_extent, grid_y, z_pos),
-            Vec3::new(grid_center_x + grid_half_extent, grid_y, z_pos),
-            grid_color,
-        );
-        
-        // Lines parallel to Z axis (running along Z, at different X positions)
-        let x_pos = grid_center_x + offset;
-        gizmos.line(
-            Vec3::new(x_pos, grid_y, grid_center_z - grid_half_extent),
-            Vec3::new(x_pos, grid_y, grid_center_z + grid_half_extent),
-            grid_color,
-        );
-    }
-    
-    // ════════════════════════════════════════════════════════════════════════
-    // Origin axes - ALWAYS at world origin (0, 0, 0)
-    // These extend far enough to be visible from anywhere
-    // ════════════════════════════════════════════════════════════════════════
-    
-    let axis_extent = 10000.0;  // Very long so always visible
-    let origin_y = 0.02;  // Slightly above grid to render on top
-    
-    // X-axis (RED) - runs along X at Z=0
-    gizmos.line(
-        Vec3::new(-axis_extent, origin_y, 0.0),
-        Vec3::new(axis_extent, origin_y, 0.0),
-        Color::srgba(1.0, 0.2, 0.2, 0.9),
-    );
-    
-    // Z-axis (BLUE) - runs along Z at X=0
-    gizmos.line(
-        Vec3::new(0.0, origin_y, -axis_extent),
-        Vec3::new(0.0, origin_y, axis_extent),
-        Color::srgba(0.2, 0.2, 1.0, 0.9),
-    );
-    
-    // Small Y-axis indicator at origin (GREEN)
-    gizmos.line(
-        Vec3::new(0.0, 0.0, 0.0),
-        Vec3::new(0.0, 5.0, 0.0),
-        Color::srgba(0.2, 1.0, 0.2, 0.9),
-    );
 }
 
 // ============================================================================

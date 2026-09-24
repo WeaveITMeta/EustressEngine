@@ -558,6 +558,9 @@ component TransitionBar inherits Rectangle {
 export component RfqBuilderPanel inherits Rectangle {
     in property <[PurchaseOrderRow]> rfqs;
     in property <[ManufacturerOption]> manufacturers;
+    // `manufacturers[i].name`, as the picker's model (Slint cannot map a
+    // struct list to strings itself).
+    in property <[string]> manufacturer-names;
     in-out property <int> selected-index: -1;
     in-out property <int> vendor-index: 0;
     in property <string> empty-hint: "No open RFQs. Pick a vendor and raise one.";
@@ -601,9 +604,9 @@ export component RfqBuilderPanel inherits Rectangle {
 
                     ComboBox {
                         model: root.manufacturers.length > 0
-                            ? [root.manufacturers[root.vendor-index].name]
+                            ? root.manufacturer-names
                             : ["No manufacturers registered"];
-                        current-index: 0;
+                        current-index <=> root.vendor-index;
                     }
 
                     // The vendor list is the Manufacturer registry, so an order

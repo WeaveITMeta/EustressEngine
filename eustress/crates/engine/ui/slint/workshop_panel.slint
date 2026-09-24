@@ -76,6 +76,15 @@ export struct ChatMessage {
     // Message body split into prose and tables. Always at least one block, so
     // the renderer never has to special-case an empty message.
     blocks: [ChatBlock],
+    // Tool rows (role "mcp"). `tool-summary` is the one-line argument preview
+    // shown collapsed; `tool-input` (pretty-printed arguments) and
+    // `tool-result` (what the tool returned) open on click. The Rust side caps
+    // both, so an enormous result cannot stall layout.
+    tool-summary: string,
+    tool-input: string,
+    tool-result: string,
+    // Assistant rows: which model answered, e.g. "Sonnet 5".
+    model-label: string,
 }
 
 // Past conversation summary for history browser
@@ -123,17 +132,198 @@ export struct WorkshopModelEntry {
 }
 
 // ============================================================================
-// 2. ChatBubble — renders a single conversation message
+// 2. Chat rows
 // ============================================================================
+//
+// Every role gets its own shape, because each answers a different question:
+//
+//   user            what you asked           tinted bubble, indented left
+//   system          what Workshop said       open prose under a quiet header
+//   mcp             what Workshop did        one line, click to open
+//   mcp (pending)   what it wants to do      a card that shows the arguments
+//                                            before you say yes
+//   notice          what changed             a centred muted line ("Stopped")
+//   error           what went wrong          red-edged, never read as prose
+//   artifact        what it produced         a clickable file chip
+//
+// Tool calls used to be full cards that hid their own arguments and results,
+// so a ten-step turn was a wall of identical boxes saying nothing about what
+// happened. Now each is one line, and a click opens its input and result.
 
-component ChatBubble inherits Rectangle {
+// Prose and tables in order. Shared by every role that shows message text, so
+// a table renders the same whoever wrote it.
+component MessageBody inherits VerticalLayout {
+    in property <[ChatBlock]> blocks: [];
+    in property <brush> text-color: Theme.text-primary;
+    spacing: 8px;
+
+    for block in root.blocks: VerticalLayout {
+        // ---- Prose ------------------------------------------------------
+        if block.kind != "table": TextInput {
+            text: block.text;
+            color: root.text-color;
+            font-size: 12px;
+            wrap: word-wrap;
+            read-only: true;
+            single-line: false;
+            selection-background-color: Theme.selection-background;
+            selection-foreground-color: Theme.text-primary;
+        }
+
+        // ---- Table ------------------------------------------------------
+        // Drawn as a real grid. Columns share the width evenly via
+        // horizontal-stretch rather than measuring content, because a chat
+        // row is narrow and a content-sized column would push the table off
+        // the panel.
+        if block.kind == "table": Rectangle {
+            border-width: 1px;
+            border-color: Theme.border-color;
+            border-radius: 3px;
+            background: Theme.background-secondary;
+
+            // Columns line up because every cell declares `min-width: 0` and
+            // an equal `horizontal-stretch`.
+            //
+            // Stretch ALONE is not enough: Slint first gives each Text its
+            // content-derived minimum width and only shares out what is left
+            // over, so a row holding "919 Wh/kg" and a row holding "98%"
+            // resolve different boundaries and the columns visibly stagger.
+            // Zeroing min-width removes the content term, so each row splits
+            // its width into N equal shares and every row agrees.
+            //
+            // Deriving an explicit cell width from this Rectangle's own width
+            // is the tempting fix and is a Slint binding loop: the container
+            // is sized by its content, so width -> cell-w -> cell width ->
+            // layoutinfo-h -> width. The compiler rejects it.
+            VerticalLayout {
+                padding: 1px;
+                spacing: 0px;
+
+                // Header row
+                Rectangle {
+                    background: Theme.background-tertiary;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        padding-top: 6px;
+                        padding-bottom: 6px;
+                        spacing: 10px;
+                        for h in block.table.headers: Text {
+                            text: h;
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                            color: Theme.text-secondary;
+                            font-size: 10.5px;
+                            font-weight: 700;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Body. `r` and `c` are integer models, so the flat cell list
+                // is addressed as r * columns + c.
+                for r in block.table.row-indices: Rectangle {
+                    background: mod(r, 2) == 1
+                        ? Theme.background-tertiary.with-alpha(0.35)
+                        : transparent;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        padding-top: 5px;
+                        padding-bottom: 5px;
+                        spacing: 10px;
+                        for c in block.table.col-indices: Text {
+                            text: block.table.cells[r * block.table.columns + c];
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                            color: Theme.text-primary;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                            // Centred so a wrapped two-line cell keeps its
+                            // single-line neighbours on the same visual band.
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Small text button used across the Workshop: Run, Skip, Stop, Copy.
+component PillButton inherits Rectangle {
+    in property <string> label: "";
+    in property <brush> tint: Theme.button-background;
+    in property <brush> tint-hover: Theme.button-hover;
+    in property <brush> label-color: Theme.text-primary;
+    in property <length> label-size: 10.5px;
+    callback clicked();
+
+    width: pill-label.preferred-width + 20px;
+    height: 22px;
+    border-radius: 5px;
+    background: pill-touch.has-hover ? root.tint-hover : root.tint;
+
+    pill-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    pill-label := Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        color: root.label-color;
+        font-size: root.label-size;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Muted inline "Copy" that confirms itself for a moment after a click, so the
+// user knows the clipboard changed without a toast.
+component CopyButton inherits Rectangle {
+    in property <string> label: "Copy";
+    callback clicked();
+    property <bool> copied: false;
+
+    width: copy-text-el.preferred-width + 12px;
+    height: 16px;
+    border-radius: 3px;
+    background: copy-touch.has-hover ? Theme.button-hover : transparent;
+
+    copy-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+            root.copied = true;
+        }
+    }
+
+    // Runs only after a click, once, so an idle row costs no wakeups.
+    Timer {
+        interval: 1500ms;
+        running: root.copied;
+        triggered => { root.copied = false; }
+    }
+
+    copy-text-el := Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.copied ? "Copied" : root.label;
+        color: root.copied ? Theme.accent-green
+            : copy-touch.has-hover ? Theme.text-primary : Theme.text-disabled;
+        font-size: 9px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component ChatBubble inherits VerticalLayout {
     in property <string> role: "system";
     in property <string> content: "";
-    // Rendered runs of the message (prose / tables). `ChatMessage` carries
-    // this and the body below iterates `root.blocks`, but the property was
-    // never declared here — so every .slint rebuild failed with
-    // "Element 'Rectangle' does not have a property 'blocks'". Defaults to
-    // empty so a message with no parsed blocks falls back to `content`.
     in property <[ChatBlock]> blocks: [];
     in property <string> timestamp: "";
     in property <string> mcp-endpoint: "";
@@ -141,6 +331,7 @@ component ChatBubble inherits Rectangle {
     in property <string> mcp-status: "pending";
     in property <string> artifact-path: "";
     in property <string> artifact-type: "";
+    in property <int> message-id: 0;
 
     // Entity affordances (see ChatMessage struct comments)
     in property <string> entity-class: "";
@@ -151,462 +342,498 @@ component ChatBubble inherits Rectangle {
     in property <image>  attachment;
     in property <bool>   has-attachment: false;
 
+    in property <string> tool-summary: "";
+    in property <string> tool-input: "";
+    in property <string> tool-result: "";
+    in property <string> model-label: "";
+
+    // Flipped by the panel twice a second while Workshop is working, so a
+    // running tool's dot breathes without every row owning a timer.
+    in property <bool> pulse: false;
+
     callback approve-mcp(int);
     callback skip-mcp(int);
-    callback edit-mcp(int, string);
     callback open-artifact(string);
     callback select-entity(string);
+    callback copy-text(string);
 
-    in property <int> message-id: 0;
+    // Whether this tool row is open. Local to the row, and it survives new
+    // messages arriving because the host updates the message model in place
+    // rather than replacing it, so this instance is never rebuilt under you.
+    property <bool> expanded: false;
+    property <bool> is-tool: root.role == "mcp";
+    property <bool> is-pending: root.is-tool && root.mcp-status == "pending";
+    property <bool> is-active-tool: root.is-tool
+        && (root.mcp-status == "running" || root.mcp-status == "approved");
 
-    // User messages align right, everything else left
-    height: bubble.preferred-height + 8px;
+    padding-left: 8px;
+    padding-right: 8px;
+    padding-top: root.is-tool && !root.is-pending ? 1px : 5px;
+    padding-bottom: root.is-tool && !root.is-pending ? 1px : 5px;
+    spacing: 3px;
 
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        padding-top: 2px;
-        padding-bottom: 2px;
+    // ── You ─────────────────────────────────────────────────────────────────
+    if root.role == "user": HorizontalLayout {
+        // Indented, lightly tinted: your own words read as yours at a glance
+        // without a heavy coloured bubble.
+        padding-left: 28px;
 
-        bubble := Rectangle {
-            horizontal-stretch: 1;
-            // Windsurf-like flat theme: subtle background tints,
-            // no heavy coloured bubbles. Agent messages are nearly
-            // transparent; user messages carry a faint blue tint.
-            background: root.role == "user" ? Theme.accent-blue.with-alpha(0.12) :
-                        root.role == "mcp" ? Theme.accent-purple.with-alpha(0.10) :
-                        root.role == "approval" ? Theme.accent-orange.with-alpha(0.12) :
-                        root.role == "artifact" ? Theme.accent-green.with-alpha(0.12) :
-                        root.role == "error" ? Theme.accent-red.with-alpha(0.12) :
-                        Theme.background-tertiary;
-            border-radius: 6px;
-            border-width: root.role == "system" ? 0px :
-                          root.role == "mcp" ? 1px : 0px;
-            border-color: root.role == "mcp" ? Theme.accent-purple.with-alpha(0.3) : transparent;
+        Rectangle {
+            background: Theme.accent-blue.with-alpha(0.14);
+            border-radius: 10px;
 
             VerticalLayout {
-                padding: 10px;
+                padding-left: 11px;
+                padding-right: 11px;
+                padding-top: 8px;
+                padding-bottom: 8px;
                 spacing: 6px;
 
-                // Role label (not for user messages)
-                if root.role != "user": Text {
-                    text: root.role == "system" ? "Workshop" :
-                          root.role == "mcp" ? "MCP Command" :
-                          root.role == "approval" ? "Approval Required" :
-                          root.role == "artifact" ? "Artifact Generated" :
-                          "Error";
-                    color: root.role == "mcp" ? Theme.accent-purple :
-                           root.role == "approval" ? Theme.accent-orange :
-                           root.role == "artifact" ? Theme.accent-green :
-                           root.role == "error" ? Theme.accent-red :
-                           Theme.accent-blue;
-                    font-size: 10px;
-                    font-weight: 600;
-                }
-
-                // MCP tool-call badge — a terminal-style chip showing
-                // the tool name. We used to render an HTTP method badge
-                // (POST/GET) which looked like a mystery image when the
-                // method string was empty (most tools don't have one).
-                // A small "›_" glyph + monospace name reads as "tool
-                // call" without the HTTP metaphor.
-                //
-                // NOTE: absolute positioning (explicit x/y) rather than
-                // a HorizontalLayout. HL was top-aligning the fixed-
-                // height children so the glyph + name read as "flush
-                // with the top of the badge strip" instead of centered.
-                // `y: (parent.height - self.height) / 2` on each piece
-                // guarantees every element is vertical-middle regardless
-                // of font metrics or Slint's layout defaults.
-                if root.role == "mcp": Rectangle {
-                    height: 28px;
-                    background: Theme.background-tertiary;
-                    border-radius: 4px;
-
-                    // Tool-call glyph — minimal "terminal prompt" feel
-                    // using two text characters so we don't depend on
-                    // an icon asset.
-                    glyph := Text {
-                        x: 10px;
-                        y: (parent.height - self.height) / 2;
-                        text: "›_";
-                        color: Theme.accent-purple;
-                        font-size: 12px;
-                        font-weight: 700;
-                        font-family: "Consolas";
-                    }
-
-                    // Optional HTTP method pill — only rendered when
-                    // the tool actually carries a method (legacy
-                    // MCP-over-HTTP path). Hidden for local tool
-                    // calls so the badge isn't an empty rectangle.
-                    method-pill := Rectangle {
-                        x: glyph.x + glyph.width + 8px;
-                        y: (parent.height - self.height) / 2;
-                        width: root.mcp-method != "" ? 40px : 0px;
-                        height: 18px;
-                        visible: root.mcp-method != "";
-                        background: root.mcp-method == "POST" ? Theme.accent-green : Theme.accent-blue;
-                        border-radius: 3px;
-
-                        Text {
-                            width: 100%;
-                            height: 100%;
-                            text: root.mcp-method;
-                            color: white;
-                            font-size: 9px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    // Tool name — sits flush against the glyph when the
-                    // method pill is hidden, or after the pill + 8px
-                    // gap when it's visible. Uses elide so long tool
-                    // names don't overflow the badge.
-                    Text {
-                        x: method-pill.visible
-                            ? method-pill.x + method-pill.width + 8px
-                            : glyph.x + glyph.width + 8px;
-                        y: (parent.height - self.height) / 2;
-                        width: parent.width - self.x - 10px;
-                        text: root.mcp-endpoint;
-                        color: Theme.text-primary;
-                        font-size: 11px;
-                        font-weight: 600;
-                        font-family: "Consolas";
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                }
-
-                // Entity chip — rendered when the tool call produced or
-                // targeted a scene entity. Clicking jumps the Explorer
-                // to that entity. Icon is y-centered with the name via
-                // explicit `y: (parent.height - self.height) / 2`
-                // arithmetic (HorizontalLayout was top-aligning fixed-
-                // height children in the same way it did on the tool
-                // badge above). The whole chip is a single TouchArea
-                // so the click target covers icon + name.
-                if root.entity-name != "": Rectangle {
-                    height: 30px;
-                    background: entity-touch.has-hover ? Theme.accent-blue.with-alpha(0.22) : Theme.accent-blue.with-alpha(0.12);
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: entity-touch.has-hover ? Theme.accent-blue : Theme.accent-blue.with-alpha(0.4);
-
-                    entity-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.select-entity(root.entity-name); }
-                    }
-
-                    entity-icon-img := Image {
-                        x: 8px;
-                        y: (parent.height - self.height) / 2;
-                        width: 16px;
-                        height: 16px;
-                        source: root.entity-icon;
-                        image-fit: contain;
-                    }
-
-                    entity-name-text := Text {
-                        x: entity-icon-img.x + entity-icon-img.width + 8px;
-                        y: (parent.height - self.height) / 2;
-                        width: parent.width - self.x - entity-class-text.width - 16px;
-                        text: root.entity-name;
-                        color: Theme.text-primary;
-                        font-size: 11px;
-                        font-weight: 600;
-                        font-family: "Consolas";
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-
-                    entity-class-text := Text {
-                        x: parent.width - self.width - 8px;
-                        y: (parent.height - self.height) / 2;
-                        text: root.entity-class;
-                        color: Theme.text-secondary;
-                        font-size: 10px;
-                        vertical-alignment: center;
-                    }
-                }
-
-                // Attached image, above the text: the picture is usually the
-                // subject and the words are the question about it. Capped in
-                // height so a tall screenshot cannot push the rest of the
-                // conversation off screen, and `image-fit: contain` keeps the
-                // aspect ratio rather than stretching it.
+                // The picture is usually the subject and the words the
+                // question about it, so it goes first. Capped in height so a
+                // tall screenshot cannot push the conversation off screen.
                 if root.has-attachment: Image {
                     source: root.attachment;
-                    width: 100%;
                     height: min(self.preferred-height, 220px);
                     image-fit: contain;
                     horizontal-alignment: left;
                 }
 
-                // Message content — hidden for pure MCP tool-call cards
-                // (the badge + status indicator already convey what ran;
-                // the raw argument JSON is noisy and unreadable).
-                if root.role != "mcp": VerticalLayout {
-                    spacing: 8px;
-
-                    for block in root.blocks: VerticalLayout {
-                        // ---- Prose ----------------------------------------
-                        if block.kind != "table": TextInput {
-                            text: block.text;
-                            color: root.role == "error" ? Theme.text-error : Theme.text-primary;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                            read-only: true;
-                            single-line: false;
-                            selection-background-color: Theme.selection-background;
-                            selection-foreground-color: Theme.text-primary;
-                        }
-
-                        // ---- Table ----------------------------------------
-                        // Drawn as a real grid. Columns share the width evenly
-                        // via horizontal-stretch rather than measuring content,
-                        // because a chat bubble is narrow and a content-sized
-                        // column would push the table off the panel.
-                        if block.kind == "table": Rectangle {
-                            border-width: 1px;
-                            border-color: Theme.border-color;
-                            border-radius: 3px;
-                            background: Theme.background-secondary;
-
-                            // Columns line up because every cell declares
-                            // `min-width: 0` and an equal `horizontal-stretch`.
-                            //
-                            // Stretch ALONE is not enough: Slint first gives
-                            // each Text its content-derived minimum width and
-                            // only shares out what is left over, so a row
-                            // holding "919 Wh/kg" and a row holding "98%"
-                            // resolve different boundaries and the columns
-                            // visibly stagger. Zeroing min-width removes the
-                            // content term, so each row splits its width into
-                            // N equal shares and every row agrees.
-                            //
-                            // Deriving an explicit cell width from this
-                            // Rectangle's own width is the tempting fix and is
-                            // a Slint binding loop: the container is sized by
-                            // its content, so width -> cell-w -> cell width ->
-                            // layoutinfo-h -> width. The compiler rejects it.
-
-                            VerticalLayout {
-                                padding: 1px;
-                                spacing: 0px;
-
-                                // Header row
-                                Rectangle {
-                                    background: Theme.background-tertiary;
-                                    HorizontalLayout {
-                                        padding-left: 8px;
-                                        padding-right: 8px;
-                                        padding-top: 6px;
-                                        padding-bottom: 6px;
-                                        spacing: 10px;
-                                        for h in block.table.headers: Text {
-                                            text: h;
-                                            horizontal-stretch: 1;
-                                            min-width: 0px;
-                                            color: Theme.text-secondary;
-                                            font-size: 10.5px;
-                                            font-weight: 700;
-                                            wrap: word-wrap;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-
-                                // Body. `r` and `c` are integer models, so the
-                                // flat cell list is addressed as r * columns + c.
-                                for r in block.table.row-indices: Rectangle {
-                                    background: mod(r, 2) == 1
-                                        ? Theme.background-tertiary.with-alpha(0.35)
-                                        : transparent;
-                                    HorizontalLayout {
-                                        padding-left: 8px;
-                                        padding-right: 8px;
-                                        padding-top: 5px;
-                                        padding-bottom: 5px;
-                                        spacing: 10px;
-                                        for c in block.table.col-indices: Text {
-                                            text: block.table.cells[r * block.table.columns + c];
-                                            horizontal-stretch: 1;
-                                            min-width: 0px;
-                                            color: Theme.text-primary;
-                                            font-size: 11px;
-                                            wrap: word-wrap;
-                                            // Centred so a wrapped two-line cell
-                                            // keeps its single-line neighbours on
-                                            // the same visual band.
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Artifact file path (clickable)
-                if root.role == "artifact": Rectangle {
-                    height: 24px;
-                    background: Theme.accent-green.with-alpha(0.12);
-                    border-radius: 4px;
-
-                    TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.open-artifact(root.artifact-path); }
-                    }
-
-                    HorizontalLayout {
-                        // Centre the 12px child in the 24px row. A HorizontalLayout does
-                        // NOT centre a fixed-height child: lower_layout pins it at
-                        // y = padding.top and leaves its height alone, so with no vertical
-                        // padding it sat flush against the top with 12px of dead space below.
-                        padding-top: 6px;
-                        padding-bottom: 6px;
-                        padding-left: 8px;
-                        padding-right: 8px;
-                        spacing: 4px;
-
-                        Image {
-                            width: 12px;
-                            height: 12px;
-                            source: @image-url("../../assets/icons/ui/new-file.svg");
-                            image-fit: contain;
-                            colorize: Theme.accent-green;
-                            vertical-alignment: center;
-                        }
-
-                        Text {
-                            text: root.artifact-path;
-                            color: Theme.accent-green;
-                            font-size: 11px;
-                            font-family: "Consolas";
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                    }
-                }
-
-                // Approval buttons (for MCP commands pending approval)
-                if root.role == "mcp" && root.mcp-status == "pending": HorizontalLayout {
-                    spacing: 4px;
-                    padding-top: 6px;
-
-                    // Run button — centered checkmark icon
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        height: 30px;
-                        background: approve-touch.has-hover ? Theme.accent-green : Theme.accent-green.with-alpha(0.8);
-                        border-radius: 4px;
-
-                        approve-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.approve-mcp(root.message-id); }
-                        }
-
-                        Image {
-                            width: 16px;
-                            height: 16px;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            source: @image-url("../../assets/icons/ui/check.svg");
-                            image-fit: contain;
-                            colorize: white;
-                        }
-                    }
-
-                    // Edit button — copies command into chat input for editing
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        height: 30px;
-                        background: edit-touch.has-hover ? Theme.accent-yellow.with-alpha(0.3) : Theme.accent-yellow.with-alpha(0.18);
-                        border-radius: 4px;
-
-                        edit-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.edit-mcp(root.message-id, root.content); }
-                        }
-
-                        Text {
-                            text: "Edit";
-                            color: Theme.text-warning;
-                            font-size: 11px;
-                            font-weight: 600;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    // Reject button — centered X icon
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        height: 30px;
-                        background: skip-touch.has-hover ? Theme.accent-red.with-alpha(0.35) : Theme.accent-red.with-alpha(0.2);
-                        border-radius: 4px;
-
-                        skip-touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.skip-mcp(root.message-id); }
-                        }
-
-                        Image {
-                            width: 14px;
-                            height: 14px;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            source: @image-url("../../assets/icons/ui/close.svg");
-                            image-fit: contain;
-                            colorize: Theme.accent-red;
-                        }
-                    }
-                }
-
-                // MCP status indicator (after approval)
-                if root.role == "mcp" && root.mcp-status != "pending": HorizontalLayout {
-                    spacing: 4px;
-                    padding-top: 2px;
-
-                    VerticalLayout {
-                        alignment: center;
-                        width: 8px;
-                        Rectangle {
-                            width: 8px;
-                            height: 8px;
-                            border-radius: 4px;
-                            background: root.mcp-status == "running" ? Theme.accent-blue :
-                                        root.mcp-status == "done" ? Theme.accent-green :
-                                        root.mcp-status == "skipped" ? Theme.text-secondary :
-                                        root.mcp-status == "error" ? Theme.accent-red :
-                                        Theme.accent-blue;
-                        }
-                    }
-
-                    Text {
-                        text: root.mcp-status == "running" ? "Running..." :
-                              root.mcp-status == "done" ? "Complete" :
-                              root.mcp-status == "skipped" ? "Skipped" :
-                              root.mcp-status == "approved" ? "Queued" :
-                              root.mcp-status == "error" ? "Failed" : "";
-                        color: Theme.text-secondary;
-                        font-size: 10px;
-                        vertical-alignment: center;
-                    }
-                }
-
-                // Timestamp — muted caption below the message.
-                Text {
-                    text: root.timestamp;
-                    color: Theme.text-secondary;
-                    font-size: 9px;
-                    horizontal-alignment: root.role == "user" ? right : left;
+                MessageBody {
+                    blocks: root.blocks;
                 }
             }
+        }
+    }
+
+    if root.role == "user" && root.timestamp != "": Text {
+        text: root.timestamp;
+        color: Theme.text-disabled;
+        font-size: 9px;
+        horizontal-alignment: right;
+    }
+
+    // ── Workshop's reply ────────────────────────────────────────────────────
+    if root.role == "system" || root.role == "approval": VerticalLayout {
+        spacing: 4px;
+
+        HorizontalLayout {
+            height: 16px;
+            spacing: 6px;
+
+            Text {
+                text: "Workshop";
+                color: root.role == "approval" ? Theme.accent-orange : Theme.accent-eustress;
+                font-size: 10px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            if root.model-label != "": Text {
+                text: root.model-label;
+                color: Theme.text-disabled;
+                font-size: 9px;
+                vertical-alignment: center;
+            }
+
+            if root.timestamp != "": Text {
+                text: root.timestamp;
+                color: Theme.text-disabled;
+                font-size: 9px;
+                vertical-alignment: center;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            CopyButton {
+                clicked => { root.copy-text(root.content); }
+            }
+        }
+
+        MessageBody {
+            blocks: root.blocks;
+        }
+    }
+
+    // ── A tool Workshop ran, or is running ──────────────────────────────────
+    if root.is-tool && !root.is-pending: Rectangle {
+        height: 24px;
+        border-radius: 5px;
+        background: row-touch.has-hover || root.expanded ? Theme.background-tertiary : transparent;
+
+        row-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.expanded = !root.expanded; }
+        }
+
+        // Status as a shape, not a glyph: a font without the character would
+        // draw a box, and these have to read at a glance.
+        status-icon := Rectangle {
+            x: 7px;
+            y: (parent.height - self.height) / 2;
+            width: 12px;
+            height: 12px;
+
+            if root.mcp-status == "done": Image {
+                width: 12px;
+                height: 12px;
+                source: @image-url("../../assets/icons/ui/check.svg");
+                image-fit: contain;
+                colorize: Theme.accent-green;
+            }
+
+            if root.mcp-status == "error": Image {
+                x: 1px;
+                y: 1px;
+                width: 10px;
+                height: 10px;
+                source: @image-url("../../assets/icons/ui/close.svg");
+                image-fit: contain;
+                colorize: Theme.accent-red;
+            }
+
+            if root.mcp-status == "skipped": Rectangle {
+                x: 2px;
+                y: 5px;
+                width: 8px;
+                height: 2px;
+                border-radius: 1px;
+                background: Theme.text-disabled;
+            }
+
+            if root.is-active-tool: Rectangle {
+                x: 2px;
+                y: 2px;
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: Theme.accent-eustress;
+                opacity: root.pulse ? 0.3 : 1.0;
+                animate opacity { duration: 450ms; }
+            }
+        }
+
+        tool-name := Text {
+            x: status-icon.x + status-icon.width + 7px;
+            y: (parent.height - self.height) / 2;
+            width: min(self.preferred-width, parent.width * 0.5);
+            text: root.mcp-endpoint;
+            color: root.mcp-status == "skipped" ? Theme.text-secondary : Theme.text-primary;
+            font-family: "Consolas";
+            font-size: 11px;
+            font-weight: 600;
+            overflow: elide;
+        }
+
+        Text {
+            x: tool-name.x + tool-name.width + 8px;
+            y: (parent.height - self.height) / 2;
+            width: max(0px, parent.width - self.x - 22px);
+            text: root.mcp-status == "skipped" ? "skipped"
+                : root.mcp-status == "error" && root.tool-summary == "" ? "failed"
+                : root.tool-summary;
+            color: root.mcp-status == "error" ? Theme.text-error : Theme.text-secondary;
+            font-size: 10.5px;
+            overflow: elide;
+        }
+
+        Text {
+            x: parent.width - 16px;
+            y: (parent.height - self.height) / 2;
+            text: root.expanded ? "▾" : "▸";
+            color: Theme.text-disabled;
+            font-size: 9px;
+        }
+    }
+
+    // Opened tool row: exactly what went in and what came back, selectable.
+    if root.is-tool && !root.is-pending && root.expanded: Rectangle {
+        background: Theme.background-secondary;
+        border-radius: 5px;
+        border-width: 1px;
+        border-color: Theme.border-color;
+
+        VerticalLayout {
+            padding: 8px;
+            spacing: 4px;
+
+            HorizontalLayout {
+                height: 16px;
+
+                Text {
+                    text: "INPUT";
+                    color: Theme.text-disabled;
+                    font-size: 8.5px;
+                    font-weight: 700;
+                    letter-spacing: 0.6px;
+                    vertical-alignment: center;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                CopyButton {
+                    label: "Copy input";
+                    clicked => { root.copy-text(root.tool-input); }
+                }
+            }
+
+            TextInput {
+                text: root.tool-input != "" ? root.tool-input : "(no arguments)";
+                color: Theme.text-primary;
+                font-family: "Consolas";
+                font-size: 10.5px;
+                wrap: word-wrap;
+                read-only: true;
+                single-line: false;
+                selection-background-color: Theme.selection-background;
+                selection-foreground-color: Theme.text-primary;
+            }
+
+            if root.tool-result != "": HorizontalLayout {
+                height: 16px;
+
+                Text {
+                    text: root.mcp-status == "error" ? "ERROR" : "RESULT";
+                    color: root.mcp-status == "error" ? Theme.accent-red : Theme.text-disabled;
+                    font-size: 8.5px;
+                    font-weight: 700;
+                    letter-spacing: 0.6px;
+                    vertical-alignment: center;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                CopyButton {
+                    label: "Copy result";
+                    clicked => { root.copy-text(root.tool-result); }
+                }
+            }
+
+            if root.tool-result != "": TextInput {
+                text: root.tool-result;
+                color: root.mcp-status == "error" ? Theme.text-error : Theme.text-primary;
+                font-family: "Consolas";
+                font-size: 10.5px;
+                wrap: word-wrap;
+                read-only: true;
+                single-line: false;
+                selection-background-color: Theme.selection-background;
+                selection-foreground-color: Theme.text-primary;
+            }
+
+            if root.tool-result == "" && root.is-active-tool: Text {
+                text: "Running…";
+                color: Theme.text-secondary;
+                font-size: 10px;
+            }
+        }
+    }
+
+    // ── A tool waiting for your yes ─────────────────────────────────────────
+    //
+    // The arguments are open by default: this is the moment you most need to
+    // see exactly what is about to happen.
+    if root.is-pending: Rectangle {
+        background: Theme.accent-orange.with-alpha(0.08);
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.accent-orange.with-alpha(0.5);
+
+        VerticalLayout {
+            padding: 10px;
+            spacing: 8px;
+
+            Text {
+                text: "Workshop wants to run";
+                color: Theme.accent-orange;
+                font-size: 10px;
+                font-weight: 700;
+            }
+
+            Text {
+                text: root.mcp-endpoint;
+                color: Theme.text-primary;
+                font-family: "Consolas";
+                font-size: 12px;
+                font-weight: 700;
+                overflow: elide;
+            }
+
+            if root.tool-input != "": Rectangle {
+                background: Theme.background-secondary;
+                border-radius: 5px;
+
+                VerticalLayout {
+                    padding: 8px;
+
+                    TextInput {
+                        text: root.tool-input;
+                        color: Theme.text-primary;
+                        font-family: "Consolas";
+                        font-size: 10.5px;
+                        wrap: word-wrap;
+                        read-only: true;
+                        single-line: false;
+                        selection-background-color: Theme.selection-background;
+                        selection-foreground-color: Theme.text-primary;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 6px;
+                height: 24px;
+
+                PillButton {
+                    height: 24px;
+                    label: "Run";
+                    tint: Theme.accent-green.with-alpha(0.85);
+                    tint-hover: Theme.accent-green;
+                    label-color: white;
+                    clicked => { root.approve-mcp(root.message-id); }
+                }
+
+                PillButton {
+                    height: 24px;
+                    label: "Skip";
+                    clicked => { root.skip-mcp(root.message-id); }
+                }
+
+                // Typing a message while this is waiting skips it and tells
+                // Workshop what to do instead, in one step.
+                Text {
+                    horizontal-stretch: 1;
+                    text: "or reply below to redirect";
+                    color: Theme.text-secondary;
+                    font-size: 9.5px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+
+    // Entity chip: the tool created or targeted a scene entity. Clicking
+    // selects it and scrolls the Explorer to it. Icon and name are centred
+    // with explicit y arithmetic, because a HorizontalLayout top-aligns
+    // fixed-height children.
+    if root.is-tool && root.entity-name != "": Rectangle {
+        height: 26px;
+        background: entity-touch.has-hover ? Theme.accent-blue.with-alpha(0.22) : Theme.accent-blue.with-alpha(0.10);
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: entity-touch.has-hover ? Theme.accent-blue : Theme.accent-blue.with-alpha(0.35);
+
+        entity-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.select-entity(root.entity-name); }
+        }
+
+        entity-icon-img := Image {
+            x: 8px;
+            y: (parent.height - self.height) / 2;
+            width: 14px;
+            height: 14px;
+            source: root.entity-icon;
+            image-fit: contain;
+        }
+
+        entity-name-text := Text {
+            x: entity-icon-img.x + entity-icon-img.width + 8px;
+            y: (parent.height - self.height) / 2;
+            width: parent.width - self.x - entity-class-text.width - 16px;
+            text: root.entity-name;
+            color: Theme.text-primary;
+            font-size: 11px;
+            font-weight: 600;
+            font-family: "Consolas";
+            overflow: elide;
+        }
+
+        entity-class-text := Text {
+            x: parent.width - self.width - 8px;
+            y: (parent.height - self.height) / 2;
+            text: root.entity-class;
+            color: Theme.text-secondary;
+            font-size: 10px;
+        }
+    }
+
+    // ── A note from Workshop itself: stopped, skipped, redirected ───────────
+    if root.role == "notice": Text {
+        text: root.content;
+        color: Theme.text-secondary;
+        font-size: 10px;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+
+    // ── What went wrong ─────────────────────────────────────────────────────
+    if root.role == "error": Rectangle {
+        background: Theme.accent-red.with-alpha(0.08);
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.accent-red.with-alpha(0.35);
+
+        VerticalLayout {
+            padding: 10px;
+            spacing: 4px;
+
+            HorizontalLayout {
+                height: 16px;
+
+                Text {
+                    text: "Something went wrong";
+                    color: Theme.accent-red;
+                    font-size: 10px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                CopyButton {
+                    clicked => { root.copy-text(root.content); }
+                }
+            }
+
+            MessageBody {
+                blocks: root.blocks;
+                text-color: Theme.text-error;
+            }
+        }
+    }
+
+    // ── A file Workshop produced ────────────────────────────────────────────
+    if root.role == "artifact": Rectangle {
+        height: 26px;
+        background: artifact-touch.has-hover ? Theme.accent-green.with-alpha(0.2) : Theme.accent-green.with-alpha(0.1);
+        border-radius: 5px;
+
+        artifact-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.open-artifact(root.artifact-path); }
+        }
+
+        artifact-icon := Image {
+            x: 8px;
+            y: (parent.height - self.height) / 2;
+            width: 12px;
+            height: 12px;
+            source: @image-url("../../assets/icons/ui/new-file.svg");
+            image-fit: contain;
+            colorize: Theme.accent-green;
+        }
+
+        Text {
+            x: artifact-icon.x + artifact-icon.width + 8px;
+            y: (parent.height - self.height) / 2;
+            width: parent.width - self.x - 8px;
+            text: root.artifact-path;
+            color: Theme.accent-green;
+            font-size: 11px;
+            font-family: "Consolas";
+            overflow: elide;
         }
     }
 }
@@ -824,6 +1051,67 @@ export component WorkshopPanel inherits Rectangle {
     // window root, so it survives this panel being torn down on tab switch.
     // The host restores the value belonging to the active session.
     in-out property <length> chat-scroll-y: 0px;
+
+    // Follow new messages while you are at the bottom, and stop following the
+    // moment you scroll up to read. Hoisted to the window root beside
+    // `chat-scroll-y` so it survives the panel being rebuilt on tab switch.
+    in-out property <bool> chat-stick-bottom: true;
+
+    // ── What the agent is doing right now ────────────────────────────────
+    // Pushed by the host only when it changes. `agent-activity` is a short
+    // phrase such as "Thinking" or "Running create_entity"; empty when idle.
+    in property <bool> agent-busy: false;
+    in property <string> agent-activity: "";
+    // Tool calls waiting for Run or Skip.
+    in property <int> pending-approvals: 0;
+    // Messages typed while Workshop was busy. They send, in order, the moment
+    // the current turn finishes. One line each, flattened by the host.
+    in property <[string]> queued-messages: [];
+    // Whether the key for the SELECTED model's provider is set. Distinct from
+    // `api-key-valid`, which is the Anthropic key the ideation pipeline always
+    // spends: picking Grok with only an xAI key must not claim a key is
+    // missing, and must not enable the pipeline either.
+    in property <bool> chat-key-valid: true;
+    in property <string> chat-key-hint: "";
+    // Your last message, recalled by Up in an empty input.
+    in property <string> last-prompt: "";
+    // Shown on an empty Workshop, one click each.
+    in property <[string]> starter-prompts: [
+        "Give me a quick tour of this Space",
+        "Add a glowing blue Part above the spawn point",
+        "Write a script that makes the selected Part spin",
+        "Design a solid-state sodium-sulfur battery pack",
+    ];
+
+    callback on-stop-agent();
+    callback on-approve-all();
+    callback on-skip-all();
+    callback on-remove-queued(int);
+    callback on-copy-text(string);
+
+    // Half-seconds this turn has been running, and a flip-flop that makes
+    // running dots breathe. The timer only runs while busy, so an idle panel
+    // costs no wakeups at all.
+    property <int> busy-ticks: 0;
+    property <bool> pulse: mod(root.busy-ticks, 2) == 1;
+    changed agent-busy => { root.busy-ticks = 0; }
+    busy-timer := Timer {
+        interval: 500ms;
+        running: root.agent-busy;
+        triggered => { root.busy-ticks += 1; }
+    }
+
+    // One path for every way of sending: Enter, the send button, a starter
+    // prompt. Sending always re-pins the chat to the bottom so your own
+    // message, and the reply to it, come into view.
+    function send-input() {
+        if root.input-text == "" && !root.has-attached-image {
+            return;
+        }
+        root.chat-stick-bottom = true;
+        root.on-send-message(root.input-text);
+        root.input-text = "";
+    }
 
     /// Scan `input-text` for a trailing `@prefix` token; if found, open
     /// the popup and emit a query. Called from the input field's `edited`
@@ -1164,57 +1452,39 @@ export component WorkshopPanel inherits Rectangle {
             }
         }
 
-        // API key warning (if not configured)
-        if !root.api-key-valid: Rectangle {
-            height: 56px;
-            background: Theme.accent-yellow.with-alpha(0.18);
+        // Missing key for the model you picked. Names the model and the
+        // provider, because with three vendors in the picker "API key
+        // required" no longer says which field to go and fill in.
+        if !root.chat-key-valid: Rectangle {
+            height: 34px;
+            background: Theme.accent-yellow.with-alpha(0.14);
 
-            VerticalLayout {
-                padding: 8px;
-                spacing: 4px;
-                alignment: center;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 8px;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                spacing: 8px;
 
-                HorizontalLayout {
-                    spacing: 4px;
-                    alignment: center;
-
-                    Image {
-                        width: 14px;
-                        height: 14px;
-                        source: @image-url("../../assets/icons/ui/info.svg");
-                        image-fit: contain;
-                        vertical-alignment: center;
-                    }
-
-                    Text {
-                        text: "SoulService API key required";
-                        color: Theme.text-primary;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                    }
+                Image {
+                    width: 14px;
+                    source: @image-url("../../assets/icons/ui/info.svg");
+                    image-fit: contain;
+                    colorize: Theme.accent-yellow;
                 }
 
-                HorizontalLayout {
-                    alignment: center;
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.chat-key-hint != "" ? root.chat-key-hint : "Add an API key to start chatting.";
+                    color: Theme.text-primary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
 
-                    Rectangle {
-                        width: 70px;
-                        height: 22px;
-                        background: Theme.button-background;
-                        border-radius: 4px;
-
-                        TouchArea {
-                            clicked => { root.on-configure-api(); }
-                        }
-
-                        Text {
-                            text: "Configure";
-                            color: Theme.text-primary;
-                            font-size: 10px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
+                PillButton {
+                    label: "Add key";
+                    clicked => { root.on-configure-api(); }
                 }
             }
         }
@@ -1277,6 +1547,28 @@ export component WorkshopPanel inherits Rectangle {
                     vertical-alignment: center;
                 }
 
+                // Cancel: saves the session, then resets the pipeline.
+                if root.pipeline-state == "running" || root.pipeline-state == "paused": Rectangle {
+                    width: 52px;
+                    y: (parent.height - self.height) / 2;
+                    height: 20px;
+                    border-radius: 3px;
+                    background: cancel-touch.has-hover ? Theme.button-hover : transparent;
+
+                    cancel-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-cancel-pipeline(); }
+                    }
+
+                    Text {
+                        text: "Cancel";
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
                 // Expand/collapse the per-step detail list.
                 Rectangle {
                     width: 20px;
@@ -1296,6 +1588,53 @@ export component WorkshopPanel inherits Rectangle {
                     Text {
                         text: root.pipeline-steps-expanded ? "▾" : "▸";
                         color: Theme.text-secondary;
+                        font-size: 10px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // ── Start: build the brief from the conversation so far ────────────
+        if root.pipeline-state == "conversing" && root.messages.length > 0: Rectangle {
+            height: 32px;
+            background: Theme.background-secondary;
+
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 8px;
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.api-key-valid
+                        ? "Ready? The brief is built from this conversation."
+                        : "Add an API key to build the brief.";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                Rectangle {
+                    width: 96px;
+                    y: (parent.height - self.height) / 2;
+                    height: 22px;
+                    border-radius: 4px;
+                    background: !root.api-key-valid ? Theme.button-background
+                        : start-touch.has-hover ? Theme.accent-blue.darker(0.15) : Theme.accent-blue;
+                    opacity: root.api-key-valid ? 1.0 : 0.5;
+
+                    start-touch := TouchArea {
+                        enabled: root.api-key-valid;
+                        mouse-cursor: root.api-key-valid ? pointer : default;
+                        clicked => { root.on-start-pipeline(); }
+                    }
+
+                    Text {
+                        text: "Start pipeline";
+                        color: Theme.text-primary;
                         font-size: 10px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
@@ -1332,187 +1671,217 @@ export component WorkshopPanel inherits Rectangle {
             }
         }
 
-        // Chat messages area
+        // ── Empty conversation ─────────────────────────────────────────────
+        //
+        // Says what Workshop can actually do, then offers prompts that
+        // exercise it. The old copy pitched only the product pipeline, which
+        // is one thing Workshop does, not the agent it has become.
         if root.messages.length == 0: Rectangle {
             vertical-stretch: 1;
             background: Theme.panel-background;
 
             VerticalLayout {
                 alignment: center;
-                spacing: 8px;
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 10px;
 
                 HorizontalLayout {
                     alignment: center;
-                    height: 40px;
+                    height: 34px;
 
                     Image {
-                        width: 40px;
-                        height: 40px;
+                        width: 34px;
+                        height: 34px;
                         source: @image-url("../../assets/icons/ui/sparkle.svg");
                         image-fit: contain;
-                        opacity: 0.5;
+                        colorize: Theme.accent-eustress;
+                        opacity: 0.85;
                     }
                 }
 
                 Text {
-                    text: "Workshop";
+                    text: "What should we build?";
                     color: Theme.text-primary;
-                    font-size: 14px;
+                    font-size: 15px;
                     font-weight: 600;
                     horizontal-alignment: center;
                 }
 
                 Text {
-                    text: "Describe your product idea.\nThe system will guide you through\npatent, validation, meshes, and TOML\ngeneration — step by step.";
+                    text: "Workshop builds and edits this Space, writes scripts, runs simulations and explains what it finds. It asks before anything risky.";
                     color: Theme.text-secondary;
                     font-size: 11px;
                     horizontal-alignment: center;
+                    wrap: word-wrap;
                 }
 
-                // Quick start examples
-                Rectangle {
-                    height: 80px;
+                VerticalLayout {
+                    padding-top: 6px;
+                    spacing: 5px;
 
-                    VerticalLayout {
-                        padding: 8px;
-                        spacing: 4px;
+                    for prompt in root.starter-prompts: Rectangle {
+                        height: 30px;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: prompt-touch.has-hover ? Theme.accent-eustress.with-alpha(0.6) : Theme.border-color;
+                        background: prompt-touch.has-hover ? Theme.accent-eustress.with-alpha(0.08) : transparent;
+
+                        prompt-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.chat-stick-bottom = true;
+                                root.on-send-message(prompt);
+                            }
+                        }
 
                         Text {
-                            text: "Try:";
-                            color: Theme.text-disabled;
-                            font-size: 10px;
-                            horizontal-alignment: center;
-                        }
-
-                        // Example 1
-                        Rectangle {
-                            height: 24px;
-                            background: example1-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                            border-radius: 4px;
-
-                            example1-touch := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => {
-                                    root.on-send-message("Solid-state sodium-sulfur battery, 15k cycle life, 900 Wh/kg");
-                                }
-                            }
-
-                            Text {
-                                text: "\"Solid-state sodium-sulfur battery, 15k cycle life\"";
-                                color: Theme.accent-blue;
-                                font-size: 11px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        // Example 2
-                        Rectangle {
-                            height: 24px;
-                            background: example2-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                            border-radius: 4px;
-
-                            example2-touch := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => {
-                                    root.on-send-message("Gravity drive using Element 115 stable island isotope");
-                                }
-                            }
-
-                            Text {
-                                text: "\"Gravity drive using Element 115 stable island isotope\"";
-                                color: Theme.accent-blue;
-                                font-size: 11px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
+                            x: 10px;
+                            width: parent.width - 20px;
+                            height: parent.height;
+                            text: prompt;
+                            color: Theme.text-primary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            overflow: elide;
                         }
                     }
+                }
+
+                Text {
+                    text: "Enter to send · Shift+Enter for a new line · @ to mention · Ctrl+V to paste an image";
+                    color: Theme.text-disabled;
+                    font-size: 9.5px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
                 }
             }
         }
 
-        if root.messages.length > 0: chat-scroll := ScrollView {
+        if root.messages.length > 0: Rectangle {
             vertical-stretch: 1;
 
-            // Chat scroll offset is hoisted to the panel root, and from there
-            // to the window root, because the right-hand dock instantiates
-            // this panel with `if right-tab-index == 3`. Switching tabs away
-            // destroys the whole component, so anything held in here (and in
-            // the ScrollView's own viewport-y) is gone on return. The host
-            // keys the saved value by session id, so each conversation tab
-            // comes back where you left it rather than sharing one offset.
-            viewport-y <=> root.chat-scroll-y;
+            chat-scroll := ScrollView {
+                width: parent.width;
+                height: parent.height;
 
-            // Edge auto-scroll: when the pointer hovers within 40px of the
-            // top or bottom edge the timer nudges viewport-y each frame.
-            // `scroll-touch.has-hover` drives the running state — no
-            // PointerEventKind.exit needed.
-            property <length> pointer-y-in-scroll: 0px;
+                // Chat scroll offset is hoisted to the panel root, and from
+                // there to the window root, because the right-hand dock
+                // instantiates this panel with `if right-tab-index == 3`.
+                // Switching tabs away destroys the whole component, so anything
+                // held in here (and in the ScrollView's own viewport-y) is gone
+                // on return. The host keys the saved value by session id, so
+                // each conversation comes back where you left it.
+                viewport-y <=> root.chat-scroll-y;
 
-            edge-scroll-timer := Timer {
-                interval: 16ms;
-                running: scroll-touch.has-hover;
-                triggered => {
-                    let edge-zone = 40px;
-                    let speed = 8px;
-                    let h = chat-scroll.height;
-                    let py = chat-scroll.pointer-y-in-scroll;
-                    let max-vp = max(0px, chat-scroll.viewport-height - h);
-                    if py < edge-zone {
-                        chat-scroll.viewport-y = max(-max-vp, chat-scroll.viewport-y + speed);
-                    } else if py > (h - edge-zone) {
-                        chat-scroll.viewport-y = min(0px, chat-scroll.viewport-y - speed);
+                // Follow new output while you are at the bottom. Nothing used
+                // to, so every reply landed below the fold and had to be
+                // scrolled to by hand. `changed` runs once the content has
+                // grown, so this lands exactly on the new bottom.
+                changed viewport-height => {
+                    if root.chat-stick-bottom {
+                        self.viewport-y = min(0px, -(self.viewport-height - self.visible-height));
+                    }
+                }
+
+                // Any scroll (wheel, drag, the host restoring a saved offset)
+                // re-decides whether we are following. Within 24px of the
+                // bottom counts as at the bottom.
+                changed viewport-y => {
+                    root.chat-stick-bottom = self.viewport-y
+                        <= min(0px, -(self.viewport-height - self.visible-height)) + 24px;
+                }
+
+                // Forwards wheel events so scrolling still works while a
+                // message's read-only TextInput has focus, which otherwise
+                // swallows them.
+                //
+                // There used to be an edge auto-scroll here as well: a 16ms
+                // timer that ran whenever the pointer was over the chat and
+                // scrolled it whenever the pointer rested within 40px of the
+                // top or bottom edge. Resting the mouse above the input box, or
+                // passing it up to the tabs, scrolled the conversation by
+                // itself, and it woke the UI sixty times a second while
+                // hovering. Removed.
+                scroll-touch := TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    scroll-event(ev) => {
+                        let max-vp = max(0px, chat-scroll.viewport-height - chat-scroll.visible-height);
+                        chat-scroll.viewport-y = clamp(
+                            chat-scroll.viewport-y + ev.delta-y,
+                            -max-vp,
+                            0px
+                        );
+                        accept
+                    }
+                }
+
+                VerticalLayout {
+                    padding-top: 6px;
+                    padding-bottom: 10px;
+                    spacing: 0px;
+
+                    for msg in root.messages: ChatBubble {
+                        role: msg.role;
+                        content: msg.content;
+                        blocks: msg.blocks;
+                        timestamp: msg.timestamp;
+                        mcp-endpoint: msg.mcp-endpoint;
+                        mcp-method: msg.mcp-method;
+                        mcp-status: msg.mcp-status;
+                        artifact-path: msg.artifact-path;
+                        artifact-type: msg.artifact-type;
+                        entity-class: msg.entity-class;
+                        entity-name: msg.entity-name;
+                        entity-icon: msg.entity-icon;
+                        attachment: msg.attachment;
+                        has-attachment: msg.has-attachment;
+                        tool-summary: msg.tool-summary;
+                        tool-input: msg.tool-input;
+                        tool-result: msg.tool-result;
+                        model-label: msg.model-label;
+                        message-id: msg.id;
+                        pulse: root.pulse;
+
+                        approve-mcp(id) => { root.on-approve-mcp(id); }
+                        skip-mcp(id) => { root.on-skip-mcp(id); }
+                        open-artifact(path) => { root.on-open-artifact(path); }
+                        select-entity(name) => { root.on-select-entity(name); }
+                        copy-text(text) => { root.on-copy-text(text); }
                     }
                 }
             }
 
-            // Transparent overlay — tracks pointer-y for edge detection and
-            // forwards wheel events so scrolling works even when the TextInput
-            // below has keyboard focus (which normally swallows wheel events).
-            scroll-touch := TouchArea {
-                width: parent.width;
-                height: parent.height;
-                moved => {
-                    chat-scroll.pointer-y-in-scroll = self.mouse-y;
+            // Only when you have scrolled away from where new output lands.
+            if !root.chat-stick-bottom: Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: parent.height - self.height - 10px;
+                width: jump-label.preferred-width + 26px;
+                height: 24px;
+                border-radius: 12px;
+                background: jump-touch.has-hover ? Theme.button-hover : Theme.dialog-background;
+                border-width: 1px;
+                border-color: Theme.border-color;
+                drop-shadow-blur: 8px;
+                drop-shadow-color: Theme.shadow-float;
+
+                jump-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.chat-stick-bottom = true;
+                        chat-scroll.viewport-y = min(0px, -(chat-scroll.viewport-height - chat-scroll.visible-height));
+                    }
                 }
-                scroll-event(ev) => {
-                    let max-vp = max(0px, chat-scroll.viewport-height - chat-scroll.height);
-                    chat-scroll.viewport-y = clamp(
-                        chat-scroll.viewport-y + ev.delta-y,
-                        -max-vp,
-                        0px
-                    );
-                    accept
-                }
-            }
 
-            VerticalLayout {
-                padding: 4px;
-                spacing: 0px;
-
-                for msg in root.messages: ChatBubble {
-                    role: msg.role;
-                    content: msg.content;
-                    blocks: msg.blocks;
-                    timestamp: msg.timestamp;
-                    mcp-endpoint: msg.mcp-endpoint;
-                    mcp-method: msg.mcp-method;
-                    mcp-status: msg.mcp-status;
-                    artifact-path: msg.artifact-path;
-                    artifact-type: msg.artifact-type;
-                    entity-class: msg.entity-class;
-                    entity-name: msg.entity-name;
-                    entity-icon: msg.entity-icon;
-                    attachment: msg.attachment;
-                    has-attachment: msg.has-attachment;
-                    message-id: msg.id;
-
-                    approve-mcp(id) => { root.on-approve-mcp(id); }
-                    skip-mcp(id) => { root.on-skip-mcp(id); }
-                    edit-mcp(id, cmd-text) => { root.input-text = cmd-text; }
-                    open-artifact(path) => { root.on-open-artifact(path); }
-                    select-entity(name) => { root.on-select-entity(name); }
+                jump-label := Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "↓  Jump to latest";
+                    color: Theme.text-primary;
+                    font-size: 10.5px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
             }
         }
@@ -1561,6 +1930,150 @@ export component WorkshopPanel inherits Rectangle {
                             color: white;
                             font-size: 12px;
                             font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── What Workshop is doing right now ───────────────────────────────
+        //
+        // The agent loop does not stream, so between Send and the reply there
+        // used to be nothing on screen at all: no sign the model was working,
+        // no way to stop it. This strip is that sign, and it owns Stop.
+        // Approvals outrank activity, because a waiting approval is the one
+        // thing only you can unblock.
+        if root.agent-busy || root.pending-approvals > 0: Rectangle {
+            height: 32px;
+            background: root.pending-approvals > 0
+                ? Theme.accent-orange.with-alpha(0.10)
+                : Theme.accent-eustress.with-alpha(0.07);
+
+            Rectangle {
+                y: 0px;
+                height: 1px;
+                background: Theme.border-color;
+            }
+
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 8px;
+                padding-top: 5px;
+                padding-bottom: 5px;
+                spacing: 8px;
+
+                VerticalLayout {
+                    alignment: center;
+                    width: 8px;
+
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: root.pending-approvals > 0 ? Theme.accent-orange : Theme.accent-eustress;
+                        opacity: root.pending-approvals > 0 || !root.pulse ? 1.0 : 0.3;
+                        animate opacity { duration: 450ms; }
+                    }
+                }
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.pending-approvals == 1 ? "Waiting for your approval"
+                        : root.pending-approvals > 1 ? root.pending-approvals + " actions need your approval"
+                        : (root.agent-activity != "" ? root.agent-activity : "Working")
+                            + (root.busy-ticks >= 2 ? "  ·  " + floor(root.busy-ticks / 2) + "s" : "");
+                    color: Theme.text-primary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                if root.pending-approvals > 1: PillButton {
+                    label: "Run all";
+                    tint: Theme.accent-green.with-alpha(0.85);
+                    tint-hover: Theme.accent-green;
+                    label-color: white;
+                    clicked => { root.on-approve-all(); }
+                }
+
+                if root.pending-approvals > 1: PillButton {
+                    label: "Skip all";
+                    clicked => { root.on-skip-all(); }
+                }
+
+                if root.agent-busy && root.pending-approvals == 0: PillButton {
+                    label: "Stop";
+                    tint: Theme.accent-red.with-alpha(0.18);
+                    tint-hover: Theme.accent-red.with-alpha(0.35);
+                    label-color: Theme.accent-red;
+                    clicked => { root.on-stop-agent(); }
+                }
+            }
+        }
+
+        // ── Messages waiting their turn ────────────────────────────────────
+        //
+        // A message sent while Workshop was working used to be appended ahead
+        // of the reply it was waiting on, and then never answered: the guard
+        // saw the assistant as the last to speak. Now it waits here, visibly,
+        // and goes the moment the turn ends. × drops one.
+        if root.queued-messages.length > 0: Rectangle {
+            background: Theme.background-secondary;
+
+            VerticalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: 6px;
+                padding-bottom: 2px;
+                spacing: 4px;
+
+                Text {
+                    text: root.queued-messages.length == 1
+                        ? "Queued, sends when Workshop finishes"
+                        : root.queued-messages.length + " queued, they send in order when Workshop finishes";
+                    color: Theme.text-secondary;
+                    font-size: 9.5px;
+                }
+
+                for queued[queued-index] in root.queued-messages: Rectangle {
+                    height: 26px;
+                    border-radius: 6px;
+                    background: Theme.background-tertiary;
+                    border-width: 1px;
+                    border-color: Theme.border-color;
+
+                    Text {
+                        x: 10px;
+                        width: parent.width - 40px;
+                        height: parent.height;
+                        text: queued;
+                        color: Theme.text-primary;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    Rectangle {
+                        x: parent.width - 24px;
+                        y: (parent.height - self.height) / 2;
+                        width: 18px;
+                        height: 18px;
+                        border-radius: 3px;
+                        background: unqueue-touch.has-hover ? Theme.accent-red.with-alpha(0.25) : transparent;
+
+                        unqueue-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.on-remove-queued(queued-index); }
+                        }
+
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "×";
+                            color: unqueue-touch.has-hover ? Theme.accent-red : Theme.text-disabled;
+                            font-size: 13px;
+                            horizontal-alignment: center;
                             vertical-alignment: center;
                         }
                     }
@@ -1926,14 +2439,9 @@ export component WorkshopPanel inherits Rectangle {
                         vertical-alignment: center;
                     }
 
-                    if root.active-tool != "": Text {
-                        text: "⟳ " + root.active-tool;
-                        color: Theme.accent-green;
-                        font-size: 9px;
-                        vertical-alignment: center;
-                    }
-
-                    if root.active-tool == "" && root.tool-count > 0: Text {
+                    // What is running now lives in the activity strip above
+                    // the input, so this corner only shows the tool count.
+                    if !root.agent-busy && root.tool-count > 0: Text {
                         text: root.tool-count + " tools";
                         color: Theme.text-secondary;
                         font-size: 9px;
@@ -2055,19 +2563,6 @@ export component WorkshopPanel inherits Rectangle {
                                 single-line: false;
                                 wrap: word-wrap;
 
-                            accepted => {
-                                // If the popup is open, Enter commits the
-                                // highlighted mention instead of sending.
-                                if root.mention-popup-visible && root.mention-items.length > 0 {
-                                    root.on-mention-commit(root.mention-selected-index);
-                                    return;
-                                }
-                                if root.input-text != "" {
-                                    root.on-send-message(root.input-text);
-                                    root.input-text = "";
-                                }
-                            }
-
                             // Live-edit hook — every keystroke scans back
                             // from the cursor for the most recent `@`. If
                             // one is found within 32 chars and not
@@ -2086,16 +2581,25 @@ export component WorkshopPanel inherits Rectangle {
                             }
 
                             key-pressed(ev) => {
-                                // Ctrl+Enter sends the message without
-                                // inserting a newline. Plain Enter still
-                                // inserts a newline (standard multi-line
-                                // TextInput behavior) — matches Discord /
-                                // Slack / ChatGPT conventions.
-                                if ev.text == Key.Return && ev.modifiers.control {
-                                    if root.input-text != "" {
-                                        root.on-send-message(root.input-text);
-                                        root.input-text = "";
+                                // Enter sends and Shift+Enter starts a new
+                                // line. It used to be the other way round,
+                                // Ctrl+Enter to send, on the stated premise
+                                // that Discord, Slack and ChatGPT work that
+                                // way. All three send on Enter, so every habit
+                                // carried over from them typed a newline here
+                                // instead. Ctrl+Enter still sends.
+                                //
+                                // With the @ popup open, Enter picks the
+                                // highlighted mention instead.
+                                if ev.text == Key.Return {
+                                    if root.mention-popup-visible && root.mention-items.length > 0 {
+                                        root.on-mention-commit(root.mention-selected-index);
+                                        return accept;
                                     }
+                                    if ev.modifiers.shift {
+                                        return reject;
+                                    }
+                                    root.send-input();
                                     return accept;
                                 }
                                 // Ctrl+V — if clipboard contains an image,
@@ -2135,10 +2639,42 @@ export component WorkshopPanel inherits Rectangle {
                                         return accept;
                                     }
                                 }
+                                // Up in an empty box brings back your last
+                                // message, to fix a typo or ask again.
+                                if ev.text == Key.UpArrow && root.input-text == "" && root.last-prompt != "" {
+                                    root.input-text = root.last-prompt;
+                                    return accept;
+                                }
+                                // Escape stops a running turn, the same as the
+                                // Stop button.
+                                if ev.text == Key.Escape && root.agent-busy {
+                                    root.on-stop-agent();
+                                    return accept;
+                                }
                                 return reject;
                             }
                         } // close TextInput (input-area)
                         } // close ScrollView (input-scroll)
+
+                        // Placeholder. TextInput has none of its own, so this
+                        // sits over it while the box is empty. Text takes no
+                        // pointer events, so clicks still reach the input. It
+                        // changes with the moment, because what typing does
+                        // changes too: while Workshop works a message queues,
+                        // and while an approval waits it redirects.
+                        if root.input-text == "": Text {
+                            // Same origin as `input-scroll`, so the hint sits
+                            // exactly where the first typed character will.
+                            x: input-scroll.x;
+                            y: input-scroll.y;
+                            width: input-scroll.width;
+                            text: root.pending-approvals > 0 ? "Reply to skip and redirect, or approve above"
+                                : root.agent-busy ? "Type to queue a message for when Workshop finishes"
+                                : "Ask Workshop to build, script or simulate";
+                            color: Theme.text-disabled;
+                            font-size: 12px;
+                            overflow: elide;
+                        }
                     } // close outer Rectangle (input container)
 
                     // Send button (arrow-up icon). Bottom-pinned to the
@@ -2146,20 +2682,46 @@ export component WorkshopPanel inherits Rectangle {
                     // line of the input even as the box grows taller.
                     // 2px inset from the bottom keeps the arrow's visual
                     // centre on the text baseline.
-                    Rectangle {
+                    //
+                    // While Workshop works and the box is empty, this is Stop.
+                    // With text in the box it sends, which queues the message
+                    // if a turn is still running. An image alone is a valid
+                    // message ("what is wrong with this?"); the host always
+                    // accepted one, but this button used to stay disabled
+                    // until you typed something.
+                    send-btn := Rectangle {
+                        property <bool> can-send: root.input-text != "" || root.has-attached-image;
+                        property <bool> is-stop: root.agent-busy && !self.can-send;
+
                         width: 36px;
                         height: 36px;
                         y: parent.height - self.height - 2px;
-                        background: root.input-text != "" ? (send-touch.has-hover ? Theme.accent-green : Theme.button-primary) : Theme.button-background;
+                        background: self.is-stop
+                            ? (send-touch.has-hover ? Theme.accent-red : Theme.accent-red.with-alpha(0.75))
+                            : self.can-send
+                                ? (send-touch.has-hover ? Theme.accent-green : Theme.button-primary)
+                                : Theme.button-background;
                         border-radius: 8px;
 
                         send-touch := TouchArea {
-                            mouse-cursor: root.input-text != "" ? pointer : default;
-                            enabled: root.input-text != "";
+                            mouse-cursor: send-btn.is-stop || send-btn.can-send ? pointer : default;
+                            enabled: send-btn.is-stop || send-btn.can-send;
                             clicked => {
-                                root.on-send-message(root.input-text);
-                                root.input-text = "";
+                                if send-btn.is-stop {
+                                    root.on-stop-agent();
+                                } else {
+                                    root.send-input();
+                                }
                             }
+                        }
+
+                        if send-btn.is-stop: Rectangle {
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            width: 11px;
+                            height: 11px;
+                            border-radius: 2px;
+                            background: white;
                         }
 
                         // Icon centred inside the button with explicit
@@ -2168,14 +2730,14 @@ export component WorkshopPanel inherits Rectangle {
                         // parent dimensions change at runtime. The
                         // arithmetic below keeps the glyph pixel-perfect
                         // regardless of button size.
-                        Image {
+                        if !send-btn.is-stop: Image {
                             width: 16px;
                             height: 16px;
                             x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
                             source: @image-url("../../assets/icons/ui/send.svg");
                             image-fit: contain;
-                            colorize: root.input-text != "" ? white : Theme.text-disabled;
+                            colorize: send-btn.can-send ? white : Theme.text-disabled;
                         }
                     }
                 }

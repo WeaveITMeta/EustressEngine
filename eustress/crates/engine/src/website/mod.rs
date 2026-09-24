@@ -4,7 +4,7 @@
 //!
 //! An author marks values in the Explorer as References inside the `Website`
 //! service. On publish they bake into one small JSON object beside the
-//! Universe `.pak`, and a website fetches that one document and updates every
+//! published world, and a website fetches that one document and updates every
 //! value it displays from it.
 //!
 //! The problem being solved is retyping. A site that quotes a Space's numbers
@@ -56,8 +56,8 @@
 //! };
 //! ```
 //!
-//! Then inside the upload thread, once the `.pak` digest and the simulation id
-//! exist:
+//! Then inside the upload thread, once the world's manifest digest and the
+//! simulation id exist:
 //!
 //! ```ignore
 //! let baked = pending.finalize(&sim_id, &website::blake3_publish_hash(&pak_bytes));
