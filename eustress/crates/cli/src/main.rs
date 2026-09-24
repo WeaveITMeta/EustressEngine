@@ -11,6 +11,7 @@
 //! - cmd_publish           — `eustress publish`   — publish Space to Cloudflare R2
 //! - cmd_sim               — `eustress sim`       — simulation history (in-process ring-buffer replay)
 //! - commerce::run         — `eustress commerce`  — products, purchases, events, listen, trigger (Stripe-CLI style)
+//! - data::run             `eustress data`: data mining on a file (models, features, clusters, rules, residuals)
 //!
 //! ## Drive surface (HEADLESS_RUNTIME.md §7)
 //! `bridge` is a thin wrapper over `eustress-bridge-client` (the same TCP JSON-RPC
@@ -30,6 +31,7 @@
 //! its siblings on the same Universe run their own.
 
 mod commerce;
+mod data;
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -128,6 +130,11 @@ enum Commands {
     /// Sell products inside your published simulations: products, purchases,
     /// events, webhooks, and a local listener, in test mode unless --live.
     Commerce(commerce::CommerceArgs),
+
+    /// Mine a data file: describe it, fit and compare models, rank and select
+    /// features, cluster, find association rules, or score a simulation
+    /// against measurements. Every run reports the pitfalls it detected.
+    Data(data::DataArgs),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -549,6 +556,7 @@ async fn main() -> Result<()> {
         Commands::Sim { action } => cmd_sim(&cli.iggy_url, action).await,
         Commands::Fork { action } => cmd_fork(action).await,
         Commands::Commerce(args) => commerce::run(args).await,
+        Commands::Data(args) => data::run(args),
     }
 }
 

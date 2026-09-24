@@ -37,6 +37,10 @@ toml = "0.8"
 # the disk shape of an MCP-created entity matches every other surface
 # (Insert menu, Toolbox, Model ribbon).
 eustress-common = { path = "../common" }
+# Data mining over data files (`mine_data`): the JSON front door of the
+# data leaf. `import` only: CSV and JSON reading, no arrow/parquet here. The
+# engine's build unifies in `parquet`, and Parquet files then read too.
+eustress-data = { path = "../data", features = ["import"] }
 # Parametric CAD kernel — cad_create_part / cad_export_glb evaluate
 # feature trees and write .glb without a live Studio.
 eustress-cad = { path = "../cad" }

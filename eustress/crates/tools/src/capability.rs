@@ -253,6 +253,8 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "find_entity"
         | "read_file"
         | "list_directory"
+        // Reads a data file and computes a report; writes nothing.
+        | "mine_data"
         | "list_space_contents"
         | "measure_distance"
         | "raycast"

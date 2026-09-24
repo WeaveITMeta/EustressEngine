@@ -27,6 +27,10 @@
 //!   the fitted model it returns only predicts. There is no half-trained state,
 //!   and cross-validation can fit one spec many times.
 
+/// The JSON front door: one request in, one report out. Needs `import` for
+/// file reading and JSON.
+#[cfg(feature = "import")]
+pub mod api;
 pub mod assoc;
 pub mod classify;
 pub mod cluster;

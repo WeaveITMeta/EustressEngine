@@ -17,6 +17,9 @@ eustress-common = { path = "../common", features = ["async-assets"] }
 # a live eustress-engine or eustress-headless (`bridge` subcommand).
 eustress-bridge-client = { path = "../bridge-client" }
 
+# `eustress data`: the data mining front door, reading CSV, JSON and Parquet.
+eustress-data = { path = "../data", features = ["import", "parquet"] }
+
 # CLI argument parsing
 clap = { version = "4.4", features = ["derive", "env"] }
 

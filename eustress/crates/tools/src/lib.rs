@@ -50,6 +50,8 @@ pub use registry::{
 // Tool implementation modules. Each hosts a family of related tools;
 // see the struct docs in the individual files for the full surface.
 pub mod cad_tools;
+/// Data mining over files in the Universe (`mine_data`).
+pub mod data_tools;
 pub mod diff_tools;
 pub mod embedvec_tools;
 pub mod entity_tools;
@@ -138,6 +140,11 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     // Kernel v2: persistent face/edge names, and exact B-rep export.
     registry.register(cad_tools::CadListTopologyTool);
     registry.register(cad_tools::CadExportStepTool);
+
+    // Data mining over data files: models, feature selection, clustering,
+    // association rules and simulation residuals, each run returning a
+    // report with its cautions.
+    registry.register(data_tools::MineDataTool);
 
     // File I/O.
     registry.register(file_tools::ReadFileTool);
