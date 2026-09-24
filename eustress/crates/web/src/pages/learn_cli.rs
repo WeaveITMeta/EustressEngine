@@ -324,6 +324,7 @@ cargo build --release -p eustress-space    # eustress-space"#}</code></pre>
                                     <tr><td><code>"close"</code></td><td>"Shut engines down cleanly by pid, by Space or all at once."</td><td>"Available"</td></tr>
                                     <tr><td><code>"bridge"</code></td><td>"Send one command to a running engine over its bridge."</td><td>"Available"</td></tr>
                                     <tr><td><code>"run"</code></td><td>"Run a Space in eustress-headless and wait for it to finish."</td><td>"Available"</td></tr>
+                                    <tr><td><code>"data"</code></td><td>"Mine a data file: describe it, fit and compare models, rank and select features, cluster, find association rules, or score a simulation against measurements, with cautions for leaks and bias."</td><td>"Available"</td></tr>
                                     <tr><td><code>"server"</code></td><td>"Start the multiplayer host."</td><td>"Not yet available"</td></tr>
                                     <tr><td><code>"publish"</code></td><td>"Upload a Space from the command line."</td><td>"Not yet available"</td></tr>
                                     <tr><td><code>"sim"</code></td><td>"Replay simulation history."</td><td>"Not yet available"</td></tr>

@@ -496,7 +496,7 @@ pub fn LearnMcpPage() -> impl IntoView {
                         <div id="access-sandbox" class="subsection">
                             <h3>"The Universe Sandbox"</h3>
                             <ul class="docs-list">
-                                <li><strong>"File tools"</strong>": "<code>"read_file"</code>", "<code>"list_directory"</code>" and "<code>"write_file"</code>" take paths relative to the Universe root. A path containing "<code>".."</code>" is refused, and so is any path that resolves outside the Universe."</li>
+                                <li><strong>"File tools"</strong>": "<code>"read_file"</code>", "<code>"list_directory"</code>", "<code>"write_file"</code>" and "<code>"mine_data"</code>" take paths relative to the Universe root. A path containing "<code>".."</code>" is refused, and so is any path that resolves outside the Universe."</li>
                                 <li><strong>"Entity files"</strong>": "<code>"write_file"</code>" will not overwrite an "<code>"_instance.toml"</code>"; entities change through "<code>"create_entity"</code>" and "<code>"update_entity"</code>"."</li>
                                 <li><strong>"Size caps"</strong>": "<code>"read_file"</code>" returns the first 50,000 bytes of a file, resource reads stop at 256 KB, and a tool's structured result is cut at 120 KB with an explicit truncation note."</li>
                                 <li><strong>"The protocol stream"</strong>" carries only protocol messages. The server's own log goes to stderr."</li>
@@ -780,6 +780,7 @@ pub fn LearnMcpPage() -> impl IntoView {
                                     <tr><td><code>"run_experiment"</code></td><td>"Optionally create a git branch, then apply overrides, run for a duration, wait, and save the result under "<code>".eustress/experiments"</code>"."</td></tr>
                                     <tr><td><code>"compare_runs"</code></td><td>"Metric deltas between two saved experiments; "<code>"latest"</code>" and "<code>"latest-1"</code>" work as names."</td></tr>
                                     <tr><td><code>"list_experiments"</code></td><td>"Saved experiment results, newest first."</td></tr>
+                                    <tr><td><code>"mine_data"</code></td><td>"Mine a data file in the Universe (CSV, JSONL, JSON or Parquet): describe it, classify, regress, compare models, rank and select features, cluster, run PCA, find association rules, or score a simulation against measured data. Every run reports cautions for leaks, duplicate records and selection bias. Read-only."</td></tr>
                                     <tr><td><code>"datastore_get"</code></td><td>"Read a key from a named DataStore file under the Universe's "<code>".eustress/datastore"</code>"."</td></tr>
                                     <tr><td><code>"datastore_set"</code></td><td>"Write a key to a named DataStore file."</td></tr>
                                     <tr><td><code>"query_material"</code></td><td>"Rendering and mechanical properties of a material preset."</td></tr>
