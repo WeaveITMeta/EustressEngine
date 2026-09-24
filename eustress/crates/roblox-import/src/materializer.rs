@@ -269,7 +269,6 @@ struct TomlPatch {
     tags: Vec<String>,
     refs_uuid: HashMap<String, String>,
     refs_unresolved: HashMap<String, String>,
-    asset_path: Option<String>,
     asset_mesh: Option<String>,
     /// Folded DataMesh (`SpecialMesh`/`BlockMesh`/`CylinderMesh`) visual
     /// scale — written as a top-level `mesh_scale = [x, y, z]` key (see
@@ -666,6 +665,9 @@ impl<'dom> Materializer<'dom> {
         // `Ustr`; project to the `HashMap<String, Variant>` the mapper expects.
         let string_props = props_to_string_map(inst);
         let mut bag = map_properties(&string_props, eustress_class);
+        for miss in bag.unmapped.drain(..) {
+            report.record_unmapped_property(inst.class.as_str(), &miss.property, &miss.variant_type);
+        }
 
         // Choose the on-disk folder name. `inst.class` is a `Ustr` in
         // rbx_dom_weak 4.x; project to String to match `inst.name`.
@@ -783,6 +785,11 @@ impl<'dom> Materializer<'dom> {
         let mut folded_mesh_primitive: Option<&'static str> = None;
         let mut folded_mesh_scale: Option<[f32; 3]> = None;
         let mut folded_mesh_offset: Option<[f32; 3]> = None;
+        // True when a SpecialMesh FileMesh supplied this part's mesh (its
+        // `MeshId` won the slot). Roblox renders such a mesh at its NATIVE
+        // size times `Scale`, independent of the part's `Size`, unlike a
+        // MeshPart whose mesh stretches to fill `Size`.
+        let mut folded_file_mesh = false;
         let mut saw_mesh_child = false;
         for child_ref in inst.children().iter() {
             let Some(child) = self.dom.get_by_ref(*child_ref) else {
@@ -941,6 +948,9 @@ impl<'dom> Materializer<'dom> {
                     // below. `entry().or_insert` so a MeshPart's own
                     // MeshId/MeshContent always wins over the child's.
                     if let Some(uri) = mesh_uri {
+                        if !bag.asset_refs.contains_key("MeshId") {
+                            folded_file_mesh = true;
+                        }
                         bag.asset_refs.entry("MeshId".to_string()).or_insert(uri);
                     }
                 }
@@ -1133,6 +1143,14 @@ impl<'dom> Materializer<'dom> {
         // (Wave F3) is content-sniffed into `assets/textures/` or
         // `assets/sounds/`. Fetch/decode/sniff failures stay on the
         // placeholder path with a warning.
+        let mut file_mesh_native_extent: Option<[f32; 3]> = None;
+        if special == SpecialKind::Csg {
+            // A union's `AssetId` names the `PartOperationAsset` model that
+            // holds its geometry; `import_csg_instance` fetches and decodes
+            // it. Sent through the media path it was fetched, sniffed as
+            // "not an image or sound", and reported as a failure.
+            bag.asset_refs.remove("AssetId");
+        }
         for (prop, uri) in bag.asset_refs {
             let prop_is_mesh = is_mesh_property(&prop, eustress_class);
             let resolved = asset_resolver::resolve(
@@ -1147,13 +1165,47 @@ impl<'dom> Materializer<'dom> {
                     report.record_asset_warning(&uri, class_template_name, &prop, reason);
                 }
             }
-            // Mesh-class properties point at mesh assets; everything
-            // else lands as a single-path asset reference.
-            let asset_path_str = resolved.asset_path.to_string_lossy().to_string();
             if prop_is_mesh {
-                patch.asset_mesh = Some(asset_path_str);
+                // Mesh-class properties point at mesh assets.
+                if folded_file_mesh && prop == "MeshId" {
+                    file_mesh_native_extent = resolved.native_extent;
+                }
+                // Forward slashes, so the path reads the same on every OS.
+                patch.asset_mesh =
+                    Some(resolved.asset_path.to_string_lossy().replace('\\', "/"));
+                continue;
+            }
+            // Media goes where the class's engine loader reads it. It must
+            // never become `[asset].path`: the engine's `[asset]` table
+            // requires `mesh`, so an `[asset]` holding only `path` fails to
+            // deserialize and the whole instance is skipped at load.
+            let space_url = if resolved.resolved {
+                space_url(&self.space_root, &created.folder_path, &resolved.asset_path)
             } else {
-                patch.asset_path = Some(asset_path_str);
+                None
+            };
+            match (media_section_key(eustress_class, &prop), space_url) {
+                (Some((section, key)), Some(url)) => {
+                    patch
+                        .section_props
+                        .entry(section.to_string())
+                        .or_default()
+                        .insert(key.to_string(), toml::Value::String(url));
+                }
+                // Resolved but no engine slot for it (a MeshPart texture, a
+                // Trail texture): keep where the file landed.
+                (None, Some(url)) => {
+                    patch.extras.insert(prop.clone(), toml::Value::String(url));
+                }
+                // Not fetched: keep the Roblox URI so a later run with a
+                // credential, or a tool, can still resolve it. The class key
+                // stays empty, which the engine draws as nothing, like Roblox
+                // does for an image that fails to load.
+                (_, None) => {
+                    if !uri.trim().is_empty() {
+                        patch.extras.insert(prop.clone(), toml::Value::String(uri.clone()));
+                    }
+                }
             }
         }
 
@@ -1168,6 +1220,18 @@ impl<'dom> Materializer<'dom> {
         }
         if folded_mesh_scale.is_some() {
             patch.mesh_scale = folded_mesh_scale;
+        }
+        // A resolved FileMesh is written unit-sized, and the engine multiplies
+        // it by the part's `Size`. Roblox instead draws it at native size times
+        // `Scale`, so the visual scale must cancel `Size` and restore the native
+        // extent: native * Scale / Size, per axis. The collider stays the
+        // part's `Size` box, which is also what Roblox collides against.
+        if let (Some(native), Some(size)) = (file_mesh_native_extent, overrides.scale) {
+            let scale = folded_mesh_scale.unwrap_or([1.0, 1.0, 1.0]);
+            patch.mesh_scale = Some([0usize, 1, 2].map(|a| {
+                let s = size[a].abs();
+                native[a] * scale[a] / if s > 1e-6 { s } else { 1.0 }
+            }));
         }
         if folded_mesh_offset.is_some() {
             patch.mesh_offset = folded_mesh_offset;
@@ -1336,16 +1400,50 @@ impl<'dom> Materializer<'dom> {
             };
             (!bytes.is_empty()).then(|| bytes.to_vec())
         };
-        let mesh_data: Option<Vec<u8>> = blob_of("MeshData2").or_else(|| blob_of("MeshData"));
+        let mut mesh_data: Option<Vec<u8>> = blob_of("MeshData2").or_else(|| blob_of("MeshData"));
 
-        // AABB fallback size from the source Part.Size (Vector3), else 4³.
-        let size = match props.get(&rbx_dom_weak::ustr("Size")) {
-            Some(rbx_dom_weak::types::Variant::Vector3(v)) => [v.x, v.y, v.z],
-            _ => [4.0, 4.0, 4.0],
-        };
+        // No inline geometry: Roblox may keep it in the cloud, as a
+        // `PartOperationAsset` model named by `AssetId`. Fetch that when a
+        // fetcher is configured; otherwise say plainly why the union is a
+        // stand-in block.
+        let mut missing_reason: Option<String> = None;
+        if mesh_data.is_none() {
+            let asset_uri = match props.get(&rbx_dom_weak::ustr("AssetId")) {
+                Some(rbx_dom_weak::types::Variant::ContentId(c)) => c.as_str().to_string(),
+                Some(rbx_dom_weak::types::Variant::Content(c)) => {
+                    c.as_uri().unwrap_or_default().to_string()
+                }
+                Some(rbx_dom_weak::types::Variant::String(s)) => s.clone(),
+                _ => String::new(),
+            };
+            let asset_id = asset_resolver::AssetReference::parse(&asset_uri).asset_id();
+            missing_reason = Some(match (asset_id, self.opts.asset_fetcher.as_deref()) {
+                (None, _) => "no inline MeshData and no cloud AssetId".to_string(),
+                (Some(id), None) => format!(
+                    "geometry is in the cloud (rbxassetid://{id}) and no asset fetcher is configured"
+                ),
+                (Some(id), Some(fetcher)) => match fetcher
+                    .fetch(id)
+                    .and_then(|bytes| crate::csg::part_operation_asset_blob(&bytes))
+                {
+                    Ok(blob) => {
+                        mesh_data = Some(blob);
+                        report.csg_cloud_fetched += 1;
+                        String::new()
+                    }
+                    Err(e) => format!("cloud geometry rbxassetid://{id} unavailable: {e}"),
+                },
+            })
+            .filter(|r| !r.is_empty());
+        }
 
-        let outcome = crate::csg::import_csg(&created.folder_path, mesh_data.as_deref(), size)
-            .map_err(|e| ImportError::Io(created.folder_path.clone(), e))?;
+        let use_part_color = matches!(
+            props.get(&rbx_dom_weak::ustr("UsePartColor")),
+            Some(rbx_dom_weak::types::Variant::Bool(true))
+        );
+        let outcome =
+            crate::csg::import_csg(&created.folder_path, mesh_data.as_deref(), use_part_color)
+                .map_err(|e| ImportError::Io(created.folder_path.clone(), e))?;
 
         // Point the Part at csg.glb + record the CSG op + count.
         let csg_op = match inst.class.as_str() {
@@ -1362,7 +1460,24 @@ impl<'dom> Materializer<'dom> {
             crate::csg::CsgOutcome::Baked {
                 mesh_file,
                 triangles,
+                vertex_coloured,
             } => {
+                if *vertex_coloured {
+                    // Roblox draws this union in its original parts' colours,
+                    // which the mesh carries per vertex. The engine multiplies
+                    // the part colour into them, so the part colour is white;
+                    // the union's own Color stays in `roblox_color_srgb`.
+                    let alpha = match props.get(&rbx_dom_weak::ustr("Transparency")) {
+                        Some(rbx_dom_weak::types::Variant::Float32(t)) => (1.0 - *t as f64).clamp(0.0, 1.0),
+                        _ => 1.0,
+                    };
+                    patch.section_props.entry("properties".to_string()).or_default().insert(
+                        "color".to_string(),
+                        toml::Value::Array(
+                            [1.0, 1.0, 1.0, alpha].into_iter().map(toml::Value::Float).collect(),
+                        ),
+                    );
+                }
                 patch.asset_mesh = Some(mesh_file.clone());
                 patch.extras.insert(
                     "csg_op".to_string(),
@@ -1381,6 +1496,7 @@ impl<'dom> Materializer<'dom> {
                     toml::Value::String(csg_op.to_string()),
                 );
                 report.csg_fallback_aabb += 1;
+                let reason = missing_reason.as_deref().unwrap_or(reason.as_str());
                 report.record_approximation(
                     entity_relpath,
                     &inst.class,
@@ -1608,20 +1724,16 @@ fn apply_toml_patch(toml_path: &Path, patch: &TomlPatch) -> Result<(), ImportErr
         );
     }
 
-    // ── Asset section ──
-    if patch.asset_mesh.is_some() || patch.asset_path.is_some() {
+    // ── Asset section ── (mesh only: the engine's `[asset]` requires `mesh`;
+    // media lands in its class section, see `media_section_key`.)
+    if let Some(mesh) = &patch.asset_mesh {
         let asset = root
             .entry("asset".to_string())
             .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
         if let Some(t) = asset.as_table_mut() {
-            if let Some(mesh) = &patch.asset_mesh {
-                t.insert("mesh".to_string(), toml::Value::String(mesh.clone()));
-                t.entry("scene".to_string())
-                    .or_insert_with(|| toml::Value::String("Scene0".to_string()));
-            }
-            if let Some(path) = &patch.asset_path {
-                t.insert("path".to_string(), toml::Value::String(path.clone()));
-            }
+            t.insert("mesh".to_string(), toml::Value::String(mesh.clone()));
+            t.entry("scene".to_string())
+                .or_insert_with(|| toml::Value::String("Scene0".to_string()));
         }
     }
 
@@ -1675,8 +1787,58 @@ pub(crate) fn place_name_from_root(space_root: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// True when the Roblox property maps to a mesh asset (vs. a single
-/// `[asset].path`). Used to pick between `asset_mesh` and `asset_path`.
+/// The `[section] key` an engine loader reads a media path from, for a Roblox
+/// asset property on a given class. `None` when the engine has no slot for it.
+///
+/// Every one of these loaders hands the string straight to Bevy's asset
+/// server, so the value is written as a `space://` URL (see [`space_url`]).
+fn media_section_key(class: ClassName, roblox_prop: &str) -> Option<(&'static str, &'static str)> {
+    Some(match (class, roblox_prop) {
+        (ClassName::Decal, "Texture" | "TextureContent") => ("decal", "texture"),
+        (ClassName::Texture, "Texture" | "TextureContent") => ("texture", "texture"),
+        (ClassName::ImageLabel | ClassName::ImageButton, "Image" | "ImageContent") => {
+            ("image", "image")
+        }
+        (ClassName::Sound, "SoundId" | "AudioContent") => ("sound", "sound_id"),
+        (ClassName::ParticleEmitter, "Texture") => ("particle", "texture"),
+        (ClassName::Beam, "Texture") => ("beam", "texture"),
+        (ClassName::VideoFrame, "Video" | "VideoContent") => ("video", "source"),
+        (ClassName::Sky, "SkyboxFt") => ("sky", "skybox_front"),
+        (ClassName::Sky, "SkyboxBk") => ("sky", "skybox_back"),
+        (ClassName::Sky, "SkyboxLf") => ("sky", "skybox_left"),
+        (ClassName::Sky, "SkyboxRt") => ("sky", "skybox_right"),
+        (ClassName::Sky, "SkyboxUp") => ("sky", "skybox_top"),
+        (ClassName::Sky, "SkyboxDn") => ("sky", "skybox_bottom"),
+        _ => return None,
+    })
+}
+
+/// A fetched file as the `space://` URL the engine's asset server resolves
+/// against the Space root. `rel_to_instance` is the path the resolver
+/// returned, relative to the instance folder. `None` when the file is not
+/// inside the Space.
+fn space_url(space_root: &Path, instance_dir: &Path, rel_to_instance: &Path) -> Option<String> {
+    use std::path::Component;
+    let mut abs = PathBuf::new();
+    for comp in instance_dir.join(rel_to_instance).components() {
+        match comp {
+            Component::ParentDir => {
+                abs.pop();
+            }
+            Component::CurDir => {}
+            other => abs.push(other.as_os_str()),
+        }
+    }
+    let rel = abs.strip_prefix(space_root).ok()?;
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    (!parts.is_empty()).then(|| format!("space://{}", parts.join("/")))
+}
+
+/// True when the Roblox property maps to a mesh asset (vs. media that lands in
+/// a class section). Used to pick the `[asset].mesh` path.
 fn is_mesh_property(roblox_prop: &str, class: ClassName) -> bool {
     // `MeshContent` is the modern `Content`-typed spelling of
     // `MeshPart.MeshId` — without it here a MeshPart whose only mesh ref
@@ -2168,6 +2330,114 @@ mod tests {
             emitted += run;
         }
         buf
+    }
+
+    /// Serves the same `.mesh` bytes for every id.
+    struct FixedMesh(Vec<u8>);
+    impl crate::asset_resolver::AssetFetcher for FixedMesh {
+        fn fetch(&self, _id: u64) -> Result<Vec<u8>, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn read_top_level_vec3(toml_path: &std::path::Path, key: &str) -> Option<[f64; 3]> {
+        let doc: toml::Value = std::fs::read_to_string(toml_path).ok()?.parse().ok()?;
+        let a = doc.get(key)?.as_array()?;
+        let f = |v: &toml::Value| v.as_float().or_else(|| v.as_integer().map(|i| i as f64));
+        Some([f(&a[0])?, f(&a[1])?, f(&a[2])?])
+    }
+
+    /// A legacy SpecialMesh FileMesh draws at its NATIVE size times `Scale`,
+    /// ignoring the part's `Size`; a MeshPart stretches its mesh to fill `Size`.
+    /// Meshes are now written unit-sized and the engine multiplies them by
+    /// `Size`, so the FileMesh's visual scale must be native * Scale / Size per
+    /// axis, and a MeshPart must get none. Extents, Scale and Size all differ
+    /// per axis so a transposed or unit-less result cannot pass.
+    #[test]
+    fn file_mesh_draws_at_native_size_times_scale() {
+        use rbx_dom_weak::types::{Content, Enum, Vector3};
+        // native extent 4 x 2 x 6
+        let mesh = crate::roblox_mesh::make_v2_mesh_fixture(&[
+            [0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 2.0, 6.0],
+        ]);
+        let dm = InstanceBuilder::new("DataModel").with_child(
+            InstanceBuilder::new("Workspace")
+                .with_child(
+                    InstanceBuilder::new("Part")
+                        .with_name("Lamp")
+                        .with_property("Size", Vector3::new(2.0, 1.0, 4.0))
+                        .with_child(
+                            InstanceBuilder::new("SpecialMesh")
+                                .with_name("Mesh")
+                                .with_property("MeshType", Enum::from_u32(5))
+                                .with_property("MeshId", Content::from("rbxassetid://42"))
+                                .with_property("Scale", Vector3::new(2.0, 3.0, 0.5)),
+                        ),
+                )
+                .with_child(
+                    InstanceBuilder::new("MeshPart")
+                        .with_name("Wheel")
+                        .with_property("Size", Vector3::new(3.0, 3.0, 3.0))
+                        .with_property("MeshId", Content::from("rbxassetid://42")),
+                ),
+        );
+        let rbx = RobloxDom::from_dom(
+            WeakDom::new(dm),
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        );
+        let space_root = make_temp_root("file_mesh_scale");
+        let opts = ImportOptions {
+            asset_fetcher: Some(std::sync::Arc::new(FixedMesh(mesh))),
+            ..Default::default()
+        };
+        import_into_space(&rbx, &space_root, opts).expect("import");
+
+        let lamp = space_root.join("Workspace").join("Lamp").join("_instance.toml");
+        let got = read_top_level_vec3(&lamp, "mesh_scale").expect("FileMesh part needs mesh_scale");
+        // native * Scale / Size = [4*2/2, 2*3/1, 6*0.5/4]
+        let want = [4.0, 6.0, 0.75];
+        for a in 0..3 {
+            assert!((got[a] - want[a]).abs() < 1e-4, "axis {a}: got {:?}, want {want:?}", got);
+        }
+
+        let wheel = space_root.join("Workspace").join("Wheel").join("_instance.toml");
+        assert!(
+            read_top_level_vec3(&wheel, "mesh_scale").is_none(),
+            "a MeshPart stretches to its Size and must not get a compensating mesh_scale"
+        );
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// Every property no handler maps is reported, aggregated per Roblox
+    /// (class, property, type) with a count. This was dead plumbing, so the
+    /// report could not say which data an import carried but never used.
+    #[test]
+    fn unmapped_properties_are_reported_with_counts() {
+        let part = |name: &str| {
+            InstanceBuilder::new("Part")
+                .with_name(name)
+                .with_property("TotallyUnmappedProp", 7i32)
+        };
+        let dm = InstanceBuilder::new("DataModel").with_child(
+            InstanceBuilder::new("Workspace").with_child(part("A")).with_child(part("B")),
+        );
+        let rbx = RobloxDom::from_dom(
+            WeakDom::new(dm),
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        );
+        let space_root = make_temp_root("unmapped_props");
+        let report = import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        let hit: Vec<_> = report
+            .unmapped_properties
+            .iter()
+            .filter(|u| u.property == "TotallyUnmappedProp")
+            .collect();
+        assert_eq!(hit.len(), 1, "one aggregated row, got {:?}", report.unmapped_properties);
+        assert_eq!(hit[0].class, "Part");
+        assert_eq!(hit[0].count, 2);
+        let _ = std::fs::remove_dir_all(&space_root);
     }
 
     #[test]

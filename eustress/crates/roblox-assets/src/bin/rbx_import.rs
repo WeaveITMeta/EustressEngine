@@ -24,6 +24,8 @@
 //! Env knobs (same as the engine's File→Import path):
 //!   EUSTRESS_ROBLOX_ASSET_DIR    local asset mirror tried before the network
 //!   EUSTRESS_ROBLOX_NO_NETWORK=1 disable the CDN fetcher entirely
+//!   EUSTRESS_ROBLOX_API_KEY      Open Cloud API key (scope legacy-asset:manage)
+//!                                for gated assets; wins over the cookie (never logged)
 //!   EUSTRESS_ROBLOSECURITY       auth cookie for gated assets (never logged)
 //!   EUSTRESS_ROBLOX_RETRY_ERRORS=1  retry ids the negative cache marked dead
 
@@ -306,7 +308,8 @@ fn main() {
 
 /// The engine's File→Import fetcher chain, shared batch-wide: optional
 /// local mirror (`EUSTRESS_ROBLOX_ASSET_DIR`) → network (unless
-/// `EUSTRESS_ROBLOX_NO_NETWORK=1`, cookie via `EUSTRESS_ROBLOSECURITY`),
+/// `EUSTRESS_ROBLOX_NO_NETWORK=1`; credential from `EUSTRESS_ROBLOX_API_KEY`
+/// or `EUSTRESS_ROBLOSECURITY`),
 /// wrapped in a byte + negative cache at `<Eustress>/.rbx_cache` so every
 /// place in the batch (and future engine re-imports pointed here) reuses
 /// fetched bytes.
@@ -322,20 +325,21 @@ fn build_fetcher(eustress_root: &Path) -> Option<Arc<dyn AssetFetcher>> {
         .map(|v| v.trim().is_empty() || v == "0" || v.eq_ignore_ascii_case("false"))
         .unwrap_or(true);
     if network_on {
-        match std::env::var("EUSTRESS_ROBLOSECURITY") {
-            Ok(tok) if !tok.trim().is_empty() => {
-                chain.push(Arc::new(NetworkFetcher::with_cookie(tok)));
-            }
-            _ => {
-                // Say this UP FRONT. Roblox gates most asset downloads behind a
-                // cookie, so without one every mesh/texture/sound 401s — a past
-                // 36-place run logged 62,598 of them and imported almost no
-                // media. Learning that from the report afterwards is too late.
-                println!("  WARNING: EUSTRESS_ROBLOSECURITY is not set. Gated assets will fail with HTTP 401");
-                println!("           and meshes/textures/sounds will be MISSING. Set it to a .ROBLOSECURITY cookie.");
-                chain.push(Arc::new(NetworkFetcher::new()));
-            }
+        let network = NetworkFetcher::from_env();
+        if network.is_authenticated() {
+            println!("Roblox credential: {}", network.credential_kind());
+        } else {
+            // Say this UP FRONT. Roblox gates most asset downloads behind
+            // authentication, so without a credential every mesh, texture and
+            // sound fails: a past 36-place run logged 62,598 rejections and
+            // Vehicle Simulator lost 77,047 asset references the same way.
+            // Learning that from the report afterwards is too late.
+            println!("  WARNING: no Roblox credential is set. Gated assets will fail with HTTP 401");
+            println!("           and meshes, textures and sounds will be MISSING. Set");
+            println!("           {} (an Open Cloud API key with legacy-asset:manage)", eustress_roblox_assets::API_KEY_ENV);
+            println!("           or {} (a .ROBLOSECURITY cookie).", eustress_roblox_assets::COOKIE_ENV);
         }
+        chain.push(Arc::new(network));
     }
     if chain.is_empty() {
         return None;

@@ -2297,7 +2297,9 @@ pub fn spawn_instance(
         Some(Vec3::from_array(out))
     }
     let mesh_visual_scale = take_vec3_extra(&mut instance.extra, "mesh_scale");
-    let mesh_visual_offset = take_vec3_extra(&mut instance.extra, "mesh_offset");
+    // Converted to meters below when `units_v1` is on (it is a length).
+    #[allow(unused_mut)]
+    let mut mesh_visual_offset = take_vec3_extra(&mut instance.extra, "mesh_offset");
 
     // ── Stage 3: authored-unit → meter conversion ──────────────────────
     //
@@ -2326,6 +2328,16 @@ pub fn spawn_instance(
             instance.transform.scale = eustress_common::units::convert_vec3_f32(
                 instance.transform.scale, from_unit, to_unit,
             );
+            // `mesh_offset` (a DataMesh `Offset`) is a length in the file's
+            // authored unit, and it is added to the already-converted
+            // translation below, so it must be converted too. Left in feet,
+            // every imported SpecialMesh offset landed 3.28x too far.
+            // `mesh_scale` is a ratio and needs no conversion.
+            if let Some(mo) = mesh_visual_offset {
+                mesh_visual_offset = Some(Vec3::from_array(
+                    eustress_common::units::convert_vec3_f32(mo.to_array(), from_unit, to_unit),
+                ));
+            }
             debug!(
                 "📐 Converted {:?} from {} → m (pos={:?}, scale={:?})",
                 toml_path, from_unit.symbol(),
@@ -2428,6 +2440,17 @@ pub fn spawn_instance(
         if matches!(class_name, eustress_common::classes::ClassName::Decal) {
             if let Some(sec) = section_table(&instance.extra, "decal") {
                 commands.entity(entity).insert(decal_from_section(sec));
+            }
+        }
+        // A Texture has no mesh of its own either: it tiles its image over a
+        // face of its parent part, drawn by `decal_place_tool::
+        // sync_texture_surfaces` from this component. Only the mesh branches
+        // attached it, and a Texture never has an `[asset]` mesh, so every
+        // texture loaded from disk, placed in Studio or imported, drew
+        // nothing.
+        if matches!(class_name, eustress_common::classes::ClassName::Texture) {
+            if let Some(sec) = section_table(&instance.extra, "texture") {
+                commands.entity(entity).insert(texture_from_section(sec));
             }
         }
         // GaussianSplats: attach the real radiance-field rendering components
@@ -3254,6 +3277,24 @@ pub(crate) fn decal_from_section(sec: &toml::value::Table) -> eustress_common::c
     }
 }
 
+/// A `Texture` from its `[texture]` section. A missing key keeps the class
+/// default. Shared by the no-mesh spawn path and the mesh branches.
+pub(crate) fn texture_from_section(sec: &toml::value::Table) -> eustress_common::classes::Texture {
+    let mut t = eustress_common::classes::Texture::default();
+    if let Some(s) = sec.get("texture").and_then(|v| v.as_str()) { t.texture = s.to_string(); }
+    if let Some(s) = sec.get("face").and_then(|v| v.as_str()) { t.face = s.to_string(); }
+    if let Some(v) = toml_f32(sec.get("studs_per_tile_u")) { t.studs_per_tile_u = v; }
+    if let Some(v) = toml_f32(sec.get("studs_per_tile_v")) { t.studs_per_tile_v = v; }
+    if let Some(v) = toml_f32(sec.get("offset_studs_u")) { t.offset_studs_u = v; }
+    if let Some(v) = toml_f32(sec.get("offset_studs_v")) { t.offset_studs_v = v; }
+    if let Some(rgb) = sec.get("color3").or_else(|| sec.get("color")) {
+        let c = color_u8_array_to_rgba(Some(rgb), [1.0, 1.0, 1.0, 1.0]);
+        t.color3 = [c[0], c[1], c[2]];
+    }
+    if let Some(v) = toml_f32(sec.get("transparency")) { t.transparency = v; }
+    t
+}
+
 /// Map an importer `[mesh].mesh_type` string → engine `MeshType` enum.
 fn mesh_type_from_str(s: &str) -> eustress_common::classes::MeshType {
     use eustress_common::classes::MeshType;
@@ -3317,19 +3358,7 @@ fn attach_decal_mesh_component(
             // this loader path needs no mesh/material assets. See
             // `decal_place_tool::sync_texture_surfaces`.
             let Some(sec) = section_table(extra, "texture") else { return; };
-            let mut t = eustress_common::classes::Texture::default();
-            if let Some(s) = sec.get("texture").and_then(|v| v.as_str()) { t.texture = s.to_string(); }
-            if let Some(s) = sec.get("face").and_then(|v| v.as_str()) { t.face = s.to_string(); }
-            if let Some(v) = toml_f32(sec.get("studs_per_tile_u")) { t.studs_per_tile_u = v; }
-            if let Some(v) = toml_f32(sec.get("studs_per_tile_v")) { t.studs_per_tile_v = v; }
-            if let Some(v) = toml_f32(sec.get("offset_studs_u")) { t.offset_studs_u = v; }
-            if let Some(v) = toml_f32(sec.get("offset_studs_v")) { t.offset_studs_v = v; }
-            if let Some(rgb) = sec.get("color3").or_else(|| sec.get("color")) {
-                let c = color_u8_array_to_rgba(Some(rgb), [1.0, 1.0, 1.0, 1.0]);
-                t.color3 = [c[0], c[1], c[2]];
-            }
-            if let Some(v) = toml_f32(sec.get("transparency")) { t.transparency = v; }
-            commands.entity(host).insert(t);
+            commands.entity(host).insert(texture_from_section(sec));
             extra.remove("texture");
             extra.remove("Texture");
         }
@@ -3867,6 +3896,16 @@ fn attach_vfx_component(
                 b.transparency_sequence = vec![(0.0, t), (1.0, t)];
             }
             ec.insert(b);
+            // The two nodes it joins, by `Instance.uuid`: what
+            // `sync_beam_transforms` stretches it between.
+            let uuid = |key: &str| {
+                sec.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string)
+            };
+            ec.insert(crate::spawners::audio_vfx::BeamSegmentLink {
+                attachment0_uuid: uuid("attachment0_uuid"),
+                attachment1_uuid: uuid("attachment1_uuid"),
+                ..Default::default()
+            });
         }
         _ => {}
     }

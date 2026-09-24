@@ -177,7 +177,8 @@ impl std::error::Error for CsgError {}
 /// A decoded CSG render mesh in plain Eustress-friendly arrays.
 #[derive(Debug, Clone, Default)]
 pub struct CsgMesh {
-    /// Vertex positions (studs = meters).
+    /// Vertex positions, in the source's native units (studs). [`write_glb`]
+    /// unit-normalises them, so units never reach the written mesh.
     pub positions: Vec<[f32; 3]>,
     /// Per-vertex normals (unit, may be empty if the source omitted them).
     pub normals: Vec<[f32; 3]>,
@@ -231,6 +232,45 @@ fn csgmdl_magic(version: u32) -> [u8; 10] {
 // ---------------------------------------------------------------------------
 // Top-level decode
 // ---------------------------------------------------------------------------
+
+/// Decode the geometry of a union Roblox keeps in the cloud.
+///
+/// Such a union carries empty `MeshData2` / `MeshData` and an `AssetId` that
+/// points at a `PartOperationAsset` model (binary `<roblox!` or XML). That
+/// model holds one `PartOperationAsset` instance whose `MeshData2` or
+/// `MeshData` is the same CSGMDL blob an inline union carries.
+pub fn mesh_from_part_operation_asset(bytes: &[u8]) -> Result<CsgMesh, String> {
+    decode_mesh_data(&part_operation_asset_blob(bytes)?).map_err(|e| e.to_string())
+}
+
+/// The CSGMDL blob inside a `PartOperationAsset` model (see
+/// [`mesh_from_part_operation_asset`]), ready for [`import_csg`].
+pub fn part_operation_asset_blob(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    use rbx_dom_weak::types::Variant;
+    let dom = if bytes.starts_with(b"<roblox!") {
+        rbx_binary::from_reader(bytes).map_err(|e| format!("PartOperationAsset model: {e}"))?
+    } else if bytes.starts_with(b"<roblox") {
+        rbx_xml::from_reader_default(bytes).map_err(|e| format!("PartOperationAsset model: {e}"))?
+    } else {
+        return Err("not a Roblox model".to_string());
+    };
+    let asset = dom
+        .descendants()
+        .find(|i| i.class.as_str() == "PartOperationAsset")
+        .ok_or_else(|| "model holds no PartOperationAsset".to_string())?;
+    let blob = ["MeshData2", "MeshData"]
+        .into_iter()
+        .find_map(|name| {
+            let bytes: &[u8] = match asset.properties.get(&rbx_dom_weak::ustr(name))? {
+                Variant::BinaryString(b) => b.as_ref(),
+                Variant::SharedString(s) => s.data(),
+                _ => return None,
+            };
+            (!bytes.is_empty()).then(|| bytes.to_vec())
+        })
+        .ok_or_else(|| "PartOperationAsset has no MeshData".to_string())?;
+    Ok(blob)
+}
 
 /// Decode a Roblox CSG `MeshData` blob into a [`CsgMesh`].
 ///
@@ -541,10 +581,79 @@ fn read_faces5(cur: &mut Cursor) -> Result<Vec<u32>, CsgError> {
 /// primitive, indexed triangles, with POSITION (required) plus optional
 /// NORMAL / TEXCOORD_0 / COLOR_0. No external crate — emits the JSON via
 /// `serde_json` and the binary container by hand per the glTF 2.0 spec.
+///
+/// The mesh is written **unit-normalised**: centred on its bounding box and
+/// scaled so that box spans `[-0.5, 0.5]` on every axis. That is the engine's
+/// contract for every part mesh (the loader multiplies the mesh by
+/// `Transform.scale`, which already carries the part's real `Size`), and it
+/// matches Roblox, which stretches a MeshPart's mesh or a union's geometry to
+/// fill the part's `Size`. Writing geometry at its native stud size instead
+/// scaled every such part twice: a 9.6 x 3.6 x 20 stud car body rendered about
+/// 28 x 4 x 122 m, while its collider (built from the true `Size`) stayed small,
+/// so the visible block could not be clicked.
 pub fn write_glb(path: &Path, mesh: &CsgMesh) -> std::io::Result<()> {
-    let glb = encode_glb(mesh)
+    let unit = to_unit_mesh(mesh);
+    let glb = encode_glb(&unit)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     std::fs::write(path, glb)
+}
+
+/// The bounding-box centre and the per-axis divisor [`to_unit_mesh`] uses.
+///
+/// The divisor is the box's extent, except that a degenerate (flat) axis gets
+/// 1 so it never divides by zero. Anything that needs the mesh's NATIVE size
+/// back must multiply by exactly this divisor, which is why it is shared rather
+/// than recomputed. `None` for a mesh with no positions.
+pub fn unit_bounds(mesh: &CsgMesh) -> Option<([f32; 3], [f32; 3])> {
+    if mesh.positions.is_empty() {
+        return None;
+    }
+    let mut lo = [f32::INFINITY; 3];
+    let mut hi = [f32::NEG_INFINITY; 3];
+    for p in &mesh.positions {
+        for a in 0..3 {
+            lo[a] = lo[a].min(p[a]);
+            hi[a] = hi[a].max(p[a]);
+        }
+    }
+    let centre = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5];
+    let divisor = [0usize, 1, 2].map(|a| {
+        let e = hi[a] - lo[a];
+        if e.is_finite() && e > 1e-6 { e } else { 1.0 }
+    });
+    Some((centre, divisor))
+}
+
+/// Return a copy of `mesh` centred on its bounding box with that box scaled to
+/// span `[-0.5, 0.5]` per axis (see [`write_glb`]).
+///
+/// Normals get the inverse-transpose of the position scale: dividing positions
+/// by the extent `e` means multiplying normals by `e` and renormalising.
+/// Rendering then applies the part's scale `S`, and the normal matrix `1/S`
+/// brings each normal back to exactly the true surface normal of the geometry
+/// at size `S`. Transforming positions alone would skew lighting on any
+/// non-cubic mesh.
+///
+/// A degenerate (flat) axis keeps a divisor of 1, so it stays flat instead of
+/// dividing by zero, and its normal component is left unchanged.
+pub fn to_unit_mesh(mesh: &CsgMesh) -> CsgMesh {
+    let mut out = mesh.clone();
+    let Some((centre, extent)) = unit_bounds(mesh) else {
+        return out;
+    };
+    for p in &mut out.positions {
+        for a in 0..3 {
+            p[a] = (p[a] - centre[a]) / extent[a];
+        }
+    }
+    for n in &mut out.normals {
+        let v = [n[0] * extent[0], n[1] * extent[1], n[2] * extent[2]];
+        let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if len > 1e-12 {
+            *n = [v[0] / len, v[1] / len, v[2] / len];
+        }
+    }
+    out
 }
 
 /// Encode `mesh` into glb bytes (testable without touching the FS).
@@ -888,6 +997,10 @@ pub enum CsgOutcome {
         mesh_file: String,
         /// Triangle count (for reporting).
         triangles: usize,
+        /// The written mesh carries per-vertex colours that are not all
+        /// white: the union's original parts' colours, which the part colour
+        /// must not tint (see [`import_csg`]).
+        vertex_coloured: bool,
     },
     /// No usable baked mesh; an AABB block `csg.glb` was written instead.
     Aabb {
@@ -903,94 +1016,64 @@ pub enum CsgOutcome {
 ///
 /// - If `mesh_data` decodes, writes `csg.glb` and returns
 ///   [`CsgOutcome::Baked`].
-/// - Otherwise writes an AABB block `csg.glb` sized from `aabb_size`
-///   (the source `Part.Size`) and returns [`CsgOutcome::Aabb`] with the
-///   reason.
+/// - Otherwise writes a unit block `csg.glb` and returns [`CsgOutcome::Aabb`]
+///   with the reason.
+///
+/// Both are written unit-normalised, like every part mesh (see
+/// [`write_glb`]): the engine multiplies the mesh by the part's `Size`, so a
+/// union written at its native stud size was drawn Size²: the car body of
+/// the `written_glb_is_unit_normalised` test rendered about 28 x 4 x 122 m.
+///
+/// Colour follows Roblox's `UsePartColor`. A union's vertices carry the
+/// colours of the parts it was made from. With `UsePartColor` off (Roblox's
+/// default) those are what shows, so they are kept; with it on, the union's
+/// own `Color` shows everywhere, so they are dropped. The engine multiplies a
+/// part's colour into its vertex colours, which is why the caller leaves the
+/// part white when [`CsgOutcome::Baked::vertex_coloured`] is set.
 ///
 /// Pure file I/O — no Bevy. Never panics. Disk write errors propagate
 /// (spec §7.4: a `.glb` write failure is a hard error).
 pub fn import_csg(
     csg_dir: &Path,
     mesh_data: Option<&[u8]>,
-    aabb_size: [f32; 3],
+    use_part_color: bool,
 ) -> std::io::Result<CsgOutcome> {
     let glb_path = csg_dir.join("csg.glb");
-
-    // Try the baked-mesh path.
-    if let Some(blob) = mesh_data {
-        match decode_mesh_data(blob) {
-            Ok(mesh) if !mesh.is_empty() => match encode_glb(&mesh) {
+    let reason = match mesh_data.map(decode_mesh_data) {
+        Some(Ok(mut mesh)) if !mesh.is_empty() => {
+            if use_part_color {
+                mesh.colors.clear();
+            }
+            let vertex_coloured = mesh
+                .colors
+                .iter()
+                .any(|c| c[0] < 0.999 || c[1] < 0.999 || c[2] < 0.999);
+            match encode_glb(&to_unit_mesh(&mesh)) {
                 Ok(bytes) => {
                     std::fs::write(&glb_path, bytes)?;
                     return Ok(CsgOutcome::Baked {
                         mesh_file: "csg.glb".to_string(),
                         triangles: mesh.indices.len() / 3,
+                        vertex_coloured,
                     });
                 }
-                Err(e) => {
-                    return write_aabb_fallback(
-                        &glb_path,
-                        aabb_size,
-                        format!("CSG mesh decoded but glb encode failed: {e}"),
-                    );
-                }
-            },
-            Ok(_) => {
-                return write_aabb_fallback(
-                    &glb_path,
-                    aabb_size,
-                    "CSG MeshData decoded to an empty mesh".to_string(),
-                );
-            }
-            Err(CsgError::NoMesh) => {
-                return write_aabb_fallback(
-                    &glb_path,
-                    aabb_size,
-                    "CSG carries a CSGK marker (unbaked) — no mesh data".to_string(),
-                );
-            }
-            Err(e) => {
-                return write_aabb_fallback(
-                    &glb_path,
-                    aabb_size,
-                    format!("CSG MeshData decode failed: {e}"),
-                );
+                Err(e) => format!("CSG mesh decoded but glb encode failed: {e}"),
             }
         }
-    }
-
-    write_aabb_fallback(
-        &glb_path,
-        aabb_size,
-        "CSG instance has no MeshData property".to_string(),
-    )
+        Some(Ok(_)) => "CSG MeshData decoded to an empty mesh".to_string(),
+        Some(Err(CsgError::NoMesh)) => {
+            "CSG carries a CSGK marker (unbaked), no mesh data".to_string()
+        }
+        Some(Err(e)) => format!("CSG MeshData decode failed: {e}"),
+        None => "CSG instance has no MeshData".to_string(),
+    };
+    write_aabb_fallback(&glb_path, reason)
 }
 
-fn write_aabb_fallback(
-    glb_path: &Path,
-    aabb_size: [f32; 3],
-    reason: String,
-) -> std::io::Result<CsgOutcome> {
-    // Guard against a degenerate size — fall back to a 4×4×4 stud block.
-    let size = [
-        if aabb_size[0].abs() < 1e-3 {
-            4.0
-        } else {
-            aabb_size[0]
-        },
-        if aabb_size[1].abs() < 1e-3 {
-            4.0
-        } else {
-            aabb_size[1]
-        },
-        if aabb_size[2].abs() < 1e-3 {
-            4.0
-        } else {
-            aabb_size[2]
-        },
-    ];
-    let mesh = aabb_box_mesh(size);
-    let bytes = encode_glb(&mesh)
+/// Write the stand-in block for a union with no usable geometry: a unit cube,
+/// which the engine stretches to the part's `Size` like any other part mesh.
+fn write_aabb_fallback(glb_path: &Path, reason: String) -> std::io::Result<CsgOutcome> {
+    let bytes = encode_glb(&aabb_box_mesh([1.0, 1.0, 1.0]))
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     std::fs::write(glb_path, bytes)?;
     Ok(CsgOutcome::Aabb {
@@ -1009,23 +1092,28 @@ fn write_aabb_fallback(
 /// fixture.
 #[cfg(test)]
 pub(crate) fn make_csgmdl2_triangle_fixture() -> Vec<u8> {
+    let mesh = CsgMesh {
+        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        normals: vec![[0.0, 0.0, 1.0]; 3],
+        uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+        indices: vec![0, 1, 2],
+        ..Default::default()
+    };
+    make_csgmdl2_fixture(&mesh)
+}
+
+/// Encode any mesh as a CSGMDL2 blob (84-byte vertices, a fixed colour, no
+/// obfuscation), so tests can feed real shapes through the union decoder.
+#[cfg(test)]
+pub(crate) fn make_csgmdl2_fixture(mesh: &CsgMesh) -> Vec<u8> {
     let mut buf = csgmdl_magic(2).to_vec();
-    // hash: 32 bytes
-    buf.extend_from_slice(&[0u8; 32]);
-    // vertex_count
-    buf.extend_from_slice(&3u32.to_le_bytes());
-    // stride magic
-    buf.extend_from_slice(&84u32.to_le_bytes());
-    let verts = [
-        ([0.0f32, 0.0, 0.0], [0.0f32, 0.0, 1.0], [0.0f32, 0.0]),
-        ([1.0f32, 0.0, 0.0], [0.0f32, 0.0, 1.0], [1.0f32, 0.0]),
-        ([0.0f32, 1.0, 0.0], [0.0f32, 0.0, 1.0], [0.0f32, 1.0]),
-    ];
-    for (pos, norm, uv) in verts {
-        for c in pos {
-            buf.extend_from_slice(&c.to_le_bytes());
-        }
-        for c in norm {
+    buf.extend_from_slice(&[0u8; 32]); // hash
+    buf.extend_from_slice(&(mesh.positions.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&84u32.to_le_bytes()); // stride magic
+    for (i, pos) in mesh.positions.iter().enumerate() {
+        let norm = mesh.normals.get(i).copied().unwrap_or([0.0, 0.0, 1.0]);
+        let uv = mesh.uvs.get(i).copied().unwrap_or([0.0, 0.0]);
+        for c in pos.iter().chain(norm.iter()) {
             buf.extend_from_slice(&c.to_le_bytes());
         }
         buf.extend_from_slice(&[200, 150, 100, 255]); // color
@@ -1039,9 +1127,8 @@ pub(crate) fn make_csgmdl2_triangle_fixture() -> Vec<u8> {
         }
         buf.extend_from_slice(&[0u8; 16]); // magic1 u128
     }
-    // face index count = 3
-    buf.extend_from_slice(&3u32.to_le_bytes());
-    for i in [0u32, 1, 2] {
+    buf.extend_from_slice(&(mesh.indices.len() as u32).to_le_bytes());
+    for i in &mesh.indices {
         buf.extend_from_slice(&i.to_le_bytes());
     }
     buf
@@ -1122,6 +1209,215 @@ mod tests {
             "only {decoded}/{seen} decoded; first failure: {}",
             first_err.unwrap_or_default()
         );
+    }
+
+    /// Where every CSG instance in a real place keeps its geometry: inline
+    /// `MeshData2`, inline legacy `MeshData`, only a cloud `AssetId`
+    /// (a `PartOperationAsset` model), or nowhere. For the cloud ones it also
+    /// opens any copy already in the asset cache and decodes it. Ignored by
+    /// default; run with
+    /// `cargo test -p eustress-roblox-import union_mesh_sources_census -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn union_mesh_sources_census() {
+        use rbx_dom_weak::types::Variant;
+        let place = std::env::var("CENSUS_PLACE").unwrap_or_else(|_| {
+            r"C:\Users\miksu\Documents\Roblox Import\Vehicle Simulator.rbxl".to_string()
+        });
+        let cache = std::env::var("RBX_CACHE").unwrap_or_else(|_| {
+            r"C:\Users\miksu\Documents\Eustress\.rbx_cache".to_string()
+        });
+        let rbx = crate::parser::parse(std::path::Path::new(&place)).expect("parse place");
+        let dom = rbx.dom();
+
+        let (mut total, mut md2, mut md1, mut cloud, mut none) = (0, 0, 0, 0, 0);
+        let mut csgk = 0;
+        let mut csgk_sample: Option<String> = None;
+        let (mut cached, mut cached_decoded) = (0, 0);
+        let mut cloud_ids = std::collections::BTreeSet::new();
+        let mut first_err: Option<String> = None;
+        for inst in dom.descendants() {
+            if !matches!(
+                inst.class.as_str(),
+                "UnionOperation" | "NegateOperation" | "IntersectOperation"
+            ) {
+                continue;
+            }
+            total += 1;
+            let bytes_of = |name: &str| -> Option<Vec<u8>> {
+                let b: &[u8] = match inst.properties.get(&rbx_dom_weak::ustr(name))? {
+                    Variant::BinaryString(bs) => bs.as_ref(),
+                    Variant::SharedString(ss) => ss.data(),
+                    _ => return None,
+                };
+                (!b.is_empty()).then(|| b.to_vec())
+            };
+            if let Some(b) = bytes_of("MeshData2").or_else(|| bytes_of("MeshData")) {
+                if b.starts_with(b"CSGK") {
+                    csgk += 1;
+                    if csgk_sample.is_none() {
+                        csgk_sample = Some(format!("{:02x?}", &b[..b.len().min(48)]));
+                    }
+                } else if bytes_of("MeshData2").is_some() {
+                    md2 += 1;
+                } else {
+                    md1 += 1;
+                }
+                continue;
+            }
+            let uri = match inst.properties.get(&rbx_dom_weak::ustr("AssetId")) {
+                Some(Variant::ContentId(c)) => c.as_str().to_string(),
+                Some(Variant::Content(c)) => c.as_uri().unwrap_or_default().to_string(),
+                Some(Variant::String(s)) => s.clone(),
+                _ => String::new(),
+            };
+            let Some(id) = crate::asset_resolver::AssetReference::parse(&uri).asset_id() else {
+                none += 1;
+                continue;
+            };
+            cloud += 1;
+            if !cloud_ids.insert(id) {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(format!("{cache}/{id}.bin")) else {
+                continue;
+            };
+            cached += 1;
+            match super::mesh_from_part_operation_asset(&bytes) {
+                Ok(m) if !m.is_empty() => cached_decoded += 1,
+                Ok(_) => {}
+                Err(e) => {
+                    first_err.get_or_insert_with(|| format!("{id}: {e}"));
+                }
+            }
+        }
+        eprintln!(
+            "CSG instances {total}: MeshData2 {md2}, MeshData {md1}, cloud AssetId only {cloud} ({} unique ids), no geometry {none}",
+            cloud_ids.len()
+        );
+        eprintln!(
+            "cloud ids already cached: {cached}, decoded to geometry: {cached_decoded}; first failure: {}",
+            first_err.unwrap_or_default()
+        );
+        eprintln!("CSGK dictionary markers: {csgk}; first: {}", csgk_sample.unwrap_or_default());
+
+        // What space is inline union geometry in? Compare each decoded mesh's
+        // bounding box with the union's Size and InitialSize, and its centre
+        // with the part origin. Roblox draws a union at Size / InitialSize.
+        let v3 = |inst: &rbx_dom_weak::Instance, name: &str| match inst
+            .properties
+            .get(&rbx_dom_weak::ustr(name))
+        {
+            Some(Variant::Vector3(v)) => Some([v.x, v.y, v.z]),
+            _ => None,
+        };
+        let close = |a: f32, b: f32| (a - b).abs() <= 0.01 * b.abs().max(0.05);
+        let (mut n, mut fits_initial, mut fits_size, mut centred, mut resized) = (0, 0, 0, 0, 0);
+        let mut examples = Vec::new();
+        for inst in dom.descendants() {
+            if inst.class.as_str() != "UnionOperation" || n >= 3000 {
+                continue;
+            }
+            let blob = match inst.properties.get(&rbx_dom_weak::ustr("MeshData2")) {
+                Some(Variant::SharedString(ss)) if !ss.data().is_empty() => ss.data().to_vec(),
+                _ => continue,
+            };
+            let (Some(size), Some(initial)) = (v3(inst, "Size"), v3(inst, "InitialSize")) else {
+                continue;
+            };
+            let Ok(mesh) = decode_mesh_data(&blob) else { continue };
+            let Some((centre, extent)) = unit_bounds(&mesh) else { continue };
+            n += 1;
+            let all = |f: &dyn Fn(usize) -> bool| (0..3).all(|a| f(a));
+            if all(&|a| close(extent[a], initial[a])) {
+                fits_initial += 1;
+            }
+            if all(&|a| close(extent[a], size[a])) {
+                fits_size += 1;
+            }
+            if all(&|a| centre[a].abs() <= 0.01 * extent[a].max(0.05)) {
+                centred += 1;
+            }
+            if !all(&|a| close(size[a], initial[a])) {
+                resized += 1;
+                if examples.len() < 4 {
+                    examples.push(format!(
+                        "size {size:?} initial {initial:?} extent {extent:?} centre {centre:?}"
+                    ));
+                }
+            }
+        }
+        eprintln!(
+            "union geometry space over {n} meshes: extent==InitialSize {fits_initial}, extent==Size {fits_size}, centred on origin {centred}, resized since creation {resized}"
+        );
+        for e in examples {
+            eprintln!("  resized: {e}");
+        }
+
+        // What do a union's vertex colours hold, and does `UsePartColor`
+        // decide whether they or the union's Color show?
+        let (mut upc_true, mut upc_false, mut multi_colour, mut white_only) = (0, 0, 0, 0);
+        let mut colour_samples = Vec::new();
+        for inst in dom.descendants().filter(|i| i.class.as_str() == "UnionOperation").take(3000) {
+            let use_part_color = matches!(
+                inst.properties.get(&rbx_dom_weak::ustr("UsePartColor")),
+                Some(Variant::Bool(true))
+            );
+            if use_part_color { upc_true += 1 } else { upc_false += 1 }
+            let Some(Variant::SharedString(ss)) = inst.properties.get(&rbx_dom_weak::ustr("MeshData2")) else {
+                continue;
+            };
+            let Ok(mesh) = decode_mesh_data(ss.data()) else { continue };
+            let mut distinct: Vec<[u8; 4]> = Vec::new();
+            for c in &mesh.colors {
+                let q = c.map(|v| (v * 255.0).round() as u8);
+                if !distinct.contains(&q) {
+                    distinct.push(q);
+                    if distinct.len() > 8 { break; }
+                }
+            }
+            if distinct.len() > 1 { multi_colour += 1 }
+            if distinct.iter().all(|c| c[..3] == [255, 255, 255]) { white_only += 1 }
+            if colour_samples.len() < 5 {
+                let colour = match inst.properties.get(&rbx_dom_weak::ustr("Color")) {
+                    Some(Variant::Color3uint8(c)) => format!("{:?}", [c.r, c.g, c.b]),
+                    Some(Variant::Color3(c)) => format!("{:?}", [c.r, c.g, c.b]),
+                    other => format!("{other:?}"),
+                };
+                colour_samples.push(format!(
+                    "UsePartColor={use_part_color} Color={colour} vertex colours={:?}",
+                    &distinct[..distinct.len().min(4)]
+                ));
+            }
+        }
+        eprintln!(
+            "UsePartColor true {upc_true}, false {upc_false}; unions with >1 vertex colour {multi_colour}; all-white vertex colours {white_only}"
+        );
+        for c in colour_samples {
+            eprintln!("  {c}");
+        }
+        for service in ["CSGDictionaryService", "NonReplicatedCSGDictionaryService"] {
+            let Some(svc) = dom.descendants().find(|i| i.class.as_str() == service) else {
+                continue;
+            };
+            let kids: Vec<_> = svc.children().iter().filter_map(|r| dom.get_by_ref(*r)).collect();
+            eprintln!("{service}: {} children", kids.len());
+            for k in kids.iter().take(3) {
+                let props: Vec<String> = k
+                    .properties
+                    .iter()
+                    .map(|(n, v)| match v {
+                        Variant::BinaryString(b) => {
+                            let b: &[u8] = b.as_ref();
+                            format!("{n}=bin[{}] {:02x?}", b.len(), &b[..b.len().min(24)])
+                        }
+                        Variant::SharedString(b) => format!("{n}=shared[{}] {:02x?}", b.data().len(), &b.data()[..b.data().len().min(24)]),
+                        other => format!("{n}={:?}", other.ty()),
+                    })
+                    .collect();
+                eprintln!("  {} '{}': {}", k.class, k.name, props.join(", "));
+            }
+        }
     }
 
     /// Build a tiny valid CSGMDL2 blob: a single triangle (3 vertices).
@@ -1231,11 +1527,12 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let blob = make_csgmdl2_triangle();
-        let outcome = import_csg(&dir, Some(&blob), [2.0, 2.0, 2.0]).expect("import_csg");
+        let outcome = import_csg(&dir, Some(&blob), false).expect("import_csg");
         match outcome {
             CsgOutcome::Baked {
                 mesh_file,
                 triangles,
+                ..
             } => {
                 assert_eq!(mesh_file, "csg.glb");
                 assert_eq!(triangles, 1);
@@ -1257,7 +1554,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let outcome = import_csg(&dir, None, [3.0, 5.0, 7.0]).expect("import_csg");
+        let outcome = import_csg(&dir, None, false).expect("import_csg");
         match outcome {
             CsgOutcome::Aabb { mesh_file, reason } => {
                 assert_eq!(mesh_file, "csg.glb");
@@ -1284,9 +1581,150 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut blob = b"CSGK".to_vec();
         blob.extend_from_slice(&[b'0'; 32]);
-        let outcome = import_csg(&dir, Some(&blob), [2.0, 2.0, 2.0]).expect("import_csg");
+        let outcome = import_csg(&dir, Some(&blob), false).expect("import_csg");
         assert!(matches!(outcome, CsgOutcome::Aabb { .. }));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Read the POSITION accessor's min/max out of a written `.glb`.
+    fn glb_position_bounds(path: &std::path::Path) -> ([f32; 3], [f32; 3]) {
+        let b = std::fs::read(path).unwrap();
+        assert_eq!(&b[..4], b"glTF");
+        let json_len = u32::from_le_bytes(b[12..16].try_into().unwrap()) as usize;
+        let j: serde_json::Value = serde_json::from_slice(&b[20..20 + json_len]).unwrap();
+        for acc in j["accessors"].as_array().unwrap() {
+            if let (Some(mn), Some(mx)) = (acc["min"].as_array(), acc["max"].as_array()) {
+                if mn.len() == 3 {
+                    let f = |v: &Vec<serde_json::Value>| [0, 1, 2].map(|i| v[i].as_f64().unwrap() as f32);
+                    return (f(mn), f(mx));
+                }
+            }
+        }
+        panic!("no 3-component accessor with bounds");
+    }
+
+    /// Regression for the "large grey blocks" defect, using the real car-body
+    /// union from Vehicle Simulator. The engine multiplies every part mesh by
+    /// `Transform.scale` (the part's `Size`), so the written mesh must span
+    /// exactly [-0.5, 0.5]. It used to span the full stud size, which rendered
+    /// this part about 28 x 4 x 122 m instead of 2.9 x 1.1 x 6.1 m.
+    #[test]
+    fn written_glb_is_unit_normalised() {
+        let dir = std::env::temp_dir().join(format!(
+            "rbx_csg_unit_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The stand-in block, and real baked geometry at the car body's size.
+        import_csg(&dir, None, false).expect("import_csg");
+        let (mn, mx) = glb_position_bounds(&dir.join("csg.glb"));
+        for a in 0..3 {
+            assert!((mn[a] + 0.5).abs() < 1e-5, "block axis {a} min {} != -0.5", mn[a]);
+            assert!((mx[a] - 0.5).abs() < 1e-5, "block axis {a} max {} != 0.5", mx[a]);
+        }
+        let size = [9.581_567, 3.644_506, 20.044_78];
+        let body = aabb_box_mesh(size);
+        let blob = make_csgmdl2_fixture(&body);
+        let outcome = import_csg(&dir, Some(&blob), false).expect("import_csg");
+        assert!(matches!(outcome, CsgOutcome::Baked { .. }), "got {outcome:?}");
+        let (mn, mx) = glb_position_bounds(&dir.join("csg.glb"));
+        for a in 0..3 {
+            assert!((mn[a] + 0.5).abs() < 1e-5, "baked axis {a} min {} != -0.5", mn[a]);
+            assert!((mx[a] - 0.5).abs() < 1e-5, "baked axis {a} max {} != 0.5", mx[a]);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `UsePartColor` decides whether a union's per-vertex part colours
+    /// survive: off keeps them (and says so), on drops them.
+    #[test]
+    fn use_part_color_decides_vertex_colours() {
+        let dir = std::env::temp_dir().join(format!(
+            "rbx_csg_upc_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The fixture's vertices are coloured (200, 150, 100).
+        let blob = make_csgmdl2_triangle();
+        match import_csg(&dir, Some(&blob), false).unwrap() {
+            CsgOutcome::Baked { vertex_coloured, .. } => assert!(vertex_coloured),
+            other => panic!("expected Baked, got {other:?}"),
+        }
+        match import_csg(&dir, Some(&blob), true).unwrap() {
+            CsgOutcome::Baked { vertex_coloured, .. } => assert!(!vertex_coloured),
+            other => panic!("expected Baked, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Geometry that is not centred on its own origin is recentred: Roblox
+    /// stretches the mesh's bounding box to fill the part.
+    #[test]
+    fn unit_mesh_recentres_offset_geometry() {
+        let mut m = aabb_box_mesh([2.0, 4.0, 6.0]);
+        for p in &mut m.positions {
+            p[0] += 10.0;
+            p[1] -= 3.0;
+            p[2] += 0.25;
+        }
+        let u = to_unit_mesh(&m);
+        for a in 0..3 {
+            let lo = u.positions.iter().map(|p| p[a]).fold(f32::INFINITY, f32::min);
+            let hi = u.positions.iter().map(|p| p[a]).fold(f32::NEG_INFINITY, f32::max);
+            assert!((lo + 0.5).abs() < 1e-5 && (hi - 0.5).abs() < 1e-5, "axis {a}: {lo}..{hi}");
+        }
+    }
+
+    /// Normals must survive the round trip the renderer performs. Positions
+    /// are divided by the extent `e`; the engine then scales by `S = e`, and a
+    /// renderer transforms normals by the inverse-transpose `1/S`. Only if the
+    /// stored normal was pre-multiplied by `e` does the final normal equal the
+    /// true one. Checked on a slanted normal and a strongly non-cubic extent.
+    #[test]
+    fn unit_mesh_normals_survive_rescaling() {
+        let extent = [2.0_f32, 8.0, 0.5];
+        let slant = {
+            let v = [0.3_f32, 0.8, -0.52];
+            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            [v[0] / l, v[1] / l, v[2] / l]
+        };
+        let m = CsgMesh {
+            positions: vec![
+                [-extent[0] / 2.0, -extent[1] / 2.0, -extent[2] / 2.0],
+                [extent[0] / 2.0, extent[1] / 2.0, extent[2] / 2.0],
+                [extent[0] / 2.0, -extent[1] / 2.0, extent[2] / 2.0],
+            ],
+            normals: vec![slant; 3],
+            indices: vec![0, 1, 2],
+            ..Default::default()
+        };
+        let u = to_unit_mesh(&m);
+        for n in &u.normals {
+            // renderer: normal matrix = diag(1 / S) with S = extent, then renormalise
+            let r = [n[0] / extent[0], n[1] / extent[1], n[2] / extent[2]];
+            let l = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt();
+            for a in 0..3 {
+                assert!((r[a] / l - slant[a]).abs() < 1e-5, "axis {a}: {} vs {}", r[a] / l, slant[a]);
+            }
+        }
+    }
+
+    /// A flat mesh has a zero extent on one axis: it must stay flat without
+    /// dividing by zero, and its normals along that axis must be preserved.
+    #[test]
+    fn unit_mesh_keeps_a_flat_axis_flat() {
+        let m = CsgMesh {
+            positions: vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 0.0, 2.0]],
+            normals: vec![[0.0, 1.0, 0.0]; 3],
+            indices: vec![0, 1, 2],
+            ..Default::default()
+        };
+        let u = to_unit_mesh(&m);
+        assert!(u.positions.iter().all(|p| p.iter().all(|c| c.is_finite())));
+        assert!(u.positions.iter().all(|p| p[1] == 0.0), "flat axis must stay flat");
+        assert!(u.normals.iter().all(|n| (n[1] - 1.0).abs() < 1e-6), "up normal preserved");
     }
 
     #[test]

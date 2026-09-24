@@ -34,6 +34,11 @@ pub struct ImportReport {
 
     /// Properties on mapped classes we recognised but didn't translate.
     pub unmapped_properties: Vec<UnmappedProperty>,
+    /// Lookup from (class, property, variant type) to its slot in
+    /// `unmapped_properties`, so recording stays O(1) across the millions
+    /// of property visits a large place makes. Not serialized.
+    #[serde(skip)]
+    pub(crate) unmapped_property_index: std::collections::HashMap<(String, String, String), usize>,
 
     /// `rbxassetid://` references we couldn't resolve.
     pub asset_warnings: Vec<AssetWarning>,
@@ -66,17 +71,20 @@ pub struct ImportReport {
     #[serde(default)]
     pub terrain_decode_errors: Vec<TerrainDecodeError>,
 
-    // ── CSG (Wave 4.A.2 deferred — these stay 0 here). ──
-    /// Wave 4.A.2 will fill: CSG instances whose baked mesh was
-    /// extracted.
+    // ── CSG ──
+    /// CSG instances whose baked mesh was extracted to `csg.glb`.
     #[serde(default)]
     pub csg_baked_extracted: usize,
-    /// Wave 4.A.2 will fill: CSG instances re-executed via the
-    /// `truck-shapeops` fallback.
+    /// Of those, the ones whose geometry came from the cloud: no inline
+    /// `MeshData`, fetched as the `PartOperationAsset` named by `AssetId`.
+    #[serde(default)]
+    pub csg_cloud_fetched: usize,
+    /// CSG instances re-executed via the `truck-shapeops` fallback. Not
+    /// implemented; always 0.
     #[serde(default)]
     pub csg_recomputed: usize,
-    /// Wave 4.A.2 will fill: CSG instances that landed on a plain AABB
-    /// because no usable mesh was present.
+    /// CSG instances that landed on a stand-in block because no usable mesh
+    /// was present. Each has an approximation entry saying why.
     #[serde(default)]
     pub csg_fallback_aabb: usize,
 
@@ -135,12 +143,23 @@ impl ImportReport {
         }
     }
 
-    /// Record a per-property mapping miss.
+    /// Record a per-property mapping miss: a property no dedicated handler
+    /// claimed, so it was preserved verbatim in `[properties.extras]` where
+    /// nothing in the engine reads it. Aggregated per (class, property, type)
+    /// with a count; one entry per occurrence would be millions of rows on a
+    /// large place.
     pub fn record_unmapped_property(&mut self, class: &str, property: &str, variant_type: &str) {
+        let key = (class.to_string(), property.to_string(), variant_type.to_string());
+        if let Some(&i) = self.unmapped_property_index.get(&key) {
+            self.unmapped_properties[i].count += 1;
+            return;
+        }
+        self.unmapped_property_index.insert(key, self.unmapped_properties.len());
         self.unmapped_properties.push(UnmappedProperty {
             class: class.to_string(),
             property: property.to_string(),
             variant_type: variant_type.to_string(),
+            count: 1,
         });
     }
 
@@ -245,12 +264,16 @@ pub struct UnmappedClass {
 /// A property the importer saw but didn't know how to translate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnmappedProperty {
-    /// Eustress class on which the unmapped property appeared.
+    /// Roblox class on which the unmapped property appeared (the source
+    /// class, so a gap reads as the Roblox property that needs a mapping).
     pub class: String,
     /// Roblox property name (e.g. `"CollisionGroupId"`).
     pub property: String,
     /// `rbx_dom_weak` variant type tag (e.g. `"Int32"`, `"Color3"`).
     pub variant_type: String,
+    /// How many instances carried this unmapped property.
+    #[serde(default)]
+    pub count: usize,
 }
 
 /// An asset reference we couldn't (or didn't try to) fetch.

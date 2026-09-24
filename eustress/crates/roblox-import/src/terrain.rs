@@ -101,28 +101,22 @@ pub const CHUNK_HEADER_LEN: usize = 12;
 /// The Eustress voxel-chunk file format version (spec §6.6).
 pub const EUSTRESS_CHUNK_VERSION: u8 = 1;
 
-/// Roblox terrain cell edge in studs (= meters in Eustress, STUD_TO_METERS = 1).
+/// Roblox terrain cell edge in studs. Like every imported length it is 1 stud =
+/// 1 ft (0.3048 m); the Terrain instance carries `metadata.unit = "ft"`, and
+/// whatever lays the voxels out in the world must convert, exactly as parts do.
 pub const ROBLOX_CELL_STUDS: f32 = 4.0;
 
 // ---------------------------------------------------------------------------
 // Eustress terrain material id (mirrors common::terrain::TerrainMaterial)
 // ---------------------------------------------------------------------------
 
-/// The 8 Eustress terrain materials, kept in sync with
-/// `eustress_common::terrain::material::TerrainMaterial` (we re-declare
-/// the discriminants here so the importer stays bevy-free — the engine
-/// crate is not a dependency).
-///
-/// | id | material |
-/// |----|----------|
-/// | 0  | Grass    |
-/// | 1  | Rock     |
-/// | 2  | Dirt     |
-/// | 3  | Snow     |
-/// | 4  | Sand     |
-/// | 5  | Mud      |
-/// | 6  | Concrete |
-/// | 7  | Asphalt  |
+/// Eustress terrain material ids, mirroring
+/// `eustress_common::terrain::material::TerrainMaterial` discriminant for
+/// discriminant: the original 8 (Grass 0 through Asphalt 7) plus the
+/// Roblox-parity tail (Slate 8 through Pavement 21), so every Roblox terrain
+/// material maps exactly. Water is not listed: this crate routes water cells to
+/// [`WATER_MARKER`] instead. A test in `common` pins these values against the
+/// enum, so the two cannot drift.
 pub mod eustress_material {
     // Discriminants MUST track `eustress_common::terrain::material::
     // TerrainMaterial`, which stored voxel data depends on. The first 8 are
@@ -801,6 +795,9 @@ pub fn import_terrain(
 /// Eustress material name for a mapped id (for reporting).
 fn eustress_material_name(id: u8) -> &'static str {
     use eustress_material::*;
+    // Every id the table can produce is named. An unknown id is reported as
+    // what it is rather than silently renamed, so a report never claims a
+    // material the voxels do not carry.
     match id {
         GRASS => "Grass",
         ROCK => "Rock",
@@ -810,9 +807,23 @@ fn eustress_material_name(id: u8) -> &'static str {
         MUD => "Mud",
         CONCRETE => "Concrete",
         ASPHALT => "Asphalt",
+        SLATE => "Slate",
+        BRICK => "Brick",
+        WOOD_PLANKS => "WoodPlanks",
+        GLACIER => "Glacier",
+        SANDSTONE => "Sandstone",
+        BASALT => "Basalt",
+        GROUND => "Ground",
+        CRACKED_LAVA => "CrackedLava",
+        COBBLESTONE => "Cobblestone",
+        ICE => "Ice",
+        LEAFY_GRASS => "LeafyGrass",
+        SALT => "Salt",
+        LIMESTONE => "Limestone",
+        PAVEMENT => "Pavement",
         WATER_MARKER => "Water",
         AIR_MARKER => "Air",
-        _ => "Rock",
+        _ => "Unknown",
     }
 }
 
@@ -1199,6 +1210,19 @@ mod tests {
         let res = decode_smooth_grid(&buf);
         assert_eq!(res.errors.len(), 1, "expected one overrun error");
         assert!(res.errors[0].reason.contains("overrun"));
+    }
+
+    /// Every Eustress id the material table can emit must be named, and named
+    /// for itself: the Roblox-parity tail used to fall through to "Rock".
+    #[test]
+    fn every_mapped_material_is_named_for_itself() {
+        for (rbx_name, eustress_id, _) in MATERIAL_TABLE {
+            let name = eustress_material_name(*eustress_id);
+            assert_ne!(name, "Unknown", "{rbx_name} (id {eustress_id}) has no name");
+            if *eustress_id != AIR_MARKER && *eustress_id != WATER_MARKER {
+                assert_eq!(name, *rbx_name, "Roblox {rbx_name} reported as {name}");
+            }
+        }
     }
 
     #[test]

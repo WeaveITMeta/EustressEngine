@@ -10,8 +10,8 @@
 //! ValueObject child into its parent:
 //!
 //! - [`is_value_object_class`] — classifies a raw Roblox class string as a
-//!   ValueObject (the 11 convertible classes + the 2 *Constrained* classes
-//!   that are dropped per the product decision).
+//!   ValueObject (the 12 convertible classes, plus `RayValue`, which is
+//!   folded out but not converted).
 //! - [`encode_value_object`] — reads a ValueObject's `Value` property and
 //!   produces the `toml::Value` that lands in the parent's
 //!   `[attributes]` table, following **Contract A** (see
@@ -32,7 +32,9 @@
 //! | `CFrameValue`                    | `{ CFrame = [px, py, pz, qx, qy, qz, qw] }`         |
 //! | `BrickColorValue`                | `{ BrickColor = N }` (palette index integer)        |
 //! | `ObjectValue`                    | bare string holding the resolved Eustress UUID hex  |
-//! | `RayValue`, `IntConstrainedValue`, `DoubleConstrainedValue` | dropped (`None`) |
+//! | `IntConstrainedValue`            | bare integer (the range is not kept)                |
+//! | `DoubleConstrainedValue`         | bare float (the range is not kept)                  |
+//! | `RayValue`                       | dropped (`None`)                                    |
 
 use rbx_dom_weak::types::{Ref, Variant};
 use rbx_dom_weak::UstrMap;
@@ -41,21 +43,26 @@ use rbx_dom_weak::UstrMap;
 // Classification
 // ---------------------------------------------------------------------------
 
-/// True when `roblox_class` is a Roblox *ValueObject* — either one of the
-/// 11 convertible classes or one of the 2 *Constrained* classes that the
-/// importer drops (records an approximation rather than converting).
+/// True when `roblox_class` is a Roblox *ValueObject*: one of the 12
+/// convertible classes, or `RayValue`, which the importer drops (records an
+/// approximation rather than converting).
 ///
 /// The materializer uses this to decide, for each child of a node, whether
 /// to fold it into the parent's `[attributes]` (convertible) or skip it
-/// with an approximation note (Constrained) — in BOTH cases the child is
+/// with an approximation note (`RayValue`). In BOTH cases the child is
 /// NOT materialised as its own instance.
 pub fn is_value_object_class(roblox_class: &str) -> bool {
     is_convertible_value_object(roblox_class) || is_dropped_value_object(roblox_class)
 }
 
-/// The 10 ValueObject classes the importer folds into a typed attribute.
+/// The 12 ValueObject classes the importer folds into a typed attribute.
 /// (`RayValue` is a recognised ValueObject but is dropped, not converted —
 /// see [`is_dropped_value_object`].)
+///
+/// The two *Constrained* classes convert to their number. They were once
+/// dropped, and that dropped real gameplay data: Vehicle Simulator keeps
+/// `SteeringRadius` and `StickyWheels` for every car as
+/// `DoubleConstrainedValue`s, 403 of them in one place.
 pub fn is_convertible_value_object(roblox_class: &str) -> bool {
     matches!(
         roblox_class,
@@ -69,18 +76,17 @@ pub fn is_convertible_value_object(roblox_class: &str) -> bool {
             | "CFrameValue"
             | "BrickColorValue"
             | "BinaryStringValue"
+            | "IntConstrainedValue"
+            | "DoubleConstrainedValue"
     )
 }
 
-/// The 2 *Constrained* ValueObject classes plus `RayValue` — recognised as
-/// ValueObjects (so they are folded out of the instance tree) but NOT
-/// converted: `encode_value_object` returns `None` for them and the
-/// materializer records an approximation noting the class was dropped.
+/// `RayValue`: recognised as a ValueObject (so it is folded out of the
+/// instance tree) but NOT converted: an attribute cannot hold a ray.
+/// `encode_value_object` returns `None` and the materializer records an
+/// approximation noting the class was dropped.
 pub fn is_dropped_value_object(roblox_class: &str) -> bool {
-    matches!(
-        roblox_class,
-        "RayValue" | "IntConstrainedValue" | "DoubleConstrainedValue"
-    )
+    matches!(roblox_class, "RayValue")
 }
 
 // ---------------------------------------------------------------------------
@@ -102,8 +108,7 @@ pub fn is_dropped_value_object(roblox_class: &str) -> bool {
 /// attribute holding the empty string `""` (the caller records an
 /// approximation); a missing attribute would silently drop the link.
 ///
-/// Returns `None` for the dropped classes (`RayValue`,
-/// `IntConstrainedValue`, `DoubleConstrainedValue`) — the caller then skips
+/// Returns `None` for the dropped class (`RayValue`); the caller then skips
 /// the child and records an approximation.
 pub fn encode_value_object(
     roblox_class: &str,
@@ -117,7 +122,28 @@ pub fn encode_value_object(
 
     let value = props.get(&rbx_dom_weak::ustr("Value"));
 
+    // A Constrained value serialises its number as lowercase `value`; its
+    // `Value` and `ConstrainedValue` properties do not serialise at all.
+    let constrained = props
+        .get(&rbx_dom_weak::ustr("value"))
+        .or(value)
+        .or_else(|| props.get(&rbx_dom_weak::ustr("ConstrainedValue")));
+
     match roblox_class {
+        "IntConstrainedValue" => match constrained {
+            Some(Variant::Int64(i)) => Some(toml::Value::Integer(*i)),
+            Some(Variant::Int32(i)) => Some(toml::Value::Integer(*i as i64)),
+            Some(Variant::Float64(f)) => Some(toml::Value::Integer(*f as i64)),
+            Some(Variant::Float32(f)) => Some(toml::Value::Integer(*f as i64)),
+            _ => Some(toml::Value::Integer(0)),
+        },
+        "DoubleConstrainedValue" => match constrained {
+            Some(Variant::Float64(f)) => Some(toml::Value::Float(*f)),
+            Some(Variant::Float32(f)) => Some(toml::Value::Float(*f as f64)),
+            Some(Variant::Int64(i)) => Some(toml::Value::Float(*i as f64)),
+            Some(Variant::Int32(i)) => Some(toml::Value::Float(*i as f64)),
+            _ => Some(toml::Value::Float(0.0)),
+        },
         "BoolValue" => match value {
             Some(Variant::Bool(b)) => Some(toml::Value::Boolean(*b)),
             // A BoolValue with no stored Value defaults to false in Roblox.
@@ -230,9 +256,9 @@ pub fn encode_value_object(
             };
             Some(toml::Value::String(resolved))
         }
-        // `RayValue` and the *Constrained* classes are handled by the
-        // `is_dropped_value_object` early-return above; any other class is
-        // not a ValueObject and should not reach here.
+        // `RayValue` is handled by the `is_dropped_value_object` early-return
+        // above; any other class is not a ValueObject and should not reach
+        // here.
         _ => None,
     }
 }
@@ -258,61 +284,13 @@ fn tagged_int(tag: &str, n: i64) -> toml::Value {
     toml::Value::Table(t)
 }
 
-/// Roblox CFrame → `(translation, quaternion[x,y,z,w])`.
-///
-/// Mirrors `property_map::cframe_to_translation_quat` (kept local so this
-/// module has no cross-module private dependency). Roblox stores rotation
-/// as a row-major basis (right / up / back); we build the column-basis
-/// matrix and convert to a quaternion via Shepperd's method.
+/// Roblox CFrame → `(translation, quaternion[x,y,z,w])`: the property
+/// mapper's conversion, so a `CFrameValue` turns exactly like a part. A
+/// separate copy here still read the matrix rows as its columns, which is the
+/// transpose, which is the inverse rotation: every rotated `CFrameValue`
+/// imported turned the wrong way after the property mapper's copy was fixed.
 fn cframe_to_translation_quat(cf: &rbx_dom_weak::types::CFrame) -> ([f32; 3], [f32; 4]) {
-    let translation = [cf.position.x, cf.position.y, cf.position.z];
-    let r = cf.orientation.x;
-    let u = cf.orientation.y;
-    let b = cf.orientation.z;
-    let m = [[r.x, r.y, r.z], [u.x, u.y, u.z], [b.x, b.y, b.z]];
-    (translation, mat3_to_quat(m))
-}
-
-/// Column-major 3×3 → quaternion `[x, y, z, w]` (Shepperd's method).
-fn mat3_to_quat(m: [[f32; 3]; 3]) -> [f32; 4] {
-    let m00 = m[0][0];
-    let m11 = m[1][1];
-    let m22 = m[2][2];
-    let trace = m00 + m11 + m22;
-
-    if trace > 0.0 {
-        let s = (trace + 1.0).sqrt() * 2.0;
-        [
-            (m[1][2] - m[2][1]) / s,
-            (m[2][0] - m[0][2]) / s,
-            (m[0][1] - m[1][0]) / s,
-            0.25 * s,
-        ]
-    } else if m00 > m11 && m00 > m22 {
-        let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
-        [
-            0.25 * s,
-            (m[1][0] + m[0][1]) / s,
-            (m[2][0] + m[0][2]) / s,
-            (m[1][2] - m[2][1]) / s,
-        ]
-    } else if m11 > m22 {
-        let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
-        [
-            (m[1][0] + m[0][1]) / s,
-            0.25 * s,
-            (m[2][1] + m[1][2]) / s,
-            (m[2][0] - m[0][2]) / s,
-        ]
-    } else {
-        let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
-        [
-            (m[2][0] + m[0][2]) / s,
-            (m[2][1] + m[1][2]) / s,
-            0.25 * s,
-            (m[0][1] - m[1][0]) / s,
-        ]
-    }
+    crate::property_map::cframe_to_translation_quat(cf)
 }
 
 // ---------------------------------------------------------------------------
@@ -350,12 +328,14 @@ mod tests {
             "CFrameValue",
             "BrickColorValue",
             "BinaryStringValue",
+            "IntConstrainedValue",
+            "DoubleConstrainedValue",
         ] {
             assert!(is_value_object_class(c), "{c} should be a ValueObject");
             assert!(is_convertible_value_object(c), "{c} should be convertible");
             assert!(!is_dropped_value_object(c), "{c} should not be dropped");
         }
-        for c in ["RayValue", "IntConstrainedValue", "DoubleConstrainedValue"] {
+        for c in ["RayValue"] {
             assert!(is_value_object_class(c), "{c} should be a ValueObject");
             assert!(is_dropped_value_object(c), "{c} should be dropped");
             assert!(
@@ -493,12 +473,53 @@ mod tests {
 
     #[test]
     fn dropped_classes_return_none() {
-        for c in ["RayValue", "IntConstrainedValue", "DoubleConstrainedValue"] {
-            assert_eq!(
-                encode_value_object(c, &props_with(vec![]), no_ref),
-                None,
-                "{c} should drop"
-            );
-        }
+        assert_eq!(encode_value_object("RayValue", &props_with(vec![]), no_ref), None);
+    }
+
+    /// Constrained values keep their number, read from the lowercase `value`
+    /// property they actually serialise.
+    #[test]
+    fn constrained_values_keep_their_number() {
+        assert_eq!(
+            encode_value_object(
+                "DoubleConstrainedValue",
+                &props_with(vec![
+                    ("value", Variant::Float64(0.35)),
+                    ("MinValue", Variant::Float64(0.0)),
+                    ("MaxValue", Variant::Float64(1.0)),
+                ]),
+                no_ref
+            ),
+            Some(toml::Value::Float(0.35))
+        );
+        assert_eq!(
+            encode_value_object(
+                "IntConstrainedValue",
+                &props_with(vec![("value", Variant::Int64(7))]),
+                no_ref
+            ),
+            Some(toml::Value::Integer(7))
+        );
+    }
+
+    /// A rotated CFrameValue keeps its rotation's sense: +90 degrees about Y
+    /// stays +90, not the -90 a row/column mix-up produces.
+    #[test]
+    fn cframe_value_rotation_is_not_inverted() {
+        use rbx_dom_weak::types::{CFrame, Matrix3};
+        let yaw90 = Matrix3::new(
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(-1.0, 0.0, 0.0),
+        );
+        let got = encode_value_object(
+            "CFrameValue",
+            &props_with(vec![("Value", Variant::CFrame(CFrame::new(Vector3::new(0.0, 0.0, 0.0), yaw90)))]),
+            no_ref,
+        )
+        .unwrap();
+        let arr = got.as_table().and_then(|t| t.get("CFrame")).and_then(|v| v.as_array()).unwrap();
+        let qy = arr[4].as_float().unwrap();
+        assert!((qy - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-5, "yaw inverted: qy = {qy}");
     }
 }

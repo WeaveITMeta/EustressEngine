@@ -113,7 +113,7 @@ impl AssetReference {
     /// The numeric asset id, when this reference carries one. `http(s)://`
     /// URLs of the form `.../asset/?id=NNN` also yield an id so a fetcher
     /// can route them through the same id-keyed path.
-    fn asset_id(&self) -> Option<u64> {
+    pub(crate) fn asset_id(&self) -> Option<u64> {
         match self {
             AssetReference::AssetId(n) => Some(*n),
             AssetReference::HttpUrl(u) | AssetReference::RbxHttp(u) => extract_id_from_url(u),
@@ -157,6 +157,12 @@ pub struct ResolvedAsset {
     pub reason: Option<String>,
     /// The original URI for cross-reference.
     pub original_uri: String,
+    /// For a fetched mesh: its native bounding-box size in studs, i.e. the
+    /// divisor the written unit-normalised `.glb` was scaled by. A legacy
+    /// `SpecialMesh` FileMesh renders at its native size times `Scale`, not
+    /// fitted to the part's `Size`, so the caller needs this to set the
+    /// visual scale. `None` for anything that is not a fetched mesh.
+    pub native_extent: Option<[f32; 3]>,
 }
 
 /// Resolve a Roblox asset URI to a path for the TOML.
@@ -193,12 +199,13 @@ pub fn resolve(
     if is_mesh {
         if let (Some(f), Some(id)) = (fetcher, parsed.asset_id()) {
             match fetch_and_decode_mesh(f, id, space_root, instance_dir) {
-                Ok(rel) => {
+                Ok((rel, extent)) => {
                     return ResolvedAsset {
                         asset_path: rel,
                         resolved: true,
                         reason: None,
                         original_uri: raw_uri.to_string(),
+                        native_extent: Some(extent),
                     };
                 }
                 Err(reason) => {
@@ -226,6 +233,7 @@ pub fn resolve(
                     resolved: true,
                     reason: None,
                     original_uri: raw_uri.to_string(),
+                    native_extent: None,
                 };
             }
             Err(reason) => return placeholder(&parsed, raw_uri, Some(reason)),
@@ -245,7 +253,7 @@ fn fetch_and_decode_mesh(
     id: u64,
     space_root: &Path,
     instance_dir: &Path,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, [f32; 3]), String> {
     let bytes = fetcher.fetch(id)?;
 
     // Only the Roblox `.mesh` magic is handled in Wave F2. A `.glb`/binary
@@ -269,10 +277,13 @@ fn fetch_and_decode_mesh(
     std::fs::create_dir_all(&meshes_dir)
         .map_err(|e| format!("create {}: {e}", meshes_dir.display()))?;
     let glb_abs = meshes_dir.join(format!("rbx-{id}.glb"));
+    // The native size, captured BEFORE write_glb unit-normalises the mesh.
+    let (_, native_extent) = crate::csg::unit_bounds(&mesh)
+        .ok_or_else(|| format!("rbxassetid://{id} .mesh has no vertices"))?;
     crate::csg::write_glb(&glb_abs, &mesh)
         .map_err(|e| format!("write {}: {e}", glb_abs.display()))?;
 
-    Ok(relative_path(instance_dir, &glb_abs))
+    Ok((relative_path(instance_dir, &glb_abs), native_extent))
 }
 
 /// A sniffed media kind: the `assets/` subdirectory it belongs in plus the
@@ -419,6 +430,7 @@ fn placeholder(parsed: &AssetReference, raw_uri: &str, extra_reason: Option<Stri
         resolved: false,
         reason,
         original_uri: raw_uri.to_string(),
+        native_extent: None,
     }
 }
 
