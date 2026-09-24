@@ -100,7 +100,7 @@ impl Plugin for NuclearPlugin {
             update_thermal_hydraulics_system,
             update_power_conversion_system,
             update_battery_buffer_system,
-        ).chain());
+        ).chain().in_set(crate::realism::PhysicsDomain::Nuclear));
 
         // Set B: control + safety + telemetry (runs after Set A each frame)
         app.add_systems(Update, (
@@ -109,7 +109,8 @@ impl Plugin for NuclearPlugin {
             nuclear_safety_monitor_system,
             execute_scram_system,
             publish_nuclear_watchpoints_system,
-        ).chain().after(update_battery_buffer_system));
+        ).chain().after(update_battery_buffer_system)
+          .in_set(crate::realism::PhysicsDomain::Nuclear));
 
         info!("NuclearPlugin initialised — ARC-1 fission simulation ready");
     }

@@ -40,7 +40,7 @@ impl Plugin for VisualizersPlugin {
                     .run_if(property_overlay::overlays_enabled),
                 vector_field::draw_vector_field,
                 stress_viz::draw_stress_indicators,
-            ));
+            ).in_set(crate::realism::PhysicsDomain::Visualizers));
         
         info!("VisualizersPlugin initialized");
     }

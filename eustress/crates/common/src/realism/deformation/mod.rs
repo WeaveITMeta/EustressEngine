@@ -78,7 +78,9 @@ impl Plugin for DeformationPlugin {
                 systems::relax_elastic_deformation,
                 systems::update_mesh_vertices,
                 systems::handle_fracture_mesh,
-            ).chain().run_if(deformation_enabled));
+            ).chain()
+              .run_if(deformation_enabled)
+              .in_set(crate::realism::PhysicsDomain::Deformation));
 
         info!("DeformationPlugin initialized - Vertex deformation ready");
     }

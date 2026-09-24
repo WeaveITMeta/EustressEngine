@@ -1,0 +1,28 @@
+# PhysicsService Service Properties
+# Global physics settings and which kinds of physics the engine steps.
+
+[Data]
+Name = { type = "string", value = "PhysicsService", readonly = true }
+ClassName = { type = "string", value = "PhysicsService", readonly = true }
+
+[Simulation]
+Enabled = { type = "bool", value = true, description = "Master switch. Off stops every physics domain, whatever the fidelity settings below say." }
+Gravity = { type = "Vector3", value = [0.0, -9.80665, 0.0], description = "Gravity in metres per second squared. Earth is 9.80665 downward." }
+TimeScale = { type = "float", value = 1.0, description = "Speed of the physics clock. 0.5 is half speed, 2.0 is double." }
+SolverSubsteps = { type = "int", value = 6, description = "Solver substeps per fixed step. More is stabler for stacks and joints, and costs more. 6 is the pinned default that keeps runs reproducible." }
+
+[Fidelity]
+Kinematics = { type = "bool", value = true, description = "Rigid bodies, collision detection, and the constraint solver. Off freezes every body in place." }
+Thermodynamics = { type = "bool", value = true, description = "Heat conduction and transfer between touching bodies." }
+Chemistry = { type = "bool", value = true, description = "Reactions, combustion, batch and continuous reactors, and reactor temperature." }
+Electricity = { type = "bool", value = true, description = "Circuits, capacitors, inductors, diodes, motors, and power electronics." }
+Deformation = { type = "bool", value = true, description = "Impact denting and fracture into separate bodies, for parts marked Destructible." }
+Fluids = { type = "bool", value = true, description = "Smoothed particle fluid dynamics, aerodynamics, and buoyancy." }
+Materials = { type = "bool", value = true, description = "Stress and strain response of materials, and the fracture checks that read it." }
+Particles = { type = "bool", value = true, description = "Thermal and kinetic stepping of particle species." }
+ParticleSimulation = { type = "bool", value = true, description = "The divergence free SPH particle solver used by ParticleSimulation objects." }
+Nuclear = { type = "bool", value = true, description = "Reactor kinetics, thermal hydraulics, control, and safety." }
+Visualizers = { type = "bool", value = true, description = "Overlays that draw simulation state such as stress and vector fields into the viewport." }
+
+[Performance]
+Parallel = { type = "bool", value = true, description = "Spread particle work across CPU threads where supported." }

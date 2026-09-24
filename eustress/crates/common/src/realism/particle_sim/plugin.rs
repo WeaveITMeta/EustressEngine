@@ -134,7 +134,8 @@ impl Plugin for ParticleSimulationPlugin {
                         .chain()
                         .in_set(ParticleSimSet::Configure),
                     step_particle_sims.in_set(ParticleSimSet::Step),
-                ),
+                )
+                    .in_set(crate::realism::PhysicsDomain::ParticleSimulation),
             )
             .add_systems(First, begin_particle_frame)
             .add_systems(PostUpdate, publish_particle_clouds.in_set(ParticleSimSet::Publish));

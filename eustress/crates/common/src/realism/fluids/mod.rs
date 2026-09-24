@@ -39,7 +39,7 @@ impl Plugin for FluidsPlugin {
                 sph::update_sph_forces,
                 aerodynamics::apply_aerodynamic_forces,
                 buoyancy::apply_buoyancy_forces,
-            ).chain());
+            ).chain().in_set(crate::realism::PhysicsDomain::Fluids));
         
         info!("FluidsPlugin initialized");
     }

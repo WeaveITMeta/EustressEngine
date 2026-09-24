@@ -233,13 +233,17 @@ impl Plugin for ThermalConductionPlugin {
     fn build(&self, app: &mut App) {
         app
             .init_resource::<ThermalConductionConfig>()
-            .add_systems(Update, thermal_conduction_system)
+            .add_systems(
+                Update,
+                thermal_conduction_system.in_set(crate::realism::PhysicsDomain::Thermodynamics),
+            )
             .add_systems(
                 Update,
                 auto_thermal_contacts_system
                     .run_if(bevy::time::common_conditions::on_real_timer(
                         std::time::Duration::from_millis(500),
-                    )),
+                    ))
+                    .in_set(crate::realism::PhysicsDomain::Thermodynamics),
             );
         
         info!("ThermalConductionPlugin initialized");

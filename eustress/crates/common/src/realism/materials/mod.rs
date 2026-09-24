@@ -40,7 +40,7 @@ impl Plugin for MaterialsPlugin {
                 stress_strain::update_stress_strain,
                 fracture::check_fracture_conditions,
                 deformation::apply_deformation,
-            ).chain());
+            ).chain().in_set(crate::realism::PhysicsDomain::Materials));
         
         info!("MaterialsPlugin initialized");
     }

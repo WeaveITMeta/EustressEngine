@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- PhysicsService: three blocks falling, blue, purple and orange. Each is
+       tilted at a different angle so they read as tumbling rather than
+       stacked, and each trails speed lines of its own colour above it, which
+       is what makes the motion read as a fall at 16 px. The blue block is
+       lowest and nearly level, as if about to land. -->
+
+  <!-- speed lines, drawn first so the blocks sit over their ends -->
+  <g stroke-width="0.7" stroke-linecap="round">
+    <line x1="3.3" y1="0.4" x2="3.3" y2="1.5" stroke="#FB923C" opacity="0.55"/>
+    <line x1="5.4" y1="0.2" x2="5.4" y2="1.2" stroke="#FB923C" opacity="0.4"/>
+    <line x1="10.4" y1="2.6" x2="10.4" y2="4.0" stroke="#A78BFA" opacity="0.55"/>
+    <line x1="12.6" y1="2.9" x2="12.6" y2="4.1" stroke="#A78BFA" opacity="0.4"/>
+    <line x1="5.2" y1="7.3" x2="5.2" y2="8.9" stroke="#5CA8FF" opacity="0.55"/>
+    <line x1="7.8" y1="7.6" x2="7.8" y2="9.0" stroke="#5CA8FF" opacity="0.4"/>
+  </g>
+
+  <!-- orange: highest, tumbling left -->
+  <g transform="rotate(-18 4.4 4.0)">
+    <rect x="2.6" y="2.2" width="3.6" height="3.6" rx="0.55" fill="#7C2D12" stroke="#FB923C" stroke-width="0.7"/>
+    <path d="M3.1 2.9h2.6" stroke="#FDBA74" stroke-width="0.55" stroke-linecap="round" opacity="0.85"/>
+  </g>
+
+  <!-- purple: middle, tumbling right -->
+  <g transform="rotate(22 11.4 7.0)">
+    <rect x="9.6" y="5.2" width="3.6" height="3.6" rx="0.55" fill="#4C1D95" stroke="#A78BFA" stroke-width="0.7"/>
+    <path d="M10.1 5.9h2.6" stroke="#C4B5FD" stroke-width="0.55" stroke-linecap="round" opacity="0.85"/>
+  </g>
+
+  <!-- blue: lowest and nearly level, about to land -->
+  <g transform="rotate(-6 6.5 12.3)">
+    <rect x="4.4" y="10.2" width="4.2" height="4.2" rx="0.6" fill="#1E3A8A" stroke="#5CA8FF" stroke-width="0.75"/>
+    <path d="M4.95 10.95h3.1" stroke="#93C5FD" stroke-width="0.6" stroke-linecap="round" opacity="0.85"/>
+  </g>
+</svg>

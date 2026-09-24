@@ -18,7 +18,19 @@ use super::spatial::SpatialHash;
 use crate::realism::constants;
 use crate::realism::laws::{thermodynamics, mechanics};
 use crate::realism::lod::SimLodTier;
-use crate::realism::RealismConfig;
+use crate::realism::{PhysicsDomain, RealismConfig};
+use crate::services::physics::PhysicsService;
+
+/// Whether a physics domain is switched on in PhysicsService.
+///
+/// These systems used to read on/off flags off `RealismConfig`, a second,
+/// unexposed switch for the same domains PhysicsService now controls. Two
+/// switches for one thing meant turning Thermodynamics off in the properties
+/// panel left particle heat transfer running. Absent service (a host that never
+/// added the physics plugin) means nothing is switched off.
+fn domain_on(physics: &Option<Res<PhysicsService>>, domain: PhysicsDomain) -> bool {
+    physics.as_ref().map_or(true, |p| p.domain_enabled(domain))
+}
 
 // ============================================================================
 // Spatial Hash Update
@@ -29,8 +41,11 @@ pub fn update_spatial_hash(
     mut spatial_hash: ResMut<SpatialHash>,
     query: Query<(Entity, &Transform), With<Particle>>,
     config: Res<RealismConfig>,
+    physics: Option<Res<PhysicsService>>,
 ) {
-    if !config.thermodynamics_enabled && !config.fluids_enabled {
+    if !domain_on(&physics, PhysicsDomain::Thermodynamics)
+        && !domain_on(&physics, PhysicsDomain::Fluids)
+    {
         return;
     }
     
@@ -53,8 +68,9 @@ pub fn update_thermodynamics(
     config: Res<RealismConfig>,
     time: Res<Time>,
     frame: Res<FrameCount>,
+    physics: Option<Res<PhysicsService>>,
 ) {
-    if !config.thermodynamics_enabled {
+    if !domain_on(&physics, PhysicsDomain::Thermodynamics) {
         return;
     }
 
@@ -124,6 +140,7 @@ pub fn update_kinematics(
     config: Res<RealismConfig>,
     time: Res<Time>,
     frame: Res<FrameCount>,
+    physics: Option<Res<PhysicsService>>,
 ) {
     let dt = time.delta_secs() * config.time_scale;
     if dt <= 0.0 {
@@ -131,7 +148,7 @@ pub fn update_kinematics(
     }
 
     // Parallel iteration for performance
-    if config.parallel_enabled {
+    if physics.as_ref().map_or(true, |p| p.parallel) {
         query.par_iter_mut().for_each(|(particle, mut kinetic, mut transform, lod)| {
             if !particle.active {
                 return;
@@ -201,9 +218,11 @@ pub fn update_kinematics(
 /// Apply standard forces to particles (gravity, drag, buoyancy)
 pub fn apply_particle_forces(
     mut query: Query<(&Particle, &mut KineticState, &Transform, Option<&ThermodynamicState>, Option<&FluidProperties>)>,
-    config: Res<RealismConfig>,
+    physics: Option<Res<PhysicsService>>,
 ) {
-    if !config.thermodynamics_enabled && !config.fluids_enabled {
+    if !domain_on(&physics, PhysicsDomain::Thermodynamics)
+        && !domain_on(&physics, PhysicsDomain::Fluids)
+    {
         return;
     }
     
