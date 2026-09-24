@@ -18,12 +18,12 @@ pub mod classes;
 pub mod properties;
 pub mod serialization;
 pub mod plugins;
-pub mod shaders;
 pub mod spawn;
 pub mod soul;
 pub mod korah;
 pub mod telemetry;
-pub mod play_server;
+/// Hosting a multiplayer session from Studio (Start Server, F9).
+pub mod multiplayer;
 pub mod hot_reload;
 pub mod pbr_materials;
 pub mod particles;

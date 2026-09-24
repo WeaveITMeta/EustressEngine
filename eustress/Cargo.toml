@@ -32,6 +32,7 @@ members = [
     "crates/identity",
     "crates/eustress-fjall",
     "crates/worlddb",
+    "crates/echk",
     "crates/data",
     "crates/data-store",
     "crates/roblox-import",
@@ -70,18 +71,14 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
 rfd = "0.15"
 
-# Networking (Lightyear 0.19 + QUIC)
-lightyear = "0.19"
+# Networking. Multiplayer itself is `eustress-networking` on wtransport
+# (WebTransport over quinn); see docs/networking/README.md.
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 thiserror = "2.0"
 rcgen = "0.13"
 bincode = "1.3"
-
-# P2P & CRDTs for Persistent Distributed Worlds
-loro = "1.4"  # High-perf CRDT library
-bevy_quinnet = "0.14"  # QUIC P2P — NO bevy-0.19 release yet (0.14=bevy0.15); de-fused by dropping the client `p2p` feature until upstream ships 0.19
-quinn = "0.11"  # Underlying QUIC transport
+quinn = "0.11"
 
 # Physics (Avian 0.7.0 — crates.io release 2026-06-20, Bevy 0.19 compatible)
 avian3d = { version = "0.7", default-features = false, features = ["3d", "f32", "parry-f32", "debug-plugin", "parallel", "collider-from-mesh", "bevy_scene", "xpbd_joints"] }

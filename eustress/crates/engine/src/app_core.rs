@@ -285,9 +285,10 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
         .add_plugins(crate::generative_arch::GenerativeArchPlugin)
         // Platform services
         .add_plugins(TeamServicePlugin)
-        // In-process play server (PlayModeCorePlugin's server-mode
-        // transitions write its Start/Stop messages).
-        .add_plugins(crate::play_server::PlayServerPlugin)
+        // Multiplayer hosting: Start Server (F9) serves the Space being
+        // played to Players over WebTransport. In this tier so the headless
+        // engine can host too (`EUSTRESS_HOST_ON_PLAY=1`).
+        .add_plugins(crate::multiplayer::MultiplayerPlugin)
         // Soul scripting + physics bridge + script-facing ECS snapshot.
         // RuneECSBindingsPlugin lives under `ui::` for historical reasons
         // but is Slint-free (resource + per-frame snapshot sync) — without

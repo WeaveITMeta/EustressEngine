@@ -35,12 +35,12 @@ use eustress_engine::{
     light_cull, light_sync, lock_tool, manufacturing, material_sync, math_utils,
     measure_tool, mesh_import, mirror_link, modal_tool, move_handles, move_tool,
     network_benchmark, notifications, numeric_input, part_selection, part_to_terrain,
-    parts, photoreal, physics, pivot_mode, play_mode, play_mode_runtime, play_server,
+    parts, photoreal, physics, pivot_mode, play_mode, play_mode_runtime,
     plugins, profiler, properties, rendering, road_tool, rotate_handles, rotate_tool,
     rune_tool_sandbox, runtime, saved_viewpoints, scale_handles, scale_tool, scenes,
     script_plugin_host,
     seats, select_tool, selection_box, selection_sets, selection_sync, serialization,
-    shaders, simulation, smart_guides, soul, soul_script_migration, space,
+    simulation, smart_guides, soul, soul_script_migration, space,
     spatial_query_bridge, spawn, spawners, startup, studio_plugins, telemetry,
     terrain_plugin, timeline_animation, timeline_panel, timeline_slint_sync,
     toast_undo, toolbox, tools_smart, transform_constraints, transform_space,
@@ -414,6 +414,8 @@ fn main() {
         .add_plugins(bliss_tracker::BlissTrackerPlugin)
         // Floating windows
         .add_plugins(ui::floating_windows::FloatingWindowsPlugin)
+        // Forge cloud: connect, allocate a dedicated server, report back
+        .add_plugins(forge::ForgePlugin)
         // 3D rendering
         .add_plugins(PartRenderingPlugin {
             selection_manager: selection_manager.clone(),
@@ -433,8 +435,6 @@ fn main() {
         // hydrate_lighting_entities (attaches DirectionalLight, markers, etc.
         // to file-loaded Lighting/ Instance entities on each Space switch).
         .add_plugins(LightingPlugin)
-        // Analytical sun/moon disc shader (resolution-independent, replaces cubemap baking)
-        .add_plugins(shaders::SunDiscPlugin)
         // Default scene
         .add_plugins(DefaultScenePlugin)
         // Automatic .txt to .toml converter (file system workaround)

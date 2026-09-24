@@ -101,8 +101,14 @@ eustress-geo = { path = "../geo" }
 # HEAVY dependency out of the default graph (arrow/parquet,
 # bevy_gaussian_splatting, openraft, tower-lsp), and this crate adds nothing to it.
 eustress-genesis = { path = "../genesis" }
-# TODO: Fix Bevy 0.17 compatibility issues in eustress-networking
-# eustress-networking = { path = "../common/eustress-networking", features = ["server", "client", "physics"] }
+# Multiplayer: Studio hosts the Space it is playing (Start Server, F9) over
+# WebTransport, and Players join it. Rides the quinn 0.11 / rustls-on-ring /
+# rcgen 0.13 stack this manifest already links, so nothing compiles twice.
+eustress-networking = { path = "../common/eustress-networking" }
+# The .echk chunk container: publishing and hosting both bake a Space into it.
+# `encode` writes compressed (version 2) chunks with the zstd this manifest
+# already links.
+eustress-echk = { path = "../echk", features = ["encode"] }
 
 # bevy_shader provides ShaderRef, used in MaterialExtension implementations (Bevy 0.18)
 bevy_shader = { version = "0.19", default-features = false }
@@ -233,6 +239,8 @@ rune = "0.14"
 # names them.
 mlua = { workspace = true }
 rand = "0.8"
+# Find & Replace's ".*" mode (already in the lock through other crates).
+regex = "1"
 rayon = "1.10"
 crossbeam = "0.8"
 tracing = "0.1"
