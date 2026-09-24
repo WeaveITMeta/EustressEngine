@@ -447,7 +447,11 @@ pub struct Mp4H264Source {
 /// when looping (re-open the file from sample 1).
 struct Mp4DecoderState {
     reader: mp4::Mp4Reader<std::io::BufReader<std::fs::File>>,
-    decoder: rusty_h264_decoder::Decoder,
+    /// Behind a `Mutex` only because the decoder holds an `mpsc::Receiver`,
+    /// which is `Send` but not `Sync`, and video sources are boxed as
+    /// `Send + Sync`. Every call goes through `get_mut`, so it is never
+    /// actually locked.
+    decoder: std::sync::Mutex<rusty_h264_decoder::Decoder>,
     track_id: u32,
     sample_count: u32,
     /// Reusable scratch buffer for the AVCC → Annex-B NAL conversion.
@@ -633,7 +637,7 @@ impl Mp4H264Source {
 
         Ok(Mp4DecoderState {
             reader: mp4,
-            decoder,
+            decoder: std::sync::Mutex::new(decoder),
             track_id,
             sample_count,
             annex_b_buf: Vec::with_capacity(64 * 1024),
@@ -702,7 +706,8 @@ impl Mp4H264Source {
 
         // One MP4 sample is one access unit, which is what the decoder
         // takes per call; it splits the NALs itself.
-        match state.decoder.decode(&state.annex_b_buf) {
+        let decoder = state.decoder.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match decoder.decode(&state.annex_b_buf) {
             Ok(Some(frame)) => {
                 if frame.width as u32 == self.width && frame.height as u32 == self.height {
                     let cts = sample.start_time as i64 + i64::from(sample.rendering_offset);
