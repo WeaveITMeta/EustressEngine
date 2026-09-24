@@ -154,7 +154,8 @@ time, never extrapolating past its span. `bias` says which way the simulation le
 
 Every random choice (split, folds, permutations, k-means starts) comes from
 `options.seed`, and every report records the options it ran with. The same request and seed
-give the same report on any machine. Change the seed to see how much a result moves.
+give the same splits on any machine and the same report on the same build. Change the seed to
+see how much a result moves.
 
 ## Limits
 

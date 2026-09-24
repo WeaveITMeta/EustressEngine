@@ -995,9 +995,10 @@ fallback (D5), all speaking the Parameters types end-to-end.
 > columns (Solve), or columns → vectors (Embed) — all unit-correct, reproducible, and
 > re-runnable by a script.**
 
-Compute **never invents a second math stack** — it routes through four existing primitives: the
-`Quantity`/`Dimension` system, the Rune/Luau VMs, the CAD solver (Phase C) + FEA (Phase D), and
-the `eustress-embedvec` ANN index. A single `Analysis` trait unifies all four:
+Compute **never invents a second math stack**. It routes through five primitives: the
+`Quantity`/`Dimension` system, the Rune/Luau VMs, the CAD solver (Phase C) + FEA (Phase D),
+the `eustress-embedvec` ANN index, and the `mine` statistical-learning layer in the data leaf
+(C.8). A single `Analysis` trait unifies them:
 
 ```rust
 // eustress/crates/data/src/compute.rs — polars-free; lives in the data leaf (D2)
@@ -1083,6 +1084,44 @@ analyses with the same digest are guaranteed identical outputs — this caches s
 `compare_runs` two runs are comparable, and lets a notebook skip unchanged cells. **A number
 typed by hand has no provenance and cannot be reproduced or twinned** — which is why analysis
 routes through stored recipes, never ad-hoc UI math.
+
+### C.8 Data mining and evaluation (`eustress-data::mine`)
+Statistical learning lives in the data leaf as pure `std` with no dependencies. All randomness
+(splits, folds, permutations, k-means starts) draws from a seeded SplitMix64, so a request and
+its seed make the same splits, folds and permutations on every machine, and the same report on
+the same build.
+
+| Module | Contents |
+|---|---|
+| `classify` | logistic regression, CART tree, k-nearest neighbours, Gaussian naive Bayes |
+| `regress` | least squares and ridge (Cholesky), LASSO (coordinate descent) |
+| `cluster` | k-means++ with seeded restarts, DBSCAN, agglomerative (single, complete, average, Ward); silhouette, Davies-Bouldin, Calinski-Harabasz |
+| `reduce` | PCA with deterministic component signs |
+| `select` | variance, Pearson, ANOVA F and mutual-information filters; greedy forward selection; LASSO selection |
+| `assoc` | Apriori itemsets and rules with support, confidence and lift, from order lines or one-hot flags |
+| `eval` | stratified and group-aware splits and folds, confusion metrics, ROC AUC, regression metrics, cross-validation, permutation importance, and the simulation-versus-measurement residuals |
+| `workflow` | one-call runs over a `Frame`, each returning a serializable report |
+| `api` | the JSON front door: one request in, one report out |
+
+**The protocol is fixed, not optional.** A `workflow` run splits before fitting, fits every
+transform on training rows only, cross-validates inside the training rows, and scores the
+result against a trivial baseline. Each report carries **cautions** with stable codes for the
+pitfalls the run detected: perfect separators and target copies (leaks), train/test overlap
+(duplicate records), selection bias, overfitting, class imbalance, unstable folds, collinear
+and constant features, mixed scales. `options.group` keeps each entity's rows (a supplier, a
+machine) on one side of every split, so a score describes entities the model has never seen.
+
+**Residuals are the twin's score.** `eval::compare` and `compare_series` judge a simulation
+against measurement with the same arithmetic as a regression model's test score, so a
+calibrated simulation and a fitted model are held to one standard; the closed loop (F.2) and
+fork scoring read this number.
+
+**One front door, every surface.** `mine::api::run` takes a JSON request (a run, a file or
+inline rows, settings) and returns the report; it refuses unknown fields by name. The
+`mine_data` tool (Workshop and MCP, read-only, sandboxed to the Universe) and the
+`eustress data` command are thin adapters over it, and the `eustress-data-mining` agent skill
+teaches the order of work and what each caution calls for. At scale, neighbour search moves to
+the HNSW route of C.5.
 
 ---
 
@@ -1318,6 +1357,8 @@ eustress-engine`.)*
   bottom-panel tabs (right of Output); **Stats/Fit/FFT/Cluster/Anomaly** running the real
   `eustress-data` pipeline on the selected Dataset's `.csv` → Output console; **Import** (file
   picker → parse → a new `Dataset` instance in the Space). 10/17 Data-ribbon verbs functional.
+- **Real, type-checked, tests written but not yet run (2026-09-24):** the `mine` data-mining
+  layer (C.8) with its JSON front door, the `mine_data` tool and the `eustress data` command.
 - **Still designed, not built:** the GPU chart pipelines (today's Chart is a Slint scaffold with
   baked geometry; the on-screen sub-rect `Camera3d` draw + `DataSelection` linked-view
   projections + in-engine LOD are pending); the generic dynamic-column editable `DataGrid` fed by

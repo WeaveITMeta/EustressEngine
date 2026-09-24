@@ -13,9 +13,9 @@
 //!
 //! - **Reproducible by construction.** Anything random (splits, folds,
 //!   permutations) takes an explicit `seed` and draws from [`Rng`], so the same
-//!   inputs give the same result on every machine. An experiment that cannot be
-//!   re-run exactly cannot be audited, and auditability is the point of the
-//!   platform.
+//!   inputs draw the same splits, folds and permutations on every machine. An
+//!   experiment that cannot be re-run exactly cannot be audited, and
+//!   auditability is the point of the platform.
 //! - **Nulls are dropped, never invented, for supervised work.** [`features`]
 //!   and friends remove any row with a missing or non-finite value in a
 //!   selected column and report how many they removed. Imputing a label would
