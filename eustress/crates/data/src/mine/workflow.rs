@@ -286,9 +286,18 @@ fn few_rows_caution(train_rows: usize, d: usize, out: &mut Vec<Caution>) {
     }
 }
 
-fn row_key(row: &[f64]) -> Vec<u64> {
-    // -0.0 and 0.0 are the same value.
-    row.iter().map(|&v| if v == 0.0 { 0 } else { v.to_bits() }).collect()
+/// One 64-bit hash per row, so remembering every training row costs a few
+/// bytes each rather than a copy of the row. A collision between two
+/// different rows is vanishingly rare at 64 bits, and would only add a
+/// caution, never change a score.
+fn row_key(row: &[f64]) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    for &v in row {
+        // -0.0 and 0.0 are the same value.
+        (if v == 0.0 { 0 } else { v.to_bits() }).hash(&mut h);
+    }
+    h.finish()
 }
 
 fn distinct_values(v: impl Iterator<Item = f64>) -> usize {
@@ -308,7 +317,7 @@ fn overlap_caution(train: &Matrix, test: &Matrix, out: &mut Vec<Caution>) {
     if !continuous {
         return;
     }
-    let seen: HashSet<Vec<u64>> = (0..n).map(|i| row_key(train.row(i))).collect();
+    let seen: HashSet<u64> = (0..n).map(|i| row_key(train.row(i))).collect();
     let repeats = (0..test.rows()).filter(|&i| seen.contains(&row_key(test.row(i)))).count();
     if repeats > 0 {
         warn(
