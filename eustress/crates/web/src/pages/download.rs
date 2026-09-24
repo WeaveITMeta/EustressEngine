@@ -21,15 +21,25 @@ pub fn DownloadPage() -> impl IntoView {
     let version = RwSignal::new("...".to_string());
     let release_date = RwSignal::new(String::new());
     let changelog = RwSignal::new(String::new());
-    let win_url = RwSignal::new("https://downloads.eustress.dev/latest/windows-x64".to_string());
+    // The permanent per-platform URL, which the downloads worker redirects to
+    // the current release. latest.json replaces it with the versioned file.
+    let win_url = RwSignal::new("https://downloads.eustress.dev/latest/windows-x64-installer".to_string());
     let win_size = RwSignal::new("~85 MB".to_string());
-    let mac_url = RwSignal::new("https://downloads.eustress.dev/latest/macos-arm64".to_string());
-    let mac_size = RwSignal::new("~82 MB".to_string());
-    let linux_url = RwSignal::new("https://downloads.eustress.dev/latest/linux-x64".to_string());
-    let linux_size = RwSignal::new("~80 MB".to_string());
+    // Empty until latest.json lists a build for the platform; until then its
+    // button shows as coming soon instead of linking to a file that is absent.
+    let mac_url = RwSignal::new(String::new());
+    let mac_size = RwSignal::new(String::new());
+    let linux_url = RwSignal::new(String::new());
+    let linux_size = RwSignal::new(String::new());
+    let platforms_line = move || match (!mac_url.get().is_empty(), !linux_url.get().is_empty()) {
+        (true, true) => "Available for Windows, macOS and Linux.",
+        (true, false) => "Available for Windows and macOS. Linux is coming soon.",
+        (false, true) => "Available for Windows and Linux. macOS is coming soon.",
+        (false, false) => "Available for Windows. macOS and Linux are coming soon.",
+    };
 
     // Fetch latest.json on mount. Browser only: the prerender ships the
-    // fallback URLs and sizes above, and the live app replaces them.
+    // fallback URL and size above, and the live app replaces them.
     #[cfg(not(feature = "ssr"))]
     wasm_bindgen_futures::spawn_local(async move {
         if let Ok(resp) = gloo_net::http::Request::get("https://downloads.eustress.dev/latest.json")
@@ -46,7 +56,12 @@ pub fn DownloadPage() -> impl IntoView {
                     changelog.set(c.to_string());
                 }
                 if let Some(platforms) = data.get("platforms") {
-                    if let Some(w) = platforms.get("windows-x64") {
+                    // A visitor wants the installer. `windows-x64` is the zip
+                    // the in-app updater unpacks over an existing install.
+                    let windows = platforms
+                        .get("windows-x64-installer")
+                        .or_else(|| platforms.get("windows-x64"));
+                    if let Some(w) = windows {
                         if let Some(u) = w.get("url").and_then(|v| v.as_str()) {
                             win_url.set(u.to_string());
                         }
@@ -127,12 +142,13 @@ pub fn DownloadPage() -> impl IntoView {
                         </div>
 
                         <h2>"Download for Your Platform"</h2>
-                        <p class="download-desc">"Eustress Engine is available for Windows, macOS, and Linux"</p>
+                        <p class="download-desc">{platforms_line}</p>
 
-                        // Platform Buttons — URLs go through auth proxy
+                        // Each button links straight to the release file on
+                        // downloads.eustress.dev. The build is free; signing in
+                        // is what shows these buttons.
                         <div class="platform-buttons">
-                            <a href=move || format!("https://api.eustress.dev/api/releases/download?platform=windows-x64&url={}", win_url.get())
-                               class="platform-btn windows">
+                            <a href=move || win_url.get() class="platform-btn windows">
                                 <img src="/assets/icons/windows.svg" alt="Windows" />
                                 <div class="btn-text">
                                     <span class="btn-label">"Download for"</span>
@@ -141,25 +157,49 @@ pub fn DownloadPage() -> impl IntoView {
                                 <span class="btn-size">{move || win_size.get()}</span>
                             </a>
 
-                            <a href=move || format!("https://api.eustress.dev/api/releases/download?platform=macos-arm64&url={}", mac_url.get())
-                               class="platform-btn macos">
-                                <img src="/assets/icons/macos.svg" alt="macOS" />
-                                <div class="btn-text">
-                                    <span class="btn-label">"Download for"</span>
-                                    <span class="btn-platform">"macOS (Apple Silicon)"</span>
-                                </div>
-                                <span class="btn-size">{move || mac_size.get()}</span>
-                            </a>
+                            <Show
+                                when=move || !mac_url.get().is_empty()
+                                fallback=|| view! {
+                                    <div class="platform-btn macos unavailable" aria-disabled="true">
+                                        <img src="/assets/icons/macos.svg" alt="macOS" />
+                                        <div class="btn-text">
+                                            <span class="btn-label">"Coming soon"</span>
+                                            <span class="btn-platform">"macOS (Apple Silicon)"</span>
+                                        </div>
+                                    </div>
+                                }
+                            >
+                                <a href=move || mac_url.get() class="platform-btn macos">
+                                    <img src="/assets/icons/macos.svg" alt="macOS" />
+                                    <div class="btn-text">
+                                        <span class="btn-label">"Download for"</span>
+                                        <span class="btn-platform">"macOS (Apple Silicon)"</span>
+                                    </div>
+                                    <span class="btn-size">{move || mac_size.get()}</span>
+                                </a>
+                            </Show>
 
-                            <a href=move || format!("https://api.eustress.dev/api/releases/download?platform=linux-x64&url={}", linux_url.get())
-                               class="platform-btn linux">
-                                <img src="/assets/icons/linux.svg" alt="Linux" />
-                                <div class="btn-text">
-                                    <span class="btn-label">"Download for"</span>
-                                    <span class="btn-platform">"Linux"</span>
-                                </div>
-                                <span class="btn-size">{move || linux_size.get()}</span>
-                            </a>
+                            <Show
+                                when=move || !linux_url.get().is_empty()
+                                fallback=|| view! {
+                                    <div class="platform-btn linux unavailable" aria-disabled="true">
+                                        <img src="/assets/icons/linux.svg" alt="Linux" />
+                                        <div class="btn-text">
+                                            <span class="btn-label">"Coming soon"</span>
+                                            <span class="btn-platform">"Linux"</span>
+                                        </div>
+                                    </div>
+                                }
+                            >
+                                <a href=move || linux_url.get() class="platform-btn linux">
+                                    <img src="/assets/icons/linux.svg" alt="Linux" />
+                                    <div class="btn-text">
+                                        <span class="btn-label">"Download for"</span>
+                                        <span class="btn-platform">"Linux"</span>
+                                    </div>
+                                    <span class="btn-size">{move || linux_size.get()}</span>
+                                </a>
+                            </Show>
                         </div>
                     </div>
                 </Show>
@@ -206,8 +246,8 @@ pub fn DownloadPage() -> impl IntoView {
                 
                 <div class="about-content">
                     <p class="about-intro">
-                        "Eustress Engine is a next-generation game engine built entirely in Rust, 
-                        designed to make creation accessible to everyone while delivering 
+                        "Eustress Engine is a next-generation platform for 3D worlds, built in Rust,
+                        designed to make creation accessible to everyone while delivering
                         professional-grade performance and features."
                     </p>
                     
@@ -223,8 +263,8 @@ pub fn DownloadPage() -> impl IntoView {
                         <div class="feature-item">
                             <img src="/assets/icons/code.svg" alt="Rust" />
                             <div>
-                                <h4>"100% Rust Powered"</h4>
-                                <p>"Memory-safe, blazing fast, with zero garbage collection pauses"</p>
+                                <h4>"Built in Rust"</h4>
+                                <p>"Memory-safe and fast, with no garbage collection pauses in the engine core"</p>
                             </div>
                         </div>
                         

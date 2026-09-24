@@ -10437,6 +10437,18 @@ p {
     transform: translateY(-2px);
 }
 
+/* A platform with no build in latest.json yet: shown, but not a link. */
+.platform-btn.unavailable {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.platform-btn.unavailable:hover {
+    border-color: rgba(128, 144, 160, 0.15);
+    background: rgba(25, 28, 35, 0.8);
+    transform: none;
+}
+
 .platform-btn img {
     width: 32px;
     height: 32px;
