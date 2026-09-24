@@ -11,7 +11,12 @@ path = "src/main.rs"
 [dependencies]
 # Workspace members
 eustress-common = { path = "../common", features = ["gui", "realism-scripting", "luau", "physics", "realism", "avatar-profile"] }
-eustress-networking = { path = "../common/eustress-networking" }  # p2p feature dropped: bevy_quinnet has no bevy-0.19 release (see docs/architecture/BEVY_019_MIGRATION.md)
+# Multiplayer: joining a Studio host over WebTransport (`--connect`).
+eustress-networking = { path = "../common/eustress-networking" }
+# The .echk chunk container: hosted and published worlds both arrive in it.
+eustress-echk = { path = "../echk" }
+# Reading a downloaded world's SpawnLocation.
+toml = "0.8"
 bevy-camera-controller = { path = "../common/bevy-camera-controller" }
 
 # Workspace dependencies (Bevy 0.19)
@@ -83,9 +88,8 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"] }
 serde_json = { workspace = true }
 dirs = { workspace = true }
 sha2 = "0.10"
-# Published-content pipeline: a .pak is tar + zstd of the Universe
-# directory (engine/src/ui/file_event_handler.rs:912-963), so the Player
-# needs both to open one.
+# Simulations published before .echk are one .pak: tar + zstd of the
+# Universe folder. The Player still opens them.
 zstd = "0.13"
 tar = "0.4"
 

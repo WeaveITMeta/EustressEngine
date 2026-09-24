@@ -3,8 +3,10 @@
 > Replication, transport, Studio dev servers, Team Create, the published-simulation
 > join path, and the dual-format storage contract that all three consume.
 >
-> **State: no multiplayer exists.** Two half-stacks are present, neither wired.
-> Zero packets move between any two processes.
+> **State (P6): written end to end, not yet compiled.** One stack: a Studio
+> host serves its Space over WebTransport and Players join it, and published
+> simulations travel as `.echk` chunks. Nothing written in P6 has been
+> compiled or run; every BUILT row below is reviewed statically only.
 
 ## Pass changelog
 
@@ -18,38 +20,49 @@
   Studio dev servers added, both missing from every prior pass. Storage contract,
   transport selection, and an Alpha-blocker list added. Findings below are
   code-verified with `file:line`, or marked otherwise.
+- **P6 (2026-09-23):** **Implementation pass.** `.echk` replaces `.pak` for
+  publishing and hosting. The lightyear, quinnet and loro half-stack is gone
+  from `eustress-networking`, replaced by one wtransport session, and the
+  `play_server` module is removed. Studio hosts on F9, the Player joins with
+  `--connect` and plays published simulations with `--sim`, and the Worker has
+  `/world/` routes. The Worker routes are tested (11 new tests; all 90 Worker
+  tests pass). The Rust side is not yet compiled.
 
 ---
 
 ## Verdict
 
-Multiplayer is not partially built. It is two disconnected halves, each missing
-the part the other has.
+One stack, written end to end.
 
-| Half | Has | Lacks |
-| --- | --- | --- |
-| `eustress-networking` | Ownership arbitration, AOI, delta tracking, prediction and interpolation scaffolding | Any transport. Any entity ever tagged for replication. |
-| `engine/src/play_server` | A real quinn QUIC endpoint, a real `GameMessage` protocol with per-variant channels | An accept loop, a join handshake, replication tagging, a reachable trigger |
+| Path | State |
+| --- | --- |
+| Studio host (F9), Player joins | Written. The host bakes its Space and the Universe's assets to `.echk`, serves the chunks over WebTransport, and relays avatars at 20 Hz after validating each sample. World changes after a player joins, and physics objects, are not replicated. |
+| Publish, gallery, Player | Written. Studio exports every Space, uploads only the chunks the API lacks, and commits the manifest into one listing per Universe. The Player downloads, verifies, caches and opens the world. |
+| Team Create | Not started. |
+| Browser play and browser join | Not started. The session layer carries no tokio and no sockets so a browser transport can drive it. |
 
-Neither is reachable from a running build. Studio does not link the first, and the
-second is gated behind an enum variant nothing constructs.
+How to run each path: `docs/networking/LOCAL_SERVER.md` and
+`docs/networking/README.md`.
 
 ---
 
 ## Feature index
 
-| # | Feature | State |
+| # | Feature | State (P6) |
 | ---: | --- | :-: |
-| 1 | Transport (QUIC / replication substrate) | RED, absent |
-| 2 | Entity replication tagging | RED, architectural hole |
-| 3 | Ownership arbitration | GREEN logic, unreachable |
-| 4 | Studio dev server (press Play, second client joins) | RED, dead button |
+| 1 | Transport | BUILT, not compiled: WebTransport over QUIC (wtransport 0.6), key and certificate pin per session |
+| 2 | Entity replication tagging | PARTIAL: avatars only (`NetReplica`); world entities are not replicated |
+| 3 | Ownership arbitration | UNUSED: the host is the only authority; the module remains |
+| 4 | Studio dev server (press Play, second client joins) | BUILT, not compiled: F9 hosts |
 | 5 | Team Create (collaborative editing) | RED, does not exist |
-| 6 | Client join from published simulation | RED, chain broken in 5 places |
-| 7 | Dedicated server (`crates/server`) | RED, cannot open a world |
-| 8 | Dual-format storage (`.pak` TOML + `.eustress` Fjall) | AMBER, ships both, drifts |
-| 9 | Identity and join tokens | RED, P0, plus a forgeable-identity defect |
-| 10 | Publish and download pipeline | AMBER, works, leaks, cannot update |
+| 6 | Client join from published simulation | BUILT as solo play (`--sim`), not compiled; a listing has no hosted session |
+| 7 | Dedicated server | `eustress-server` does not host; `eustress-headless` with `EUSTRESS_HOST_ON_PLAY=1` does |
+| 8 | Dual-format storage | BUILT: `.echk` export takes each entity's current state (tree text, `#bin`, cores) plus files only on disk |
+| 9 | Identity and join tokens | Session key and pin; the account is not carried into a session |
+| 10 | Publish and download pipeline | BUILT: delta upload, one listing per Universe, Space-only update, gated reads; Worker tested |
+
+The feature cards below are the P5 findings this pass acted on. Their `file:line`
+references describe the tree before P6.
 
 ---
 

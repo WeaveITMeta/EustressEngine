@@ -22,9 +22,7 @@ use bevy::prelude::*;
 use avian3d::prelude::*;
 use eustress_common::{spawn_baseplate, spawn_welcome_cube};
 use eustress_common::services::TeamServicePlugin;
-// DISABLED for bevy 0.19 — bevy_quinnet (p2p QUIC) has no 0.19 release yet.
-// Re-enable with the `p2p` feature once upstream ships (see BEVY_019_MIGRATION.md).
-// use eustress_networking::p2p::DistributedWorldPlugin;
+use eustress_networking::JoinLink;
 use plugins::{
     EnhancementPlugin, PlayerServicePlugin, LightingServicePlugin,
     PauseMenuPlugin, ClientTerrainPlugin, CharacterAnimationPlugin,
@@ -37,19 +35,120 @@ use eustress_common::avatar::control::AvatarEscapePressed;
 use systems::LoadSceneEvent;
 use std::path::PathBuf;
 
+const USAGE: &str = "\
+usage:
+  eustress-client                          open the local Space (EUSTRESS_SPACE, else the movement course)
+  eustress-client <scene file>             open a legacy scene file
+  eustress-client --connect <host:port>    join a Studio host; on this computer the key and pin are found automatically
+      [--key <join key>] [--pin <64 hex>] [--name <display name>]
+  eustress-client eustress://join/<host:port>?key=...&pin=...
+  eustress-client --sim <simulation id>    play a published simulation
+  eustress-client eustress://play/<simulation id>";
+
+/// How the Player was launched.
+#[derive(Debug, Clone)]
+pub enum Launch {
+    /// A Space from this computer, or a legacy scene file.
+    Local { scene_path: Option<PathBuf> },
+    /// Join a Studio host.
+    Join { link: JoinLink, name: String },
+    /// Play a published simulation.
+    Published { sim_id: String },
+}
+
+impl Launch {
+    fn from_args(args: &[String]) -> Result<Self, String> {
+        let mut link: Option<JoinLink> = None;
+        let (mut key, mut pin, mut name, mut sim, mut scene) = (None, None, None, None, None);
+        let mut it = args.iter().skip(1);
+        while let Some(arg) = it.next() {
+            let mut value = |flag: &str| it.next().cloned().ok_or_else(|| format!("{flag} needs a value"));
+            match arg.as_str() {
+                "--connect" => link = Some(JoinLink::parse(&value("--connect")?)?),
+                "--key" => key = Some(value("--key")?),
+                "--pin" => pin = Some(value("--pin")?),
+                "--name" => name = Some(value("--name")?),
+                "--sim" => sim = Some(value("--sim")?),
+                other if other.starts_with("eustress://play/") => {
+                    sim = Some(other["eustress://play/".len()..].trim_end_matches('/').to_string());
+                }
+                other if other.starts_with("eustress://") || other.starts_with("https://") => {
+                    link = Some(JoinLink::parse(other)?);
+                }
+                other if other.starts_with("--") => return Err(format!("unknown option {other}")),
+                other => scene = Some(PathBuf::from(other)),
+            }
+        }
+
+        if let Some(sim_id) = sim {
+            let valid = !sim_id.is_empty() && sim_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+            if !valid {
+                return Err(format!("{sim_id:?} is not a simulation id"));
+            }
+            return Ok(Launch::Published { sim_id });
+        }
+        if let Some(mut link) = link {
+            if key.is_some() {
+                link.key = key;
+            }
+            if let Some(p) = pin {
+                link.pin = Some(
+                    eustress_networking::join_link::parse_hex32(&p).ok_or("--pin must be 64 hex characters")?,
+                );
+            }
+            // A Studio host on this computer leaves its full link behind, so
+            // the address alone is enough here.
+            if link.key.is_none() && link.pin.is_none() && link.is_loopback() {
+                let local = systems::space_world::workspace_root()
+                    .and_then(|w| eustress_networking::native::read_host_file(&w, link.port));
+                if let Some(local) = local {
+                    link.key = local.key;
+                    link.pin = local.pin;
+                }
+            }
+            let name = name
+                .or_else(|| std::env::var("EUSTRESS_PLAYER_NAME").ok())
+                .or_else(|| std::env::var("USERNAME").ok())
+                .or_else(|| std::env::var("USER").ok())
+                .unwrap_or_else(|| "Player".to_string());
+            return Ok(Launch::Join { link, name });
+        }
+        Ok(Launch::Local { scene_path: scene })
+    }
+
+    fn is_network(&self) -> bool {
+        !matches!(self, Launch::Local { .. })
+    }
+}
+
 /// Command line arguments
 #[derive(Resource, Default)]
 struct ClientArgs {
     scene_path: Option<PathBuf>,
 }
 
+/// The published simulation to play, when launched with `--sim`.
+#[derive(Resource)]
+struct PublishedTarget(String);
+
 /// Build the Client app without running it.
 ///
 /// Extracted so the golden parity test can construct both shells as *values*
 /// and diff their registered systems, resources and component sets. Two
 /// binaries that can only be launched cannot be compared; two `App`s can.
-pub fn build_app(scene_path: Option<PathBuf>) -> App {
+pub fn build_app(launch: Launch) -> App {
     let mut app = App::new();
+    let network = launch.is_network();
+    // A world that arrives over the network (a host's Space, or a published
+    // simulation) is written into this process's own folder before opening.
+    let live = network.then(systems::live_world::LiveWorld::for_this_process);
+    if let Some(live) = &live {
+        live.prepare();
+    }
+    let scene_path = match &launch {
+        Launch::Local { scene_path } => scene_path.clone(),
+        _ => None,
+    };
 
     // ── Asset sources MUST be registered before AssetPlugin ────────────────
     //
@@ -66,7 +165,13 @@ pub fn build_app(scene_path: Option<PathBuf>) -> App {
     // at most one Space, resolved at launch, so a plain file source rooted
     // there is enough (the engine needs a swappable reader only because Studio
     // switches Spaces at runtime).
-    if let Some(space_root) = systems::space_world::resolve_space() {
+    // A network launch registers the folder its world will be written to;
+    // the world has not arrived yet, but the source must exist now.
+    let space_source = match &live {
+        Some(live) => Some(live.space_root.clone()),
+        None => systems::space_world::resolve_space(),
+    };
+    if let Some(space_root) = space_source {
         app.register_asset_source(
             "space",
             bevy::asset::io::AssetSourceBuilder::platform_default(&space_root.to_string_lossy(), None),
@@ -119,11 +224,15 @@ pub fn build_app(scene_path: Option<PathBuf>) -> App {
         .add_plugins(systems::frame_capture::FrameCapturePlugin)
         // Agent control surface (opt-in via EUSTRESS_AGENT_PORT).
         .add_plugins(systems::agent_control::AgentControlPlugin)
-        // Published-content fetch: download + unpack a .pak from R2.
+        // Published-content fetch: a simulation's .echk chunks (or an older
+        // .pak) from R2.
         .add_plugins(systems::space_fetch::SpaceFetchPlugin)
         // Open a real Eustress Space (Movement/Climbing by default) instead of
-        // the two hardcoded demo primitives.
-        .add_plugins(systems::space_world::SpaceWorldPlugin)
+        // the two hardcoded demo primitives. A network launch opens its world
+        // when it arrives instead.
+        .add_plugins(systems::space_world::SpaceWorldPlugin { open_local: !network })
+        // Multiplayer: join a Studio host, and open any world that arrives.
+        .add_plugins(systems::net_play::NetPlayPlugin)
 
         // Enhancement pipeline
         .add_plugins(EnhancementPlugin)
@@ -131,10 +240,6 @@ pub fn build_app(scene_path: Option<PathBuf>) -> App {
         // Soul scripting — Rune + Luau + GUI bridge
         .add_plugins(soul::ClientSoulPlugin)
         .add_plugins(soul::ClientPhysicsBridgePlugin)
-
-        // P2P Distributed World (CRDT-based chunk sync) — DISABLED for bevy 0.19
-        // until bevy_quinnet ships a 0.19-compatible release (BEVY_019_MIGRATION.md)
-        // .add_plugins(DistributedWorldPlugin)
 
         // Register types needed for glTF scene spawning.
         //
@@ -150,23 +255,51 @@ pub fn build_app(scene_path: Option<PathBuf>) -> App {
 
         // World setup - loads default scene (same as Studio)
         // Only when no Space is open: otherwise the demo baseplate and cube
-        // spawn inside the authored level.
+        // spawn inside the authored level. A network launch has neither: its
+        // world, and then its avatar, arrive later (systems::net_play).
         .add_systems(
             Startup,
-            setup_default_scene.run_if(|| !systems::space_world::space_is_available()),
+            setup_default_scene.run_if(move || !network && !systems::space_world::space_is_available()),
         )
-        .add_systems(Startup, spawn_local_avatar.after(setup_default_scene))
+        .add_systems(Startup, spawn_local_avatar.after(setup_default_scene).run_if(move || !network))
         .add_systems(Update, handle_escape);
+
+    if let Some(live) = live {
+        app.insert_resource(live);
+    }
+    match launch {
+        Launch::Join { link, name } => {
+            app.insert_resource(systems::net_play::JoinTarget { link, name });
+        }
+        Launch::Published { sim_id } => {
+            app.insert_resource(PublishedTarget(sim_id));
+            app.add_systems(Startup, request_published_world);
+        }
+        Launch::Local { .. } => {}
+    }
 
     app
 }
 
 fn main() {
-    // Parse command line args
     let args: Vec<String> = std::env::args().collect();
-    let scene_path = args.get(1).map(PathBuf::from);
+    let launch = match Launch::from_args(&args) {
+        Ok(launch) => launch,
+        Err(e) => {
+            eprintln!("eustress-client: {e}\n\n{USAGE}");
+            std::process::exit(2);
+        }
+    };
+    build_app(launch).run();
+}
 
-    build_app(scene_path).run();
+/// `--sim <id>`: download the published world; it opens on arrival.
+fn request_published_world(target: Res<PublishedTarget>, mut fetch: MessageWriter<systems::space_fetch::FetchSpace>) {
+    let token = dirs::data_local_dir()
+        .and_then(|dir| std::fs::read_to_string(dir.join("EustressEngine/auth_token")).ok())
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    fetch.write(systems::space_fetch::FetchSpace { simulation_id: target.0.clone(), token });
 }
 
 /// Spawn the player's avatar through the sealed runtime.

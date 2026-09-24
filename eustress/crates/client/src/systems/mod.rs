@@ -6,6 +6,8 @@ pub mod agent_control;
 pub mod frame_capture;
 pub mod window_icon;
 pub mod scene_loader;
+pub mod live_world;
+pub mod net_play;
 pub mod space_fetch;
 pub mod space_world;
 pub mod enhancement_scheduler;

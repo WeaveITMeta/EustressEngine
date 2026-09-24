@@ -286,9 +286,12 @@ fn main() {
         .add_plugins(eustress_common::services::teleport::TeleportPlugin)
         .add_plugins(eustress_common::services::marketplace::MarketplacePlugin)
         
-        // Networking (server mode — port configured via StartServer message)
-        .add_plugins(eustress_networking::server::ServerNetworkPlugin)
-        
+        // Networking: this binary does not host sessions. It loads no world
+        // (no worlddb, no avatar runtime, no simulation), so it has nothing to
+        // serve. Host from Studio (Test > Start Server, F9), which runs the
+        // full simulation and serves the open Space through
+        // `eustress_networking::session` + `native`.
+
         // Server systems
         .add_systems(Startup, setup_server)
         .add_systems(Update, (

@@ -26,8 +26,9 @@ eustress-common = { path = "../common", features = ["async-assets"] }
 # Runtime (character, physics, ownership)
 eustress-runtime = { path = "../runtime", default-features = false, features = ["networking"] }
 
-# Networking (server mode)
-eustress-networking = { path = "../common/eustress-networking", features = ["server"] }
+# Networking. Hosting a session lives in `eustress_networking::session` and
+# `native`; this binary does not host yet (see the note in src/main.rs).
+eustress-networking = { path = "../common/eustress-networking" }
 
 # Physics (headless) - DISABLED until Bevy 0.19 support
 # avian3d = { workspace = true }

@@ -1,316 +1,142 @@
-# Running a Local Eustress Server
+# Hosting a Multiplayer Session
 
-> Inspired by the classic Minecraft server experience — port-forward once, share your IP, play together.
+A multiplayer session in Eustress is a Studio host that serves the Space it is
+playing, and Players that join it. The host runs the scripts and the physics.
+Every Player downloads the host's world once, then sees every avatar in the
+session move in real time.
+
+The code lives in three places:
+
+| Part | Where |
+|---|---|
+| Host (Studio, and the headless engine) | `eustress/crates/engine/src/multiplayer.rs` |
+| Session, wire format, transport | `eustress/crates/common/eustress-networking/src/` (`session.rs`, `wire.rs`, `join_link.rs`, `native.rs`) |
+| Joining (the Player) | `eustress/crates/client/src/systems/net_play.rs` |
 
 ---
 
-## Quick Start
+## 1. Host from Studio
 
-### 1. Download the server binary
+1. Open the Space you want to share.
+2. Press **F9**, or choose **Network > Start Local Server**, or **Start** in
+   the Test tab's Server group.
+
+Studio then:
+
+1. saves the Space, when you are editing, so players get what you see;
+2. bakes the Space and the Universe's shared `assets/` into `.echk` chunks
+   (the same export publishing uses), off the main thread;
+3. starts listening on port 7777;
+4. enters Play with a character, when you were not already playing.
+
+The Output panel prints the join link and the command for this computer:
+
+```text
+Join link: eustress://join/127.0.0.1:7777?key=9f2c...&pin=3f9a...
+On this computer: eustress-client --connect 127.0.0.1:7777
+```
+
+**Stop Server**, or returning to Edit, ends the session. Pausing does not.
+
+## 2. Join with the Player
+
+On the same computer the key and pin are read from the file the host leaves at
+`<workspace>/.eustress/hosts/<port>.link`, so the address is enough:
 
 ```bash
-# From the Eustress release page, or build from source:
-cargo build --release -p eustress-server
+eustress-client --connect 127.0.0.1:7777
 ```
 
-The binary is `eustress-server` (Linux/macOS) or `eustress-server.exe` (Windows).
-
-### 2. Start the server
+From another computer, pass the whole link, or its parts:
 
 ```bash
-# Minimal — default port 7777, max 8 players
-./eustress-server
-
-# Full options
-./eustress-server \
-  --port 7777 \
-  --max-players 16 \
-  --tick-rate 60 \
-  --scene my_world.eustress \
-  --name "My Eustress Server"
+eustress-client "eustress://join/192.168.1.20:7777?key=9f2c...&pin=3f9a..."
+eustress-client --connect 192.168.1.20:7777 --key 9f2c... --pin 3f9a...
 ```
 
-### 3. Port forward on your router
-
-Open **one port** on your home router and point it to your machine's local IP:
-
-| Service | Protocol | Port  | Purpose                         |
-|---------|----------|-------|---------------------------------|
-| Play    | UDP/QUIC | 7777  | Player connections, entity sync |
-
-> **How to find your local IP:** Run `ipconfig` (Windows) or `ip addr` (Linux/macOS).
-> Look for your LAN IP, typically `192.168.x.x` or `10.0.x.x`.
-
-> **Forward only the play port.** The Stream Node (TCP 33000, REST 43000) is a
-> local tooling channel for AI agents and dashboards, and it authenticates
-> nobody: any peer that connects may publish into any topic and read every
-> other, including live scene contents. It binds `127.0.0.1` so that stays on
-> the machine. Do not port-forward it. To reach it from another machine, tunnel
-> over SSH or a VPN rather than exposing the port:
->
-> ```bash
-> ssh -N -L 33000:127.0.0.1:33000 -L 43000:127.0.0.1:43000 you@your-server
-> ```
-
-### 4. Find your public IP
-
-Visit [whatismyip.com](https://whatismyip.com) or run:
-
-```bash
-curl -s ifconfig.me
-```
-
-### 5. Share the connection string with friends
-
-```
-eustress://203.0.113.42:7777
-```
-
-Or just send the raw IP + port: `203.0.113.42:7777`
-
----
-
-## Connecting as a Client
-
-In the Eustress editor, open the **Play** menu → **Connect to Server** and enter:
-
-```
-IP:PORT    e.g.  203.0.113.42:7777
-           or    friend.noip.me:7777   (dynamic DNS)
-```
-
----
-
-## Server Configuration File
-
-Create `server.toml` in the same directory as the binary:
-
-```toml
-[server]
-port        = 7777
-max_players = 32
-tick_rate   = 60       # 24 | 60 | 144
-name        = "My World"
-scene       = "worlds/main.eustress"
-
-[stream]
-enabled     = true
-bind        = "127.0.0.1"  # loopback only; the node is unauthenticated
-tcp_port    = 33000
-rest_port   = 43000
-nodes       = 1            # increase for >622 K msg/s fan-out (see scaling below)
-
-[security]
-password    = ""       # leave empty for open server
-whitelist   = []       # Steam IDs or usernames, empty = allow all
-```
-
----
-
-## Tick Rate Guide
-
-The server tick rate controls how frequently game state is synchronised across all clients.
-
-| Tick Rate | Interval | Best for                                    |
-|-----------|----------|---------------------------------------------|
-| **24 Hz** | 41.7 ms  | Low-bandwidth links, slow-paced games       |
-| **60 Hz** | 16.7 ms  | Standard — recommended for most worlds      |
-| **144 Hz**| 6.9 ms   | Competitive, fast-paced, physics-intensive  |
-
-> All clients must be able to reach at least **24 FPS** to stay in sync.
-> The server is authoritative — clients with lower FPS receive corrections.
-
-### LOD-aware replication
-
-Entities further from each player are replicated at reduced rates automatically:
-
-| Distance   | Replication rate at 60 Hz server |
-|------------|----------------------------------|
-| < 20 m     | 60 Hz (every tick)               |
-| 20 – 100 m | 10 Hz (every 6 ticks)            |
-| 100 – 500 m| 2 Hz  (every 30 ticks)           |
-| > 500 m    | 0 Hz  (culled — no bandwidth)    |
-
----
-
-## Scaling Equations
-
-### Variables
-
-| Symbol | Meaning |
-|--------|---------|
-| `P`    | Connected players |
-| `Hz`   | Server tick rate (24, 60, or 144) |
-| `V`    | Average visible players per client (default 20) |
-| `BW`   | Available server bandwidth (bytes/s) |
-| `T`    | StreamNode TCP throughput (bytes/s) |
-
-### Per-player bandwidth
-
-```
-Upstream   (client → server):   U = 48 × Hz  bytes/s  ≈ 2.9 KB/s  @ 60 Hz
-Downstream (server → client):   D = 56 × V × Hz  bytes/s
-                                   = 56 × 20 × 60  ≈ 67.2 KB/s  @ 60 Hz, V=20
-```
-
-Packet breakdown:
-- Input packet (upstream): 48 bytes = pos(12) + rot(16) + buttons(4) + tick(8) + padding(8)
-- Entity update (downstream): 56 bytes = net_id(8) + pos(12) + rot(16) + vel(12) + flags(8)
-
-### Server total bandwidth
-
-```
-Inbound:   S_in  = P × 48 × Hz
-Outbound:  S_out = P × 56 × V × Hz
-```
-
-**Examples at 60 Hz, V = 20:**
-
-| Players | Inbound       | Outbound      | Required BW  |
-|---------|---------------|---------------|--------------|
-| 8       | 23 KB/s       | 538 KB/s      | 1 Mbps       |
-| 32      | 92 KB/s       | 2.2 MB/s      | 18 Mbps      |
-| 100     | 288 KB/s      | 6.7 MB/s      | 54 Mbps      |
-| 500     | 1.4 MB/s      | 33.6 MB/s     | 269 Mbps     |
-
-### Maximum players for a given upload bandwidth
-
-```
-P_max(BW, Hz, V) = floor(BW / (56 × V × Hz))
-```
-
-Common uplinks:
-
-| Upload BW   | P_max @ 24 Hz | P_max @ 60 Hz | P_max @ 144 Hz |
-|-------------|---------------|---------------|----------------|
-| 10 Mbps     | 372           | 148           | 62             |
-| 100 Mbps    | 3,720         | 1,488         | 620            |
-| 1 Gbps      | 37,202        | 14,880        | 6,200          |
-
-### Stream Node (EustressStream TCP) throughput
-
-```
-P_stream(Hz) = floor(StreamNode_throughput / (Hz × msg_per_player))
-```
-
-Benchmarked throughputs (internal, single node):
-
-| Transport                          | Throughput        | P_max @ 60 Hz (3 msg/player/tick) |
-|------------------------------------|-------------------|-----------------------------------|
-| In-process                         | ~85 M msg/s       | ∞ (no network)                    |
-| TCP batch-256 (mixed topics)       | ~622 K msg/s      | ~3,455 players                    |
-| TCP batch-1024 (same topic)¹       | **~836 K msg/s**  | **~4,644 players**                |
-| **TCP no-ack batch-64**²           | **~1,049 K msg/s**| **~5,827 players**                |
-| **TCP no-ack batch-256**²          | **~1,151 K msg/s**| **~6,394 players**                |
-| **TCP no-ack batch-1024**²         | **~1,184 K msg/s**| **~6,578 players**                |
-| QUIC batch-256                     | ~336 K msg/s      | ~1,866 players                    |
-
-¹ `PublishBatchTopic` with `BatchAckCompact` — use when all messages share one topic (e.g. `scene_deltas`).
-² `PublishBatchNoAck` — fire-and-forget, no ack. Use for best-effort streams (`scene_deltas`, `log/output`, `agent_observations`). Throughput bounded by TCP write bandwidth, not RTT.
-
-### ForgeCluster horizontal scaling
-
-```
-P_cluster(N, Hz) = N × P_stream(Hz)
-```
-
-| Nodes | TCP P_max @ 60 Hz | Ports             |
-|-------|-------------------|-------------------|
-| 1     | ~3,455            | 33000             |
-| 3     | ~10,365           | 33000–33002       |
-| 5     | ~17,275           | 33000–33004       |
-| 10    | ~34,550           | 33000–33009       |
-
-Enable multi-node in `server.toml`:
-
-```toml
-[stream]
-nodes = 3   # starts 3 TCP nodes on 33000, 33001, 33002
-```
-
-### Recommended server specs
-
-| Players | CPU          | RAM   | Upload     | Config                    |
-|---------|--------------|-------|------------|---------------------------|
-| ≤ 32    | 2-core       | 2 GB  | 10 Mbps    | Single node, 60 Hz        |
-| ≤ 100   | 4-core       | 4 GB  | 100 Mbps   | Single node, 60 Hz        |
-| ≤ 500   | 8-core       | 8 GB  | 500 Mbps   | 3-node cluster, 60 Hz     |
-| ≤ 2000  | 16-core      | 16 GB | 1 Gbps     | 5-node cluster, 60 Hz     |
-| ≤ 10000 | 32-core      | 32 GB | 10 Gbps    | 10-node cluster, 24 Hz    |
-
----
-
-## Troubleshooting
-
-### "Connection refused" on port 7777
-
-1. Check the server is running: `./eustress-server --port 7777`
-2. Check your firewall allows UDP/7777 inbound
-3. Verify port forwarding points to the **correct local IP**
-4. Test locally first: connect to `127.0.0.1:7777`
-
-### Players can connect locally but not externally
-
-Your router NAT isn't forwarding the port. Verify:
-- Port forward rule: External 7777 UDP → Internal `<your-local-ip>` 7777
-- Some ISPs block ports below 1024 — try port 27777 instead
-- If behind CGNAT (common on mobile/shared IPs), use a VPN or relay
-
-### High latency / rubber-banding
-
-Lower the tick rate to reduce bandwidth pressure:
-
-```toml
-tick_rate = 24
-```
-
-Or reduce visible players per client:
-
-```toml
-[replication]
-view_distance = 50   # metres — entities beyond this are culled
-```
-
-### Stream Node not reachable
-
-```bash
-# Check it's listening
-ss -tlnp | grep 33000        # Linux
-netstat -an | grep 33000     # Windows
-
-# Test subscribe from CLI
-eustress stream subscribe scene_deltas --host 203.0.113.42:33000
-```
-
----
-
-## Dynamic DNS (no static IP)
-
-If your public IP changes, use a free dynamic DNS service:
-
-1. Register at **DuckDNS** or **No-IP** — get a hostname like `myworld.duckdns.org`
-2. Run their updater client on your server machine
-3. Share `eustress://myworld.duckdns.org:7777` instead of a raw IP
-
----
-
-## Headless / Cloud Deployment
-
-For persistent 24/7 servers, run the binary on a VPS (DigitalOcean, Hetzner, etc.):
-
-```bash
-# systemd service
-[Unit]
-Description=Eustress Game Server
-After=network.target
-
-[Service]
-ExecStart=/opt/eustress/eustress-server --port 7777 --scene worlds/main.eustress
-Restart=always
-User=eustress
-
-[Install]
-WantedBy=multi-user.target
-```
-
-No port forwarding needed — VPS machines have public IPs directly.
+`--name` sets the name other players see. Without it the Player uses
+`EUSTRESS_PLAYER_NAME`, then the computer's user name.
+
+Joining downloads the host's world, opens it, and places the avatar near the
+Space's SpawnLocation, each player on its own spot around it. Chunks are cached
+under the local data folder (`eustress/echk/`), so joining the same host again
+downloads only the chunks that changed.
+
+## 3. Let other computers in
+
+By default a host accepts players from its own computer only. To open it:
+
+1. Set `EUSTRESS_HOST_LAN=1` before starting Studio. The host then listens on
+   every network interface, and the join link carries the computer's local
+   network address.
+2. Allow inbound **UDP 7777** in the firewall.
+3. For players outside your network, forward **UDP 7777** on the router to
+   this computer, and share the link with your public address in place of the
+   local one.
+
+The key in the link keeps anyone without it out, and the pin makes sure a
+player reaches your computer rather than an impostor. Both change every time a
+server starts, so share the link from the current session.
+
+### Settings
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `EUSTRESS_HOST_PORT` | 7777 | Port to listen on. `0` picks any free port. |
+| `EUSTRESS_HOST_LAN` | off | `1` also accepts players on the local network. |
+| `EUSTRESS_HOST_MAX_PLAYERS` | 8 | Players besides the host. |
+| `EUSTRESS_HOST_ON_PLAY` | off | `1` hosts whenever Play starts. |
+
+## 4. What a session shares
+
+| Data | How it travels |
+|---|---|
+| The world | The host's baked Space as `.echk` chunks, once per join, over the reliable stream in 256 KiB pieces. Each chunk must hash to its BLAKE3 name before the Player uses it. |
+| Avatars | 20 samples a second per player: position, facing, movement direction, vertical speed, sprint, crouch, grounded, and a jump count. Datagrams where the connection supports them, the reliable stream otherwise. Each receiver drives the avatar with its own character controller and corrects it toward the sender's position, snapping when it is more than 4 m off. |
+| Appearance | Each player's avatar descriptor, once per join. |
+| Arrivals and departures | Reliable messages; the host shows a notification for each. |
+| Chat | Carried by the protocol. Neither Studio nor the Player has a chat box yet. |
+
+What a session does **not** share yet:
+
+- **Changes to the world after a player joins.** A player sees the world as it
+  was baked when the server started: a part a script moves, a door that opens,
+  or an object physics knocks over stays where it was on the player's screen.
+- **Physics objects.** Only avatars are synchronised.
+- **Scripts on the Player.** The Player runs no scripts. The host is the only
+  authority by construction.
+
+## 5. Safety
+
+| Check | Rule |
+|---|---|
+| Who can connect | This computer only, unless `EUSTRESS_HOST_LAN=1`. |
+| Join key | 128 random bits, compared in constant time before a session is accepted. |
+| Host identity | Every server start mints a self-signed ECDSA P-256 certificate valid for 14 days. Players verify its SHA-256 (the pin). A Player refuses to join another computer's host without a pin. |
+| Avatar samples | Finite numbers, within 100 km of the origin, at most 80 m/s plus 6 m of slack between samples. A player with more than 60 violations in 10 seconds is removed. |
+| Chat | 8 lines per 10 seconds, 400 characters each. Names are cut to 32 characters. |
+| Sizes | Messages up to 4 MiB; a world up to 8 GiB; a chunk up to 512 MiB; paths inside a chunk checked before anything is written to disk. |
+
+## 6. A host with no window
+
+The headless engine (`eustress-headless`) registers the same hosting plugin.
+With `EUSTRESS_HOST_ON_PLAY=1` it hosts whenever Play starts, which makes it a
+dedicated host. The standalone `eustress-server` binary does not host.
+
+## 7. Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `could not join: ... timed out` | Nothing is listening at that address: the server is stopped, the firewall blocks UDP 7777, or `EUSTRESS_HOST_LAN` is off on the host. |
+| `the host did not answer within 20 seconds` | The connection opened but the host never welcomed the player. Restart the server. |
+| The join is refused at once | The key is wrong. Copy the link from the current session. |
+| A certificate error | The pin is from an earlier session. Every server start has a new one. |
+| `Could not start the server` with an address in use | Another program holds port 7777. Set `EUSTRESS_HOST_PORT`. |
+| `The Space is still opening` | The Space's database was still loading. Start the server again in a moment. |
+
+## 8. Browsers
+
+The transport is WebTransport so that a browser build of the Player can join
+the same hosts: a browser's `WebTransport` constructor takes the pin through
+`serverCertificateHashes`, and the session and wire code are free of tokio and
+of the operating system. The browser Player itself is not built yet.
