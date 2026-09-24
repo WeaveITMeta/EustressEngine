@@ -2239,7 +2239,7 @@ fn setup_slint_overlay(world: &mut World) {
     {
         let icon_cache: std::cell::RefCell<std::collections::HashMap<String, slint::Image>> =
             std::cell::RefCell::new(std::collections::HashMap::new());
-        let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/icons");
+        let assets = crate::resource_root().join("assets/icons");
         ui.on_tool_icon_image(move |action_id| {
             let key = action_id.to_string();
             if let Some(img) = icon_cache.borrow().get(&key) {
@@ -16181,10 +16181,11 @@ fn drain_slint_actions(
                         info!("Help: Opened Services Browser center tab");
                     } else if action == "help:constitution" {
                         // Open the Eustress Constitution PDF in the OS default viewer.
-                        // The document lives in the repo at docs/documents/ so every
-                        // build ships with it and every user can access it without
-                        // a network connection.
+                        // The document lives in the repo at docs/documents/ and the
+                        // installer puts a copy in `docs/` beside the executable, so
+                        // every user can open it without a network connection.
                         let candidates = [
+                            crate::resource_root().join("docs/eustress_constitution.pdf"),
                             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                                 .join("../../..")
                                 .join("docs/documents/eustress_constitution.pdf"),
@@ -22841,7 +22842,7 @@ fn sync_unified_explorer_to_slint(
                     };
                     
                     let entry_icon = {
-                        let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(load_file_icon(if *is_dir { "folder" } else { extension }));
+                        let icon_path = crate::resource_root().join(load_file_icon(if *is_dir { "folder" } else { extension }));
                         cached_image(&icon_path).unwrap_or_default()
                     };
                     tree_nodes.push(TreeNode {
@@ -22893,7 +22894,7 @@ fn sync_unified_explorer_to_slint(
                                 }).unwrap_or_default();
                                 
                                 let sub_icon = {
-                                    let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(load_file_icon(sub_ext));
+                                    let icon_path = crate::resource_root().join(load_file_icon(sub_ext));
                                     cached_image(&icon_path).unwrap_or_default()
                                 };
                                 tree_nodes.push(TreeNode {
@@ -23666,7 +23667,7 @@ fn make_service_node(
 fn load_service_icon(name: &str) -> slint::Image {
     // Per service node, per Explorer push — cached for the same reason as
     // `load_class_icon` (an SVG rasterise per row per push was the freeze).
-    let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let icon_path = crate::resource_root()
         .join("assets")
         .join("icons")
         .join(format!("{}.svg", name));
@@ -23813,10 +23814,10 @@ fn build_file_tree_nodes(
             }
         };
         let icon_path = if is_workshop_folder {
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            crate::resource_root()
                 .join("assets").join("icons").join("wrench.svg")
         } else {
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            crate::resource_root()
                 .join("assets").join("icons").join("folders")
                 .join(format!("{}.svg", folder_icon_name))
         };
@@ -23889,7 +23890,7 @@ fn build_file_tree_nodes(
             "hgt" | "geotiff" => "image",
             _ => "file",
         };
-        let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let icon_path = crate::resource_root()
             .join("assets")
             .join("icons")
             .join("filetypes")
@@ -28071,7 +28072,7 @@ fn asset_icon(asset_type: &str) -> slint::Image {
         "Fonts" | "font" => "ui/new-file",
         _ => "ui/new-file",
     };
-    let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let icon_path = crate::resource_root()
         .join("assets")
         .join("icons")
         .join(format!("{}.svg", icon_name));
@@ -28867,7 +28868,7 @@ fn load_class_icon(class_name: &eustress_common::classes::ClassName) -> slint::I
         if let Some(img) = cache.borrow().get(filename) {
             return img.clone();
         }
-        let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let icon_path = crate::resource_root()
             .join("assets")
             .join("icons")
             .join(format!("{}.svg", filename));

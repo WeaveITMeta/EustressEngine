@@ -131,15 +131,29 @@ pub mod streaming;
 // consolidation.
 //
 // In dev builds `CARGO_MANIFEST_DIR` resolves to the common crate's path on
-// disk. In deployed builds (no source tree present) callers should ship the
-// `common/assets/` directory next to the binary; we'll add an exe-relative
-// fallback when ship time arrives.
+// disk. An installed copy has no source tree: the installer puts this
+// directory beside the executable as `common/assets/`, and `assets_dir`
+// prefers that copy whenever it is there.
 
 /// Path to the `common/assets/` directory — the single source of truth for
 /// bundled engine templates (class schemas, service templates, service
-/// properties). Resolves from this crate's manifest dir at compile time.
+/// properties) and the shared material and character assets.
+///
+/// Prefers `<exe dir>/common/assets`, where the installer puts it, and falls
+/// back to this crate's source tree for `cargo run`. `CARGO_MANIFEST_DIR` is
+/// the BUILD machine's path, baked in at compile time, so on its own it only
+/// ever worked on the machine that compiled the binary. Requiring
+/// `class_schema` inside keeps a stray empty folder from winning. Decided
+/// once per process.
 pub fn assets_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets")
+    static DIR: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("common").join("assets")))
+            .filter(|dir| dir.join("class_schema").is_dir())
+            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"))
+    });
+    DIR.clone()
 }
 
 /// `common/assets/class_schema/` — per-class default TOMLs.

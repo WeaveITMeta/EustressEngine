@@ -203,4 +203,28 @@ lto = false
 codegen-units = 32
 strip = true
 
+# What ships in the installer. `release` plus cross-crate thin LTO.
+#
+# Debug info is already off and `strip = true` is inherited; together those
+# are most of the size win a stripped static build gets. Thin LTO adds the
+# cross-crate inlining and dead-code removal that `lto = false` leaves on the
+# table, at a fraction of fat LTO's link time and memory on a program this
+# size. `opt-level` stays at 3: size-first levels (`s`, `z`) buy almost nothing
+# on their own and cost frame time, which is the wrong trade for an engine.
+#
+# Build it with the static C runtime, so the installed exe needs no VC++
+# Redistributable. The flag goes through `--config`, which appends to
+# `.cargo/config.toml`'s rustflags; a RUSTFLAGS variable would REPLACE them
+# and drop `-C linker-flavor=lld-link`, and the final link would fail:
+#
+#   CARGO_INCREMENTAL=0 cargo build --profile dist -p eustress-engine \
+#     --bin eustress-engine --target x86_64-pc-windows-msvc \
+#     --config 'target.x86_64-pc-windows-msvc.rustflags=["-C","target-feature=+crt-static"]'
+#
+# `CARGO_INCREMENTAL=0` because `build.incremental = true` in the config
+# overrides every profile, and an LTO build gains nothing from it.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
 

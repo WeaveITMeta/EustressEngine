@@ -143,20 +143,25 @@ jobs:
           Remove-Item $pfx -Force
 
       - name: Package
-        shell: bash
+        shell: pwsh
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          mkdir -p stage dist
-          cp eustress/target/release/eustress-engine.exe stage/
-          cp -r eustress/crates/engine/assets stage/assets
-          (cd stage && 7z a "../dist/eustress-engine-v${VERSION}-windows-x64.zip" *)
+          # The layout the installer ships too. Staged outside dist/, which
+          # is uploaded whole and then flattened by the publish job.
+          ./installer/windows/stage.ps1 -BinDir eustress/target/release -OutDir stage
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Push-Location stage
+          7z a "../dist/eustress-engine-v$env:VERSION-windows-x64.zip" *
+          if ($LASTEXITCODE -ne 0) { throw "7z failed with exit code $LASTEXITCODE" }
+          Pop-Location
 
       - name: Build installer
         shell: pwsh
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
             "/DMyAppVersion=${{ needs.version.outputs.version }}" `
+            "/DStageDir=..\..\stage" `
             installer\windows\eustress-engine.iss
           Copy-Item dist\windows\EustressEngine-Setup.exe dist\ -Force
 

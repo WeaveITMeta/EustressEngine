@@ -247,7 +247,7 @@ pub fn scaffold_new_space(
     // Copy templates from assets/lighting_templates/ to Lighting/ folder.
     // Files use .instance.toml extension so FileType::from_path returns Toml
     // and the file loader spawns them as ECS entities with Instance components.
-    let lighting_template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let lighting_template_dir = crate::resource_root()
         .join("assets")
         .join("lighting_templates");
 
@@ -281,7 +281,7 @@ pub fn scaffold_new_space(
 /// Copy engine default part GLBs (block, ball, wedge, etc.) into a target directory.
 /// Skips files that already exist so user modifications are preserved.
 pub fn copy_engine_default_parts(target_parts_dir: &Path) {
-    let engine_parts_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let engine_parts_dir = crate::resource_root()
         .join("assets")
         .join("parts");
 
@@ -1359,7 +1359,7 @@ pub fn ensure_space_integrity(space_root: &Path) {
             repaired += 1;
         }
 
-        let lighting_template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let lighting_template_dir = crate::resource_root()
             .join("assets")
             .join("lighting_templates");
 

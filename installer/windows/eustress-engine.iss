@@ -1,13 +1,19 @@
 ; =============================================================================
 ; Eustress Engine - Windows Installer Script (Inno Setup)
 ; =============================================================================
-; Build: iscc eustress-engine.iss
-; Output: EustressEngine-Setup.exe
+; Stage first, then compile:
+;   pwsh installer/windows/stage.ps1 -BinDir <dir holding eustress-engine.exe>
+;   iscc /DMyAppVersion=X.Y.Z installer/windows/eustress-engine.iss
+; Output: dist\windows\EustressEngine-Setup.exe
 ; =============================================================================
 
 #define MyAppName "Eustress Engine"
 #ifndef MyAppVersion
   #define MyAppVersion "0.1.0"
+#endif
+; The layout stage.ps1 builds, which the release zip also ships.
+#ifndef StageDir
+  #define StageDir "..\..\dist\windows\stage"
 #endif
 #define MyAppPublisher "Eustress"
 #define MyAppURL "https://eustress.dev"
@@ -54,32 +60,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-; Main executable
-Source: "..\..\eustress\target\release\eustress-engine.exe"; DestDir: "{app}"; Flags: ignoreversion
-
-; Rune LSP server — ships alongside the engine so external IDEs (Windsurf,
-; VS Code, Cursor) get Rune intelligence without a second download. The
-; engine launches this binary on startup from the install directory.
-; `skipifsourcedoesntexist`: it IS a [[bin]] in the eustress-engine package
-; gated by the `lsp` feature (on by default via `core`), so plain
-; `cargo build --release --package eustress-engine` should already produce
-; it alongside eustress-engine.exe — but the CI Windows job has never been
-; verified to package it, so this stays a safety net rather than a hard
-; requirement until that's confirmed.
-Source: "..\..\eustress\target\release\eustress-lsp.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-
-; MCP server — exposes the Universe (Spaces, scripts, entities, assets,
-; conversations) to any MCP-compatible AI client (Windsurf, Cursor,
-; Claude Desktop). Lives in a SEPARATE package (eustress-mcp-server, bin
-; eustress-mcp) that the CI Windows job's `--package eustress-engine`
-; build does NOT produce today — `skipifsourcedoesntexist` keeps this
-; installer buildable now; wire a build step for it into release.yml
-; separately when the MCP binary is meant to ship in the installer.
-Source: "..\..\eustress\target\release\eustress-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-
-; Assets folder — shaders, monaco, parts, lighting_templates, icons,
-; characters. Excludes the Linux-only install-script subtree.
-Source: "..\..\eustress\crates\engine\assets\*"; DestDir: "{app}\assets"; Excludes: "\linux\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Everything stage.ps1 staged: eustress-engine.exe, eustress-lsp.exe (the
+; Rune language server the editor starts from this directory), assets\,
+; common\assets\ and docs\. The engine finds each one beside its exe.
+;
+; Not shipped yet: eustress-mcp.exe, the MCP server for external AI clients,
+; lives in its own package (eustress-mcp-server) and is not built here.
+Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

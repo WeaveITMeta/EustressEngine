@@ -1,6 +1,6 @@
 [package]
 name = "eustress-engine"
-version = "0.3.6"
+version = "0.3.7"
 description = "EustressEngine - Desktop 3D Editor"
 authors = ["EustressEngine Contributors"]
 edition = "2021"

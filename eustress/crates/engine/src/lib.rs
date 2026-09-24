@@ -277,3 +277,24 @@ pub use plugins::{
     PhysicsPlugin, InputPlugin, RunPlugin,
     AllServicesPlugin,
 };
+
+/// The directory this crate's `assets/` lives in: the executable's own
+/// directory when an `assets/` folder sits beside it (the installed layout),
+/// otherwise the crate's source directory (`cargo run`).
+///
+/// Join `"assets/..."` onto it. `env!("CARGO_MANIFEST_DIR")` alone is the
+/// BUILD machine's source path, baked in at compile time, so an installed
+/// copy found none of its icons or templates on anyone else's machine. The
+/// `AssetPlugin` root in `main.rs` makes the same choice, and cargo never
+/// puts an `assets/` beside `target/<profile>/`, so dev runs are unaffected.
+/// Decided once per process.
+pub fn resource_root() -> &'static std::path::Path {
+    static ROOT: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+            .filter(|dir| dir.join("assets").is_dir())
+            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+    });
+    &ROOT
+}

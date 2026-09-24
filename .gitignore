@@ -163,6 +163,11 @@ eustress/.patches/wgpu-fresh/
 .trunk-web-target/
 target-verify/
 **/target-verify/
+# Static-CRT distribution builds (`--profile dist --target x86_64-pc-windows-msvc`),
+# kept apart from `target/` so the crt-static flags never force a rebuild of
+# the everyday dev tree, and a dist build never contends for its lock.
+target-dist/
+**/target-dist/
 
 # Cargo target tree used by the data-platform test harness. Same class as the
 # `target-*` siblings above: a build directory that was never listed, so it

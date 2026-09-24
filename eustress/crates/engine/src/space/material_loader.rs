@@ -670,9 +670,7 @@ fn load_texture(
     //    library, e.g. "materials/textures/brick_base_color.png" →
     //    "bundled://materials/textures/brick_base_color.png".
     let in_space = mat_toml_dir.join(relative_path);
-    let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../common/assets")
-        .join(relative_path);
+    let bundled = eustress_common::assets_dir().join(relative_path);
     let (disk, asset_path) = if in_space.exists() {
         let asset_path = match in_space.strip_prefix(space_root) {
             Ok(rel) => format!("space://{}", rel.to_string_lossy().replace('\\', "/")),
