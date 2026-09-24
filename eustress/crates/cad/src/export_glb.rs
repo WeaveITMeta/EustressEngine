@@ -256,6 +256,7 @@ mod tests {
             normals: vec![[0.0, 0.0, 1.0]; 3],
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
             indices: vec![0, 1, 2],
+            ..Default::default()
         };
         let bytes = encode_glb(&mesh, Some(serde_json::json!({"cad": true}))).unwrap();
         assert!(bytes.len() > 100);

@@ -69,16 +69,55 @@ pub enum SketchEntity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SketchDimension {
-    Linear  { e1: usize,          value: String }, // value = "50 mm" | "length"
-    Radial  { e1: usize,          value: String },
-    Angular { e1: usize, e2: usize, value: String }, // angle between two lines
+    /// With `e1` alone: a line's length, or a rectangle's width (`axis =
+    /// "x"`, the default) or height (`axis = "y"`). With `e2` too: the
+    /// distance between two points (`p1`/`p2` pick which point of a line
+    /// or arc; a point or circle needs none), from a point to a line, or
+    /// between parallel lines; `axis` measures only the x or y component.
+    Linear {
+        e1: usize,
+        value: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        e2: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        axis: Option<DimAxis>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        p1: Option<PointRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        p2: Option<PointRef>,
+    },
+    Radial { e1: usize, value: String },
+    Diameter { e1: usize, value: String },
+    /// Angle between two lines. A value in [0, 180] degrees is unsigned
+    /// (either way round); anything outside it is measured
+    /// counter-clockwise from `e1` to `e2`, which is how a reflex angle
+    /// is dimensioned.
+    Angular { e1: usize, e2: usize, value: String },
+}
+
+/// Axis a linear dimension measures along.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DimAxis {
+    X,
+    Y,
+}
+
+/// A particular point of an entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PointRef {
+    Start,
+    End,
+    Center,
 }
 
 impl SketchDimension {
     pub fn resolved_value(&self, vars: &std::collections::HashMap<String, String>) -> Option<Quantity> {
         let raw = match self {
-            SketchDimension::Linear { value, .. }  => value,
-            SketchDimension::Radial { value, .. }  => value,
+            SketchDimension::Linear { value, .. } => value,
+            SketchDimension::Radial { value, .. } => value,
+            SketchDimension::Diameter { value, .. } => value,
             SketchDimension::Angular { value, .. } => value,
         };
         crate::feature_tree::resolve_quantity(raw, vars)
@@ -95,6 +134,26 @@ pub struct SketchConstraint {
     /// only need one).
     #[serde(default)]
     pub e2: Option<usize>,
+    /// Which point of `e1` a point constraint means. When absent, the
+    /// solver picks from the geometry as drawn: a point is itself, a
+    /// circle is its centre, and for `coincident` the nearest pair of
+    /// endpoints (so chaining two lines end to start does what it says).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p1: Option<PointRef>,
+    /// Which point of `e2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p2: Option<PointRef>,
+    /// The axis line for `symmetric` between two points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e3: Option<usize>,
+}
+
+impl SketchConstraint {
+    /// A constraint between whole entities, with every point choice left
+    /// to the solver's defaults.
+    pub fn new(kind: ConstraintKind, e1: usize, e2: Option<usize>) -> Self {
+        Self { kind, e1, e2, p1: None, p2: None, e3: None }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,4 +171,10 @@ pub enum ConstraintKind {
     EqualRadius,
     Symmetric,
     Fix, // lock the entity in place — no DOF
+    /// Point `e1` (`p1`) at the midpoint of line `e2`.
+    Midpoint,
+    /// Point `e1` (`p1`) on the infinite line through line `e2`.
+    PointOnLine,
+    /// Point `e1` (`p1`) on circle or arc `e2`.
+    PointOnCircle,
 }

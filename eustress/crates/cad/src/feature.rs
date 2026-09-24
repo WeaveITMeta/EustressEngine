@@ -37,6 +37,23 @@ pub enum Feature {
         /// side of the sketch plane.
         #[serde(default)]
         both_sides: bool,
+        /// What `to_plane` / `to_surface` stop at: a plane name (`"xy"`,
+        /// a reference plane feature) or a planar face name
+        /// (`"Extrude1.cap_end"`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        /// Extrude against the sketch normal. A negative `depth` does the
+        /// same.
+        #[serde(default, skip_serializing_if = "is_false")]
+        reverse: bool,
+        /// Thin-feature wall thickness: instead of the filled profile,
+        /// extrude a wall this thick grown inward from every loop.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thin: Option<String>,
+        /// Bodies this feature may join, cut or intersect. Empty means
+        /// every body it touches.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bodies: Vec<String>,
     },
 
     /// Revolve a sketch profile around an axis.
@@ -49,11 +66,22 @@ pub enum Feature {
         angle: String,
         #[serde(default)]
         combine: FeatureOp,
+        /// Revolve half the angle to each side of the sketch plane.
+        #[serde(default, skip_serializing_if = "is_false")]
+        both_sides: bool,
+        /// Bodies this feature may join, cut or intersect. Empty means
+        /// every body it touches.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bodies: Vec<String>,
     },
 
     /// Fillet rounded edges — one radius per edge list.
     Fillet {
-        /// List of edge references (e.g. `["Extrude1/edge-0", "Extrude1/edge-2"]`).
+        /// Edge names from the topology listing, each the two faces the
+        /// edge separates: `["Extrude1.cap_end | Extrude1.side.e0.top"]`.
+        /// The legacy positional form `"Extrude1/edge-0"` still parses,
+        /// but it never identified an edge and is applied as a
+        /// visual-only rounding, reported as such.
         edges: Vec<String>,
         radius: String,
         /// Propagate to tangent-connected edges automatically.
@@ -76,6 +104,8 @@ pub enum Feature {
 
     /// Hollow the part; `open_faces` stay open.
     Shell {
+        /// Face names to leave open (`["Extrude1.cap_end"]` for an
+        /// open-top box). Empty makes a closed, fully enclosed cavity.
         open_faces: Vec<String>,
         wall_thickness: String,
     },
@@ -144,6 +174,10 @@ pub enum Feature {
         axis: Option<String>,
         #[serde(default)]
         angle: Option<String>,
+        /// Linear direction taken from a straight edge instead of
+        /// `direction`: an edge name from the topology listing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direction_ref: Option<String>,
         /// How the instances combine with the running body.
         ///
         /// Defaults to `Add`, which is what every pre-existing tree
@@ -174,6 +208,14 @@ pub enum Feature {
     Boolean {
         target: String,
         boolean_op: BooleanOp,
+        /// Tool bodies applied to `target`. When empty, `target` is
+        /// itself the tool and is applied to every other body, which is
+        /// what this feature always meant.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tools: Vec<String>,
+        /// Keep the tool bodies after combining instead of consuming them.
+        #[serde(default, skip_serializing_if = "is_false")]
+        keep_tools: bool,
     },
 
     /// Split-body along a plane — produces two output bodies the user
@@ -335,4 +377,5 @@ pub enum ReferencePlane {
 }
 
 fn default_true() -> bool { true }
+fn is_false(b: &bool) -> bool { !*b }
 fn default_zero_deg() -> String { "0 deg".to_string() }

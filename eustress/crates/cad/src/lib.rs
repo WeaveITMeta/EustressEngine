@@ -27,27 +27,35 @@
 //!                                                      + Avian collider)
 //! ```
 //!
-//! ## Shipped
+//! ## Kernel
 //!
-//! - `Quantity` + unit registry (length, angle, mass, force)
-//! - TOML schemas for `FeatureTree`, `Sketch`, `Feature::*`
-//! - Working evaluators: Extrude, Revolve, Mirror, Pattern
-//!   (linear/circular), Boolean, Split, Hole
-//! - Real tessellation: [`tessellate_solid`] — truck Solid →
-//!   flat triangle arrays ([`EvalMesh`]) via truck-meshalgo, with
-//!   robust-retry for boolean output and per-tree
-//!   `metadata.mesh_tolerance` override
+//! - **Placement** ([`frame`]): every sketch lives in a frame resolved
+//!   from its `plane`: a built-in plane, a reference plane, or a planar
+//!   face by name.
+//! - **Profiles** ([`profile`]): lines, arcs, circles and rectangles
+//!   weld into loops; nesting gives regions with holes.
+//! - **Bodies with names** ([`topology`]): a part is a list of bodies,
+//!   and every face has a name that survives regeneration and booleans;
+//!   edges are named by the faces they separate.
+//! - **Features**: extrude (blind, mid-plane, through-all, to a plane or
+//!   face, up to next; reverse; draft; thin), revolve, loft, sweep,
+//!   hole (counterbore, true countersink, cosmetic thread), fillet and
+//!   chamfer on named edges, shell with named open faces or a closed
+//!   cavity, mirror, pattern, split into two bodies, reference planes.
+//! - **Output**: tessellation with per-triangle face ids
+//!   ([`tessellate_body`]), GLB ([`export_glb`]), STEP ([`step`]).
 //!
-//! ## What lands next
-//!
-//! Sweep / Loft / Shell evaluators; Fillet / Chamfer once
-//! truck-shapeops stabilizes upstream. Sketch solver lands as
-//! in-house Levenberg-Marquardt over constraint residuals (see
-//! docs/architecture/CAD_PLATFORM_PLAN.md Phase C).
+//! Design and roadmap: docs/architecture/CAD_KERNEL_V2.md.
 
 pub mod quantity;
 pub mod expr;
 pub mod offset;
+pub mod frame;
+pub mod profile;
+pub mod topology;
+mod build;
+mod blend;
+pub mod step;
 pub mod feature_tree;
 pub mod sketch;
 pub mod feature;
@@ -72,9 +80,16 @@ pub use feature::{
 // Re-export for engine CSG consumers (already in feature:: above).
 pub use error::{CadError, CadResult};
 pub use eval::{
-    evaluate_tree, tessellate_solid,
+    evaluate_tree, merge_meshes, tessellate_body, tessellate_solid,
     EvalOutput, EvalMesh, EntryStatus, DEFAULT_MESH_TOLERANCE,
 };
+// Kernel v2: placement, profiles, bodies and their persistent names, and
+// STEP. `topology` the module (names) and `topology` the function (the
+// mesh edge census in `measure`) live in different namespaces.
+pub use frame::Frame;
+pub use profile::{profile_of, Profile, Region};
+pub use topology::{edges_of, faces_of, Body, EdgeInfo, FaceInfo};
+pub use step::{step_string, write_step};
 pub use parts_csg::{boolean_oriented_solids, OrientedShape, OrientedSolid};
 // Measurement — the read half of the loop. Mass properties and the
 // edge census are kernel concerns, not tool-surface ones: the Studio

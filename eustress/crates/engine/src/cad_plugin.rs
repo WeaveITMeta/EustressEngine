@@ -1111,11 +1111,7 @@ fn handle_cad_add_constraint(
                         continue;
                     }
                 }
-                body.constraints.push(SketchConstraint {
-                    kind: event.kind,
-                    e1: event.e1,
-                    e2: event.e2,
-                });
+                body.constraints.push(SketchConstraint::new(event.kind, event.e1, event.e2));
                 // Immediately solve this sketch.
                 match eustress_cad::solve_sketch(body, &tree.variables) {
                     Ok(report) => {
@@ -1561,17 +1557,25 @@ impl ColliderFidelity {
 /// `center` is subtracted because the render mesh is recentred on the
 /// entity origin before upload, and a collider in a different frame from
 /// its mesh is worse than no collider at all.
+///
+/// `single_body` must be false for a multi-body part: two separate convex
+/// bodies have no reflex edge between them either, and one hull around
+/// both would fill the gap between them.
 fn cad_collider(
     eval: &EvalMesh,
     topo: &eustress_cad::TopoReport,
     center: Vec3,
     half: Vec3,
+    single_body: bool,
 ) -> (Collider, ColliderFidelity) {
+    // Avian's `Collider::cuboid` takes FULL side lengths and halves them
+    // itself, so the half extents are doubled here; passed as given they
+    // built a box half the size of the part.
     let bbox = || {
         Collider::cuboid(
-            half.x.max(0.001),
-            half.y.max(0.001),
-            half.z.max(0.001),
+            half.x.max(0.001) * 2.0,
+            half.y.max(0.001) * 2.0,
+            half.z.max(0.001) * 2.0,
         )
     };
     let verts: Vec<Vec3> = eval
@@ -1586,7 +1590,7 @@ fn cad_collider(
 
     // A convex body's hull is the body. No decomposition to run, and no
     // approximation to disclose.
-    if topo.is_convex() {
+    if single_body && topo.is_convex() {
         if let Some(c) = Collider::convex_hull(verts.clone()) {
             return (c, ColliderFidelity::Hull);
         }
@@ -1691,6 +1695,7 @@ fn regenerate_cad_parts(
                 continue;
             }
         };
+        let body_count = out.bodies.len();
         let Some(eval_mesh) = out.mesh.filter(|m| !m.indices.is_empty()) else {
             fail(&mut commands, entity, "no mesh produced".into());
             continue;
@@ -1722,7 +1727,7 @@ fn regenerate_cad_parts(
                 .mesh_tolerance
                 .unwrap_or(eustress_cad::DEFAULT_MESH_TOLERANCE);
             let topo = eustress_cad::topology(&eval_mesh, tol);
-            let (shape, how) = cad_collider(&eval_mesh, &topo, center_local, half);
+            let (shape, how) = cad_collider(&eval_mesh, &topo, center_local, half, body_count <= 1);
             fidelity = Some(how);
             if let Some(mut col) = collider {
                 *col = shape;
@@ -2028,7 +2033,7 @@ mod collider_tests {
         let (min, max) = mesh_bounds(mesh);
         let center = (min + max) * 0.5;
         let half = (max - min).max(Vec3::splat(0.01)) * 0.5;
-        cad_collider(mesh, &topo, center, half).1
+        cad_collider(mesh, &topo, center, half, true).1
     }
 
     #[test]
@@ -2072,7 +2077,7 @@ mod collider_tests {
     fn an_empty_mesh_falls_back_and_says_so() {
         let mesh = EvalMesh::default();
         let topo = eustress_cad::topology(&mesh, eustress_cad::DEFAULT_MESH_TOLERANCE);
-        let how = cad_collider(&mesh, &topo, Vec3::ZERO, Vec3::splat(0.05)).1;
+        let how = cad_collider(&mesh, &topo, Vec3::ZERO, Vec3::splat(0.05), true).1;
         assert_eq!(how, ColliderFidelity::BoundingBox);
         // The status line has to carry the caveat, or this is the old
         // silent box wearing a new name.

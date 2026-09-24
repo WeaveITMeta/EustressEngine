@@ -1,65 +1,83 @@
-//! Deterministic feature-tree evaluator — walks a [`FeatureTree`] in
-//! declaration order, applies each sketch + feature, produces a final
-//! `truck` `Solid` + a tessellated mesh.
+//! Deterministic feature-tree evaluator.
 //!
-//! ## Shipped evaluators (2026-04-22)
+//! Walks a [`FeatureTree`] in declaration order and produces bodies: truck
+//! solids, each with a stable name for every face (see [`crate::topology`]).
 //!
-//! | Feature   | Status    | Notes                                           |
-//! |-----------|-----------|-------------------------------------------------|
-//! | Extrude   | ✅ working | Rectangle / Circle / closed-polyline profiles   |
-//! | Revolve   | ✅ working | `builder::rsweep` around arbitrary axis+angle   |
-//! | Mirror    | ✅ working | Plane reflection via transform                  |
-//! | Pattern   | ✅ working | Linear + Circular (Path/Sketch pending)         |
-//! | Split     | ✅ working | Plane cut → boolean with slab                   |
-//! | Hole      | ✅ working | Decomposes to circular extrude-cut              |
-//! | Boolean   | ✅ working | truck-shapeops `and_solid` / `or_solid` / `not_solid` |
-//! | Fillet    | 🟡 mesh    | Mesh crease soften interim (BRep fillet later)  |
-//! | Chamfer   | 🟡 mesh    | Same mesh soften path as Fillet                 |
-//! | Shell     | ✅ approx  | Open-top inner cut (enclosed cavities need offset surfaces) |
-//! | Sweep     | ✅ working | Profile along path polyline (segment chain)     |
-//! | Loft      | 🚧 pending | Profile interpolation + guide curves            |
-//! | Solver    | ✅ working | Gauss-Newton on sketch constraints/dimensions   |
+//! ## What a part is
 //!
-//! ## Combine-mode semantics
+//! A part is a list of bodies, not one solid. The single running body this
+//! replaces could not represent the result of two things that do not touch:
+//! mirror a bracket to the other side, or pattern a boss along a rail, and
+//! the union of disjoint solids has no intersection curves, so truck returns
+//! nothing and the old evaluator kept whichever operand it had last. Now:
 //!
-//! Every body-producing feature carries a `FeatureOp` telling the
-//! evaluator how it combines with the running body:
-//! - `NewBody` — discard running body, replace with this feature's.
-//! - `Add` — union (running OR feature).
-//! - `Subtract` — difference (running minus feature).
-//! - `Intersect` — intersection (running AND feature).
+//! - `new_body` adds a body.
+//! - `add` joins every body it touches into one (the oldest keeps its name);
+//!   if it touches none it becomes a body of its own.
+//! - `subtract` cuts every body it touches, and fails loudly if it touches
+//!   none.
+//! - `intersect` keeps only what each body shares with the feature.
 //!
-//! Booleans route through [`boolean_combine`] which calls
-//! `truck-shapeops`. On failure (tolerance issues, non-manifold),
-//! returns the new feature body alone so the user's work isn't
-//! silently discarded.
+//! A feature can be limited to named bodies with its `bodies` field.
+//!
+//! ## Where a sketch is
+//!
+//! Every sketch is placed by a [`Frame`] resolved from `Sketch.plane`: a
+//! built-in plane, a reference plane feature, or a planar face by name.
+//! Extrude runs along the frame normal, a hole drills along it, a revolve
+//! happens in its plane.
+//!
+//! ## Honesty rules
+//!
+//! A feature either does what its fields say, or it fails with a reason. A
+//! result that is geometry but not the geometry asked for (a boolean that
+//! could not be computed and was skipped, a pattern instance that would not
+//! combine) is reported as `degraded`, because a caller that only checks
+//! `ok` would otherwise build on a wrong body without knowing it.
 
 use std::collections::HashMap;
 use std::f64::consts::{PI, TAU};
 
-use truck_base::cgmath64::*;
 use truck_modeling::*;
 
-use crate::{FeatureTree, FeatureEntry, Feature, Sketch, SketchEntity, CadError, CadResult};
+use crate::build;
+use crate::frame::{reflection_about, Frame};
+use crate::profile::{profile_of, Region};
+use crate::topology::{self, base_name, edges_of, faces_of, inherit_names, Body, EdgeInfo, FaceInfo, Named, Prism, Replay};
+use crate::{CadError, CadResult, Feature, FeatureEntry, FeatureOp, FeatureTree, Sketch, SketchEntity};
 
-/// Output of a successful tree evaluation.
+/// Output of a tree evaluation.
 pub struct EvalOutput {
+    /// Every body in the part, in creation order.
+    pub bodies: Vec<Body>,
+    /// The first body's solid. For a single-body part, the part.
     pub body: Option<Solid>,
+    /// All bodies tessellated into one mesh, with per-triangle face ids.
     pub mesh: Option<EvalMesh>,
     pub entry_status: Vec<EntryStatus>,
+    /// Reference planes defined by the tree, by feature name.
+    pub planes: HashMap<String, Frame>,
 }
 
-/// Flat triangle arrays — the engine lifts these into a Bevy `Mesh`
-/// + Avian trimesh collider; the glTF exporter writes them as a
-/// primitive. Per-corner attributes are deduplicated: smooth-surface
-/// corners share vertices, crease corners (same position, different
-/// normal) are split.
+/// Flat triangle arrays: the engine lifts these into a Bevy `Mesh` and the
+/// glTF exporter writes them as a primitive.
+///
+/// Every triangle records the face it belongs to (`face_ids` indexes
+/// `face_names` and `face_bodies`), which is what lets the Studio highlight
+/// and pick a face or an edge by the same name a feature uses.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct EvalMesh {
     pub positions: Vec<[f32; 3]>,
-    pub normals:   Vec<[f32; 3]>,
-    pub uvs:       Vec<[f32; 2]>,
-    pub indices:   Vec<u32>,
+    pub normals: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
+    pub indices: Vec<u32>,
+    /// Per triangle: index into `face_names` and `face_bodies`.
+    #[serde(default)]
+    pub face_ids: Vec<u32>,
+    #[serde(default)]
+    pub face_names: Vec<String>,
+    #[serde(default)]
+    pub face_bodies: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,52 +85,36 @@ pub struct EntryStatus {
     pub name: String,
     pub ok: bool,
     pub message: String,
-    /// The feature produced a body, but not the one that was asked
-    /// for — a boolean failed and a fallback stood in for it.
-    ///
-    /// Distinct from `ok: false` on purpose. `ok: false` means the
-    /// feature did not evaluate; `degraded` means it evaluated to
-    /// something the author did not request. The second is the more
-    /// dangerous of the two, because everything downstream keeps
-    /// working on a silently wrong body. Callers that only check `ok`
-    /// see nothing wrong, which is exactly how a pattern of four
-    /// holes could report success while cutting none.
+    /// The feature produced geometry, but not the geometry it was asked
+    /// for: a boolean failed and was skipped, or only some pattern
+    /// instances combined. Distinct from `ok: false`, and more dangerous,
+    /// because everything downstream keeps working on a wrong body.
     pub degraded: bool,
 }
 
-/// Tolerance ladder for normalized boolean ops. Values are relative
-/// to the *normalized* geometry, where the geometric mean of the two
-/// operands' bounding-box diagonals is 1.0. The probe suite showed
-/// shapeops 0.4's success landscape is jagged and proportion-
-/// dependent (e.g. 0.005 succeeds where both 0.01 and 0.003 fail),
-/// so the ladder is dense; failed rungs return fast, so the walk is
-/// cheap relative to a successful op.
+// ============================================================================
+// Booleans
+// ============================================================================
+
+/// Tolerance ladder for normalized boolean ops, relative to geometry
+/// normalized so the geometric mean of the operands' diagonals is 1. The
+/// shapeops 0.4 success landscape is jagged (0.005 can succeed where 0.01
+/// and 0.003 both fail), so the ladder is dense; failed rungs return fast.
 const BOOLEAN_TOLERANCE_LADDER: [f64; 6] = [0.005, 0.01, 0.002, 0.02, 0.05, 0.001];
 
 /// Run a truck-shapeops binary op with **scale normalization**.
 ///
-/// shapeops 0.4 has an absolute scale floor: identical geometry that
-/// booleans fine at unit scale returns `None` at centimeter scale
-/// (verified empirically in `tests/shapeops_probe.rs` — same
-/// part/hole ratio, only the absolute size varied). Since the engine
-/// is meter-native, real parts sit under that floor. Workaround:
-/// uniformly scale both operands toward unit size, run the op, scale
-/// the result back. The scale target is the *geometric mean* of the
-/// two bounding-box diagonals — it balances a large base against a
-/// small cut so both land near the unit-scale regime truck's own
-/// examples run in (min-based normalization left a 10 mm-hole-in-a-
-/// 40 mm-plate base at 4x while the cut sat at 1x, off the reliable
-/// band). Hugely asymmetric construction bodies (Split's half-space
-/// slab) pull the mean, so the scale is additionally clamped to keep
-/// the smaller operand within sane bounds.
+/// shapeops 0.4 has an absolute scale floor: geometry that booleans fine at
+/// unit scale returns `None` at centimetre scale (`tests/shapeops_probe.rs`).
+/// The engine is metre-native, so real parts sit under the floor. Both
+/// operands are scaled toward unit size (geometric mean of their diagonals,
+/// clamped so a huge construction slab cannot push the small operand off the
+/// reliable band), the op runs, and the result is scaled back.
 ///
-/// The result is returned at the caller's (meter) scale, but its
-/// `IntersectionCurve` edges carry the composed transform — naively
-/// evaluating their surfaces at meter scale diverges (and truck
-/// panics on the internal unwrap). Every downstream surface-
-/// evaluating op must therefore re-normalize first: booleans do (this
-/// fn), and `tessellate_solid` does. Plain `builder::transformed`
-/// (Mirror/Pattern) only composes matrices and is safe.
+/// The result's `IntersectionCurve` edges carry the composed transform, so
+/// anything that evaluates them must re-normalize first (booleans do, and
+/// `tessellate_solid` does). `builder::transformed` only composes matrices
+/// and is safe.
 fn boolean_normalized<F>(a: &Solid, b: &Solid, op: F) -> Option<Solid>
 where
     F: Fn(&Solid, &Solid, f64) -> Option<Solid>,
@@ -121,8 +123,6 @@ where
     let db = solid_bbox_diagonal(b);
     let mean = (da * db).sqrt();
     let scale = if mean > 1.0e-12 {
-        // Keep the smaller operand's normalized diagonal in [0.05, 20]
-        // even when the operands are wildly different sizes.
         let s = 1.0 / mean;
         let d_min = da.min(db);
         s.clamp(0.05 / d_min.max(1.0e-12), 20.0 / d_min.max(1.0e-12))
@@ -132,14 +132,10 @@ where
     let a = builder::transformed(a, Matrix4::from_scale(scale));
     let b = builder::transformed(b, Matrix4::from_scale(scale));
     for tol in BOOLEAN_TOLERANCE_LADDER {
-        // truck-geometry `unwrap()`s Newton projections internally
-        // (IntersectionCurve::subs), so a tolerance its numerics
-        // can't handle PANICS rather than returning None. Catch and
-        // treat as "this rung failed" — rayon propagates worker
-        // panics to this thread, so catch_unwind sees them all.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            op(&a, &b, tol)
-        }));
+        // truck-geometry unwraps Newton projections internally, so a
+        // tolerance its numerics cannot handle PANICS rather than returning
+        // None. Treat a panic as "this rung failed".
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op(&a, &b, tol)));
         if let Ok(Some(out)) = result {
             return Some(builder::transformed(&out, Matrix4::from_scale(1.0 / scale)));
         }
@@ -147,190 +143,115 @@ where
     None
 }
 
-/// Bounding-box diagonal from topological vertices — corner points
-/// only, but that's plenty for a scale estimate.
 fn solid_bbox_diagonal(s: &Solid) -> f64 {
-    let mut min = [f64::INFINITY; 3];
-    let mut max = [f64::NEG_INFINITY; 3];
-    for shell in s.boundaries() {
-        for v in shell.vertex_iter() {
-            let p = v.point();
-            let c = [p.x, p.y, p.z];
-            for axis in 0..3 {
-                min[axis] = min[axis].min(c[axis]);
-                max[axis] = max[axis].max(c[axis]);
-            }
-        }
+    match topology::bounds(s) {
+        Some((lo, hi)) => ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt(),
+        None => 1.0,
     }
-    if min[0] > max[0] {
-        return 1.0; // no vertices — fall back to unit scale
-    }
-    let dx = max[0] - min[0];
-    let dy = max[1] - min[1];
-    let dz = max[2] - min[2];
-    (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
-/// Axis-aligned bounds over the solid's topological vertices.
-fn solid_bbox(s: &Solid) -> Option<(Point3, Point3)> {
-    let mut min = Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
-    let mut max = Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for shell in s.boundaries() {
-        for v in shell.vertex_iter() {
-            let p = v.point();
-            min.x = min.x.min(p.x);
-            min.y = min.y.min(p.y);
-            min.z = min.z.min(p.z);
-            max.x = max.x.max(p.x);
-            max.y = max.y.max(p.y);
-            max.z = max.z.max(p.z);
-        }
-    }
-    (min.x <= max.x).then_some((min, max))
+/// Bounding-box diagonal of a solid, in metres.
+pub(crate) fn solid_size(s: &Solid) -> f64 {
+    solid_bbox_diagonal(s)
 }
 
-/// Sweep a profile sketch along a path sketch's line chain.
+/// Union. `pub(crate)` so `parts_csg` reuses the normalized path.
+pub(crate) fn boolean_or(a: &Solid, b: &Solid) -> Option<Solid> {
+    boolean_normalized(a, b, |x, y, tol| truck_shapeops::or(x, y, tol))
+}
+
+pub(crate) fn boolean_and(a: &Solid, b: &Solid) -> Option<Solid> {
+    boolean_normalized(a, b, |x, y, tol| truck_shapeops::and(x, y, tol))
+}
+
+/// Difference `A \ B = A ∩ ¬B`. shapeops 0.4 exports only `or` and `and`;
+/// `Solid::not` turns a solid inside out, which is how truck's own
+/// punched-cube example subtracts. Invert AFTER the rescale: scaling an
+/// already-inverted solid breaks shapeops.
 ///
-/// For each consecutive path segment, extrudes the profile along the
-/// segment direction and unions the results. Profile is assumed to lie
-/// in XY; each segment orients the profile so local Z aligns with the
-/// segment direction (simple frame — no freeform Frenet twist).
-fn sweep_profile_along_path(profile: &Sketch, path: &Sketch) -> CadResult<Solid> {
-    let points = path_polyline_points(path)?;
-    if points.len() < 2 {
-        return Err(CadError::EvalFailed {
-            feature: "Sweep".into(),
-            reason: "path sketch needs ≥2 points (Line chain or Points)".into(),
-        });
-    }
-
-    // Build a unit-depth profile solid along +Z, then reorient per segment.
-    let unit_profile = extrude_sketch(profile, 1.0, false)?;
-    let mut parts: Vec<Solid> = Vec::new();
-
-    for w in points.windows(2) {
-        let a = w[0];
-        let b = w[1];
-        let dir = b - a;
-        let len = dir.magnitude();
-        if len < 1e-9 {
-            continue;
-        }
-        let axis = dir / len;
-        // Rotation taking +Z to `axis`.
-        let z = Vector3::unit_z();
-        let rot = rotation_between(z, axis);
-        let mat = Matrix4::from_translation(a.to_vec())
-            * Matrix4::from(rot)
-            * Matrix4::from_nonuniform_scale(1.0, 1.0, len);
-        parts.push(builder::transformed(&unit_profile, mat));
-    }
-
-    if parts.is_empty() {
-        return Err(CadError::EvalFailed {
-            feature: "Sweep".into(),
-            reason: "all path segments had zero length".into(),
-        });
-    }
-    let n = parts.len();
-    // Returning `parts[0]` on failure turned "sweep along my 4-segment
-    // path" into a single straight bar the length of segment 1, with
-    // ok: true and a watertight, manifold, positive-volume result that
-    // passed every validity check. A sweep that cannot join its
-    // segments has not swept.
-    union_many(&parts).ok_or_else(|| CadError::EvalFailed {
-        feature: "Sweep".into(),
-        reason: format!(
-            "could not join the {n} path segments into one solid — consecutive segments must \
-             overlap for the kernel to union them; a path with sharp corners or collinear \
-             duplicate points can leave them disjoint"
-        ),
+/// Coplanar or flush faces between operands degenerate the intersection
+/// curve and the op returns `None`, so every cutter in this crate protrudes
+/// through the faces it enters.
+pub(crate) fn boolean_not(a: &Solid, b: &Solid) -> Option<Solid> {
+    boolean_normalized(a, b, |x, y, tol| {
+        let mut y_inverted = y.clone();
+        y_inverted.not();
+        truck_shapeops::and(x, &y_inverted, tol)
     })
 }
 
-fn path_polyline_points(path: &Sketch) -> CadResult<Vec<Point3>> {
-    let mut pts: Vec<Point3> = Vec::new();
-    for e in &path.entities {
-        match e {
-            SketchEntity::Line { p1, p2 } | SketchEntity::Construction { p1, p2 } => {
-                let a = Point3::new(p1[0], p1[1], 0.0);
-                let b = Point3::new(p2[0], p2[1], 0.0);
-                if pts.last().map(|p| (*p - a).magnitude() > 1e-9).unwrap_or(true) {
-                    pts.push(a);
-                }
-                pts.push(b);
-            }
-            SketchEntity::Point { p } => {
-                pts.push(Point3::new(p[0], p[1], 0.0));
-            }
-            _ => {}
+// ============================================================================
+// The model under construction
+// ============================================================================
+
+/// A feature's own geometry: the prism an extrude built, the cutter a hole
+/// drilled with. Pattern and Mirror replicate these, not the whole part.
+#[derive(Clone)]
+struct Gen {
+    solid: Solid,
+    names: Vec<String>,
+    op: FeatureOp,
+    prism: Option<Prism>,
+}
+
+#[derive(Default)]
+struct Outcome {
+    notes: Vec<String>,
+    degraded: Vec<String>,
+}
+
+impl Outcome {
+    fn note(&mut self, s: impl Into<String>) {
+        self.notes.push(s.into());
+    }
+    fn degrade(&mut self, s: impl Into<String>) {
+        self.degraded.push(s.into());
+    }
+    fn absorb(&mut self, o: Outcome) {
+        self.notes.extend(o.notes);
+        self.degraded.extend(o.degraded);
+    }
+    fn message(&self) -> String {
+        let mut parts: Vec<String> = self.notes.clone();
+        parts.extend(self.degraded.iter().map(|d| format!("DEGRADED: {d}")));
+        if parts.is_empty() {
+            "ok".to_string()
+        } else {
+            parts.join("; ")
         }
     }
-    if pts.len() < 2 {
-        // Fall back: rectangle / circle path not supported for sweep path.
-        return Err(CadError::EvalFailed {
-            feature: "Sweep".into(),
-            reason: "path must be Line/Point entities forming a polyline".into(),
-        });
-    }
-    Ok(pts)
 }
 
-/// Rotation matrix mapping unit vector `from` → unit vector `to`.
-fn rotation_between(from: Vector3, to: Vector3) -> Matrix3 {
-    let f = from.normalize();
-    let t = to.normalize();
-    let cos = f.dot(t).clamp(-1.0, 1.0);
-    if (cos - 1.0).abs() < 1e-9 {
-        return Matrix3::one();
-    }
-    if (cos + 1.0).abs() < 1e-9 {
-        // 180° — pick any perpendicular axis.
-        let axis = if f.x.abs() < 0.9 {
-            f.cross(Vector3::unit_x()).normalize()
-        } else {
-            f.cross(Vector3::unit_y()).normalize()
-        };
-        return Matrix3::from_axis_angle(axis, Rad(PI));
-    }
-    let axis = f.cross(t).normalize();
-    let angle = cos.acos();
-    Matrix3::from_axis_angle(axis, Rad(angle))
+struct Model<'t> {
+    vars: &'t HashMap<String, String>,
+    bodies: Vec<Body>,
+    planes: HashMap<String, Frame>,
+    sketches: HashMap<String, (Sketch, Frame)>,
+    sketch_errors: HashMap<String, String>,
+    generated: HashMap<String, Vec<Gen>>,
+    seq: u64,
+    /// Largest radius asked of a legacy positional fillet/chamfer: applied
+    /// as the old visual-only crease soften after tessellation.
+    legacy_round: f64,
 }
 
-/// Z-extent over the solid's topological vertices — used by the Hole
-/// arm to detect through cuts and span them. v0 holes always cut
-/// along +z of the sketch plane, so z is the right axis until
-/// sketch-plane transforms land.
-fn solid_z_range(s: &Solid) -> (f64, f64) {
-    s.boundaries()
-        .iter()
-        .flat_map(|shell| shell.vertex_iter())
-        .map(|v| v.point().z)
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), z| {
-            (lo.min(z), hi.max(z))
-        })
+fn err(feature: &str, reason: impl Into<String>) -> CadError {
+    CadError::EvalFailed { feature: feature.to_string(), reason: reason.into() }
 }
 
-/// Walk the tree top-to-bottom, accumulating a running body.
-///
-/// Sketches with constraints / dimensions are solved via
-/// [`crate::solver::solve_sketch`] before Extrude / Revolve / Sweep
-/// consume them. Solve status is reported on the sketch entry.
+/// Walk the tree top to bottom.
 pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
-    let mut body: Option<Solid> = None;
-    let mut feature_outputs: HashMap<String, Solid> = HashMap::new();
-    // Cutting features record the operand they cut WITH, separately
-    // from the result they produced. Only a subtractive Pattern reads
-    // this, but recording it is what makes "four of this hole"
-    // expressible at all.
-    let mut feature_tools: HashMap<String, Solid> = HashMap::new();
+    let mut m = Model {
+        vars: &tree.variables,
+        bodies: Vec::new(),
+        planes: HashMap::new(),
+        sketches: HashMap::new(),
+        sketch_errors: HashMap::new(),
+        generated: HashMap::new(),
+        seq: 0,
+        legacy_round: 0.0,
+    };
     let mut entry_status = Vec::with_capacity(tree.entries.len());
-    // Max fillet/chamfer radius seen — drives mesh crease soften after tessellate.
-    let mut mesh_round_radius: f64 = 0.0;
-
-    // Own solved sketches so Extrude sees constrained geometry.
-    let mut solved_sketches: HashMap<String, Sketch> = HashMap::new();
 
     for entry in &tree.entries {
         if entry.is_suppressed() {
@@ -343,90 +264,25 @@ pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
             continue;
         }
         match entry {
-            FeatureEntry::Sketch { name, body: sk } => {
-                let has_work = !sk.constraints.is_empty() || !sk.dimensions.is_empty();
-                if has_work {
-                    match crate::solver::solve_sketch(sk, &tree.variables) {
-                        Ok(report) => {
-                            let mut sk2 = sk.clone();
-                            crate::solver::apply_solve(&mut sk2, &report);
-                            let msg = format!(
-                                "solved {:?} residual={:.2e} dof={} iters={}",
-                                report.status,
-                                report.residual_norm,
-                                report.free_dof,
-                                report.iterations
-                            );
-                            solved_sketches.insert(name.clone(), sk2);
-                            entry_status.push(EntryStatus {
-                                name: name.clone(),
-                                ok: report.converged || report.residual_norm < 1e-3,
-                                message: msg,
-                                degraded: false,
-                            });
-                        }
-                        Err(e) => {
-                            solved_sketches.insert(name.clone(), sk.clone());
-                            entry_status.push(EntryStatus {
-                                name: name.clone(),
-                                ok: false,
-                                message: format!("solver: {e}"),
-                                degraded: false,
-                            });
-                        }
-                    }
-                } else {
-                    solved_sketches.insert(name.clone(), sk.clone());
-                    entry_status.push(EntryStatus {
+            FeatureEntry::Sketch { name, body } => entry_status.push(m.add_sketch(name, body)),
+            FeatureEntry::Feature { name, body } => {
+                m.seq += 1;
+                // A feature that fails leaves the part exactly as it was:
+                // half-applied patterns and partial cuts are worse than
+                // nothing, because they look like the requested result.
+                let snapshot = m.bodies.clone();
+                match m.feature(name, body) {
+                    Ok(o) => entry_status.push(EntryStatus {
                         name: name.clone(),
                         ok: true,
-                        message: "sketch loaded".to_string(),
-                        degraded: false,
-                    });
-                }
-            }
-            FeatureEntry::Feature { name, body: feature_body } => {
-                // Build a map of references for evaluate_feature_into_body
-                let sketch_refs: HashMap<String, &Sketch> = solved_sketches
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v))
-                    .collect();
-                match evaluate_feature_into_body(
-                    feature_body,
-                    &sketch_refs,
-                    body.as_ref(),
-                    &feature_outputs,
-                    &feature_tools,
-                    &tree.variables,
-                ) {
-                    Ok(FeatureEvalResult::ReplacedBody {
-                        body: new_body, note, mesh_round, tool_body, degraded,
-                    }) => {
-                        feature_outputs.insert(name.clone(), new_body.clone());
-                        if let Some(t) = tool_body {
-                            feature_tools.insert(name.clone(), t);
-                        }
-                        body = Some(new_body);
-                        if let Some(r) = mesh_round {
-                            mesh_round_radius = mesh_round_radius.max(r);
-                        }
+                        message: o.message(),
+                        degraded: !o.degraded.is_empty(),
+                    }),
+                    Err(e) => {
+                        m.bodies = snapshot;
                         entry_status.push(EntryStatus {
                             name: name.clone(),
-                            ok: true,
-                            message: note.unwrap_or_else(|| "ok".to_string()),
-                            degraded: degraded.is_some(),
-                        });
-                    }
-                    Ok(FeatureEvalResult::NoBodyChange) => {
-                        entry_status.push(EntryStatus {
-                            name: name.clone(), ok: true,
-                            message: "reference-only (no body change)".to_string(),
-                            degraded: false,
-                        });
-                    }
-                    Err(e) => {
-                        entry_status.push(EntryStatus {
-                            name: name.clone(), ok: false,
+                            ok: false,
                             message: e.to_string(),
                             degraded: false,
                         });
@@ -437,1202 +293,1719 @@ pub fn evaluate_tree(tree: &FeatureTree) -> CadResult<EvalOutput> {
         }
     }
 
-    let tolerance = tree
-        .metadata
-        .mesh_tolerance
-        .unwrap_or(DEFAULT_MESH_TOLERANCE);
-    let mut mesh = body.as_ref().map(|b| tessellate_solid(b, tolerance));
-    // Mesh-edge fillet/chamfer interim: soften crease vertices when any
-    // Fillet/Chamfer feature requested a radius. True BRep fillet waits
-    // on truck-shapeops; this keeps the feature tree useful and visibly
-    // rounds sharp edges in the viewport / GLB export.
-    if mesh_round_radius > 1.0e-9 {
-        if let Some(ref mut m) = mesh {
-            soften_mesh_creases(m, mesh_round_radius as f32);
+    let tolerance = tree.metadata.mesh_tolerance.unwrap_or(DEFAULT_MESH_TOLERANCE);
+    let mut mesh = if m.bodies.is_empty() {
+        None
+    } else {
+        let meshes: Vec<EvalMesh> = m.bodies.iter().map(|b| tessellate_body(b, tolerance)).collect();
+        Some(merge_meshes(meshes))
+    };
+    if m.legacy_round > 1.0e-9 {
+        if let Some(ref mut mm) = mesh {
+            soften_mesh_creases(mm, m.legacy_round as f32);
         }
     }
-    Ok(EvalOutput { body, mesh, entry_status })
+    let body = m.bodies.first().map(|b| b.solid.clone());
+    Ok(EvalOutput { bodies: m.bodies, body, mesh, entry_status, planes: m.planes })
 }
 
-/// Per-entry result. `ReplacedBody` means the running body becomes
-/// the contained `Solid`; `NoBodyChange` keeps the existing running
-/// body untouched (used for ReferencePlane etc.).
-enum FeatureEvalResult {
-    ReplacedBody {
-        body: Solid,
-        note: Option<String>,
-        /// When set, max crease-soften radius for post-tessellation.
-        mesh_round: Option<f64>,
-        /// The operand this feature cut/intersected WITH, kept
-        /// separately from the result.
-        ///
-        /// A Hole's result is the plate-with-a-hole; its tool is the
-        /// cylinder that made the hole. Patterning the result is
-        /// meaningless (unioning offset copies of an already-drilled
-        /// plate), while patterning the TOOL is exactly what "four of
-        /// these holes" means. Nothing could express that before,
-        /// because only the result was recorded.
-        tool_body: Option<Solid>,
-        /// Set when a boolean failed and a fallback body stood in.
-        degraded: Option<String>,
-    },
-    NoBodyChange,
-}
+impl<'t> Model<'t> {
+    // ── Lookups ─────────────────────────────────────────────────────
 
-impl FeatureEvalResult {
-    fn body(body: Solid) -> Self {
-        FeatureEvalResult::ReplacedBody {
-            body,
-            note: None,
-            mesh_round: None,
-            tool_body: None,
-            degraded: None,
-        }
+    fn len(&self, s: &str) -> CadResult<f64> {
+        resolve_length_meters(s, self.vars)
     }
-}
 
-fn evaluate_feature_into_body(
-    feature: &Feature,
-    sketches: &HashMap<String, &Sketch>,
-    current: Option<&Solid>,
-    prior_outputs: &HashMap<String, Solid>,
-    prior_tools: &HashMap<String, Solid>,
-    vars: &HashMap<String, String>,
-) -> CadResult<FeatureEvalResult> {
-    use Feature::*;
-    match feature {
-        Extrude { sketch, depth, combine, both_sides, end_condition, draft_angle } => {
-            let sk = sketches.get(sketch).copied()
-                .ok_or_else(|| CadError::SketchNotFound(sketch.clone()))?;
+    fn angle(&self, s: &str) -> CadResult<f64> {
+        resolve_angle_radians(s, self.vars)
+    }
 
-            // `draft_angle` has never been applied. Defaulting to
-            // "0 deg" means the overwhelmingly common case is a true
-            // no-op and stays silent, but a non-zero value must not be
-            // accepted and ignored: the user would read their own
-            // draft back out of the file and conclude the straight
-            // walls they can see are what they asked for.
-            let draft = resolve_angle_radians(draft_angle, vars).unwrap_or(0.0);
-            if draft.abs() > 1.0e-9 {
-                return Err(CadError::NotImplemented(format!(
-                    "Extrude draft_angle ({draft_angle}) is not implemented — a tapered sweep \
-                     needs a lofted side surface the kernel does not build yet. Remove the \
-                     draft_angle (or set it to \"0 deg\") to extrude with straight walls."
-                )));
-            }
+    /// Characteristic size of the model, for scale-aware tolerances.
+    fn scale(&self) -> f64 {
+        self.bodies.iter().map(|b| solid_bbox_diagonal(&b.solid)).fold(0.0_f64, f64::max).max(1.0e-3)
+    }
 
-            use crate::EndCondition::*;
-            let new_body = match end_condition {
-                // Blind honours `both_sides`; MidPlane IS both_sides,
-                // expressed as an end condition. The machinery already
-                // existed and simply was not wired to the field.
-                Blind => extrude_sketch(sk, resolve_length_meters(depth, vars)?, *both_sides)?,
-                MidPlane => extrude_sketch(sk, resolve_length_meters(depth, vars)?, true)?,
+    /// Surface-identity tolerance for lineage. Operand surfaces come back
+    /// from the scale-normalized booleans off by a few ulps, never by a
+    /// nanometre.
+    fn lineage_tol(&self) -> f64 {
+        1.0e-9 * (1.0 + self.scale())
+    }
 
-                // ThroughAll means depth stops mattering: span the
-                // running body completely. Same construction the Hole
-                // arm uses for a through-cut — start below the lowest
-                // point (or the sketch plane, whichever is lower) and
-                // finish above the highest, with an overcut at each end
-                // so the faces are never flush. Coplanar operands
-                // degenerate shapeops booleans.
-                ThroughAll => {
-                    let Some(cur) = current else {
-                        return Err(CadError::EvalFailed {
-                            feature: "Extrude".into(),
-                            reason: "end_condition = \"through_all\" needs an existing body to \
-                                     pass through; this is the first feature in the tree"
-                                .into(),
-                        });
-                    };
-                    let (z_min, z_max) = solid_z_range(cur);
-                    let span = (z_max - z_min).abs().max(1.0e-4);
-                    let overcut = (span * 0.05).max(1.0e-4);
-                    let start = z_min.min(0.0) - overcut;
-                    let length = (z_max - z_min.min(0.0)) + 2.0 * overcut;
-                    extrude_sketch_span(sk, start, length)?
+    fn add_sketch(&mut self, name: &str, sk: &Sketch) -> EntryStatus {
+        let (solved, mut message, mut ok) = if sk.constraints.is_empty() && sk.dimensions.is_empty() {
+            (sk.clone(), "sketch loaded".to_string(), true)
+        } else {
+            match crate::solver::solve_sketch(sk, self.vars) {
+                Ok(report) => {
+                    let mut s2 = sk.clone();
+                    crate::solver::apply_solve(&mut s2, &report);
+                    let msg = format!(
+                        "solved {:?} residual={:.2e} dof={} iters={}",
+                        report.status, report.residual_norm, report.free_dof, report.iterations
+                    );
+                    (s2, msg, report.converged || report.residual_norm < 1e-3)
                 }
+                Err(e) => (sk.clone(), format!("solver: {e}"), false),
+            }
+        };
+        match self.resolve_frame(&sk.plane) {
+            Ok(frame) => {
+                self.sketches.insert(name.to_string(), (solved, frame));
+                self.sketch_errors.remove(name);
+            }
+            Err(e) => {
+                ok = false;
+                message = format!("plane '{}' does not resolve: {e}", sk.plane);
+                self.sketch_errors.insert(name.to_string(), message.clone());
+            }
+        }
+        EntryStatus { name: name.to_string(), ok, message, degraded: false }
+    }
 
-                // These three name a TARGET (a plane, a face, the next
-                // body) and the variant carries no field to name it —
-                // there is nothing to resolve against. Extruding Blind
-                // instead produced a wrong-but-plausible body; say so
-                // rather than guess.
-                other @ (ToPlane | ToSurface | UpToNext) => {
+    fn sketch(&self, name: &str) -> CadResult<(Sketch, Frame)> {
+        if let Some((s, f)) = self.sketches.get(name) {
+            return Ok((s.clone(), *f));
+        }
+        if let Some(e) = self.sketch_errors.get(name) {
+            return Err(err("sketch", format!("sketch '{name}' could not be placed: {e}")));
+        }
+        Err(CadError::SketchNotFound(name.to_string()))
+    }
+
+    fn all_faces(&self) -> Vec<(usize, FaceInfo)> {
+        self.bodies.iter().enumerate().flat_map(|(i, b)| faces_of(b).into_iter().map(move |f| (i, f))).collect()
+    }
+
+    fn find_face(&self, name: &str) -> Option<(usize, FaceInfo)> {
+        let q = name.trim();
+        let all = self.all_faces();
+        if let Some(hit) = all.iter().find(|(_, f)| f.name == q) {
+            return Some(hit.clone());
+        }
+        // `Body/Face` form, for parts where two bodies share face names.
+        if let Some((body, face)) = q.split_once('/') {
+            if let Some(hit) = all.iter().find(|(i, f)| self.bodies[*i].name == body && f.name == face) {
+                return Some(hit.clone());
+            }
+        }
+        None
+    }
+
+    fn face_names_hint(&self) -> String {
+        let mut names: Vec<String> = self.all_faces().into_iter().filter(|(_, f)| f.plane.is_some()).map(|(_, f)| f.name).collect();
+        names.sort();
+        names.truncate(12);
+        names.join(", ")
+    }
+
+    /// Resolve a plane reference: built-in, reference plane, or planar face.
+    fn resolve_frame(&self, name: &str) -> CadResult<Frame> {
+        let q = name.trim();
+        if let Some(f) = Frame::builtin(q) {
+            return Ok(f);
+        }
+        if let Some(f) = self.planes.get(q) {
+            return Ok(*f);
+        }
+        if let Some((_, face)) = self.find_face(q) {
+            let Some(pf) = face.plane else {
+                return Err(err("plane", format!("face '{q}' is {}, not planar, so it cannot carry a sketch or act as a plane", face.kind)));
+            };
+            // Anchor the frame on the world origin projected into the face
+            // plane, with axes from the world axes: sketch coordinates on a
+            // face then read like world coordinates, and they do not move
+            // when an upstream edit reshapes the face.
+            let o = Point3::origin();
+            let foot = o - pf.z * (o - pf.origin).dot(pf.z);
+            return Frame::from_origin_normal(foot, pf.z).ok_or_else(|| err("plane", "face normal is degenerate"));
+        }
+        let mut planes: Vec<&String> = self.planes.keys().collect();
+        planes.sort();
+        Err(err(
+            "plane",
+            format!(
+                "unknown plane '{q}'. Built-in: xy, xz, yz. Reference planes: [{}]. Planar faces include: [{}]",
+                planes.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                self.face_names_hint()
+            ),
+        ))
+    }
+
+    fn find_edge(&self, name: &str) -> CadResult<(usize, EdgeInfo)> {
+        for (i, b) in self.bodies.iter().enumerate() {
+            let edges = edges_of(b);
+            if let Some(e) = topology::find_edge(&edges, name) {
+                return Ok((i, e.clone()));
+            }
+        }
+        Err(err(
+            "edge",
+            format!(
+                "no edge named '{name}'. Edges are named by the two faces they separate, \
+                 'FaceA | FaceB'; list them with cad_list_topology"
+            ),
+        ))
+    }
+
+    /// Resolve an axis: a world axis, a line in the given sketch (`e3`), or
+    /// a straight edge by name.
+    fn resolve_axis(&self, s: &str, sketch: Option<(&Sketch, &Frame)>) -> CadResult<(Point3, Vector3)> {
+        let q = s.trim();
+        match q.to_ascii_lowercase().as_str() {
+            "x" | "world/x" => return Ok((Point3::origin(), Vector3::unit_x())),
+            "y" | "world/y" => return Ok((Point3::origin(), Vector3::unit_y())),
+            "z" | "world/z" => return Ok((Point3::origin(), Vector3::unit_z())),
+            _ => {}
+        }
+        if let Some((sk, frame)) = sketch {
+            let tail = q.rsplit('.').next().unwrap_or(q);
+            if let Some(idx) = tail.strip_prefix('e').and_then(|n| n.parse::<usize>().ok()) {
+                return match sk.entities.get(idx) {
+                    Some(SketchEntity::Line { p1, p2 }) | Some(SketchEntity::Construction { p1, p2 }) => {
+                        let a = frame.to_world(*p1);
+                        let b = frame.to_world(*p2);
+                        let d = b - a;
+                        if d.magnitude() < 1.0e-12 {
+                            Err(err("axis", format!("sketch line e{idx} has zero length")))
+                        } else {
+                            Ok((a, d.normalize()))
+                        }
+                    }
+                    _ => Err(err("axis", format!("sketch entity e{idx} is not a line or construction line"))),
+                };
+            }
+        }
+        if q.contains('|') {
+            let (_, e) = self.find_edge(q)?;
+            if !e.straight {
+                return Err(err("axis", format!("edge '{q}' is not straight")));
+            }
+            let a = Point3::new(e.a[0], e.a[1], e.a[2]);
+            let b = Point3::new(e.b[0], e.b[1], e.b[2]);
+            return Ok((a, (b - a).normalize()));
+        }
+        Err(err(
+            "axis",
+            format!("unknown axis '{q}': expected x, y or z, a sketch line such as 'e3', or a straight edge 'FaceA | FaceB'"),
+        ))
+    }
+
+    fn unique_body_name(&self, base: &str) -> String {
+        if !self.bodies.iter().any(|b| b.name == base) {
+            return base.to_string();
+        }
+        (2..).map(|k| format!("{base}#{k}")).find(|n| !self.bodies.iter().any(|b| &b.name == n)).unwrap()
+    }
+
+    fn targeted(&self, i: usize, targets: &[String]) -> bool {
+        targets.is_empty() || targets.iter().any(|t| t == &self.bodies[i].name)
+    }
+
+    /// Extent of the (targeted) bodies along an axis, relative to `origin`.
+    fn extent_along(&self, origin: Point3, axis: Vector3, targets: &[String]) -> Option<(f64, f64)> {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for i in 0..self.bodies.len() {
+            if !self.targeted(i, targets) {
+                continue;
+            }
+            if let Some((a, b)) = topology::extent_along(&self.bodies[i].solid, origin, axis) {
+                lo = lo.min(a);
+                hi = hi.max(b);
+            }
+        }
+        (lo <= hi).then_some((lo, hi))
+    }
+
+    /// Do two solids share no volume? Decides whether a boolean that
+    /// returned nothing failed, or simply had nothing to do.
+    fn disjoint(&self, a: &Solid, b: &Solid) -> bool {
+        let (Some(ba), Some(bb)) = (topology::bounds(a), topology::bounds(b)) else {
+            return true;
+        };
+        let margin = 1.0e-9 * (1.0 + self.scale());
+        if !topology::bounds_overlap(&ba, &bb, margin) {
+            return true;
+        }
+        let coarse = 0.01 * solid_bbox_diagonal(a).max(solid_bbox_diagonal(b));
+        let ma = tessellate_solid(a, coarse);
+        let mb = tessellate_solid(b, coarse);
+        if ma.indices.is_empty() || mb.indices.is_empty() {
+            return false;
+        }
+        let (d, _) = crate::measure::min_distance(&ma, &mb);
+        if !(d > margin) {
+            return false;
+        }
+        // Surfaces apart, but one could still sit inside the other.
+        let inside = |m: &EvalMesh, other: &EvalMesh| {
+            other.positions.first().map_or(false, |p| {
+                crate::measure::contains_point(m, [p[0] as f64, p[1] as f64, p[2] as f64])
+            })
+        };
+        !(inside(&ma, &mb) || inside(&mb, &ma))
+    }
+
+    fn gens_of(&self, feature: &str, names: &[String]) -> CadResult<Vec<Gen>> {
+        let mut out = Vec::new();
+        for n in names {
+            match self.generated.get(n) {
+                Some(g) => out.extend(g.iter().cloned()),
+                None => {
+                    let mut known: Vec<&str> = self.generated.keys().map(|s| s.as_str()).collect();
+                    known.sort_unstable();
+                    return Err(err(
+                        feature,
+                        format!(
+                            "feature '{n}' has no geometry to replicate. Features that produced geometry so far: \
+                             [{}]. A referenced feature must appear EARLIER in the tree, and must build or \
+                             cut geometry (a fillet or a shell modifies a body in place and has none of its own).",
+                            known.join(", ")
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn bodies_as_gens(&self) -> Vec<Gen> {
+        self.bodies
+            .iter()
+            .map(|b| Gen { solid: b.solid.clone(), names: b.face_names.clone(), op: FeatureOp::Add, prism: None })
+            .collect()
+    }
+
+    // ── Combining ───────────────────────────────────────────────────
+
+    fn apply(&mut self, feature: &str, gens: Vec<Gen>, targets: &[String]) -> CadResult<Outcome> {
+        let mut out = Outcome::default();
+        let mut applied = 0usize;
+        for g in &gens {
+            let o = match g.op {
+                FeatureOp::NewBody => {
+                    self.push_body(feature, g);
+                    Ok(Outcome::default())
+                }
+                FeatureOp::Add => self.join(feature, g, targets),
+                FeatureOp::Subtract => self.cut(feature, g, targets),
+                FeatureOp::Intersect => self.intersect(feature, g, targets),
+            }?;
+            if o.degraded.is_empty() {
+                applied += 1;
+            }
+            out.absorb(o);
+        }
+        if gens.len() > 1 && applied < gens.len() {
+            out.note(format!("{applied} of {} pieces combined", gens.len()));
+        }
+        self.generated.insert(feature.to_string(), gens);
+        Ok(out)
+    }
+
+    fn push_body(&mut self, feature: &str, g: &Gen) {
+        let name = self.unique_body_name(feature);
+        let mut body = Body::fresh(name, g.solid.clone(), g.names.clone(), self.seq);
+        body.prism = g.prism.clone();
+        self.bodies.push(body);
+    }
+
+    fn join(&mut self, feature: &str, g: &Gen, targets: &[String]) -> CadResult<Outcome> {
+        let mut out = Outcome::default();
+        let tol = self.lineage_tol();
+        let gb = topology::bounds(&g.solid);
+        let seq = self.seq;
+        let g_seq = vec![seq; g.names.len()];
+        // The merged result so far: starts as the feature's own solid.
+        let mut merged: Option<Body> = None;
+        let mut consumed: Vec<usize> = Vec::new();
+        for i in 0..self.bodies.len() {
+            if !self.targeted(i, targets) {
+                continue;
+            }
+            let overlaps = match (&gb, topology::bounds(&self.bodies[i].solid)) {
+                (Some(a), Some(b)) => topology::bounds_overlap(a, &b, tol),
+                _ => false,
+            };
+            if !overlaps {
+                continue;
+            }
+            let (tool_solid, tool_names, tool_seq) = match &merged {
+                Some(mb) => (mb.solid.clone(), mb.face_names.clone(), mb.face_seq.clone()),
+                None => (g.solid.clone(), g.names.clone(), g_seq.clone()),
+            };
+            let body = &self.bodies[i];
+            match boolean_or(&body.solid, &tool_solid) {
+                Some(r) => {
+                    let (names, seqs) = inherit_names(
+                        &r,
+                        &[body.named(), Named { solid: &tool_solid, names: &tool_names, seq: &tool_seq }],
+                        tol,
+                        feature,
+                    );
+                    // The first body merged keeps its name; its prism
+                    // record survives a join with the FEATURE (replayable),
+                    // not a merge of two existing bodies.
+                    let (name, prism) = match &merged {
+                        None => {
+                            let prism = body.prism.clone().map(|mut p| {
+                                p.history.push(Replay { op: FeatureOp::Add, tool: g.solid.clone(), tool_names: g.names.clone(), tool_seq: seq });
+                                p
+                            });
+                            (body.name.clone(), prism)
+                        }
+                        Some(mb) => (mb.name.clone(), None),
+                    };
+                    merged = Some(Body { name, solid: r, face_names: names, face_seq: seqs, prism });
+                    consumed.push(i);
+                }
+                None => {
+                    if !self.disjoint(&self.bodies[i].solid, &tool_solid) {
+                        out.degrade(format!(
+                            "could not join with body '{}': the kernel returned no union although the two touch",
+                            self.bodies[i].name
+                        ));
+                    }
+                }
+            }
+        }
+        match merged {
+            Some(mb) => {
+                let at = consumed[0];
+                for &i in consumed.iter().rev() {
+                    self.bodies.remove(i);
+                }
+                self.bodies.insert(at, mb);
+                if consumed.len() > 1 {
+                    out.note(format!("merged {} bodies", consumed.len()));
+                }
+            }
+            None => {
+                self.push_body(feature, g);
+                if self.bodies.len() > 1 {
+                    out.note(format!("touches no existing body; added as body '{}'", self.bodies.last().map(|b| b.name.as_str()).unwrap_or("")));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn cut(&mut self, feature: &str, g: &Gen, targets: &[String]) -> CadResult<Outcome> {
+        let mut out = Outcome::default();
+        let tol = self.lineage_tol();
+        let gb = topology::bounds(&g.solid);
+        let seq = self.seq;
+        let g_seq = vec![seq; g.names.len()];
+        let mut touched = 0usize;
+        for i in 0..self.bodies.len() {
+            if !self.targeted(i, targets) {
+                continue;
+            }
+            let overlaps = match (&gb, topology::bounds(&self.bodies[i].solid)) {
+                (Some(a), Some(b)) => topology::bounds_overlap(a, &b, tol),
+                _ => false,
+            };
+            if !overlaps {
+                continue;
+            }
+            match boolean_not(&self.bodies[i].solid, &g.solid) {
+                Some(r) => {
+                    let body = &self.bodies[i];
+                    let (names, seqs) = inherit_names(
+                        &r,
+                        &[body.named(), Named { solid: &g.solid, names: &g.names, seq: &g_seq }],
+                        tol,
+                        feature,
+                    );
+                    let body = &mut self.bodies[i];
+                    body.solid = r;
+                    body.face_names = names;
+                    body.face_seq = seqs;
+                    if let Some(p) = &mut body.prism {
+                        p.history.push(Replay { op: FeatureOp::Subtract, tool: g.solid.clone(), tool_names: g.names.clone(), tool_seq: seq });
+                    }
+                    touched += 1;
+                }
+                None => {
+                    if !self.disjoint(&self.bodies[i].solid, &g.solid) {
+                        out.degrade(format!(
+                            "could not cut body '{}': the kernel returned no result although the cutter meets it",
+                            self.bodies[i].name
+                        ));
+                    }
+                }
+            }
+        }
+        if touched == 0 && out.degraded.is_empty() {
+            return Err(err(
+                feature,
+                "the cut does not intersect any body, so it removes nothing; check its position and direction",
+            ));
+        }
+        Ok(out)
+    }
+
+    fn intersect(&mut self, feature: &str, g: &Gen, targets: &[String]) -> CadResult<Outcome> {
+        let mut out = Outcome::default();
+        let tol = self.lineage_tol();
+        let seq = self.seq;
+        let g_seq = vec![seq; g.names.len()];
+        let mut keep: Vec<bool> = vec![true; self.bodies.len()];
+        let mut any = false;
+        for i in 0..self.bodies.len() {
+            if !self.targeted(i, targets) {
+                continue;
+            }
+            match boolean_and(&self.bodies[i].solid, &g.solid) {
+                Some(r) => {
+                    let body = &self.bodies[i];
+                    let (names, seqs) = inherit_names(
+                        &r,
+                        &[body.named(), Named { solid: &g.solid, names: &g.names, seq: &g_seq }],
+                        tol,
+                        feature,
+                    );
+                    let body = &mut self.bodies[i];
+                    body.solid = r;
+                    body.face_names = names;
+                    body.face_seq = seqs;
+                    if let Some(p) = &mut body.prism {
+                        p.history.push(Replay { op: FeatureOp::Intersect, tool: g.solid.clone(), tool_names: g.names.clone(), tool_seq: seq });
+                    }
+                    any = true;
+                }
+                None => {
+                    if self.disjoint(&self.bodies[i].solid, &g.solid) {
+                        keep[i] = false;
+                        out.note(format!("body '{}' shares nothing with the feature and was removed", self.bodies[i].name));
+                    } else {
+                        out.degrade(format!("could not intersect body '{}'", self.bodies[i].name));
+                    }
+                }
+            }
+        }
+        if !any && out.degraded.is_empty() {
+            return Err(err(feature, "the intersection is empty: the feature shares no volume with any body"));
+        }
+        let mut k = 0;
+        self.bodies.retain(|_| {
+            let r = keep[k];
+            k += 1;
+            r
+        });
+        Ok(out)
+    }
+
+    // ── Feature dispatch ────────────────────────────────────────────
+
+    fn feature(&mut self, name: &str, f: &Feature) -> CadResult<Outcome> {
+        use Feature::*;
+        match f {
+            Extrude { sketch, depth, end_condition, combine, draft_angle, both_sides, to, reverse, thin, bodies } => self
+                .extrude(name, sketch, depth, *end_condition, *combine, draft_angle, *both_sides, to.as_deref(), *reverse, thin.as_deref(), bodies),
+            Revolve { sketch, axis, angle, combine, both_sides, bodies } => {
+                self.revolve(name, sketch, axis, angle, *combine, *both_sides, bodies)
+            }
+            Hole {
+                sketch_point,
+                diameter,
+                depth,
+                counterbore_diameter,
+                counterbore_depth,
+                countersink_diameter,
+                countersink_angle,
+                tap_class,
+            } => self.hole(
+                name,
+                sketch_point,
+                diameter,
+                depth,
+                counterbore_diameter.as_deref(),
+                counterbore_depth.as_deref(),
+                countersink_diameter.as_deref(),
+                countersink_angle.as_deref(),
+                tap_class.as_deref(),
+            ),
+            Mirror { plane, features, combine } => self.mirror(name, plane, features, *combine),
+            Pattern { kind, features, count, spacing, direction, axis, angle, direction_ref, combine } => self.pattern(
+                name,
+                *kind,
+                features,
+                count.resolve(self.vars)?,
+                spacing.as_deref(),
+                *direction,
+                axis.as_deref(),
+                angle.as_deref(),
+                direction_ref.as_deref(),
+                *combine,
+            ),
+            Boolean { target, boolean_op, tools, keep_tools } => self.boolean(name, target, *boolean_op, tools, *keep_tools),
+            Split { plane } => self.split(name, plane),
+            Fillet { edges, radius, propagate_tangent } => {
+                if !*propagate_tangent {
+                    return Err(CadError::NotImplemented(
+                        "Fillet propagate_tangent = false is not implemented: edges are filleted exactly as \
+                         listed, and tangent chains are not extended automatically in either mode"
+                            .into(),
+                    ));
+                }
+                let r = self.len(radius)?;
+                self.blend(name, edges, crate::blend::BlendKind::Fillet { r })
+            }
+            Chamfer { edges, distance, distance2, angle } => {
+                let d = self.len(distance)?;
+                let second = match (distance2, angle) {
+                    (Some(_), Some(_)) => {
+                        return Err(err(name, "give either distance2 or angle for an asymmetric chamfer, not both"))
+                    }
+                    (Some(d2), None) => crate::blend::Second::Distance(self.len(d2)?),
+                    (None, Some(a)) => crate::blend::Second::Angle(self.angle(a)?),
+                    (None, None) => crate::blend::Second::Equal,
+                };
+                self.blend(name, edges, crate::blend::BlendKind::Chamfer { d, second })
+            }
+            Shell { open_faces, wall_thickness } => {
+                let t = self.len(wall_thickness)?;
+                self.shell(name, open_faces, t)
+            }
+            Sweep { profile, path, combine } => self.sweep(name, profile, path, *combine),
+            Loft { profiles, guide_curves, combine } => {
+                if !guide_curves.is_empty() {
+                    return Err(CadError::NotImplemented(
+                        "Loft guide_curves are not implemented: the loft is ruled between consecutive \
+                         sections. Remove guide_curves, or add intermediate sections to shape it."
+                            .into(),
+                    ));
+                }
+                self.loft(name, profiles, *combine)
+            }
+            ReferencePlane { plane } => self.reference_plane(name, plane),
+        }
+    }
+
+    // ── Extrude ─────────────────────────────────────────────────────
+
+    #[allow(clippy::too_many_arguments)]
+    fn extrude(
+        &mut self,
+        name: &str,
+        sketch: &str,
+        depth: &str,
+        end: crate::EndCondition,
+        combine: FeatureOp,
+        draft_angle: &str,
+        both_sides: bool,
+        to: Option<&str>,
+        reverse: bool,
+        thin: Option<&str>,
+        bodies: &[String],
+    ) -> CadResult<Outcome> {
+        use crate::EndCondition::*;
+        let (sk, frame) = self.sketch(sketch)?;
+        let profile = profile_of(&sk)?;
+        let mut out = Outcome::default();
+        if profile.open_segments > 0 {
+            out.note(format!(
+                "{} open segment(s) in '{sketch}' enclose nothing and were not extruded",
+                profile.open_segments
+            ));
+        }
+        let draft = self.angle(draft_angle)?;
+        let regions = match thin {
+            Some(t) => build::thin_regions(&profile.regions, self.len(t)?, name)?,
+            None => profile.regions.clone(),
+        };
+
+        let uses_depth = matches!(end, Blind | MidPlane);
+        let raw = if uses_depth { self.len(depth)? } else { 0.0 };
+        let mut dir = if reverse { -1.0 } else { 1.0 };
+        let d = if raw < 0.0 {
+            dir = -dir;
+            -raw
+        } else {
+            raw
+        };
+        if uses_depth && !(d > 0.0) {
+            return Err(err(name, "depth is zero, so the extrusion has no volume"));
+        }
+        // A face's frame normal points out of the material, so a cut
+        // sketched on a face would, by default, remove nothing. When the
+        // caller chose no direction and only the other side meets material,
+        // cut into it, as Fusion and SolidWorks do and as the hole feature
+        // drills.
+        if matches!(end, Blind)
+            && !both_sides
+            && !reverse
+            && raw > 0.0
+            && matches!(combine, FeatureOp::Subtract | FeatureOp::Intersect)
+        {
+            let meshes = self.target_meshes(bodies);
+            if !meets_material(&meshes, &regions, &frame, 1.0, d) && meets_material(&meshes, &regions, &frame, -1.0, d) {
+                dir = -1.0;
+                out.note("the cut runs against the sketch normal, into the material; the normal side is empty");
+            }
+        }
+
+        // (start, length, caps reversed, trim plane)
+        let (start, length, caps_reversed, trim): (f64, f64, bool, Option<Frame>) = match end {
+            Blind if both_sides => (-d * 0.5, d, false, None),
+            MidPlane => (-d * 0.5, d, false, None),
+            Blind => {
+                if dir > 0.0 {
+                    (0.0, d, false, None)
+                } else {
+                    (-d, d, true, None)
+                }
+            }
+            ThroughAll => {
+                let Some((lo, hi)) = self.extent_along(frame.origin, frame.z, bodies) else {
+                    return Err(err(
+                        name,
+                        "end_condition = \"through_all\" needs an existing body to pass through; this is the \
+                         first body in the tree",
+                    ));
+                };
+                // Through everything, both ways: a through cut from a sketch
+                // on the top face and one from the plane under the part must
+                // both clear it. Overcut so no cap is flush with a face.
+                let over = ((hi - lo).abs() * 0.05).max(1.0e-4);
+                let s = lo.min(0.0) - over;
+                (s, (hi.max(0.0) - s) + over, false, None)
+            }
+            ToPlane | ToSurface => {
+                let Some(t) = to else {
+                    return Err(err(
+                        name,
+                        format!(
+                            "end_condition = \"{}\" needs `to`: the plane or planar face to stop at",
+                            if matches!(end, ToPlane) { "to_plane" } else { "to_surface" }
+                        ),
+                    ));
+                };
+                let target = self.resolve_frame(t)?;
+                self.span_to_plane(name, &regions, &frame, &target)?
+            }
+            UpToNext => {
+                let target = self.next_face_plane(name, &regions, &frame, dir, bodies)?;
+                self.span_to_plane(name, &regions, &frame, &target)?
+            }
+        };
+
+        if draft.abs() > 1.0e-12 && (both_sides || matches!(end, MidPlane)) {
+            return Err(CadError::NotImplemented(
+                "a draft on a two-sided extrusion is not implemented: draft one side at a time, or remove the draft"
+                    .into(),
+            ));
+        }
+        if draft.abs() >= PI * 0.5 - 1.0e-6 {
+            return Err(err(name, "draft_angle must be less than 90 degrees"));
+        }
+        let (start, length) = if matches!(end, Blind) && !both_sides && trim.is_none() && draft.abs() <= 1.0e-12 {
+            self.embed(&regions, &frame, start, length, caps_reversed, combine, bodies)
+        } else {
+            (start, length)
+        };
+
+        let mut gens = Vec::with_capacity(regions.len());
+        for (ri, region) in regions.iter().enumerate() {
+            let (mut solid, mut names) = if draft.abs() > 1.0e-12 {
+                // Taper toward the far end: that is the lower end when the
+                // extrusion ran against the normal.
+                let shrink = -length * draft.tan();
+                let far = build::offset_region(region, shrink)?;
+                let sections = if caps_reversed {
+                    vec![(far, frame.offset(start)), (region.clone(), frame.offset(start + length))]
+                } else {
+                    vec![(region.clone(), frame.offset(start)), (far, frame.offset(start + length))]
+                };
+                let (s, mut n) = build::loft(&sections, name)?;
+                if caps_reversed {
+                    let last = n.len() - 1;
+                    n.swap(0, last);
+                }
+                if ri > 0 {
+                    let first_ix = 0;
+                    let last = n.len() - 1;
+                    n[first_ix] = format!("{}.r{}", n[first_ix], ri + 1);
+                    n[last] = format!("{}.r{}", n[last], ri + 1);
+                }
+                (s, n)
+            } else {
+                build::prism(region, &frame, start, length, name, ri, caps_reversed)?
+            };
+            let mut prism = None;
+            if let Some(plane) = &trim {
+                let extent = 10.0 * (self.scale() + length + region.outer.extent());
+                // Keep the side of the target plane the sketch is on.
+                let keep_frame = if plane.signed_distance(frame.origin) > 0.0 { plane.reversed() } else { *plane };
+                let (slab, slab_names) = build::halfspace_slab(&keep_frame, extent, name)?;
+                let slab_names: Vec<String> = slab_names
+                    .into_iter()
+                    .map(|n| if n == format!("{name}.cut") { format!("{name}.cap_end") } else { n })
+                    .collect();
+                let seq = vec![self.seq; names.len()];
+                let slab_seq = vec![self.seq; slab_names.len()];
+                let r = boolean_and(&solid, &slab).ok_or_else(|| {
+                    err(name, "could not trim the extrusion at the target plane (the kernel returned no result)")
+                })?;
+                let (n2, _) = inherit_names(
+                    &r,
+                    &[Named { solid: &solid, names: &names, seq: &seq }, Named { solid: &slab, names: &slab_names, seq: &slab_seq }],
+                    self.lineage_tol(),
+                    name,
+                );
+                solid = r;
+                names = n2;
+            } else if draft.abs() <= 1.0e-12 {
+                prism = Some(Prism {
+                    feature: name.to_string(),
+                    frame,
+                    regions: vec![region.clone()],
+                    region_index: ri,
+                    start,
+                    length,
+                    reversed: caps_reversed,
+                    seq: self.seq,
+                    history: Vec::new(),
+                });
+            }
+            gens.push(Gen { solid, names, op: combine, prism });
+        }
+        let o = self.apply(name, gens, bodies)?;
+        out.absorb(o);
+        Ok(out)
+    }
+
+    /// Keep a join or a cut from sharing a face's plane with the body.
+    ///
+    /// Extruding from a sketch on a face puts the new solid's base cap in
+    /// the very plane of that face, and shapeops degenerates on coplanar
+    /// operands: the join of a boss to the face it stands on, the most
+    /// common move in part modeling, would fail. So a JOIN whose base sits
+    /// on material is buried a little way into it, and a CUT that starts
+    /// on a face is started a little way out in the air in front of it (as
+    /// the hole feature has always done). A cut that ends exactly at the
+    /// far face is carried through it too. The extra length merges into the
+    /// body or falls in empty space, so the resulting solid is the same.
+    ///
+    /// Material is probed under the profile itself, not by bounding box, so
+    /// an unrelated tall body elsewhere in the part cannot trigger it.
+    #[allow(clippy::too_many_arguments)]
+    fn embed(
+        &self,
+        regions: &[Region],
+        frame: &Frame,
+        start: f64,
+        length: f64,
+        reversed: bool,
+        combine: FeatureOp,
+        targets: &[String],
+    ) -> (f64, f64) {
+        let travel = if reversed { -1.0 } else { 1.0 };
+        let Some(region) = regions.first() else { return (start, length) };
+        let p2 = interior_point(region);
+        let base = frame.to_world(p2);
+        let along = frame.z * travel;
+        let meshes = self.target_meshes(targets);
+        let inside = |d: f64| {
+            let q = base + along * d;
+            meshes.iter().any(|m| crate::measure::contains_point(m, [q.x, q.y, q.z]))
+        };
+        let (back, front) = match combine {
+            FeatureOp::Add => {
+                let d = 0.25 * length;
+                // Material directly behind the base, for the whole depth
+                // the base would be buried.
+                if inside(-0.5 * d) && inside(-d) {
+                    (d, 0.0)
+                } else {
+                    (0.0, 0.0)
+                }
+            }
+            FeatureOp::Subtract | FeatureOp::Intersect => {
+                let d = (0.05 * length).max(1.0e-4);
+                // Air behind the start, material just in front of it.
+                let back = if !inside(-0.5 * d) && inside(0.5 * d) { d } else { 0.0 };
+                // Air just past the far end, material just before it.
+                let front = if inside(length - 0.5 * d) && !inside(length + 0.5 * d) { d } else { 0.0 };
+                (back, front)
+            }
+            FeatureOp::NewBody => (0.0, 0.0),
+        };
+        if back == 0.0 && front == 0.0 {
+            return (start, length);
+        }
+        if travel > 0.0 {
+            (start - back, length + back + front)
+        } else {
+            (start - front, length + back + front)
+        }
+    }
+
+    /// Coarse meshes of the bodies a feature may act on, for probing where
+    /// material is.
+    fn target_meshes(&self, targets: &[String]) -> Vec<EvalMesh> {
+        (0..self.bodies.len())
+            .filter(|&i| self.targeted(i, targets))
+            .map(|i| tessellate_solid(&self.bodies[i].solid, 0.01 * solid_bbox_diagonal(&self.bodies[i].solid)))
+            .collect()
+    }
+
+    /// Span of an extrusion that stops at `target`: exact for a parallel
+    /// plane, and trimmed by the plane otherwise.
+    fn span_to_plane(
+        &self,
+        name: &str,
+        regions: &[Region],
+        frame: &Frame,
+        target: &Frame,
+    ) -> CadResult<(f64, f64, bool, Option<Frame>)> {
+        let c = frame.z.dot(target.z);
+        if c.abs() > 1.0 - 1.0e-9 {
+            let dist = target.signed_distance(frame.origin) / -c;
+            // `dist` is how far along +z the plane lies from the sketch.
+            if dist.abs() < 1.0e-9 {
+                return Err(err(name, "the target plane is the sketch plane itself"));
+            }
+            return Ok(if dist > 0.0 { (0.0, dist, false, None) } else { (dist, -dist, true, None) });
+        }
+        if c.abs() < 1.0e-9 {
+            return Err(err(name, "the extrusion runs parallel to the target plane and never reaches it"));
+        }
+        let mut ts = Vec::new();
+        for r in regions {
+            for s in &r.outer.segs {
+                let p = frame.to_world(s.geom.start());
+                ts.push(-target.signed_distance(p) / c);
+            }
+        }
+        let pos = ts.iter().all(|t| *t > 0.0);
+        let neg = ts.iter().all(|t| *t < 0.0);
+        if !pos && !neg {
+            return Err(err(name, "the target plane crosses the profile, so there is no single side to extrude toward"));
+        }
+        let reach = ts.iter().fold(0.0_f64, |m, t| m.max(t.abs()));
+        let over = (reach * 0.05).max(1.0e-4);
+        Ok(if pos {
+            (0.0, reach + over, false, Some(*target))
+        } else {
+            (-(reach + over), reach + over, true, Some(*target))
+        })
+    }
+
+    /// The plane of the nearest planar face an extrusion from `regions`
+    /// would run into, in direction `dir` along the normal.
+    fn next_face_plane(&self, name: &str, regions: &[Region], frame: &Frame, dir: f64, targets: &[String]) -> CadResult<Frame> {
+        let tol = DEFAULT_MESH_TOLERANCE;
+        let ray = frame.z * dir;
+        let mut best: Option<(f64, usize, usize)> = None;
+        for bi in 0..self.bodies.len() {
+            if !self.targeted(bi, targets) {
+                continue;
+            }
+            let mesh = tessellate_solid(&self.bodies[bi].solid, tol);
+            for r in regions {
+                let n = r.outer.segs.len();
+                for (k, s) in r.outer.segs.iter().enumerate() {
+                    // A point just inside the region beside each side:
+                    // the interior is to the left of a counter-clockwise loop.
+                    let m = s.geom.midpoint();
+                    let next = r.outer.segs[(k + 1) % n].geom.start();
+                    let dx = next[0] - s.geom.start()[0];
+                    let dy = next[1] - s.geom.start()[1];
+                    let l = (dx * dx + dy * dy).sqrt().max(1.0e-12);
+                    let inset = 1.0e-4 * (1.0 + r.outer.extent());
+                    let p2 = [m[0] - dy / l * inset, m[1] + dx / l * inset];
+                    let o = frame.to_world(p2) + ray * 1.0e-9;
+                    if let Some((t, tri)) = crate::measure::raycast(&mesh, [o.x, o.y, o.z], [ray.x, ray.y, ray.z]) {
+                        let face = mesh.face_ids.get(tri).copied().unwrap_or(0) as usize;
+                        if best.map_or(true, |(bt, _, _)| t < bt) {
+                            best = Some((t, bi, face));
+                        }
+                    }
+                }
+            }
+        }
+        let Some((_, bi, fi)) = best else {
+            return Err(err(name, "up_to_next: the extrusion meets no face in that direction"));
+        };
+        let faces = faces_of(&self.bodies[bi]);
+        let f = &faces[fi];
+        f.plane.ok_or_else(|| {
+            err(name, format!("up_to_next stops at '{}', which is not planar; only planar targets are supported", f.name))
+        })
+    }
+
+    // ── Revolve ─────────────────────────────────────────────────────
+
+    #[allow(clippy::too_many_arguments)]
+    fn revolve(
+        &mut self,
+        name: &str,
+        sketch: &str,
+        axis: &str,
+        angle: &str,
+        combine: FeatureOp,
+        both_sides: bool,
+        bodies: &[String],
+    ) -> CadResult<Outcome> {
+        let (sk, frame) = self.sketch(sketch)?;
+        let profile = profile_of(&sk)?;
+        let a = self.angle(angle)?;
+        let (origin, dir) = self.resolve_axis(axis, Some((&sk, &frame)))?;
+        let mut gens = Vec::new();
+        for (ri, region) in profile.regions.iter().enumerate() {
+            let (solid, names) = build::revolve(region, &frame, origin, dir, a, both_sides, name, ri)?;
+            gens.push(Gen { solid, names, op: combine, prism: None });
+        }
+        self.apply(name, gens, bodies)
+    }
+
+    // ── Hole ────────────────────────────────────────────────────────
+
+    #[allow(clippy::too_many_arguments)]
+    fn hole(
+        &mut self,
+        name: &str,
+        sketch_point: &str,
+        diameter: &str,
+        depth: &str,
+        cb_d: Option<&str>,
+        cb_depth: Option<&str>,
+        csk_d: Option<&str>,
+        csk_angle: Option<&str>,
+        tap_class: Option<&str>,
+    ) -> CadResult<Outcome> {
+        match (cb_d.is_some(), cb_depth.is_some()) {
+            (true, false) => {
+                return Err(err(name, "counterbore_diameter was given without counterbore_depth; both are required"))
+            }
+            (false, true) => {
+                return Err(err(name, "counterbore_depth was given without counterbore_diameter; both are required"))
+            }
+            _ => {}
+        }
+        if csk_angle.is_some() && csk_d.is_none() {
+            return Err(err(name, "countersink_angle was given without countersink_diameter"));
+        }
+        let mut out = Outcome::default();
+        let (sk_name, spec) = parse_sketch_ref(sketch_point)?;
+        let (sk, frame) = self.sketch(&sk_name)?;
+        let p2 = sketch_point_by_spec(&sk, &spec)?;
+        let r = self.len(diameter)? * 0.5;
+        let depth_m = self.len(depth)?;
+        if !(r > 0.0) || !(depth_m > 0.0) {
+            return Err(err(name, "hole diameter and depth must both be positive"));
+        }
+
+        if let Some(tc) = tap_class {
+            let (major, pitch) = parse_metric_tap(tc).ok_or_else(|| {
+                err(name, format!("tap_class '{tc}' is not a metric thread like \"M6\" or \"M6x0.75\""))
+            })?;
+            let drill = major - pitch;
+            let d_mm = 2.0 * r * 1000.0;
+            if (d_mm - drill).abs() > 0.05 * drill {
+                out.note(format!(
+                    "diameter {d_mm:.2} mm is not the {tc} tap drill ({drill:.2} mm); the bore is cut as given"
+                ));
+            }
+            out.note(format!(
+                "cosmetic thread {tc} (M{major}x{pitch}): recorded for drawings and export, not modeled as a helix"
+            ));
+        }
+
+        // Drill INTO the material, whichever side of the sketch plane it is
+        // on: a sketch on a top face drills down, a sketch on the plane
+        // under a part drills up. When the plane runs through the part, drill
+        // along the normal, which is what every existing tree meant.
+        let base = frame.to_world(p2);
+        let (lo, hi) = self.extent_along(base, frame.z, &[]).ok_or_else(|| err(name, "there is no body to drill"))?;
+        let eps = 1.0e-9 * (1.0 + self.scale());
+        let into = if hi <= eps && lo < -eps { -1.0 } else { 1.0 };
+        let hf = if into > 0.0 { Frame { origin: base, ..frame } } else { Frame { origin: base, ..frame }.reversed() };
+        let (lo2, hi2) = if into > 0.0 { (lo, hi) } else { (-hi, -lo) };
+
+        let overcut = (depth_m * 0.05).max(1.0e-4);
+        let through = depth_m >= hi2 - eps;
+        let (start, len) = if through {
+            let s = lo2.min(0.0) - overcut;
+            (s, (hi2 - s) + overcut)
+        } else {
+            (-overcut, depth_m + overcut)
+        };
+        let far = if through { "exit" } else { "floor" };
+        let (mut cutter, mut names) = build::cylinder(&hf, r, start, len, name, "entry", far)?;
+        let tol = self.lineage_tol();
+        let seq = self.seq;
+
+        let union_into = |cutter: &mut Solid, names: &mut Vec<String>, extra: (Solid, Vec<String>), what: &str| -> CadResult<()> {
+            let s1 = vec![seq; names.len()];
+            let s2 = vec![seq; extra.1.len()];
+            let u = boolean_or(cutter, &extra.0).ok_or_else(|| {
+                err(name, format!("could not combine the {what} with the bore; the hole was not cut rather than cut without it"))
+            })?;
+            let (n, _) = inherit_names(
+                &u,
+                &[Named { solid: &*cutter, names: &names[..], seq: &s1 }, Named { solid: &extra.0, names: &extra.1, seq: &s2 }],
+                tol,
+                name,
+            );
+            *cutter = u;
+            *names = n;
+            Ok(())
+        };
+
+        if let (Some(d), Some(dp)) = (cb_d, cb_depth) {
+            let cb_r = self.len(d)? * 0.5;
+            let cb_depth_m = self.len(dp)?;
+            if !(cb_r > r) {
+                return Err(err(name, "counterbore_diameter must be larger than the hole diameter"));
+            }
+            // Staggered overcut so its top is not coplanar with the bore's.
+            let cb = build::cylinder(&hf, cb_r, -2.0 * overcut, cb_depth_m + 2.0 * overcut, &format!("{name}.counterbore"), "entry", "floor")?;
+            union_into(&mut cutter, &mut names, cb, "counterbore")?;
+        }
+        if let Some(d) = csk_d {
+            let csk_r = self.len(d)? * 0.5;
+            let angle = match csk_angle {
+                Some(a) => self.angle(a)?,
+                None => 90.0_f64.to_radians(),
+            };
+            if !(angle > 0.0 && angle < PI) {
+                return Err(err(name, "countersink_angle must be between 0 and 180 degrees"));
+            }
+            if !(csk_r > r) {
+                return Err(err(name, "countersink_diameter must be larger than the hole diameter"));
+            }
+            let half = angle * 0.5;
+            let lift = 3.0 * overcut;
+            let r_top = csk_r + lift * half.tan();
+            let apex = csk_r / half.tan();
+            let cone = build::cone(&hf, r_top, -lift, apex, name)?;
+            union_into(&mut cutter, &mut names, cone, "countersink")?;
+            out.note(format!("countersink {:.1} deg to {:.2} mm", angle.to_degrees(), 2.0 * csk_r * 1000.0));
+        }
+
+        let o = self.apply(name, vec![Gen { solid: cutter, names, op: FeatureOp::Subtract, prism: None }], &[])?;
+        out.absorb(o);
+        Ok(out)
+    }
+
+    // ── Mirror / Pattern ────────────────────────────────────────────
+
+    fn mirror(&mut self, name: &str, plane: &str, features: &[String], combine: FeatureOp) -> CadResult<Outcome> {
+        let pf = self.resolve_frame(plane)?;
+        let m = reflection_about(&pf);
+        let sources = if features.is_empty() { self.bodies_as_gens() } else { self.gens_of(name, features)? };
+        if sources.is_empty() {
+            return Err(err(name, "there is nothing to mirror yet"));
+        }
+        let gens = sources
+            .into_iter()
+            .map(|g| {
+                let mut s = builder::transformed(&g.solid, m);
+                // A reflection has determinant -1; `transformed` keeps each
+                // face's orientation flag, so the copy comes out inside-out
+                // until its faces are inverted. Left as is, a mirrored body
+                // has negative volume, and `boolean_not` (which inverts its
+                // second operand) turns a mirrored cut into an intersection.
+                s.not();
+                Gen {
+                    solid: s,
+                    names: g.names.iter().map(|n| format!("{}@{name}", base_name(n))).collect(),
+                    op: effective_op(g.op, combine),
+                    prism: None,
+                }
+            })
+            .collect();
+        self.apply(name, gens, &[])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pattern(
+        &mut self,
+        name: &str,
+        kind: crate::PatternKind,
+        features: &[String],
+        count: u32,
+        spacing: Option<&str>,
+        direction: Option<[f64; 3]>,
+        axis: Option<&str>,
+        angle: Option<&str>,
+        direction_ref: Option<&str>,
+        combine: FeatureOp,
+    ) -> CadResult<Outcome> {
+        if features.is_empty() && matches!(combine, FeatureOp::Subtract | FeatureOp::Intersect) {
+            return Err(err(
+                name,
+                "a subtractive pattern must name the cutting feature in `features` (e.g. [\"Hole1\"]); \
+                 with none given the whole part would be its own cutter",
+            ));
+        }
+        let sources = if features.is_empty() { self.bodies_as_gens() } else { self.gens_of(name, features)? };
+        if sources.is_empty() {
+            return Err(err(name, "there is nothing to pattern yet"));
+        }
+        let transforms: Vec<Matrix4> = match kind {
+            crate::PatternKind::Linear => {
+                let dir = match direction_ref {
+                    Some(e) => {
+                        let (_, edge) = self.find_edge(e)?;
+                        if !edge.straight {
+                            return Err(err(name, format!("direction_ref '{e}' is not a straight edge")));
+                        }
+                        Vector3::new(edge.b[0] - edge.a[0], edge.b[1] - edge.a[1], edge.b[2] - edge.a[2])
+                    }
+                    None => {
+                        let d = direction.unwrap_or([1.0, 0.0, 0.0]);
+                        Vector3::new(d[0], d[1], d[2])
+                    }
+                };
+                if !(dir.magnitude() > 1.0e-12) {
+                    return Err(err(name, "pattern direction has zero length"));
+                }
+                let unit = dir.normalize();
+                let step = match spacing {
+                    Some(s) => self.len(s)?,
+                    None => return Err(err(name, "a linear pattern needs `spacing`")),
+                };
+                (1..count).map(|i| Matrix4::from_translation(unit * (step * i as f64))).collect()
+            }
+            crate::PatternKind::Circular => {
+                let (origin, dir) = self.resolve_axis(axis.unwrap_or("y"), None)?;
+                let total = match angle {
+                    Some(a) => self.angle(a)?,
+                    None => TAU,
+                };
+                let step = if count < 2 {
+                    0.0
+                } else if (total.abs() - TAU).abs() < 1e-6 {
+                    total / count as f64
+                } else {
+                    total / (count - 1) as f64
+                };
+                (1..count)
+                    .map(|i| {
+                        Matrix4::from_translation(origin.to_vec())
+                            * Matrix4::from_axis_angle(dir, Rad(step * i as f64))
+                            * Matrix4::from_translation(-origin.to_vec())
+                    })
+                    .collect()
+            }
+            crate::PatternKind::Path => {
+                return Err(CadError::NotImplemented("Pattern path_kind = \"path\" is not implemented".into()))
+            }
+            crate::PatternKind::Sketch => {
+                return Err(CadError::NotImplemented("Pattern path_kind = \"sketch\" is not implemented".into()))
+            }
+        };
+        // `count` includes the seed, as in every mainstream CAD package; the
+        // seed is already in the part, so the work is the copies 1..count.
+        let mut gens = Vec::new();
+        for (k, m) in transforms.iter().enumerate() {
+            for g in &sources {
+                gens.push(Gen {
+                    solid: builder::transformed(&g.solid, *m),
+                    names: g.names.iter().map(|n| format!("{}@{name}.{}", base_name(n), k + 2)).collect(),
+                    op: effective_op(g.op, combine),
+                    prism: None,
+                });
+            }
+        }
+        let total = gens.len();
+        if total == 0 {
+            let mut o = Outcome::default();
+            o.note("count 1: the seed only, nothing to add");
+            return Ok(o);
+        }
+        let mut out = self.apply(name, gens, &[])?;
+        out.note(format!("{} total ({} copies + seed)", count, count.saturating_sub(1)));
+        Ok(out)
+    }
+
+    // ── Boolean / Split ─────────────────────────────────────────────
+
+    fn body_index(&self, feature: &str, name: &str) -> CadResult<usize> {
+        self.bodies.iter().position(|b| b.name == name).ok_or_else(|| {
+            let known: Vec<&str> = self.bodies.iter().map(|b| b.name.as_str()).collect();
+            err(feature, format!("no body named '{name}'. Bodies: [{}]", known.join(", ")))
+        })
+    }
+
+    fn boolean(&mut self, name: &str, target: &str, op: crate::BooleanOp, tools: &[String], keep_tools: bool) -> CadResult<Outcome> {
+        let fop = match op {
+            crate::BooleanOp::Union => FeatureOp::Add,
+            crate::BooleanOp::Difference => FeatureOp::Subtract,
+            crate::BooleanOp::Intersect => FeatureOp::Intersect,
+        };
+        if tools.is_empty() {
+            // Legacy form: `target` is the TOOL, applied to every other body.
+            let ti = self.body_index(name, target)?;
+            let tool = self.bodies[ti].clone();
+            if !keep_tools {
+                self.bodies.remove(ti);
+            }
+            let others: Vec<String> = self.bodies.iter().filter(|b| b.name != tool.name).map(|b| b.name.clone()).collect();
+            if others.is_empty() {
+                return Err(err(name, format!("body '{target}' has nothing to combine with")));
+            }
+            let g = Gen { solid: tool.solid, names: tool.face_names, op: fop, prism: None };
+            return self.apply(name, vec![g], &others);
+        }
+        let _ = self.body_index(name, target)?;
+        let mut gens = Vec::new();
+        for t in tools {
+            let ti = self.body_index(name, t)?;
+            let b = &self.bodies[ti];
+            gens.push(Gen { solid: b.solid.clone(), names: b.face_names.clone(), op: fop, prism: None });
+        }
+        if !keep_tools {
+            self.bodies.retain(|b| !tools.contains(&b.name));
+        }
+        self.apply(name, gens, &[target.to_string()])
+    }
+
+    fn split(&mut self, name: &str, plane: &str) -> CadResult<Outcome> {
+        let pf = self.resolve_frame(plane)?;
+        let tol = self.lineage_tol();
+        let extent = 10.0 * self.scale();
+        let (neg_slab, neg_names) = build::halfspace_slab(&pf, extent, name)?;
+        let (pos_slab, pos_names) = build::halfspace_slab(&pf.reversed(), extent, name)?;
+        let slab_seq_n = vec![self.seq; neg_names.len()];
+        let slab_seq_p = vec![self.seq; pos_names.len()];
+        let mut out = Outcome::default();
+        let mut added: Vec<(usize, Body)> = Vec::new();
+        let mut touched = 0;
+        for i in 0..self.bodies.len() {
+            let Some((lo, hi)) = topology::extent_along(&self.bodies[i].solid, pf.origin, pf.z) else { continue };
+            let eps = 1.0e-9 * (1.0 + self.scale());
+            if lo >= -eps || hi <= eps {
+                continue;
+            }
+            let body = self.bodies[i].clone();
+            let pos = boolean_and(&body.solid, &pos_slab)
+                .ok_or_else(|| err(name, format!("could not split body '{}' (positive side)", body.name)))?;
+            let neg = boolean_and(&body.solid, &neg_slab)
+                .ok_or_else(|| err(name, format!("could not split body '{}' (negative side)", body.name)))?;
+            let (pn, ps) = inherit_names(&pos, &[body.named(), Named { solid: &pos_slab, names: &pos_names, seq: &slab_seq_p }], tol, name);
+            let (nn, ns) = inherit_names(&neg, &[body.named(), Named { solid: &neg_slab, names: &neg_names, seq: &slab_seq_n }], tol, name);
+            self.bodies[i] = Body { name: body.name.clone(), solid: pos, face_names: pn, face_seq: ps, prism: None };
+            added.push((i + 1, Body { name: format!("{}.{name}", body.name), solid: neg, face_names: nn, face_seq: ns, prism: None }));
+            touched += 1;
+        }
+        if touched == 0 {
+            return Err(err(name, "the split plane does not cross any body"));
+        }
+        for (at, b) in added.into_iter().rev() {
+            out.note(format!("new body '{}'", b.name));
+            self.bodies.insert(at, b);
+        }
+        Ok(out)
+    }
+
+    // ── Fillet / Chamfer ────────────────────────────────────────────
+
+    fn blend(&mut self, name: &str, edges: &[String], kind: crate::blend::BlendKind) -> CadResult<Outcome> {
+        if edges.is_empty() {
+            return Err(err(name, "name at least one edge; list edge names with cad_list_topology"));
+        }
+        let legacy: Vec<&String> = edges.iter().filter(|e| is_legacy_edge_ref(e)).collect();
+        if !legacy.is_empty() {
+            if legacy.len() != edges.len() {
+                return Err(err(name, "do not mix legacy positional references (\"Extrude1/edge-0\") with edge names"));
+            }
+            // The positional form never identified an edge. Keep the old
+            // visual rounding so existing parts look as they did, and say
+            // exactly what it is.
+            let r = kind.size();
+            self.legacy_round = self.legacy_round.max(r);
+            let mut o = Outcome::default();
+            o.note(format!(
+                "mesh-edge {} r={r:.4}m on {} legacy edge reference(s): visual only, the solid is unchanged. \
+                 Use edge names from cad_list_topology for a real {}.",
+                kind.label(),
+                edges.len(),
+                kind.label()
+            ));
+            return Ok(o);
+        }
+        // Resolve every edge, then group by body.
+        let mut by_body: Vec<(usize, Vec<(usize, EdgeInfo)>)> = Vec::new();
+        for (k, e) in edges.iter().enumerate() {
+            let (bi, info) = self.find_edge(e)?;
+            match by_body.iter_mut().find(|(b, _)| *b == bi) {
+                Some((_, v)) => v.push((k, info)),
+                None => by_body.push((bi, vec![(k, info)])),
+            }
+        }
+        let mut out = Outcome::default();
+        let tol = self.lineage_tol();
+        for (bi, list) in by_body {
+            let (body, notes, degraded) = crate::blend::blend_body(&self.bodies[bi], &list, name, kind, self.seq, tol)?;
+            self.bodies[bi] = body;
+            for n in notes {
+                out.note(n);
+            }
+            for d in degraded {
+                out.degrade(d);
+            }
+        }
+        Ok(out)
+    }
+
+    // ── Shell ───────────────────────────────────────────────────────
+
+    fn shell(&mut self, name: &str, open_faces: &[String], t: f64) -> CadResult<Outcome> {
+        if !(t > 0.0) {
+            return Err(err(name, "wall_thickness must be positive"));
+        }
+        let mut open_in: Vec<(usize, String)> = Vec::new();
+        for f in open_faces {
+            let (bi, info) = self.find_face(f).ok_or_else(|| {
+                err(name, format!("no face named '{f}'. Planar faces include: [{}]", self.face_names_hint()))
+            })?;
+            open_in.push((bi, info.name));
+        }
+        let bi = match (open_in.first(), self.bodies.len()) {
+            (Some((b, _)), _) => {
+                if open_in.iter().any(|(x, _)| x != b) {
+                    return Err(err(name, "all open faces of one shell must belong to the same body"));
+                }
+                *b
+            }
+            (None, 1) => 0,
+            (None, 0) => return Err(err(name, "no body to shell")),
+            (None, _) => return Err(err(name, "the part has several bodies; name an open face to say which one to shell")),
+        };
+        let body = self.bodies[bi].clone();
+        let mut out = Outcome::default();
+        let tol = self.lineage_tol();
+        let seq = self.seq;
+
+        if let Some(prism) = body.prism.clone() {
+            let cap = |which: &str| format!("{}.{which}", prism.feature);
+            let is = |n: &str, which: &str| base_name(n) == cap(which) || base_name(n).starts_with(&format!("{}.r", cap(which)));
+            let mut start_open = false;
+            let mut end_open = false;
+            for (_, n) in &open_in {
+                if is(n, "cap_start") {
+                    start_open = true;
+                } else if is(n, "cap_end") {
+                    end_open = true;
+                } else {
                     return Err(CadError::NotImplemented(format!(
-                        "Extrude end_condition = {other:?} is not implemented: the Extrude \
-                         variant has no field naming the target plane/surface to stop at, so it \
-                         cannot be resolved. Use \"blind\" with an explicit depth, or \
-                         \"through_all\" to pass entirely through the current body."
+                        "opening '{n}' is not implemented: a shell can open the end caps of the extrusion that \
+                         made the body ('{}' / '{}'), not its side walls",
+                        cap("cap_start"),
+                        cap("cap_end")
                     )));
                 }
-            };
-            finish_combine(current, new_body, *combine)
-        }
-        Revolve { sketch, axis, angle, combine } => {
-            let sk = sketches.get(sketch).copied()
-                .ok_or_else(|| CadError::SketchNotFound(sketch.clone()))?;
-            let angle_rad = resolve_angle_radians(angle, vars)?;
-            let (origin, axis_dir) = resolve_axis(axis, sk)?;
-            let new_body = revolve_sketch(sk, origin, axis_dir, angle_rad)?;
-            finish_combine(current, new_body, *combine)
-        }
-        Hole {
-            sketch_point, diameter, depth,
-            counterbore_diameter, counterbore_depth,
-            countersink_diameter, countersink_angle,
-            tap_class,
-        } => {
-            // `tap_class` reaches no code — a tapped hole comes out as
-            // a plain bore, so a part specified M6 would be machined
-            // wrong from geometry that looked right.
-            if let Some(tc) = tap_class {
-                return Err(CadError::NotImplemented(format!(
-                    "Hole tap_class ({tc}) is not implemented — no thread geometry or \
-                     tap-drill sizing is applied, so the result is a plain bore at the \
-                     stated diameter. Remove tap_class and set `diameter` to the tap-drill \
-                     size you want."
-                )));
             }
-            // `countersink_angle` is likewise discarded: the sink is cut
-            // as a straight cylinder at a hard-coded depth, so an
-            // authored angle would be silently ignored.
-            if countersink_angle.is_some() {
-                return Err(CadError::NotImplemented(
-                    "Hole countersink_angle is not implemented — the countersink is cut as a \
-                     straight counterbore, not a cone, so the angle cannot be honoured."
-                        .into(),
-                ));
+            // Which cap sits at the lower end along the frame normal.
+            let (lower_open, upper_open) = if prism.reversed { (end_open, start_open) } else { (start_open, end_open) };
+            let over = (prism.length * 0.05).max(1.0e-4);
+            let lo = if lower_open { prism.start - over } else { prism.start + t };
+            let hi = if upper_open { prism.start + prism.length + over } else { prism.start + prism.length - t };
+            if !(hi - lo > 1.0e-9) {
+                return Err(err(name, format!("a {t:.6} m wall leaves no cavity in a {:.6} m tall body", prism.length)));
             }
-            // Counterbore needs BOTH fields; supplying one silently
-            // dropped the whole feature.
-            match (counterbore_diameter.is_some(), counterbore_depth.is_some()) {
-                (true, false) => {
-                    return Err(CadError::EvalFailed {
-                        feature: "Hole".into(),
-                        reason: "counterbore_diameter was given without counterbore_depth — \
-                                 both are required, and supplying one alone silently produced \
-                                 a plain hole"
-                            .into(),
-                    })
+            let inner_name = format!("{name}.inner");
+            let mut inner_parts: Vec<(Solid, Vec<String>)> = Vec::new();
+            for (ri, region) in prism.regions.iter().enumerate() {
+                let inner = build::offset_region(region, -t).map_err(|e| err(name, format!("wall too thick for the profile: {e}")))?;
+                inner_parts.push(build::prism(&inner, &prism.frame, lo, hi - lo, &inner_name, ri, false)?);
+            }
+            if !lower_open && !upper_open {
+                // A closed cavity is a second, inward-facing boundary shell
+                // of the same solid. No boolean can make one (the cavity
+                // shares no surface with the outside), and none is needed.
+                let mut shells: Vec<Shell> = body.solid.boundaries().clone();
+                let mut names = body.face_names.clone();
+                let mut seqs = body.face_seq.clone();
+                for (mut s, n) in inner_parts {
+                    s.not();
+                    seqs.extend(std::iter::repeat(seq).take(n.len()));
+                    names.extend(n);
+                    shells.extend(s.into_boundaries());
                 }
-                (false, true) => {
-                    return Err(CadError::EvalFailed {
-                        feature: "Hole".into(),
-                        reason: "counterbore_depth was given without counterbore_diameter — \
-                                 both are required"
-                            .into(),
-                    })
-                }
-                _ => {}
+                let solid = Solid::try_new(shells).map_err(|e| err(name, format!("could not form the cavity: {e}")))?;
+                self.bodies[bi] = Body { name: body.name, solid, face_names: names, face_seq: seqs, prism: None };
+                out.note(format!("closed shell, wall {:.3} mm, fully enclosed cavity", t * 1000.0));
+                return Ok(out);
             }
-            let (sk_name, point_ix) = parse_sketch_ref(sketch_point)?;
-            let sk = sketches.get(&sk_name).copied()
-                .ok_or_else(|| CadError::SketchNotFound(sk_name.clone()))?;
-            // v0: treat the named sketch-point as a circle center in
-            // the sketch's plane. For a 1-point sketch, take the
-            // `Point` entity. If the user wants a non-origin hole,
-            // they place the sketch on the target face + dimension the
-            // point.
-            let point = sketch_point_by_spec(sk, &point_ix)?;
-            let radius = resolve_length_meters(diameter, vars)? * 0.5;
-            let depth_m = resolve_length_meters(depth, vars)?;
+            let mut current = body.clone();
+            for (inner, inner_names) in inner_parts {
+                let r = boolean_not(&current.solid, &inner)
+                    .ok_or_else(|| err(name, "could not cut the cavity (the kernel returned no result)"))?;
+                let s2 = vec![seq; inner_names.len()];
+                let (n, q) = inherit_names(&r, &[current.named(), Named { solid: &inner, names: &inner_names, seq: &s2 }], tol, name);
+                if let Some(p) = &mut current.prism {
+                    p.history.push(Replay { op: FeatureOp::Subtract, tool: inner.clone(), tool_names: inner_names.clone(), tool_seq: seq });
+                }
+                current.solid = r;
+                current.face_names = n;
+                current.face_seq = q;
+            }
+            self.bodies[bi] = current;
+            out.note(format!("shell wall {:.3} mm", t * 1000.0));
+            return Ok(out);
+        }
 
-            // Cut bodies must protrude past the faces they enter —
-            // shapeops 0.4 booleans degenerate on coplanar/flush
-            // faces (see `boolean_not`). Over-extend above the
-            // sketch plane always, and out the bottom too when the
-            // hole reaches the far face (a through hole).
-            let overcut = (depth_m * 0.05).max(1.0e-4);
-            let (part_z_min, part_z_max) = current.map(solid_z_range).unwrap_or((0.0, depth_m));
-            let through = depth_m >= part_z_max - 1.0e-9;
-            // Through cuts span the part's FULL z-range: a both_sides
-            // base puts the sketch plane mid-part, so a cut measured
-            // from the plane alone would leave the bottom half solid.
-            let (cut_start, cut_len) = if through {
-                (
-                    part_z_min.min(0.0) - overcut,
-                    (part_z_max - part_z_min.min(0.0)) + 2.0 * overcut,
-                )
-            } else {
-                (-overcut, depth_m + overcut)
-            };
-            let body = extrude_circle(point, radius, cut_len, false)?;
-            let mut cut_body = builder::translated(&body, Vector3::new(0.0, 0.0, cut_start));
+        // Not a prism: the scaled-inner-body approximation, which is only
+        // right for boxes. Say so.
+        if !open_in.is_empty() {
+            return Err(CadError::NotImplemented(
+                "shelling a body that is not a single extruded profile, with named open faces, is not implemented"
+                    .into(),
+            ));
+        }
+        let (bmin, bmax) = topology::bounds(&body.solid).ok_or_else(|| err(name, "body has no vertices"))?;
+        let (dx, dy, dz) = (bmax[0] - bmin[0], bmax[1] - bmin[1], bmax[2] - bmin[2]);
+        if dx <= 2.0 * t || dy <= 2.0 * t || dz <= t {
+            return Err(err(name, format!("wall {t:.4} m too thick for body {dx:.4}x{dy:.4}x{dz:.4} m")));
+        }
+        let over = (dz * 0.05).max(1.0e-4);
+        let (sx, sy) = ((dx - 2.0 * t) / dx, (dy - 2.0 * t) / dy);
+        let sz = ((bmax[2] + over) - (bmin[2] + t)) / dz;
+        let anchor = Vector3::new((bmin[0] + bmax[0]) * 0.5, (bmin[1] + bmax[1]) * 0.5, bmin[2]);
+        let m = Matrix4::from_translation(Vector3::new(0.0, 0.0, t))
+            * Matrix4::from_translation(anchor)
+            * Matrix4::from_nonuniform_scale(sx, sy, sz)
+            * Matrix4::from_translation(-anchor);
+        let inner = builder::transformed(&body.solid, m);
+        let inner_names: Vec<String> = body.face_names.iter().map(|n| format!("{name}.inner.{}", base_name(n))).collect();
+        let r = boolean_not(&body.solid, &inner).ok_or_else(|| err(name, "Shell: boolean difference with the inner body failed"))?;
+        let s2 = vec![seq; inner_names.len()];
+        let (n, q) = inherit_names(&r, &[body.named(), Named { solid: &inner, names: &inner_names, seq: &s2 }], tol, name);
+        self.bodies[bi] = Body { name: body.name, solid: r, face_names: n, face_seq: q, prism: None };
+        out.degrade(format!(
+            "approximate open-top shell t={t:.4} m: the body is not a single extruded profile, so the cavity is a \
+             scaled copy of the body, which is exact only for boxes"
+        ));
+        Ok(out)
+    }
 
-            // Counterbore — wider shallow cylinder at the top.
-            // Staggered overcut (2x) so its top face isn't coplanar
-            // with the main cut's — that union would degenerate too.
-            if let (Some(cb_d), Some(cb_depth)) = (counterbore_diameter, counterbore_depth) {
-                let cb_r = resolve_length_meters(cb_d, vars)? * 0.5;
-                let cb_depth_m = resolve_length_meters(cb_depth, vars)?;
-                let cb_overcut = overcut * 2.0;
-                let cb_body = extrude_circle(point, cb_r, cb_depth_m + cb_overcut, false)?;
-                let cb_body = builder::translated(&cb_body, Vector3::new(0.0, 0.0, -cb_overcut));
-                // Union onto the hole cylinder — the whole thing
-                // subtracts from the current body below.
-                cut_body = boolean_or(&cut_body, &cb_body).unwrap_or(cut_body);
-            }
-            // Countersink — conical widening. Approximated in v0 as a
-            // larger cylinder at the top; true cone lands with a
-            // Revolve-around-point path. Staggered overcut (3x).
-            if let Some(csk_d) = countersink_diameter {
-                let csk_r = resolve_length_meters(csk_d, vars)? * 0.5;
-                let csk_overcut = overcut * 3.0;
-                let csk_body = extrude_circle(point, csk_r, 0.005 + csk_overcut, false)?;
-                let csk_body = builder::translated(&csk_body, Vector3::new(0.0, 0.0, -csk_overcut));
-                cut_body = boolean_or(&cut_body, &csk_body).unwrap_or(cut_body);
-            }
+    // ── Sweep / Loft ────────────────────────────────────────────────
 
-            // Always subtract — that's what a hole does.
-            finish_combine(current, cut_body, crate::FeatureOp::Subtract)
+    fn sweep(&mut self, name: &str, profile: &str, path: &str, combine: FeatureOp) -> CadResult<Outcome> {
+        let (psk, _pframe) = self.sketch(profile)?;
+        let (qsk, qframe) = self.sketch(path)?;
+        let prof = profile_of(&psk)?;
+        let pts = path_points(&qsk, &qframe)?;
+        let radius = prof.regions.iter().map(|r| r.outer.extent()).fold(0.0_f64, f64::max) * 0.5;
+        // Rotation-minimizing frames: carry the profile's x axis from one
+        // segment to the next, so consecutive segments line up instead of
+        // twisting to whatever a world axis dictates.
+        let mut x_prev: Option<Vector3> = None;
+        let mut parts: Vec<(Solid, Vec<String>)> = Vec::new();
+        let nseg = pts.len() - 1;
+        for (k, w) in pts.windows(2).enumerate() {
+            let (a, b) = (w[0], w[1]);
+            let dvec = b - a;
+            let len = dvec.magnitude();
+            if len < 1.0e-12 {
+                continue;
+            }
+            let z = dvec / len;
+            let mut f = Frame::from_origin_normal(a, z).ok_or_else(|| err(name, "degenerate path segment"))?;
+            if let Some(xp) = x_prev {
+                let x = xp - z * xp.dot(z);
+                if x.magnitude() > 1.0e-9 {
+                    let x = x.normalize();
+                    f = Frame { origin: a, x, y: z.cross(x), z };
+                }
+            }
+            x_prev = Some(f.x);
+            // Overlap consecutive segments so each union has real
+            // intersection curves; shapeops returns nothing for solids that
+            // only touch.
+            let e0 = if k == 0 { 0.0 } else { radius };
+            let e1 = if k + 1 == nseg { 0.0 } else { radius };
+            for (ri, region) in prof.regions.iter().enumerate() {
+                let seg_name = format!("{name}.seg{}", k + 1);
+                parts.push(build::prism(region, &f, -e0, len + e0 + e1, &seg_name, ri, false)?);
+            }
         }
-        Mirror { plane, features, combine } => {
-            let reflected = mirror_bodies(plane, features, current, prior_outputs)?;
-            finish_combine(current, reflected, *combine)
+        let Some((mut acc, mut acc_names)) = parts.first().cloned() else {
+            return Err(err(name, "every path segment has zero length"));
+        };
+        let tol = self.lineage_tol();
+        for (s, n) in parts.iter().skip(1) {
+            let s1 = vec![self.seq; acc_names.len()];
+            let s2 = vec![self.seq; n.len()];
+            let u = boolean_or(&acc, s).ok_or_else(|| {
+                err(name, "could not join consecutive path segments; a path with very sharp corners can defeat the kernel")
+            })?;
+            let (nn, _) = inherit_names(&u, &[Named { solid: &acc, names: &acc_names, seq: &s1 }, Named { solid: s, names: n, seq: &s2 }], tol, name);
+            acc = u;
+            acc_names = nn;
         }
-        Pattern { kind, features, count, spacing, direction, axis, angle, combine } => {
-            let combine = *combine;
-            // Resolve the count through the same variable/expression
-            // path every other algorithmic parameter uses, so
-            // `count = "hole_count"` works exactly like
-            // `spacing = "pitch"`.
-            let count = count.resolve(vars)?;
-            // A subtractive pattern replicates the source feature's
-            // TOOL, not its result. Patterning a Hole's result would
-            // mean stamping copies of an already-drilled plate; what
-            // "four of this hole" means is four of the cylinder that
-            // drilled it. Additive patterns still replicate the
-            // output body, which is what they always did.
-            let want_tool = matches!(
-                combine,
-                crate::FeatureOp::Subtract | crate::FeatureOp::Intersect
-            );
-            let source = if want_tool {
-                resolve_pattern_tool(features, prior_tools, prior_outputs, current)?
-            } else {
-                resolve_pattern_source(features, current, prior_outputs)?
-            };
-            let instances = match kind {
-                crate::PatternKind::Linear => {
-                    let dir = direction.unwrap_or([1.0, 0.0, 0.0]);
-                    let step = match spacing {
-                        Some(s) => resolve_length_meters(s, vars)?,
-                        None => 1.0,
-                    };
-                    pattern_linear(&source, dir, step, count)
-                }
-                crate::PatternKind::Circular => {
-                    let axis_ref = axis.as_deref().unwrap_or("y");
-                    let (origin, axis_dir) = resolve_world_axis(axis_ref)?;
-                    let total = match angle {
-                        Some(a) => resolve_angle_radians(a, vars)?,
-                        None    => TAU,
-                    };
-                    pattern_circular(&source, origin, axis_dir, total, count)
-                }
-                crate::PatternKind::Path => {
-                    return Err(CadError::NotImplemented(
-                        "Pattern::Path — awaits path-sketch resolver (lands with Sweep)".into()
-                    ));
-                }
-                crate::PatternKind::Sketch => {
-                    return Err(CadError::NotImplemented(
-                        "Pattern::Sketch — sketch-point-driven patterns land after sketch solver".into()
-                    ));
-                }
-            };
+        let mut out = self.apply(name, vec![Gen { solid: acc, names: acc_names, op: combine, prism: None }], &[])?;
+        if nseg > 1 {
+            out.note("segmented sweep: path corners are joined by overlapping segments, not mitred");
+        }
+        Ok(out)
+    }
 
-            // Fold the instances in one at a time rather than unioning
-            // them first. Each of these booleans meets the running
-            // body, so each has the intersection curves shapeops needs;
-            // a pre-union of the (disjoint) instances has none and
-            // always fails. Failures are counted rather than swallowed
-            // so "I asked for 4 and got 2" is visible.
-            let Some(cur0) = current else {
-                return Err(CadError::EvalFailed {
-                    feature: "Pattern".into(),
-                    reason: "no running body to pattern onto".into(),
-                });
-            };
-            let mut running = cur0.clone();
-            let mut applied = 0usize;
-            let mut failed = 0usize;
-            // `instances[0]` is the seed at identity. Its effect is
-            // ALREADY in the running body — the source feature applied
-            // it — so re-applying it is redundant, and for a subtract
-            // it fails outright because the void is already there.
-            // Counting that as a failure would flag every correct
-            // pattern as degraded. `count` includes the seed, matching
-            // the convention in every mainstream CAD package, so the
-            // work is instances 1..count.
-            for inst in instances.iter().skip(1) {
-                let attempt = match combine {
-                    crate::FeatureOp::Subtract => boolean_not(&running, inst),
-                    crate::FeatureOp::Intersect => boolean_and(&running, inst),
-                    _ => boolean_or(&running, inst),
-                };
-                match attempt {
-                    Some(next) => {
-                        running = next;
-                        applied += 1;
-                    }
-                    None => failed += 1,
+    fn loft(&mut self, name: &str, profiles: &[String], combine: FeatureOp) -> CadResult<Outcome> {
+        if profiles.len() < 2 {
+            return Err(err(name, "a loft needs at least two profile sketches"));
+        }
+        let mut sections: Vec<(Region, Frame)> = Vec::new();
+        for p in profiles {
+            let (sk, frame) = self.sketch(p)?;
+            let prof = profile_of(&sk)?;
+            if prof.regions.len() != 1 || !prof.regions[0].holes.is_empty() {
+                return Err(err(name, format!("loft section '{p}' must be a single closed outline without holes")));
+            }
+            sections.push((prof.regions[0].clone(), frame));
+        }
+        build::prepare_loft_sections(&mut sections).map_err(|e| err(name, e))?;
+        let (solid, mut names) = build::loft(&sections, name)?;
+        // Splitting edges to match section edge counts can give two side
+        // faces one name; number them like any other duplicate.
+        topology::disambiguate(&solid, &mut names);
+        self.apply(name, vec![Gen { solid, names, op: combine, prism: None }], &[])
+    }
+
+    fn reference_plane(&mut self, name: &str, plane: &crate::ReferencePlane) -> CadResult<Outcome> {
+        use crate::ReferencePlane::*;
+        let frame = match plane {
+            Offset { base, distance } => self.resolve_frame(base)?.offset(self.len(distance)?),
+            ThreePoint { p1, p2, p3 } => Frame::from_three_points(
+                Point3::new(p1[0], p1[1], p1[2]),
+                Point3::new(p2[0], p2[1], p2[2]),
+                Point3::new(p3[0], p3[1], p3[2]),
+            )
+            .ok_or_else(|| err(name, "the three points are collinear"))?,
+            TangentFace { face } => {
+                let (_, info) = self.find_face(face).ok_or_else(|| err(name, format!("no face named '{face}'")))?;
+                info.plane.ok_or_else(|| err(name, format!("face '{face}' is not planar")))?
+            }
+            NormalToCurve { curve, t } => {
+                let (_, e) = self.find_edge(curve)?;
+                if !e.straight {
+                    return Err(err(name, "normal_to_curve needs a straight edge"));
                 }
+                let a = Point3::new(e.a[0], e.a[1], e.a[2]);
+                let b = Point3::new(e.b[0], e.b[1], e.b[2]);
+                let p = a + (b - a) * t.clamp(0.0, 1.0);
+                Frame::from_origin_normal(p, b - a).ok_or_else(|| err(name, "the edge has zero length"))?
             }
-            let expected = instances.len().saturating_sub(1);
-            if expected > 0 && applied == 0 {
-                return Err(CadError::EvalFailed {
-                    feature: "Pattern".into(),
-                    reason: format!(
-                        "all {expected} patterned instances failed to combine — the pattern \
-                         source and the body may not intersect, or shapeops rejected the operands"
-                    ),
-                });
-            }
-            let note = if failed > 0 {
-                Some(format!(
-                    "{applied} of {expected} patterned instances applied ({failed} failed); \
-                     seed already present"
-                ))
-            } else {
-                Some(format!(
-                    "{} total ({applied} patterned + 1 seed)",
-                    applied + 1
-                ))
-            };
-            Ok(FeatureEvalResult::ReplacedBody {
-                body: running,
-                note,
-                mesh_round: None,
-                tool_body: None,
-                degraded: if failed > 0 {
-                    Some(format!("{failed} pattern instance(s) failed to combine"))
-                } else {
-                    None
-                },
-            })
-        }
-        Boolean { target, boolean_op } => {
-            let Some(target_body) = prior_outputs.get(target) else {
-                return Err(CadError::EvalFailed {
-                    feature: "Boolean".into(),
-                    reason: format!("target feature '{}' not found", target),
-                });
-            };
-            let Some(cur) = current else {
-                return Err(CadError::EvalFailed {
-                    feature: "Boolean".into(),
-                    reason: "no running body to combine with".into(),
-                });
-            };
-            let result = match boolean_op {
-                crate::BooleanOp::Union      => boolean_or(cur, target_body),
-                crate::BooleanOp::Difference => boolean_not(cur, target_body),
-                crate::BooleanOp::Intersect  => boolean_and(cur, target_body),
-            }.ok_or_else(|| CadError::Kernel(
-                "boolean operation produced no result (non-manifold or disjoint)".into()
-            ))?;
-            Ok(FeatureEvalResult::body(result))
-        }
-        Split { plane } => {
-            let Some(cur) = current else {
-                return Err(CadError::EvalFailed {
-                    feature: "Split".into(),
-                    reason: "no running body to split".into(),
-                });
-            };
-            let (origin, normal) = resolve_plane(plane)?;
-            // Build a half-space slab large enough to fully contain
-            // the body, then Difference with it → the "positive side"
-            // body. The "negative side" gets reconstructed by a second
-            // Split entry in follow-up work.
-            let slab = build_halfspace_slab(origin, normal, 1000.0);
-            let remaining = boolean_not(cur, &slab).ok_or_else(|| CadError::Kernel(
-                "Split: boolean difference with half-space failed".into()
-            ))?;
-            Ok(FeatureEvalResult::body(remaining))
-        }
-        Fillet { edges, radius, propagate_tangent } => {
-            // `propagate_tangent` reaches no code — the soften is
-            // applied to every crease in the part regardless. Accepting
-            // an explicit `false` would tell the user they had narrowed
-            // the fillet when they had not. Default is `true`, so only
-            // a deliberate override is refused.
-            if !*propagate_tangent {
-                return Err(CadError::NotImplemented(
-                    "Fillet propagate_tangent = false is not implemented — the interim \
-                     mesh-crease soften has no per-edge selection, so tangent propagation \
-                     cannot be disabled. Remove the field to accept the default."
-                        .into(),
-                ));
-            }
-            // truck-shapeops has no stable BRep fillet. Keep the solid
-            // topology intact and flag a post-tessellation mesh crease
-            // soften so edges round in the viewport / GLB. True BRep
-            // fillet upgrades in place once truck lands the API.
-            let r = resolve_length_meters(radius, vars)?;
-            let Some(cur) = current else {
-                return Err(CadError::EvalFailed {
-                    feature: "Fillet".into(),
-                    reason: "no body to fillet".into(),
-                });
-            };
-            let n_edges = edges.len().max(1);
-            Ok(FeatureEvalResult::ReplacedBody {
-                body: cur.clone(),
-                note: Some(format!(
-                    "mesh-edge fillet r={r:.4}m ({n_edges} edge refs) — BRep pending"
-                )),
-                mesh_round: Some(r),
-                tool_body: None,
-                degraded: None,
-            })
-        }
-        Chamfer { edges, distance, distance2, angle } => {
-            // Neither field reaches any code — the soften is symmetric
-            // and radius-only. An asymmetric or angled chamfer that
-            // silently came out symmetric is exactly the kind of
-            // wrong-but-plausible result this surface exists to stop.
-            if distance2.is_some() || angle.is_some() {
-                return Err(CadError::NotImplemented(
-                    "Chamfer distance2 / angle are not implemented — the interim mesh-crease \
-                     soften produces a symmetric rounding from `distance` alone. Remove them \
-                     to accept a symmetric chamfer."
-                        .into(),
-                ));
-            }
-            let d = resolve_length_meters(distance, vars)?;
-            let Some(cur) = current else {
-                return Err(CadError::EvalFailed {
-                    feature: "Chamfer".into(),
-                    reason: "no body to chamfer".into(),
-                });
-            };
-            let n_edges = edges.len().max(1);
-            // Mesh soften uses the same crease path as Fillet (visual
-            // interim). True BRep chamfer lands with truck.
-            Ok(FeatureEvalResult::ReplacedBody {
-                body: cur.clone(),
-                note: Some(format!(
-                    "mesh-edge chamfer d={d:.4}m ({n_edges} edge refs) — BRep pending"
-                )),
-                mesh_round: Some(d),
-                tool_body: None,
-                degraded: None,
-            })
-        }
-        Shell { wall_thickness, open_faces: _ } => {
-            let t = resolve_length_meters(wall_thickness, vars)?;
-            let Some(cur) = current else {
-                return Err(CadError::EvalFailed {
-                    feature: "Shell".into(),
-                    reason: "no body to shell".into(),
-                });
-            };
-            // v0 shell is OPEN-TOP: the inner cut protrudes through the
-            // +z face so shapeops has intersection curves to work with.
-            // A fully-enclosed cavity (scaled inner body strictly inside)
-            // produces NO intersection curves and shapeops 0.4 returns
-            // None every time — the original scale-to-centroid shell
-            // could never succeed. Per-face open_faces selection lands
-            // with real offset surfaces.
-            let Some((bmin, bmax)) = solid_bbox(cur) else {
-                return Err(CadError::EvalFailed {
-                    feature: "Shell".into(),
-                    reason: "body has no vertices".into(),
-                });
-            };
-            let dx = bmax.x - bmin.x;
-            let dy = bmax.y - bmin.y;
-            let dz = bmax.z - bmin.z;
-            if t <= 0.0 || dx <= 2.0 * t + 1e-6 || dy <= 2.0 * t + 1e-6 || dz <= t + 1e-6 {
-                return Err(CadError::EvalFailed {
-                    feature: "Shell".into(),
-                    reason: format!(
-                        "wall {:.4}m too thick for body {:.4}×{:.4}×{:.4}m",
-                        t, dx, dy, dz
-                    ),
-                });
-            }
-            let overcut = (dz * 0.05).max(1.0e-4);
-            let sx = (dx - 2.0 * t) / dx;
-            let sy = (dy - 2.0 * t) / dy;
-            // Inner spans [bmin.z + t, bmax.z + overcut] — wall at the
-            // bottom, protruding out the top.
-            let sz = ((bmax.z + overcut) - (bmin.z + t)) / dz;
-            let anchor = Vector3::new((bmin.x + bmax.x) * 0.5, (bmin.y + bmax.y) * 0.5, bmin.z);
-            let m = Matrix4::from_translation(Vector3::new(0.0, 0.0, t))
-                * Matrix4::from_translation(anchor)
-                * Matrix4::from_nonuniform_scale(sx, sy, sz)
-                * Matrix4::from_translation(-anchor);
-            let inner = builder::transformed(cur, m);
-            let shelled = boolean_not(cur, &inner).ok_or_else(|| CadError::Kernel(
-                "Shell: boolean difference with inner body failed".into()
-            ))?;
-            Ok(FeatureEvalResult::ReplacedBody {
-                body: shelled,
-                note: Some(format!(
-                    "open-top shell t={t:.4}m (per-face open_faces pending)"
-                )),
-                mesh_round: None,
-                tool_body: None,
-                degraded: None,
-            })
-        }
-        Sweep { profile, path, combine } => {
-            let profile_sk = sketches.get(profile).copied()
-                .ok_or_else(|| CadError::SketchNotFound(profile.clone()))?;
-            let path_sk = sketches.get(path).copied()
-                .ok_or_else(|| CadError::SketchNotFound(path.clone()))?;
-            let new_body = sweep_profile_along_path(profile_sk, path_sk)?;
-            finish_combine(current, new_body, *combine)
-        }
-        Loft { profiles, .. } => {
-            Err(CadError::NotImplemented(format!(
-                "Loft ({} profiles) — profile-interpolation routine pending; \
-                 truck-modeling has `homotopy` for between-two surfaces but multi-profile \
-                 lofting requires a guide-curve solver not yet in 0.6.",
-                profiles.len()
-            )))
-        }
-        ReferencePlane { .. } => Ok(FeatureEvalResult::NoBodyChange),
+        };
+        self.planes.insert(name.to_string(), frame);
+        let mut o = Outcome::default();
+        o.note(format!(
+            "plane through ({:.4}, {:.4}, {:.4}) m, normal ({:.3}, {:.3}, {:.3})",
+            frame.origin.x, frame.origin.y, frame.origin.z, frame.z.x, frame.z.y, frame.z.z
+        ));
+        Ok(o)
     }
 }
 
-// ============================================================================
-// Extrude — supports Rectangle / Circle / closed-polyline profiles
-// ============================================================================
-
-/// Extrude a profile over an explicit z span.
-///
-/// `extrude_sketch` covers the two symmetric cases; `ThroughAll` needs
-/// to start below the running body and finish above it, which neither
-/// a depth nor a both_sides flag can express.
-fn extrude_sketch_span(sk: &Sketch, start_z: f64, length: f64) -> CadResult<Solid> {
-    if length.abs() < 1.0e-12 {
-        return Err(CadError::EvalFailed {
-            feature: "Extrude".into(),
-            reason: "zero-length extrusion produces no solid".into(),
-        });
+/// A point strictly inside a region: the outline's centroid when that lies
+/// in the material, otherwise a point just inside the first side.
+fn interior_point(r: &Region) -> [f64; 2] {
+    let poly = r.outer.polygon();
+    let k = poly.len().max(1) as f64;
+    let c = poly.iter().fold([0.0, 0.0], |a, p| [a[0] + p[0] / k, a[1] + p[1] / k]);
+    let in_material = |q: [f64; 2]| r.outer.contains(q) && !r.holes.iter().any(|h| h.contains(q));
+    if in_material(c) {
+        return c;
     }
-    let face = build_planar_face(sk)?;
-    let face_use = builder::translated(&face, Vector3::new(0.0, 0.0, start_z));
-    Ok(builder::tsweep(&face_use, Vector3::new(0.0, 0.0, length)))
+    let s = &r.outer.segs[0].geom;
+    let (a, b) = (s.start(), s.end());
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let l = (dx * dx + dy * dy).sqrt().max(1e-12);
+    let m = s.midpoint();
+    let inset = 1.0e-3 * r.outer.extent().max(1e-9);
+    // Counter-clockwise outline: the material is to the left of travel.
+    [m[0] - dy / l * inset, m[1] + dx / l * inset]
 }
 
-fn extrude_sketch(sk: &Sketch, depth_m: f64, both_sides: bool) -> CadResult<Solid> {
-    // both_sides centres the solid on the sketch plane: start half a
-    // depth below and sweep the full depth.
-    let start_z = if both_sides { -depth_m * 0.5 } else { 0.0 };
-    extrude_sketch_span(sk, start_z, depth_m)
-}
-
-fn extrude_circle(center: [f64; 2], radius: f64, depth_m: f64, both_sides: bool) -> CadResult<Solid> {
-    // Build a circle wire by 3-point arc approximation (truck's
-    // `circle_arc` needs a transit point; for a full circle we chain
-    // two half-arcs).
-    let cx = center[0];
-    let cy = center[1];
-    let v_r  = builder::vertex(Point3::new(cx + radius, cy, 0.0));
-    let v_l  = builder::vertex(Point3::new(cx - radius, cy, 0.0));
-    let top = Point3::new(cx, cy + radius, 0.0);
-    let bot = Point3::new(cx, cy - radius, 0.0);
-    let arc_upper = builder::circle_arc(&v_r, &v_l, top);
-    let arc_lower = builder::circle_arc(&v_l, &v_r, bot);
-    let wire: Wire = vec![arc_upper, arc_lower].into();
-    let face = builder::try_attach_plane(&[wire]).map_err(|e| CadError::Kernel(e.to_string()))?;
-
-    let (face_use, vec_use) = if both_sides {
-        let half = depth_m * 0.5;
-        (
-            builder::translated(&face, Vector3::new(0.0, 0.0, -half)),
-            Vector3::new(0.0, 0.0, depth_m),
-        )
-    } else {
-        (face, Vector3::new(0.0, 0.0, depth_m))
-    };
-    Ok(builder::tsweep(&face_use, vec_use))
-}
-
-/// Build a planar Face from a sketch's entities. Supports three
-/// profile shapes:
-/// - exactly one `Rectangle` entity
-/// - exactly one `Circle` entity
-/// - a closed chain of `Line` entities forming a single loop
-fn build_planar_face(sk: &Sketch) -> CadResult<Face> {
-    // Rectangle profile.
-    if let Some(SketchEntity::Rectangle { p1, p2 }) = sk.entities.iter()
-        .find(|e| matches!(e, SketchEntity::Rectangle { .. }))
-    {
-        let (min_x, max_x) = (p1[0].min(p2[0]), p1[0].max(p2[0]));
-        let (min_y, max_y) = (p1[1].min(p2[1]), p1[1].max(p2[1]));
-        let v00 = builder::vertex(Point3::new(min_x, min_y, 0.0));
-        let v10 = builder::vertex(Point3::new(max_x, min_y, 0.0));
-        let v11 = builder::vertex(Point3::new(max_x, max_y, 0.0));
-        let v01 = builder::vertex(Point3::new(min_x, max_y, 0.0));
-        let wire: Wire = vec![
-            builder::line(&v00, &v10),
-            builder::line(&v10, &v11),
-            builder::line(&v11, &v01),
-            builder::line(&v01, &v00),
-        ].into();
-        return builder::try_attach_plane(&[wire]).map_err(|e| CadError::Kernel(e.to_string()));
-    }
-
-    // Circle profile.
-    if let Some(SketchEntity::Circle { center, radius }) = sk.entities.iter()
-        .find(|e| matches!(e, SketchEntity::Circle { .. }))
-    {
-        let v_r  = builder::vertex(Point3::new(center[0] + radius, center[1], 0.0));
-        let v_l  = builder::vertex(Point3::new(center[0] - radius, center[1], 0.0));
-        let top  = Point3::new(center[0], center[1] + radius, 0.0);
-        let bot  = Point3::new(center[0], center[1] - radius, 0.0);
-        let arc_upper = builder::circle_arc(&v_r, &v_l, top);
-        let arc_lower = builder::circle_arc(&v_l, &v_r, bot);
-        let wire: Wire = vec![arc_upper, arc_lower].into();
-        return builder::try_attach_plane(&[wire]).map_err(|e| CadError::Kernel(e.to_string()));
-    }
-
-    // Closed polyline of `Line` entities.
-    let lines: Vec<&SketchEntity> = sk.entities.iter()
-        .filter(|e| matches!(e, SketchEntity::Line { .. }))
-        .collect();
-    if lines.len() >= 3 {
-        // Chain by consecutive endpoint matching. Simple walker —
-        // picks the first line, then finds the next line whose start
-        // matches the previous line's end. Works for user-authored
-        // polygons; doesn't handle self-intersecting or branching
-        // chains (that's the sketch-solver's job anyway).
-        let mut chain: Vec<Edge> = Vec::with_capacity(lines.len());
-        let mut remaining: Vec<(usize, [f64; 2], [f64; 2])> = lines.iter().enumerate()
-            .map(|(i, e)| match e {
-                SketchEntity::Line { p1, p2 } => (i, *p1, *p2),
-                _ => unreachable!(),
-            }).collect();
-        let (_, start, next_point) = remaining.remove(0);
-        let v_start = builder::vertex(Point3::new(start[0], start[1], 0.0));
-        let mut v_prev = v_start.clone();
-        let mut next_target = next_point;
-        let v_next = builder::vertex(Point3::new(next_point[0], next_point[1], 0.0));
-        chain.push(builder::line(&v_prev, &v_next));
-        v_prev = v_next;
-
-        while !remaining.is_empty() {
-            let pos = remaining.iter().position(|(_, p1, _)| {
-                (p1[0] - next_target[0]).abs() < 1e-6 && (p1[1] - next_target[1]).abs() < 1e-6
-            });
-            let Some(ix) = pos else { break; };
-            let (_, _, p2) = remaining.remove(ix);
-            let lands_on_start =
-                (p2[0] - start[0]).abs() < 1e-6 && (p2[1] - start[1]).abs() < 1e-6;
-            if remaining.is_empty() && lands_on_start {
-                // Closing edge must reuse the START vertex — truck
-                // checks wire closure by vertex IDENTITY, not by
-                // position, so a fresh vertex at the same coordinates
-                // still yields "This wire is not closed".
-                chain.push(builder::line(&v_prev, &v_start));
-                next_target = start;
-            } else {
-                let v_new = builder::vertex(Point3::new(p2[0], p2[1], 0.0));
-                chain.push(builder::line(&v_prev, &v_new));
-                v_prev = v_new;
-                next_target = p2;
-            }
-        }
-        // Close the loop if we landed back at the starting point.
-        let closes = (next_target[0] - start[0]).abs() < 1e-6
-                  && (next_target[1] - start[1]).abs() < 1e-6;
-        if !closes {
-            return Err(CadError::EvalFailed {
-                feature: "Extrude".into(),
-                reason: "polyline profile isn't closed — chain doesn't return to start".into(),
-            });
-        }
-        let wire: Wire = chain.into();
-        return builder::try_attach_plane(&[wire]).map_err(|e| CadError::Kernel(e.to_string()));
-    }
-
-    Err(CadError::EvalFailed {
-        feature: "Extrude".into(),
-        reason: "sketch must contain exactly one Rectangle, one Circle, or a closed \
-                 polyline of Line entities".into(),
-    })
-}
-
-// ============================================================================
-// Revolve
-// ============================================================================
-
-fn revolve_sketch(sk: &Sketch, origin: Point3, axis: Vector3, angle: f64) -> CadResult<Solid> {
-    let face = build_planar_face(sk)?;
-    Ok(builder::rsweep(&face, origin, axis, Rad(angle)))
-}
-
-// ============================================================================
-// Mirror
-// ============================================================================
-
-fn mirror_bodies(
-    plane: &str,
-    features: &[String],
-    current: Option<&Solid>,
-    prior_outputs: &HashMap<String, Solid>,
-) -> CadResult<Solid> {
-    let (origin, normal) = resolve_plane(plane)?;
-    let source = if features.is_empty() {
-        current.ok_or_else(|| CadError::EvalFailed {
-            feature: "Mirror".into(),
-            reason: "no running body to mirror and no explicit feature list".into(),
-        })?.clone()
-    } else {
-        // Union the listed features' output bodies, then mirror the union.
-        let mut bodies: Vec<Solid> = Vec::new();
-        for name in features {
-            // Silently skipping an unmatched name mirrored a smaller
-            // set than asked for, with no indication which name missed.
-            let Some(b) = prior_outputs.get(name) else {
-                let mut known: Vec<&str> = prior_outputs.keys().map(|s| s.as_str()).collect();
-                known.sort_unstable();
-                return Err(CadError::EvalFailed {
-                    feature: "Mirror".into(),
-                    reason: format!(
-                        "feature '{name}' not found — features that have produced a body so \
-                         far: [{}]. A mirrored feature must appear EARLIER in the tree.",
-                        known.join(", ")
-                    ),
-                });
-            };
-            bodies.push(b.clone());
-        }
-        if bodies.is_empty() {
-            return Err(CadError::EvalFailed {
-                feature: "Mirror".into(),
-                reason: "no referenced features produced bodies".into(),
-            });
-        }
-        union_many(&bodies).ok_or_else(|| CadError::Kernel(
-            "Mirror: union of referenced features failed".into()
-        ))?
-    };
-
-    // Reflection via an affine transform: `p' = p - 2 ((p - origin) · n) n`
-    // truck's `builder::transformed` takes a 4x4 matrix. Compose a
-    // reflection matrix.
-    let mat = reflection_matrix(origin, normal);
-    let mut out = builder::transformed(&source, mat);
-    // A reflection has determinant -1, and `builder::transformed` maps
-    // geometry while PRESERVING every face's orientation flag. For an
-    // orthogonal R with det < 0, (R·a)x(R·b) = -R·(a×b): every surface
-    // normal is negated while the topology still claims the old
-    // winding, so the result is a negative-volume solid. It renders
-    // backface-culled, its collider normals point inward, and
-    // `cad_validate_part` fails `positive_volume`. Worse, shapeops
-    // classifies faces by orientation and `boolean_not` inverts its
-    // second operand, so feeding it an already-inverted body computed
-    // an INTERSECTION instead of a difference.
-    //
-    // Translation and rotation (Pattern) keep det = +1 and are
-    // unaffected, which is why only Mirror needs this.
-    if mat.determinant() < 0.0 {
-        out.not();
-    }
-    Ok(out)
-}
-
-// ============================================================================
-// Pattern
-// ============================================================================
-
-fn resolve_pattern_source(
-    features: &[String],
-    current: Option<&Solid>,
-    prior_outputs: &HashMap<String, Solid>,
-) -> CadResult<Solid> {
-    if features.is_empty() {
-        current.cloned().ok_or_else(|| CadError::EvalFailed {
-            feature: "Pattern".into(),
-            reason: "no running body and no features referenced".into(),
+/// Would an extrusion of `regions` from the sketch plane, `reach` long in
+/// direction `travel` (+1 along the normal, -1 against it), meet material?
+/// Probed at an interior point of each region: inside a body just past the
+/// plane, or a ray that reaches a body within `reach`.
+fn meets_material(meshes: &[EvalMesh], regions: &[Region], frame: &Frame, travel: f64, reach: f64) -> bool {
+    let along = frame.z * travel;
+    let step = (1.0e-3 * reach).max(1.0e-7);
+    regions.iter().any(|r| {
+        let o = frame.to_world(interior_point(r)) + along * step;
+        let (o, d) = ([o.x, o.y, o.z], [along.x, along.y, along.z]);
+        meshes.iter().any(|m| {
+            crate::measure::contains_point(m, o)
+                || crate::measure::raycast(m, o, d).map_or(false, |(t, _)| t + step <= reach)
         })
+    })
+}
+
+/// A pattern or mirror copy combines the way its source did (a hole's copy
+/// cuts), unless the feature says otherwise.
+fn effective_op(item: FeatureOp, combine: FeatureOp) -> FeatureOp {
+    if combine == FeatureOp::Add {
+        item
     } else {
-        let mut bodies: Vec<Solid> = Vec::new();
-        for name in features {
-            // A name that matches nothing used to be skipped in
-            // silence, so a typo shrank the pattern source without a
-            // word — and if EVERY name was a typo the error blamed the
-            // features for "producing no bodies" rather than saying
-            // they did not exist.
-            let Some(b) = prior_outputs.get(name) else {
-                let mut known: Vec<&str> = prior_outputs.keys().map(|s| s.as_str()).collect();
-                known.sort_unstable();
-                return Err(CadError::EvalFailed {
-                    feature: "Pattern".into(),
-                    reason: format!(
-                        "pattern source feature '{name}' not found — features that have \
-                         produced a body so far: [{}]. Note a feature must appear EARLIER in \
-                         the tree than the pattern that references it.",
-                        known.join(", ")
-                    ),
-                });
-            };
-            bodies.push(b.clone());
-        }
-        union_many(&bodies).ok_or_else(|| CadError::EvalFailed {
-            feature: "Pattern".into(),
-            reason: format!(
-                "could not union the {} referenced source bodies — they are probably \
-                 disjoint, which truck-shapeops cannot union",
-                bodies.len()
-            ),
-        })
+        combine
     }
 }
 
-/// The pattern INSTANCES, deliberately not unioned.
-///
-/// Pre-unioning them was the bug that made "pattern this hole four
-/// times" a silent no-op. Pattern copies are normally disjoint, and
-/// truck-shapeops returns `None` for a union of disjoint solids —
-/// there are no intersection curves to work with, the same reason the
-/// enclosed-cavity Shell could never succeed. `union_many` swallowed
-/// that failure and returned just the first body, so the caller
-/// received one un-translated copy and combined it with the running
-/// body it was already identical to. Zero change, no error.
-///
-/// Returning the instances lets the caller fold them into the running
-/// body one at a time. Each of those booleans has real intersection
-/// curves (each cutter genuinely meets the part), so they can actually
-/// succeed.
-/// The TOOL body of the referenced features — the operand they cut
-/// with — for a subtractive or intersecting pattern.
-///
-/// Falls back to the output body with a clear error rather than
-/// silently patterning the wrong thing: a feature that never cut
-/// anything (a plain Extrude) has no tool, and patterning its result
-/// subtractively would carve the part away instead of replicating a
-/// cut.
-fn resolve_pattern_tool(
-    features: &[String],
-    prior_tools: &HashMap<String, Solid>,
-    prior_outputs: &HashMap<String, Solid>,
-    current: Option<&Solid>,
-) -> CadResult<Solid> {
-    if features.is_empty() {
-        // Falling back to `current` here made the ENTIRE PART the
-        // cutting tool: the pattern carved the body with translated
-        // copies of itself, which is never what anyone means by
-        // "pattern this cut". A subtractive pattern has to name the
-        // cutting feature — there is no sensible default.
-        let _ = (current, prior_outputs);
-        return Err(CadError::EvalFailed {
-            feature: "Pattern".into(),
-            reason: "a subtractive pattern must name the cutting feature in `features` \
-                     (e.g. features = [\"Hole1\"]); with none given there is no tool to \
-                     replicate, and using the whole part as its own cutter is never intended"
-                .into(),
-        });
-    }
-    let mut bodies: Vec<Solid> = Vec::new();
-    for name in features {
-        match prior_tools.get(name) {
-            Some(t) => bodies.push(t.clone()),
-            None => {
-                let known: Vec<&str> = prior_tools.keys().map(|s| s.as_str()).collect();
-                return Err(CadError::EvalFailed {
-                    feature: "Pattern".into(),
-                    reason: if prior_outputs.contains_key(name) {
-                        format!(
-                            "feature '{name}' exists but is not a cutting feature, so it has no \
-                             tool to replicate. A subtractive pattern needs a source that removes \
-                             material (hole, or a feature with combine = subtract). Features with \
-                             tools: [{}]",
-                            known.join(", ")
-                        )
-                    } else {
-                        format!("pattern source feature '{name}' not found")
-                    },
-                });
+fn is_legacy_edge_ref(s: &str) -> bool {
+    !s.contains('|')
+        && s.rsplit_once("/edge-").map_or(false, |(_, n)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// `"M6"` or `"M6x0.75"` -> (major mm, pitch mm). Coarse pitch from ISO 261
+/// when none is given.
+fn parse_metric_tap(s: &str) -> Option<(f64, f64)> {
+    let t = s.trim().to_ascii_uppercase();
+    let body = t.strip_prefix('M')?;
+    let (major, pitch) = match body.split_once('X') {
+        Some((a, b)) => (a.trim().parse::<f64>().ok()?, Some(b.trim().parse::<f64>().ok()?)),
+        None => (body.trim().parse::<f64>().ok()?, None),
+    };
+    let coarse = [
+        (1.6, 0.35), (2.0, 0.4), (2.5, 0.45), (3.0, 0.5), (4.0, 0.7), (5.0, 0.8), (6.0, 1.0), (8.0, 1.25),
+        (10.0, 1.5), (12.0, 1.75), (14.0, 2.0), (16.0, 2.0), (20.0, 2.5), (24.0, 3.0), (30.0, 3.5),
+    ];
+    let pitch = match pitch {
+        Some(p) => p,
+        None => coarse.iter().find(|(d, _)| (d - major).abs() < 1e-9)?.1,
+    };
+    (major > pitch && pitch > 0.0).then_some((major, pitch))
+}
+
+/// World points of a path sketch's line chain.
+fn path_points(path: &Sketch, frame: &Frame) -> CadResult<Vec<Point3>> {
+    let mut pts: Vec<Point3> = Vec::new();
+    for e in &path.entities {
+        match e {
+            SketchEntity::Line { p1, p2 } => {
+                let a = frame.to_world(*p1);
+                let b = frame.to_world(*p2);
+                if pts.last().map_or(true, |p| (*p - a).magnitude() > 1e-9) {
+                    pts.push(a);
+                }
+                pts.push(b);
             }
+            SketchEntity::Point { p } => pts.push(frame.to_world(*p)),
+            _ => {}
         }
     }
-    union_many(&bodies).ok_or_else(|| CadError::EvalFailed {
-        feature: "Pattern".into(),
-        reason: "referenced features produced no tool bodies".into(),
-    })
-}
-
-fn pattern_linear(source: &Solid, dir: [f64; 3], step: f64, count: u32) -> Vec<Solid> {
-    let dir_vec = Vector3::new(dir[0], dir[1], dir[2]);
-    let dir_norm = dir_vec.magnitude();
-    let unit = if dir_norm > 1e-9 { dir_vec / dir_norm } else { Vector3::unit_x() };
-    let mut copies = vec![source.clone()];
-    for i in 1..count {
-        let offset = unit * (step * i as f64);
-        copies.push(builder::translated(source, offset));
+    if pts.len() < 2 {
+        return Err(err("Sweep", "the path must be a chain of lines (or points) with at least two points"));
     }
-    copies
-}
-
-/// Circular pattern instances — see [`pattern_linear`] for why these
-/// are returned un-unioned.
-fn pattern_circular(
-    source: &Solid,
-    origin: Point3,
-    axis: Vector3,
-    total_angle: f64,
-    count: u32,
-) -> Vec<Solid> {
-    if count < 2 {
-        return vec![source.clone()];
-    }
-    // Full-360 sweep wraps evenly; partial sweep distributes
-    // endpoints exactly.
-    let step = if (total_angle.abs() - TAU).abs() < 1e-6 {
-        total_angle / count as f64
-    } else {
-        total_angle / (count - 1) as f64
-    };
-    let mut copies = vec![source.clone()];
-    for i in 1..count {
-        let theta = step * i as f64;
-        copies.push(builder::rotated(source, origin, axis, Rad(theta)));
-    }
-    copies
-}
-
-// ============================================================================
-// Split
-// ============================================================================
-
-fn build_halfspace_slab(origin: Point3, normal: Vector3, half_extent: f64) -> Solid {
-    // Plane frame — pick any two orthonormal vectors perpendicular to `normal`.
-    let n = normal.normalize();
-    let up = if n.x.abs() < 0.9 { Vector3::unit_x() } else { Vector3::unit_y() };
-    let tangent1 = up.cross(n).normalize();
-    let tangent2 = n.cross(tangent1);
-
-    let e = half_extent;
-    // Build a square face on the plane centered on origin.
-    let c00 = origin + (-tangent1 * e) + (-tangent2 * e);
-    let c10 = origin + ( tangent1 * e) + (-tangent2 * e);
-    let c11 = origin + ( tangent1 * e) + ( tangent2 * e);
-    let c01 = origin + (-tangent1 * e) + ( tangent2 * e);
-
-    let v00 = builder::vertex(c00);
-    let v10 = builder::vertex(c10);
-    let v11 = builder::vertex(c11);
-    let v01 = builder::vertex(c01);
-    let wire: Wire = vec![
-        builder::line(&v00, &v10),
-        builder::line(&v10, &v11),
-        builder::line(&v11, &v01),
-        builder::line(&v01, &v00),
-    ].into();
-    let face = builder::try_attach_plane(&[wire])
-        .expect("half-space plane face construction should never fail");
-    // Sweep along +normal for a large extent — that's the slab.
-    builder::tsweep(&face, n * (half_extent * 2.0))
-}
-
-// ============================================================================
-// Combine helpers + boolean ops
-// ============================================================================
-
-/// Apply `FeatureOp` to combine a feature's output body with the
-/// running body.
-fn finish_combine(
-    current: Option<&Solid>,
-    new_body: Solid,
-    op: crate::FeatureOp,
-) -> CadResult<FeatureEvalResult> {
-    use crate::FeatureOp::*;
-    // Subtract/Intersect consume `new_body` as an OPERAND rather than
-    // contributing it to the result, which makes it this feature's
-    // tool. Recording it here covers every subtractive feature at
-    // once — a Hole passes its cutter through this exact path.
-    let tool = match op {
-        Subtract | Intersect => Some(new_body.clone()),
-        _ => None,
-    };
-    let mut degraded: Option<String> = None;
-    let result = match op {
-        NewBody => new_body,
-        Add => match current {
-            Some(cur) => boolean_or(cur, &new_body).unwrap_or_else(|| {
-                // The union failed. Keeping the new body preserves the
-                // feature's work, but the result is NOT the union that
-                // was asked for — the running body has been dropped.
-                // Say so: a caller that cannot tell this happened will
-                // build its next operation on geometry it never asked
-                // for and misattribute the error many steps later.
-                degraded = Some(
-                    "union failed; kept this feature's body and dropped the previous running \
-                     body (truck-shapeops returns None when the operands share no intersection \
-                     curves, e.g. when they are disjoint)"
-                        .to_string(),
-                );
-                new_body
-            }),
-            None => new_body,
-        },
-        Subtract => match current {
-            Some(cur) => boolean_not(cur, &new_body).ok_or_else(|| CadError::Kernel(
-                "Subtract: boolean difference failed".into()
-            ))?,
-            None => return Err(CadError::EvalFailed {
-                feature: "Subtract".into(),
-                reason: "no running body to subtract from".into(),
-            }),
-        },
-        Intersect => match current {
-            Some(cur) => boolean_and(cur, &new_body).ok_or_else(|| CadError::Kernel(
-                "Intersect: boolean intersect failed".into()
-            ))?,
-            None => return Err(CadError::EvalFailed {
-                feature: "Intersect".into(),
-                reason: "no running body to intersect with".into(),
-            }),
-        },
-    };
-    Ok(FeatureEvalResult::ReplacedBody {
-        body: result,
-        note: degraded.clone(),
-        mesh_round: None,
-        tool_body: tool,
-        degraded,
-    })
-}
-
-/// Union a slice of solids into one, via pairwise boolean-or.
-/// Returns None if no bodies or if every union fails.
-fn union_many(bodies: &[Solid]) -> Option<Solid> {
-    let mut iter = bodies.iter();
-    let mut acc = iter.next().cloned()?;
-    for next in iter {
-        // Propagate the failure instead of keeping `acc`.
-        //
-        // The old `.unwrap_or(acc)` made the documented "returns None
-        // if every union fails" impossible: this function could only
-        // ever return `Some`, so every caller's `.ok_or_else(...)`
-        // guard was dead code and each silently received the FIRST
-        // body in place of the union. Concretely, a Pattern over two
-        // holes replicated only the first — the cutters are disjoint
-        // cylinders, their union returns None, and the caller was
-        // handed cutter #1 with `failed = 0` and nothing to report.
-        acc = boolean_or(&acc, next)?;
-    }
-    Some(acc)
-}
-
-/// Boolean OR (union) via truck-shapeops. Thin layer so the
-/// one-time swap to a newer truck version lands in a single spot.
-/// `pub(crate)` so `parts_csg` can reuse the scale-normalized path.
-pub(crate) fn boolean_or(a: &Solid, b: &Solid) -> Option<Solid> {
-    boolean_normalized(a, b, |x, y, tol| truck_shapeops::or(x, y, tol))
-}
-
-pub(crate) fn boolean_and(a: &Solid, b: &Solid) -> Option<Solid> {
-    boolean_normalized(a, b, |x, y, tol| truck_shapeops::and(x, y, tol))
-}
-
-/// Difference (A ∖ B) = A ∩ ¬B. truck-shapeops 0.4 exports only
-/// `or` + `and`, but `truck_topology::Solid::not()` inverts face
-/// orientation, turning the solid inside-out — this is exactly how
-/// truck's own `punched-cube-shapeops` example computes difference.
-///
-/// Known limitation (shapeops 0.4): coplanar/flush faces between the
-/// operands degenerate the intersection curve and the op returns
-/// `None`. Cuts should protrude through the faces they enter (the
-/// evaluator's Hole arm over-extends its cut body for this reason).
-pub(crate) fn boolean_not(a: &Solid, b: &Solid) -> Option<Solid> {
-    // Invert INSIDE the normalized op — i.e. after the rescale.
-    // Scaling an already-inverted solid via builder::transformed
-    // breaks shapeops (every tolerance panics in IntersectionCurve);
-    // scale-then-invert matches truck's own example order and works.
-    boolean_normalized(a, b, |x, y, tol| {
-        let mut y_inverted = y.clone();
-        y_inverted.not();
-        truck_shapeops::and(x, &y_inverted, tol)
-    })
-}
-
-// ============================================================================
-// Reference resolution
-// ============================================================================
-
-fn resolve_plane(s: &str) -> CadResult<(Point3, Vector3)> {
-    // v0: built-in planes by name. Feature-produced reference planes
-    // resolve via a lookup into prior outputs — that path lands with
-    // the full reference-tree plumbing.
-    match s {
-        "xy" => Ok((Point3::origin(), Vector3::unit_z())),
-        "xz" => Ok((Point3::origin(), Vector3::unit_y())),
-        "yz" => Ok((Point3::origin(), Vector3::unit_x())),
-        other => Err(CadError::EvalFailed {
-            feature: "plane lookup".into(),
-            reason: format!("unsupported plane '{}' — v0 supports xy/xz/yz; \
-                             feature-produced planes land with reference-tree plumbing", other),
-        }),
-    }
-}
-
-/// World axis by name, for circular patterns.
-///
-/// The `_ => Y` fallback this used to have meant a typo (`"Z "`,
-/// `"vertical"`, an edge reference the resolver does not understand)
-/// silently swept the pattern about the WRONG axis and reported
-/// success. Its sibling `resolve_axis` directly below already errored
-/// on an unknown name; the two disagreeing was the whole bug.
-fn resolve_world_axis(s: &str) -> CadResult<(Point3, Vector3)> {
-    match s.trim() {
-        "x" | "world/x" => Ok((Point3::origin(), Vector3::unit_x())),
-        "y" | "world/y" => Ok((Point3::origin(), Vector3::unit_y())),
-        "z" | "world/z" => Ok((Point3::origin(), Vector3::unit_z())),
-        other => Err(CadError::EvalFailed {
-            feature: "Pattern".into(),
-            reason: format!(
-                "unknown circular-pattern axis '{other}' — expected x, y or z. \
-                 Edge references are not resolvable here yet."
-            ),
-        }),
-    }
-}
-
-fn resolve_axis(s: &str, _sk: &Sketch) -> CadResult<(Point3, Vector3)> {
-    // v0: world axis names. Edge references like "Extrude1/edge-4"
-    // land with the reference-tree plumbing alongside ReferencePlane.
-    match s {
-        "x" | "world/x" => Ok((Point3::origin(), Vector3::unit_x())),
-        "y" | "world/y" => Ok((Point3::origin(), Vector3::unit_y())),
-        "z" | "world/z" => Ok((Point3::origin(), Vector3::unit_z())),
-        other => Err(CadError::EvalFailed {
-            feature: "axis lookup".into(),
-            reason: format!("unsupported axis '{}' — v0 supports x/y/z world axes; \
-                             edge refs land with reference-tree plumbing", other),
-        }),
-    }
+    Ok(pts)
 }
 
 fn parse_sketch_ref(s: &str) -> CadResult<(String, String)> {
-    // Format: "<sketch_name>/<entity_spec>" — e.g. "Sketch1/point-0".
-    let (sk, ent) = s.split_once('/').ok_or_else(|| CadError::EvalFailed {
-        feature: "sketch ref parse".into(),
-        reason: format!("expected '<sketch>/<entity>', got '{}'", s),
-    })?;
+    let (sk, ent) = s.split_once('/').ok_or_else(|| err("sketch ref parse", format!("expected '<sketch>/<entity>', got '{s}'")))?;
     Ok((sk.to_string(), ent.to_string()))
 }
 
-/// Resolve an entity spec like `"point-2"` against a sketch.
-///
-/// The index used to be parsed and then thrown away, so every
-/// `point-N` in a sketch resolved to the same first point. Four holes
-/// referencing `point-0..3` all drilled the same spot: the first
-/// succeeded and the rest failed trying to cut a void that was already
-/// there. The reference format documented an index the kernel never
-/// honoured.
-///
-/// The index counts POINT entities, not entity slots, so `point-2` is
-/// the third `Point` in the sketch regardless of any lines drawn
-/// between them.
+/// Resolve `"point-2"` against a sketch. The index counts POINT entities,
+/// so `point-2` is the third point regardless of lines drawn between them.
 fn sketch_point_by_spec(sk: &Sketch, spec: &str) -> CadResult<[f64; 2]> {
     let points: Vec<[f64; 2]> = sk
         .entities
@@ -1642,246 +2015,173 @@ fn sketch_point_by_spec(sk: &Sketch, spec: &str) -> CadResult<[f64; 2]> {
             _ => None,
         })
         .collect();
-
-    // A bare name, or anything without a trailing index, keeps the old
-    // meaning: the first point, or the sketch origin when there is none.
-    let idx = spec
-        .rsplit_once('-')
-        .and_then(|(_, n)| n.parse::<usize>().ok());
-
+    let idx = spec.rsplit_once('-').and_then(|(_, n)| n.parse::<usize>().ok());
     match idx {
-        Some(i) => points.get(i).copied().ok_or_else(|| CadError::EvalFailed {
-            feature: "Hole".into(),
-            reason: format!(
-                "'{spec}' refers to point {i}, but the sketch has {} point entit{} \
-                 (valid indices 0..{}). Add the point to the sketch, or reference an existing one.",
-                points.len(),
-                if points.len() == 1 { "y" } else { "ies" },
-                points.len().saturating_sub(1)
-            ),
+        Some(i) => points.get(i).copied().ok_or_else(|| {
+            err(
+                "Hole",
+                format!(
+                    "'{spec}' refers to point {i}, but the sketch has {} point entit{} (valid indices 0..{}).",
+                    points.len(),
+                    if points.len() == 1 { "y" } else { "ies" },
+                    points.len().saturating_sub(1)
+                ),
+            )
         }),
         None => Ok(points.first().copied().unwrap_or([0.0, 0.0])),
     }
 }
 
-// ============================================================================
-// Math helpers
-// ============================================================================
-
-fn reflection_matrix(origin: Point3, normal: Vector3) -> Matrix4 {
-    let n = normal.normalize();
-    // I - 2 n nᵀ in 3x3, then embed in homogeneous 4x4 with the
-    // translation part set so the reflection is about the plane
-    // through `origin`.
-    let nx = n.x; let ny = n.y; let nz = n.z;
-    let r00 = 1.0 - 2.0 * nx * nx;
-    let r01 =       -2.0 * nx * ny;
-    let r02 =       -2.0 * nx * nz;
-    let r10 =       -2.0 * ny * nx;
-    let r11 = 1.0 - 2.0 * ny * ny;
-    let r12 =       -2.0 * ny * nz;
-    let r20 =       -2.0 * nz * nx;
-    let r21 =       -2.0 * nz * ny;
-    let r22 = 1.0 - 2.0 * nz * nz;
-
-    // Translation: t = origin - R * origin
-    let ox = origin.x; let oy = origin.y; let oz = origin.z;
-    let tx = ox - (r00 * ox + r01 * oy + r02 * oz);
-    let ty = oy - (r10 * ox + r11 * oy + r12 * oz);
-    let tz = oz - (r20 * ox + r21 * oy + r22 * oz);
-
-    Matrix4::new(
-        r00, r10, r20, 0.0,
-        r01, r11, r21, 0.0,
-        r02, r12, r22, 0.0,
-        tx,  ty,  tz,  1.0,
-    )
-}
-
-fn resolve_length_meters(s: &str, vars: &HashMap<String, String>) -> CadResult<f64> {
-    // `resolve_quantity_explained`, not `resolve_quantity`: every
-    // algorithmic parameter now resolves through one rule chain
-    // (literal, then variable, then expression), so every one of them
-    // should fail with the same vocabulary. The `Option` variant throws
-    // the reason away, which was survivable when a value could only be
-    // a literal or a variable name and wrong meant misspelt. An
-    // expression has many more ways to be wrong (an unknown name nested
-    // inside it, unbalanced parentheses, adding a length to a scalar),
-    // and "could not resolve 'wall * 2'" names none of them.
+pub(crate) fn resolve_length_meters(s: &str, vars: &HashMap<String, String>) -> CadResult<f64> {
     let q = crate::feature_tree::resolve_quantity_explained(s, vars)
-        .map_err(|why| CadError::EvalFailed {
-            feature: "length lookup".into(),
-            reason: format!("could not resolve '{s}': {why}"),
-        })?;
+        .map_err(|why| err("length lookup", format!("could not resolve '{s}': {why}")))?;
     match q.unit {
         crate::Unit::Length(_) => Ok(q.to_si()),
-        // A bare number has NO defensible reading as a length.
-        // `Quantity::parse` returns `Unit::Scalar` for it, and folding
-        // that into this arm meant `to_si()` handed back the raw value
-        // as METRES: `height = "10"` on a part authored in millimetres
-        // produced a body 1000x too large, with every status reporting
-        // success and every validity check passing — a 10 m plate is
-        // perfectly watertight and manifold. Unlike an angle (where a
-        // bare number sensibly means degrees) there is no sane default
-        // between metres and millimetres, so refuse and say so.
+        // A bare number has no defensible reading as a length: metres and
+        // millimetres are both plausible and 1000x apart, so refuse.
         crate::Unit::Scalar => Err(CadError::UnitMismatch {
-            // Name BOTH the reference and what it resolved to. `s` is
-            // usually a variable name, so reporting it alone reads as
-            // "the bare number 'height'" — which is nonsense to whoever
-            // wrote `height = "10"` and is looking for the mistake.
             expected: format!(
-                "a length with a unit, e.g. \"0.02 m\" or \"20 mm\" — '{s}' resolved to the \
-                 unitless value {}",
+                "a length with a unit, e.g. \"0.02 m\" or \"20 mm\" — '{s}' resolved to the unitless value {}",
                 q.value
             ),
             got: "scalar (no unit)".into(),
         }),
-        other => Err(CadError::UnitMismatch {
-            expected: "length".into(),
-            got: format!("{:?}", other),
-        }),
+        other => Err(CadError::UnitMismatch { expected: "length".into(), got: format!("{other:?}") }),
     }
 }
 
-fn resolve_angle_radians(s: &str, vars: &HashMap<String, String>) -> CadResult<f64> {
+pub(crate) fn resolve_angle_radians(s: &str, vars: &HashMap<String, String>) -> CadResult<f64> {
     let q = crate::feature_tree::resolve_quantity_explained(s, vars)
-        .map_err(|why| CadError::EvalFailed {
-            feature: "angle lookup".into(),
-            reason: format!("could not resolve '{s}': {why}"),
-        })?;
+        .map_err(|why| err("angle lookup", format!("could not resolve '{s}': {why}")))?;
     match q.unit {
         crate::Unit::Angle(_) => Ok(q.to_si()),
-        crate::Unit::Scalar   => Ok(q.value * PI / 180.0), // bare numbers treated as degrees
-        other => Err(CadError::UnitMismatch {
-            expected: "angle".into(),
-            got: format!("{:?}", other),
-        }),
+        crate::Unit::Scalar => Ok(q.value * PI / 180.0), // bare numbers are degrees
+        other => Err(CadError::UnitMismatch { expected: "angle".into(), got: format!("{other:?}") }),
     }
 }
 
 // ============================================================================
-// Tessellation — truck Solid → flat triangle arrays via truck-meshalgo
+// Tessellation
 // ============================================================================
 
-/// Default deviation tolerance for tessellation, in meters (the
-/// engine is meter-native). 1 mm keeps curved surfaces crisp at
-/// part scale without exploding triangle counts. Override per tree
-/// via `metadata.mesh_tolerance`.
+/// Default deviation tolerance for tessellation, in metres.
 pub const DEFAULT_MESH_TOLERANCE: f64 = 0.001;
 
-/// Tessellate a truck `Solid` into flat triangle arrays ready to lift
-/// into a Bevy `Mesh` (engine side) or a glTF primitive (exporter).
-/// The kernel crate stays Bevy-free — output is plain `f32` arrays.
+/// Tessellate a truck `Solid` into flat triangle arrays, one face at a
+/// time so every triangle knows its face (`face_ids` is the face's index
+/// in `solid.face_iter()` order; `face_names` is left empty).
 ///
-/// `tolerance` is the maximum deviation between the true surface and
-/// the triangle mesh, in model units (meters). Clamped to stay above
-/// truck's internal epsilon, which `triangulation` panics below.
+/// Surfaces are evaluated at unit scale: the same absolute scale floor
+/// that breaks shapeops booleans on metre-native parts makes truck's
+/// Newton projections diverge during triangulation of boolean results.
+/// Positions are scaled back with plain f32 math. Everything runs under
+/// `catch_unwind`: a kernel panic must never take down the editor.
 pub fn tessellate_solid(solid: &Solid, tolerance: f64) -> EvalMesh {
     use truck_meshalgo::filters::{NormalFilters, OptimizingFilter};
-    use truck_meshalgo::tessellation::{MeshableShape, MeshedShape, RobustMeshableShape};
+    use truck_meshalgo::tessellation::{MeshableShape, RobustMeshableShape};
 
-    // Normalize to unit scale before evaluating any surface — the
-    // same absolute scale floor that breaks shapeops booleans on
-    // meter-native parts (see `boolean_normalized`) makes truck's
-    // Newton projections diverge (and panic) during triangulation
-    // of boolean results. Tessellate at ~unit size, then emit
-    // positions scaled back with plain f32 math — no truck
-    // transform touches the output.
     let diagonal = solid_bbox_diagonal(solid);
     let scale = if diagonal > 1.0e-12 { 1.0 / diagonal } else { 1.0 };
     let solid = builder::transformed(solid, Matrix4::from_scale(scale));
     let tolerance = (tolerance * scale).max(1.0e-5);
     let inv_scale = (1.0 / scale) as f32;
 
-    // Fast path requires boundary curves to ride exactly on their
-    // surfaces. Boolean (shapeops) output can violate that within
-    // tolerance — faces then come back `None` and would silently
-    // drop, leaving holes. Detect and retry with the robust
-    // (project-onto-surface) path before giving up on those faces.
-    // Both paths run under catch_unwind: truck unwrap()s internal
-    // Newton projections, and a kernel panic must never take down
-    // the editor — degrade to an empty mesh instead.
-    let Ok(mut poly) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let Ok(meshed) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut meshed = solid.triangulation(tolerance);
+        // The fast path needs boundary curves to ride exactly on their
+        // surfaces; boolean output can violate that, and those faces come
+        // back None. Retry with the projecting path before dropping them.
         if count_missing_faces(&meshed) > 0 {
             meshed = solid.robust_triangulation(tolerance);
         }
-        meshed.to_polygon()
+        meshed
     })) else {
         return EvalMesh::default();
     };
 
-    // Weld attributes duplicated along shared edges so the triangle
-    // soup becomes a connected (closed, for the fast path) surface,
-    // drop anything the weld orphaned, then fill missing normals
-    // from face geometry. `false` = never overwrite the analytic
-    // surface normals tessellation already produced.
-    poly.put_together_same_attrs(truck_base::tolerance::TOLERANCE);
-    poly.remove_degenerate_faces().remove_unused_attrs();
-    poly.add_naive_normals(false);
-
-    // Expand truck's per-corner (pos, uv, nor) index triples into a
-    // single index space, deduplicating identical triples so shared
-    // smooth-surface corners stay welded while crease corners (same
-    // position, different normal) stay split.
-    let attrs = poly.attributes();
-    let mut remap: HashMap<(usize, Option<usize>, Option<usize>), u32> = HashMap::new();
     let mut out = EvalMesh::default();
-    for tri in poly.faces().triangle_iter() {
-        for v in tri {
-            let key = (v.pos, v.uv, v.nor);
-            let next = remap.len() as u32;
-            let idx = *remap.entry(key).or_insert_with(|| {
-                let p = attrs.positions[v.pos];
-                out.positions.push([
-                    p.x as f32 * inv_scale,
-                    p.y as f32 * inv_scale,
-                    p.z as f32 * inv_scale,
-                ]);
-                let n = match v.nor {
-                    Some(i) => attrs.normals[i],
-                    None => Vector3::new(0.0, 0.0, 0.0),
-                };
-                out.normals.push([n.x as f32, n.y as f32, n.z as f32]);
-                let t = match v.uv {
-                    Some(i) => attrs.uv_coords[i],
-                    None => Vector2::new(0.0, 0.0),
-                };
-                out.uvs.push([t.x as f32, t.y as f32]);
-                next
-            });
-            out.indices.push(idx);
+    let mut face_index = 0u32;
+    for shell in meshed.boundaries() {
+        for face in shell.face_iter() {
+            if let Some(mut poly) = face.surface() {
+                if !face.orientation() {
+                    poly.invert();
+                }
+                poly.put_together_same_attrs(truck_base::tolerance::TOLERANCE);
+                poly.remove_degenerate_faces().remove_unused_attrs();
+                poly.add_naive_normals(false);
+                let attrs = poly.attributes();
+                let mut remap: HashMap<(usize, Option<usize>, Option<usize>), u32> = HashMap::new();
+                for tri in poly.faces().triangle_iter() {
+                    for v in tri {
+                        let key = (v.pos, v.uv, v.nor);
+                        let next = out.positions.len() as u32;
+                        let idx = *remap.entry(key).or_insert_with(|| {
+                            let p = attrs.positions[v.pos];
+                            out.positions.push([p.x as f32 * inv_scale, p.y as f32 * inv_scale, p.z as f32 * inv_scale]);
+                            let n = match v.nor {
+                                Some(i) => attrs.normals[i],
+                                None => Vector3::new(0.0, 0.0, 0.0),
+                            };
+                            out.normals.push([n.x as f32, n.y as f32, n.z as f32]);
+                            let t = match v.uv {
+                                Some(i) => attrs.uv_coords[i],
+                                None => Vector2::new(0.0, 0.0),
+                            };
+                            out.uvs.push([t.x as f32, t.y as f32]);
+                            next
+                        });
+                        out.indices.push(idx);
+                    }
+                    out.face_ids.push(face_index);
+                }
+            }
+            face_index += 1;
         }
     }
     out
 }
 
-/// Soften sharp mesh creases as an interim Fillet/Chamfer.
-///
-/// For each geometric position that has multiple split-normals (a crease
-/// after tessellation), pull the corner **inward** along the average
-/// outward normal and blend the normals. Does not change triangle count —
-/// pure attribute edit so colliders / GLB stay simple.
+/// Tessellate a body, with its face names.
+pub fn tessellate_body(body: &Body, tolerance: f64) -> EvalMesh {
+    let mut m = tessellate_solid(&body.solid, tolerance);
+    m.face_names = body.face_names.clone();
+    m.face_bodies = vec![body.name.clone(); body.face_names.len()];
+    m
+}
+
+/// Concatenate meshes, offsetting indices and face ids.
+pub fn merge_meshes(meshes: Vec<EvalMesh>) -> EvalMesh {
+    let mut out = EvalMesh::default();
+    for m in meshes {
+        let base = out.positions.len() as u32;
+        let face_base = out.face_names.len() as u32;
+        out.positions.extend(m.positions);
+        out.normals.extend(m.normals);
+        out.uvs.extend(m.uvs);
+        out.indices.extend(m.indices.iter().map(|i| i + base));
+        out.face_ids.extend(m.face_ids.iter().map(|f| f + face_base));
+        out.face_names.extend(m.face_names);
+        out.face_bodies.extend(m.face_bodies);
+    }
+    out
+}
+
+/// Visual-only crease softening, kept solely for legacy positional
+/// fillet/chamfer references (see `Model::blend`). It moves vertices and
+/// blends normals; it does not change the solid.
 fn soften_mesh_creases(mesh: &mut EvalMesh, radius: f32) {
     if mesh.positions.is_empty() || radius <= 0.0 {
         return;
     }
     let n = mesh.positions.len();
-    // Quantize positions for welding keys (1 µm bins).
     let key_of = |p: [f32; 3]| -> (i32, i32, i32) {
-        (
-            (p[0] * 1.0e6).round() as i32,
-            (p[1] * 1.0e6).round() as i32,
-            (p[2] * 1.0e6).round() as i32,
-        )
+        ((p[0] * 1.0e6).round() as i32, (p[1] * 1.0e6).round() as i32, (p[2] * 1.0e6).round() as i32)
     };
     let mut buckets: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::new();
     for i in 0..n {
         buckets.entry(key_of(mesh.positions[i])).or_default().push(i);
     }
-
-    // Estimate a safe max offset from mesh extent so tiny parts don't
-    // invert and huge parts still get a visible round.
     let mut min_p = [f32::INFINITY; 3];
     let mut max_p = [f32::NEG_INFINITY; 3];
     for p in &mesh.positions {
@@ -1890,96 +2190,64 @@ fn soften_mesh_creases(mesh: &mut EvalMesh, radius: f32) {
             max_p[a] = max_p[a].max(p[a]);
         }
     }
-    let extent = ((max_p[0] - min_p[0]).powi(2)
-        + (max_p[1] - min_p[1]).powi(2)
-        + (max_p[2] - min_p[2]).powi(2))
-    .sqrt()
-    .max(1.0e-6);
-    let max_off = (radius.min(extent * 0.15)).max(0.0);
-
+    let extent = ((max_p[0] - min_p[0]).powi(2) + (max_p[1] - min_p[1]).powi(2) + (max_p[2] - min_p[2]).powi(2))
+        .sqrt()
+        .max(1.0e-6);
+    let max_off = radius.min(extent * 0.15).max(0.0);
     let mut new_positions = mesh.positions.clone();
     let mut new_normals = mesh.normals.clone();
     if new_normals.len() != n {
         new_normals = vec![[0.0, 1.0, 0.0]; n];
     }
-
     for indices in buckets.values() {
         if indices.len() < 2 {
             continue;
         }
-        // Average outward normal across crease splits.
         let mut avg = [0.0f32; 3];
         for &i in indices {
-            let nn = new_normals[i];
-            avg[0] += nn[0];
-            avg[1] += nn[1];
-            avg[2] += nn[2];
+            for a in 0..3 {
+                avg[a] += new_normals[i][a];
+            }
         }
         let len = (avg[0] * avg[0] + avg[1] * avg[1] + avg[2] * avg[2]).sqrt();
         if len < 1.0e-8 {
             continue;
         }
-        avg[0] /= len;
-        avg[1] /= len;
-        avg[2] /= len;
-
-        // Measure crease strength: min pairwise normal dot.
+        for a in avg.iter_mut() {
+            *a /= len;
+        }
         let mut min_dot = 1.0f32;
         for (a, &ia) in indices.iter().enumerate() {
             for &ib in indices.iter().skip(a + 1) {
-                let na = new_normals[ia];
-                let nb = new_normals[ib];
-                let d = na[0] * nb[0] + na[1] * nb[1] + na[2] * nb[2];
-                min_dot = min_dot.min(d);
+                let (na, nb) = (new_normals[ia], new_normals[ib]);
+                min_dot = min_dot.min(na[0] * nb[0] + na[1] * nb[1] + na[2] * nb[2]);
             }
         }
-        // Only soften genuine creases (angle ≳ 25°).
         if min_dot > 0.9 {
             continue;
         }
-        // Stronger creases get more of the radius.
-        let strength = (1.0 - min_dot).clamp(0.0, 1.0);
-        let off = max_off * strength * 0.55;
+        let off = max_off * (1.0 - min_dot).clamp(0.0, 1.0) * 0.55;
         if off <= 1.0e-9 {
             continue;
         }
-        // Pull inward (opposite outward average) for convex corners.
         for &i in indices {
-            new_positions[i][0] -= avg[0] * off;
-            new_positions[i][1] -= avg[1] * off;
-            new_positions[i][2] -= avg[2] * off;
-            // Blend normal toward average for softer shading.
+            for a in 0..3 {
+                new_positions[i][a] -= avg[a] * off;
+            }
             let nn = new_normals[i];
-            let mut blended = [
-                nn[0] * 0.45 + avg[0] * 0.55,
-                nn[1] * 0.45 + avg[1] * 0.55,
-                nn[2] * 0.45 + avg[2] * 0.55,
-            ];
-            let bl = (blended[0] * blended[0]
-                + blended[1] * blended[1]
-                + blended[2] * blended[2])
-                .sqrt()
-                .max(1.0e-8);
-            blended[0] /= bl;
-            blended[1] /= bl;
-            blended[2] /= bl;
-            new_normals[i] = blended;
+            let mut b = [nn[0] * 0.45 + avg[0] * 0.55, nn[1] * 0.45 + avg[1] * 0.55, nn[2] * 0.45 + avg[2] * 0.55];
+            let bl = (b[0] * b[0] + b[1] * b[1] + b[2] * b[2]).sqrt().max(1.0e-8);
+            for c in b.iter_mut() {
+                *c /= bl;
+            }
+            new_normals[i] = b;
         }
     }
     mesh.positions = new_positions;
     mesh.normals = new_normals;
 }
 
-/// Count faces whose tessellation failed (`surface() == None`) in a
-/// meshed shape — the trigger for the robust-triangulation retry.
-fn count_missing_faces<P, C, S: Clone>(
-    meshed: &truck_topology::Solid<P, C, Option<S>>,
-) -> usize {
-    meshed
-        .boundaries()
-        .iter()
-        .flat_map(|shell| shell.face_iter())
-        .filter(|face| face.surface().is_none())
-        .count()
+/// Count faces whose tessellation failed (`surface() == None`).
+fn count_missing_faces<P, C, S: Clone>(meshed: &truck_topology::Solid<P, C, Option<S>>) -> usize {
+    meshed.boundaries().iter().flat_map(|shell| shell.face_iter()).filter(|face| face.surface().is_none()).count()
 }
-
