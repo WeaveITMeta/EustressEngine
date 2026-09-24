@@ -969,12 +969,20 @@ fn load_binary_ecs_instances(
     // duplicate parts on Super Station, each rendered, shadowed, collided and
     // visibility-tested twice. A core is the same entity as a live instance
     // when its stored id derives from that instance's uuid.
-    let before = existing_ids.len();
-    existing_ids.extend(live_instances.iter().filter_map(|i| {
-        eustress_common::instance_create::uuid_hex_to_bytes(&i.uuid)
-            .map(|b| super::bake_cores::stored_id_from_uuid(&b))
-    }));
-    let live_from_tree = existing_ids.len() - before;
+    //
+    // Both derivations go in: the canonical id, and the legacy one bakes
+    // before v3 wrote. `bake_cores` re-keys legacy cores on open, but if that
+    // upgrade was interrupted, a core it has not reached yet must still be
+    // recognised here, or it spawns a second copy of a live part.
+    let mut live_from_tree = 0usize;
+    for uuid in live_instances
+        .iter()
+        .filter_map(|i| eustress_common::instance_create::uuid_hex_to_bytes(&i.uuid))
+    {
+        live_from_tree += 1;
+        existing_ids.insert(super::bake_cores::stored_id_from_uuid(&uuid));
+        existing_ids.insert(super::bake_cores::legacy_stored_id_from_uuid(&uuid));
+    }
 
     let mut spawned = 0usize;
     let mut already_live = 0usize;

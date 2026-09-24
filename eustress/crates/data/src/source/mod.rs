@@ -218,6 +218,25 @@ pub trait DataSource: Send + Sync {
     fn fetch(&self) -> Result<Frame>;
 }
 
+/// Build the provider a config names. Construction validates what each
+/// provider needs; the network is touched only when the caller probes
+/// ([`DataSource::test_connection`]) or fetches.
+pub fn open(config: SourceConfig) -> Result<Box<dyn DataSource>> {
+    Ok(match config.kind {
+        SourceKind::Csv => Box::new(csv::CsvSource::new(config)),
+        SourceKind::Rest => Box::new(rest::RestSource::new(config)?),
+        SourceKind::GraphQl => Box::new(graphql::GraphQlSource::new(config)?),
+        SourceKind::Postgres => Box::new(postgres::PostgresSource::new(config)?),
+        SourceKind::S3 => Box::new(s3::S3Source::new(config)?),
+        SourceKind::Firebase => Box::new(firebase::FirebaseSource::new(config)?),
+        SourceKind::Supabase => Box::new(supabase::SupabaseSource::new(config)?),
+        SourceKind::AzureBlob => Box::new(azure::AzureBlobSource::new(config)?),
+        SourceKind::Oracle => Box::new(oracle::OracleSource::new(config)?),
+        SourceKind::Neo4j => Box::new(graphdb::Neo4jSource::new(config)?),
+        SourceKind::Neptune => Box::new(graphdb::NeptuneSource::new(config)?),
+    })
+}
+
 /// Validate a config for its provider without touching the network.
 ///
 /// Pure: same input always yields the same answer, in CI, offline. This is the

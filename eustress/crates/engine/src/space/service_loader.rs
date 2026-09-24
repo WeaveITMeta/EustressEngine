@@ -424,6 +424,15 @@ pub fn save_service_to_file_signed(
     let toml_str = toml::to_string_pretty(&definition)
         .map_err(|e| format!("Failed to serialize service: {}", e))?;
 
+    // A service can be listed in the Explorer before its folder exists: canonical
+    // services are synthesized as header-only entries in Spaces that predate
+    // them, and the folder is otherwise created lazily with the first child.
+    // Without this the first property edit on such a service failed with a
+    // path-not-found error and the value never persisted.
+    if let Some(parent) = service.toml_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
+    }
     std::fs::write(&service.toml_path, toml_str)
         .map_err(|e| format!("Failed to write {}: {}", service.toml_path.display(), e))?;
 

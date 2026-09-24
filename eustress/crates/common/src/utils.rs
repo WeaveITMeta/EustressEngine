@@ -17,6 +17,69 @@ pub fn unique_name(base: &str, existing: &[String]) -> String {
     }
 }
 
+// ── Performance switches ────────────────────────────────────────────────
+//
+// A performance change that keeps an equivalent older path keeps both behind
+// a named switch, so one binary can be measured with the change on and off:
+// alternate launches on the same Space, same camera. Every switch is on
+// unless `EUSTRESS_PERF_OFF` names it (a comma-separated list, or `all`). The
+// variable is read once, at first use, and does not change during a run, so
+// a switch may decide which systems a plugin registers.
+
+/// The switches `EUSTRESS_PERF_OFF` turns off, lower-cased.
+pub fn perf_switches_off() -> &'static [String] {
+    static OFF: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    OFF.get_or_init(|| {
+        std::env::var("EUSTRESS_PERF_OFF")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+}
+
+/// Whether the performance change named `key` is on (see above).
+pub fn perf_on(key: &str) -> bool {
+    !perf_switches_off()
+        .iter()
+        .any(|s| s == "all" || s.eq_ignore_ascii_case(key))
+}
+
+/// Whether `query` matches at least one entity, found with a parallel walk.
+///
+/// `Query::is_empty` stops at the first match, but on a quiet frame nothing
+/// matches, so a change-filtered query checks every row on one thread. This
+/// checks the same rows spread over the compute pool. The answer is the same
+/// and so is the change window, which belongs to the calling system.
+pub fn par_any<F: bevy::ecs::query::QueryFilter>(query: &bevy::prelude::Query<(), F>) -> bool {
+    let hit = std::sync::atomic::AtomicBool::new(false);
+    query.par_iter().for_each(|()| {
+        hit.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    hit.into_inner()
+}
+
+/// Whether a change probe matches anything: [`par_any`] under the
+/// `idle_par_any` switch, `!is_empty()` without it.
+pub fn probe_any<F: bevy::ecs::query::QueryFilter>(query: &bevy::prelude::Query<(), F>) -> bool {
+    if perf_on("idle_par_any") {
+        par_any(query)
+    } else {
+        !query.is_empty()
+    }
+}
+
+/// How many entities `query` matches, summed over its tables instead of
+/// counted one by one. Only filters decided per archetype (`With`,
+/// `Without`) are accepted, which is what makes the iterator's size hint
+/// exact.
+pub fn count_matching<F: bevy::ecs::query::ArchetypeFilter>(
+    query: &bevy::prelude::Query<(), F>,
+) -> usize {
+    query.iter().size_hint().0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

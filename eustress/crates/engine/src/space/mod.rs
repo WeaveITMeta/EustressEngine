@@ -62,6 +62,12 @@ pub mod world_db_binary;
 pub mod promote;
 #[cfg(feature = "world-db")]
 pub mod db_export;
+/// A world as `.echk` chunks: what publishing uploads and hosting serves.
+#[cfg(feature = "world-db")]
+pub mod echk_export;
+/// Publishing a Universe to the gallery as `.echk` chunks.
+#[cfg(feature = "world-db")]
+pub mod echk_publish;
 #[cfg(feature = "world-db")]
 pub mod residency;
 /// Velocity-predictive streaming: prefetch along the heading, order the

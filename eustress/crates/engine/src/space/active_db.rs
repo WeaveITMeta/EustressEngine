@@ -729,28 +729,154 @@ mod imp {
         let Some(rel) = rel_key(&a.root, abs) else {
             return false;
         };
+        let uuid = eustress_common::instance_create::uuid_hex_to_bytes(uuid_hex)
+            .filter(|b| *b != [0u8; 16]);
+        purge_rel_locked(a, &rel, uuid, class_name)
+    }
 
+    /// The body of [`purge_path_all_stores`], for a caller already holding the
+    /// `ACTIVE` read guard: [`delete_binary_instance`] purges a baked part's
+    /// tree half through it. `std::sync::RwLock` is not re-entrant, so taking
+    /// the guard a second time could deadlock behind a queued writer.
+    fn purge_rel_locked(a: &Active, rel: &str, uuid: Option<[u8; 16]>, class_name: &str) -> bool {
         // Tree partition + its binary twin (what `delete_path` already did).
-        let removed_toml = a.db.delete_file(&rel).is_ok();
+        let removed_toml = a.db.delete_file(rel).is_ok();
         let _ = a.db.delete_file(&format!("{rel}{BIN_SUFFIX}"));
 
         // Resolve the UUID: the entity's own hex first, else the path index.
-        let uuid: Option<[u8; 16]> =
-            eustress_common::instance_create::uuid_hex_to_bytes(uuid_hex)
-                .filter(|b| *b != [0u8; 16])
-                .or_else(|| a.db.path_to_uuid(&rel).ok().flatten());
+        let uuid = uuid.or_else(|| a.db.path_to_uuid(rel).ok().flatten());
 
-        // Clear every uuid-keyed store `migrate_identity` populated. The
-        // `entities_uuid` core is THE resurrector; the indices are pointers.
         if let Some(uuid) = uuid {
+            // A baked leaf (`bake_cores`) is ALSO stored as a Morton core, and
+            // below the streaming threshold boot-load spawns any core whose
+            // part is not live: a survivor here is a deleted part that comes
+            // back next session. Purge it while the uuid-primary copy, which
+            // says where it is keyed, still exists.
+            purge_baked_core_locked(a, &uuid, class_name);
+            // Clear every uuid-keyed store `migrate_identity` populated. The
+            // `entities_uuid` core is THE resurrector; the indices are pointers.
             let _ = a.db.delete_entity_by_uuid(&uuid);
             let _ = a.db.delete_uuid_to_path(&uuid);
             if !class_name.is_empty() {
                 let _ = a.db.delete_class_index(class_name, &uuid);
             }
         }
-        let _ = a.db.delete_path_to_uuid(&rel);
+        let _ = a.db.delete_path_to_uuid(rel);
         removed_toml
+    }
+
+    /// Delete the Morton core a bake wrote for `uuid`, with its synthetic
+    /// `path_to_uuid` entry. The key is the stored id plus the cell the core
+    /// was written in; the uuid-primary copy holds the same bytes, so its
+    /// translation names that cell. Both the canonical and the legacy id are
+    /// tried, since a bake before v3 wrote the latter. Exact single keys only,
+    /// never a range, so no other entity's core can be caught.
+    fn purge_baked_core_locked(a: &Active, uuid: &[u8; 16], class_name: &str) {
+        let copy_at = a
+            .db
+            .get_entity_core_by_uuid(uuid)
+            .ok()
+            .flatten()
+            .and_then(|b| eustress_worlddb::decode_instance_core(&b).ok())
+            .map(|c| c.t);
+        let ids = [
+            crate::space::bake_cores::stored_id_from_uuid(uuid),
+            crate::space::bake_cores::legacy_stored_id_from_uuid(uuid),
+        ];
+        if let Some(pos) = copy_at {
+            for id in ids {
+                let _ = a.db.delete_instance_core(
+                    eustress_worlddb::EntityId(id),
+                    (pos[0], pos[1], pos[2]),
+                );
+            }
+        }
+        if !class_name.is_empty() {
+            for id in ids {
+                let _ = a
+                    .db
+                    .delete_path_to_uuid(&crate::space::bake_cores::synthetic_rel(class_name, id));
+            }
+        }
+    }
+
+    /// The tree row a baked core was made from, if `uuid` has one: the row
+    /// `uuid_to_path` names, confirmed to be this entity by its own
+    /// `[metadata] uuid` (or, when the row carries none, by `path_to_uuid`
+    /// pointing back), so a stale index can never aim a delete at another
+    /// entity's folder. `None` for a part that only ever existed as a core
+    /// (created or imported), whose index names its synthetic path.
+    fn baked_tree_rel_locked(a: &Active, uuid: &[u8; 16], synthetic_rel: &str) -> Option<String> {
+        let rel = a.db.uuid_to_path(uuid).ok().flatten()?;
+        if rel == synthetic_rel || rel.contains("/__bin_") || !rel.ends_with("/_instance.toml") {
+            return None;
+        }
+        let bytes = a.db.get_file(&rel).ok().flatten()?;
+        let row_uuid = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|text| text.parse::<toml::Table>().ok())
+            .and_then(|doc| {
+                doc.get("metadata")?
+                    .get("uuid")?
+                    .as_str()
+                    .map(str::to_owned)
+            });
+        let same_entity = match row_uuid {
+            Some(hex) => eustress_common::instance_create::uuid_hex_to_bytes(&hex) == Some(*uuid),
+            None => a.db.path_to_uuid(&rel).ok().flatten() == Some(*uuid),
+        };
+        same_entity.then_some(rel)
+    }
+
+    /// Move a tree entity's folder into `.eustress/trash/`, the reversible
+    /// destination the editor's Delete uses (`undo::Action::reserve_trash_path`
+    /// names it). `None` when there is no folder, which is normal in a migrated
+    /// Space, or when the move failed; the caller purges the database rows
+    /// either way.
+    fn trash_entity_folder(root: &Path, rel: &str) -> Option<PathBuf> {
+        let mut toml_path = root.to_path_buf();
+        for seg in rel.split('/').filter(|s| !s.is_empty()) {
+            toml_path.push(seg);
+        }
+        let folder = toml_path.parent()?;
+        // An entity folder sits under a service folder; a service root is
+        // never moved.
+        if folder.parent()? == root || !folder.is_dir() {
+            return None;
+        }
+        let dest = crate::undo::Action::reserve_trash_path(root, folder);
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // A short retry, as the editor's Delete does: antivirus and indexers
+        // hold new files open for a moment.
+        let mut last_err = None;
+        for attempt in 0..3 {
+            match std::fs::rename(folder, &dest) {
+                Ok(()) => {
+                    tracing::info!(
+                        target: "eustress_engine::active_db",
+                        from = %folder.display(),
+                        to = %dest.display(),
+                        "baked part's tree folder moved to trash"
+                    );
+                    return Some(dest);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < 2 {
+                        std::thread::sleep(std::time::Duration::from_millis(30));
+                    }
+                }
+            }
+        }
+        tracing::warn!(
+            target: "eustress_engine::active_db",
+            folder = %folder.display(),
+            error = ?last_err,
+            "could not move a baked part's tree folder to trash; its database rows are purged, but the next open's reconcile will read it back in"
+        );
+        None
     }
 
     /// Eager snapshot of every binary-ECS core in the active Space's
@@ -1029,7 +1155,15 @@ mod imp {
     /// from all five stores so a deleted binary part does NOT resurrect
     /// from the DB on the next boot-load (and is no longer found by uuid /
     /// path / class). Best-effort; a delete of a missing key is harmless.
-    /// `pos` MUST be the entity's last-persisted (Morton-key) position.
+    /// `pos` should be the entity's position; the core is also deleted where
+    /// its uuid-primary copy says it is keyed, which covers a moved part.
+    ///
+    /// A BAKED part (`bake_cores`) is one entity stored twice: its tree rows,
+    /// plus a folder on disk in a Space with loose files, and the core it
+    /// streams from. Both halves go. Removing only the core left the tree half
+    /// to come back: through the Explorer's database section, when the Space
+    /// drops below the streaming threshold, in a publish, and from the folder
+    /// at the next reconcile. The folder is moved to `.eustress/trash/`.
     pub fn delete_binary_instance(
         stored_id: u64,
         uuid: &[u8; 16],
@@ -1043,15 +1177,55 @@ mod imp {
         let Some(a) = g.as_ref() else {
             return false;
         };
+        // A part spawned from a core carries no uuid of its own
+        // (`ArchInstanceCore` has none), so callers may pass zeros. Create,
+        // import and bake all register the synthetic path, which resolves it.
+        let uuid: [u8; 16] = if *uuid != [0u8; 16] {
+            *uuid
+        } else {
+            a.db
+                .path_to_uuid(synthetic_rel)
+                .ok()
+                .flatten()
+                .unwrap_or([0u8; 16])
+        };
+        let known = uuid != [0u8; 16];
+
+        // Where the uuid-primary copy says the core is keyed: a move re-keys
+        // the core and the copy together, so this finds a core whose cell the
+        // caller's position has left. Read before anything below deletes it.
+        let copy_at = if known {
+            a.db
+                .get_entity_core_by_uuid(&uuid)
+                .ok()
+                .flatten()
+                .and_then(|b| eustress_worlddb::decode_instance_core(&b).ok())
+                .map(|c| c.t)
+        } else {
+            None
+        };
+
+        if known {
+            if let Some(tree_rel) = baked_tree_rel_locked(a, &uuid, synthetic_rel) {
+                trash_entity_folder(&a.root, &tree_rel);
+                purge_rel_locked(a, &tree_rel, Some(uuid), class_name);
+            }
+        }
+
         let eid = eustress_worlddb::EntityId(stored_id);
         let core_removed = a
             .db
             .delete_instance_core(eid, (pos[0], pos[1], pos[2]))
             .is_ok();
-        let _ = a.db.delete_entity_by_uuid(uuid);
+        if let Some(t) = copy_at {
+            let _ = a.db.delete_instance_core(eid, (t[0], t[1], t[2]));
+        }
+        if known {
+            let _ = a.db.delete_entity_by_uuid(&uuid);
+            let _ = a.db.delete_uuid_to_path(&uuid);
+            let _ = a.db.delete_class_index(class_name, &uuid);
+        }
         let _ = a.db.delete_path_to_uuid(synthetic_rel);
-        let _ = a.db.delete_uuid_to_path(uuid);
-        let _ = a.db.delete_class_index(class_name, uuid);
         // Causal op-log: record the semantic delete iff the canonical core was
         // removed. (promote teardown also routes here — shows as a Delete in
         // pass 1; labeled via `reason` in the causality follow-up.)
@@ -1060,7 +1234,7 @@ mod imp {
                 &a.db,
                 eustress_worlddb::MutationActor::System,
                 eustress_worlddb::MutationOp::Delete,
-                uuid,
+                &uuid,
                 class_name,
                 synthetic_rel,
                 None,

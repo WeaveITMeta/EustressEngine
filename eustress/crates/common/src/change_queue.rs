@@ -357,7 +357,9 @@ fn emit_scene_change_deltas(
     //    `evicted` is a plain `Res` (no per-reader cursor to leak), so it
     //    plays no part in this gate — it is only consulted on the slow path
     //    below, which runs whenever `removed` is non-empty. ──
-    let driver_hit = !driver.is_empty();
+    // On a quiet frame the driver matches nothing, so the check visits every
+    // row; `probe_any` spreads those rows over the compute pool.
+    let driver_hit = crate::utils::probe_any(&driver);
     let removal_hit = !removed.is_empty();
     diag.frame(driver_hit, removal_hit, &names);
     if !driver_hit && !removal_hit {

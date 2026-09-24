@@ -145,50 +145,10 @@ impl ClassSpawner for BeamSpawner {
             ai: false,
         };
 
-        // Build the stretched cylinder. Without a `&World` we can't
-        // resolve attachments here — fall back to a default 4m segment
-        // along +Y. The Wave 4 sync system updates the transform once
-        // attachments resolve.
-        let length: f32 = 4.0;
-        let avg_radius = (beam.width0 + beam.width1).max(0.01) * 0.5;
-        let mesh_handle = ctx
-            .meshes
-            .add(Cylinder::new(avg_radius, length).mesh().build());
-
-        // Pull the first colour-sequence key as the base material
-        // colour. Empty sequences fall back to white.
-        let base_color = beam
-            .color_sequence
-            .first()
-            .map(|(_, c)| *c)
-            .unwrap_or(Color::WHITE);
-        let emissive_scalar = beam.light_emission.max(0.0);
-        let emissive = if emissive_scalar > 0.0 {
-            // LinearRgba is what bevy materials want for emissive HDR.
-            let srgba = base_color.to_srgba();
-            LinearRgba::new(
-                srgba.red * emissive_scalar,
-                srgba.green * emissive_scalar,
-                srgba.blue * emissive_scalar,
-                1.0,
-            )
-        } else {
-            LinearRgba::BLACK
-        };
-        let material = StandardMaterial {
-            base_color,
-            emissive,
-            unlit: matches!(beam.blend_mode, BeamBlendMode::Additive),
-            alpha_mode: match beam.blend_mode {
-                BeamBlendMode::Alpha => AlphaMode::Blend,
-                BeamBlendMode::Additive => AlphaMode::Add,
-                BeamBlendMode::Multiply => AlphaMode::Multiply,
-            },
-            double_sided: true,
-            cull_mode: None,
-            ..Default::default()
-        };
-        let material_handle = ctx.standard_materials.add(material);
+        // Without a `&World` the attachments can't be resolved here;
+        // `sync_beam_transforms` stretches the unit cylinder between them.
+        let mesh_handle = ctx.meshes.add(beam_mesh(&beam));
+        let material_handle = ctx.standard_materials.add(beam_material(&beam));
 
         // Default transform: stand the cylinder along Y from the
         // entity's local origin. Wave 4 sync system rewrites this once
@@ -526,6 +486,63 @@ impl ClassSpawner for BeamSpawner {
 // makes a dragged mind-map node's edges follow it instead of staying
 // wherever they were baked.
 // ============================================================================
+
+/// The beam's cylinder: unit height, because `sync_beam_transforms` writes the
+/// span between the attachments into `scale.y` (a 4 m mesh drew every edge
+/// four times too long). The radius is half the mean width. An unresolved
+/// beam shows as a 1 m stub along +Y.
+fn beam_mesh(beam: &Beam) -> Mesh {
+    let radius = ((beam.width0 + beam.width1) * 0.25).max(0.005);
+    Cylinder::new(radius, 1.0).mesh().build()
+}
+
+/// The beam's material: the first colour key (white when there is none),
+/// the first transparency key as alpha, `light_emission` as glow.
+fn beam_material(beam: &Beam) -> StandardMaterial {
+    let color = beam.color_sequence.first().map(|(_, c)| *c).unwrap_or(Color::WHITE);
+    let alpha = 1.0 - beam.transparency_sequence.first().map(|(_, t)| *t).unwrap_or(0.0).clamp(0.0, 1.0);
+    let glow = beam.light_emission.max(0.0);
+    let emissive = if glow > 0.0 {
+        // LinearRgba is what bevy materials want for emissive HDR.
+        let srgba = color.to_srgba();
+        LinearRgba::new(srgba.red * glow, srgba.green * glow, srgba.blue * glow, 1.0)
+    } else {
+        LinearRgba::BLACK
+    };
+    StandardMaterial {
+        base_color: color.with_alpha(alpha),
+        emissive,
+        unlit: matches!(beam.blend_mode, BeamBlendMode::Additive),
+        alpha_mode: match beam.blend_mode {
+            BeamBlendMode::Alpha => AlphaMode::Blend,
+            BeamBlendMode::Additive => AlphaMode::Add,
+            BeamBlendMode::Multiply => AlphaMode::Multiply,
+        },
+        double_sided: true,
+        cull_mode: None,
+        ..Default::default()
+    }
+}
+
+/// Beams loaded from a Space folder arrive as data only: the instance loader
+/// adds `Beam` and its `BeamSegmentLink`, no geometry. Give each the cylinder
+/// and material `BeamSpawner` builds, so edges on disk are visible.
+pub fn hydrate_beam_visuals(
+    mut commands: Commands,
+    beams: Query<(Entity, &Beam), (Added<Beam>, Without<Mesh3d>)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (entity, beam) in &beams {
+        let visibility = if beam.enabled { Visibility::default() } else { Visibility::Hidden };
+        commands.entity(entity).insert((
+            Mesh3d(meshes.add(beam_mesh(beam))),
+            MeshMaterial3d(materials.add(beam_material(beam))),
+            BeamLodMode::Live,
+            visibility,
+        ));
+    }
+}
 
 /// Keeps every `Beam`'s transform taut between its two attachments, every
 /// frame. Unresolved attachments (UUID doesn't match any live entity, or a

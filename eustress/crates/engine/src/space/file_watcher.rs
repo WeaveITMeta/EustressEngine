@@ -1494,7 +1494,9 @@ fn handle_file_created(
                 let mut bb_tags: Vec<String> = Vec::new();
                 if let Ok(gui_def) = super::gui_loader::load_gui_definition(&event.path) {
                     bb_tags = gui_def.tags.clone();
-                    let g = &gui_def.gui;
+                    let mut g_native = gui_def.gui.clone();
+                    super::gui_loader::billboard_lengths_to_native(&mut g_native, gui_def.metadata.unit.as_deref());
+                    let g = &g_native;
                     bb_class.size = g.resolved_size();
                     bb_class.max_distance = g.max_distance.unwrap_or(bb_class.max_distance);
                     bb_class.always_on_top = g.always_on_top.unwrap_or(bb_class.always_on_top);

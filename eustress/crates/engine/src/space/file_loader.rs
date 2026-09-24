@@ -1145,6 +1145,7 @@ const KNOWN_SERVICE_NAMES: &[&str] = &[
     "AdornmentService", "DataService",
     "Players", "StarterPack", "StarterPlayer", "ReplicatedStorage",
     "ServerStorage", "ServerScriptService", "SoundService", "Teams", "Chat",
+    "PhysicsService",
 ];
 
 /// The entry tree the loader spawns from, built ahead of time on the open
@@ -2113,7 +2114,9 @@ pub fn spawn_directory_entry(
 
         if let Ok(gui_def) = take_gui_def(&mut parsed, source, space_path, &instance_toml) {
             bb_tags = gui_def.tags.clone();
-            let g = &gui_def.gui;
+            let mut g_native = gui_def.gui.clone();
+            super::gui_loader::billboard_lengths_to_native(&mut g_native, gui_def.metadata.unit.as_deref());
+            let g = &g_native;
 
             // Geometry
             bb_class.size = g.resolved_size();
@@ -2457,6 +2460,10 @@ pub fn spawn_directory_entry(
                 get_ci(&v, "script")
                     .and_then(|s| get_ci(s, "source"))
                     .and_then(|s| s.as_str())
+                    // `source = ""` (what the class-schema self-heal writes)
+                    // means "not given": joined onto the folder it named the
+                    // folder itself, and the scan below never ran.
+                    .filter(|s| !s.trim().is_empty())
                     .map(|s| s.to_string())
             })
             .map(|rel| dir_meta.path.join(rel))

@@ -70,6 +70,7 @@ const SERVICE_FOLDERS: &[ServiceFolder] = &[
     ServiceFolder { name: "SoulService",             class: "SoulService",            icon: "soulservice",        description: "Soul and Rune scripts (.soul, .rune files)" },
     ServiceFolder { name: "MaterialService",         class: "MaterialService",        icon: "materialservice",    description: "PBR material definitions (.mat.toml files)" },
     ServiceFolder { name: "SoundService",            class: "SoundService",           icon: "soundservice",       description: "Audio - Sound effects and music" },
+    ServiceFolder { name: "PhysicsService",          class: "PhysicsService",         icon: "physicsservice",     description: "Gravity, solver settings, and which physics domains step" },
     ServiceFolder { name: "AdornmentService",        class: "AdornmentService",       icon: "adornmentservice",   description: "Beams, billboards, particles, highlights" },
     ServiceFolder { name: "DataService",             class: "DataService",            icon: "dataservice",        description: "Data Platform - datasets, series, columns, and runs" },
     ServiceFolder { name: "Website",                 class: "Website",                 icon: "website",            description: "Values a website reads - References baked into a published manifest" },
