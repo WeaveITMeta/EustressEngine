@@ -4,33 +4,24 @@
 > Premium subscriptions, Marketplace, creator payouts, Stripe Connect,
 > refund / chargeback, tax / VAT / GST, fraud detection.
 
-> **⚠️ 2026-07-05 — THIS DOCUMENT IS PARTLY SUPERSEDED.** Two corrections:
->
-> 1. **The "dual-nature" premise below is wrong.** Bliss is **not** an
->    arcade currency purchased with Steam Wallet; it is **earned only** and
->    cannot be bought. **Tickets** are the purchased currency. The
->    "regulatory arbitrage risk" flagged in the P4 pass stemmed from that
->    mistaken dual-nature reading and does not apply as written.
-> 2. **The state table is stale.** Bliss earning, the witness ledger,
->    UTC-midnight BLS distribution, treasury drip, and cosign anti-abuse
->    shipped to production 2026-07-04/05. Features 1, 7, 10 are LIVE, not
->    🔴/🟡. Marketplace (Feature 6) is a **stub** returning empty — it was
->    over-reported at 🟢 75%.
->
-> Canonical: [docs/monetization/CURRENCY.md](../monetization/CURRENCY.md).
+> The current design of both currencies, the treasury and the nightly
+> settlement is [docs/monetization/CURRENCY.md](../monetization/CURRENCY.md);
+> Ticket commerce is [docs/monetization/COMMERCE.md](../monetization/COMMERCE.md).
 
 ## Pass changelog
 
 - **P2 (2026-05-14):** New system doc; 12 features, 8 cards expanded, 10 wiring gaps.
 - **P4 (2026-05-14):** State corrections from secondary critique: Marketplace state **inflated** — purchase handler has no Bliss-debit; true state 🟡 40% (was 75%). Stripe Connect (Feature 3) is **gated by [08] KYC (Feature 14)** — not independent; effective state 🔴 0% until [08] lands. Bliss dual-nature carries **regulatory arbitrage risk** — needs legal counsel before public launch.
+- **P5 (2026-07-05):** Bliss is earned only and cannot be bought; Tickets are the purchased currency, so the P4 dual-nature risk does not apply. Bliss earning, the witness ledger, the nightly BLS distribution, the treasury drip and cosign anti-abuse are live (Features 1, 7, 10). The Marketplace (Feature 6) was a stub.
+- **P6 (2026-09-23):** Tickets live in per-account Wallet Durable Objects and are spent through the Commerce API; Stripe refunds and disputes reverse both the treasury share and the Tickets; the treasury and the nightly settlement run in a Treasury Durable Object in integer cents.
 
 ---
 
 ## Concept summary
 
-**Bliss (BLS)** has two natures:
-1. **In-game arcade currency** — Steam Wallet purchase ($0.99–$49.99), spent on cosmetics, marketplace items, creator tips. Cosmetic-only — **no pay-to-win**.
-2. **Proof-of-Contribution cryptocurrency** — Light Nodes (auto-run while engine open) and Full Nodes (opt-in, +10% bonus, stores chain data) earn Bliss. Daily payouts at UTC midnight from a USD treasury that drips to active contributors via Stripe Connect.
+**Bliss (BLS)** is earned only, by contribution the witness co-signs; it cannot be bought and does not transfer between accounts. Light Nodes (running while the engine is open) and Full Nodes (opt-in, +10%) earn it, and each night the previous day's emission is credited by share of score, with a USD treasury drip paid beside it to contributors with a verified Stripe account.
+
+**Tickets (TKT)** are the purchased currency: bought with USD and spent on products creators sell in their simulations. They never convert to Bliss.
 
 **Premium subscriptions** (3 tiers): Player Plus ($4.99/mo) — 500 Bliss/mo + queue priority + cosmetics + 10 GB saves; Creator Pro ($9.99/mo) — 40% revenue share (vs. 25% free), 1 TB storage, advanced analytics, 500 Bliss/mo; Bundle ($12.99/mo) — both + 1000 Bliss/mo.
 

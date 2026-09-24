@@ -262,6 +262,7 @@ fn service_member(lua: &Lua, class: &str, key: &str) -> LuaResult<Option<Value>>
         "TweenService" => "TweenService",
         "Debris" => "Debris",
         "ContextActionService" => "ContextActionService",
+        "MarketplaceService" => "MarketplaceService",
         _ => return Ok(None),
     };
     let t: Value = host.raw_get(table_name)?;

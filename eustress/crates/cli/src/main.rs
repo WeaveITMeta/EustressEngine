@@ -10,6 +10,7 @@
 //! - cmd_server            — `eustress server`    — start headless dedicated server
 //! - cmd_publish           — `eustress publish`   — publish Space to Cloudflare R2
 //! - cmd_sim               — `eustress sim`       — simulation history (in-process ring-buffer replay)
+//! - commerce::run         — `eustress commerce`  — products, purchases, events, listen, trigger (Stripe-CLI style)
 //!
 //! ## Drive surface (HEADLESS_RUNTIME.md §7)
 //! `bridge` is a thin wrapper over `eustress-bridge-client` (the same TCP JSON-RPC
@@ -27,6 +28,8 @@
 //! Simulation runs are per instance too: `bridge --pid <N> sim-run --duration 60
 //! --wait` runs one engine's simulation and prints that run's final values, while
 //! its siblings on the same Universe run their own.
+
+mod commerce;
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -121,6 +124,10 @@ enum Commands {
         #[command(subcommand)]
         action: ForkCommands,
     },
+
+    /// Sell products inside your published simulations: products, purchases,
+    /// events, webhooks, and a local listener, in test mode unless --live.
+    Commerce(commerce::CommerceArgs),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -541,6 +548,7 @@ async fn main() -> Result<()> {
         Commands::Publish(args) => cmd_publish(args).await,
         Commands::Sim { action } => cmd_sim(&cli.iggy_url, action).await,
         Commands::Fork { action } => cmd_fork(action).await,
+        Commands::Commerce(args) => commerce::run(args).await,
     }
 }
 

@@ -715,6 +715,10 @@ function Host.setCallback(id, name, fn)
 		callbacks[id] = t
 	end
 	t[name] = fn
+	if name == "ProcessReceipt" then
+		-- Purchases still waiting from earlier sessions load now.
+		host.commerceWanted()
+	end
 end
 
 local function callback(id, name)
@@ -875,6 +879,99 @@ function Host.dispatchActions(state, inputObject)
 	end
 end
 
+-- MarketplaceService: products the creator sells in this simulation. The
+-- catalog, prompts and receipts are the DataModel's commerce queues
+-- (datamodel/commerce.rs); the engine buys and fulfills through the Commerce
+-- API. Scripts name a product by its number, as Roblox scripts name a
+-- developer product by its id.
+local marketplaceSignals = {
+	PromptProductPurchaseFinished = newSignal(),
+	PromptGamePassPurchaseFinished = newSignal(),
+	PromptPurchaseFinished = newSignal(),
+}
+
+-- A script that asks about products before the catalog arrives waits for it
+-- (up to 10 s), as Roblox's calls wait for the web.
+local function marketplaceReady()
+	local status = host.commerceStatus()
+	if status == "loading" and running() ~= nil and isyieldable() then
+		for _ = 1, 100 do
+			Sched.wait(0.1)
+			status = host.commerceStatus()
+			if status ~= "loading" then
+				break
+			end
+		end
+	end
+	return status
+end
+
+Host.MarketplaceService = {
+	PromptProductPurchase = function(_, player, productId)
+		host.commercePrompt(player, productId, "consumable")
+	end,
+	PromptGamePassPurchase = function(_, player, passId)
+		host.commercePrompt(player, passId, "pass")
+	end,
+	PromptPurchase = function(_, player, productId)
+		host.commercePrompt(player, productId, "any")
+	end,
+	GetProductInfo = function(_, productId)
+		local status = marketplaceReady()
+		local info = host.commerceProduct(productId)
+		if info == nil then
+			if status ~= "ready" then
+				error("MarketplaceService is " .. status, 2)
+			end
+			error("MarketplaceService:GetProductInfo(): this simulation has no product " .. tostring(productId), 2)
+		end
+		return info
+	end,
+	UserOwnsGamePassAsync = function(_, userId, passId)
+		marketplaceReady()
+		return host.commerceOwns(userId, passId)
+	end,
+	PlayerOwnsAsset = function(_, player, productId)
+		marketplaceReady()
+		return host.commerceOwns(player, productId)
+	end,
+	PromptProductPurchaseFinished = marketplaceSignals.PromptProductPurchaseFinished,
+	PromptGamePassPurchaseFinished = marketplaceSignals.PromptGamePassPurchaseFinished,
+	PromptPurchaseFinished = marketplaceSignals.PromptPurchaseFinished,
+}
+
+-- Prompts that closed fire their signal. Receipts wait until a script sets
+-- MarketplaceService.ProcessReceipt; then each runs on its own thread, so a
+-- callback that yields (a DataStore write) holds up nothing else.
+local function stepMarketplace()
+	if host.commercePending() == 0 then
+		return
+	end
+	local players = game:GetService("Players")
+	for _, o in ipairs(host.commerceTakeOutcomes()) do
+		if o.prompt == "consumable" then
+			marketplaceSignals.PromptProductPurchaseFinished:Fire(o.userId, o.productId, o.purchased)
+		elseif o.prompt == "pass" then
+			marketplaceSignals.PromptGamePassPurchaseFinished:Fire(players:GetPlayerByUserId(o.userId), o.productId, o.purchased)
+		else
+			marketplaceSignals.PromptPurchaseFinished:Fire(players:GetPlayerByUserId(o.userId), o.productId, o.purchased)
+		end
+	end
+	local processReceipt = callback(host.idOf(game:GetService("MarketplaceService")), "ProcessReceipt")
+	if processReceipt == nil then
+		return
+	end
+	for _, receipt in ipairs(host.commerceTakeReceipts()) do
+		Sched.spawn(function()
+			local ok, decision = pcall(processReceipt, receipt)
+			if not ok then
+				report(decision, running())
+			end
+			host.commerceDecision(receipt.PurchaseId, ok and decision == Host.Enum.ProductPurchaseDecision.PurchaseGranted)
+		end)
+	end
+end
+
 -- The Mouse (Player:GetMouse()). Live values come from the host each read.
 local mouseSignals = {
 	Button1Down = newSignal(),
@@ -945,6 +1042,7 @@ function Host.frame(now, dt)
 	RunServiceSignals.PreSimulation:Fire(dt)
 	RunServiceSignals.Stepped:Fire(now, dt)
 	Sched.step(now)
+	stepMarketplace()
 	stepTweens(dt)
 	RunServiceSignals.PostSimulation:Fire(dt)
 	RunServiceSignals.Heartbeat:Fire(dt)
@@ -964,6 +1062,9 @@ function Host.reset()
 		Host.dropSignals(id)
 	end
 	for _, sig in pairs(RunServiceSignals) do
+		sig:DisconnectAll()
+	end
+	for _, sig in pairs(marketplaceSignals) do
 		sig:DisconnectAll()
 	end
 	for k in pairs(activeTweens) do

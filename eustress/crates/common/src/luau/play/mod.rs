@@ -38,7 +38,10 @@ use std::sync::Arc;
 
 use mlua::{Function, Lua, Table, Value, Variadic};
 
-use crate::datamodel::{DmEvent, DmValue, EnumItem, InputPhase, InstanceId, OutputLevel, SharedDataModel};
+use crate::datamodel::{
+    CommerceStatus, DmEvent, DmValue, EnumItem, InputPhase, InstanceId, OutputLevel, ProductKind, PurchasePrompt,
+    ReceiptDecision, SharedDataModel,
+};
 use crate::luau::types::{LuauCFrame, LuauColor3, LuauUDim2, LuauVector3, UserDataPeek};
 use crate::scripting::{CFrame, Color3, Vector3};
 
@@ -283,6 +286,7 @@ impl PlayLuau {
                 Ok(())
             })?)?;
         }
+        install_commerce(lua, &host_fns, dm)?;
         globals.set("__host", host_fns)?;
 
         // `game` / `workspace` before the prelude, which reads them lazily.
@@ -655,6 +659,186 @@ fn join_args(lua: &Lua, args: Variadic<Value>) -> mlua::Result<String> {
     Ok(parts.join(" "))
 }
 
+/// Host functions behind `MarketplaceService` (its Luau half is
+/// `Host.MarketplaceService` in the prelude). They read and queue only; the
+/// engine talks to the Commerce API (see `datamodel::commerce`). Every one
+/// wakes commerce, so the catalog loads the first time a script asks.
+fn install_commerce(lua: &Lua, host_fns: &Table, dm: &SharedDataModel) -> mlua::Result<()> {
+    {
+        let dm = dm.clone();
+        host_fns.raw_set("commerceStatus", lua.create_function(move |_, ()| {
+            let mut g = dm.lock();
+            g.commerce.wake();
+            Ok(match &g.commerce.status {
+                CommerceStatus::Idle | CommerceStatus::Loading => "loading".to_string(),
+                CommerceStatus::Ready => "ready".to_string(),
+                CommerceStatus::Unavailable(why) => format!("unavailable: {why}"),
+            })
+        })?)?;
+    }
+    {
+        let dm = dm.clone();
+        host_fns.raw_set("commerceWanted", lua.create_function(move |_, ()| {
+            dm.lock().commerce.wake();
+            Ok(())
+        })?)?;
+    }
+    {
+        let dm = dm.clone();
+        host_fns.raw_set("commercePrompt", lua.create_function(move |_, (player, product, prompt): (Value, Value, String)| {
+            let user_id = user_id_arg(&dm, &player)?;
+            let product = product_arg(&product)?;
+            let expects = match prompt.as_str() {
+                "pass" => Some(ProductKind::Pass),
+                "consumable" => Some(ProductKind::Consumable),
+                _ => None,
+            };
+            let mut g = dm.lock();
+            g.commerce.wake();
+            g.commerce.prompts.push(PurchasePrompt { user_id, product, expects });
+            Ok(())
+        })?)?;
+    }
+    {
+        let dm = dm.clone();
+        host_fns.raw_set("commerceProduct", lua.create_function(move |lua, id: Value| {
+            let Ok(number) = product_arg(&id) else { return Ok(Value::Nil) };
+            let product = dm.lock().commerce.product(number).cloned();
+            let Some(p) = product else { return Ok(Value::Nil) };
+            let info = lua.create_table()?;
+            info.raw_set("Name", p.name)?;
+            info.raw_set("Description", p.description)?;
+            info.raw_set("PriceInTickets", p.price as f64)?;
+            // Where scripts ported from Roblox read the price.
+            info.raw_set("PriceInRobux", p.price as f64)?;
+            info.raw_set("ProductId", p.number as f64)?;
+            info.raw_set("TargetId", p.number as f64)?;
+            info.raw_set("IsForSale", p.active)?;
+            info.raw_set(
+                "ProductType",
+                match p.kind {
+                    ProductKind::Consumable => "Developer Product",
+                    ProductKind::Pass => "Game Pass",
+                },
+            )?;
+            info.raw_set("IconImageAssetId", 0)?;
+            if let Some(icon) = p.icon {
+                info.raw_set("IconUrl", icon)?;
+            }
+            info.raw_set("EustressProductId", p.id)?;
+            Ok(Value::Table(info))
+        })?)?;
+    }
+    {
+        let dm = dm.clone();
+        host_fns.raw_set("commerceOwns", lua.create_function(move |_, (user, pass): (Value, Value)| {
+            let user_id = user_id_arg(&dm, &user)?;
+            let number = product_arg(&pass)?;
+            let mut g = dm.lock();
+            g.commerce.wake();
+            // Studio knows the passes of the signed-in account, who plays the
+            // local player.
+            let local = g.local_player.and_then(|p| g.get_prop(p, "UserId")).and_then(|v| v.as_number());
+            Ok(local == Some(user_id) && g.commerce.owned_passes.contains(&number))
+        })?)?;
+    }
+    {
+        let dm = dm.clone();
+        host_fns.raw_set("commercePending", lua.create_function(move |_, ()| {
+            Ok(dm.lock().commerce.waiting_for_scripts() as f64)
+        })?)?;
+    }
+    {
+        let dm = dm.clone();
+        host_fns.raw_set("commerceTakeReceipts", lua.create_function(move |lua, ()| {
+            let receipts: Vec<_> = dm.lock().commerce.receipts.drain(..).collect();
+            let out = lua.create_table()?;
+            for (i, r) in receipts.into_iter().enumerate() {
+                // Roblox's receiptInfo, with Tickets for the currency.
+                let info = lua.create_table()?;
+                info.raw_set("PurchaseId", r.purchase_id)?;
+                info.raw_set("PlayerId", r.user_id)?;
+                info.raw_set("ProductId", r.product as f64)?;
+                info.raw_set("CurrencySpent", r.price as f64)?;
+                info.raw_set("CurrencyType", convert::enum_item(lua, &EnumItem::new("CurrencyType", "Tickets"))?)?;
+                info.raw_set("PlaceIdWherePurchased", r.sim_id.as_str())?;
+                info.raw_set("SimulationId", r.sim_id)?;
+                if let Some(space) = r.space {
+                    info.raw_set("Space", space)?;
+                }
+                out.raw_set(i + 1, info)?;
+            }
+            Ok(out)
+        })?)?;
+    }
+    {
+        let dm = dm.clone();
+        host_fns.raw_set("commerceTakeOutcomes", lua.create_function(move |lua, ()| {
+            let outcomes = std::mem::take(&mut dm.lock().commerce.outcomes);
+            let out = lua.create_table()?;
+            for (i, o) in outcomes.into_iter().enumerate() {
+                let t = lua.create_table()?;
+                t.raw_set("userId", o.user_id)?;
+                t.raw_set("productId", o.product as f64)?;
+                t.raw_set(
+                    "prompt",
+                    match o.expects {
+                        Some(ProductKind::Pass) => "pass",
+                        Some(ProductKind::Consumable) => "consumable",
+                        None => "any",
+                    },
+                )?;
+                t.raw_set("purchased", o.purchased)?;
+                out.raw_set(i + 1, t)?;
+            }
+            Ok(out)
+        })?)?;
+    }
+    {
+        let dm = dm.clone();
+        host_fns.raw_set("commerceDecision", lua.create_function(move |_, (purchase_id, granted): (String, bool)| {
+            dm.lock().commerce.decisions.push(ReceiptDecision { purchase_id, granted });
+            Ok(())
+        })?)?;
+    }
+    Ok(())
+}
+
+/// A `UserId`: a Player handle's, or a number given directly.
+fn user_id_arg(dm: &SharedDataModel, v: &Value) -> mlua::Result<f64> {
+    match v {
+        Value::Integer(i) => Ok(*i as f64),
+        Value::Number(n) => Ok(*n),
+        Value::UserData(ud) => {
+            let id = ud.peek::<LInst>()?.0;
+            let g = dm.lock();
+            if g.class_of(id) != Some("Player") {
+                return Err(mlua::Error::RuntimeError("expected a Player".into()));
+            }
+            Ok(g.get_prop(id, "UserId").and_then(|v| v.as_number()).unwrap_or(0.0))
+        }
+        other => Err(mlua::Error::RuntimeError(format!("expected a Player, got {}", other.type_name()))),
+    }
+}
+
+/// A product number, as scripts pass one to `PromptProductPurchase`.
+fn product_arg(v: &Value) -> mlua::Result<u64> {
+    let n = match v {
+        Value::Integer(i) => *i as f64,
+        Value::Number(n) => *n,
+        Value::String(s) => s.to_str()?.trim().parse::<f64>().unwrap_or(0.0),
+        _ => 0.0,
+    };
+    if n >= 1.0 && n.fract() == 0.0 && n <= 999_999_999.0 {
+        Ok(n as u64)
+    } else {
+        Err(mlua::Error::RuntimeError(format!(
+            "expected a product number (a whole number from 1), got {}",
+            v.type_name()
+        )))
+    }
+}
+
 fn mouse_get(lua: &Lua, dm: &SharedDataModel, key: &str) -> mlua::Result<Value> {
     // Copy what is needed and release the lock before touching Lua.
     let (m, x, y, w, h) = {
@@ -692,4 +876,126 @@ fn mouse_get(lua: &Lua, dm: &SharedDataModel, key: &str) -> mlua::Result<Value> 
         "ClassName" => Value::String(lua.create_string("PlayerMouse")?),
         _ => Value::Nil,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::datamodel::{CommerceProduct, PromptOutcome, Receipt};
+
+    fn no_rays(_: &RayQuery) -> Option<RayHit> {
+        None
+    }
+
+    /// A VM over a tree whose local player has UserId 42, and a Script to run
+    /// code as.
+    fn session() -> (PlayLuau, SharedDataModel, InstanceId) {
+        let dm = crate::datamodel::new_shared();
+        let script = {
+            let mut g = dm.lock();
+            let players = g.get_service("Players").expect("Players");
+            let player = g.create_virtual("Player", "Creator", Some(players));
+            g.set_prop_from_engine(player, "UserId", DmValue::Number(42.0));
+            g.local_player = Some(player);
+            let service = g.get_service("ServerScriptService").expect("ServerScriptService");
+            g.create_virtual("Script", "Shop", Some(service))
+        };
+        let vm = PlayLuau::new(dm.clone()).expect("the prelude loads");
+        (vm, dm, script)
+    }
+
+    fn run(vm: &mut PlayLuau, script: InstanceId, source: &str) {
+        let launch = ScriptLaunch { instance: script, source: source.to_string(), chunk_name: "Shop".into() };
+        vm.run_scripts(vec![launch], &no_rays);
+    }
+
+    fn output(dm: &SharedDataModel) -> Vec<String> {
+        dm.lock().output.iter().map(|l| l.text.clone()).collect()
+    }
+
+    #[test]
+    fn marketplace_prompts_reach_the_commerce_queue() {
+        let (mut vm, dm, script) = session();
+        assert_eq!(dm.lock().commerce.status, CommerceStatus::Idle);
+        run(&mut vm, script, r#"
+            local MarketplaceService = game:GetService("MarketplaceService")
+            local player = game:GetService("Players"):GetPlayers()[1]
+            MarketplaceService:PromptProductPurchase(player, 3)
+            MarketplaceService:PromptGamePassPurchase(player, 7)
+        "#);
+        let g = dm.lock();
+        assert!(g.output.iter().all(|l| l.level != OutputLevel::Error), "{:?}", g.output);
+        assert_eq!(g.commerce.status, CommerceStatus::Loading, "the first use wakes commerce");
+        let asked: Vec<_> = g.commerce.prompts.iter().map(|p| (p.user_id, p.product, p.expects)).collect();
+        assert_eq!(asked, vec![(42.0, 3, Some(ProductKind::Consumable)), (42.0, 7, Some(ProductKind::Pass))]);
+    }
+
+    #[test]
+    fn receipts_wait_for_process_receipt_and_report_its_decision() {
+        let (mut vm, dm, script) = session();
+        dm.lock().commerce.receipts.push_back(Receipt {
+            purchase_id: "pur_a".into(),
+            user_id: 42.0,
+            product: 3,
+            price: 50,
+            sim_id: "sim".into(),
+            space: None,
+        });
+        vm.frame(&no_rays);
+        assert_eq!(dm.lock().commerce.receipts.len(), 1, "with no ProcessReceipt the receipt waits");
+
+        run(&mut vm, script, r#"
+            local MarketplaceService = game:GetService("MarketplaceService")
+            MarketplaceService.ProcessReceipt = function(info)
+                if info.ProductId == 3 and info.CurrencySpent == 50 and info.PlayerId == 42 then
+                    return Enum.ProductPurchaseDecision.PurchaseGranted
+                end
+                return Enum.ProductPurchaseDecision.NotProcessedYet
+            end
+            MarketplaceService.PromptProductPurchaseFinished:Connect(function(userId, productId, purchased)
+                print("finished", userId, productId, purchased)
+            end)
+        "#);
+        assert_eq!(dm.lock().commerce.status, CommerceStatus::Loading, "setting ProcessReceipt wakes commerce");
+        dm.lock().commerce.outcomes.push(PromptOutcome {
+            user_id: 42.0,
+            product: 3,
+            expects: Some(ProductKind::Consumable),
+            purchased: true,
+        });
+        vm.frame(&no_rays);
+
+        let g = dm.lock();
+        assert!(g.commerce.receipts.is_empty());
+        assert_eq!(g.commerce.decisions, vec![ReceiptDecision { purchase_id: "pur_a".into(), granted: true }]);
+        assert!(g.output.iter().any(|l| l.text == "finished 42 3 true"), "{:?}", g.output);
+    }
+
+    #[test]
+    fn product_info_and_pass_ownership_come_from_the_catalog() {
+        let (mut vm, dm, script) = session();
+        {
+            let mut g = dm.lock();
+            g.commerce.status = CommerceStatus::Ready;
+            g.commerce.catalog = vec![CommerceProduct {
+                id: "prod_x".into(),
+                number: 7,
+                name: "VIP".into(),
+                description: String::new(),
+                price: 99,
+                kind: ProductKind::Pass,
+                icon: None,
+                active: true,
+            }];
+            g.commerce.owned_passes.insert(7);
+        }
+        run(&mut vm, script, r#"
+            local MarketplaceService = game:GetService("MarketplaceService")
+            local info = MarketplaceService:GetProductInfo(7)
+            print(info.Name, info.PriceInRobux, info.ProductType)
+            print(MarketplaceService:UserOwnsGamePassAsync(42, 7), MarketplaceService:UserOwnsGamePassAsync(1, 7))
+            print(pcall(function() return MarketplaceService:GetProductInfo(8) end) == false)
+        "#);
+        assert_eq!(output(&dm), vec!["VIP 99 Game Pass", "true false", "true"]);
+    }
 }

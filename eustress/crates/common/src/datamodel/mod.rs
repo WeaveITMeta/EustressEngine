@@ -30,9 +30,11 @@
 //! [`LiveInstance::entity`].
 
 mod classes;
+mod commerce;
 mod value;
 
 pub use classes::*;
+pub use commerce::*;
 pub use value::*;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -375,6 +377,8 @@ pub struct DataModel {
     /// reports contacts for colliders that ask for them, so the engine turns
     /// reporting on for each part queued here.
     pub touch_watch: Vec<InstanceId>,
+    /// `MarketplaceService`: products, purchase prompts and receipts.
+    pub commerce: CommerceState,
     /// Bumped on every structural change, so caches keyed on the tree
     /// shape (the Rune snapshot, name lookups) know when to rebuild.
     pub structure_version: u64,
@@ -413,6 +417,7 @@ impl DataModel {
             humanoid_commands: Vec::new(),
             physics_commands: Vec::new(),
             touch_watch: Vec::new(),
+            commerce: CommerceState::default(),
             structure_version: 0,
         };
         let root = dm.alloc("DataModel", "Game", Origin::Scene);

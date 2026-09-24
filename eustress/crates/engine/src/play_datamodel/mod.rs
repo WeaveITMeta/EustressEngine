@@ -14,6 +14,9 @@
 //!                                        property writes, destroys,
 //!                                        sounds, particles, impulses, NPC
 //!                                        humanoids, the scripted camera
+//!                   commerce::drive_commerce
+//!                                        MarketplaceService purchases
+//!                                        through the Commerce API (test mode)
 //!                   end_frame            trim events, free destroyed slots
 //! OnEnter(Editing)  stop_session         stop threads, despawn what scripts
 //!                                        spawned, restore hidden storage
@@ -26,6 +29,7 @@
 pub mod apply;
 pub mod audio;
 pub mod camera;
+pub mod commerce;
 pub mod npc;
 pub mod particles;
 pub mod pull;
@@ -152,6 +156,7 @@ impl Plugin for PlayDataModelPlugin {
             .init_resource::<pull::MouseRayState>()
             .init_resource::<pull::InjectedInput>()
             .init_resource::<PlayStageClock>()
+            .init_resource::<commerce::PlayCommerce>()
             .configure_sets(
                 Update,
                 (PlayScriptSet::Pull, PlayScriptSet::Scripts, PlayScriptSet::Apply, PlayScriptSet::End)
@@ -167,7 +172,7 @@ impl Plugin for PlayDataModelPlugin {
             )
             // `seed::seed_session` is registered by PlayModeCorePlugin, which
             // owns the OnEnter(Playing) systems it has to be ordered against.
-            .add_systems(OnEnter(PlayModeState::Editing), stop_session)
+            .add_systems(OnEnter(PlayModeState::Editing), (stop_session, commerce::reset_commerce))
             .add_systems(
                 Update,
                 (
@@ -199,6 +204,8 @@ impl Plugin for PlayDataModelPlugin {
                     .chain()
                     .in_set(PlayScriptSet::Apply),
             )
+            // Its Output lines show the same frame.
+            .add_systems(Update, commerce::drive_commerce.in_set(PlayScriptSet::Apply).before(drain_output))
             .add_systems(Update, end_frame.in_set(PlayScriptSet::End))
             // Stage timing for the profiler, at the seams of the chain.
             .add_systems(Update, stage_open.in_set(PlayScriptSet::Pull).before(pull::pull_frame_state))

@@ -61,5 +61,11 @@ hex = "0.4"
 # Date/time for validation loop timestamps
 chrono = "0.4"
 
+# `eustress commerce`: where keys and the Studio sign-in live, and the
+# HMAC-SHA256 that signs events `listen` forwards (the API's webhook scheme)
+dirs = { workspace = true }
+hmac = "0.12"
+sha2 = "0.10"
+
 [features]
 default = []

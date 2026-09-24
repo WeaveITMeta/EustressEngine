@@ -155,9 +155,66 @@ namespace_id = "2001"
 # [ai]
 # binding = "AI"
 
-# Daily payout cron - runs at UTC midnight
+# Commerce (src/commerce.mjs): microtransactions inside published simulations.
+# Durable Objects rather than KV because money and ordering need what KV cannot
+# give: KV has no compare-and-set and is eventually consistent between
+# locations.
+#
+#   WALLETS        one Wallet per account: the authoritative Ticket balance
+#                  (opened from USERS user:{id}.ticket_balance, then copied to
+#                  USERS ticketbal:{id} for display), idempotency keys, passes owned,
+#                  receipts awaiting fulfillment, and an alarm-retried outbox
+#                  that finishes each purchase.
+#   COMMERCE_HUBS  one CommerceHub per creator: products, sales, events (30
+#                  days), webhook endpoints and deliveries, the `listen`
+#                  stream, API keys, and each sale's deferred value score.
+#
+# API keys are indexed in USERS as apikey:{sha256 of the key}.
+#
+# Webhook deliveries POST to URLs creators supply, through the global fetch,
+# which reaches only the public internet. Keep them off any binding's fetch
+# (service, VPC service, Tunnel): see cleanWebhookUrl in src/commerce.mjs.
+[[durable_objects.bindings]]
+name = "WALLETS"
+class_name = "Wallet"
+
+[[durable_objects.bindings]]
+name = "COMMERCE_HUBS"
+class_name = "CommerceHub"
+
+[[migrations]]
+tag = "v1-commerce"
+new_sqlite_classes = ["Wallet", "CommerceHub"]
+
+# Treasury (src/treasury.mjs): the USD pool contributors are paid from, in
+# integer cents, with every deposit, refund, dispute and payout keyed by its
+# source so a repeat changes nothing. The same object runs each night's
+# settlement (the BLS emission, the USD drip, the ledger backup) in bounded
+# steps on its alarm. One instance, named "treasury".
+[[durable_objects.bindings]]
+name = "TREASURY"
+class_name = "Treasury"
+
+[[migrations]]
+tag = "v2-treasury"
+new_sqlite_classes = ["Treasury"]
+
+# Cosign claims per account. The engine sends at most 6 claims per 5-minute
+# flush; this only meets a script. Per Cloudflare location, like the manifest
+# limiter above.
+[[ratelimits]]
+name = "COSIGN_RATE_LIMITER"
+namespace_id = "2002"
+
+  [ratelimits.simple]
+  limit = 30
+  period = 60
+
+# Hourly: each run makes sure yesterday's settlement has started (a repeat
+# does nothing); the midnight run also refreshes the model catalog and sweeps
+# moderation. See scheduled() in src/index.js.
 [triggers]
-crons = ["0 0 * * *"]
+crons = ["0 * * * *"]
 
 # Email Workers - send identity backup emails from identity@eustress.dev
 # Requires Email Routing enabled on eustress.dev in Cloudflare dashboard

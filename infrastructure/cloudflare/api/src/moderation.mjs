@@ -1327,7 +1327,9 @@ export async function handleModerationRoute(request, url, env, ctx, deps) {
     // refreshed here: a Space-only update clears it because the Universe
     // .pak no longer describes what plays, and re-reading that unchanged
     // object would hand the stale decision straight back through dedup.
-    sim.scene_size_bytes = head.size || sim.scene_size_bytes || 0;
+    // An .echk listing's r2_key is its manifest; the world's size is the
+    // chunk total its commit recorded.
+    sim.scene_size_bytes = sim.format === 'echk' ? (sim.world?.bytes || head.size || 0) : (head.size || sim.scene_size_bytes || 0);
     sim.moderation = { ...(sim.moderation || {}), status: 'pending', submitted_at: new Date().toISOString() };
     await env.SOCIAL.put(`sim:${sim.id}`, JSON.stringify(sim));
     const run = runModerationCase(sim.id, env, deps, { trigger: 'publish' }).catch(e => console.error('moderation run failed', e));
