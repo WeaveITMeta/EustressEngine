@@ -29,8 +29,13 @@ use bevy::pbr::{DistanceFog, FogFalloff};
 use tracing::info;
 
 use crate::classes::{Moon as MoonClass, Sky, Sun as SunClass};
+use crate::plugins::moon_disc::MoonDiscPlugin;
 use crate::plugins::reflections::ReflectionsPlugin;
-use crate::plugins::sky_atmosphere::SkyAtmospherePlugin;
+use crate::plugins::sky_atmosphere::{
+    luminance, moonlight_color, moonlight_lux, SkyAtmospherePlugin, SkyExposure, SkyLight,
+    SkyLightSet,
+};
+use crate::plugins::volumetric_clouds::VolumetricCloudsPlugin;
 use crate::services::lighting::{
     EustressAtmosphere, FillLight, LightingService, Moon as MoonMarker, Sun as SunMarker,
 };
@@ -42,7 +47,7 @@ use crate::services::lighting::{
 // for a different thing (procedural/sun-visible/star-visible toggles).
 pub use crate::plugins::sky_atmosphere::{
     create_gradient_skybox, create_star_field, ActiveSkyMode, NoAtmosphere, SceneAtmosphere,
-    SkyCamera, SkyConfig, SkyMode, StarField,
+    SkyBillboard, SkyCamera, SkyConfig, SkyMode, StarField,
 };
 
 // ============================================================================
@@ -59,6 +64,9 @@ impl Plugin for SharedLightingPlugin {
             .add_plugins(SkyAtmospherePlugin)
             // Local reflection probes and (opt-in) screen-space reflections.
             .add_plugins(ReflectionsPlugin)
+            // The moon's disc and the volumetric cloud layer, both drawn at
+            // sky distance and lit from `SkyLight`.
+            .add_plugins((MoonDiscPlugin, VolumetricCloudsPlugin))
             .init_resource::<LightingService>()
             .register_type::<LightingService>()
             .register_type::<Sky>()
@@ -70,14 +78,17 @@ impl Plugin for SharedLightingPlugin {
             .add_systems(
                 Update,
                 (
-                    sync_clock_time_to_sun,
-                    update_sun_position.after(sync_clock_time_to_sun),
-                    update_moon_position.after(sync_clock_time_to_sun),
-                    // Sole owner of GlobalAmbientLight. Ordered after the sun so
-                    // it reads this frame's elevation, not last frame's.
-                    update_ambient_light.after(update_sun_position),
+                    // The clock drives the classes the sky light is computed
+                    // from, so it runs first.
+                    sync_clock_time_to_sun.before(SkyLightSet),
+                    update_sun_position.after(sync_clock_time_to_sun).before(SkyLightSet),
+                    update_moon_position.after(SkyLightSet),
+                    // Sole owner of GlobalAmbientLight. After the sky light, so
+                    // it reads this frame's sun and moon, not last frame's.
+                    update_ambient_light.after(SkyLightSet),
                     update_fog_settings,
-                    sync_sun_class_to_sundisk,
+                    sync_sun_disk.after(SkyLightSet),
+                    hide_moon_sun_disk,
                 ),
             );
     }
@@ -113,11 +124,24 @@ fn setup_lighting(mut commands: Commands) {
 /// The single owner of the sun light. The engine used to run a second system
 /// over the same entity with a different intensity curve
 /// (`lighting.sun_intensity * elevation^0.4` here against
-/// `SunClass::current_intensity()` there); the two are merged, with `SunClass`
-/// winning because its noon/horizon interpolation is the better model and it is
-/// what the Properties panel edits.
+/// `SunClass::current_intensity()` there); the two are merged.
+///
+/// ## The atmosphere colours the sun; this must not
+///
+/// On the atmosphere path bevy multiplies every directional light, on every
+/// surface and in the volumetric fog, by the atmosphere's transmittance
+/// toward it and by how much of its disc clears the horizon. That IS the
+/// low sun's reddening and dimming, computed from the same medium that draws
+/// the sky. So the light carries the sun as it is above the atmosphere:
+/// `SunClass::current_color()` and `current_intensity()` reddened and dimmed
+/// it a second time, which is why golden hour came out a dim brick red
+/// (a 5 degree sun at about 3,000 lux instead of 35,000), and their twilight
+/// ramp cut the light that lights the twilight sky to zero at 6 degrees down,
+/// switching the blue hour off. Those curves remain for the cubemap paths,
+/// which have no atmosphere to do the work.
 fn update_sun_position(
     lighting: Option<ResMut<LightingService>>,
+    active: Option<Res<ActiveSkyMode>>,
     mut sun_query: Query<(&mut DirectionalLight, &mut Transform), With<SunMarker>>,
     sun_class_query: Query<&SunClass, With<SunMarker>>,
     // The Sun appears LONG after startup: the file loader spawns it when the
@@ -141,6 +165,14 @@ fn update_sun_position(
             if lighting.time_of_day > 1.0 {
                 lighting.time_of_day -= 1.0;
             }
+            // Keep the clock in step. `sync_clock_time_to_sun` and the
+            // Properties panel both read the clock string, so advancing only
+            // `time_of_day` left the sun where the clock said, frozen, for as
+            // long as the cycle ran.
+            let clock = format_clock(lighting.time_of_day);
+            if lighting.clock_time != clock {
+                lighting.clock_time = clock;
+            }
         }
     } else {
         lighting.bypass_change_detection();
@@ -156,7 +188,8 @@ fn update_sun_position(
     // `sun_dirty` is what makes the guard correct rather than merely cheap: the
     // sun arriving is itself a change, and it arrives after the resource has
     // gone quiet.
-    if !lighting.is_changed() && !lighting.cycle_enabled && sun_dirty.is_empty() {
+    let mode_changed = active.as_ref().is_some_and(|mode| mode.is_changed());
+    if !lighting.is_changed() && !lighting.cycle_enabled && sun_dirty.is_empty() && !mode_changed {
         return;
     }
 
@@ -170,13 +203,35 @@ fn update_sun_position(
         .unwrap_or_else(|| lighting.sun_direction());
 
     let scale = brightness_scale(&lighting);
+    let atmosphere = active.is_some_and(|mode| mode.0 == SkyMode::Atmosphere);
+    // Shadows stay on until the whole disc is down (it is 0.53 degrees
+    // across). The atmosphere lights surfaces from a grazing sun, and a
+    // light with no shadow map shines straight through walls: the old
+    // 3 degree cut-off lit every interior at sunrise and sunset.
+    let sun_up = sun_dir.y > -0.005;
+    // The atmosphere keeps a sun below the horizon off every surface, but it
+    // is that sun that lights the twilight sky, so the light stays on through
+    // dusk. By 10 degrees down that sky is black at any exposure; past it the
+    // light is faded out, so a camera that renders without the atmosphere
+    // (the AI capture camera) is not lit from under the ground all night.
+    let twilight = ((sun_dir.y.clamp(-1.0, 1.0).asin().to_degrees() + 16.0) / 6.0).clamp(0.0, 1.0);
     match sun_class {
-        // SunClass models colour and intensity against solar elevation, so a
-        // low sun reddens and dims the way it should.
+        Some(sc) if atmosphere => {
+            sun_light.color = arr_to_color(sc.noon_color);
+            sun_light.illuminance = sc.noon_intensity.max(0.0) * scale * twilight;
+            sun_light.shadow_maps_enabled = sc.cast_shadows && sun_up;
+        }
+        // No atmosphere to redden a low sun: `SunClass` models colour and
+        // intensity against solar elevation instead.
         Some(sc) => {
             sun_light.color = arr_to_color(sc.current_color());
             sun_light.illuminance = sc.current_intensity() * scale;
             sun_light.shadow_maps_enabled = sc.cast_shadows && sun_dir.y > 0.05;
+        }
+        None if atmosphere => {
+            sun_light.color = arr_to_color(lighting.sun_color);
+            sun_light.illuminance = lighting.sun_intensity.max(0.0) * scale * twilight;
+            sun_light.shadow_maps_enabled = lighting.shadows_enabled && sun_up;
         }
         None => {
             sun_light.color = arr_to_color(lighting.sun_color);
@@ -199,21 +254,84 @@ fn update_sun_position(
     }
 }
 
-/// Keep `SunDisk::angular_size` in step with the authored `Sun.angular_size`.
+/// The brightest the sun's disc is drawn, as a pre-tonemap value.
+///
+/// Bevy draws the disc energy-conserving: its radiance is the light's
+/// illuminance over the disc's solid angle. For the true 0.53 degree sun at
+/// `RAW_SUNLIGHT` and ev100 13 that is about 175,000, and the HDR target is
+/// 16-bit float, which ends at 65,504; past it the value becomes infinity
+/// and bloom smears it into a block. Anything above a few hundred is already
+/// pure white on screen, so the cap costs no brightness the eye could see and
+/// still leaves bloom a disc far brighter than the sky to glare from.
+pub const SUN_DISC_PEAK: f32 = 16_000.0;
+
+/// `SunDisk::intensity` that draws a disc of `angular_size` radians for a
+/// light of `illuminance` lux no brighter than [`SUN_DISC_PEAK`] at `ev100`.
+pub fn sun_disk_intensity(illuminance: f32, angular_size: f32, ev100: f32) -> f32 {
+    let solid_angle = angular_size * angular_size * 0.25 * std::f32::consts::PI;
+    let exposure = (-ev100).exp2() / 1.2;
+    let peak = illuminance.max(0.0) / solid_angle.max(1e-9) * exposure;
+    if peak <= SUN_DISC_PEAK {
+        1.0
+    } else {
+        SUN_DISC_PEAK / peak
+    }
+}
+
+/// Keep the drawn sun disc sized from `Sun.angular_size` and below the HDR
+/// ceiling at the current exposure.
 ///
 /// The disc is drawn by bevy's atmosphere from this component, so it is the one
 /// place the sun's apparent size is set.
-fn sync_sun_class_to_sundisk(mut sun_query: Query<(&SunClass, &mut SunDisk), Changed<SunClass>>) {
-    for (sun_class, mut sun_disk) in sun_query.iter_mut() {
-        let new_angular_size = sun_class.angular_size.to_radians();
-        if (sun_disk.angular_size - new_angular_size).abs() > 0.001 {
-            sun_disk.angular_size = new_angular_size;
-            info!(
-                "☀️ Sun angular_size synced: {:.1}° → {:.4} rad",
-                sun_class.angular_size, new_angular_size
-            );
+fn sync_sun_disk(
+    exposure: Res<SkyExposure>,
+    mut suns: Query<(&SunClass, &DirectionalLight, &mut SunDisk), With<SunMarker>>,
+    skies: Query<&Sky>,
+) {
+    let shown = skies.iter().next().map_or(true, |s| s.celestial_bodies_shown);
+    for (sun_class, light, mut disk) in suns.iter_mut() {
+        let angular_size = sun_class.angular_size.clamp(0.05, 20.0).to_radians();
+        let intensity = if shown {
+            sun_disk_intensity(light.illuminance, angular_size, exposure.camera_ev100)
+        } else {
+            0.0
+        };
+        if (disk.angular_size - angular_size).abs() > 1e-5 {
+            disk.angular_size = angular_size;
+        }
+        if (disk.intensity - intensity).abs() > disk.intensity.max(intensity) * 0.02 + 1e-6 {
+            disk.intensity = intensity;
         }
     }
+}
+
+/// Stop bevy drawing a second sun where the moon is.
+///
+/// Bevy's atmosphere draws a sun disc for EVERY directional light, and a
+/// light without a `SunDisk` gets `SunDisk::EARTH`: a flat, sun-bright disc
+/// sat exactly where the moon is, a small white hole in front of the moon's
+/// own disc. Intensity 0 turns the drawing off; the angular size is kept so
+/// the atmosphere still eases moonlight off as the moon sets.
+fn hide_moon_sun_disk(
+    mut commands: Commands,
+    moons: Query<(Entity, &MoonClass, Option<&SunDisk>), With<MoonMarker>>,
+) {
+    for (entity, moon, disk) in moons.iter() {
+        let angular_size = moon.angular_size.clamp(0.05, 20.0).to_radians();
+        let wanted = SunDisk { angular_size, intensity: 0.0 };
+        let stale = disk.map_or(true, |d| {
+            d.intensity != 0.0 || (d.angular_size - angular_size).abs() > 1e-5
+        });
+        if stale {
+            commands.entity(entity).insert(wanted);
+        }
+    }
+}
+
+/// `time_of_day` (0..1) as the `HH:MM:SS` the clock property shows.
+fn format_clock(time_of_day: f32) -> String {
+    let total = (time_of_day.rem_euclid(1.0) * 86_400.0).round() as u32 % 86_400;
+    format!("{:02}:{:02}:{:02}", total / 3600, (total / 60) % 60, total % 60)
 }
 
 /// Parse `LightingService.clock_time` into `Sun.time_of_day`.
@@ -227,7 +345,9 @@ fn sync_clock_time_to_sun(
     let time_of_day =
         parse_clock_time(&lighting.clock_time).unwrap_or(lighting.time_of_day * 24.0);
     for mut sun in sun_query.iter_mut() {
-        if (sun.time_of_day - time_of_day).abs() > 0.01 {
+        // A second of clock time. The old hundredth of an hour (36 s, a
+        // sixth of a degree of sun) stepped the running day cycle visibly.
+        if (sun.time_of_day - time_of_day).abs() > 1.0 / 3600.0 {
             sun.time_of_day = time_of_day;
         }
     }
@@ -246,40 +366,71 @@ fn parse_clock_time(clock_time: &str) -> Option<f32> {
 // Moon
 // ============================================================================
 
-/// Drive the moon's `DirectionalLight` from real orbital mechanics.
+/// Drive the moon's `DirectionalLight` from its place on the sky.
 ///
 /// The sole owner of the moon light. The engine's celestial plugin used to
 /// reach it too, through a `Without<Sun>` query that matched every directional
 /// light that was not the sun, and drove it with *sun* data.
+///
+/// Gated like the sun, on the moon arriving as well as on the resource. It
+/// used to wait for `lighting.is_changed()` alone, but the moon hydrates when
+/// its Space loads, long after the resource last changed, so the light kept
+/// its hydration placeholder (500 lux, from a fixed point overhead, day and
+/// night) until someone happened to edit the clock.
+///
+/// The light is the moon above the atmosphere, as the sun's is: bevy's
+/// atmosphere dims and reddens it on the way down. Its phase follows Allen's
+/// law (a quarter moon is a tenth of a full one) and it carries
+/// [`crate::plugins::sky_atmosphere::MOONLIGHT_GAIN`].
 fn update_moon_position(
     lighting: Res<LightingService>,
+    active: Option<Res<ActiveSkyMode>>,
+    sky_light: Res<SkyLight>,
     mut moon_query: Query<(&mut DirectionalLight, &mut Transform, &MoonClass), With<MoonMarker>>,
-    sun_query: Query<&SunClass, With<SunMarker>>,
+    moon_dirty: Query<(), (With<MoonMarker>, Or<(Added<MoonMarker>, Changed<MoonClass>)>)>,
+    sun_dirty: Query<(), (With<SunMarker>, Or<(Added<SunMarker>, Changed<SunClass>)>)>,
 ) {
-    if !lighting.is_changed() && !lighting.cycle_enabled {
+    let mode_changed = active.as_ref().is_some_and(|mode| mode.is_changed());
+    if !lighting.is_changed()
+        && !lighting.cycle_enabled
+        && moon_dirty.is_empty()
+        && sun_dirty.is_empty()
+        && !mode_changed
+    {
         return;
     }
 
-    let sun_data = sun_query.iter().next().cloned().unwrap_or_else(|| SunClass {
-        time_of_day: lighting.time_of_day * 24.0,
-        latitude: lighting.geographic_latitude,
-        ..Default::default()
-    });
+    let Ok((mut moon_light, mut moon_transform, moon_data)) = moon_query.single_mut() else {
+        return;
+    };
+    let moon_dir = sky_light.moon_direction;
+    let atmosphere = active.is_some_and(|mode| mode.0 == SkyMode::Atmosphere);
+    let color = moonlight_color(moon_data);
+    let lux = moonlight_lux(moon_data) * brightness_scale(&lighting);
 
-    if let Ok((mut moon_light, mut moon_transform, moon_data)) = moon_query.single_mut() {
-        let moon_dir = moon_data.direction_realistic(&sun_data);
-        let sun_elevation = sun_data.elevation();
-        let phase_illumination = moon_data.illumination();
+    moon_light.color = Color::linear_rgb(color.x, color.y, color.z);
+    moon_light.illuminance = if atmosphere {
+        // Faded out once it has set, for the same reason as the sun: a
+        // camera without the atmosphere would be lit from under the ground.
+        let risen = ((moon_dir.y.clamp(-1.0, 1.0).asin().to_degrees() + 6.0) / 4.0).clamp(0.0, 1.0);
+        lux * risen
+    } else {
+        // No atmosphere to dim a setting moon: the ground moonlight the sky
+        // model computed, in this light's colour.
+        luminance(sky_light.moon_ground) / luminance(color).max(1e-6)
+    };
+    // Moon shadows only once the sun's are gone and the moon is up and bright
+    // enough to throw one; two shadowed directional lights cost two sets of
+    // cascades, and a sliver of crescent casts nothing worth drawing.
+    let sun_down = sky_light.sun_direction.y < -0.035;
+    moon_light.shadow_maps_enabled = moon_data.cast_shadows
+        && moon_data.enabled
+        && sun_down
+        && moon_dir.y > 0.02
+        && lux > 0.5;
 
-        moon_light.color = arr_to_color(moon_data.color);
-        moon_light.illuminance =
-            (moon_data.current_intensity(sun_elevation) * phase_illumination).max(0.01);
-        moon_light.shadow_maps_enabled =
-            moon_data.cast_shadows && sun_elevation < -0.1 && phase_illumination > 0.3;
-
-        moon_transform.translation = moon_dir * 100.0;
-        moon_transform.look_at(Vec3::ZERO, Vec3::Y);
-    }
+    moon_transform.translation = moon_dir * 100.0;
+    moon_transform.look_at(Vec3::ZERO, Vec3::Y);
 }
 
 // ============================================================================
@@ -295,12 +446,12 @@ const BRIGHTNESS_REFERENCE: f32 = 2.0;
 
 /// How much `LightingService.brightness` scales the scene.
 ///
-/// It scales the **sun**, not just the ambient fill. Previously it multiplied
-/// only ambient, which — once image-based lighting became the primary ambient
-/// source and the fill dropped to a fraction of its old value — left the slider
-/// with almost no visible authority. Sunlight is what a brightness control is
-/// expected to move.
-fn brightness_scale(lighting: &LightingService) -> f32 {
+/// It scales the **sun** and the moon, not just the ambient fill. Previously it
+/// multiplied only ambient, which left the slider with almost no visible
+/// authority once image-based lighting became the primary ambient source and
+/// the fill dropped to a fraction of its old value. Sunlight is what a
+/// brightness control is expected to move.
+pub(crate) fn brightness_scale(lighting: &LightingService) -> f32 {
     (lighting.brightness / BRIGHTNESS_REFERENCE).clamp(0.0, 64.0)
 }
 
@@ -319,21 +470,31 @@ fn brightness_scale(lighting: &LightingService) -> f32 {
 /// it through `EnvBRDFApprox`, which attenuates it several times below what a
 /// naive irradiance model predicts. Deriving this from the physical sky/sun
 /// ratio gave 0.08 and measured a sunlit-to-shadow ratio of 46x against a target
-/// of 6-10x; this value is that measurement corrected.
-const SKY_FILL_FRACTION: f32 = 0.45;
+/// of 6-10x; the measurement corrected it to 0.45 of the light's illuminance.
+///
+/// The fill now anchors to the sun that reaches the ground (see
+/// [`SkyLight::sun_ground`]) rather than to the light above the atmosphere,
+/// and a high sun loses about 13% on the way down, so 0.45 becomes 0.52 to
+/// keep the calibrated midday balance.
+const SKY_FILL_FRACTION: f32 = 0.52;
 
 /// Skylight fill when there is no environment map to lean on.
 ///
 /// If the author disables the environment map (or the GPU cannot run bevy's
 /// filtering compute pipelines) this term carries every unlit surface alone, so
 /// it takes over the share the sky would have contributed.
-const SKY_FILL_FRACTION_NO_IBL: f32 = 0.75;
+const SKY_FILL_FRACTION_NO_IBL: f32 = 0.86;
 
-/// Minimum ambient, in lux, so a night scene is legible rather than pitch black.
+/// Minimum ambient, so a moonless night is dark but legible, not black.
 ///
-/// Roughly moonlight plus skyglow. Without it, ambient anchored to the sun would
-/// fall to exactly zero the moment the sun set.
-const NIGHT_FLOOR_LUX: f32 = 40.0;
+/// Starlight and airglow, lifted to meet the night exposure: the camera opens
+/// up to `MAX_NIGHT_ADAPTATION_EV` stops at night, so this reads about seven
+/// stops under a daylit scene. The old 40 was set against the daylight
+/// exposure and would read as dusk once the exposure adapts.
+const NIGHT_FLOOR_LUX: f32 = 6.0;
+
+/// Shadow fill at night leans toward moonlight's blue, as the eye sees it.
+const NIGHT_FILL_TINT: [f32; 3] = [0.75, 0.86, 1.18];
 
 /// The one and only writer of `GlobalAmbientLight`.
 ///
@@ -353,29 +514,34 @@ const NIGHT_FLOOR_LUX: f32 = 40.0;
 fn update_ambient_light(
     lighting: Res<LightingService>,
     scene_atmosphere: Res<SceneAtmosphere>,
-    sun_query: Query<&DirectionalLight, With<SunMarker>>,
+    sky_light: Res<SkyLight>,
     mut ambient: ResMut<GlobalAmbientLight>,
 ) {
-    // Read the sun's *actual* illuminance rather than re-deriving it. That is
-    // what the scene is really lit by, so anchoring to it keeps the fill correct
-    // even when something else has adjusted the light.
-    let sun_lux = sun_query
-        .iter()
-        .next()
-        .map(|light| light.illuminance)
-        .unwrap_or(lighting.sun_intensity);
+    // Anchor to the light that actually reaches the ground: the sun and moon
+    // after the atmosphere and the horizon. The sun's `DirectionalLight` is
+    // now the sun above the atmosphere, constant through the day, so reading
+    // its illuminance would light a midnight scene like noon. `SkyLight`
+    // already carries `brightness`, which is why it is not applied again.
+    let direct_lux = luminance(sky_light.sun_ground) + luminance(sky_light.moon_ground);
 
     let ibl_active = scene_atmosphere.atmosphere.environment_map_enabled
         && scene_atmosphere.atmosphere.environment_intensity > 0.0;
-    let fraction = if ibl_active { SKY_FILL_FRACTION } else { SKY_FILL_FRACTION_NO_IBL };
 
-    // The sun's own intensity already falls away at dusk, so the fill follows it
-    // down without a separate night curve. The floor keeps night legible.
-    let fill = (sun_lux * fraction).max(NIGHT_FLOOR_LUX);
+    // Direct light already falls away at dusk, so the fill follows it down
+    // without a separate night curve. The floor keeps night legible.
+    let fill = sky_fill_lux(direct_lux, ibl_active);
 
-    ambient.color = arr_to_color(sky_fill_color(&lighting));
-    ambient.brightness =
-        fill * brightness_scale(&lighting) * lighting.environment_diffuse_scale.max(0.0);
+    let base = sky_fill_color(&lighting);
+    let night = sky_light.night;
+    let tint = |i: usize| base[i] * (1.0 + (NIGHT_FILL_TINT[i] - 1.0) * night);
+    let color = Color::srgba(tint(0), tint(1), tint(2), base[3]);
+    if ambient.color != color {
+        ambient.color = color;
+    }
+    let brightness = fill * lighting.environment_diffuse_scale.max(0.0);
+    if (ambient.brightness - brightness).abs() > brightness * 1e-4 + 1e-4 {
+        ambient.brightness = brightness;
+    }
 }
 
 /// The colour that skylight fills shadows with.
@@ -607,6 +773,44 @@ mod tests {
             lighting.sun_intensity > bevy::light::light_consts::lux::FULL_DAYLIGHT,
             "direct sun must exceed diffuse full daylight"
         );
+    }
+
+    #[test]
+    fn the_true_sun_disc_stays_inside_the_hdr_target() {
+        // The HDR target is 16-bit float: 65,504 is the largest finite value,
+        // and a sun drawn above it becomes infinity. Measured against the
+        // brightest case the Studio sees: raw sunlight, the daylight exposure,
+        // the true 0.53 degree disc and the brightness slider doubled.
+        let disc = 0.53f32.to_radians();
+        let sun = bevy::light::light_consts::lux::RAW_SUNLIGHT * 2.0;
+        for ev100 in [13.0f32, 11.0, 8.0, 4.0] {
+            let intensity = sun_disk_intensity(sun, disc, ev100);
+            let solid_angle = disc * disc * 0.25 * std::f32::consts::PI;
+            let peak = sun / solid_angle * intensity * (-ev100).exp2() / 1.2;
+            assert!(peak <= SUN_DISC_PEAK * 1.001, "ev100 {ev100}: disc drawn at {peak:.0}");
+            assert!(peak < 65_504.0, "ev100 {ev100}: disc overflows f16 at {peak:.0}");
+        }
+    }
+
+    #[test]
+    fn a_dim_disc_is_drawn_at_full_physical_brightness() {
+        // The cap only ever dims; a disc that fits keeps intensity 1, so a
+        // large authored sun or a weak light is drawn as bevy would draw it.
+        assert_eq!(sun_disk_intensity(10.0, 0.53f32.to_radians(), 13.0), 1.0);
+        assert_eq!(sun_disk_intensity(130_000.0, 20f32.to_radians(), 13.0), 1.0);
+    }
+
+    #[test]
+    fn the_running_clock_reads_as_hours_minutes_seconds() {
+        assert_eq!(format_clock(0.5), "12:00:00");
+        assert_eq!(format_clock(0.25 + 1.0 / 86_400.0 * 30.0), "06:00:30");
+        // Wraps rather than reading 24:00:00 or going negative.
+        assert_eq!(format_clock(1.0), "00:00:00");
+        assert_eq!(format_clock(-0.25), "18:00:00");
+        // And it round-trips through the parser the sun reads it with.
+        let t = 0.73f32;
+        let hours = parse_clock_time(&format_clock(t)).unwrap();
+        assert!((hours / 24.0 - t).abs() < 1.0 / 86_400.0 * 1.5);
     }
 
     #[test]

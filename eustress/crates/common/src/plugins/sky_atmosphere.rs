@@ -49,13 +49,30 @@
 //! with a single `Skybox::brightness` write. The previous implementation rebuilt
 //! a 1024x1024x6 RGBA8 cubemap (6.29M pixels, per-pixel `sin`/`fract` hashing,
 //! ~25 MB) on the main thread every 60 frames for as long as the sun was moving.
+//! The field turns about the celestial pole with the time of day, the way the
+//! real sky does, and its brightness is compensated for night adaptation.
+//!
+//! ## Light levels on the CPU
+//!
+//! Bevy computes transmittance and sky light on the GPU and hands nothing
+//! back, while several CPU decisions depend on them: camera exposure, the
+//! ambient fill, the colour of sunlight reaching the clouds. [`SkyMedium`]
+//! integrates the same [`ScatteringMedium`] the GPU renders, and
+//! [`SkyLight`] holds this frame's result.
+//!
+//! ## Night adaptation
+//!
+//! A single exposure cannot serve both noon and a moonlit night: the two
+//! differ by nineteen stops. [`SkyExposure`] adapts toward the light the way
+//! the eye does, part of the way and up to [`MAX_NIGHT_ADAPTATION_EV`], so a
+//! night reads as night rather than as black.
 
 use bevy::prelude::*;
 use bevy::camera::Exposure;
 use bevy::light::atmosphere::{Falloff, PhaseFunction, ScatteringMedium, ScatteringTerm};
 use bevy::light::{
-    Atmosphere as PlanetAtmosphere, AtmosphereEnvironmentMapLight, EnvironmentMapLight,
-    GeneratedEnvironmentMapLight, Skybox,
+    Atmosphere as PlanetAtmosphere, AtmosphereEnvironmentMapLight, CascadeShadowConfig,
+    EnvironmentMapLight, FogVolume, GeneratedEnvironmentMapLight, Skybox, VolumetricFog,
 };
 use bevy::pbr::{AtmosphereMode, AtmosphereSettings};
 use bevy::render::render_resource::{
@@ -66,9 +83,12 @@ use bevy::render::render_resource::{
 use tracing::{info, warn};
 use std::sync::OnceLock;
 
-use crate::classes::{Sky, Sun as SunClass};
+use crate::classes::{
+    ecliptic_to_equatorial, solar_ecliptic_longitude, Moon as MoonClass, Sky, Sun as SunClass,
+};
 use crate::services::lighting::{
-    AtmosphereRenderingMode, EustressAtmosphere, LightingService, Sun as SunMarker,
+    AtmosphereRenderingMode, EustressAtmosphere, LightingService, Moon as MoonMarker,
+    Sun as SunMarker,
 };
 
 // ============================================================================
@@ -87,6 +107,9 @@ impl Plugin for SkyAtmospherePlugin {
             .init_resource::<StarField>()
             .init_resource::<SkyConfig>()
             .init_resource::<ActiveSkyMode>()
+            .init_resource::<SkyMedium>()
+            .init_resource::<SkyLight>()
+            .init_resource::<SkyExposure>()
             .register_type::<EustressAtmosphere>()
             .register_type::<AtmosphereRenderingMode>()
             .add_systems(Startup, build_star_field)
@@ -99,9 +122,14 @@ impl Plugin for SkyAtmospherePlugin {
                     resolve_sky_mode,
                     // The planet must exist before a camera can point at it.
                     sync_atmosphere_planet.after(resolve_sky_mode),
+                    // This frame's light levels, then the exposure they call for.
+                    // Everything that reads either runs after `SkyLightSet`.
+                    update_sky_light.in_set(SkyLightSet).after(sync_atmosphere_planet),
+                    adapt_exposure.in_set(SkyLightSet).after(update_sky_light),
                     attach_sky_to_cameras
                         .after(resolve_sky_mode)
-                        .after(sync_atmosphere_planet),
+                        .after(sync_atmosphere_planet)
+                        .after(SkyLightSet),
                     sync_camera_atmosphere_settings.after(attach_sky_to_cameras),
                     apply_custom_skybox.after(attach_sky_to_cameras),
                     sync_environment_intensity.after(attach_sky_to_cameras),
@@ -116,6 +144,7 @@ impl Plugin for SkyAtmospherePlugin {
                     fade_star_field
                         .after(attach_sky_to_cameras)
                         .after(poll_star_field_build),
+                    sync_god_rays.after(attach_sky_to_cameras),
                 ),
             )
             // Bevy's sky shaders assume a perspective camera; see
@@ -175,7 +204,17 @@ pub struct SkyConfig {
     /// flat white with no visible gradient. Bevy's own atmosphere example uses
     /// 13.0 for exactly this reason. `LightingService.exposure_compensation` is
     /// applied on top as an EV bias.
+    ///
+    /// This is the DAYLIGHT exposure. At dusk and at night [`SkyExposure`]
+    /// opens it up by as much as [`MAX_NIGHT_ADAPTATION_EV`].
     pub base_ev100: f32,
+    /// Whether the exposure adapts to the light at all. Off
+    /// (`EUSTRESS_EXPOSURE_ADAPT=0`) pins every camera at `base_ev100`, which
+    /// is what a measurement across times of day wants.
+    pub exposure_adaptation: bool,
+    /// Multiplier on the ground haze the sun's shafts are drawn in.
+    /// `EUSTRESS_GOD_RAYS=0` switches the volumetric pass off entirely.
+    pub god_rays: f32,
 }
 
 impl Default for SkyConfig {
@@ -185,6 +224,8 @@ impl Default for SkyConfig {
             star_brightness: env_f32("EUSTRESS_STAR_BRIGHTNESS", 2600.0),
             environment_map_size: 512,
             base_ev100: env_f32("EUSTRESS_EV100", 13.0),
+            exposure_adaptation: env_flag("EUSTRESS_EXPOSURE_ADAPT", true),
+            god_rays: env_f32("EUSTRESS_GOD_RAYS", 1.0).clamp(0.0, 16.0),
         }
     }
 }
@@ -288,6 +329,14 @@ fn env_f32(key: &'static str, default: f32) -> f32 {
         .and_then(|v| v.trim().parse::<f32>().ok())
         .filter(|v| v.is_finite())
         .unwrap_or(default)
+}
+
+/// An on/off switch: `0`, `false` and `off` are off, anything else set is on.
+fn env_flag(key: &'static str, default: bool) -> bool {
+    match std::env::var(key) {
+        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
+        Err(_) => default,
+    }
 }
 
 // ============================================================================
@@ -491,10 +540,15 @@ pub fn build_scattering_medium(a: &EustressAtmosphere) -> ScatteringMedium {
     let rayleigh_scale = (8_000.0 / height * profile).max(1e-4);
     let mie_scale = (1_200.0 / height * profile).max(1e-4);
 
-    // Ozone sits in a band around 25 km with a ~30 km spread. Expressed as a
-    // proportion of the authored thickness, and clamped to stay inside the
-    // [0, 1] domain Falloff::Tent requires.
-    let ozone_center = (25_000.0 / height).clamp(0.05, 0.95);
+    // Ozone sits in a band around 25 km with a ~30 km spread. Falloff
+    // coordinates run from 1 at the ground to 0 at the top of the atmosphere
+    // (bevy samples `Falloff` at `p = 1 - altitude / height`), so the band's
+    // centre is `1 - 25 km / height`: 0.75 of a 100 km atmosphere, exactly
+    // where `ScatteringMedium::earth` puts it. It used to be `25 km / height`,
+    // which put the layer at 75 km, above almost all the air, where it could
+    // no longer filter the grazing twilight light that makes the blue hour
+    // blue. Clamped to stay inside the [0, 1] domain `Falloff::Tent` requires.
+    let ozone_center = (1.0 - 25_000.0 / height).clamp(0.05, 0.95);
     let ozone_width = (30_000.0 / height).clamp(0.05, 1.0);
 
     let density = (a.density / 0.5).clamp(0.05, 8.0);
@@ -683,6 +737,7 @@ fn attach_sky_to_cameras(
     scene: Res<SceneAtmosphere>,
     stars: Res<StarField>,
     lighting: Res<LightingService>,
+    exposure: Res<SkyExposure>,
     cameras: Query<Entity, (With<Camera3d>, Without<SkyCamera>, Without<NoAtmosphere>)>,
 ) {
     for camera in cameras.iter() {
@@ -690,7 +745,7 @@ fn attach_sky_to_cameras(
         // Exposure goes on every managed camera regardless of sky path: it is a
         // camera property, and leaving it at bevy's Blender-calibrated default
         // blows a physically-lit scene out to white.
-        ec.insert((SkyCamera { mode: active.0 }, camera_exposure(&sky, &lighting)));
+        ec.insert((SkyCamera { mode: active.0 }, exposure.camera()));
 
         match active.0 {
             SkyMode::Atmosphere => {
@@ -779,29 +834,27 @@ fn environment_intensity(a: &EustressAtmosphere, lighting: &LightingService) -> 
 /// `Camera3d` the scene lights, atmosphere or not.
 fn attach_exposure_to_opted_out_cameras(
     mut commands: Commands,
-    sky: Res<SkyConfig>,
-    lighting: Res<LightingService>,
+    exposure: Res<SkyExposure>,
     cameras: Query<Entity, (With<Camera3d>, With<NoAtmosphere>, Without<Exposure>)>,
 ) {
     for camera in cameras.iter() {
-        commands.entity(camera).insert(camera_exposure(&sky, &lighting));
+        commands.entity(camera).insert(exposure.camera());
     }
 }
 
-/// Track `exposure_compensation` edits, on every camera that carries an
-/// `Exposure` this plugin manages (sky cameras and opted-out ones alike).
+/// Carry the adapted exposure, and `exposure_compensation` edits, to every
+/// camera that holds an `Exposure` this plugin manages (sky cameras and
+/// opted-out ones alike, so an AI capture at night matches the viewport).
 fn sync_camera_exposure(
-    sky: Res<SkyConfig>,
-    lighting: Res<LightingService>,
+    exposure: Res<SkyExposure>,
     mut cameras: Query<&mut Exposure, (With<Camera3d>, Or<(With<SkyCamera>, With<NoAtmosphere>)>)>,
 ) {
-    if !lighting.is_changed() {
+    if !exposure.is_changed() {
         return;
     }
-    let desired = camera_exposure(&sky, &lighting);
-    for mut exposure in cameras.iter_mut() {
-        if (exposure.ev100 - desired.ev100).abs() > 1e-4 {
-            exposure.ev100 = desired.ev100;
+    for mut camera in cameras.iter_mut() {
+        if (camera.ev100 - exposure.camera_ev100).abs() > 1e-4 {
+            camera.ev100 = exposure.camera_ev100;
         }
     }
 }
@@ -905,6 +958,488 @@ fn warn_once_on_multiface(path: &str) {
 }
 
 // ============================================================================
+// Sky light model
+// ============================================================================
+
+/// The systems that compute this frame's [`SkyLight`] and [`SkyExposure`].
+/// Anything that reads either orders itself after this set.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SkyLightSet;
+
+/// Marks an object drawn at sky distance around the camera: the moon's disc
+/// and the cloud dome. They are sized for a perspective view, so orthographic
+/// views hide them.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct SkyBillboard;
+
+/// Moonlight is multiplied by this, so a moonlit night is legible.
+///
+/// A real full moon gives about 0.25 lux, nineteen stops under the sun. The
+/// dark-adapted eye makes up most of that gap; an exposure that did the same
+/// would blow every lamp and lit window out to white, since they are
+/// authored against daylight. So the exposure adapts only
+/// [`MAX_NIGHT_ADAPTATION_EV`] stops and the moon makes up the rest, the
+/// film-maker's day-for-night. The sky/ground balance stays physical, because
+/// the atmosphere scatters the moon's light exactly as it scatters the sun's.
+pub const MOONLIGHT_GAIN: f32 = 30.0;
+
+/// The most the exposure opens up for the night, EV.
+pub const MAX_NIGHT_ADAPTATION_EV: f32 = 9.0;
+
+/// The key illuminance, lux, at which the exposure sits at
+/// [`SkyConfig::base_ev100`]: a clear sky with the sun high.
+const KEY_LUX_AT_BASE: f32 = 70_000.0;
+
+/// Fraction of a full log-luminance adaptation the exposure makes. Below 1 so
+/// dusk and night still read darker than day, the way they do to the eye.
+const ADAPTATION: f32 = 0.75;
+
+/// Time constant of the adaptation, seconds. Short enough that dragging the
+/// time of day never waits on it, long enough not to pop.
+const ADAPTATION_SECONDS: f32 = 0.35;
+
+/// Starlight and airglow on a moonless night, lux.
+const AIRGLOW_LUX: f32 = 0.002;
+
+/// Rec. 709 luminance of linear RGB.
+#[inline]
+pub fn luminance(rgb: Vec3) -> f32 {
+    rgb.dot(Vec3::new(0.2126, 0.7152, 0.0722))
+}
+
+/// Linear RGB of an authored sRGB colour.
+#[inline]
+fn linear_rgb(srgb: [f32; 4]) -> Vec3 {
+    let c = Color::srgb(srgb[0], srgb[1], srgb[2]).to_linear();
+    Vec3::new(c.red, c.green, c.blue)
+}
+
+/// How much of a disc of `angular_radius` (radians) clears the horizon when
+/// its centre stands at an elevation with sine `sin_elevation`. The linear
+/// ramp bevy's `calculate_visible_sun_ratio` uses, so the CPU and the GPU
+/// set the sun together.
+#[inline]
+pub fn disc_visibility(sin_elevation: f32, angular_radius: f32) -> f32 {
+    let elevation = sin_elevation.clamp(-1.0, 1.0).asin();
+    (0.5 + 0.5 * elevation / angular_radius.max(1e-4)).clamp(0.0, 1.0)
+}
+
+/// The authored atmosphere's scattering medium, on the CPU.
+///
+/// The same [`ScatteringMedium`] [`build_scattering_medium`] hands the GPU,
+/// integrated here so that CPU decisions agree with the rendered sky.
+#[derive(Resource, Clone)]
+pub struct SkyMedium {
+    medium: ScatteringMedium,
+    planet_radius: f64,
+    atmosphere_height: f64,
+    fingerprint: u64,
+}
+
+impl Default for SkyMedium {
+    fn default() -> Self {
+        Self::from_atmosphere(&SceneAtmosphere::default().atmosphere)
+    }
+}
+
+impl SkyMedium {
+    pub fn from_atmosphere(a: &EustressAtmosphere) -> Self {
+        Self {
+            medium: build_scattering_medium(a),
+            planet_radius: a.planet_radius.max(1_000.0) as f64,
+            atmosphere_height: a.atmosphere_height.max(1_000.0) as f64,
+            fingerprint: fingerprint(a),
+        }
+    }
+
+    /// Extinction, per metre, at `altitude` metres above the ground.
+    pub fn extinction(&self, altitude: f32) -> Vec3 {
+        let p = (1.0 - altitude as f64 / self.atmosphere_height).clamp(0.0, 1.0) as f32;
+        self.medium
+            .terms
+            .iter()
+            .fold(Vec3::ZERO, |sum, term| {
+                sum + (term.absorption + term.scattering) * term.falloff.sample(p)
+            })
+    }
+
+    /// Transmittance from `altitude` metres out to space along a ray whose
+    /// elevation has sine `sin_elevation`. Zero when the ray meets the ground.
+    ///
+    /// Integrated in double precision: the planet's radius squared is 4e13,
+    /// and in f32 its rounding is as large as the horizon test's whole
+    /// answer for a viewer a few metres up.
+    pub fn transmittance(&self, altitude: f32, sin_elevation: f32) -> Vec3 {
+        let r_ground = self.planet_radius;
+        let r_top = r_ground + self.atmosphere_height;
+        let r0 = r_ground + altitude.max(0.0) as f64;
+        if r0 >= r_top {
+            return Vec3::ONE;
+        }
+        let mu = sin_elevation.clamp(-1.0, 1.0) as f64;
+        // Below the local horizontal the ray meets the ground if its closest
+        // approach to the planet's centre falls inside the ground.
+        if mu < 0.0 && r0 * r0 * (1.0 - mu * mu) <= r_ground * r_ground {
+            return Vec3::ZERO;
+        }
+        let t_max = -r0 * mu + (r0 * r0 * (mu * mu - 1.0) + r_top * r_top).max(0.0).sqrt();
+        // Steps crowd toward the start, where the air is thick: at a grazing
+        // angle almost all the optical depth lies in the first tenth of a
+        // path a thousand kilometres long.
+        const STEPS: usize = 48;
+        let mut depth = Vec3::ZERO;
+        let mut previous = 0.0f64;
+        for i in 1..=STEPS {
+            let f = i as f64 / STEPS as f64;
+            let t = t_max * f * f;
+            let middle = 0.5 * (previous + t);
+            let r = (r0 * r0 + middle * middle + 2.0 * r0 * middle * mu).sqrt();
+            depth += self.extinction((r - r_ground) as f32) * (t - previous) as f32;
+            previous = t;
+        }
+        (-depth).exp()
+    }
+}
+
+/// This frame's light, from the sun and moon classes and the authored
+/// atmosphere. Written by [`update_sky_light`] in [`SkyLightSet`].
+#[derive(Resource, Clone, Debug)]
+pub struct SkyLight {
+    /// Toward the sun.
+    pub sun_direction: Vec3,
+    /// Toward the moon.
+    pub moon_direction: Vec3,
+    /// The sun's light above the atmosphere, as its `DirectionalLight`
+    /// carries it on the atmosphere path: linear RGB times lux.
+    pub sun_light: Vec3,
+    /// The moon's the same way, its phase and [`MOONLIGHT_GAIN`] included.
+    pub moon_light: Vec3,
+    /// Sunlight reaching the ground, on a surface facing the sun.
+    pub sun_ground: Vec3,
+    /// Moonlight reaching the ground, on a surface facing the moon.
+    pub moon_ground: Vec3,
+    /// Diffuse light from the sky dome on a level surface, lux.
+    pub sky_lux: f32,
+    /// 0 in daylight, rising to 1 once the sun is 10 degrees down.
+    pub night: f32,
+    /// The illuminance the exposure adapts to, lux.
+    pub key_lux: f32,
+}
+
+impl Default for SkyLight {
+    fn default() -> Self {
+        let sun = Vec3::splat(bevy::light::light_consts::lux::RAW_SUNLIGHT);
+        Self {
+            sun_direction: Vec3::Y,
+            moon_direction: Vec3::NEG_Y,
+            sun_light: sun,
+            moon_light: Vec3::ZERO,
+            sun_ground: sun,
+            moon_ground: Vec3::ZERO,
+            sky_lux: clear_sky_lux(90.0),
+            night: 0.0,
+            key_lux: KEY_LUX_AT_BASE,
+        }
+    }
+}
+
+/// Diffuse illuminance on a level surface from a clear sky lit by
+/// `RAW_SUNLIGHT` standing at `elevation_deg`, lux.
+///
+/// Above the horizon, the clear-sky diffuse fit `0.8 + 15.5 sqrt(sin e)`
+/// klux. Below it, twilight: about 0.42 decades per degree of depression,
+/// from 800 lux at sunset to 2.4 at the end of civil twilight and 0.007 at
+/// the end of nautical.
+pub fn clear_sky_lux(elevation_deg: f32) -> f32 {
+    if elevation_deg >= 0.0 {
+        800.0 + 15_500.0 * elevation_deg.to_radians().sin().max(0.0).sqrt()
+    } else {
+        800.0 * 10f32.powf(0.42 * elevation_deg.max(-30.0))
+    }
+}
+
+/// The Moon's brightness relative to full, from its elongation in degrees.
+///
+/// Allen's lunar phase law: the magnitude falls by `0.026 a + 4e-9 a^4` at
+/// phase angle `a`. A quarter moon is about a tenth of a full one, not half:
+/// most of the full moon's brilliance is the opposition surge, and the lit
+/// fraction alone overstates every other phase.
+pub fn moon_phase_brightness(elongation_deg: f32) -> f32 {
+    let phase_angle = (180.0 - elongation_deg.rem_euclid(360.0)).abs();
+    let delta_magnitude = 0.026 * phase_angle + 4.0e-9 * phase_angle.powi(4);
+    10f32.powf(-0.4 * delta_magnitude)
+}
+
+/// The moon's light above the atmosphere, lux: the authored full-moon
+/// illuminance, the phase and [`MOONLIGHT_GAIN`].
+pub fn moonlight_lux(moon: &MoonClass) -> f32 {
+    if !moon.enabled {
+        return 0.0;
+    }
+    moon.full_intensity.max(0.0) * moon_phase_brightness(moon.elongation_from_sun()) * MOONLIGHT_GAIN
+}
+
+/// Moonlight's colour: the authored moon colour pulled toward the blue the
+/// dark-adapted eye sees it as. Moonlight is physically a little redder than
+/// sunlight; at night the rods take over and it reads blue, which is why
+/// every convincing night is graded that way.
+pub fn moonlight_color(moon: &MoonClass) -> Vec3 {
+    linear_rgb(moon.color) * Vec3::new(0.78, 0.88, 1.14)
+}
+
+/// Integrate this frame's light: sun and moon above the atmosphere, what
+/// reaches the ground, the sky's own light, and the key the exposure adapts
+/// to.
+fn update_sky_light(
+    scene: Res<SceneAtmosphere>,
+    lighting: Res<LightingService>,
+    mut medium: ResMut<SkyMedium>,
+    sun: Query<&SunClass, With<SunMarker>>,
+    moon: Query<&MoonClass, With<MoonMarker>>,
+    mut sky_light: ResMut<SkyLight>,
+) {
+    if medium.fingerprint != fingerprint(&scene.atmosphere) {
+        *medium = SkyMedium::from_atmosphere(&scene.atmosphere);
+    }
+    let scale = super::lighting_plugin::brightness_scale(&lighting);
+    const RAW_SUNLIGHT: f32 = bevy::light::light_consts::lux::RAW_SUNLIGHT;
+
+    let authored_sun = sun.iter().next();
+    let sun_class = authored_sun.cloned().unwrap_or_else(|| SunClass {
+        time_of_day: lighting.time_of_day * 24.0,
+        latitude: lighting.geographic_latitude,
+        noon_color: lighting.sun_color,
+        noon_intensity: lighting.sun_intensity,
+        angular_size: lighting.sun_angular_radius * 2.0,
+        ..default()
+    });
+    // Without a Sun class the light is aimed by the service's own model; the
+    // sky must agree with where the light actually is.
+    let sun_direction = match authored_sun {
+        Some(s) => s.direction(),
+        None => lighting.sun_direction(),
+    };
+    let sun_light = linear_rgb(sun_class.noon_color) * sun_class.noon_intensity.max(0.0) * scale;
+    let sun_ground = sun_light
+        * medium.transmittance(0.0, sun_direction.y)
+        * disc_visibility(sun_direction.y, (sun_class.angular_size * 0.5).to_radians());
+
+    // No Moon in the Space, no moonlight.
+    let authored_moon = moon.iter().next();
+    let moon_class = authored_moon.cloned().unwrap_or_default();
+    let moon_direction = moon_class.direction_realistic(&sun_class);
+    let moon_light = if authored_moon.is_some() {
+        moonlight_color(&moon_class) * moonlight_lux(&moon_class) * scale
+    } else {
+        Vec3::ZERO
+    };
+    let moon_ground = moon_light
+        * medium.transmittance(0.0, moon_direction.y)
+        * disc_visibility(moon_direction.y, (moon_class.angular_size * 0.5).to_radians());
+
+    let elevation = |d: Vec3| d.y.clamp(-1.0, 1.0).asin().to_degrees();
+    let sun_elevation = elevation(sun_direction);
+    let sky_lux = clear_sky_lux(sun_elevation) * luminance(sun_light) / RAW_SUNLIGHT
+        + clear_sky_lux(elevation(moon_direction)) * luminance(moon_light) / RAW_SUNLIGHT;
+    let night = ((2.0 - sun_elevation) / 12.0).clamp(0.0, 1.0);
+    // Half the direct light: a view holds as much in shadow and facing away
+    // as it does facing the light.
+    let key_lux = 0.5 * (luminance(sun_ground) + luminance(moon_ground)) + sky_lux + AIRGLOW_LUX;
+
+    *sky_light = SkyLight {
+        sun_direction,
+        moon_direction,
+        sun_light,
+        moon_light,
+        sun_ground,
+        moon_ground,
+        sky_lux,
+        night,
+        key_lux,
+    };
+}
+
+/// The exposure every managed camera runs at, adapted to the light.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct SkyExposure {
+    /// Adapted EV100, before the author's `exposure_compensation`.
+    pub adapted_ev100: f32,
+    /// What the cameras carry: the adapted value, compensation applied.
+    pub camera_ev100: f32,
+    settled: bool,
+}
+
+impl Default for SkyExposure {
+    fn default() -> Self {
+        let base = SkyConfig::default().base_ev100;
+        Self { adapted_ev100: base, camera_ev100: base, settled: false }
+    }
+}
+
+impl SkyExposure {
+    /// The camera component for the current exposure.
+    pub fn camera(&self) -> Exposure {
+        Exposure { ev100: self.camera_ev100 }
+    }
+}
+
+/// The EV100 the view settles at under `key_lux`: part of the way from
+/// `base_ev100` toward full adaptation, at most [`MAX_NIGHT_ADAPTATION_EV`]
+/// below it and never above it, so daylight stays exactly as calibrated.
+pub fn adapted_ev100(base_ev100: f32, key_lux: f32) -> f32 {
+    let stops = (key_lux.max(1e-6) / KEY_LUX_AT_BASE).log2() * ADAPTATION;
+    base_ev100 + stops.clamp(-MAX_NIGHT_ADAPTATION_EV, 0.0)
+}
+
+/// Move the exposure toward what this frame's light calls for.
+fn adapt_exposure(
+    time: Res<Time>,
+    sky: Res<SkyConfig>,
+    lighting: Res<LightingService>,
+    sky_light: Res<SkyLight>,
+    new_sun: Query<(), Added<SunMarker>>,
+    mut exposure: ResMut<SkyExposure>,
+) {
+    let target = if sky.exposure_adaptation {
+        adapted_ev100(sky.base_ev100, sky_light.key_lux)
+    } else {
+        sky.base_ev100
+    };
+    // A Space arriving (its sun appearing) snaps to its light instead of
+    // fading up from whatever the last Space was lit by.
+    let snap = !exposure.settled || !new_sun.is_empty();
+    let adapted = if snap {
+        target
+    } else {
+        let k = 1.0 - (-time.delta_secs() / ADAPTATION_SECONDS).exp();
+        exposure.adapted_ev100 + (target - exposure.adapted_ev100) * k
+    };
+    let camera =
+        (camera_exposure(&sky, &lighting).ev100 + (adapted - sky.base_ev100)).clamp(-5.0, 25.0);
+    if snap
+        || (adapted - exposure.adapted_ev100).abs() > 1e-4
+        || (camera - exposure.camera_ev100).abs() > 1e-4
+    {
+        exposure.adapted_ev100 = adapted;
+        exposure.camera_ev100 = camera;
+        exposure.settled = true;
+    }
+}
+
+// ============================================================================
+// God rays
+// ============================================================================
+
+/// The haze the sun's shafts are drawn in: one camera-following
+/// [`FogVolume`], lit through the sun's shadow maps by bevy's volumetric fog.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct GodRayHaze;
+
+/// Aerosol density of the haze at strength 1, per metre. Thin enough that
+/// the scene reads clear side-on; toward the sun forward scattering makes it
+/// glow, and wherever geometry shadows it the glow breaks into shafts.
+const GOD_RAY_DENSITY: f32 = 0.0006;
+
+/// Half the haze box's width, metres. Bevy lights fog only inside the sun's
+/// shadow cascades, and haze beyond them would only darken what lies behind
+/// it, so a shorter cascade range shrinks the box to match.
+const GOD_RAY_REACH: f32 = 450.0;
+
+/// Keep the god ray haze and every sky camera's `VolumetricFog` in step with
+/// the sun.
+fn sync_god_rays(
+    mut commands: Commands,
+    sky: Res<SkyConfig>,
+    active: Res<ActiveSkyMode>,
+    scene: Res<SceneAtmosphere>,
+    sky_light: Res<SkyLight>,
+    suns: Query<(&SunClass, Option<&CascadeShadowConfig>), With<SunMarker>>,
+    cameras: Query<(Entity, &Camera, &GlobalTransform, Has<VolumetricFog>), With<SkyCamera>>,
+    mut haze: Query<(Entity, &mut FogVolume, &mut Transform), With<GodRayHaze>>,
+) {
+    let sun = suns.iter().next();
+    let authored = sun.map_or(1.0, |(s, _)| s.god_rays_intensity.max(0.0));
+    let elevation = sky_light.sun_direction.y.clamp(-1.0, 1.0).asin().to_degrees();
+    // Shafts need a sun to cast them. Fade in over the first degrees of
+    // daylight rather than switching on at the horizon.
+    let daylight = ((elevation + 1.0) / 6.0).clamp(0.0, 1.0);
+    let strength = sky.god_rays * authored * daylight;
+
+    if active.0 != SkyMode::Atmosphere || strength <= 1e-3 {
+        for (camera, _, _, has_fog) in cameras.iter() {
+            if has_fog {
+                commands.entity(camera).remove::<VolumetricFog>();
+            }
+        }
+        for (entity, ..) in haze.iter() {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
+
+    for (camera, _, _, has_fog) in cameras.iter() {
+        if !has_fog {
+            commands.entity(camera).insert(VolumetricFog {
+                // The environment map already lights the scene from the sky;
+                // ambient light in the fog would add it a second time.
+                ambient_intensity: 0.0,
+                jitter: 0.0,
+                step_count: 64,
+                ..default()
+            });
+        }
+    }
+
+    let Some((_, _, view, _)) = cameras
+        .iter()
+        .filter(|(_, camera, ..)| camera.is_active)
+        .min_by_key(|(_, camera, ..)| camera.order)
+    else {
+        return;
+    };
+    let reach = sun
+        .and_then(|(_, cascades)| cascades)
+        .and_then(|c| c.bounds.last().copied())
+        .map_or(GOD_RAY_REACH, |far| (far * 0.85).min(GOD_RAY_REACH))
+        .max(20.0);
+    let center = view.translation() + Vec3::Y * (reach * 0.12);
+    let scale = Vec3::new(reach * 2.0, reach * 0.9, reach * 2.0);
+    let density = GOD_RAY_DENSITY * strength * (1.0 + 2.0 * scene.atmosphere.haze.clamp(0.0, 5.0));
+
+    match haze.iter_mut().next() {
+        Some((_, mut volume, mut transform)) => {
+            if (volume.density_factor - density).abs() > density * 0.01 {
+                volume.density_factor = density;
+            }
+            if transform.translation.distance_squared(center) > 1.0
+                || transform.scale.distance_squared(scale) > 1.0
+            {
+                transform.translation = center;
+                transform.scale = scale;
+            }
+        }
+        None => {
+            commands.spawn((
+                FogVolume {
+                    density_factor: density,
+                    // Aerosol scatters far more than it absorbs, which keeps
+                    // the haze bright rather than smoky.
+                    absorption: 0.08,
+                    scattering: 0.55,
+                    // Forward-peaked, as haze is: the glow and the shafts
+                    // gather toward the sun.
+                    scattering_asymmetry: 0.65,
+                    ..default()
+                },
+                Transform::from_translation(center).with_scale(scale),
+                GodRayHaze,
+                Name::new("God Ray Haze"),
+            ));
+        }
+    }
+}
+
+// ============================================================================
 // Star field
 // ============================================================================
 
@@ -1004,7 +1539,9 @@ fn poll_star_field_build(
     let handle = images.add(image);
     stars.built_for_count = count;
     stars.handle = Some(handle.clone());
-    if active.0 != SkyMode::Skybox {
+    // Only the atmosphere path composites stars behind its sky; on the
+    // gradient path the skybox slot holds the gradient itself.
+    if active.0 == SkyMode::Atmosphere {
         for (camera, skybox) in cameras.iter_mut() {
             match skybox {
                 Some(mut skybox) => skybox.image = Some(handle.clone()),
@@ -1045,32 +1582,48 @@ fn rebuild_star_field_on_sky_change(
     info!("✨ Star field rebuild started for star_count = {}", sky.star_count);
 }
 
-/// Fade the star field with the sun.
+/// Fade the star field with the sun, keep it at its calibrated brightness
+/// through night adaptation, and turn it with the sky.
 ///
-/// One float write per camera per frame, against the previous implementation's
-/// 25 MB cubemap rebuild every 60 frames.
+/// One float and one quaternion per camera per frame, against the previous
+/// implementation's 25 MB cubemap rebuild every 60 frames.
 fn fade_star_field(
     sky: Res<SkyConfig>,
     active: Res<ActiveSkyMode>,
     lighting: Res<LightingService>,
+    exposure: Res<SkyExposure>,
     sun: Query<&SunClass, With<SunMarker>>,
+    skies: Query<&Sky>,
     mut cameras: Query<(&mut Skybox, Option<&Projection>), With<SkyCamera>>,
 ) {
-    if active.0 == SkyMode::Skybox {
-        // An authored cubemap sets its own brightness; it is not a star field.
+    if active.0 != SkyMode::Atmosphere {
+        // On the cubemap paths the skybox IS the sky (an authored cubemap or
+        // the gradient), at its own brightness and orientation; fading it
+        // like a star field blacked the gradient out by day.
         return;
     }
-    let sun_dir = sun
-        .iter()
-        .next()
+    let sun_class = sun.iter().next();
+    let sun_dir = sun_class
         .map(|s| s.direction())
         .unwrap_or_else(|| lighting.sun_direction());
 
     // Full brightness once the sun is 6 degrees below the horizon (civil dusk),
     // gone by the time it is 3 degrees above.
-    let elevation = sun_dir.y.asin().to_degrees();
+    let elevation = sun_dir.y.clamp(-1.0, 1.0).asin().to_degrees();
     let night = ((3.0 - elevation) / 9.0).clamp(0.0, 1.0);
-    let brightness = sky.star_brightness * night * night;
+    let shown = skies.iter().next().map_or(true, |s| s.celestial_bodies_shown);
+    // Bevy multiplies the skybox by the camera's exposure, so as the exposure
+    // opens up for the night the stars would brighten with it, 512 times over
+    // at full adaptation. Scaling by the adaptation keeps them where their
+    // brightness was calibrated. Only the adaptation is taken out:
+    // `exposure_compensation` is the author's, and should reach the stars.
+    let adaptation = (exposure.adapted_ev100 - sky.base_ev100).exp2();
+    let brightness = if shown { sky.star_brightness * night * night * adaptation } else { 0.0 };
+
+    let rotation = match sun_class {
+        Some(s) => star_sky_rotation(s.latitude, sidereal_angle(s)),
+        None => star_sky_rotation(lighting.geographic_latitude, lighting.time_of_day * 360.0),
+    };
 
     for (mut skybox, projection) in cameras.iter_mut() {
         // An orthographic view's rays are parallel, so every pixel would show
@@ -1081,10 +1634,35 @@ fn fade_star_field(
         } else {
             brightness
         };
-        if (skybox.brightness - brightness).abs() > 0.5 {
+        if (skybox.brightness - brightness).abs() > (brightness * 0.01).max(1e-3) {
             skybox.brightness = brightness;
         }
+        if skybox.rotation.angle_between(rotation) > 1e-5 {
+            skybox.rotation = rotation;
+        }
     }
+}
+
+/// The local sidereal angle, degrees: how far the sky has turned about the
+/// celestial pole. The Sun's hour angle plus its right ascension, so the
+/// stars keep their place relative to the Sun and gain one turn a year.
+pub fn sidereal_angle(sun: &SunClass) -> f32 {
+    let (sun_ra, _) = ecliptic_to_equatorial(solar_ecliptic_longitude(sun.day_of_year), 0.0);
+    (sun.time_of_day - 12.0) * 15.0 + sun_ra
+}
+
+/// The rotation that carries the star cubemap onto the sky at `latitude`
+/// after the sky has turned `sidereal_degrees` about the pole.
+///
+/// The cubemap's +Y is the north celestial pole. Turning about it by the
+/// sidereal angle is the Earth's rotation; tilting +Y onto the pole at
+/// `(0, sin lat, cos lat)` (a turn about the east axis) places that pole in
+/// this latitude's sky. A positive turn about +Y carries east into the
+/// southern meridian and on to the west, which is the way everything in the
+/// sky moves through a day.
+pub fn star_sky_rotation(latitude: f32, sidereal_degrees: f32) -> Quat {
+    Quat::from_rotation_x((90.0 - latitude).to_radians())
+        * Quat::from_rotation_y(sidereal_degrees.to_radians())
 }
 
 /// Generate the star cubemap: black, plus stars, plus a faint galactic band.
@@ -1756,7 +2334,176 @@ mod tests {
             star_brightness: 1500.0,
             environment_map_size: 512,
             base_ev100: 13.0,
+            exposure_adaptation: true,
+            god_rays: 1.0,
         }
+    }
+
+    #[test]
+    fn the_ozone_layer_sits_at_25_km() {
+        // Falloff coordinates run 1 at the ground to 0 at the top, so the
+        // tent's peak must be at `1 - 25 km / height`. It was at 75 km.
+        let a = EustressAtmosphere::default();
+        let m = build_scattering_medium(&a);
+        let ozone = &m.terms[2].falloff;
+        let at = |altitude: f32| ozone.sample(1.0 - altitude / a.atmosphere_height);
+        assert!((at(25_000.0) - 1.0).abs() < 1e-4, "peak {}", at(25_000.0));
+        assert!(at(75_000.0) < 0.05, "no ozone at 75 km: {}", at(75_000.0));
+        assert!(at(25_000.0) > at(10_000.0) && at(25_000.0) > at(40_000.0));
+    }
+
+    #[test]
+    fn a_high_sun_loses_little_and_a_setting_sun_is_red() {
+        let medium = SkyMedium::default();
+        let noon = medium.transmittance(0.0, 60f32.to_radians().sin());
+        assert!(noon.x > 0.85 && noon.z > 0.6, "high sun {noon:?}");
+        let low = medium.transmittance(0.0, 2f32.to_radians().sin());
+        assert!(low.x > low.y && low.y > low.z, "a low sun reddens: {low:?}");
+        assert!(low.z < noon.z * 0.2, "and loses most of its blue: {low:?}");
+        // Monotonic in elevation, in every channel.
+        let mut previous = Vec3::ZERO;
+        for degrees in [0.5f32, 2.0, 5.0, 10.0, 20.0, 45.0, 90.0] {
+            let t = medium.transmittance(0.0, degrees.to_radians().sin());
+            assert!(t.cmpge(previous).all(), "{degrees} deg: {t:?} after {previous:?}");
+            previous = t;
+        }
+    }
+
+    #[test]
+    fn the_ground_blocks_a_ray_below_the_horizon_but_altitude_sees_past_it() {
+        let medium = SkyMedium::default();
+        let below = (-0.5f32).to_radians().sin();
+        assert_eq!(medium.transmittance(0.0, below), Vec3::ZERO);
+        // 2.7 km up the horizon dips about 1.7 degrees: a sun half a degree
+        // down still lights a cloud top.
+        assert!(medium.transmittance(2_700.0, below).x > 0.0);
+        // Space is clear.
+        assert_eq!(medium.transmittance(200_000.0, 0.3), Vec3::ONE);
+    }
+
+    #[test]
+    fn a_quarter_moon_is_a_tenth_of_a_full_one() {
+        assert!((moon_phase_brightness(180.0) - 1.0).abs() < 1e-6);
+        let quarter = moon_phase_brightness(90.0);
+        assert!((0.06..0.14).contains(&quarter), "quarter moon {quarter}");
+        assert!(moon_phase_brightness(0.0) < 1e-3, "a new moon gives no light");
+        // Waxing and waning phases match.
+        assert!((moon_phase_brightness(120.0) - moon_phase_brightness(240.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn night_adaptation_is_bounded_and_day_is_untouched() {
+        let base = 13.0;
+        // Bright daylight never darkens past the calibrated exposure.
+        assert_eq!(adapted_ev100(base, 150_000.0), base);
+        assert_eq!(adapted_ev100(base, KEY_LUX_AT_BASE), base);
+        // Dusk opens up part of the way.
+        let dusk = adapted_ev100(base, 700.0);
+        assert!(dusk < base - 3.0 && dusk > base - MAX_NIGHT_ADAPTATION_EV, "dusk {dusk}");
+        // A moonless night stops at the bound.
+        assert_eq!(adapted_ev100(base, 0.001), base - MAX_NIGHT_ADAPTATION_EV);
+        // Monotonic: less light is never a darker exposure.
+        let mut previous = f32::INFINITY;
+        for lux in [100_000.0f32, 20_000.0, 3_000.0, 400.0, 30.0, 2.0, 0.1] {
+            let ev = adapted_ev100(base, lux);
+            assert!(ev <= previous);
+            previous = ev;
+        }
+    }
+
+    #[test]
+    fn adapted_stars_keep_their_calibrated_brightness() {
+        // Bevy multiplies the skybox by the camera's exposure; the fade
+        // divides the adaptation back out, so on-screen star brightness is
+        // the same at any adaptation.
+        let sky = default_config();
+        let on_screen = |adapted_ev100: f32| {
+            let skybox = sky.star_brightness * (adapted_ev100 - sky.base_ev100).exp2();
+            skybox * Exposure { ev100: adapted_ev100 }.exposure()
+        };
+        let day = on_screen(sky.base_ev100);
+        let night = on_screen(sky.base_ev100 - MAX_NIGHT_ADAPTATION_EV);
+        assert!((day - night).abs() < day * 1e-4, "{day} vs {night}");
+    }
+
+    #[test]
+    fn the_star_field_turns_about_the_celestial_pole() {
+        for latitude in [-33.0f32, 0.0, 41.7, 70.0] {
+            let pole = Vec3::new(0.0, latitude.to_radians().sin(), latitude.to_radians().cos());
+            for sidereal in [0.0f32, 77.0, 190.0] {
+                let r = star_sky_rotation(latitude, sidereal);
+                assert!((r * Vec3::Y - pole).length() < 1e-5, "the cubemap pole must stay on the sky's");
+            }
+        }
+    }
+
+    #[test]
+    fn the_stars_rise_in_the_east_and_set_in_the_west() {
+        // A star on the celestial equator, 45 degrees north: at one sidereal
+        // angle it is due east on the horizon, a quarter turn later on the
+        // southern meridian, then due west. The same way the sun goes.
+        let star = Vec3::X;
+        let east = star_sky_rotation(45.0, 0.0) * star;
+        let south = star_sky_rotation(45.0, 90.0) * star;
+        let west = star_sky_rotation(45.0, 180.0) * star;
+        assert!((east - Vec3::X).length() < 1e-5, "{east:?}");
+        assert!(south.z < -0.5 && south.y > 0.5, "culminates in the south: {south:?}");
+        assert!((west - Vec3::NEG_X).length() < 1e-5, "{west:?}");
+        // And the sun's own path runs the same way through the day.
+        let mut sun = SunClass { latitude: 45.0, day_of_year: 80, ..default() };
+        sun.time_of_day = 6.0;
+        let morning = sun.direction();
+        sun.time_of_day = 18.0;
+        let evening = sun.direction();
+        assert!(morning.x > 0.9 && evening.x < -0.9, "{morning:?} {evening:?}");
+    }
+
+    #[test]
+    fn the_sky_direction_is_the_suns_own_alt_azimuth() {
+        // Moon and sun must share one conversion, or the lit side of the moon
+        // cannot face the rendered sun.
+        let sun = SunClass { latitude: 41.7, day_of_year: 172, time_of_day: 9.5, ..default() };
+        let declination = 23.45 * ((360.0f32 / 365.0) * (sun.day_of_year as f32 - 81.0)).to_radians().sin();
+        let via_sky = crate::classes::sky_direction((sun.time_of_day - 12.0) * 15.0, declination, sun.latitude);
+        assert!((via_sky - sun.direction()).length() < 1e-3, "{via_sky:?} vs {:?}", sun.direction());
+    }
+
+    #[test]
+    fn a_full_moon_stands_opposite_the_sun() {
+        // The failure this guards: the old model put a summer full moon 133
+        // degrees from the sun, high in the sky at midnight.
+        let sun = SunClass { latitude: 45.0, day_of_year: 172, time_of_day: 0.0, ..default() };
+        let moon = MoonClass { lunar_day: MoonClass::SYNODIC_MONTH / 2.0, ascending_node: 90.0, ..default() };
+        let angle = sun.direction().angle_between(moon.direction_realistic(&sun)).to_degrees();
+        assert!(angle > 170.0, "full moon {angle:.1} deg from the sun");
+        // A summer full moon runs low: the sun's declination, reversed.
+        let elevation = moon.direction_realistic(&sun).y.asin().to_degrees();
+        assert!(elevation < 30.0, "summer full moon at {elevation:.1} deg");
+        // A first quarter is a right angle from the sun.
+        let quarter = MoonClass { lunar_day: MoonClass::SYNODIC_MONTH / 4.0, orbital_inclination: 0.0, ..default() };
+        let noon = SunClass { time_of_day: 18.0, ..sun.clone() };
+        let angle = noon.direction().angle_between(quarter.direction_realistic(&noon)).to_degrees();
+        assert!((angle - 90.0).abs() < 3.0, "first quarter {angle:.1} deg from the sun");
+    }
+
+    #[test]
+    fn the_sky_light_follows_the_sun_down() {
+        let noon = clear_sky_lux(60.0);
+        let sunset = clear_sky_lux(0.0);
+        let civil = clear_sky_lux(-6.0);
+        let nautical = clear_sky_lux(-12.0);
+        assert!(noon > 10_000.0 && noon < 25_000.0, "clear midday sky {noon}");
+        assert!((sunset - 800.0).abs() < 1.0);
+        assert!((1.0..10.0).contains(&civil), "end of civil twilight {civil}");
+        assert!(nautical < 0.05, "end of nautical twilight {nautical}");
+    }
+
+    #[test]
+    fn the_sun_disc_eases_down_over_its_own_width() {
+        let radius = 0.2665f32.to_radians();
+        assert_eq!(disc_visibility(0.3, radius), 1.0);
+        assert!((disc_visibility(0.0, radius) - 0.5).abs() < 1e-5);
+        assert_eq!(disc_visibility(-0.3, radius), 0.0);
     }
 
     #[test]

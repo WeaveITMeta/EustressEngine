@@ -92,6 +92,16 @@ impl Plugin for PartRenderingPlugin {
         #[cfg(not(target_arch = "wasm32"))]
         app.init_resource::<HighlightGeneration>()
             .add_systems(Update, update_selection_highlights);
+
+        // Performance switch `overlay_cascades` (eustress_common::utils).
+        if eustress_common::utils::perf_on("overlay_cascades") {
+            app.add_systems(
+                PostUpdate,
+                prune_overlay_sun_cascades
+                    .after(bevy::light::SimulationLightSystems::UpdateDirectionalLightCascades)
+                    .before(bevy::light::update_directional_light_frusta),
+            );
+        }
     }
 
     /// Run the render world's `Core3d` schedule on the single-threaded
@@ -121,6 +131,46 @@ impl Plugin for PartRenderingPlugin {
             render_app.edit_schedule(bevy::core_pipeline::Core3d, |schedule| {
                 schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
             });
+        }
+    }
+}
+
+/// Drop the Slint overlay camera's sun shadow cascades.
+///
+/// Bevy builds directional-light cascades for every active camera, with no
+/// render-layer test. The overlay camera is orthographic at the window's size
+/// in world units and composites one texture on layer 31, so its cascades
+/// covered a box about as wide and tall as the window in metres and 1 km deep.
+/// Each frame the light-visibility pass walked every shadow caster once more
+/// for it, marked nearly all of them visible and queued them for the main
+/// thread, and `extract_lights` copied the lists, all for a camera the
+/// renderer skips: `prepare_lights` only builds a camera's cascades when its
+/// layers intersect the light's. This removes the overlay's entry after the
+/// cascades are built and before their frusta, under that same layer test, so
+/// nothing the renderer draws changes.
+///
+/// It is limited to the overlay camera on purpose. `prepare_lights` unwraps
+/// the cascades of every camera whose layers intersect a light's, so a camera
+/// whose layers could change later in the frame must keep its entry. The
+/// overlay's layer is fixed when it spawns.
+fn prune_overlay_sun_cascades(
+    overlay: Query<
+        (Entity, Option<&bevy::camera::visibility::RenderLayers>),
+        With<crate::ui::slint_ui::SlintOverlayCamera>,
+    >,
+    mut lights: Query<
+        (&mut bevy::light::Cascades, Option<&bevy::camera::visibility::RenderLayers>),
+        With<DirectionalLight>,
+    >,
+) {
+    for (mut cascades, light_layers) in &mut lights {
+        let light_layers = light_layers.unwrap_or_default();
+        for (camera, camera_layers) in &overlay {
+            if !light_layers.intersects(camera_layers.unwrap_or_default())
+                && cascades.cascades.contains_key(&camera)
+            {
+                cascades.cascades.remove(&camera);
+            }
         }
     }
 }

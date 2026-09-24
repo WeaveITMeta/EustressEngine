@@ -30,11 +30,18 @@
 //! |-----|---------|--------|
 //! | `EUSTRESS_SMAA`          | on  | subpixel-morphological AA (3 passes) |
 //! | `EUSTRESS_BLOOM`         | on  | filmic bloom (down/upsample chain) |
+//! | `EUSTRESS_BLOOM_INTENSITY` | 0.15 | bloom strength (bevy's `NATURAL`) |
 //! | `EUSTRESS_MSAA`          | off | `2`/`4`/`8` restores hardware MSAA |
 //! | `EUSTRESS_GTAO`          | off | ground-contact AO; adds a `NormalPrepass` |
-//! | `EUSTRESS_AUTO_EXPOSURE` | off | exposure adaptation |
+//! | `EUSTRESS_AUTO_EXPOSURE` | off | histogram exposure adaptation (the sky's own night adaptation is always on; see `sky_atmosphere::SkyExposure`) |
+//! | `EUSTRESS_CONTACT_SHADOWS` | off | screen-space contact shadows from the sun |
 //!
 //! Set any flag to `0`/`false` to disable, or a non-empty value to enable.
+//!
+//! **Contact shadows are a view-layout switch like MSAA.** `ContactShadows`
+//! is part of the mesh view bind-group layout key, which is why it is read
+//! once here and applied to every Studio camera together, never toggled on
+//! one camera at runtime.
 //!
 //! **`EUSTRESS_MSAA` is the one to be careful with:** hardware MSAA and SMAA
 //! both anti-alias, so enabling MSAA while SMAA is on pays twice. It exists to
@@ -42,7 +49,7 @@
 
 use bevy::prelude::*;
 use bevy::anti_alias::smaa::Smaa;
-use bevy::pbr::ScreenSpaceAmbientOcclusion;
+use bevy::pbr::{ContactShadows, ScreenSpaceAmbientOcclusion};
 use bevy::post_process::auto_exposure::{AutoExposure, AutoExposurePlugin};
 use bevy::post_process::bloom::Bloom;
 use bevy::render::view::Msaa;
@@ -74,6 +81,24 @@ fn bloom_on() -> bool {
     *V.get_or_init(|| flag("EUSTRESS_BLOOM", true))
 }
 
+/// Bloom's strength, `EUSTRESS_BLOOM_INTENSITY` (default: bevy's `NATURAL`,
+/// 0.15). Energy-conserving, so raising it spreads more of every bright
+/// pixel into its glow rather than brightening the frame. The sun's disc is
+/// capped for the HDR target (see `lighting_plugin::SUN_DISC_PEAK`), so this
+/// is what sets how far its glare reaches.
+fn bloom() -> Bloom {
+    static V: OnceLock<f32> = OnceLock::new();
+    let natural = Bloom::NATURAL;
+    let intensity = *V.get_or_init(|| {
+        std::env::var("EUSTRESS_BLOOM_INTENSITY")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(natural.intensity)
+    });
+    Bloom { intensity, ..natural }
+}
+
 fn gtao_on() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| flag("EUSTRESS_GTAO", false))
@@ -82,6 +107,15 @@ fn gtao_on() -> bool {
 fn auto_exposure_on() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| flag("EUSTRESS_AUTO_EXPOSURE", false))
+}
+
+/// Screen-space contact shadows: the fine shadow where a part meets the
+/// ground, below what the sun's shadow maps resolve. Read by the sun's
+/// hydration too, which must set `contact_shadows_enabled` on the light for
+/// the camera component to have anything to draw.
+pub fn contact_shadows_on() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| flag("EUSTRESS_CONTACT_SHADOWS", false))
 }
 
 /// Hardware MSAA sample count, or `None` to leave the bundle's `Msaa::Off`.
@@ -109,6 +143,7 @@ pub struct PhotorealSettings {
     pub bloom: bool,
     pub gtao: bool,
     pub auto_exposure: bool,
+    pub contact_shadows: bool,
     /// `None` = `Msaa::Off` (the default); `Some(n)` = hardware MSAA at n samples.
     pub msaa_samples: Option<u32>,
 }
@@ -120,6 +155,7 @@ impl Default for PhotorealSettings {
             bloom: bloom_on(),
             gtao: gtao_on(),
             auto_exposure: auto_exposure_on(),
+            contact_shadows: contact_shadows_on(),
             msaa_samples: msaa_override().map(|m| m.samples()),
         }
     }
@@ -143,11 +179,12 @@ impl Plugin for PhotorealPlugin {
 
         let s = PhotorealSettings::default();
         info!(
-            "photoreal: smaa={} bloom={} gtao={} auto_exposure={} msaa={}",
+            "photoreal: smaa={} bloom={} gtao={} auto_exposure={} contact_shadows={} msaa={}",
             s.smaa,
             s.bloom,
             s.gtao,
             s.auto_exposure,
+            s.contact_shadows,
             s.msaa_samples.map_or("off".to_string(), |n| n.to_string()),
         );
     }
@@ -171,7 +208,7 @@ fn apply_camera_stages(mut commands: Commands, cameras: Query<Entity, Added<Stud
             ec.insert(Smaa::default());
         }
         if bloom_on() {
-            ec.insert(Bloom::NATURAL);
+            ec.insert(bloom());
         }
         if let Some(msaa) = msaa_override() {
             ec.insert(msaa);
@@ -181,6 +218,10 @@ fn apply_camera_stages(mut commands: Commands, cameras: Query<Entity, Added<Stud
         }
         if auto_exposure_on() {
             ec.insert(AutoExposure::default());
+        }
+        if contact_shadows_on() {
+            // Requires the `DepthPrepass` every Studio camera already has.
+            ec.insert(ContactShadows::default());
         }
     }
 }

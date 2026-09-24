@@ -248,7 +248,8 @@ fn hydrate_lighting_entities(
             ambient_day_color: lighting.ambient,
             ambient_night_color: [0.02, 0.02, 0.05, 1.0],
             corona_intensity: 0.3,
-            god_rays_intensity: 0.0,
+            // The calibrated default; 0 turns the sun's shafts off.
+            god_rays_intensity: 1.0,
             texture: String::new(),
         };
 
@@ -282,6 +283,10 @@ fn hydrate_lighting_entities(
                 ),
                 illuminance: lux::RAW_SUNLIGHT,
                 shadow_maps_enabled: true,
+                // Screen-space contact shadows only reach a camera that
+                // carries `ContactShadows`, which `photoreal` attaches when
+                // `EUSTRESS_CONTACT_SHADOWS` asks for it.
+                contact_shadows_enabled: crate::photoreal::contact_shadows_on(),
                 shadow_depth_bias: 0.02,
                 shadow_normal_bias: 1.8,
                 ..default()
@@ -306,10 +311,13 @@ fn hydrate_lighting_entities(
 
         info!("🌙 Hydrating Moon entity {:?} from Lighting/ TOML", entity);
 
+        // Dark until `update_moon_position` places it, on the next frame: the
+        // old placeholder was a 500 lux moon hanging overhead, and it stayed
+        // lit day and night until something edited the clock.
         commands.entity(entity).insert((
             DirectionalLight {
                 color: Color::srgb(0.7, 0.75, 0.9),
-                illuminance: 500.0,
+                illuminance: 0.0,
                 shadow_maps_enabled: false,
                 ..default()
             },
@@ -372,15 +380,31 @@ fn sync_sun_with_lighting_service(
     
     for mut sun in sun_query.iter_mut() {
         // Sync latitude from LightingService (controls sun arc path)
-        sun.latitude = lighting.geographic_latitude;
-        
-        // Parse ClockTime string to time_of_day if it changed
-        if let Some((hours, minutes)) = parse_clock_time(&lighting.clock_time) {
-            let time = hours as f32 + (minutes as f32 / 60.0);
-            if (sun.time_of_day - time).abs() > 0.01 {
-                sun.time_of_day = time;
-            }
+        if sun.latitude != lighting.geographic_latitude {
+            sun.latitude = lighting.geographic_latitude;
         }
+
+        // The sun's light, disc and shadows follow the service too. They were
+        // copied into `SunClass` once, at hydration, so a Properties-panel
+        // edit of the sun's intensity, colour, size or shadows reached the
+        // service and never the sun.
+        if sun.noon_intensity != lighting.sun_intensity {
+            sun.noon_intensity = lighting.sun_intensity;
+        }
+        if sun.noon_color != lighting.sun_color {
+            sun.noon_color = lighting.sun_color;
+        }
+        let angular_size = lighting.sun_angular_radius * 2.0;
+        if (sun.angular_size - angular_size).abs() > 1e-5 {
+            sun.angular_size = angular_size;
+        }
+        if sun.cast_shadows != lighting.shadows_enabled {
+            sun.cast_shadows = lighting.shadows_enabled;
+        }
+
+        // `sync_clock_time_to_sun` in the shared plugin owns `time_of_day`.
+        // This used to write it too, from hours and minutes only, and the two
+        // fought to the second whenever the clock carried seconds.
     }
 }
 
@@ -402,18 +426,6 @@ fn parse_hours(text: &str) -> Option<f32> {
     let s: f32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
     (h.is_finite() && m.is_finite() && s.is_finite())
         .then(|| (h + m / 60.0 + s / 3600.0).rem_euclid(24.0))
-}
-
-/// Parse clock time string "HH:MM:SS" to (hours, minutes)
-fn parse_clock_time(clock_time: &str) -> Option<(u32, u32)> {
-    let parts: Vec<&str> = clock_time.split(':').collect();
-    if parts.len() >= 2 {
-        let hours = parts[0].parse().ok()?;
-        let minutes = parts[1].parse().ok()?;
-        Some((hours, minutes))
-    } else {
-        None
-    }
 }
 
 /// Sync the authored Atmosphere entity into the `SceneAtmosphere` resource that

@@ -5,6 +5,8 @@
 
 pub mod lighting_plugin;
 pub mod sky_atmosphere;
+pub mod moon_disc;
+pub mod volumetric_clouds;
 pub mod orthographic_sky;
 pub mod reflections;
 pub mod character_plugin;
