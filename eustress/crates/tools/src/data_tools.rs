@@ -38,7 +38,9 @@ impl ToolHandler for MineDataTool {
             name: "mine_data",
             description: "Mine a data file in the Universe (CSV, JSONL, a JSON array of rows, or Parquet) \
                 without writing code. Runs: describe (columns, types, missing values, summary \
-                statistics; start here), classify, regress, compare (several models on identical \
+                statistics; start here), rows (a page of the table), graph (the table read as an \
+                edge list, answering one question: sole_sourced, unsourced, impact, path, neighbors, \
+                traverse, cycles or summary), classify, regress, compare (several models on identical \
                 splits), rank (filter scores of every feature), selection_check (how much choosing \
                 features on all rows inflates accuracy), forward_select, lasso (penalty chosen by \
                 cross-validation), cluster, pca, rules (association rules from baskets), and \
@@ -129,7 +131,31 @@ impl ToolHandler for MineDataTool {
                     "min_support": { "type": "number", "description": "For rules (default 0.1)." },
                     "min_confidence": { "type": "number", "description": "For rules (default 0.5)." },
                     "max_len": { "type": "integer", "description": "For rules: largest itemset (default 4)." },
-                    "limit": { "type": "integer", "description": "For rules: how many itemsets and rules to return (default 50)." },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "For rules: how many itemsets and rules to return (default 50). For rows: rows per page (default 100). For graph: nodes listed (default 200)."
+                    },
+                    "columns": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "For rows: the columns to return. Default: every column."
+                    },
+                    "offset": { "type": "integer", "minimum": 0, "description": "For rows: the first row to return, counting from 0." },
+                    "from": { "type": "string", "description": "For graph: the column naming each edge's source node." },
+                    "to": { "type": "string", "description": "For graph: the column naming each edge's target node." },
+                    "rel": { "type": "string", "description": "For graph: the column naming each edge's relation type." },
+                    "default_rel": { "type": "string", "description": "For graph: the relation type of every edge when there is no `rel` column (default RELATED)." },
+                    "ask": {
+                        "type": "string",
+                        "enum": ["summary", "neighbors", "traverse", "path", "sole_sourced", "unsourced", "impact", "cycles"],
+                        "description": "For graph: the question. summary (default): the best-connected nodes. neighbors, traverse {depth}: what is near `node`. path: the shortest path from `node` to `to_node`. sole_sourced: nodes with exactly one inbound `relation` edge. unsourced: nodes with none. impact: everything losing `node` reaches along `relation` (backwards unless `direction` is given). cycles: loops."
+                    },
+                    "node": { "type": "string", "description": "For graph: the node a question starts from." },
+                    "to_node": { "type": "string", "description": "For graph path: the node to reach." },
+                    "relation": { "type": "string", "description": "For graph: the relation type to follow, such as SUPPLIES. Required by sole_sourced, unsourced and impact; narrows the others." },
+                    "direction": { "type": "string", "enum": ["out", "in", "both"], "description": "For graph: which way to follow edges (default out)." },
+                    "depth": { "type": "integer", "minimum": 0, "description": "For graph traverse: the most edges from `node` (default 3)." },
                     "measured": { "type": "string", "description": "For residuals: the measured column, beside `simulated` in the same file." },
                     "simulated": { "type": "string", "description": "For residuals: the simulated column." },
                     "time": { "type": "string", "description": "For residuals on two clocks: the measured file's time column." },

@@ -17,6 +17,9 @@ use serde_json::{json, Map, Value};
 const EXAMPLES: &str = "\
 Examples:
   eustress data describe deliveries.csv
+  eustress data rows deliveries.csv --columns supplier,late --limit 20 --offset 40
+  eustress data graph supply.csv --from supplier --to sku --default-rel SUPPLIES --ask sole_sourced --relation SUPPLIES
+  eustress data graph bom.csv --from assembly --to part --rel rel --ask impact --node PUMP-7 --relation CONTAINS
   eustress data classify deliveries.csv --target late --group supplier
   eustress data classify deliveries.csv --target late --model decision_tree:max_depth=4
   eustress data compare deliveries.csv --target late --model decision_tree --model k_nearest_neighbors:k=7
@@ -32,17 +35,18 @@ Every supervised run splits before fitting, cross-validates inside the training
 rows, and scores against a trivial baseline. Read the cautions it prints before
 trusting a score; --strict turns any caution into a failing exit code.";
 
-/// Mine a data file: describe it, fit and compare models, rank and select
-/// features, cluster, find association rules, or score a simulation against
-/// measurements. Every run reports the pitfalls it detected.
+/// Mine a data file: describe it, page through its rows, ask graph questions of
+/// an edge list, fit and compare models, rank and select features, cluster,
+/// find association rules, or score a simulation against measurements. Every
+/// run reports the pitfalls it detected.
 #[derive(Args, Debug)]
 #[command(after_long_help = EXAMPLES)]
 pub struct DataArgs {
     /// The run. `selection-check` and `forward-select` may also be written
     /// with underscores.
     #[arg(value_parser = PossibleValuesParser::new([
-        "describe", "classify", "regress", "compare", "rank", "selection-check", "selection_check",
-        "forward-select", "forward_select", "lasso", "cluster", "pca", "rules", "residuals",
+        "describe", "rows", "graph", "classify", "regress", "compare", "rank", "selection-check",
+        "selection_check", "forward-select", "forward_select", "lasso", "cluster", "pca", "rules", "residuals",
     ]))]
     run: String,
 
@@ -139,9 +143,63 @@ pub struct DataArgs {
     #[arg(long)]
     max_len: Option<usize>,
 
-    /// rules: how many itemsets and rules to return (default 50).
+    /// rules: how many itemsets and rules to return (default 50). rows: rows
+    /// per page (default 100). graph: nodes listed (default 200).
     #[arg(long)]
     limit: Option<usize>,
+
+    /// rows: the columns to return, comma-separated. Default: every column.
+    #[arg(long, value_delimiter = ',')]
+    columns: Vec<String>,
+
+    /// rows: the first row to return, counting from 0.
+    #[arg(long)]
+    offset: Option<usize>,
+
+    /// graph: the column naming each edge's source node.
+    #[arg(long)]
+    from: Option<String>,
+
+    /// graph: the column naming each edge's target node.
+    #[arg(long)]
+    to: Option<String>,
+
+    /// graph: the column naming each edge's relation type.
+    #[arg(long)]
+    rel: Option<String>,
+
+    /// graph: the relation type of every edge when there is no --rel column
+    /// (default RELATED).
+    #[arg(long)]
+    default_rel: Option<String>,
+
+    /// graph: the question to answer.
+    #[arg(long, value_parser = PossibleValuesParser::new([
+        "summary", "neighbors", "traverse", "path", "sole_sourced", "unsourced", "impact", "cycles",
+    ]))]
+    ask: Option<String>,
+
+    /// graph: the node a question starts from.
+    #[arg(long)]
+    node: Option<String>,
+
+    /// graph path: the node to reach.
+    #[arg(long)]
+    to_node: Option<String>,
+
+    /// graph: the relation type to follow, such as SUPPLIES. Required by
+    /// sole_sourced, unsourced and impact; narrows the others.
+    #[arg(long)]
+    relation: Option<String>,
+
+    /// graph: which way to follow edges (default out; impact walks backwards
+    /// unless this is given).
+    #[arg(long, value_parser = PossibleValuesParser::new(["out", "in", "both"]))]
+    direction: Option<String>,
+
+    /// graph traverse: the most edges from --node (default 3).
+    #[arg(long)]
+    depth: Option<usize>,
 
     /// residuals: the measured column, beside --simulated in the same file.
     #[arg(long)]
@@ -283,6 +341,20 @@ fn request(args: &DataArgs) -> Result<Value> {
     put(&mut req, "min_confidence", args.min_confidence);
     put(&mut req, "max_len", args.max_len);
     put(&mut req, "limit", args.limit);
+    if !args.columns.is_empty() {
+        req.insert("columns".to_string(), json!(args.columns));
+    }
+    put(&mut req, "offset", args.offset);
+    put(&mut req, "from", args.from.clone());
+    put(&mut req, "to", args.to.clone());
+    put(&mut req, "rel", args.rel.clone());
+    put(&mut req, "default_rel", args.default_rel.clone());
+    put(&mut req, "ask", args.ask.clone());
+    put(&mut req, "node", args.node.clone());
+    put(&mut req, "to_node", args.to_node.clone());
+    put(&mut req, "relation", args.relation.clone());
+    put(&mut req, "direction", args.direction.clone());
+    put(&mut req, "depth", args.depth);
     put(&mut req, "measured", args.measured.clone());
     put(&mut req, "simulated", args.simulated.clone());
     put(&mut req, "time", args.time.clone());
@@ -343,6 +415,22 @@ mod tests {
         let r = req(&["compare", "d.csv", "--target", "t", "--model", "decision_tree", "--model", "k_nearest_neighbors:k=7"]);
         assert_eq!(r["models"], json!([{ "name": "decision_tree" }, { "name": "k_nearest_neighbors", "k": 7 }]));
         assert_eq!(req(&["selection-check", "d.csv", "--target", "t"])["run"], "selection_check");
+    }
+
+    #[test]
+    fn rows_and_graph_flags_become_the_json_request() {
+        let r = req(&["rows", "d.csv", "--columns", "sku,qty", "--limit", "20", "--offset", "40"]);
+        assert_eq!(r, json!({ "run": "rows", "file": "d.csv", "columns": ["sku", "qty"], "limit": 20, "offset": 40 }));
+        let g = req(&[
+            "graph", "bom.csv", "--from", "assembly", "--to", "part", "--rel", "rel", "--ask", "impact", "--node", "PUMP-7",
+            "--relation", "CONTAINS", "--direction", "in",
+        ]);
+        assert_eq!(
+            g,
+            json!({ "run": "graph", "file": "bom.csv", "from": "assembly", "to": "part", "rel": "rel", "ask": "impact",
+                    "node": "PUMP-7", "relation": "CONTAINS", "direction": "in" })
+        );
+        assert!(Probe::try_parse_from(["data", "graph", "g.csv", "--ask", "shortest"]).is_err(), "an unknown question");
     }
 
     #[test]

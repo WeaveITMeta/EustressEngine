@@ -15,6 +15,14 @@
 //! The reply is `{ "run", "source", "report" }`, where `report` is the run's
 //! report from [`super::workflow`], cautions included.
 //!
+//! Data comes from a `file`, from `data` (row objects inline), or from a
+//! `connector`: a Connector in the Space's DataService, read through
+//! [`crate::source::connector`], optionally with a `statement` (Cypher, SQL or
+//! GraphQL) in place of its configured query. Two runs look at data rather
+//! than fit it: `rows` returns the table itself, and `graph` reads it as an
+//! edge list and answers supply-chain questions (who supplies what, what is
+//! sole-sourced, what a loss would reach, the shortest route).
+//!
 //! Unknown fields are refused by name rather than ignored: a misspelled
 //! setting that silently fell back to its default would produce a plausible,
 //! wrong result. When `features` is left out, every numeric column except the
@@ -38,13 +46,16 @@ use super::classify::{
 use super::cluster::{Agglomerative, Dbscan, KMeans, Linkage};
 use super::regress::{Lasso, LinearRegression, RegressorSpec};
 use super::workflow::{self, Baskets, ClusterMethod, RunOptions, Series, Task};
+use crate::graph::{Direction, Graph, Reached};
 use crate::import::{frame_from_csv, frame_from_jsonl};
 use crate::numerics::stats;
-use crate::{ColumnData, ColumnDtype, DataError, Frame, Result};
+use crate::{ColumnData, ColumnDtype, ColumnSpec, DataError, Frame, Result};
 
 /// Every run the front door accepts.
 pub const RUNS: &[&str] = &[
     "describe",
+    "rows",
+    "graph",
     "classify",
     "regress",
     "compare",
@@ -427,22 +438,47 @@ pub fn load_frame(path: &Path) -> Result<Frame> {
     }
 }
 
-/// The frame a request points at: a file (through `resolve`) or rows inline.
-fn load_source(
-    r: &Req<'_>,
-    resolve: &dyn Fn(&str) -> Result<PathBuf>,
-    file_key: &str,
-    data_key: &str,
-) -> Result<(Frame, String)> {
-    match (r.string(file_key)?, r.get(data_key)) {
-        (Some(_), Some(_)) => Err(bad(format!("give `{file_key}` or `{data_key}`, not both"))),
-        (Some(f), None) => Ok((load_frame(&resolve(f)?)?, f.to_string())),
-        (None, Some(Value::Array(rows))) => Ok((frame_from_rows(rows)?, "inline".to_string())),
-        (None, Some(_)) => Err(bad(format!("`{data_key}` must be an array of row objects"))),
-        (None, None) => Err(bad(format!(
+/// What a request may reach beyond its own fields.
+#[derive(Clone, Copy)]
+pub struct Env<'a> {
+    /// Turns a request's file names into paths. A sandboxed caller refuses
+    /// anything outside its sandbox here.
+    pub resolve: &'a dyn Fn(&str) -> Result<PathBuf>,
+    /// Fetches a Connector by name, with an optional statement in place of its
+    /// configured query. `None` for a caller with no Space, which then refuses
+    /// any request that names a Connector.
+    pub connector: Option<&'a dyn Fn(&str, Option<&str>) -> Result<Frame>>,
+}
+
+/// The frame a request points at: a file (through `resolve`), rows inline, or,
+/// for the main source only, a Connector.
+fn load_source(r: &Req<'_>, env: &Env<'_>, file_key: &str, data_key: &str) -> Result<(Frame, String)> {
+    let main = file_key == "file";
+    let connector = if main { r.string("connector")? } else { None };
+    let statement = if main { r.string("statement")? } else { None };
+    if statement.is_some() && connector.is_none() {
+        return Err(bad("`statement` goes with `connector`: it replaces that Connector's configured query"));
+    }
+    match (r.string(file_key)?, r.get(data_key), connector) {
+        (None, None, Some(name)) => {
+            let fetch = env.connector.ok_or_else(|| {
+                bad(format!("Connector '{name}' cannot be read here: this caller has no Space to find it in"))
+            })?;
+            Ok((fetch(name, statement)?, format!("connector {name}")))
+        }
+        (Some(f), None, None) => Ok((load_frame(&(env.resolve)(f)?)?, f.to_string())),
+        (None, Some(Value::Array(rows)), None) => Ok((frame_from_rows(rows)?, "inline".to_string())),
+        (None, Some(_), None) => Err(bad(format!("`{data_key}` must be an array of row objects"))),
+        (None, None, None) if file_key == "file" => Err(bad(format!(
+            "{} needs `file` (a data file), `data` (an array of row objects) or `connector` (a Connector's name)",
+            r.ctx
+        ))),
+        (None, None, None) => Err(bad(format!(
             "{} needs `{file_key}` (a data file) or `{data_key}` (an array of row objects)",
             r.ctx
         ))),
+        _ if file_key == "file" => Err(bad("give one of `file`, `data` or `connector`")),
+        _ => Err(bad(format!("give `{file_key}` or `{data_key}`, not both"))),
     }
 }
 
@@ -488,9 +524,15 @@ fn truncate(v: &mut Value, field: &str, limit: usize) {
 // Running a request
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Run one request. `resolve` turns the request's file names into paths; a
-/// sandboxed caller refuses anything outside its sandbox there.
+/// Run one request against files only. `resolve` turns the request's file
+/// names into paths; a sandboxed caller refuses anything outside its sandbox
+/// there.
 pub fn run(request: &Value, resolve: &dyn Fn(&str) -> Result<PathBuf>) -> Result<Value> {
+    run_in(request, &Env { resolve, connector: None })
+}
+
+/// Run one request with everything `env` lets it reach.
+pub fn run_in(request: &Value, env: &Env<'_>) -> Result<Value> {
     let obj = request.as_object().ok_or_else(|| bad("a request is a JSON object with a `run` field"))?;
     let run = obj
         .get("run")
@@ -498,6 +540,10 @@ pub fn run(request: &Value, resolve: &dyn Fn(&str) -> Result<PathBuf>) -> Result
         .ok_or_else(|| bad(format!("a request needs `run`, one of: {}", RUNS.join(", "))))?;
     let specific: &[&str] = match run {
         "describe" => &[],
+        "rows" => &["columns", "limit", "offset"],
+        "graph" => &[
+            "from", "to", "rel", "default_rel", "ask", "node", "to_node", "relation", "direction", "depth", "limit",
+        ],
         "classify" | "regress" => &["target", "features", "model", "options"],
         "compare" => &["task", "target", "features", "models", "options"],
         "rank" => &["task", "target", "features"],
@@ -513,14 +559,16 @@ pub fn run(request: &Value, resolve: &dyn Fn(&str) -> Result<PathBuf>) -> Result
         other => return Err(bad(format!("unknown run `{other}`; expected one of: {}", RUNS.join(", ")))),
     };
     let ctx = format!("run `{run}`");
-    let mut allowed = vec!["run", "file", "data"];
+    let mut allowed = vec!["run", "file", "data", "connector", "statement"];
     allowed.extend_from_slice(specific);
     check_keys(obj, &allowed, &ctx)?;
     let r = Req { ctx, obj };
-    let (frame, source) = load_source(&r, resolve, "file", "data")?;
+    let (frame, source) = load_source(&r, env, "file", "data")?;
 
     let report = match run {
         "describe" => describe(&frame),
+        "rows" => rows(&r, &frame)?,
+        "graph" => graph(&r, &frame)?,
         "classify" => {
             let target = r.need_string("target")?;
             let opts = run_options(r.get("options"))?;
@@ -642,7 +690,7 @@ pub fn run(request: &Value, resolve: &dyn Fn(&str) -> Result<PathBuf>) -> Result
             (None, None) => {
                 let time = r.need_string("time")?;
                 let value = r.need_string("value")?;
-                let (sim, _) = load_source(&r, resolve, "simulated_file", "simulated_data")?;
+                let (sim, _) = load_source(&r, env, "simulated_file", "simulated_data")?;
                 let sim_time = r.string("sim_time")?.unwrap_or(time);
                 let sim_value = r.string("sim_value")?.unwrap_or(value);
                 to_value(&workflow::compare_frames(
@@ -668,6 +716,148 @@ fn excluded<'a>(target: &'a str, opts: &'a RunOptions) -> Vec<&'a str> {
         v.push(g.as_str());
     }
     v
+}
+
+fn cell_json(data: &ColumnData, r: usize) -> Value {
+    match data {
+        ColumnData::F64(v) => v[r].filter(|x| x.is_finite()).map_or(Value::Null, |x| json!(x)),
+        ColumnData::I64(v) => v[r].map_or(Value::Null, |x| json!(x)),
+        ColumnData::Bool(v) => v[r].map_or(Value::Null, |x| json!(x)),
+        ColumnData::Str(v) => v[r].as_ref().map_or(Value::Null, |x| json!(x)),
+    }
+}
+
+/// The table itself, one page of row objects at a time.
+fn rows(r: &Req<'_>, frame: &Frame) -> Result<Value> {
+    let cols: Vec<&(ColumnSpec, ColumnData)> = match r.names("columns")?.filter(|c| !c.is_empty()) {
+        Some(names) => names
+            .iter()
+            .map(|n| {
+                frame
+                    .columns()
+                    .iter()
+                    .find(|(s, _)| &s.name == n)
+                    .ok_or_else(|| bad(format!("no column `{n}`")))
+            })
+            .collect::<Result<_>>()?,
+        None => frame.columns().iter().collect(),
+    };
+    let limit = r.count("limit")?.unwrap_or(100);
+    let offset = r.count("offset")?.unwrap_or(0);
+    let total = frame.n_rows();
+    let start = offset.min(total);
+    let end = total.min(start.saturating_add(limit));
+    let rows: Vec<Value> = (start..end)
+        .map(|i| {
+            let mut o = Map::new();
+            for (spec, data) in &cols {
+                o.insert(spec.name.clone(), cell_json(data, i));
+            }
+            Value::Object(o)
+        })
+        .collect();
+    let columns: Vec<Value> = cols
+        .iter()
+        .map(|(s, _)| {
+            let mut c = json!({ "name": s.name, "dtype": s.dtype.as_token() });
+            if let Some(u) = &s.unit {
+                c["unit"] = json!(u);
+            }
+            c
+        })
+        .collect();
+    Ok(json!({ "total": total, "offset": start, "columns": columns, "rows": rows }))
+}
+
+/// Read the table as an edge list and answer one question about the graph.
+fn graph(r: &Req<'_>, frame: &Frame) -> Result<Value> {
+    let from = r.need_string("from")?;
+    let to = r.need_string("to")?;
+    let default_rel = r.string("default_rel")?.unwrap_or("RELATED");
+    let g = Graph::from_edge_frame(frame, from, to, r.string("rel")?, default_rel)?;
+    let relation = r.string("relation")?;
+    let limit = r.count("limit")?.unwrap_or(200);
+    let named_direction = match r.string("direction")? {
+        None => None,
+        Some("out") => Some(Direction::Out),
+        Some("in") => Some(Direction::In),
+        Some("both") => Some(Direction::Both),
+        Some(other) => return Err(bad(format!("`direction` must be `out`, `in` or `both`, got `{other}`"))),
+    };
+    let direction = named_direction.unwrap_or(Direction::Out);
+    let node = |key: &str| {
+        let id = r.need_string(key)?;
+        if g.node(id).is_none() {
+            return Err(bad(format!("no node `{id}` in the graph")));
+        }
+        Ok::<_, DataError>(id)
+    };
+    let need_relation = || {
+        relation.ok_or_else(|| bad("this question needs `relation`: the relation type to follow, such as SUPPLIES"))
+    };
+    let ids = |found: Vec<&String>| {
+        let total = found.len();
+        json!({ "total": total, "nodes": found.into_iter().take(limit).collect::<Vec<_>>() })
+    };
+    let reached = |found: Vec<Reached>| {
+        let total = found.len();
+        let nodes: Vec<Value> =
+            found.into_iter().take(limit).map(|n| json!({ "id": n.id, "hops": n.depth })).collect();
+        json!({ "total": total, "nodes": nodes })
+    };
+    let ask = r.string("ask")?.unwrap_or("summary");
+    let result = match ask {
+        "summary" => {
+            let degree = |dir: Direction| {
+                let mut d: Vec<(&String, usize)> =
+                    g.nodes().map(|n| (&n.id, g.incident(&n.id, dir, relation).len())).collect();
+                d.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+                d.into_iter()
+                    .take(10)
+                    .map(|(id, n)| json!({ "id": id, "edges": n }))
+                    .collect::<Vec<_>>()
+            };
+            json!({ "most_outgoing": degree(Direction::Out), "most_incoming": degree(Direction::In) })
+        }
+        "neighbors" => ids(g.neighbors(node("node")?, direction, relation)),
+        "traverse" => reached(g.traverse(node("node")?, direction, relation, r.count("depth")?.unwrap_or(3))),
+        "path" => match g.shortest_path(node("node")?, node("to_node")?, relation) {
+            Some(path) => json!({ "hops": path.len() - 1, "path": path }),
+            None => json!({ "hops": Value::Null, "path": Value::Null }),
+        },
+        "sole_sourced" => ids(g.sole_sourced(need_relation()?)),
+        "unsourced" => ids(g.unsourced(need_relation()?)),
+        // Everything a loss would reach. By default it follows `relation`
+        // backwards, for edges that point at what they depend on (an assembly
+        // CONTAINS its part); `direction: "out"` follows edges that point from
+        // the supplier to what it supplies.
+        "impact" => {
+            let rel = need_relation()?;
+            let start = node("node")?;
+            reached(match named_direction {
+                None => g.impact_of_losing(start, rel),
+                Some(dir) => g.traverse(start, dir, Some(rel), usize::MAX),
+            })
+        }
+        "cycles" => {
+            let found = g.cycles(relation);
+            let total = found.len();
+            json!({ "total": total, "cycles": found.into_iter().take(limit).collect::<Vec<_>>() })
+        }
+        other => {
+            return Err(bad(format!(
+                "unknown graph question `{other}`; expected one of: summary, neighbors, traverse, path, \
+                 sole_sourced, unsourced, impact, cycles"
+            )))
+        }
+    };
+    Ok(json!({
+        "ask": ask,
+        "nodes": g.node_count(),
+        "edges": g.edge_count(),
+        "relation_types": g.relation_types().into_iter().collect::<Vec<_>>(),
+        "result": result,
+    }))
 }
 
 fn null_count(data: &ColumnData) -> usize {
@@ -783,6 +973,75 @@ pub fn render(reply: &Value) -> String {
     let r = &reply["report"];
     let mut out = String::new();
     match run {
+        "rows" => {
+            let names: Vec<&str> = r["columns"].as_array().into_iter().flatten().map(|c| text(&c["name"])).collect();
+            let shown = r["rows"].as_array().map_or(0, Vec::len);
+            let start = r["offset"].as_u64().unwrap_or(0);
+            let _ = writeln!(out, "{source}: {} rows; showing {} from row {}", r["total"], shown, start + 1);
+            let _ = writeln!(out, "  {}", names.join(" | "));
+            for row in r["rows"].as_array().into_iter().flatten() {
+                let cells: Vec<String> = names
+                    .iter()
+                    .map(|n| match &row[*n] {
+                        Value::Null => String::new(),
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .collect();
+                let _ = writeln!(out, "  {}", cells.join(" | "));
+            }
+        }
+        "graph" => {
+            let _ = writeln!(
+                out,
+                "{source}: a graph of {} nodes and {} edges; relations: {}",
+                r["nodes"],
+                r["edges"],
+                list(&r["relation_types"])
+            );
+            let result = &r["result"];
+            match text(&r["ask"]) {
+                "summary" => {
+                    for (label, key) in [("most outgoing", "most_outgoing"), ("most incoming", "most_incoming")] {
+                        let top: Vec<String> = result[key]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|n| format!("{} ({})", text(&n["id"]), n["edges"]))
+                            .collect();
+                        let _ = writeln!(out, "  {label}: {}", top.join(", "));
+                    }
+                }
+                "path" => match result["path"].as_array() {
+                    Some(path) => {
+                        let hops: Vec<&str> = path.iter().map(text).collect();
+                        let _ = writeln!(out, "  {} hops: {}", result["hops"], hops.join(" → "));
+                    }
+                    None => {
+                        let _ = writeln!(out, "  no path");
+                    }
+                },
+                "cycles" => {
+                    let _ = writeln!(out, "  {} cycles", result["total"]);
+                    for c in result["cycles"].as_array().into_iter().flatten().take(20) {
+                        let _ = writeln!(out, "  {}", list(c));
+                    }
+                }
+                ask => {
+                    let _ = writeln!(out, "  {ask}: {} nodes", result["total"]);
+                    for n in result["nodes"].as_array().into_iter().flatten().take(50) {
+                        match n.as_str() {
+                            Some(id) => {
+                                let _ = writeln!(out, "    {id}");
+                            }
+                            None => {
+                                let _ = writeln!(out, "    {} ({} hops)", text(&n["id"]), n["hops"]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         "describe" => {
             let _ = writeln!(out, "{source}: {} rows", r["rows"]);
             for c in r["columns"].as_array().into_iter().flatten() {
@@ -1101,6 +1360,92 @@ mod tests {
         let e = run(&json!({ "run": "describe", "file": "m.xlsx" }), &resolve).unwrap_err();
         assert!(e.to_string().contains(".csv"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// S1 and S2 supply SKU-1; only S2 supplies SKU-2, which feeds assembly A.
+    fn supply() -> Value {
+        json!([
+            { "src": "S1", "dst": "SKU-1", "rel": "SUPPLIES" },
+            { "src": "S2", "dst": "SKU-1", "rel": "SUPPLIES" },
+            { "src": "S2", "dst": "SKU-2", "rel": "SUPPLIES" },
+            { "src": "SKU-2", "dst": "A", "rel": "FEEDS" }
+        ])
+    }
+
+    fn ask(extra: Value) -> Value {
+        let mut q = json!({ "run": "graph", "data": supply(), "from": "src", "to": "dst", "rel": "rel" });
+        for (k, v) in extra.as_object().unwrap() {
+            q[k.as_str()] = v.clone();
+        }
+        run(&q, &no_files).unwrap()["report"].clone()
+    }
+
+    #[test]
+    fn graph_questions_are_answered_from_an_edge_list() {
+        let summary = ask(json!({}));
+        assert_eq!((summary["nodes"].as_u64(), summary["edges"].as_u64()), (Some(5), Some(4)));
+        assert_eq!(summary["relation_types"], json!(["FEEDS", "SUPPLIES"]));
+        assert_eq!(summary["result"]["most_outgoing"][0]["id"], "S2");
+
+        let sole = ask(json!({ "ask": "sole_sourced", "relation": "SUPPLIES" }));
+        assert_eq!(sole["result"]["nodes"], json!(["SKU-2"]), "one supplier: a single point of failure");
+
+        let path = ask(json!({ "ask": "path", "node": "S2", "to_node": "A" }));
+        assert_eq!(path["result"]["path"], json!(["S2", "SKU-2", "A"]));
+        assert_eq!(path["result"]["hops"], 2);
+
+        let lost = ask(json!({ "ask": "impact", "node": "S2", "relation": "SUPPLIES", "direction": "out" }));
+        assert_eq!(lost["result"]["total"], 2);
+        assert_eq!(lost["result"]["nodes"][0], json!({ "id": "SKU-1", "hops": 1 }));
+
+        let text = render(&json!({ "run": "graph", "source": "inline", "report": path }));
+        assert!(text.contains("S2 → SKU-2 → A"), "{text}");
+    }
+
+    #[test]
+    fn a_graph_question_about_a_missing_node_says_so() {
+        let q = json!({ "run": "graph", "data": supply(), "from": "src", "to": "dst",
+                        "ask": "neighbors", "node": "S9" });
+        let e = run(&q, &no_files).unwrap_err();
+        assert!(e.to_string().contains("`S9`"), "{e}");
+    }
+
+    #[test]
+    fn rows_come_back_a_page_at_a_time() {
+        let reply = run(&json!({ "run": "rows", "data": blobs(), "offset": 38, "limit": 5 }), &no_files).unwrap();
+        let report = &reply["report"];
+        assert_eq!(report["total"], 40);
+        assert_eq!(report["offset"], 38);
+        assert_eq!(report["rows"].as_array().map(Vec::len), Some(2));
+        assert_eq!(report["rows"][1]["kind"], "b");
+        assert!(render(&reply).contains("showing 2 from row 39"), "{}", render(&reply));
+    }
+
+    #[test]
+    fn a_connector_is_read_through_the_callers_fetcher() {
+        let seen = std::cell::RefCell::new(None);
+        let fetch = |name: &str, statement: Option<&str>| -> Result<Frame> {
+            *seen.borrow_mut() = Some((name.to_string(), statement.map(str::to_string)));
+            frame_from_rows(&[json!({ "sku": "SKU-1", "qty": 4 })])
+        };
+        let env = Env { resolve: &no_files, connector: Some(&fetch) };
+        let reply = run_in(
+            &json!({ "run": "rows", "connector": "Warehouse", "statement": "MATCH (k:SKU) RETURN k.id AS sku" }),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(reply["source"], "connector Warehouse");
+        assert_eq!(reply["report"]["rows"][0]["qty"], 4);
+        assert_eq!(
+            seen.borrow().clone(),
+            Some(("Warehouse".to_string(), Some("MATCH (k:SKU) RETURN k.id AS sku".to_string())))
+        );
+        // A caller with no Space cannot reach Connectors at all.
+        let e = run(&json!({ "run": "rows", "connector": "Warehouse" }), &no_files).unwrap_err();
+        assert!(e.to_string().contains("no Space"), "{e}");
+        // A statement without a Connector has nothing to replace.
+        let e = run(&json!({ "run": "rows", "data": blobs(), "statement": "SELECT 1" }), &no_files).unwrap_err();
+        assert!(e.to_string().contains("`statement`"), "{e}");
     }
 
     #[test]

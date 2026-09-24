@@ -48,6 +48,9 @@ pub mod supabase;
 /// Connector → Dataset materialization (the pure, engine-independent half).
 pub mod materialize;
 
+/// Reading a Connector: attributes to a fetched Frame, shared by every reader.
+pub mod connector;
+
 /// Which provider a config describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SourceKind {
