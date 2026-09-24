@@ -69,6 +69,7 @@ import { AboutDialog } from "about_dialog.slint";
 import { NewUniverseDialog } from "new_universe_dialog.slint";
 import { NewSpaceDialog } from "new_space_dialog.slint";
 import { AddAttributeDialog } from "add_attribute_dialog.slint";
+import { AddParameterDialog } from "add_parameter_dialog.slint";
 import { RenameTagDialog } from "rename_tag_dialog.slint";
 import { EditLabelDialog } from "edit_label_dialog.slint";
 import { FeedbackDialog } from "feedback_dialog.slint";
@@ -360,6 +361,33 @@ export component StudioWindow inherits Window {
     callback attribute-confirmed(string, string, string, bool);
     // (name) — Rust removes the attribute from the ECS Attributes component.
     callback attribute-delete(string);
+
+    // Add/Edit Parameter modal. Rust opens it (filling the Domain and
+    // Connector lists and, for an edit, the binding the row does not carry),
+    // reads the fields on confirm, and closes it once the Parameter is set;
+    // a problem stays on screen in `parameter-dialog-error`.
+    in-out property <bool> show-parameter-dialog: false;
+    in-out property <bool> parameter-dialog-is-edit: false;
+    // The label being edited (`key` or `domain.key`); empty when adding.
+    in-out property <string> parameter-dialog-original: "";
+    in-out property <string> parameter-dialog-domain: "instance";
+    in-out property <string> parameter-dialog-name: "";
+    in-out property <string> parameter-dialog-type: "String";
+    in-out property <string> parameter-dialog-value: "";
+    in-out property <bool> parameter-dialog-bound: false;
+    in-out property <string> parameter-dialog-connector: "";
+    in-out property <string> parameter-dialog-field: "";
+    in-out property <string> parameter-dialog-refresh: "";
+    in-out property <string> parameter-dialog-error: "";
+    in property <[string]> parameter-type-options: [];
+    in property <[string]> parameter-domain-options: [];
+    in property <[string]> parameter-connector-options: [];
+    callback parameter-add-requested();
+    // (label): Rust prefills the modal from the Parameter and its binding.
+    callback parameter-edit-requested(string);
+    callback parameter-confirmed();
+    // (label): Rust removes the Parameter and any binding.
+    callback parameter-delete(string);
     // Tag system (chips + project registry tray).
     in property <[TagChip]> entity-tags: [];
     // Row buckets — Rust splits the flat assigned list into up to 4 rows so
@@ -3846,6 +3874,11 @@ export component StudioWindow inherits Window {
                                 root.show-attribute-dialog = true;
                             }
                             on-attribute-delete(name) => { root.attribute-delete(name); }
+                            // Parameters UX: Rust opens the modal for both add
+                            // and edit, since it owns the lists and the binding.
+                            on-add-parameter => { root.parameter-add-requested(); }
+                            on-parameter-edit(label) => { root.parameter-edit-requested(label); }
+                            on-parameter-delete(label) => { root.parameter-delete(label); }
                             // Tag system
                             entity-tags: root.entity-tags;
                             entity-tag-row-0: root.entity-tag-row-0;
@@ -4785,6 +4818,28 @@ export component StudioWindow inherits Window {
         }
         on-cancel => {
             root.show-attribute-dialog = false;
+        }
+    }
+
+    // Add / Edit Parameter dialog
+    if root.show-parameter-dialog: AddParameterDialog {
+        is-edit: root.parameter-dialog-is-edit;
+        domain <=> root.parameter-dialog-domain;
+        param-name <=> root.parameter-dialog-name;
+        param-type <=> root.parameter-dialog-type;
+        param-value <=> root.parameter-dialog-value;
+        bound <=> root.parameter-dialog-bound;
+        connector <=> root.parameter-dialog-connector;
+        field <=> root.parameter-dialog-field;
+        refresh <=> root.parameter-dialog-refresh;
+        error: root.parameter-dialog-error;
+        type-options: root.parameter-type-options;
+        domain-options: root.parameter-domain-options;
+        connector-options: root.parameter-connector-options;
+        on-confirm => { root.parameter-confirmed(); }
+        on-cancel => {
+            root.show-parameter-dialog = false;
+            root.parameter-dialog-error = "";
         }
     }
 

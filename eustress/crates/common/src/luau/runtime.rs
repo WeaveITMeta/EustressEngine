@@ -1106,6 +1106,7 @@ impl LuauRuntime {
         Self::inject_tween_service(lua)?;
         Self::inject_data_services(lua)?;
         Self::inject_http_service(lua)?;
+        Self::inject_data_platform(lua)?;
         Self::inject_collection_service(lua)?;
         Self::inject_sound_service(lua)?;
         Self::inject_camera_api(lua)?;
@@ -3161,6 +3162,53 @@ Enum = setmetatable({}, {
         globals.set("HttpService", http_service_table)
             .map_err(|error| format!("Failed to set HttpService: {}", error))?;
 
+        Ok(())
+    }
+
+    // ========================================================================
+    // DataService: the Data Platform's front door
+    //
+    // The same four methods Play's DataService has, over the same
+    // implementation (`play::instance::data_service`), so the command bar and
+    // `execute_luau` answer exactly as a running script would.
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_data_platform(lua: &mlua::Lua) -> Result<(), String> {
+        use super::play::instance::data_service;
+        use mlua::LuaSerdeExt;
+        let globals = lua.globals();
+        let table = lua.create_table().map_err(|e| format!("Failed to create DataService table: {e}"))?;
+
+        // DataService:Mine(request) -> reply
+        let mine = lua
+            .create_function(|lua, (_this, request): (mlua::Value, mlua::Value)| data_service(lua, "mine", request))
+            .map_err(|e| format!("Failed to create DataService:Mine: {e}"))?;
+        // DataService:Describe(file) -> reply
+        let describe = lua
+            .create_function(|lua, (_this, file): (mlua::Value, String)| {
+                let request = lua.to_value(&serde_json::json!({ "run": "describe", "file": file }))?;
+                data_service(lua, "mine", request)
+            })
+            .map_err(|e| format!("Failed to create DataService:Describe: {e}"))?;
+        // DataService:Query(connector, statement?) -> rows
+        let query = lua
+            .create_function(|lua, (_this, connector, statement): (mlua::Value, String, Option<String>)| {
+                let request = lua.to_value(&serde_json::json!({ "connector": connector, "statement": statement }))?;
+                data_service(lua, "query", request)
+            })
+            .map_err(|e| format!("Failed to create DataService:Query: {e}"))?;
+        // DataService:Render(reply) -> string
+        let render = lua
+            .create_function(|lua, (_this, reply): (mlua::Value, mlua::Value)| data_service(lua, "render", reply))
+            .map_err(|e| format!("Failed to create DataService:Render: {e}"))?;
+
+        for (name, f) in [("Mine", mine), ("Describe", describe), ("Query", query), ("Render", render)] {
+            table.set(name, f).map_err(|e| format!("Failed to set DataService:{name}: {e}"))?;
+        }
+        globals.set("DataService", table.clone()).map_err(|e| format!("Failed to set DataService: {e}"))?;
+        if let Ok(game) = globals.get::<mlua::Table>("game") {
+            game.set("DataService", table).map_err(|e| format!("Failed to set game.DataService: {e}"))?;
+        }
         Ok(())
     }
 

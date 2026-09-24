@@ -304,7 +304,25 @@ pub(crate) fn core_from_entity(
 ) -> ArchInstanceCore {
     let mut def = def_from_components(instance, transform, base, tags, mesh);
     fold_spawner_properties(&mut def, world, entity, registry);
+    fold_parameters(&mut def, world, entity);
     arch_instance::instance_to_arch(&def)
+}
+
+/// Fold the entity's Parameters into the definition as the same
+/// `[parameters]` and `[parameter_bindings]` a file-backed instance carries,
+/// so they survive a binary save; the load path reads them back through the
+/// shared `spawn_instance`.
+fn fold_parameters(def: &mut InstanceDefinition, world: &World, entity: Entity) {
+    let Some(params) = world.get::<eustress_common::parameters::InstanceParameters>(entity) else {
+        return;
+    };
+    let (values, bindings) = params.to_toml_tables();
+    if !values.is_empty() {
+        def.parameters = Some(values.into_iter().collect());
+    }
+    if !bindings.is_empty() {
+        def.extra.insert("parameter_bindings".to_string(), toml::Value::Table(bindings));
+    }
 }
 
 /// Synthetic in-Space path for a binary-ECS entity. The entity carries an

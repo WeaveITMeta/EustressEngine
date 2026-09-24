@@ -345,6 +345,15 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
     #[cfg(feature = "data")]
     app.add_plugins(crate::capture::CapturePlugin);
 
+    // Instance Parameters: loaded on demand for classes the spawn path does
+    // not load, saved when edited, and read from their Connectors when bound.
+    app.add_plugins(crate::space::parameters_runtime::ParametersRuntimePlugin);
+
+    // Scripts reach the Data Platform: Luau's DataService (Rune's
+    // `eustress::data` registers with the other Rune modules).
+    #[cfg(feature = "data")]
+    app.add_plugins(crate::data_scripting::DataScriptingPlugin);
+
     // Streaming — in-process EustressStream (ring buffers inside this process,
     // no socket) plus the persistent SimStreamWriter connection.
     #[cfg(feature = "streaming")]

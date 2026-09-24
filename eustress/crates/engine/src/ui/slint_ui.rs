@@ -418,6 +418,17 @@ pub enum SlintAction {
     AttributeConfirmed(String, String, String, bool),
     /// Delete a custom attribute by name from the selected entity.
     AttributeDeleted(String),
+    /// Parameters "+": Rust fills the modal's Domain and Connector lists,
+    /// resets its fields and opens it.
+    ParameterAddRequested,
+    /// Gear on a Parameter row: Rust opens the modal prefilled, binding
+    /// included. `(label)`
+    ParameterEditRequested(String),
+    /// Add/Edit Parameter modal confirmed. Rust reads the fields and applies
+    /// them, or says in the modal why not.
+    ParameterConfirmed,
+    /// Trash on a Parameter row: remove it and any binding. `(label)`
+    ParameterDeleted(String),
     /// Tag system. Add a tag to / remove a tag from the selected entity.
     TagAdded(String),
     TagRemoved(String),
@@ -2120,6 +2131,16 @@ fn setup_slint_overlay(world: &mut World) {
     });
     let q = queue.clone();
     ui.on_attribute_delete(move |name| q.push(SlintAction::AttributeDeleted(name.to_string())));
+    // Add/Edit Parameter modal + delete. Rust opens the modal, since it holds
+    // the Domain and Connector lists and the binding a row does not carry.
+    let q = queue.clone();
+    ui.on_parameter_add_requested(move || q.push(SlintAction::ParameterAddRequested));
+    let q = queue.clone();
+    ui.on_parameter_edit_requested(move |label| q.push(SlintAction::ParameterEditRequested(label.to_string())));
+    let q = queue.clone();
+    ui.on_parameter_confirmed(move || q.push(SlintAction::ParameterConfirmed));
+    let q = queue.clone();
+    ui.on_parameter_delete(move |label| q.push(SlintAction::ParameterDeleted(label.to_string())));
     // Tag system — chip add/remove + click-to-select-all-tagged.
     let q = queue.clone();
     ui.on_tag_add(move |name| q.push(SlintAction::TagAdded(name.to_string())));
@@ -2131,6 +2152,14 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_tag_rename(move |old, new| q.push(SlintAction::TagRenamed(old.to_string(), new.to_string())));
     let q = queue.clone();
     ui.on_edit_label_confirmed(move |new_text| q.push(SlintAction::EditLabelConfirmed(new_text.to_string())));
+    // Populate the Add/Edit Parameter dialog's type list once.
+    {
+        let opts: Vec<slint::SharedString> = eustress_common::parameters::ParameterValue::EDITABLE_TYPES
+            .iter()
+            .map(|s| (*s).into())
+            .collect();
+        ui.set_parameter_type_options(slint::ModelRc::new(slint::VecModel::from(opts)));
+    }
     // Populate the Add/Edit Attribute dialog's type dropdown once.
     {
         let opts: Vec<slint::SharedString> =
@@ -4873,12 +4902,111 @@ struct DrainActionQueries<'w, 's> {
     /// it to TOML. Tags are set via `commands.insert(Tags(..))` instead — a
     /// `&mut Tags` query here would alias the read-only `entity_tags` above.
     attributes: Query<'w, 's, &'static mut eustress_common::attributes::Attributes>,
+    /// Mutable Parameters access for the Properties panel: the Add/Edit
+    /// Parameter modal, row edits and deletes. `Has<ParametersSynced>` says
+    /// whether the component already matches the stored instance; see
+    /// `ensure_parameters_synced`.
+    parameters: Query<
+        'w,
+        's,
+        (
+            &'static mut eustress_common::parameters::InstanceParameters,
+            Has<crate::space::parameters_runtime::ParametersSynced>,
+        ),
+    >,
     /// Bevy's built-in parent link — read-only. Used to build the
     /// hierarchy snapshot handed to Rune one-shot scripts (see
     /// `rune_ecs_module::seed_instance_snapshot`) so `Instance.Parent` /
     /// `GetChildren()` resolve against the REAL scene tree, not just
     /// entities the script itself created.
     hierarchy_parents: Query<'w, 's, &'static ChildOf>,
+}
+
+/// The instance a Parameters action applies to: the Explorer's selected
+/// entity, or the entity behind a selected service row.
+fn parameter_target(res: &DrainResources, queries: &DrainActionQueries) -> Option<Entity> {
+    res.explorer_state.as_ref().and_then(|es| match &es.selected {
+        SelectedItem::Entity(e) => Some(*e),
+        SelectedItem::Service(svc) => queries
+            .instances
+            .iter()
+            .find_map(|(en, inst)| if inst.name == *svc { Some(en) } else { None }),
+        _ => None,
+    })
+}
+
+/// Bring an instance's Parameters in step with its stored record before an
+/// edit, so saving the edit never drops Parameters the component had not
+/// loaded yet.
+fn ensure_parameters_synced(entity: Entity, queries: &mut DrainActionQueries, commands: &mut Commands) {
+    use crate::space::parameters_runtime::{persisted_signature, sync_from_store, ParametersSynced};
+    let path = queries.instance_files.get(entity).ok().map(|f| f.toml_path.clone());
+    let Ok((mut params, synced)) = queries.parameters.get_mut(entity) else { return };
+    if synced {
+        return;
+    }
+    let marker = match path.filter(|p| !p.to_string_lossy().contains("__bin_")) {
+        Some(path) => sync_from_store(&mut params, &path),
+        // Nothing stored to read: the component is all there is.
+        None => ParametersSynced { persisted: persisted_signature(&params) },
+    };
+    commands.entity(entity).insert(marker);
+}
+
+/// Fill the Parameter modal's lists: the default domain, the Space's Domain
+/// instances and the domains this instance already uses; and the Space's
+/// Connectors.
+fn fill_parameter_lists(ui: &StudioWindow, entity: Entity, res: &DrainResources, queries: &DrainActionQueries) {
+    use eustress_common::parameters::DEFAULT_PARAMETER_DOMAIN;
+    let mut domains: Vec<String> = queries
+        .instances
+        .iter()
+        .filter(|(_, inst)| inst.class_name == eustress_common::classes::ClassName::Domain)
+        .map(|(_, inst)| inst.name.clone())
+        .collect();
+    if let Ok((params, _)) = queries.parameters.get(entity) {
+        domains.extend(params.domains.keys().cloned());
+    }
+    domains.retain(|d| d != DEFAULT_PARAMETER_DOMAIN);
+    domains.sort_by_key(|d| d.to_lowercase());
+    domains.dedup();
+    domains.insert(0, DEFAULT_PARAMETER_DOMAIN.to_string());
+    let space = crate::space::open_space_root(res.space_root.as_deref());
+    let connectors = eustress_common::parameters::connector_names(&space);
+    let model = |v: Vec<String>| {
+        let items: Vec<slint::SharedString> = v.into_iter().map(Into::into).collect();
+        slint::ModelRc::new(slint::VecModel::from(items))
+    };
+    ui.set_parameter_domain_options(model(domains));
+    ui.set_parameter_connector_options(model(connectors));
+}
+
+/// Rebuild the Properties panel next frame and make sure it is showing.
+/// Parameters have no change-queue producer (Tags and Attributes do), so a
+/// Parameters action marks the panel dirty itself.
+fn refresh_parameter_rows(res: &mut DrainResources) {
+    if let Some(ref mut d) = res.panel_dirty {
+        d.properties = true;
+    }
+    if let Some(ref mut s) = res.state {
+        s.show_properties = true;
+    }
+}
+
+/// The Parameter modal's fields, as the runtime's draft.
+fn read_parameter_draft(ui: &StudioWindow) -> crate::space::parameters_runtime::ParameterDraft {
+    crate::space::parameters_runtime::ParameterDraft {
+        is_edit: ui.get_parameter_dialog_is_edit(),
+        original: ui.get_parameter_dialog_original().to_string(),
+        domain: ui.get_parameter_dialog_domain().to_string(),
+        name: ui.get_parameter_dialog_name().to_string(),
+        type_name: ui.get_parameter_dialog_type().to_string(),
+        value: ui.get_parameter_dialog_value().to_string(),
+        bound: ui.get_parameter_dialog_bound(),
+        connector: ui.get_parameter_dialog_connector().to_string(),
+        field: ui.get_parameter_dialog_field().to_string(),
+        refresh: ui.get_parameter_dialog_refresh().to_string(),
+    }
 }
 
 /// Snapshot the CURRENT value of a canonical undo property for an entity,
@@ -9914,6 +10042,117 @@ fn drain_slint_actions(
                 }
             }
 
+            // Parameters "+" → fill the lists, reset the modal, open it.
+            SlintAction::ParameterAddRequested => {
+                let Some(entity) = parameter_target(&res, &queries) else {
+                    if let Some(ref mut out) = res.output {
+                        out.error("Select an instance before adding a Parameter".to_string());
+                    }
+                    continue;
+                };
+                if !queries.parameters.contains(entity) {
+                    if let Some(ref mut out) = res.output {
+                        out.error("This instance cannot hold Parameters".to_string());
+                    }
+                    continue;
+                }
+                ensure_parameters_synced(entity, &mut queries, &mut commands);
+                if let Some(ui) = ui {
+                    fill_parameter_lists(ui, entity, &res, &queries);
+                    ui.set_parameter_dialog_is_edit(false);
+                    ui.set_parameter_dialog_original("".into());
+                    ui.set_parameter_dialog_domain(eustress_common::parameters::DEFAULT_PARAMETER_DOMAIN.into());
+                    ui.set_parameter_dialog_name("".into());
+                    ui.set_parameter_dialog_type("String".into());
+                    ui.set_parameter_dialog_value("".into());
+                    ui.set_parameter_dialog_bound(false);
+                    ui.set_parameter_dialog_connector("".into());
+                    ui.set_parameter_dialog_field("".into());
+                    ui.set_parameter_dialog_refresh("".into());
+                    ui.set_parameter_dialog_error("".into());
+                    ui.set_show_parameter_dialog(true);
+                }
+            }
+
+            // Gear on a Parameter row → open the modal prefilled, binding
+            // included (the row carries only the value and its type).
+            SlintAction::ParameterEditRequested(label) => {
+                let Some(entity) = parameter_target(&res, &queries) else { continue };
+                ensure_parameters_synced(entity, &mut queries, &mut commands);
+                let (domain, key) = crate::space::parameters_runtime::label_parts(&label);
+                let found = queries.parameters.get(entity).ok().and_then(|(params, _)| {
+                    let value = params.get(&domain, &key)?.clone();
+                    Some((value, params.binding(&domain, &key).cloned().unwrap_or_default()))
+                });
+                let Some((value, binding)) = found else {
+                    if let Some(ref mut out) = res.output {
+                        out.error(format!("This instance has no Parameter '{label}'"));
+                    }
+                    continue;
+                };
+                if let Some(ui) = ui {
+                    fill_parameter_lists(ui, entity, &res, &queries);
+                    ui.set_parameter_dialog_is_edit(true);
+                    ui.set_parameter_dialog_original(label.as_str().into());
+                    ui.set_parameter_dialog_domain(domain.as_str().into());
+                    ui.set_parameter_dialog_name(key.as_str().into());
+                    ui.set_parameter_dialog_type(value.type_name().into());
+                    ui.set_parameter_dialog_value(value.edit_string().into());
+                    ui.set_parameter_dialog_bound(binding.is_sourced());
+                    ui.set_parameter_dialog_connector(binding.connector.clone().unwrap_or_default().into());
+                    ui.set_parameter_dialog_field(binding.field.clone().unwrap_or_default().into());
+                    ui.set_parameter_dialog_refresh(
+                        binding.refresh_seconds.map(|s| s.to_string()).unwrap_or_default().into(),
+                    );
+                    ui.set_parameter_dialog_error("".into());
+                    ui.set_show_parameter_dialog(true);
+                }
+            }
+
+            // Add/Edit Parameter modal confirmed → apply, or say why not in
+            // the modal, which stays open so the mistake is fixed in place.
+            // Changed<InstanceParameters> → parameters_runtime saves it and,
+            // when it is bound, reads its Connector.
+            SlintAction::ParameterConfirmed => {
+                let Some(ui) = ui else { continue };
+                let Some(entity) = parameter_target(&res, &queries) else {
+                    ui.set_parameter_dialog_error("Select an instance first.".into());
+                    continue;
+                };
+                ensure_parameters_synced(entity, &mut queries, &mut commands);
+                let draft = read_parameter_draft(ui);
+                let Ok((mut params, _)) = queries.parameters.get_mut(entity) else {
+                    ui.set_parameter_dialog_error("This instance cannot hold Parameters.".into());
+                    continue;
+                };
+                match crate::space::parameters_runtime::apply_parameter_draft(&mut params, &draft) {
+                    Ok(label) => {
+                        ui.set_show_parameter_dialog(false);
+                        ui.set_parameter_dialog_error("".into());
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Parameter '{label}' set ({})", draft.type_name));
+                        }
+                        refresh_parameter_rows(&mut res);
+                    }
+                    Err(why) => ui.set_parameter_dialog_error(why.into()),
+                }
+            }
+
+            // Trash on a Parameter row → remove it and any binding.
+            SlintAction::ParameterDeleted(label) => {
+                let Some(entity) = parameter_target(&res, &queries) else { continue };
+                ensure_parameters_synced(entity, &mut queries, &mut commands);
+                let (domain, key) = crate::space::parameters_runtime::label_parts(&label);
+                if let Ok((mut params, _)) = queries.parameters.get_mut(entity) {
+                    if params.remove(&domain, &key).is_some() {
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Parameter '{label}' deleted"));
+                        }
+                    }
+                }
+                refresh_parameter_rows(&mut res);
+            }
+
             // Tag chip / registry "+" → add a tag to the selected entity. Tags
             // are re-inserted via `commands` (a `&mut Tags` query would alias the
             // read-only `entity_tags`); Changed<Tags> → save + panel refresh.
@@ -10107,6 +10346,22 @@ fn drain_slint_actions(
 
             // Properties write-back — apply edits from Slint properties panel to ECS
             SlintAction::PropertyChanged(key, raw_val) => {
+                // A Parameter row edits as `Parameter:<label>` (see
+                // properties.slint), so it never collides with an Attribute or
+                // a built-in property of the same name.
+                if let Some(label) = key.strip_prefix("Parameter:") {
+                    if let Some(entity) = parameter_target(&res, &queries) {
+                        ensure_parameters_synced(entity, &mut queries, &mut commands);
+                        let edited = queries.parameters.get_mut(entity).ok().and_then(|(mut params, _)| {
+                            crate::space::parameters_runtime::edit_parameter_value(&mut params, label, &raw_val)
+                        });
+                        if let (Some(Err(why)), Some(out)) = (edited, res.output.as_mut()) {
+                            out.warn(why);
+                        }
+                    }
+                    refresh_parameter_rows(&mut res);
+                    continue;
+                }
                 // BrickColor is a presentation-only alias for Color: the wheel
                 // picker writes a "wheel|name|r, g, b" payload. Only the RGB is
                 // applied, through the exact same path the Color field uses.
@@ -24659,6 +24914,9 @@ fn sync_properties_to_slint(
     let mut attribute_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     // Same, for Parameter rows: label -> ParameterValue type name.
     let mut parameter_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // And label -> (binding state, the note its help icon shows).
+    let mut parameter_rows: std::collections::HashMap<String, (&'static str, String)> =
+        std::collections::HashMap::new();
 
     // Helper to add a property to a category bucket
     let mut add_prop = |cat: &str, name: &str, value: String, prop_type: &str, editable: bool| {
@@ -25407,16 +25665,26 @@ fn sync_properties_to_slint(
         // domain-scoped, so a key outside the default domain renders as
         // `domain.key` and the basic case stays a bare key.
         if let Ok(params) = extra_q.params.get(selected_entity) {
-            use eustress_common::parameters::DEFAULT_PARAMETER_DOMAIN;
+            use eustress_common::parameters::{parameter_label, BindingState};
             for (domain, keys) in params.domains.iter() {
                 for (key, value) in keys.iter() {
-                    let label = if domain == DEFAULT_PARAMETER_DOMAIN {
-                        key.clone()
-                    } else {
-                        format!("{domain}.{key}")
+                    let label = parameter_label(domain, key);
+                    let binding = params.binding(domain, key);
+                    let state = match params.binding_state(domain, key) {
+                        BindingState::Local => "local",
+                        BindingState::Sourced => "sourced",
+                        BindingState::Published => "published",
+                        BindingState::Relay => "relay",
+                        BindingState::Faulted => "faulted",
                     };
+                    let note = binding.map(crate::space::parameters_runtime::describe_binding).unwrap_or_default();
+                    // A sourced value belongs to its source: the row is
+                    // read-only rather than taking an edit the next read
+                    // would silently replace.
+                    let editable = !binding.is_some_and(|b| b.value_is_read_only());
                     parameter_types.insert(label.clone(), value.type_name().to_string());
-                    add_prop("Parameters", &label, value.edit_string(), "string", true);
+                    parameter_rows.insert(label.clone(), (state, note));
+                    add_prop("Parameters", &label, value.edit_string(), "string", editable);
                 }
             }
         }
@@ -25534,6 +25802,7 @@ fn sync_properties_to_slint(
             is_attribute: false,
             attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
         });
 
         // Insert properties in this category (sorted A-Z by name)
@@ -25599,14 +25868,24 @@ fn sync_properties_to_slint(
                     value.clone()
                 };
 
-                // Attribute rows (category == "Attributes") get the Roblox-style
-                // type badge + gear/trash controls. `attribute_types` carries the
-                // AttributeValue type name recorded when the row was emitted.
-                let is_attr = cat.as_str() == "Attributes";
-                let attr_type = if is_attr {
-                    attribute_types.get(&name).cloned().unwrap_or_default()
+                // Attribute and Parameter rows get the Roblox-style type badge
+                // + gear/trash controls. `attribute_types` / `parameter_types`
+                // carry the type name recorded when the row was emitted; a
+                // Parameter row also carries its binding state and the note
+                // its help icon shows.
+                let is_attr = cat.as_str() == "Attributes" || cat.as_str() == "Parameters";
+                let attr_type = match cat.as_str() {
+                    "Attributes" => attribute_types.get(&name).cloned().unwrap_or_default(),
+                    "Parameters" => parameter_types.get(&name).cloned().unwrap_or_default(),
+                    _ => String::new(),
+                };
+                let (binding_state, row_note) = if cat.as_str() == "Parameters" {
+                    parameter_rows
+                        .get(&name)
+                        .map(|(state, note)| (*state, note.clone()))
+                        .unwrap_or(("local", String::new()))
                 } else {
-                    String::new()
+                    ("", String::new())
                 };
 
                 flat_props.push(PropertyData {
@@ -25626,11 +25905,12 @@ fn sync_properties_to_slint(
                     y_scale: ys.into(),
                     y_offset: yo.into(),
                     color_value,
-                    description: slint::SharedString::default(),
+                    description: row_note.as_str().into(),
                     learn_url: slint::SharedString::default(),
                     is_attribute: is_attr,
                     attribute_type: attr_type.as_str().into(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: binding_state.into(),
                 });
             }
         }
@@ -25768,6 +26048,7 @@ fn build_dataset_properties(
         description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
         is_attribute: false, attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
     };
     let rowf = |cat: &str, name: &str, value: &str| PropertyData {
         name: name.into(), value: value.into(), property_type: "string".into(),
@@ -25780,6 +26061,7 @@ fn build_dataset_properties(
         description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
         is_attribute: false, attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
     };
 
     let mut out: Vec<PropertyData> = Vec::new();
@@ -25864,6 +26146,7 @@ fn data_hdr(cat: &str, collapsed: &std::collections::HashSet<String>) -> Propert
         description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
         is_attribute: false, attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
     }
 }
 /// Value row for a data-class Properties panel.
@@ -25879,6 +26162,7 @@ fn data_row(cat: &str, name: &str, value: &str, collapsed: &std::collections::Ha
         description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
         is_attribute: false, attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
     }
 }
 
@@ -26948,6 +27232,7 @@ fn build_file_properties(ui: &StudioWindow, path: &std::path::Path) {
             is_attribute: false,
             attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
         }
     };
 
@@ -27047,6 +27332,7 @@ fn build_streaming_in_properties(ui: &StudioWindow, uuid: &str) {
         is_attribute: false,
         attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
     };
     props.push(mk("Status", "Streaming in…"));
     // Short uuid prefix so the user can confirm which row is loading.
@@ -27110,6 +27396,7 @@ fn build_service_properties(
             is_attribute: false,
             attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
         }
     };
 

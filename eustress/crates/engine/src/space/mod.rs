@@ -37,6 +37,8 @@ pub mod file_watcher;
 pub mod gui_loader;
 pub mod instance_create;
 pub mod instance_loader;
+/// Instance Parameters: disk sync, saving edits, and reads from bound Connectors.
+pub mod parameters_runtime;
 pub mod material_loader;
 pub mod service_loader;
 pub mod draco_decoder;

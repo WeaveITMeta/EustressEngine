@@ -139,6 +139,7 @@ fn blank_row(category: &str, collapsed: &HashSet<String>) -> PropertyData {
         slider_min: 0.0,
         slider_max: 1.0,
         slider_display: SharedString::default(),
+        binding_state: SharedString::default(),
     }
 }
 

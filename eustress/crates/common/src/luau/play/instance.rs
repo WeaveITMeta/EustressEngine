@@ -275,6 +275,43 @@ fn service_member(lua: &Lua, class: &str, key: &str) -> LuaResult<Option<Value>>
     Ok(None)
 }
 
+/// The engine's implementation of `DataService`: `(operation, argument)` to a
+/// reply, where the operations are `mine` (a request to the Data Platform's
+/// front door), `query` (a Connector's rows) and `render` (a reply as text).
+///
+/// The VM lives in this crate, which does not link the data crate, so the
+/// engine installs the implementation at startup; until it does, every
+/// DataService call fails with an error that says so.
+pub type DataServiceFn =
+    std::sync::Arc<dyn Fn(&str, serde_json::Value) -> Result<serde_json::Value, String> + Send + Sync>;
+
+static DATA_SERVICE: std::sync::RwLock<Option<DataServiceFn>> = std::sync::RwLock::new(None);
+
+/// Install the engine's `DataService` implementation.
+pub fn set_data_service(f: DataServiceFn) {
+    if let Ok(mut slot) = DATA_SERVICE.write() {
+        *slot = Some(f);
+    }
+}
+
+/// One DataService call: the argument as JSON to the installed
+/// implementation, and its reply back as Lua. The one-shot runtime's
+/// DataService (command bar, `execute_luau`) calls this too.
+pub(crate) fn data_service(lua: &Lua, op: &str, arg: Value) -> LuaResult<Value> {
+    use mlua::LuaSerdeExt;
+    let json: serde_json::Value = lua.from_value(arg)?;
+    let f = DATA_SERVICE
+        .read()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .ok_or_else(|| mlua::Error::RuntimeError("DataService is not available in this build".into()))?;
+    let reply = f(op, json).map_err(|e| mlua::Error::RuntimeError(format!("DataService: {e}")))?;
+    // A missing cell or an unanswered question (JSON null) arrives as nil, so
+    // `row.qty == nil` reads the way a script expects.
+    let options = mlua::SerializeOptions::new().serialize_none_to_null(false).serialize_unit_to_null(false);
+    lua.to_value_with(&reply, options)
+}
+
 /// Whether `key` names a method on `class`, so a child called "Play" is not
 /// shadowed on a Part.
 fn method_applies(class: &str, key: &str) -> bool {
@@ -318,6 +355,7 @@ fn method_applies(class: &str, key: &str) -> bool {
             class == "CollectionService"
         }
         "JSONEncode" | "JSONDecode" | "GenerateGUID" | "UrlEncode" => class == "HttpService",
+        "Mine" | "Describe" | "Query" | "Render" => class == "DataService",
         "PlayLocalSound" => class == "SoundService",
         _ => false,
     }
@@ -860,6 +898,25 @@ pub fn install_methods(lua: &Lua) -> LuaResult<()> {
             .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{:02X}", b) })
             .collect::<String>())
     });
+
+    // ── DataService: the Data Platform's front door ─────────────────────
+    // `DataService:Mine(request)` takes the same request table the mine_data
+    // tool and `eustress data` take, and returns the reply table.
+    method!(lua, t, "Mine", |lua, (_this, request): (LInst, Value)| data_service(lua, "mine", request));
+    method!(lua, t, "Describe", |lua, (_this, file): (LInst, String)| {
+        use mlua::LuaSerdeExt;
+        let request = lua.to_value(&serde_json::json!({ "run": "describe", "file": file }))?;
+        data_service(lua, "mine", request)
+    });
+    // `DataService:Query(connector, statement?)`: the rows a Connector returns,
+    // with `statement` (Cypher, SQL or GraphQL) in place of its configured query.
+    method!(lua, t, "Query", |lua, (_this, connector, statement): (LInst, String, Option<String>)| {
+        use mlua::LuaSerdeExt;
+        let request = lua.to_value(&serde_json::json!({ "connector": connector, "statement": statement }))?;
+        data_service(lua, "query", request)
+    });
+    // `DataService:Render(reply)`: a reply as readable text, for print().
+    method!(lua, t, "Render", |lua, (_this, reply): (LInst, Value)| data_service(lua, "render", reply));
 
     // ── SoundService ─────────────────────────────────────────────────────
     method!(lua, t, "PlayLocalSound", |lua, (_this, s): (LInst, LInst)| sound(lua, s.0, SoundAction::Play));

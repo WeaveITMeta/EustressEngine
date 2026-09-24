@@ -68,6 +68,9 @@ pub mod view_grid;
 // Connector materialization rather than carrying a second copy of either.
 #[cfg(feature = "data")]
 pub mod capture;
+/// Scripts reach the Data Platform: Rune's `eustress::data` and Luau's DataService.
+#[cfg(feature = "data")]
+pub mod data_scripting;
 // Off-screen AI camera (marker/state/plugin). Also declared in main.rs; mirror
 // it here so the LIBRARY compile of `play_mode` can resolve
 // `crate::ai_camera::AiCamera` (gap-3 Play→Edit camera-disable filter). Its only

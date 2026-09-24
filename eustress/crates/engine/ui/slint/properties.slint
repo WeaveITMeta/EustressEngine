@@ -68,6 +68,11 @@ export struct PropertyData {
     // "Vector3", "Color3"). Shown as a small badge and used to prefill the
     // edit dialog's type dropdown.
     attribute-type: string,
+    // Parameter rows only: where the value comes from. "" or "local" (the
+    // instance owns it), "sourced" (read from a Connector), "published",
+    // "relay" (read in and forwarded), or "faulted" (the last read failed).
+    // Drawn as a dot beside the type badge; the row's help text says more.
+    binding-state: string,
     // Range for `property-type == "slider"`, read from the schema's min/max.
     slider-min: float,
     slider-max: float,
@@ -166,7 +171,7 @@ component SectionHeader inherits Rectangle {
 
     // Fired when chevron is clicked so parent can update model state
     callback clicked();
-    // Fired when the "+" add button (Attributes section only) is clicked
+    // Fired when the "+" add button (Attributes and Parameters sections) is clicked
     callback add-clicked();
 
     height: 32px;
@@ -217,9 +222,10 @@ component SectionHeader inherits Rectangle {
         // Spacer
         Rectangle { horizontal-stretch: 1; }
 
-        // "+" add button — Attributes section only. Roblox-style: opens the
-        // Add-Attribute modal (name + type + initial value).
-        if root.category == "Attributes": Rectangle {
+        // "+" add button on the Attributes and Parameters sections. Each
+        // opens its own modal: an Attribute takes a name, type and value; a
+        // Parameter also takes a domain and, optionally, a Connector to read.
+        if root.category == "Attributes" || root.category == "Parameters": Rectangle {
             width: 20px;
             height: 20px;
             y: (parent.height - self.height) / 2;
@@ -574,6 +580,9 @@ component PropRow inherits Rectangle {
     // a gear (change type / edit) icon, and a red trash (delete) icon.
     in property <bool> is-attribute: false;
     in property <string> attribute-type: "";
+    // Parameter rows: "" / "local", "sourced", "published", "relay" or
+    // "faulted". Anything but local draws a coloured dot before the badge.
+    in property <string> binding-state: "";
 
     // Expose focus state so parent can aggregate across all rows
     out property <bool> has-focus: input-edit.has-focus;
@@ -688,6 +697,20 @@ component PropRow inherits Rectangle {
         // ── Attribute controls (type badge + gear + trash) ──
         if root.is-attribute: HorizontalLayout {
             spacing: 3px;
+
+            // Binding state (Parameters): green while read from a source,
+            // blue when published, red when the last read failed.
+            if root.binding-state != "" && root.binding-state != "local": VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 7px;
+                    height: 7px;
+                    border-radius: 3.5px;
+                    background: root.binding-state == "faulted" ? Theme.text-error
+                        : root.binding-state == "published" ? Theme.accent-blue
+                        : Theme.text-success;
+                }
+            }
 
             // Type badge
             Rectangle {
@@ -2594,6 +2617,13 @@ export component PropertiesPanel inherits Rectangle {
     callback on-add-attribute();
     callback on-attribute-edit(string, string, string);
     callback on-attribute-delete(string);
+    // Parameters UX. The "+" asks Rust to open the Add-Parameter modal (Rust
+    // fills the Domain and Connector lists); the gear asks Rust to open it
+    // prefilled (the row does not carry the binding); the trash removes the
+    // Parameter. Each passes the row's label (`key` or `domain.key`).
+    callback on-add-parameter();
+    callback on-parameter-edit(string);
+    callback on-parameter-delete(string);
     // Tag system (chips). entity-tags = assigned (with color + count);
     // tag-suggestions = project registry tags not on this entity.
     in property <[TagChip]> entity-tags: [];
@@ -2906,7 +2936,13 @@ export component PropertiesPanel inherits Rectangle {
                         category: prop.category;
                         expanded: !prop.section-collapsed;
                         clicked => { root.on-section-toggle(prop.category); }
-                        add-clicked => { root.on-add-attribute(); }
+                        add-clicked => {
+                            if prop.category == "Parameters" {
+                                root.on-add-parameter();
+                            } else {
+                                root.on-add-attribute();
+                            }
+                        }
                     }
                     
                     // UDim2 property (Roblox-parity 2D layout: Position / Size)
@@ -3104,11 +3140,29 @@ export component PropertiesPanel inherits Rectangle {
                         show-help-icons: root.show-help-icons;
                         is-attribute: prop.is-attribute;
                         attribute-type: prop.attribute-type;
-                        value-changed(val) => { root.on-property-changed(prop.name, val); }
+                        binding-state: prop.binding-state;
+                        // A Parameter row's edit is sent as `Parameter:<label>`,
+                        // so a Parameter and an Attribute sharing a name never
+                        // edit each other.
+                        value-changed(val) => {
+                            root.on-property-changed(prop.category == "Parameters" ? "Parameter:" + prop.name : prop.name, val);
+                        }
                         open-learn-url(url) => { root.on-open-learn-url(url); }
                         focus-changed(focused) => { root.on-input-focus-changed(focused); }
-                        gear-clicked(n, t, v) => { root.on-attribute-edit(n, t, v); }
-                        trash-clicked(n) => { root.on-attribute-delete(n); }
+                        gear-clicked(n, t, v) => {
+                            if prop.category == "Parameters" {
+                                root.on-parameter-edit(n);
+                            } else {
+                                root.on-attribute-edit(n, t, v);
+                            }
+                        }
+                        trash-clicked(n) => {
+                            if prop.category == "Parameters" {
+                                root.on-parameter-delete(n);
+                            } else {
+                                root.on-attribute-delete(n);
+                            }
+                        }
                     }
                 }
             }

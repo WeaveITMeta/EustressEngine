@@ -465,6 +465,12 @@ fn luau_known_entries(
         ("DataStore:RemoveAsync", "key", "", "Remove key", "DataStoreService"),
         ("DataStore:IncrementAsync", "key, delta?", "number", "Atomic increment", "DataStoreService"),
 
+        // DataService (the Data Platform's front door; Rune: eustress::data)
+        ("DataService:Mine", "request", "table", "Run a Data Platform request (describe, rows, graph, classify, regress, compare, rank, cluster, pca, rules, residuals, ...) and return the reply with its cautions", "DataService"),
+        ("DataService:Describe", "file", "table", "Every column of a Space file: type, missing values, summary statistics", "DataService"),
+        ("DataService:Query", "connector, statement?", "table", "A Connector's rows; the statement (Cypher, openCypher, GraphQL or SQL) replaces its configured query", "DataService"),
+        ("DataService:Render", "reply", "string", "A reply as readable text", "DataService"),
+
         // MarketplaceService
         ("MarketplaceService:PromptPurchase", "player, productId", "", "Open purchase dialog", "MarketplaceService"),
         ("MarketplaceService:GetProductInfo", "productId", "ProductInfo", "Get product metadata", "MarketplaceService"),

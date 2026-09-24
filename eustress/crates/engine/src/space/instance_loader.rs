@@ -1935,45 +1935,6 @@ fn attributes_from_toml_table(
     attrs
 }
 
-/// Build an `InstanceParameters` component from an instance's `[parameters]`
-/// table.
-///
-/// The on-disk table is flat (`key = value`) while the component is
-/// domain-scoped (`domain -> key -> value`), so a flat authoring shape lands in
-/// [`DEFAULT_PARAMETER_DOMAIN`] — that is what "basic by default" means: a
-/// parameter is usable before any Domain exists, and promoting it into a real
-/// domain is an edit, not a migration.
-///
-/// A dotted key (`telemetry.sample_rate`) is read as an explicit
-/// `domain.key`, so an author can opt into a domain straight from the TOML.
-fn parameters_from_toml_table(
-    table: Option<&std::collections::HashMap<String, toml::Value>>,
-) -> eustress_common::parameters::InstanceParameters {
-    use eustress_common::parameters::{
-        InstanceParameters, ParameterValue, DEFAULT_PARAMETER_DOMAIN,
-    };
-    let mut params = InstanceParameters::new();
-    let Some(map) = table else { return params };
-    for (k, v) in map {
-        let value = match v {
-            toml::Value::String(s) => ParameterValue::String(s.clone()),
-            toml::Value::Integer(i) => ParameterValue::Int(*i),
-            toml::Value::Float(f) => ParameterValue::Float(*f),
-            toml::Value::Boolean(b) => ParameterValue::Bool(*b),
-            // Arrays/tables have no scalar parameter form; keep them verbatim as
-            // JSON so nothing authored on disk is silently dropped.
-            other => ParameterValue::Json(other.to_string()),
-        };
-        match k.split_once('.') {
-            Some((domain, key)) if !domain.is_empty() && !key.is_empty() => {
-                params.set(domain, key, value)
-            }
-            _ => params.set(DEFAULT_PARAMETER_DOMAIN, k, value),
-        }
-    }
-    params
-}
-
 /// Known primitive mesh filenames that map to engine asset parts
 // ORDER MATTERS: the lookup takes the FIRST hint that appears anywhere in the
 // mesh filename, so any hint that is a substring of another must come first.
@@ -2671,7 +2632,10 @@ pub fn spawn_instance(
         // `attributes_from_toml_table` establishes for Attributes. Inserted
         // here rather than in the spawn bundle to stay clear of Bevy's tuple
         // arity limit.
-        ec.insert(parameters_from_toml_table(instance.parameters.as_ref()));
+        ec.insert(super::parameters_runtime::loaded_parameters(
+            instance.parameters.as_ref(),
+            instance.extra.get("parameter_bindings"),
+        ));
         ec.insert(part_visibility_range(part_half_extent(scale)));
 
         // Only add physics collider when can_collide is true — avoids broadphase
@@ -2841,7 +2805,10 @@ pub fn spawn_instance(
     ec.insert(measure_unit);
     // See the sibling spawn path above: Parameters mirror `[parameters]` from
     // disk into the live component.
-    ec.insert(parameters_from_toml_table(instance.parameters.as_ref()));
+    ec.insert(super::parameters_runtime::loaded_parameters(
+        instance.parameters.as_ref(),
+        instance.extra.get("parameter_bindings"),
+    ));
     ec.insert(part_visibility_range(part_half_extent(scale)));
 
     // Only add physics collider when can_collide is true — avoids broadphase

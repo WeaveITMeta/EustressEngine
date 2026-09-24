@@ -113,6 +113,14 @@ pub fn engine_rune_modules() -> Vec<rune::Module> {
         Err(e) => error!("Failed to create eustress::dm Rune module: {}", e),
     }
 
+    // `eustress::data`: the Data Platform's front door, shared with Luau's
+    // DataService.
+    #[cfg(feature = "data")]
+    match crate::data_scripting::rune_data::create_data_module() {
+        Ok(module) => modules.push(module),
+        Err(e) => error!("Failed to create eustress::data Rune module: {}", e),
+    }
+
     // Realism law sub-namespaces: eustress::realism::<domain>::<fn>
     modules.extend(eustress_common::realism::scripting::laws::realism_law_modules());
 
