@@ -54,6 +54,11 @@ pub mod export;
 /// Data sources — the provider seam behind the Studio's Data menu.
 pub mod source;
 
+/// Data mining: classification, regression, clustering, PCA, feature
+/// selection, association rules, and the evaluation that keeps them honest.
+/// Pure std, always compiled.
+pub mod mine;
+
 // ── Core types — always compiled, no arrow/parquet dependency ────────────────
 
 /// Logical column element type. P0 covers the four Logger-Pro-grade scalars;
