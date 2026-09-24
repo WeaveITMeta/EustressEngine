@@ -181,6 +181,9 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         "create_entity"
         | "update_entity"
         | "particle_simulation"
+        // Changes PhysicsService and saves it to the Space's _service.toml,
+        // the same effect as a properties panel edit.
+        | "set_physics_settings"
         | "insert_gaussian_splats"
         | "write_file"
         | "create_script"
@@ -203,6 +206,8 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "cad_dimension"
         | "cad_offset_sketch"
         | "cad_publish_part"
+        // Writes a .step file into the Space, like cad_export_glb.
+        | "cad_export_step"
         // Engine-registered Workshop tools that mutate state or write
         // files — see the Read-bucket note above for why they were
         // missing entirely.
@@ -278,6 +283,7 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "cad_list_templates"
         | "cad_solve_sketch"
         | "cad_list_sources"
+        | "cad_list_topology"
         // Mode-specific Workshop tools. These are registered by the
         // ENGINE (engine/src/workshop/mod.rs) on top of this crate's
         // baseline, so they are advertised to callers and to the
@@ -311,6 +317,7 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "oplog_tail"
         | "sim_step"
         | "get_editor_state"
+        | "read_output"
         | "get_conversation"
         | "suggest_contextual_edits"
         | "suggest_swap_template"
@@ -327,6 +334,8 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "ai_camera_set_pose"
         | "capture_viewport"
         | "data_bindings"
+        // Reports PhysicsService settings and which domains are running.
+        | "get_physics_settings"
         // Observation only. `publish_status` reports readiness and progress
         // WITHOUT publishing.
         | "list_modes"

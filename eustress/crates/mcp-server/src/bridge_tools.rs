@@ -1887,6 +1887,78 @@ impl ToolHandler for GetEditorStateTool {
 }
 
 // ---------------------------------------------------------------------------
+// read_output  ->  output.tail
+// ---------------------------------------------------------------------------
+
+pub struct ReadOutputTool;
+
+impl ToolHandler for ReadOutputTool {
+    /// Read-only: a pure bridge query, mutates nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "read_output",
+            description: "Read the newest lines of the LIVE engine's Output panel: what scripts printed, their warnings, and runtime errors with the script's name and line (Luau and Rune), plus Studio's own messages. Use it after Play to see whether the game's scripts ran and what failed. Params: limit (default 50, max 500), level (lowest level shown: debug, info, warn, error; default info), contains (case-insensitive filter). Lines come oldest first. Requires the engine to be running. Read-only.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "How many of the newest matching lines to return (default 50, max 500)." },
+                    "level": { "type": "string", "enum": ["debug", "info", "warn", "error"], "description": "The lowest level included; \"error\" returns errors only. Default info." },
+                    "contains": { "type": "string", "description": "Only lines holding this text (case-insensitive)." },
+                    "port": { "type": "integer", "description": "Bridge port of one engine instance, when several run." }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = input;
+        let port = params
+            .as_object_mut()
+            .and_then(|m| m.remove("port"))
+            .and_then(|p| p.as_u64())
+            .and_then(|p| u16::try_from(p).ok());
+        let result = match port {
+            Some(port) => eustress_bridge_client::call_port(port, "output.tail", params),
+            None => call_engine(&ctx.universe_root, "output.tail", params),
+        };
+        match result {
+            Ok(r) => {
+                let lines: Vec<String> = r
+                    .get("lines")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .map(|l| {
+                                format!(
+                                    "{} [{}] {}",
+                                    l.get("time").and_then(|v| v.as_str()).unwrap_or(""),
+                                    l.get("level").and_then(|v| v.as_str()).unwrap_or(""),
+                                    l.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let summary = if lines.is_empty() {
+                    "No matching Output lines.".to_string()
+                } else {
+                    format!("{} line(s):\n{}", lines.len(), lines.join("\n"))
+                };
+                ok("read_output", summary, r)
+            }
+            Err(e) => fail("read_output", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // invoke_action  ->  action.invoke
 // ---------------------------------------------------------------------------
 
@@ -2039,6 +2111,157 @@ impl ToolHandler for AiCameraSetPoseTool {
         match call_engine(&ctx.universe_root, "ai_camera.set_pose", input) {
             Ok(r) => ok("ai_camera_set_pose", "AI camera repositioned.".to_string(), r),
             Err(e) => fail("ai_camera_set_pose", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PhysicsService: simulation fidelity
+// ---------------------------------------------------------------------------
+
+/// The `set_physics_settings` input schema, generated from the same two
+/// definitions the engine validates against (`PhysicsDomain::ALL` and
+/// `PHYSICS_GENERAL_SETTINGS`), so a setting the engine accepts cannot be
+/// missing here, and its type and range cannot disagree.
+fn physics_settings_schema() -> Value {
+    use eustress_common::realism::PhysicsDomain;
+    use eustress_common::services::physics::{PhysicsSettingKind, PHYSICS_GENERAL_SETTINGS};
+
+    let mut props = serde_json::Map::new();
+    for (key, kind, desc) in PHYSICS_GENERAL_SETTINGS {
+        let schema = match kind {
+            PhysicsSettingKind::Bool => serde_json::json!({ "type": "boolean", "description": desc }),
+            PhysicsSettingKind::Float { min, max } => serde_json::json!({
+                "type": "number", "minimum": min, "maximum": max, "description": desc
+            }),
+            PhysicsSettingKind::Int { min, max } => serde_json::json!({
+                "type": "integer", "minimum": min, "maximum": max, "description": desc
+            }),
+            PhysicsSettingKind::Vec3 => serde_json::json!({
+                "type": "array", "items": { "type": "number" },
+                "minItems": 3, "maxItems": 3, "description": desc
+            }),
+        };
+        props.insert(key.to_string(), schema);
+    }
+    for domain in PhysicsDomain::ALL {
+        props.insert(
+            domain.key().to_string(),
+            serde_json::json!({
+                "type": "boolean",
+                "description": format!("{} domain. {}", domain.label(), domain.description()),
+            }),
+        );
+    }
+    serde_json::json!({
+        "type": "object",
+        "properties": props,
+        "additionalProperties": false,
+        "minProperties": 1,
+    })
+}
+
+/// One line per state an agent needs: what runs, what is off, and the tuning.
+fn summarize_physics_state(state: &Value) -> String {
+    let mut running = Vec::new();
+    let mut off = Vec::new();
+    for d in state["domains"].as_array().into_iter().flatten() {
+        let key = d["key"].as_str().unwrap_or("?");
+        if d["running"].as_bool() == Some(true) {
+            running.push(key);
+        } else {
+            off.push(key);
+        }
+    }
+    let master = if state["enabled"].as_bool() == Some(false) {
+        "Physics is OFF (master switch), so nothing runs."
+    } else {
+        "Physics is on."
+    };
+    let g = &state["gravity"];
+    format!(
+        "{master} Gravity [{}, {}, {}] m/s², time_scale {}, solver_substeps {}. Running: {}. Off: {}.",
+        g[0], g[1], g[2],
+        state["time_scale"],
+        state["solver_substeps"],
+        if running.is_empty() { "none".to_string() } else { running.join(", ") },
+        if off.is_empty() { "none".to_string() } else { off.join(", ") },
+    )
+}
+
+pub struct GetPhysicsSettingsTool;
+
+impl ToolHandler for GetPhysicsSettingsTool {
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "get_physics_settings",
+            description: "Read the running engine's PhysicsService: gravity in m/s², time_scale, solver_substeps, the master `enabled` switch, and for each physics domain (kinematics, thermodynamics, chemistry, electricity, deformation, fluids, materials, particles, particle_simulation, nuclear, visualizers) its own flag plus whether it is actually running. A domain whose flag is on is still stopped when `enabled` is off, so read `running`, not just `on`. Also lists the realism modules that cannot be toggled because they run no systems. Requires the engine running.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
+        match call_engine(&ctx.universe_root, "physics.get", serde_json::json!({})) {
+            Ok(state) => ok("get_physics_settings", summarize_physics_state(&state), state),
+            Err(e) => fail("get_physics_settings", e),
+        }
+    }
+}
+
+pub struct SetPhysicsSettingsTool;
+
+impl ToolHandler for SetPhysicsSettingsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "set_physics_settings",
+            description: "Change PhysicsService settings in the running engine. Pass ONLY the settings to change, for example {\"chemistry\": false} or {\"gravity\": [0, -3.71, 0], \"time_scale\": 0.5}. Each domain flag switches that kind of physics on or off from the next step, with no restart; `enabled` false stops every domain; `kinematics` false freezes rigid bodies without pausing Play. Validated all or nothing: an unknown key or an out-of-range value changes nothing and the error says why. Applied live and saved to the Space's PhysicsService/_service.toml exactly like a properties panel edit. Returns the keys that actually changed and the full resulting state. Call get_physics_settings first to see current values. Requires the engine running.",
+            input_schema: physics_settings_schema(),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        match call_engine(&ctx.universe_root, "physics.set", input) {
+            Ok(reply) => {
+                let changed: Vec<&str> = reply["changed"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str())
+                    .collect();
+                let what = if changed.is_empty() {
+                    "Nothing changed; every value was already set.".to_string()
+                } else {
+                    format!("Changed: {}.", changed.join(", "))
+                };
+                let saved = match (reply["persisted"].as_bool(), reply["file"].as_str()) {
+                    (Some(true), Some(file)) => format!(" Saved to {file}."),
+                    _ => String::new(),
+                };
+                let note = reply["note"]
+                    .as_str()
+                    .map(|n| format!(" {n}"))
+                    .unwrap_or_default();
+                let save_error = reply["save_error"]
+                    .as_str()
+                    .map(|e| format!(" Save error: {e}."))
+                    .unwrap_or_default();
+                let content = format!(
+                    "{what}{saved}{note}{save_error} {}",
+                    summarize_physics_state(&reply["state"])
+                );
+                ok("set_physics_settings", content, reply)
+            }
+            Err(e) => fail("set_physics_settings", e),
         }
     }
 }

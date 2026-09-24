@@ -31,6 +31,10 @@
 //! engine can insert it directly. Off by default so the MCP server
 //! can depend on this crate without pulling in the Bevy tree.
 
+// `serde_json::json!` recurses once per token tree, and the larger tool
+// schemas (cad_add_feature's above all) pass the default limit of 128.
+#![recursion_limit = "256"]
+
 /// Tool capability classification and caller permissions (CMMC AC.L1-3.1.2).
 pub mod capability;
 pub mod modes;
@@ -131,6 +135,9 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(cad_tools::CadOffsetSketchTool);
     registry.register(cad_tools::CadPublishPartTool);
     registry.register(cad_tools::CadListSourcesTool);
+    // Kernel v2: persistent face/edge names, and exact B-rep export.
+    registry.register(cad_tools::CadListTopologyTool);
+    registry.register(cad_tools::CadExportStepTool);
 
     // File I/O.
     registry.register(file_tools::ReadFileTool);

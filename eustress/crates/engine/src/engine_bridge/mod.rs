@@ -661,6 +661,7 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::ToolEquip => protocol::handlers::tool_equip(world, &pending.request),
             MethodName::SelectionSet => protocol::handlers::selection_set(world, &pending.request),
             MethodName::StateGet => protocol::handlers::state_get(world, &pending.request),
+            MethodName::OutputTail => protocol::handlers::output_tail(world, &pending.request),
             MethodName::ActionInvoke => protocol::handlers::action_invoke(world, &pending.request),
             MethodName::InputInject => {
                 let result = match world.get_resource_mut::<crate::play_datamodel::pull::InjectedInput>() {
@@ -677,6 +678,8 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::AiCameraOrbit => protocol::handlers::ai_camera_orbit(world, &pending.request),
             MethodName::AiCameraFrame => protocol::handlers::ai_camera_frame(world, &pending.request),
             MethodName::AiCameraCapture => protocol::handlers::ai_camera_capture(world, &pending.request),
+            MethodName::PhysicsGet => protocol::handlers::physics_get(world, &pending.request),
+            MethodName::PhysicsSet => protocol::handlers::physics_set(world, &pending.request),
             MethodName::ToolsList => protocol::handlers::tools_list(world, &pending.request),
             MethodName::ToolsCall => protocol::handlers::tools_call(world, &pending.request),
             MethodName::EntityCreate => protocol::handlers::entity_create(world, &pending.request),

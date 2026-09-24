@@ -166,7 +166,7 @@ impl ToolHandler for ListScriptsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "list_scripts",
-            description: "List every Soul script (.rune / .lua / .luau / .soul) in the active Space's SoulService directory.",
+            description: "List every script source (.rune / .lua / .luau / .soul) in the active Space's services (SoulService, ServerScriptService, StarterPlayerScripts, ReplicatedStorage and the rest), as Space-relative paths. Workspace is left out; use search_universe there.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {}
@@ -178,16 +178,16 @@ impl ToolHandler for ListScriptsTool {
     }
 
     fn execute(&self, _input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
-        let soul_dir = ctx.space_root.join("SoulService");
-        let mut scripts = Vec::new();
-        collect_scripts(&soul_dir, &mut scripts);
-        scripts.sort();
+        let scripts: Vec<String> = space_script_sources(&ctx.space_root)
+            .iter()
+            .map(|p| space_relative(&ctx.space_root, p))
+            .collect();
 
         ToolResult {
             tool_name: "list_scripts".to_string(),
             tool_use_id: String::new(),
             success: true,
-            content: format!("{} script(s) in SoulService: {}", scripts.len(), scripts.join(", ")),
+            content: format!("{} script(s): {}", scripts.len(), scripts.join(", ")),
             structured_data: Some(serde_json::json!({ "scripts": scripts })),
             stream_topic: None,
         }
@@ -209,11 +209,11 @@ impl ToolHandler for ReadScriptTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "read_script",
-            description: "Read the source of a Soul script by name (without extension). Searches SoulService for a matching file.",
+            description: "Read a script's source by name (\"GameDirector\") or by the Space-relative path list_scripts returns. Searches every service in the active Space.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Script name without extension" }
+                    "name": { "type": "string", "description": "Script name without extension, or a Space-relative source path" }
                 },
                 "required": ["name"]
             }),
@@ -224,42 +224,49 @@ impl ToolHandler for ReadScriptTool {
     }
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
-        let Some(name) = input.get("name").and_then(|v| v.as_str()) else {
-            return ToolResult {
-                tool_name: "read_script".to_string(), tool_use_id: String::new(),
-                success: false, content: "Missing 'name' argument".into(),
-                structured_data: None, stream_topic: None,
-            };
-        };
-        let soul_dir = ctx.space_root.join("SoulService");
-        // Try each extension in turn. First match wins.
-        for ext in &["rune", "soul", "lua", "luau"] {
-            let path = soul_dir.join(format!("{}.{}", name, ext));
-            if path.exists() {
-                match std::fs::read_to_string(&path) {
-                    Ok(src) => return ToolResult {
-                        tool_name: "read_script".to_string(), tool_use_id: String::new(),
-                        success: true,
-                        content: src.clone(),
-                        structured_data: Some(serde_json::json!({
-                            "path": path.to_string_lossy(),
-                            "extension": ext,
-                            "bytes": src.len(),
-                        })),
-                        stream_topic: None,
-                    },
-                    Err(e) => return ToolResult {
-                        tool_name: "read_script".to_string(), tool_use_id: String::new(),
-                        success: false, content: format!("Read failed: {}", e),
-                        structured_data: None, stream_topic: None,
-                    },
-                }
-            }
-        }
-        ToolResult {
+        let fail = |content: String| ToolResult {
             tool_name: "read_script".to_string(), tool_use_id: String::new(),
-            success: false, content: format!("Script '{}' not found in SoulService", name),
+            success: false, content,
             structured_data: None, stream_topic: None,
+        };
+        let Some(name) = input.get("name").and_then(|v| v.as_str()).map(str::trim) else {
+            return fail("Missing 'name' argument".into());
+        };
+        let wanted = name.replace('\\', "/");
+
+        // A script matches by its Space-relative path, by its file stem
+        // (Rojo suffix dropped), or by its folder's name.
+        let matches: Vec<std::path::PathBuf> = space_script_sources(&ctx.space_root)
+            .into_iter()
+            .filter(|p| {
+                let folder = p.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()).unwrap_or_default();
+                space_relative(&ctx.space_root, p) == wanted || script_stem(p) == wanted || folder == wanted
+            })
+            .collect();
+
+        let path = match matches.as_slice() {
+            [] => return fail(format!("Script '{}' not found in this Space's services; list_scripts shows what exists", name)),
+            [one] => one.clone(),
+            many => return fail(format!(
+                "'{}' matches {} scripts; pass one of these paths: {}",
+                name, many.len(),
+                many.iter().map(|p| space_relative(&ctx.space_root, p)).collect::<Vec<_>>().join(", "),
+            )),
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(src) => ToolResult {
+                tool_name: "read_script".to_string(), tool_use_id: String::new(),
+                success: true,
+                content: src.clone(),
+                structured_data: Some(serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "relative_path": space_relative(&ctx.space_root, &path),
+                    "extension": path.extension().and_then(|e| e.to_str()).unwrap_or_default(),
+                    "bytes": src.len(),
+                })),
+                stream_topic: None,
+            },
+            Err(e) => fail(format!("Read failed: {}", e)),
         }
     }
 }
@@ -430,14 +437,16 @@ impl ToolHandler for CreateScriptTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "create_script",
-            description: "Create a new script as a folder under SoulService/: <Name>/_instance.toml (class = SoulScript or LuauScript), <Name>/script.<ext> (source code), <Name>/README.md (human summary). The file watcher hot-loads the new entity. Use language=\"rune\" for Soul/Rune (default) or language=\"luau\" for Luau.",
+            description: "Create a script as a SoulScript folder: <Parent>/<Name>/_instance.toml, <Name>/<Name>.<kind>.luau or <Name>.rune (source code), <Name>/<Name>.md (human summary). The file watcher hot-loads it and Play runs it. language=\"rune\" (default) or \"luau\". For Luau, kind picks where it runs: \"server\" (default), \"client\" (each player, for HUD and input) or \"module\" (returned by require). parent is a Space-relative folder; it defaults to SoulService for server scripts, StarterPlayerScripts for client scripts and ReplicatedStorage for modules.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "name":     { "type": "string", "description": "Script name (folder name + display name)" },
                     "code":     { "type": "string", "description": "Script source code" },
                     "language": { "type": "string", "enum": ["rune", "luau", "lua"], "default": "rune" },
-                    "summary":  { "type": "string", "description": "Optional short markdown summary for README.md (1-3 sentences). Omitted → a placeholder is generated." }
+                    "kind":     { "type": "string", "enum": ["server", "client", "module"], "default": "server", "description": "Luau only. server runs once on the server, client runs for each player, module is loaded with require()." },
+                    "parent":   { "type": "string", "description": "Space-relative folder to create the script in, e.g. \"ServerScriptService\" or \"ReplicatedStorage/Shared\". Omitted: SoulService (server), StarterPlayerScripts (client), ReplicatedStorage (module)." },
+                    "summary":  { "type": "string", "description": "Optional short markdown summary for <Name>.md (1-3 sentences). Omitted → a placeholder is generated." }
                 },
                 "required": ["name", "code"]
             }),
@@ -464,31 +473,72 @@ impl ToolHandler for CreateScriptTool {
         };
         let language = input.get("language").and_then(|v| v.as_str()).unwrap_or("rune");
         let summary  = input.get("summary").and_then(|v| v.as_str());
-
-        // Language → (class template, source filename) mapping. Both
-        // class templates already ship in
-        // `common/assets/class_schema/<Class>/_instance.toml`; the
-        // canonical pipeline copies them and we drop the user's code
-        // alongside.
-        let (class_name, ext) = match language {
-            "luau" | "lua" => ("LuauScript", "luau"),
-            _              => ("SoulScript", "rune"),
+        let fail = |content: String| ToolResult {
+            tool_name: "create_script".to_string(), tool_use_id: String::new(),
+            success: false, content,
+            structured_data: None, stream_topic: None,
         };
-        let source_filename = format!("script.{}", ext);
+
+        // Every script is a SoulScript folder whose `[script]` block names its
+        // source file and run context, the same shape Studio's Insert writes.
+        // Play classifies Luau by the source's Rojo suffix, so the suffix and
+        // `run_context` always agree.
+        let is_luau = matches!(language, "luau" | "lua");
+        let kind = input.get("kind").and_then(|v| v.as_str()).unwrap_or("server");
+        let (suffix, run_context) = match (is_luau, kind) {
+            (true, "server")  => (".server", "Server"),
+            (true, "client")  => (".client", "Client"),
+            (true, "module")  => (".module", "Module"),
+            (false, "server") => ("", "Rune"),
+            (false, _) => return fail(format!(
+                "kind '{}' applies to Luau scripts; pass language=\"luau\" for a client or module script", kind,
+            )),
+            (true, other) => return fail(format!(
+                "Unknown kind '{}': use server, client or module", other,
+            )),
+        };
+        let ext = if is_luau { "luau" } else { "rune" };
+
+        // The parent folder: the caller's Space-relative path, or the service
+        // where this kind of script belongs.
+        let parent_dir = match input.get("parent").and_then(|v| v.as_str()).map(str::trim).filter(|p| !p.is_empty()) {
+            Some(rel) => {
+                let rel_path = std::path::Path::new(rel);
+                let stays_inside = rel_path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+                if !stays_inside {
+                    return fail(format!(
+                        "parent '{}' must be a folder inside the Space, like \"ServerScriptService\" or \"ReplicatedStorage/Shared\"", rel,
+                    ));
+                }
+                ctx.space_root.join(rel_path)
+            }
+            None => match run_context {
+                "Client" => {
+                    // New Spaces keep StarterPlayerScripts at the top level;
+                    // older ones nest it inside StarterPlayer.
+                    let nested = ctx.space_root.join("StarterPlayer").join("StarterPlayerScripts");
+                    if !ctx.space_root.join("StarterPlayerScripts").is_dir() && nested.is_dir() {
+                        nested
+                    } else {
+                        ctx.space_root.join("StarterPlayerScripts")
+                    }
+                }
+                "Module" => ctx.space_root.join("ReplicatedStorage"),
+                _ => ctx.space_root.join("SoulService"),
+            },
+        };
 
         // 1. Materialise the script folder via the canonical pipeline.
         //    Patches `[metadata].name` to the user-supplied name; the
-        //    `[script]` section in the template needs `source` rewritten
-        //    to point at our filename, which is done below by re-reading
-        //    + rewriting the TOML (the helper's overrides don't yet
-        //    cover arbitrary section fields).
-        let soul_dir = ctx.space_root.join("SoulService");
+        //    `[script]` section is rewritten below (the helper's overrides
+        //    don't cover arbitrary section fields).
+        let class_name = "SoulScript";
         let overrides = eustress_common::instance_create::InstanceOverrides {
             display_name: Some(name.to_string()),
             ..Default::default()
         };
         let created = match eustress_common::instance_create::create_instance(
-            &soul_dir,
+            &parent_dir,
             class_name,
             Some(name),
             overrides,
@@ -501,10 +551,12 @@ impl ToolHandler for CreateScriptTool {
             },
         };
 
-        // 2. Patch `[script].source` in the freshly-written
-        //    `_instance.toml` so the file_loader resolves the source
-        //    file we're about to drop next to it.
-        if let Err(e) = patch_script_source(&created.toml_path, &source_filename) {
+        // 2. Point `[script]` at the source file we're about to drop next to
+        //    it, with the run context its suffix implies. Files are named
+        //    after the folder so two siblings never share a filename.
+        let source_filename = format!("{}{}.{}", created.folder_name, suffix, ext);
+        let script_language = if is_luau { "luau" } else { "rune" };
+        if let Err(e) = patch_script_block(&created.toml_path, &source_filename, run_context, script_language) {
             return ToolResult {
                 tool_name: "create_script".to_string(), tool_use_id: String::new(),
                 success: false, content: format!("Patch _instance.toml failed: {}", e),
@@ -522,33 +574,35 @@ impl ToolHandler for CreateScriptTool {
             };
         }
 
-        // 4. README.md summary — either the caller's text or a sensible
-        //    placeholder. Kept short on purpose: the file is a hand-
-        //    readable cover sheet, not full documentation.
-        let readme_path = created.folder_path.join("README.md");
+        // 4. `<Name>.md` summary, the cover sheet Studio's script tab opens:
+        //    either the caller's text or a sensible placeholder.
+        let readme_path = created.folder_path.join(format!("{}.md", created.folder_name));
         let readme = match summary {
             Some(s) if !s.trim().is_empty() => format!(
-                "# {}\n\n{}\n\n*Language: {}*\n",
-                created.folder_name, s.trim(), language,
+                "# {}\n\n{}\n\n*Language: {}, runs as: {}*\n",
+                name, s.trim(), script_language, run_context,
             ),
             _ => format!(
-                "# {}\n\n*{} script — describe its purpose here.*\n\n*Language: {}*\n",
-                created.folder_name, class_name, language,
+                "# {}\n\n*Describe what this script does here.*\n\n*Language: {}, runs as: {}*\n",
+                name, script_language, run_context,
             ),
         };
         if let Err(e) = std::fs::write(&readme_path, readme) {
-            // Non-fatal — the script itself is on disk; missing README
+            // Non-fatal — the script itself is on disk; a missing summary
             // shouldn't fail the tool call.
-            tracing::warn!("create_script: failed to write README.md: {}", e);
+            tracing::warn!("create_script: failed to write {}: {}", readme_path.display(), e);
         }
 
+        let relative_folder = created.folder_path.strip_prefix(&ctx.space_root)
+            .unwrap_or(&created.folder_path)
+            .to_string_lossy()
+            .replace('\\', "/");
         ToolResult {
             tool_name: "create_script".to_string(), tool_use_id: String::new(),
             success: true,
             content: format!(
-                "Created {} '{}' at {} ({} source bytes, language={})",
-                class_name, created.folder_name,
-                created.folder_path.display(), code.len(), language,
+                "Created {} script '{}' at {} ({} source bytes, language={}). It runs the next time Play starts.",
+                run_context, name, relative_folder, code.len(), script_language,
             ),
             structured_data: Some(serde_json::json!({
                 "class": class_name,
@@ -557,7 +611,8 @@ impl ToolHandler for CreateScriptTool {
                 "instance_toml": created.toml_path.to_string_lossy(),
                 "source_file": source_path.to_string_lossy(),
                 "readme": readme_path.to_string_lossy(),
-                "language": language,
+                "language": script_language,
+                "run_context": run_context,
                 "bytes": code.len(),
             })),
             stream_topic: Some("workshop.tool.create_script".to_string()),
@@ -565,13 +620,19 @@ impl ToolHandler for CreateScriptTool {
     }
 }
 
-/// Rewrite the `[script].source` field on a freshly-templated script
-/// `_instance.toml` so the file_loader knows which sibling file holds
-/// the source code. Created next to `CreateScriptTool` because no
+/// Rewrite the `[script]` block (source, run context, enabled) and
+/// `[properties].language` on a freshly-templated script `_instance.toml`
+/// so the file_loader knows which sibling file holds the source code and
+/// where it runs. Created next to `CreateScriptTool` because no
 /// other surface needs this in-place edit; the canonical instance
 /// pipeline's override struct intentionally doesn't expose arbitrary
 /// section fields.
-fn patch_script_source(toml_path: &std::path::Path, source_filename: &str) -> Result<(), String> {
+fn patch_script_block(
+    toml_path: &std::path::Path,
+    source_filename: &str,
+    run_context: &str,
+    language: &str,
+) -> Result<(), String> {
     let raw = std::fs::read_to_string(toml_path)
         .map_err(|e| format!("read {}: {}", toml_path.display(), e))?;
     let mut doc: toml::Value = raw.parse()
@@ -580,10 +641,14 @@ fn patch_script_source(toml_path: &std::path::Path, source_filename: &str) -> Re
         let script = root.entry("script".to_string())
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
         if let Some(t) = script.as_table_mut() {
-            t.insert(
-                "source".to_string(),
-                toml::Value::String(source_filename.to_string()),
-            );
+            t.insert("source".to_string(), toml::Value::String(source_filename.to_string()));
+            t.insert("run_context".to_string(), toml::Value::String(run_context.to_string()));
+            t.insert("enabled".to_string(), toml::Value::Boolean(true));
+        }
+        let properties = root.entry("properties".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        if let Some(t) = properties.as_table_mut() {
+            t.insert("language".to_string(), toml::Value::String(language.to_string()));
         }
     }
     let out = toml::to_string_pretty(&doc)
@@ -1312,21 +1377,53 @@ fn default_eustress_root() -> std::path::PathBuf {
     std::path::PathBuf::from(".")
 }
 
-fn collect_scripts(dir: &std::path::Path, out: &mut Vec<String>) {
+fn collect_scripts(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            // recurse shallowly so scripts-in-folders are found too
+            // Scripts are folders (`<Name>/_instance.toml` + source), so recurse.
             collect_scripts(&path, out);
         } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             if matches!(ext, "rune" | "lua" | "luau" | "soul") {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    out.push(name.to_string());
-                }
+                out.push(path);
             }
         }
     }
+}
+
+/// Every script source file in a Space's services, as absolute paths.
+/// Workspace is left out: imported worlds can hold hundreds of thousands of
+/// folders there, and game scripts live in the services.
+fn space_script_sources(space_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(space_root) else { return out };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        if !path.is_dir() || name.starts_with('.') || name == "Workspace" || name == "src" {
+            continue;
+        }
+        collect_scripts(&path, &mut out);
+    }
+    out.sort();
+    out
+}
+
+/// `GameDirector.server.luau` → `GameDirector`; `script.rune` → `script`.
+fn script_stem(path: &std::path::Path) -> String {
+    let file = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let without_ext = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
+    for suffix in [".server", ".client", ".module"] {
+        if let Some(s) = without_ext.strip_suffix(suffix) {
+            return s.to_string();
+        }
+    }
+    without_ext.to_string()
+}
+
+fn space_relative(space_root: &std::path::Path, path: &std::path::Path) -> String {
+    path.strip_prefix(space_root).unwrap_or(path).to_string_lossy().replace('\\', "/")
 }
 
 fn collect_assets(dir: &std::path::Path, out: &mut Vec<String>) {
@@ -1400,5 +1497,67 @@ fn grep_tree(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ctx(dir: &std::path::Path) -> ToolContext {
+        // Constructed field by field: ToolContext does not implement Default.
+        ToolContext {
+            space_root: dir.to_path_buf(),
+            universe_root: dir.to_path_buf(),
+            user_id: None,
+            username: None,
+            luau_executor: None,
+            display_unit: None,
+            cancelled: None,
+            permissions: crate::capability::Permissions::default(),
+        }
+    }
+
+    #[test]
+    fn create_script_places_each_kind_where_it_runs_and_read_script_finds_it() {
+        let space = std::env::temp_dir().join(format!("eus_create_script_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&space);
+        std::fs::create_dir_all(space.join("StarterPlayerScripts")).unwrap();
+        let c = ctx(&space);
+
+        let r = CreateScriptTool.execute(json!({ "name": "Hud", "code": "print('hud')", "language": "luau", "kind": "client" }), &c);
+        assert!(r.success, "{}", r.content);
+        let hud = space.join("StarterPlayerScripts").join("Hud");
+        assert!(hud.join("Hud.client.luau").is_file());
+        assert!(hud.join("Hud.md").is_file());
+        let toml: toml::Value = std::fs::read_to_string(hud.join("_instance.toml")).unwrap().parse().unwrap();
+        assert_eq!(toml["script"]["source"].as_str(), Some("Hud.client.luau"));
+        assert_eq!(toml["script"]["run_context"].as_str(), Some("Client"));
+        assert_eq!(toml["metadata"]["class_name"].as_str(), Some("SoulScript"));
+
+        let r = CreateScriptTool.execute(json!({ "name": "Config", "code": "return {}", "language": "luau", "kind": "module", "parent": "ReplicatedStorage/Shared" }), &c);
+        assert!(r.success, "{}", r.content);
+        assert!(space.join("ReplicatedStorage/Shared/Config/Config.module.luau").is_file());
+
+        let r = CreateScriptTool.execute(json!({ "name": "Rules", "code": "pub fn main() {}" }), &c);
+        assert!(r.success, "{}", r.content);
+        assert!(space.join("SoulService/Rules/Rules.rune").is_file());
+
+        let r = CreateScriptTool.execute(json!({ "name": "Nope", "code": "", "kind": "client" }), &c);
+        assert!(!r.success, "a Rune client script must be refused");
+        let r = CreateScriptTool.execute(json!({ "name": "Nope", "code": "", "language": "luau", "parent": "../Outside" }), &c);
+        assert!(!r.success, "a parent outside the Space must be refused");
+
+        let listed = ListScriptsTool.execute(json!({}), &c);
+        let scripts = listed.structured_data.unwrap()["scripts"].as_array().unwrap().len();
+        assert_eq!(scripts, 3);
+        let read = ReadScriptTool.execute(json!({ "name": "Hud" }), &c);
+        assert!(read.success, "{}", read.content);
+        assert_eq!(read.content, "print('hud')");
+        let read = ReadScriptTool.execute(json!({ "name": "ReplicatedStorage/Shared/Config/Config.module.luau" }), &c);
+        assert_eq!(read.content, "return {}");
+
+        let _ = std::fs::remove_dir_all(&space);
     }
 }

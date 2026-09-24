@@ -47,6 +47,7 @@ fn registry() -> &'static ToolRegistry {
         r.register(crate::bridge_tools::EquipToolTool);
         r.register(crate::bridge_tools::SelectEntityTool);
         r.register(crate::bridge_tools::GetEditorStateTool);
+        r.register(crate::bridge_tools::ReadOutputTool);
         r.register(crate::bridge_tools::InvokeActionTool);
         r.register(crate::bridge_tools::PlayInputTool);
         r.register(crate::bridge_tools::CaptureViewportTool);
@@ -61,6 +62,9 @@ fn registry() -> &'static ToolRegistry {
         r.register(crate::bridge_tools::AiCameraOrbitTool);
         r.register(crate::bridge_tools::AiCameraFrameTool);
         r.register(crate::bridge_tools::AiCameraCaptureTool);
+        // PhysicsService: which physics domains step, gravity, clock speed.
+        r.register(crate::bridge_tools::GetPhysicsSettingsTool);
+        r.register(crate::bridge_tools::SetPhysicsSettingsTool);
         // Binary-ECS entity CRUD: OVERRIDE the disk entity tools by name so
         // they operate on binary cores via the bridge when the engine is
         // live, and fall back to the disk tool (FileSystem rep) when it's
@@ -126,6 +130,7 @@ pub const BRIDGE_TOOL_NAMES: &[&str] = &[
     "equip_tool",
     "select_entity",
     "get_editor_state",
+    "read_output",
     "invoke_action",
     "play_input",
     "capture_viewport",
@@ -136,6 +141,9 @@ pub const BRIDGE_TOOL_NAMES: &[&str] = &[
     "ai_camera_orbit",
     "ai_camera_frame",
     "ai_camera_capture",
+    // Both read or write the RUNNING engine's PhysicsService resource.
+    "get_physics_settings",
+    "set_physics_settings",
     "export_instances_toml",
     // The UI surface and publishing all reach the RUNNING engine.
     "list_modes",

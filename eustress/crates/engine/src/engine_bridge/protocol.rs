@@ -119,6 +119,9 @@ pub enum MethodName {
     /// Read live editor state (active tool + current selection) so the AI
     /// can query the result of its own actions. The queryable complement.
     StateGet,
+    /// The newest lines of the Output panel: script prints, warnings and
+    /// runtime errors, so an agent can see what its scripts did in Play.
+    OutputTail,
     /// Invoke any editor Action by name (Copy/Cut/Paste/Duplicate/Group/
     /// Ungroup/Delete/SelectAll/Undo/Redo/SaveScene/tool switches/…) — the
     /// AI "press the keyboard shortcut" surface. Writes the same
@@ -148,6 +151,13 @@ pub enum MethodName {
     /// user's window). On-demand: powers the off-screen camera up only for
     /// the capture.
     AiCameraCapture,
+    /// Read PhysicsService: gravity, time scale, substeps, and every physics
+    /// domain's flag alongside whether that domain is actually running.
+    PhysicsGet,
+    /// Apply a partial update to PhysicsService. Validated all or nothing,
+    /// applied live, and saved to the Space exactly like a properties panel
+    /// edit.
+    PhysicsSet,
     /// List every registered Workshop tool — MCP's `tools/list` proxies
     /// to this so external IDEs see the same 52+ tool surface Workshop has.
     ToolsList,
@@ -269,6 +279,7 @@ where
         "tool.equip" => MethodName::ToolEquip,
         "selection.set" => MethodName::SelectionSet,
         "state.get" => MethodName::StateGet,
+        "output.tail" => MethodName::OutputTail,
         "action.invoke" => MethodName::ActionInvoke,
         "input.inject" => MethodName::InputInject,
         "viewport.capture" => MethodName::ViewportCapture,
@@ -276,6 +287,8 @@ where
         "ai_camera.orbit" => MethodName::AiCameraOrbit,
         "ai_camera.frame" => MethodName::AiCameraFrame,
         "ai_camera.capture" => MethodName::AiCameraCapture,
+        "physics.get" => MethodName::PhysicsGet,
+        "physics.set" => MethodName::PhysicsSet,
         "tools.list" => MethodName::ToolsList,
         "tools.call" => MethodName::ToolsCall,
         "entity.create" => MethodName::EntityCreate,
@@ -2516,6 +2529,89 @@ pub mod handlers {
         )
     }
 
+    /// `output.tail`: the newest lines of the Output panel, oldest first.
+    /// Script prints, warnings and runtime errors from Luau and Rune land
+    /// there, along with Studio's own messages.
+    ///
+    /// Params: `limit` (default 50, at most 500), `level` (the lowest level
+    /// included: "debug", "info", "warn" or "error"; default "info") and
+    /// `contains` (a case-insensitive substring every line must hold).
+    pub fn output_tail(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        use crate::ui::slint_ui::{LogLevel, OutputConsole};
+        fn rank(level: LogLevel) -> u8 {
+            match level {
+                LogLevel::Debug => 0,
+                LogLevel::Info => 1,
+                LogLevel::Warn => 2,
+                LogLevel::Error => 3,
+            }
+        }
+        let limit = req
+            .params
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n.clamp(1, 500) as usize)
+            .unwrap_or(50);
+        let min = match req.params.get("level").and_then(|v| v.as_str()).unwrap_or("info") {
+            "debug" => 0,
+            "info" => 1,
+            "warn" | "warning" => 2,
+            "error" => 3,
+            other => {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::invalid_params(format!(
+                        "output.tail: unknown level '{other}'; use debug, info, warn or error"
+                    )),
+                )
+            }
+        };
+        let contains = req
+            .params
+            .get("contains")
+            .and_then(|v| v.as_str())
+            .map(str::to_lowercase)
+            .filter(|s| !s.is_empty());
+        let Some(console) = world.get_resource::<OutputConsole>() else {
+            return BridgeResponse::ok(
+                req.id.clone(),
+                serde_json::json!({ "count": 0, "matching": 0, "total": 0, "lines": [] }),
+            );
+        };
+        let matching: Vec<_> = console
+            .entries
+            .iter()
+            .filter(|e| rank(e.level) >= min)
+            .filter(|e| contains.as_ref().map_or(true, |c| e.message.to_lowercase().contains(c)))
+            .collect();
+        let start = matching.len().saturating_sub(limit);
+        let lines: Vec<Value> = matching[start..]
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "level": match e.level {
+                        LogLevel::Debug => "debug",
+                        LogLevel::Info => "info",
+                        LogLevel::Warn => "warn",
+                        LogLevel::Error => "error",
+                    },
+                    "source": e.source,
+                    "time": e.timestamp,
+                    "message": e.message,
+                })
+            })
+            .collect();
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({
+                "count": lines.len(),
+                "matching": matching.len(),
+                "total": console.entries.len(),
+                "lines": lines,
+            }),
+        )
+    }
+
     /// `action.invoke` — fire any editor `Action` by its enum-variant name
     /// (param `action`, e.g. "Copy", "Cut", "Paste", "Duplicate", "Group",
     /// "Ungroup", "Delete", "SelectAll", "Undo", "Redo", "SaveScene",
@@ -2649,6 +2745,27 @@ pub mod handlers {
             return true;
         }
         false
+    }
+
+    /// `physics.get` — the PhysicsService settings, each domain's flag, and
+    /// whether each domain is actually running. Backs `get_physics_settings`.
+    pub fn physics_get(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        match crate::plugins::physics_plugin::bridge_physics_get(world) {
+            Ok(v) => BridgeResponse::ok(req.id.clone(), v),
+            Err(e) => BridgeResponse::error(req.id.clone(), BridgeError::internal(e)),
+        }
+    }
+
+    /// `physics.set` — apply a partial update to PhysicsService. Params: an
+    /// object of settings keyed by property name, for example
+    /// `{"chemistry": false, "gravity": [0, -3.71, 0]}`. Backs
+    /// `set_physics_settings`. An unknown key or bad value rejects the whole
+    /// request with nothing applied.
+    pub fn physics_set(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        match crate::plugins::physics_plugin::bridge_physics_set(world, &req.params) {
+            Ok(v) => BridgeResponse::ok(req.id.clone(), v),
+            Err(e) => BridgeResponse::error(req.id.clone(), BridgeError::invalid_params(e)),
+        }
     }
 
     /// `ai_camera.set_pose` — place the AI camera. Params: `position`
