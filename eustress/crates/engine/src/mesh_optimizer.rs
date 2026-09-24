@@ -1,4 +1,5 @@
-//! Runtime mesh optimization via meshopt — makes GLB meshes GPU-fast.
+//! Runtime mesh optimization via `meshopt-rs` (pure-Rust meshoptimizer) —
+//! makes GLB meshes GPU-fast.
 //!
 //! One system:
 //! 1. `optimize_loaded_meshes` — runs once per mesh asset after GLB load
@@ -12,7 +13,6 @@ use bevy::prelude::*;
 use bevy::asset::AssetEvent;
 use bevy::mesh::{Indices, MeshVertexAttribute, VertexAttributeValues};
 use bevy::render::render_resource::PrimitiveTopology;
-use meshopt::VertexDataAdapter;
 
 // ---------------------------------------------------------------------------
 // Plugin
@@ -154,26 +154,33 @@ fn optimize_mesh_in_place(mesh: &mut Mesh) {
     let vertex_count = positions.len();
     if vertex_count == 0 { return; }
 
-    // Build position byte slice for VertexDataAdapter
-    let pos_bytes: Vec<u8> = bytemuck::cast_slice::<[f32; 3], u8>(&positions).to_vec();
-    let pos_stride = std::mem::size_of::<[f32; 3]>();
+    // `meshopt-rs` asserts a whole triangle list and in-range indices, where
+    // the C++ library tolerated them in release. An imported mesh can carry
+    // either defect, and an assert here would take the engine down over a
+    // file on disk, so a malformed mesh is left as it came.
+    if indices.len() % 3 != 0 || indices.iter().any(|&i| i as usize >= vertex_count) {
+        return;
+    }
 
     // 1. Vertex cache optimization (Tom Forsyth algorithm)
     //    Reorders indices for maximum GPU vertex cache reuse.
     //    Typically 1.5-3× improvement in vertex shading throughput.
-    meshopt::optimize_vertex_cache_in_place(&mut indices, vertex_count);
+    let mut scratch = vec![0u32; indices.len()];
+    meshopt_rs::vertex::cache::optimize_vertex_cache(&mut scratch, &indices, vertex_count);
+    std::mem::swap(&mut indices, &mut scratch);
 
     // 2. Overdraw optimization
     //    Reorders triangles so occluders render first → depth test rejects hidden frags.
-    if let Ok(adapter) = VertexDataAdapter::new(&pos_bytes, pos_stride, 0) {
-        meshopt::optimize_overdraw_in_place(&mut indices, &adapter, 1.05);
-    }
+    //    Must run on the cache-optimised order, as meshoptimizer requires.
+    meshopt_rs::overdraw::optimize_overdraw(&mut scratch, &indices, &positions, 1.05);
+    std::mem::swap(&mut indices, &mut scratch);
 
     // 3. Vertex fetch optimization
     //    Reorders vertex buffer so vertices are accessed sequentially.
     //    Reduces GPU L2 cache pressure significantly.
-    let remap = meshopt::optimize_vertex_fetch_remap(&indices, vertex_count);
-    indices = meshopt::remap_index_buffer(Some(&indices), vertex_count, &remap);
+    let mut remap = vec![0u32; vertex_count];
+    meshopt_rs::vertex::fetch::optimize_vertex_fetch_remap(&mut remap, &indices);
+    meshopt_rs::index::generator::remap_index_buffer(&mut indices, &remap);
 
     // Apply remap to all vertex attributes
     reorder_f32x3(mesh, Mesh::ATTRIBUTE_POSITION, &remap, vertex_count);

@@ -91,7 +91,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 use eustress_worlddb::{decode_instance_core, keys::world_to_cell, MortonKeyEncoder};
-use meshopt::{generate_vertex_remap, remap_index_buffer, remap_vertex_buffer, VertexDataAdapter};
+use meshopt_rs::index::generator::{generate_vertex_remap, remap_index_buffer};
 
 use super::active_db;
 use super::file_loader::LoadInProgress;
@@ -111,7 +111,7 @@ type Cell = (u32, u32, u32);
 // A proxy is a FAR level-of-detail: it is only ever seen from `load_radius`
 // (~350 m) or further, so it needs a coarse silhouette, NOT every triangle of
 // every part. Before a proxy mesh leaves the worker thread we run it through
-// `meshopt::simplify_sloppy` (sloppy is right for a far LOD — it ignores exact
+// `meshopt_rs::simplify::simplify_sloppy` (sloppy is right for a far LOD — it ignores exact
 // topology to always hit the target and is the cheapest reduction) down to an
 // aggressive triangle budget, then COMPACT the vertex buffer so the position /
 // normal / colour arrays shrink in step with the index list (not just fewer
@@ -128,13 +128,9 @@ const DECIMATE_FRACTION: f32 = 0.10;
 /// one keeps its 10 %.
 const DECIMATE_MAX_TRIS: usize = 2_000;
 /// Below this triangle count a proxy is already cheap; skip simplification and
-/// the remap (the meshopt round-trip would cost more than it saves, and a tiny
+/// the remap (the round-trip would cost more than it saves, and a tiny
 /// cell — a handful of parts — reads fine un-decimated at distance).
 const DECIMATE_MIN_TRIS: usize = 256;
-/// Relative error tolerance handed to the simplifier (fraction of mesh extent).
-/// Generous because this is a far LOD where deformation is invisible — a larger
-/// tolerance lets `simplify_sloppy` reach the aggressive target reliably.
-const DECIMATE_TARGET_ERROR: f32 = 0.1;
 
 /// HLOD configuration. Radii are read from env once at startup so the
 /// optimization↔distance balance can be dialed WITHOUT a 16-min rebuild.
@@ -554,12 +550,13 @@ fn flat_geom(corners: &[[f32; 3]], tris: &[[usize; 3]]) -> UnitGeom {
 
 /// One fully-interleaved proxy vertex: position + normal + colour, contiguous
 /// and tightly packed (10 × `f32` = 40 bytes, no padding). Interleaving lets a
-/// SINGLE `meshopt::generate_vertex_remap` pass compact ALL THREE attributes
+/// SINGLE `generate_vertex_remap` pass compact ALL THREE attributes
 /// consistently: binary-equivalence over the whole struct means two vertices
 /// merge only when their position AND normal AND colour are identical (a true
 /// duplicate), so the remap can never cross-merge verts that share a position
-/// but differ in shading. `Clone + Copy + Default` satisfy the meshopt remap
-/// generics; `#[repr(C)]` keeps the field order stable for the byte view.
+/// but differ in shading. `Clone + Copy + Default` satisfy
+/// [`compact_vertices`]; `#[repr(C)]` keeps the field order stable for the
+/// byte view `meshopt_rs::Stream` hashes.
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 struct MergeVertex {
@@ -573,22 +570,22 @@ struct MergeVertex {
 /// buffer so all three attribute arrays shrink with the index list. CPU-only —
 /// called from inside the worker-thread merge, never on the main thread.
 ///
-/// Strategy (all via `meshopt` 0.4):
+/// Strategy (via `meshopt-rs`, the pure-Rust meshoptimizer port):
 /// 1. **Skip-guard** — a proxy already under `DECIMATE_MIN_TRIS` is left as-is
 ///    (the round-trip would cost more than it saves; tiny cells read fine).
 /// 2. **`simplify_sloppy`** reduces the INDEX buffer to `target_index_count`
-///    (= budget × 3) against the position stream (stride 12). Sloppy is the
-///    right call for a far LOD: it discards exact topology to always reach the
-///    target and is the cheapest variant. The result still references the
-///    *original* (fat) vertex arrays — only the index list is shorter.
+///    (= budget × 3) against the positions. Sloppy is the right call for a far
+///    LOD: it discards exact topology to always reach the target and is the
+///    cheapest variant. The result still references the *original* (fat)
+///    vertex arrays — only the index list is shorter.
 /// 3. **Compact** — `generate_vertex_remap` over the interleaved `MergeVertex`
 ///    stream WITH the simplified indices builds a full-length (`vertex_count`)
 ///    remap in which only vertices the new indices still reference get a slot
-///    (unreferenced ones keep the `~0` sentinel and are dropped). `remap_index_
-///    buffer` rewrites the indices into the compact space and `remap_vertex_
-///    buffer` produces the small interleaved array, which we de-interleave back
-///    into the three attribute `Vec`s. Net: small vertex buffer AND small index
-///    buffer.
+///    (unreferenced ones keep the `u32::MAX` sentinel and are dropped).
+///    `remap_index_buffer` rewrites the indices into the compact space, and
+///    [`compact_vertices`] produces the small interleaved array, which we
+///    de-interleave back into the three attribute `Vec`s. Net: small vertex
+///    buffer AND small index buffer.
 ///
 /// On any degenerate/empty intermediate result it LEAVES the buffers untouched
 /// (the caller still ships the un-simplified proxy) rather than dropping the
@@ -603,8 +600,9 @@ fn decimate_merged(
     let orig_tris = orig_index_count / 3;
     let vertex_count = positions.len();
 
-    // (1) Already cheap — nothing to gain. Also bail on anything malformed so
-    // the meshopt FFI only ever sees a well-formed triangle list.
+    // (1) Already cheap — nothing to gain. Also bail on anything malformed:
+    // the simplifier asserts a well-formed triangle list, and an assert on a
+    // worker thread would lose the whole cell.
     if orig_tris <= DECIMATE_MIN_TRIS
         || orig_index_count < 3
         || orig_index_count % 3 != 0
@@ -626,22 +624,20 @@ fn decimate_merged(
         return;
     }
 
-    // (2) Simplify the index buffer against the position stream. The adapter is
-    // a (stride-12) byte view over the `[f32;3]` positions — the SAME pattern
-    // `mesh_optimizer::optimize_mesh_in_place` uses.
-    let pos_bytes: Vec<u8> =
-        bytemuck::cast_slice::<[f32; 3], u8>(positions.as_slice()).to_vec();
-    let pos_stride = std::mem::size_of::<[f32; 3]>(); // 12
-    let Ok(adapter) = VertexDataAdapter::new(&pos_bytes, pos_stride, 0) else {
-        return; // malformed view — keep the un-simplified proxy
-    };
-    let simplified = meshopt::simplify_sloppy(
+    // Every index must name a real vertex, or the simplifier's asserts fire.
+    if indices.iter().any(|&i| i as usize >= vertex_count) {
+        return;
+    }
+
+    // (2) Simplify the index buffer against the positions.
+    let mut simplified = vec![0u32; orig_index_count];
+    let kept = meshopt_rs::simplify::simplify_sloppy(
+        &mut simplified,
         indices.as_slice(),
-        &adapter,
+        positions.as_slice(),
         target_index_count,
-        DECIMATE_TARGET_ERROR,
-        None,
     );
+    simplified.truncate(kept);
     // Degenerate reduction (collapsed to nothing, or — defensively — somehow
     // grew): don't touch the buffers, ship the original.
     if simplified.len() < 3 || simplified.len() >= orig_index_count {
@@ -659,16 +655,21 @@ fn decimate_merged(
             color: colors[i],
         });
     }
-    let (unique_count, remap) = generate_vertex_remap(&interleaved, Some(&simplified));
+    let mut remap = vec![0u32; vertex_count];
+    let unique_count = generate_vertex_remap(
+        &mut remap,
+        Some(&simplified),
+        &meshopt_rs::Stream::from_slice(&interleaved),
+    );
     // A sane remap yields at least one vertex and no more than we started with.
     if unique_count == 0 || unique_count > vertex_count {
         return;
     }
-    let new_indices = remap_index_buffer(Some(&simplified), vertex_count, &remap);
-    let compact: Vec<MergeVertex> = remap_vertex_buffer(&interleaved, unique_count, &remap);
-    if compact.len() != unique_count || new_indices.len() != simplified.len() {
-        return; // unexpected meshopt output — keep the original, never corrupt
-    }
+    let mut new_indices = simplified;
+    remap_index_buffer(&mut new_indices, &remap);
+    let Some(compact) = compact_vertices(&interleaved, &remap, unique_count) else {
+        return; // a remap slot out of range — keep the original, never corrupt
+    };
 
     // De-interleave back into the three attribute arrays the proxy mesh needs.
     let mut new_pos: Vec<[f32; 3]> = Vec::with_capacity(unique_count);
@@ -684,6 +685,25 @@ fn decimate_merged(
     *normals = new_norm;
     *colors = new_col;
     *indices = new_indices;
+}
+
+/// Build the compact vertex array a remap describes: vertex `src` moves to
+/// slot `remap[src]`, and a `u32::MAX` slot means the vertex is dropped.
+///
+/// Not `meshopt_rs::index::generator::remap_vertex_buffer`: that one filters
+/// the dropped entries out BEFORE enumerating, so from the first dropped vertex
+/// onward it copies from the wrong source index. After `simplify_sloppy` most
+/// vertices are dropped, and on y_bot it put the wrong vertex in all 2063 of
+/// 2063 surviving slots. Returns `None` if a slot is out of range.
+fn compact_vertices<T: Copy + Default>(vertices: &[T], remap: &[u32], unique_count: usize) -> Option<Vec<T>> {
+    let mut out = vec![T::default(); unique_count];
+    for (src, &dst) in remap.iter().enumerate() {
+        if dst == u32::MAX {
+            continue;
+        }
+        *out.get_mut(dst as usize)? = *vertices.get(src)?;
+    }
+    Some(out)
 }
 
 // ── the merge (runs on a worker thread) ──────────────────────────────────────

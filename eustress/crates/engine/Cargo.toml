@@ -302,21 +302,25 @@ notify-debouncer-full = "0.3"
 # • `mp4` (alfg/mp4-rust) parses ISO Base Media File Format containers,
 #   walks H.264 video tracks, and yields each sample's bytes in AVCC
 #   length-prefixed NAL format.
-# • `openh264` is the BSD-2-licensed Rust wrapper around Cisco's
-#   OpenH264 decoder. The default build downloads the prebuilt binary
-#   at `cargo build` time (Cisco's H.264 patent licence covers users
-#   of the binary). For offline builds, switch to `openh264 = { ...,
-#   features = ["source"] }` — compiles the C source instead, slower
-#   but reproducible.
+# • `rusty_h264-decoder` decodes the H.264 elementary stream in pure Rust
+#   (`#![forbid(unsafe_code)]`, BSD-2, no C anywhere in its tree): Constrained
+#   Baseline plus B-slices and most of High profile, CAVLC and CABAC. It
+#   replaced Cisco's OpenH264, which compiled C++ and NASM into the engine.
+#   Checked side by side before the swap: on a stream from OpenH264's own
+#   encoder the two decoders produced bit-identical planes on every frame,
+#   and the Rust one was faster.
+#
+#   `default-features = false` is load-bearing. Its default `global-alloc`
+#   feature installs a process-wide `#[global_allocator]`, which a library
+#   must never do to the engine. `asm` is portable Rust SIMD, not assembly.
 #
 # Constraints accepted by this choice:
 #   - H.264-in-MP4 only (95% of "user uploads a clip" cases). HEVC,
 #     AV1, VP9, WebM/Matroska are out of scope until a heavier decoder
-#     stack (ffmpeg-next / gstreamer) is wired in.
-#   - Software decode only. Hardware paths require ffmpeg-next or a
-#     wgpu-direct decoder (not yet a thing in 2026).
+#     stack is wired in.
+#   - Software decode only.
 mp4 = "0.14"
-openh264 = "0.9"
+rusty_h264-decoder = { version = "0.16", default-features = false, features = ["std", "asm"] }
 csv = "1.3"
 crossbeam-channel = "0.5"
 syntect = { version = "5.2", default-features = false, features = ["default-syntaxes", "default-themes", "html", "regex-fancy"] }
@@ -358,8 +362,15 @@ tower-lsp = { version = "0.20", optional = true }
 spin_on = "0.1"
 # Byte casting for GPU buffer operations
 bytemuck = { version = "1.16", features = ["derive"] }
-# Mesh optimization (runtime vertex cache, LOD, meshlets)
-meshopt = "0.4"
+# Mesh optimization (vertex cache, overdraw, vertex fetch, far-LOD
+# simplification). Pure-Rust port of meshoptimizer 0.15; replaced the `meshopt`
+# FFI crate, which compiled meshoptimizer's C++. On y_bot, x_bot and
+# voltec_supreme it matched the C++ output exactly (same cache miss ratio, same
+# simplified triangle counts). `experimental` gates `simplify_sloppy`, which the
+# HLOD proxies need. Its `remap_vertex_buffer` is wrong whenever the remap drops
+# a vertex (it enumerates AFTER filtering), so `space::hlod` compacts with its
+# own loop instead; do not switch to that function.
+meshopt-rs = { version = "0.1.2", features = ["experimental"] }
 # System info detection for stress test scaling
 sysinfo = "0.33"
 
