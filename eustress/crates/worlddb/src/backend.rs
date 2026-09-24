@@ -39,6 +39,18 @@ impl From<EntityId> for u64 {
     }
 }
 
+/// What [`WorldDb::rekey_instance_cores`] did.
+#[derive(Debug, Default, Clone)]
+pub struct RekeyReport {
+    /// Cores moved from their old id to their new id.
+    pub moved: usize,
+    /// Old-id cores dropped because the new id already held a core.
+    pub dropped_stale: usize,
+    /// New ids that hold a core when the call returns, whether moved there
+    /// or already present.
+    pub present: std::collections::HashSet<EntityId>,
+}
+
 /// Batch of pending writes that commit atomically. Mirrors a Fjall
 /// `WriteBatch` but lives behind the trait so callers don't depend on
 /// the backend type.
@@ -353,6 +365,55 @@ pub trait WorldDb: Send + Sync + 'static {
     /// it across a Bevy system boundary.
     fn iter_instance_cores(&self) -> Result<Vec<(EntityId, Vec<u8>)>> {
         Ok(Vec::new())
+    }
+
+    /// Rename Morton-keyed instance cores from one entity id to another, in
+    /// place: same cell, same bytes, only the id at the end of the key
+    /// changes. Old ids with no core are ignored.
+    ///
+    /// When the new id already holds a core, the old one is dropped instead
+    /// of moved: the core under the new id was written later, so it is the
+    /// current state and must not be overwritten by the older bytes.
+    ///
+    /// This default walks [`Self::iter_instance_cores`] and takes each cell
+    /// from the core's own translation (a core is always written at its
+    /// `t`). Backends that can address their keys directly override it.
+    fn rekey_instance_cores(
+        &self,
+        rename: &std::collections::HashMap<EntityId, EntityId>,
+    ) -> Result<RekeyReport> {
+        let mut report = RekeyReport::default();
+        if rename.is_empty() {
+            return Ok(report);
+        }
+        let cores = self.iter_instance_cores()?;
+        let targets: std::collections::HashSet<EntityId> = rename.values().copied().collect();
+        let existing: std::collections::HashSet<EntityId> = cores
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| targets.contains(id))
+            .collect();
+        report.present.extend(existing.iter().copied());
+        for (old, bytes) in &cores {
+            let Some(&new) = rename.get(old) else { continue };
+            if new == *old {
+                continue;
+            }
+            let Ok(core) = crate::rkyv_values::decode_instance_core(bytes) else {
+                continue;
+            };
+            let pos = (core.t[0], core.t[1], core.t[2]);
+            if existing.contains(&new) {
+                self.delete_instance_core(*old, pos)?;
+                report.dropped_stale += 1;
+            } else {
+                self.put_instance_core(new, pos, bytes)?;
+                self.delete_instance_core(*old, pos)?;
+                report.moved += 1;
+            }
+            report.present.insert(new);
+        }
+        Ok(report)
     }
 
     /// Collect every `INSTANCE_CORE` whose Morton cell lies in the

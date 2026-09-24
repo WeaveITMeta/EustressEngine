@@ -59,7 +59,7 @@ pub mod rollout;
 pub mod schema;
 pub mod tracing_hooks;
 
-pub use backend::{Commit, EntityId, TreeEntry, WorldDb};
+pub use backend::{Commit, EntityId, RekeyReport, TreeEntry, WorldDb};
 pub use branch::{BranchHandle, WorldDbBranchExt};
 pub use changestream::{ChangeStream, CommitDelta, EntityChange, Filter, Subscription, TxId};
 pub use datastore::{DataStore, DataStorePages, DataStoreService, OrderedDataStore};

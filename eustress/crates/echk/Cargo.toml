@@ -1,0 +1,29 @@
+[package]
+name = "eustress-echk"
+version = "0.2.0"
+edition = "2021"
+description = "The .echk chunk container and world manifest: pure bytes, no storage engine."
+license = "PolyForm-Shield-1.0.0"
+
+# Reading is plain Rust with no C and no IO, so the Player (native and browser)
+# can decode a published or hosted world without linking Fjall or a C library:
+# version 2 chunks inflate through ruzstd, a pure-Rust zstd decoder. Writing
+# version 2 compresses with the zstd C library, behind the `encode` feature,
+# which only Studio and the bake turn on.
+
+[features]
+default = []
+encode = ["dep:zstd"]
+
+[dependencies]
+serde = { workspace = true }
+toml = "0.8"
+blake3 = "1"
+ruzstd = "0.8"
+zstd = { version = "0.13", optional = true }
+
+[dev-dependencies]
+eustress-worlddb = { path = "../worlddb" }
+serde_json = { workspace = true }
+# Builds version 2 test chunks whether or not `encode` is on.
+zstd = "0.13"

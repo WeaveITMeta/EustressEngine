@@ -645,6 +645,85 @@ impl WorldDb for FjallWorldDb {
         Ok(out)
     }
 
+    fn rekey_instance_cores(
+        &self,
+        rename: &std::collections::HashMap<EntityId, EntityId>,
+    ) -> Result<crate::backend::RekeyReport> {
+        let mut report = crate::backend::RekeyReport::default();
+        if rename.is_empty() {
+            return Ok(report);
+        }
+        // Morton key layout: `M | ver | morton63 (8) | component (2) | entity (8)`.
+        // The entity id is the last eight bytes, big-endian, so a rename keeps
+        // the cell prefix and swaps only that suffix: no position needs
+        // re-deriving, and a core whose `t` drifted from its key still moves
+        // to exactly the cell it was stored in.
+        const KEY_LEN: usize = 1 + 1 + 8 + 2 + 8;
+        let morton = crate::keys::MortonKeyEncoder::default();
+        let prefix = morton.component_prefix(ComponentTypeId::INSTANCE_CORE);
+        let targets: std::collections::HashSet<EntityId> = rename.values().copied().collect();
+
+        // One pass over the keys: the exact keys of every old id, and which new
+        // ids already hold a core. Only matching keys are retained, so memory
+        // scales with the rename, not with the partition.
+        let mut matches: Vec<(Vec<u8>, EntityId)> = Vec::new();
+        let mut existing: std::collections::HashSet<EntityId> = std::collections::HashSet::new();
+        for res in self.entities.prefix(prefix) {
+            let (key, _value) = res?;
+            let Ok((entity, component)) = morton.decode_component(&key) else {
+                continue;
+            };
+            if component != ComponentTypeId::INSTANCE_CORE {
+                continue;
+            }
+            if rename.contains_key(&entity) && key.len() == KEY_LEN {
+                matches.push((key.to_vec(), entity));
+            }
+            if targets.contains(&entity) {
+                existing.insert(entity);
+            }
+        }
+        report.present.extend(existing.iter().copied());
+
+        // Bounded batches, each committed atomically, so a huge re-key never
+        // holds the whole partition in one write batch.
+        const BATCH: usize = 4096;
+        for chunk in matches.chunks(BATCH) {
+            let mut batch = self.keyspace.batch();
+            let mut feed: Vec<(eustress_fjall::ReplOp, Vec<u8>, Vec<u8>)> = Vec::new();
+            for (old_key, old) in chunk {
+                let new = rename[old];
+                if new == *old {
+                    continue;
+                }
+                if existing.contains(&new) {
+                    batch.remove(&self.entities, old_key.clone());
+                    feed.push((eustress_fjall::ReplOp::Remove, old_key.clone(), Vec::new()));
+                    report.dropped_stale += 1;
+                } else {
+                    let Some(value) = self.entities.get(old_key)? else {
+                        continue;
+                    };
+                    let mut new_key = old_key.clone();
+                    new_key[KEY_LEN - 8..].copy_from_slice(&new.0.to_be_bytes());
+                    let head = value[..value.len().min(64)].to_vec();
+                    batch.insert(&self.entities, new_key.clone(), value);
+                    batch.remove(&self.entities, old_key.clone());
+                    feed.push((eustress_fjall::ReplOp::Put, new_key, head));
+                    feed.push((eustress_fjall::ReplOp::Remove, old_key.clone(), Vec::new()));
+                    report.moved += 1;
+                }
+                report.present.insert(new);
+            }
+            batch.commit()?;
+            // Replication feed after the durable commit, as put/delete do.
+            for (op, key, head) in feed {
+                self.s_entities.publish_external(op, &key, &head);
+            }
+        }
+        Ok(report)
+    }
+
     fn iter_instance_cores_in_region(
         &self,
         cx: (u32, u32),
@@ -1719,6 +1798,108 @@ mod mutations_tests {
             .collect();
         assert_eq!(windowed, vec![1, 2]);
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod rekey_tests {
+    use super::*;
+    use crate::rkyv_values::{encode_instance_core, ArchInstanceCore};
+    use std::collections::HashMap;
+
+    fn fresh_db() -> (FjallWorldDb, std::path::PathBuf) {
+        let tmp = std::env::temp_dir().join(format!(
+            "eustress_rekey_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db = FjallWorldDb::open(&tmp).unwrap();
+        (db, tmp)
+    }
+
+    fn core_bytes(t: [f32; 3], material: &str) -> Vec<u8> {
+        encode_instance_core(&ArchInstanceCore {
+            class_name: "Part".into(),
+            mesh: "parts/block.glb".into(),
+            scene: String::new(),
+            t,
+            r: [0.0, 0.0, 0.0, 1.0],
+            s: [1.0, 1.0, 1.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+            transparency: 0.0,
+            reflectance: 0.0,
+            anchored: true,
+            can_collide: true,
+            cast_shadow: true,
+            locked: false,
+            material: material.into(),
+            tags: Vec::new(),
+            extra: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    fn cores(db: &FjallWorldDb) -> HashMap<u64, Vec<u8>> {
+        db.iter_instance_cores()
+            .unwrap()
+            .into_iter()
+            .map(|(id, b)| (id.0, b))
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "opens a Fjall keyspace; run with --ignored or --test-threads=1 (memory: feedback_worlddb_test_threads)"]
+    fn rekey_moves_keeps_newer_and_ignores_missing() {
+        let (db, tmp) = fresh_db();
+        // A far cell, so a rename that re-derived the cell wrongly would show.
+        let far = [1000.0, 10.0, -700.0];
+        let moved_bytes = core_bytes(far, "Moved");
+        let stale_bytes = core_bytes([1.0, 2.0, 3.0], "Stale");
+        let newer_bytes = core_bytes([1.0, 2.0, 3.0], "Newer");
+        db.put_instance_core(EntityId(10), (far[0], far[1], far[2]), &moved_bytes).unwrap();
+        db.put_instance_core(EntityId(20), (1.0, 2.0, 3.0), &stale_bytes).unwrap();
+        db.put_instance_core(EntityId(21), (1.0, 2.0, 3.0), &newer_bytes).unwrap();
+
+        let rename: HashMap<EntityId, EntityId> = [
+            (EntityId(10), EntityId(11)), // plain move
+            (EntityId(20), EntityId(21)), // new id already holds a later core
+            (EntityId(30), EntityId(31)), // no core under the old id
+        ]
+        .into_iter()
+        .collect();
+        let report = db.rekey_instance_cores(&rename).unwrap();
+
+        assert_eq!(report.moved, 1);
+        assert_eq!(report.dropped_stale, 1);
+        assert!(report.present.contains(&EntityId(11)));
+        assert!(report.present.contains(&EntityId(21)));
+        assert!(!report.present.contains(&EntityId(31)));
+
+        let after = cores(&db);
+        assert_eq!(after.get(&11), Some(&moved_bytes), "moved with its bytes intact");
+        assert!(!after.contains_key(&10), "old id gone");
+        assert_eq!(after.get(&21), Some(&newer_bytes), "the later core survives");
+        assert!(!after.contains_key(&20), "the stale core is dropped, not moved");
+        assert_eq!(after.len(), 2);
+
+        // Same cell as before: the region query for the far cell finds the new id.
+        let cx = crate::keys::world_to_cell(far[0], 256.0);
+        let cy = crate::keys::world_to_cell(far[1], 256.0);
+        let cz = crate::keys::world_to_cell(far[2], 256.0);
+        let in_cell: Vec<u64> = db
+            .iter_instance_cores_in_region((cx, cx), (cy, cy), (cz, cz))
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id.0)
+            .collect();
+        assert_eq!(in_cell, vec![11]);
+
+        drop(db);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
