@@ -408,7 +408,7 @@ pub fn ProjectsPage() -> impl IntoView {
                             </svg>
                         </div>
                         <h3>"Scene Export"</h3>
-                        <p>"Export full scene graphs as structured .pak archives. Human-readable TOML files preserved for direct AI ingestion."</p>
+                        <p>"Export full scene graphs as content-addressed .echk chunks. Human-readable TOML files preserved for direct AI ingestion."</p>
                         <ul class="ai-feature-list">
                             <li>"Transforms, materials, physics, scripting context"</li>
                             <li>"TOML files readable without custom deserializers"</li>

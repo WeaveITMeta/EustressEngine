@@ -585,9 +585,9 @@ pub fn LearnMcpPage() -> impl IntoView {
                                     <tr><td><code>"stage_file_change"</code></td><td>"Return a proposed create, modify or delete for review. Writes nothing."</td></tr>
                                     <tr><td><code>"search_universe"</code></td><td>"Search every Space's "<code>".toml"</code>", "<code>".rune"</code>", "<code>".lua"</code>" and "<code>".md"</code>" files; returns paths and line numbers."</td></tr>
                                     <tr><td><code>"list_assets"</code></td><td>"Meshes, textures and materials in the Space's MaterialService and Workspace."</td></tr>
-                                    <tr><td><code>"list_scripts"</code></td><td>"The Soul scripts ("<code>".rune"</code>", "<code>".lua"</code>", "<code>".luau"</code>", "<code>".soul"</code>") in the Space's SoulService."</td></tr>
-                                    <tr><td><code>"read_script"</code></td><td>"A Soul script's source, by name."</td></tr>
-                                    <tr><td><code>"create_script"</code></td><td>"Create a script folder under SoulService, Rune by default or Luau; the engine's watcher loads it."</td></tr>
+                                    <tr><td><code>"list_scripts"</code></td><td>"Every script source ("<code>".rune"</code>", "<code>".lua"</code>", "<code>".luau"</code>", "<code>".soul"</code>") in the Space's services, as Space-relative paths. Workspace is left out."</td></tr>
+                                    <tr><td><code>"read_script"</code></td><td>"A script's source, by name or by the path "<code>"list_scripts"</code>" returns."</td></tr>
+                                    <tr><td><code>"create_script"</code></td><td>"Create a script folder, Rune by default or Luau. A Luau "<code>"kind"</code>" of server, client or module picks where it runs and its default service; "<code>"parent"</code>" places it in any Space folder. The engine's watcher loads it."</td></tr>
                                     <tr><td><code>"execute_rune"</code></td><td>"Write a Rune script into SoulService for the engine to run. Refused over MCP (Execute)."</td></tr>
                                     <tr><td><code>"execute_luau"</code></td><td>"Write a Luau script into SoulService for the engine to run. Refused over MCP (Execute)."</td></tr>
                                     <tr><td><code>"run_bash"</code></td><td>"Run a shell command in the Universe root. Refused over MCP (Execute)."</td></tr>
@@ -704,6 +704,7 @@ pub fn LearnMcpPage() -> impl IntoView {
                                     <tr><td><code>"oplog_tail"</code></td><td>"Recent entity creates and deletes from the engine's op-log, 50 by default and 1,000 at most."</td></tr>
                                     <tr><td><code>"sim_step"</code></td><td>"Advance physics by exact 1/60 s ticks, up to 10,000 per call and one call at a time. Pause the simulation first."</td></tr>
                                     <tr><td><code>"get_editor_state"</code></td><td>"The active editor tool and the current selection."</td></tr>
+                                    <tr><td><code>"read_output"</code></td><td>"The newest Output panel lines: script prints, warnings and runtime errors, 50 by default and 500 at most, filtered by lowest level or text."</td></tr>
                                     <tr><td><code>"sim_bindings"</code></td><td>"Forge placement records. Needs an engine built with the sim-orchestration feature."</td></tr>
                                     <tr><td><code>"equip_tool"</code></td><td>"Set the active tool: select, move, scale or rotate. Refused today."</td></tr>
                                     <tr><td><code>"select_entity"</code></td><td>"Replace the selection with entities by id. Refused today."</td></tr>

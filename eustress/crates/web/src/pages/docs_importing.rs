@@ -493,7 +493,7 @@ car.Speed.Changed:Connect(onChange)   car:GetAttributeChangedSignal("Speed"):Con
                                 Space's "<code>"assets"</code>" folder:"
                             </p>
                             <ul class="docs-list">
-                                <li><strong>"Meshes"</strong>": Roblox "<code>".mesh"</code>" files, versions 1.00 to 7.00, are decoded (the full-detail level only) to "<code>"assets/meshes/rbx-<id>.glb"</code>", and the part's "<code>"[asset] mesh"</code>" points at it."</li>
+                                <li><strong>"Meshes"</strong>": Roblox "<code>".mesh"</code>" files, versions 1.00 to 7.00, are decoded (the full-detail level only) to "<code>"assets/meshes/rbx-<id>.glb"</code>", and the part's "<code>"[asset] mesh"</code>" points at it. A version 6 or 7 mesh whose geometry is Draco-compressed keeps a placeholder, and the report names it."</li>
                                 <li><strong>"Images"</strong>": PNG, JPEG, WebP, GIF, BMP and DDS go to "<code>"assets/textures/rbx-<id>.<ext>"</code>"."</li>
                                 <li><strong>"Sounds"</strong>": OGG, WAV and MP3 go to "<code>"assets/sounds/"</code>"."</li>
                                 <li><strong>"Anything else"</strong>", such as a packaged model, keeps a placeholder path under "<code>"assets/_unresolved/"</code>" and a warning in the report."</li>
@@ -501,7 +501,7 @@ car.Speed.Changed:Connect(onChange)   car:GetAttributeChangedSignal("Speed"):Con
                             <p>
                                 "Downloads are cached in "<code>"<Universe>/assets/.rbx_cache/"</code>", so a second
                                 import of the same place fetches nothing it already has. An id that failed is marked
-                                there too and skipped next time. Four environment variables, read when the import
+                                there too and skipped next time. Five environment variables, read when the import
                                 starts, change where assets come from:"
                             </p>
                             <table class="docs-table">
@@ -511,23 +511,29 @@ car.Speed.Changed:Connect(onChange)   car:GetAttributeChangedSignal("Speed"):Con
                                 <tbody>
                                     <tr><td><code>"EUSTRESS_ROBLOX_ASSET_DIR"</code></td><td>"A local folder of assets named by id, tried before the network"</td></tr>
                                     <tr><td><code>"EUSTRESS_ROBLOX_NO_NETWORK=1"</code></td><td>"No downloads; assets come only from the local folder, or keep placeholders"</td></tr>
+                                    <tr><td><code>"EUSTRESS_ROBLOX_API_KEY"</code></td><td>"An Open Cloud API key with the "<code>"legacy-asset:manage"</code>" scope, for assets that need a signed-in account. Used instead of the cookie when both are set"</td></tr>
                                     <tr><td><code>"EUSTRESS_ROBLOSECURITY"</code></td><td>"A Roblox session cookie sent with each request, for assets that need a signed-in account"</td></tr>
                                     <tr><td><code>"EUSTRESS_ROBLOX_RETRY_ERRORS=1"</code></td><td>"Retry ids the cache has marked as failed"</td></tr>
                                 </tbody>
                             </table>
                             <p>
-                                "Without a session cookie, many assets are refused with HTTP 401. After 32 refusals in
-                                a row the importer stops asking for the rest of that import and keeps placeholders.
-                                Refusals are never cached as failures, so the same place imports its assets once a
-                                cookie is set."
+                                "Without a credential, many assets are refused with HTTP 401. After 32 refusals in a
+                                row the importer stops asking for the rest of that import and keeps placeholders. With
+                                a credential set it allows 256, because one refused asset usually means that asset is
+                                private to another creator rather than that the credential is wrong. Refusals are
+                                never cached as failures, so the same place imports its assets once a credential is
+                                set. Rate limits (HTTP 429) and server errors are tried up to five times, waiting as
+                                long as Roblox asks, up to 30 seconds."
                             </p>
                             <div class="callout callout-advanced">
                                 <img src="/assets/icons/settings.svg" alt="Pitfall" />
                                 <div>
                                     <strong>"The session cookie is a password"</strong>
                                     <p>
-                                        "Whoever holds a session cookie can act as that account. Set the variable only
-                                        in the terminal that launches Studio, and remove it when the import is done."
+                                        "Whoever holds a session cookie can act as that account. Prefer an API key: it
+                                        carries only the scope you give it and can be revoked on its own. Set either
+                                        variable only in the terminal that launches Studio, and remove it when the
+                                        import is done."
                                     </p>
                                 </div>
                             </div>

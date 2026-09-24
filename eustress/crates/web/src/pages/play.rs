@@ -3,11 +3,12 @@ use crate::components::{CentralNav, Footer};
 use crate::state::AppState;
 use crate::api::ApiClient;
 
+/// `POST /api/simulations/{id}/play`: counts the visit and says how to open
+/// the simulation. A published simulation plays solo in the Eustress Player,
+/// which downloads its world once and keeps it cached.
 #[derive(Clone, Debug, serde::Deserialize)]
 struct PlayResponse {
     status: String,
-    #[serde(default)]
-    server: Option<ServerInfo>,
     #[serde(default)]
     launch: Option<LaunchInfo>,
     #[serde(default)]
@@ -15,29 +16,17 @@ struct PlayResponse {
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
-struct ServerInfo {
-    node_id: String,
-    address: String,
-    port: u16,
-    protocol: String,
-    players: u32,
-    max_players: u32,
-}
-
-#[derive(Clone, Debug, serde::Deserialize)]
 struct LaunchInfo {
+    /// `eustress://play/<id>`, for a Player registered to open it.
+    #[serde(default)]
+    link: Option<String>,
     command: String,
     args: Vec<String>,
-    r2_key: Option<String>,
-    pak_url: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
 struct SimInfo {
-    id: String,
     name: String,
-    #[serde(default)]
-    description: Option<String>,
 }
 
 #[component]
@@ -46,9 +35,10 @@ pub fn PlayPage() -> impl IntoView {
     let params = leptos_router::hooks::use_params_map();
     let id = move || params.read().get("id").unwrap_or_default();
 
-    let play_status = RwSignal::new("Finding server...".to_string());
-    let server_info = RwSignal::new(None::<ServerInfo>);
+    let play_status = RwSignal::new("Preparing...".to_string());
+    let launch = RwSignal::new(None::<LaunchInfo>);
     let sim_name = RwSignal::new(String::new());
+    let loading = RwSignal::new(true);
 
     // Call play API on mount
     {
@@ -57,28 +47,23 @@ pub fn PlayPage() -> impl IntoView {
         wasm_bindgen_futures::spawn_local(async move {
             let client = ApiClient::new(&api_url);
             let empty: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-            match client.post::<PlayResponse, _>(&format!("/api/simulations/{}/play", sim_id), &empty).await {
+            let answer = client.post::<PlayResponse, _>(&format!("/api/simulations/{}/play", sim_id), &empty).await;
+            loading.set(false);
+            match answer {
                 Ok(resp) => {
                     if let Some(sim) = &resp.simulation {
                         sim_name.set(sim.name.clone());
                     }
-                    match resp.status.as_str() {
-                        "ready" => {
-                            if let Some(server) = resp.server {
-                                play_status.set(format!("Server ready at {}:{}", server.address, server.port));
-                                server_info.set(Some(server));
-                            }
+                    match (resp.status.as_str(), resp.launch) {
+                        ("solo", Some(info)) => {
+                            play_status.set("Plays in the Eustress Player on your computer.".to_string());
+                            launch.set(Some(info));
                         }
-                        "spawn" => {
-                            play_status.set("No server available. Download Eustress Engine to host locally.".to_string());
-                        }
-                        _ => {
-                            play_status.set(format!("Status: {}", resp.status));
-                        }
+                        (status, _) => play_status.set(format!("Status: {}", status)),
                     }
                 }
                 Err(e) => {
-                    play_status.set(format!("Failed to connect: {:?}", e));
+                    play_status.set(format!("This simulation could not be opened: {}", e));
                 }
             }
         });
@@ -99,38 +84,35 @@ pub fn PlayPage() -> impl IntoView {
                     </div>
 
                     {move || {
-                        if let Some(server) = server_info.get() {
+                        if let Some(info) = launch.get() {
+                            let command = format!("{} {}", info.command, info.args.join(" "));
+                            let link = info.link.clone().unwrap_or_default();
                             view! {
-                                <div class="play-server-card">
-                                    <h2>"Server Ready"</h2>
-                                    <div class="play-server-details">
-                                        <div class="play-detail-row">
-                                            <span class="play-label">"Address"</span>
-                                            <span class="play-value">{format!("{}:{}", server.address, server.port)}</span>
-                                        </div>
-                                        <div class="play-detail-row">
-                                            <span class="play-label">"Protocol"</span>
-                                            <span class="play-value">{server.protocol.to_uppercase()}</span>
-                                        </div>
-                                        <div class="play-detail-row">
-                                            <span class="play-label">"Players"</span>
-                                            <span class="play-value">{format!("{}/{}", server.players, server.max_players)}</span>
-                                        </div>
+                                <div class="play-not-installed">
+                                    <h2>"Play on your computer"</h2>
+                                    <p class="play-subtitle">
+                                        "The Eustress Player downloads this world once, keeps it cached, and runs it locally."
+                                    </p>
+                                    <div class="play-actions">
+                                        <a href=link class="btn-download-player">"Open in Eustress Player"</a>
                                     </div>
-                                    <a href="/download" class="play-join-btn">"Launch Player"</a>
+                                    <p class="play-subtitle">"Or run it from a terminal:"</p>
+                                    <code class="play-id">{command}</code>
                                 </div>
                             }.into_any()
-                        } else {
+                        } else if loading.get() {
                             view! {
-                                <div class="play-status-card">
+                                <div class="play-status">
                                     <div class="play-spinner"></div>
                                 </div>
                             }.into_any()
+                        } else {
+                            ().into_any()
                         }
                     }}
 
                     <div class="play-actions">
-                        <a href="/download" class="play-download-btn">"Download Eustress Engine"</a>
+                        <a href="/download" class="play-download-btn">"Download Eustress"</a>
                         <a href={move || format!("/simulation/{}", id())} class="play-back-btn">"Back to Details"</a>
                     </div>
                 </div>

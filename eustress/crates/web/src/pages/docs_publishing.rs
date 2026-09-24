@@ -44,7 +44,7 @@ fn get_toc() -> Vec<TocSection> {
             id: "upload",
             title: "What Gets Uploaded",
             subsections: vec![
-                TocSubsection { id: "upload-package", title: "The Package" },
+                TocSubsection { id: "upload-package", title: "The World as Chunks" },
                 TocSubsection { id: "upload-steps", title: "Upload and Storage" },
                 TocSubsection { id: "upload-files", title: "Files Publishing Writes" },
             ],
@@ -79,7 +79,7 @@ fn get_toc() -> Vec<TocSection> {
             id: "roadmap",
             title: "What's Next",
             subsections: vec![
-                TocSubsection { id: "roadmap-listing", title: "Updating a Listing" },
+                TocSubsection { id: "roadmap-listing", title: "Removing a Listing" },
                 TocSubsection { id: "roadmap-review", title: "Review Goes Live" },
                 TocSubsection { id: "roadmap-play", title: "Playing Published Worlds" },
             ],
@@ -94,7 +94,7 @@ fn PublishFlowDiagram() -> impl IntoView {
     view! {
         <figure class="docs-figure">
             <svg class="docs-diagram" viewBox="0 0 640 200" role="img"
-                aria-label="Studio saves and packages the Universe, the Eustress API creates a listing, Cloudflare R2 stores the package, review reads the dossier and four captured views, and the Gallery shows the listing only after review approves it and it is marked Public.">
+                aria-label="Studio saves the Universe and bakes it into chunks, the Eustress API finds or creates the listing and names the chunks it lacks, Cloudflare R2 stores those chunks, review reads the dossier and four captured views, and the Gallery shows the listing only after review approves it and it is marked Public.">
                 <defs>
                     <marker id="publish-arrow" viewBox="0 0 10 10" refX="9" refY="5"
                         markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -106,19 +106,19 @@ fn PublishFlowDiagram() -> impl IntoView {
 
                 <rect x="10" y="70" width="100" height="60" rx="8" class="dg-box dg-box-accent"></rect>
                 <text x="60" y="96" class="dg-label" text-anchor="middle">"Studio"</text>
-                <text x="60" y="116" class="dg-note" text-anchor="middle">"save, package"</text>
+                <text x="60" y="116" class="dg-note" text-anchor="middle">"save, bake"</text>
 
                 <line x1="110" y1="100" x2="138" y2="100" class="dg-line" marker-end="url(#publish-arrow)"></line>
 
                 <rect x="140" y="70" width="100" height="60" rx="8" class="dg-box"></rect>
                 <text x="190" y="96" class="dg-label" text-anchor="middle">"API"</text>
-                <text x="190" y="116" class="dg-note" text-anchor="middle">"new listing"</text>
+                <text x="190" y="116" class="dg-note" text-anchor="middle">"listing, diff"</text>
 
                 <line x1="240" y1="100" x2="268" y2="100" class="dg-line" marker-end="url(#publish-arrow)"></line>
 
                 <rect x="270" y="70" width="100" height="60" rx="8" class="dg-box"></rect>
                 <text x="320" y="96" class="dg-label" text-anchor="middle">"R2"</text>
-                <text x="320" y="116" class="dg-note" text-anchor="middle">"stores the .pak"</text>
+                <text x="320" y="116" class="dg-note" text-anchor="middle">"new chunks"</text>
 
                 <line x1="370" y1="100" x2="398" y2="100" class="dg-line" marker-end="url(#publish-arrow)"></line>
 
@@ -135,7 +135,7 @@ fn PublishFlowDiagram() -> impl IntoView {
                 <text x="320" y="170" class="dg-note" text-anchor="middle">"A listing is served only when review approved it and you marked it Public"</text>
             </svg>
             <figcaption>
-                "Studio does the packaging and uploads; the API decides what the Gallery shows."
+                "Studio bakes the world and uploads what changed; the API decides what the Gallery shows."
             </figcaption>
         </figure>
     }
@@ -208,10 +208,10 @@ pub fn DocsPublishingPage() -> impl IntoView {
                         </div>
                         <h1 class="docs-title">"Publishing"</h1>
                         <p class="docs-subtitle">
-                            "Publishing uploads a Universe from Studio to eustress.dev. Studio packages the
-                            Universe folder into one compressed file, creates a listing for it and submits it
-                            for review, and the Gallery lists it once review approves it and you have marked it
-                            Public."
+                            "Publishing uploads a Universe from Studio to eustress.dev. Studio bakes every
+                            Space into chunks, uploads the chunks eustress.dev does not already hold into the
+                            Universe's listing and submits it for review, and the Gallery lists it once review
+                            approves it and you have marked it Public."
                         </p>
                         <div class="docs-meta">
                             <span class="meta-item">
@@ -244,7 +244,8 @@ pub fn DocsPublishingPage() -> impl IntoView {
                                 "Publishing takes the Universe you are working in, with every Space inside it,
                                 and stores it on eustress.dev under a listing: a name, a description, a genre and
                                 a thumbnail. You do it from one dialog in Studio. The Eustress API at
-                                api.eustress.dev keeps the listing record and stores the package in Cloudflare R2."
+                                api.eustress.dev keeps the listing record and stores the world's chunks in
+                                Cloudflare R2."
                             </p>
                             <PublishFlowDiagram />
                             <p>
@@ -257,7 +258,7 @@ pub fn DocsPublishingPage() -> impl IntoView {
                         <div id="overview-needs" class="subsection">
                             <h3>"Before You Publish"</h3>
                             <ul class="docs-list">
-                                <li><strong>"An open Space"</strong>": publishing starts from the Space you have open and packages the Universe that contains it."</li>
+                                <li><strong>"An open Space"</strong>": publishing starts from the Space you have open and publishes the Universe that contains it. Players start in the Space you had open."</li>
                                 <li><strong>"An Eustress account"</strong>": registering on eustress.dev checks a government ID and your age, then gives you an identity file named "<code>"eustress-<username>.toml"</code>"."</li>
                                 <li><strong>"A Studio sign-in"</strong>": choose Sign In on the ribbon, browse to your identity file and press Sign In with Identity. Studio signs a challenge from the API with the file's Ed25519 private key and receives the session token that every publish request carries."</li>
                             </ul>
@@ -305,25 +306,25 @@ pub fn DocsPublishingPage() -> impl IntoView {
                             <p>"Both publish commands are in the File menu:"</p>
                             <table class="docs-table">
                                 <thead>
-                                    <tr><th>"Command"</th><th>"Shortcut"</th><th>"What it packages"</th></tr>
+                                    <tr><th>"Command"</th><th>"Shortcut"</th><th>"What it publishes"</th></tr>
                                 </thead>
                                 <tbody>
-                                    <tr><td>"Publish Universe"</td><td><code>"Ctrl+P"</code></td><td>"The whole Universe folder, every Space in it"</td></tr>
+                                    <tr><td>"Publish Universe"</td><td><code>"Ctrl+P"</code></td><td>"Every Space in the Universe, and its shared assets"</td></tr>
                                     <tr><td>"Publish Space"</td><td><code>"Ctrl+Shift+P"</code></td><td>"Only the open Space, as an update to a published Universe"</td></tr>
                                 </tbody>
                             </table>
                             <p>
                                 "The Roblox keymap preset gives "<code>"Ctrl+Shift+P"</code>" to the Properties
-                                filter and moves Publish Space to "<code>"Ctrl+Alt+Shift+P"</code>". Use Publish
-                                Universe for now: Publish Space depends on a listing id that Studio does not record
-                                yet, as "<a href="#updates-space">"Updating One Space"</a>" explains."
+                                filter and moves Publish Space to "<code>"Ctrl+Alt+Shift+P"</code>". Publish Space
+                                works once the Universe has been published, as "
+                                <a href="#updates-space">"Updating One Space"</a>" explains."
                             </p>
                         </div>
 
                         <div id="studio-fields" class="subsection">
                             <h3>"The Publish Dialog"</h3>
                             <p>
-                                "The dialog's left side lists the files that will be packaged, with the open Space
+                                "The dialog's left side lists the files that will be published, with the open Space
                                 marked "<em>"primary"</em>". The right side holds the listing:"
                             </p>
                             <table class="docs-table">
@@ -347,15 +348,21 @@ pub fn DocsPublishingPage() -> impl IntoView {
                         <div id="studio-progress" class="subsection">
                             <h3>"While It Uploads"</h3>
                             <p>
-                                "Publish saves the Space first, shows "<em>"Publishing Universe... packaging all
-                                Spaces and uploading."</em>" and does the rest on a background thread, so you can
-                                keep working. Three problems stop it before anything is uploaded:"
+                                "Publish saves the Space first, shows "<em>"Publishing Universe: baking every Space
+                                and uploading what changed."</em>" and does the rest on a background thread, so you
+                                can keep working. Four problems stop it before anything is uploaded:"
                             </p>
                             <ul class="docs-list">
                                 <li><strong>"No open Space"</strong>": "<em>"Publish requires an open Space folder."</em></li>
                                 <li><strong>"No session"</strong>": "<em>"Sign in to publish."</em></li>
+                                <li><strong>"A Space still opening"</strong>": "<em>"The Space is still opening. Publish again in a moment."</em></li>
                                 <li><strong>"A Website reference that does not resolve"</strong>": the message names the reference and the nearest candidates. See "<a href="/docs/website">"Website Service"</a>"."</li>
                             </ul>
+                            <p>
+                                "When nothing changed since the last publish, neither the world nor the listing
+                                text, Studio uploads nothing and reports "<em>"No changes since the last
+                                publish"</em>"."
+                            </p>
                             <p>
                                 "Studio does not show the outcome in the editor yet. The final line goes to the
                                 engine log, "<code>"~/.eustress_engine/logs/engine-<pid>.log"</code>": "
@@ -376,41 +383,70 @@ pub fn DocsPublishingPage() -> impl IntoView {
                         </h2>
 
                         <div id="upload-package" class="subsection">
-                            <h3>"The Package"</h3>
+                            <h3>"The World as Chunks"</h3>
                             <p>
-                                "A package is a "<code>".pak"</code>" file: a tar archive of the Universe folder,
-                                compressed with zstd at level 3. Studio archives the folder as it sits on disk, so
-                                the package holds every Space with its files and database, plus the Universe's "
-                                <code>".eustress"</code>" metadata. It leaves out:"
+                                "Studio bakes each Space into "<code>".echk"</code>" chunks: small containers of
+                                files, each named by the BLAKE3 hash of its bytes. A Space's entities are read
+                                from its database in their current state, so edits you have not saved to a file
+                                still go up; files that exist only in the Space folder, such as meshes an import
+                                wrote, are added to them. Entities are grouped by position into 256 m squares, so a
+                                change in one part of a map changes only that part's chunk. Files with no position
+                                (scripts, meshes, textures) share a chunk, split whenever it grows past 64 MB, and
+                                the Universe's shared "<code>"assets"</code>" folder goes up in chunks of about
+                                32 MB."
                             </p>
+                            <p>"A publish leaves out:"</p>
                             <ul class="docs-list">
-                                <li><strong>"Development folders"</strong>": "<code>".git"</code>", "<code>"node_modules"</code>" and "<code>"target"</code></li>
-                                <li><strong>"Operating system files"</strong>": "<code>".DS_Store"</code>", "<code>"Thumbs.db"</code>" and "<code>"desktop.ini"</code></li>
-                                <li><strong>"Temporary files"</strong>": anything ending in "<code>".lock"</code>" or "<code>".tmp"</code></li>
+                                <li><strong>"Hidden folders"</strong>": any name starting with a dot, such as "<code>".eustress"</code>" and "<code>".git"</code></li>
+                                <li><strong>"The database files themselves"</strong>": "<code>"world.fjalldb"</code>" and "<code>"header.bin"</code>", whose content the chunks already carry"</li>
+                                <li><strong>"Operating system and temporary files"</strong>": "<code>"Thumbs.db"</code>", "<code>"desktop.ini"</code>", and anything ending in "<code>".lock"</code>" or "<code>".tmp"</code></li>
                             </ul>
                             <p>
-                                "Studio hashes the finished package with BLAKE3 and sends the hash with the
-                                listing as its content id, in the form "<code>"blake3:<hex>"</code>". The API
-                                records it, but de-duplicates on its own fingerprint of the stored object, because
-                                a hash a client sends is only a claim."
+                                "A manifest lists every Space's chunks, the asset chunks, and the Space players
+                                open first. Its BLAKE3 hash is the publish's content id, in the form "
+                                <code>"blake3:<hex>"</code>". The API records it; the Player checks every chunk it
+                                downloads against its name, so a chunk that does not match is never opened."
                             </p>
+                            <div class="callout callout-advanced">
+                                <img src="/assets/icons/settings.svg" alt="Advanced" />
+                                <div>
+                                    <strong>"One file larger than 95 MB stops a publish"</strong>
+                                    <p>
+                                        "A chunk goes up in a single request, and a request carries at most 95 MB.
+                                        Chunks are split to stay under that, but a single file larger than it
+                                        cannot be split, and the publish stops naming it."
+                                    </p>
+                                </div>
+                            </div>
                         </div>
 
                         <div id="upload-steps" class="subsection">
                             <h3>"Upload and Storage"</h3>
                             <ol class="numbered-list">
                                 <li>
-                                    <strong>"Create the listing."</strong>
-                                    " Studio sends the name, description, genre, Public setting and content id.
-                                    The API answers with a new listing id and starts the listing as pending
-                                    review. Every listing records 10 as its player limit."
+                                    <strong>"Find or create the listing."</strong>
+                                    " The first publish of a Universe creates its listing and keeps the id in the
+                                    Universe's "<code>".eustress/sync.toml"</code>" at once, so a publish that
+                                    fails halfway retries into the same listing. Every later publish goes to that
+                                    listing. Every listing records 10 as its player limit."
                                 </li>
                                 <li>
-                                    <strong>"Upload the package."</strong>
-                                    " Packages under 100 MB go up in one request; larger ones go up in 95 MB
-                                    parts. The API stores the file in Cloudflare R2 at "
-                                    <code>"universes/<id>/universe.pak"</code>" and refuses a single-request
-                                    upload above 500 MB."
+                                    <strong>"Compare."</strong>
+                                    " Studio sends the manifest, and the API answers with the chunks it does not
+                                    hold yet."
+                                </li>
+                                <li>
+                                    <strong>"Upload the new chunks."</strong>
+                                    " Only those, one request each. The API checks each is an "
+                                    <code>".echk"</code>" container and stores it in Cloudflare R2 at "
+                                    <code>"universes/<id>/chunks/<hash>.echk"</code>". A republish that changed one
+                                    building uploads one chunk."
+                                </li>
+                                <li>
+                                    <strong>"Commit."</strong>
+                                    " The API confirms every chunk is stored at the size the manifest gives,
+                                    stores the manifest, and points the listing at it. New content or new listing
+                                    text puts the listing back to pending review."
                                 </li>
                                 <li>
                                     <strong>"Upload the Website manifest"</strong>
@@ -426,7 +462,7 @@ pub fn DocsPublishingPage() -> impl IntoView {
                                 <li>
                                     <strong>"Submit for review."</strong>
                                     " Covered in the next section. If submission does not go through, the
-                                    listing stays pending while the package is already stored."
+                                    listing stays pending while the world is already stored."
                                 </li>
                             </ol>
                             <div class="callout callout-advanced">
@@ -453,10 +489,13 @@ pub fn DocsPublishingPage() -> impl IntoView {
                                 </thead>
                                 <tbody>
                                     <tr><td><code>"thumbnail.png"</code></td><td>"Universe "<code>".eustress/"</code></td><td>"The viewport capture, 512 by 288"</td></tr>
-                                    <tr><td><code>".last_publish_hash"</code></td><td>"Universe "<code>".eustress/"</code></td><td>"The BLAKE3 hash of the last uploaded package"</td></tr>
+                                    <tr><td><code>"publish/"</code></td><td>"Universe "<code>".eustress/"</code></td><td>"The baked chunks, kept so an unchanged Space is not rewritten"</td></tr>
+                                    <tr><td><code>".last_publish_hash"</code></td><td>"Universe "<code>".eustress/"</code></td><td>"The BLAKE3 hash of the last committed manifest"</td></tr>
+                                    <tr><td><code>".last_publish_state"</code></td><td>"Universe "<code>".eustress/"</code></td><td>"What the last publish sent, so an unchanged one is skipped"</td></tr>
                                     <tr><td><code>"moderation-dossier.json"</code></td><td>"Universe "<code>".eustress/"</code></td><td>"The evidence review reads"</td></tr>
                                     <tr><td><code>"capture-0.png"</code>" to "<code>"capture-3.png"</code></td><td>"Universe "<code>".eustress/moderation/"</code></td><td>"The review views"</td></tr>
-                                    <tr><td><code>"publish.toml"</code>", "<code>"publish-journal.toml"</code>", "<code>"sync.toml"</code></td><td>"Space "<code>".eustress/"</code></td><td>"The listing fields and visibility you chose, and publish checkpoints"</td></tr>
+                                    <tr><td><code>"sync.toml"</code></td><td>"Universe and open Space "<code>".eustress/"</code></td><td>"The listing id ("<code>"experience_id"</code>")"</td></tr>
+                                    <tr><td><code>"publish.toml"</code>", "<code>"publish-journal.toml"</code></td><td>"Universe "<code>".eustress/"</code></td><td>"The listing fields and visibility you chose, and publish checkpoints"</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -492,7 +531,7 @@ pub fn DocsPublishingPage() -> impl IntoView {
                                     <tr><th>"Layer"</th><th>"Reads"</th><th>"Can decide"</th></tr>
                                 </thead>
                                 <tbody>
-                                    <tr><td>"L0 Deterministic"</td><td>"The stored package and the dossier digest"</td><td>"Reuse the decision already made on an identical package; flag empty or default-only scenes"</td></tr>
+                                    <tr><td>"L0 Deterministic"</td><td>"The stored world and the dossier digest"</td><td>"Flag empty or default-only scenes"</td></tr>
                                     <tr><td>"L1 Text classifier (Jev, from TypeSafe)"</td><td>"The dossier text"</td><td>"Quarantine, hold, reject or ask for changes; it never approves"</td></tr>
                                     <tr><td>"L2a Judge (xAI Grok)"</td><td>"The views and a case summary"</td><td>"Approve, reject or hold under the Eustress AI Guardian Policy, version 1.2"</td></tr>
                                     <tr><td>"L2b Agent"</td><td>"The case record and the moderation playbook"</td><td>"Settle gray-band cases through guarded tools, in at most 4 rounds"</td></tr>
@@ -561,7 +600,7 @@ pub fn DocsPublishingPage() -> impl IntoView {
                             <p>
                                 "The "<a href="/gallery">"Gallery"</a>" lists a simulation only when two things are
                                 true: you marked it Public, and review approved it. The same rule gates the listing
-                                page, the package download, the play request and the thumbnail. The Gallery's API
+                                page, the world download, the play request and the thumbnail. The Gallery's API
                                 returns eligible listings newest first. Its featured shelf holds approved listings
                                 that review marked as featured, either through the judge's quality grade or when a
                                 reviewer approves, and never one rated "<code>"adult_18"</code>"."
@@ -579,12 +618,31 @@ pub fn DocsPublishingPage() -> impl IntoView {
                             <p>
                                 "The listing page's Play Now button opens a dialog titled "
                                 <em>"Eustress Player Required"</em>", with a download link and a Try Again button
-                                that opens an "<code>"eustress://play/<id>"</code>" link. No Eustress program
-                                registers that link yet, so it does not open the simulation. "
+                                that opens an "<code>"eustress://play/<id>"</code>" link. "
                                 <code>"eustress.dev/play/<id>"</code>" counts a visit (the number the listing
-                                shows) and asks the API for a running server. No server registers itself today, so
-                                that page reports that no server is available."
+                                shows) and gives the same link, with the command that opens the simulation in
+                                the Eustress Player:"
                             </p>
+                            <div class="code-block">
+                                <pre><code>"eustress-client --sim <id>"</code></pre>
+                            </div>
+                            <p>
+                                "The Player downloads the world's manifest and every chunk it has not cached,
+                                checks each chunk against its name, and opens the Space you had open when you
+                                published. A published simulation plays solo."
+                            </p>
+                            <div class="callout callout-info">
+                                <img src="/assets/icons/help.svg" alt="Info" />
+                                <div>
+                                    <strong>"The Player is not in the installer yet"</strong>
+                                    <p>
+                                        "The Studio installer registers "<code>"eustress://"</code>" links for
+                                        Studio, and it does not include the Player, so the link does not open a
+                                        simulation today. The Player builds from source as "
+                                        <code>"eustress-client"</code>"."
+                                    </p>
+                                </div>
+                            </div>
                         </div>
 
                         <div id="web-projects" class="subsection">
@@ -618,19 +676,20 @@ pub fn DocsPublishingPage() -> impl IntoView {
                         <div id="updates-again" class="subsection">
                             <h3>"Publishing Again"</h3>
                             <p>
-                                "Every Publish Universe creates a new listing with a new id, and review judges it
-                                from the start. The earlier listing stays where it is, and the API numbers every
-                                listing version 1."
+                                "Publishing a Universe again updates its listing: same id, same page, and only the
+                                chunks that changed go up. The API counts the listing's version up by one each
+                                time the world changes. New content goes back to review, and the listing leaves
+                                the Gallery until review approves it again, so publish when a version is ready
+                                for people to see."
                             </p>
                             <div class="callout callout-advanced">
                                 <img src="/assets/icons/settings.svg" alt="Advanced" />
                                 <div>
-                                    <strong>"Publishing again creates a second listing"</strong>
+                                    <strong>"A new listing only when the old one is gone"</strong>
                                     <p>
-                                        "Studio does not keep the listing id after a publish, so it cannot update
-                                        the listing it made last time, and the API has no route to delete or
-                                        unpublish a listing. Publish when a version is ready for people to see,
-                                        rather than after every change."
+                                        "When the kept id names a listing that was removed, or one that belongs to
+                                        another account (a Universe folder copied from someone else), Studio
+                                        creates a new listing and keeps its id instead."
                                     </p>
                                 </div>
                             </div>
@@ -639,18 +698,17 @@ pub fn DocsPublishingPage() -> impl IntoView {
                         <div id="updates-space" class="subsection">
                             <h3>"Updating One Space"</h3>
                             <p>
-                                "Publish Space is built to update one Space of a published Universe: it packages
-                                only the open Space's folder, uploads it to "
-                                <code>"universes/<id>/spaces/<name>.pak"</code>" beside the Universe package, and
-                                returns the listing to pending review, because the content that people see has
-                                changed."
+                                "Publish Space updates one Space of a published Universe. It bakes only the open
+                                Space, swaps it into the world the listing already plays, keeps every other Space
+                                exactly as published, and refreshes the shared assets. The listing returns to
+                                pending review, because the content that people see has changed."
                             </p>
                             <p>
-                                "Before it opens the dialog, Publish Space looks for the listing id ("
-                                <code>"experience_id"</code>") in the Universe's "<code>".eustress/sync.toml"</code>
-                                " and stops with "<em>"Publish the Universe first before publishing individual
-                                Spaces."</em>" when it is missing. Studio does not write that id after a Universe
-                                publish yet, so the check stops every Space publish today."
+                                "Publish Space reads the listing id ("<code>"experience_id"</code>") from the
+                                Universe's "<code>".eustress/sync.toml"</code>" and stops with "
+                                <em>"Publish the Universe first before publishing individual Spaces."</em>" when
+                                it is missing. A listing published before chunks existed must be published as a
+                                whole Universe once before its Spaces can be updated one at a time."
                             </p>
                         </div>
                     </section>
@@ -665,14 +723,11 @@ pub fn DocsPublishingPage() -> impl IntoView {
                         </h2>
 
                         <div id="roadmap-listing" class="subsection">
-                            <h3>"Updating a Listing"</h3>
+                            <h3>"Removing a Listing"</h3>
                             <p>
-                                "The storage plan will keep the listing id after a publish, so the next Publish
-                                updates the same listing instead of creating another, and it will move the publish
-                                manifests to the Universe root. The same work will regenerate files from the
-                                WorldDb at publish time and replace the exclusion list with an allowlist of what a
-                                package may contain. Its test: republishing an unchanged Space will produce a
-                                byte-identical package."
+                                "The API has no route to delete or unpublish a listing yet. Chunks a republish
+                                stops naming stay in storage until a cleanup job removes them; the Player only
+                                ever downloads the chunks the current manifest names."
                             </p>
                         </div>
 
@@ -691,13 +746,15 @@ pub fn DocsPublishingPage() -> impl IntoView {
                         <div id="roadmap-play" class="subsection">
                             <h3>"Playing Published Worlds"</h3>
                             <p>
-                                "Opening a published simulation from the website is the last phase of the
-                                multiplayer plan: play links that open the Player, servers that register their
-                                address, and single-use join tokens. The phases are listed on the "
+                                "The Player opens a published simulation today from its command line. Next: the
+                                installer ships the Player and registers "<code>"eustress://play/"</code>" links
+                                to it, so Play Now opens the simulation; a browser build plays it on the listing
+                                page; and a listing can have hosted sessions that players join together. The
+                                multiplayer phases are listed on the "
                                 <a href="/docs/networking#roadmap-phases">"Networking"</a>" page."
                             </p>
                             <div class="future-cta">
-                                <p><strong>"Publish from Studio today. Updates in place and playable listings come next."</strong></p>
+                                <p><strong>"Publish from Studio today. Play Now in the Player and in the browser comes next."</strong></p>
                                 <div class="cta-buttons">
                                     <a href="/download" class="btn-primary-glow">"Download Eustress"</a>
                                     <a href="/docs/website" class="btn-secondary-steel">"Website Service Docs"</a>

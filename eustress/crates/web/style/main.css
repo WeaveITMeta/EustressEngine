@@ -17583,6 +17583,35 @@ a.experience-card {
     fill: #22d3ee;
 }
 
+/* Stat cards in docs: the dashboard's .stat-card is a flex row (icon beside
+   text); in docs the value, label and note stack in a centered column. */
+.docs-content .stats-grid {
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+}
+
+.docs-content .stats-grid .stat-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-xs);
+    padding: var(--space-lg) var(--space-md);
+    text-align: center;
+}
+
+.docs-content .stats-grid .stat-card .stat-value {
+    font-size: var(--text-xl);
+    font-weight: 800;
+    line-height: 1.2;
+    color: var(--color-accent);
+    white-space: nowrap;
+}
+
+.docs-content .stats-grid .stat-card .stat-label,
+.docs-content .stats-grid .stat-card .stat-note {
+    line-height: 1.4;
+}
+
 /* Per-page background glows */
 .docs-glow.glow-getting-started { top: 8%; right: 10%; background: linear-gradient(135deg, #3b82f6, #22d3ee); }
 .docs-glow.glow-studio { top: 10%; right: 12%; background: linear-gradient(135deg, #22d3ee, #8b5cf6); }
@@ -23369,4 +23398,27 @@ a.experience-card {
 @media (max-width: 720px) {
     .ledger-wrap { padding: 92px 16px 56px; }
     .ledger-stats { gap: 18px; }
+}
+
+/* Bliss leaderboard: rank, contributor, BLS earned, score, days active. */
+.page-leaderboard-industrial .table-header,
+.page-leaderboard-industrial .table-row {
+    grid-template-columns: 56px minmax(0, 2fr) minmax(0, 1.4fr) minmax(0, 1fr) 96px;
+}
+
+.page-leaderboard-industrial .col-bls,
+.page-leaderboard-industrial .col-score,
+.page-leaderboard-industrial .col-node {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.page-leaderboard-industrial .table-row-you {
+    background: rgba(0, 188, 212, 0.08);
+    box-shadow: inset 3px 0 0 #00bcd4;
+}
+
+.page-leaderboard-industrial .leaderboard-content > .ledger-hint {
+    text-align: center;
+    margin: 0 auto 24px;
 }

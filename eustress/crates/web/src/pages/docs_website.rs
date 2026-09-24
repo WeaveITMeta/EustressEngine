@@ -225,13 +225,13 @@ pub fn DocsWebsitePage() -> impl IntoView {
                             <div class="callout callout-info">
                                 <img src="/assets/icons/help.svg" alt="Info" />
                                 <div>
-                                    <strong>"Why not serve the .pak?"</strong>
+                                    <strong>"Why not serve the world?"</strong>
                                     <p>
-                                        "A "<code>".pak"</code>" is the whole Universe folder as a zstd-compressed
-                                        tar, and it exists to carry the world. Asking a browser to download it,
+                                        "The published world is every Space as compressed "<code>".echk"</code>"
+                                        chunks, and it exists to carry the world. Asking a browser to download it,
                                         decompress it and parse TOML to recover a few scalars is the wrong shape.
-                                        The "<code>".pak"</code>" is unchanged; the manifest is a second, small
-                                        object written by the same publish, capped at 1 MB."
+                                        The manifest is a second, small object written by the same publish, capped
+                                        at 1 MB."
                                     </p>
                                 </div>
                             </div>
@@ -500,10 +500,9 @@ basis  = "derived""##}</code></pre>
                             <p>
                                 "The bake runs inside "<a href="/docs/publishing">"Publish"</a>", in two halves.
                                 Before anything uploads, Studio resolves every Reference against the live Space,
-                                and a failure stops the publish there, before a listing exists. After the "
-                                <code>".pak"</code>" uploads, Studio stamps the manifest with the new simulation
-                                id and the "<code>".pak"</code>"'s hash and sends it to the witness. If that upload
-                                fails, the publish fails too."
+                                and a failure stops the publish there, before a listing exists. After the world
+                                uploads, Studio stamps the manifest with the simulation id and the world's hash
+                                and sends it to the witness. If that upload fails, the publish fails too."
                             </p>
                             <div class="code-block">
                                 <div class="code-header">
@@ -513,7 +512,7 @@ basis  = "derived""##}</code></pre>
    |
    +-- any failure  ->  publish stops, no listing created
    |
-create the listing, upload the .pak
+find or create the listing, upload the changed chunks, commit the world
 stamp simulation_id and publish_hash
 PUT the manifest  ->  a failed upload fails the publish"#}</code></pre>
                             </div>
@@ -522,10 +521,10 @@ PUT the manifest  ->  a failed upload fails the publish"#}</code></pre>
                                 <div>
                                     <strong>"An unchanged Universe does not republish"</strong>
                                     <p>
-                                        "Studio hashes the "<code>".pak"</code>" and skips the upload, manifest
-                                        included, when the hash matches the last publish. References read live
-                                        values, but the "<code>".pak"</code>" is built from the files on disk, so
-                                        save the change that moved a number before you publish."
+                                        "Studio skips the upload, manifest included, when neither the world nor
+                                        the listing text changed since the last publish. References read live
+                                        values, but the world is what the Space saved, so save the change that
+                                        moved a number before you publish."
                                     </p>
                                 </div>
                             </div>
@@ -602,8 +601,9 @@ PUT the manifest  ->  a failed upload fails the publish"#}</code></pre>
                                 <div class="code-header">
                                     <span class="code-lang">"Storage layout"</span>
                                 </div>
-                                <pre><code class="language-text">{r#"universes/{id}/universe.pak              the packaged Universe
-universes/{id}/website-manifest.json     the manifest for that publish
+                                <pre><code class="language-text">{r#"universes/{id}/chunks/{hash}.echk        the world's chunks
+universes/{id}/manifests/{sha256}.json   the world manifest each publish commits
+universes/{id}/website-manifest.json     the website manifest for that publish
 thumbnails/{id}/thumb.webp               listing thumbnail"#}</code></pre>
                             </div>
                             <div class="callout callout-info">
@@ -690,7 +690,7 @@ GET https://api.eustress.dev/api/simulation/{simulation_id}/manifest"#}</code></
                             </div>
                             <p>
                                 "Values are keyed by reference name and sorted. "<code>"publish_hash"</code>" is the
-                                BLAKE3 digest of the published "<code>".pak"</code>" as 64 hex characters, and it
+                                BLAKE3 digest of the published world's manifest as 64 hex characters, and it
                                 doubles as the ETag. "<code>"value"</code>" is a number, string or boolean, never
                                 null; "<code>"unit"</code>" and "<code>"format"</code>" appear when the Reference
                                 sets them, and "<code>"run_label"</code>" only on sim values."
@@ -1025,7 +1025,7 @@ hydrate();"#}</code></pre>
                             <p>
                                 "Turning on "<code>"RotateKey"</code>" will mint a key, show it once and never store
                                 it in the Space, because "<code>"Website/_service.toml"</code>" ships inside the
-                                published "<code>".pak"</code>". The next publish will attach it, and the previous key
+                                published world. The next publish will attach it, and the previous key
                                 will keep working for "<code>"KeyOverlapDays"</code>". Keys will come in two kinds,
                                 told apart by prefix: "<code>"eus_pk_"</code>" for a browser key that ships in a
                                 page, and "<code>"eus_bk_"</code>" for a build key held as a CI secret, each

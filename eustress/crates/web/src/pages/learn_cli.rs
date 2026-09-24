@@ -701,6 +701,7 @@ eustress close --all"#}</code></pre>
                                     <tr><td><code>"db.export_toml"</code></td><td>"Dump the world database to readable TOML files."</td></tr>
                                     <tr><td><code>"tool.equip"</code>", "<code>"selection.set"</code>", "<code>"state.get"</code></td><td>"The editor's active tool and selection."</td></tr>
                                     <tr><td><code>"action.invoke"</code></td><td>"Run an editor action by name, as its shortcut would."</td></tr>
+                                    <tr><td><code>"output.tail"</code></td><td>"The newest Output panel lines; "<code>"limit"</code>", "<code>"level"</code>" and "<code>"contains"</code>" narrow them."</td></tr>
                                     <tr><td><code>"viewport.capture"</code></td><td>"Screenshot the window to "<code>"<Space>/.eustress/capture.png"</code>"; the file lands a frame or two after the reply."</td></tr>
                                     <tr><td><code>"ai_camera.set_pose"</code>", "<code>".orbit"</code>", "<code>".frame"</code>", "<code>".capture"</code></td><td>"The off-screen AI camera; captures go to "<code>"<Space>/.eustress/ai_camera.png"</code>"."</td></tr>
                                     <tr><td><code>"data.bind"</code>", "<code>"data.bindings"</code>", "<code>"data.unbind"</code></td><td>"Dataset columns driving simulation parameters."</td></tr>
