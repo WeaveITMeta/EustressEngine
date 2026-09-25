@@ -368,6 +368,8 @@ export component StudioWindow inherits Window {
     // a problem stays on screen in `parameter-dialog-error`.
     in-out property <bool> show-parameter-dialog: false;
     in-out property <bool> parameter-dialog-is-edit: false;
+    // The instance the Parameter goes on ("Pump7 (Part)"), for the subtitle.
+    in-out property <string> parameter-dialog-target: "";
     // The label being edited (`key` or `domain.key`); empty when adding.
     in-out property <string> parameter-dialog-original: "";
     in-out property <string> parameter-dialog-domain: "instance";
@@ -4824,6 +4826,7 @@ export component StudioWindow inherits Window {
     // Add / Edit Parameter dialog
     if root.show-parameter-dialog: AddParameterDialog {
         is-edit: root.parameter-dialog-is-edit;
+        target: root.parameter-dialog-target;
         domain <=> root.parameter-dialog-domain;
         param-name <=> root.parameter-dialog-name;
         param-type <=> root.parameter-dialog-type;

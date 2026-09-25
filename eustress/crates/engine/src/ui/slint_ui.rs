@@ -4981,6 +4981,16 @@ fn fill_parameter_lists(ui: &StudioWindow, entity: Entity, res: &DrainResources,
     ui.set_parameter_connector_options(model(connectors));
 }
 
+/// The instance a Parameter dialog is for, as its subtitle shows it:
+/// "Pump7 (Part)".
+fn parameter_target_label(entity: Entity, queries: &DrainActionQueries) -> String {
+    queries
+        .instances
+        .get(entity)
+        .map(|(_, inst)| format!("{} ({})", inst.name, inst.class_name.as_str()))
+        .unwrap_or_default()
+}
+
 /// Rebuild the Properties panel next frame and make sure it is showing.
 /// Parameters have no change-queue producer (Tags and Attributes do), so a
 /// Parameters action marks the panel dirty itself.
@@ -10059,6 +10069,7 @@ fn drain_slint_actions(
                 ensure_parameters_synced(entity, &mut queries, &mut commands);
                 if let Some(ui) = ui {
                     fill_parameter_lists(ui, entity, &res, &queries);
+                    ui.set_parameter_dialog_target(parameter_target_label(entity, &queries).into());
                     ui.set_parameter_dialog_is_edit(false);
                     ui.set_parameter_dialog_original("".into());
                     ui.set_parameter_dialog_domain(eustress_common::parameters::DEFAULT_PARAMETER_DOMAIN.into());
@@ -10092,6 +10103,7 @@ fn drain_slint_actions(
                 };
                 if let Some(ui) = ui {
                     fill_parameter_lists(ui, entity, &res, &queries);
+                    ui.set_parameter_dialog_target(parameter_target_label(entity, &queries).into());
                     ui.set_parameter_dialog_is_edit(true);
                     ui.set_parameter_dialog_original(label.as_str().into());
                     ui.set_parameter_dialog_domain(domain.as_str().into());
@@ -24589,13 +24601,19 @@ fn filter_property_rows(rows: Vec<PropertyData>, query: &str) -> Vec<PropertyDat
 
     // Two passes so a header's fate can depend on rows that come AFTER it:
     // first decide which headers keep at least one child, then emit.
+    // A Parameters domain's group row is kept the same way, by the rows under
+    // it; an empty section's hint never matches, so filtering hides it.
     let mut header_keeps = vec![false; rows.len()];
     let mut current_header: Option<usize> = None;
+    let mut current_group: Option<usize> = None;
     for (i, row) in rows.iter().enumerate() {
         if row.is_header {
             current_header = Some(i);
+            current_group = None;
+        } else if row.property_type.as_str() == "parameter-group" {
+            current_group = Some(i);
         } else if row.name.to_lowercase().contains(&needle) {
-            if let Some(h) = current_header {
+            for h in [current_header, current_group].into_iter().flatten() {
                 header_keeps[h] = true;
             }
         }
@@ -24604,7 +24622,7 @@ fn filter_property_rows(rows: Vec<PropertyData>, query: &str) -> Vec<PropertyDat
     rows.into_iter()
         .enumerate()
         .filter(|(i, row)| {
-            if row.is_header {
+            if row.is_header || row.property_type.as_str() == "parameter-group" {
                 header_keeps[*i]
             } else {
                 row.name.to_lowercase().contains(&needle)
@@ -24612,6 +24630,58 @@ fn filter_property_rows(rows: Vec<PropertyData>, query: &str) -> Vec<PropertyDat
         })
         .map(|(_, row)| row)
         .collect()
+}
+
+/// Row order inside Parameters: the default domain's keys first, then each
+/// named domain in turn, keys A-Z within it (case-insensitively, so a group
+/// reads in order however its keys are cased).
+fn parameter_row_order(label: &str) -> (bool, String, String) {
+    use eustress_common::parameters::{split_parameter_label, DEFAULT_PARAMETER_DOMAIN};
+    let (domain, key) = split_parameter_label(label);
+    (domain != DEFAULT_PARAMETER_DOMAIN, domain.to_lowercase(), key.to_lowercase())
+}
+
+/// What an empty Attributes or Parameters section says under its header, so
+/// the "+" beside it explains itself.
+fn empty_section_hint(category: &str) -> Option<&'static str> {
+    match category {
+        "Attributes" => Some("No Attributes yet. + adds a named value to this instance."),
+        "Parameters" => Some("No Parameters yet. + adds one: a value in a domain, set here or read from a Connector."),
+        _ => None,
+    }
+}
+
+/// A row that is neither a header nor a property: a Parameters domain's group
+/// row (`parameter-group`, named by its domain) or an empty section's hint
+/// (`hint`, its text in `value`).
+fn section_aux_row(category: &str, name: &str, value: &str, kind: &str, collapsed: bool) -> PropertyData {
+    PropertyData {
+        name: name.into(),
+        value: value.into(),
+        property_type: kind.into(),
+        category: category.into(),
+        editable: false,
+        options: slint::ModelRc::default(),
+        is_header: false,
+        section_collapsed: collapsed,
+        x_value: slint::SharedString::default(),
+        y_value: slint::SharedString::default(),
+        z_value: slint::SharedString::default(),
+        x_scale: slint::SharedString::default(),
+        x_offset: slint::SharedString::default(),
+        y_scale: slint::SharedString::default(),
+        y_offset: slint::SharedString::default(),
+        color_value: slint::Color::from_rgb_u8(0x80, 0x80, 0x80),
+        description: slint::SharedString::default(),
+        learn_url: slint::SharedString::default(),
+        is_attribute: false,
+        attribute_type: slint::SharedString::default(),
+        slider_min: 0.0,
+        slider_max: 1.0,
+        slider_display: slint::SharedString::default(),
+        binding_state: slint::SharedString::default(),
+        display_name: slint::SharedString::default(),
+    }
 }
 
 /// Push a Properties row model, applying the panel's filter first.
@@ -24652,6 +24722,13 @@ fn push_property_rows(ui: &StudioWindow, rows: Vec<PropertyData>) {
         r.editable.hash(&mut hasher);
         r.is_header.hash(&mut hasher);
         r.section_collapsed.hash(&mut hasher);
+        // What a row shows beyond its value: a changed note, type badge or
+        // binding state (a failed read keeps the last value) must re-push.
+        r.description.as_str().hash(&mut hasher);
+        r.is_attribute.hash(&mut hasher);
+        r.attribute_type.as_str().hash(&mut hasher);
+        r.binding_state.as_str().hash(&mut hasher);
+        r.display_name.as_str().hash(&mut hasher);
     }
     let new_hash = hasher.finish();
 
@@ -25803,14 +25880,36 @@ fn sync_properties_to_slint(
             attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
             binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
         });
 
-        // Insert properties in this category (sorted A-Z by name)
+        // Insert properties in this category (sorted A-Z by name). Parameters
+        // sort by domain instead: the default domain's keys first, then each
+        // named domain under its own group row.
         if let Some(entries) = categorized.get(cat.as_str()) {
             let mut sorted_entries = entries.clone();
-            sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+            if cat.as_str() == "Parameters" {
+                sorted_entries.sort_by_cached_key(|e| parameter_row_order(&e.0));
+            } else {
+                sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+            if sorted_entries.is_empty() {
+                if let Some(hint) = empty_section_hint(cat) {
+                    flat_props.push(section_aux_row(cat, "", hint, "hint", is_collapsed));
+                }
+            }
 
+            let mut group_domain: Option<String> = None;
             for (name, value, prop_type, editable) in sorted_entries {
+                if cat.as_str() == "Parameters" {
+                    let (domain, _) = eustress_common::parameters::split_parameter_label(&name);
+                    if domain != eustress_common::parameters::DEFAULT_PARAMETER_DOMAIN
+                        && group_domain.as_deref() != Some(domain)
+                    {
+                        flat_props.push(section_aux_row(cat, domain, "", "parameter-group", is_collapsed));
+                        group_domain = Some(domain.to_string());
+                    }
+                }
                 // Parse Vec3/rotation values into x, y, z components.
                 // Vec2 reuses the same parser (the trailing z parse just
                 // fails for a 2-tuple and stays "", which Vec2Row ignores
@@ -25887,6 +25986,18 @@ fn sync_properties_to_slint(
                 } else {
                     ("", String::new())
                 };
+                // Under its domain's group row a Parameter shows only its key;
+                // `name` keeps the full label for edits and callbacks.
+                let display_name = if cat.as_str() == "Parameters" {
+                    let (domain, key) = eustress_common::parameters::split_parameter_label(&name);
+                    if domain == eustress_common::parameters::DEFAULT_PARAMETER_DOMAIN {
+                        String::new()
+                    } else {
+                        key.to_string()
+                    }
+                } else {
+                    String::new()
+                };
 
                 flat_props.push(PropertyData {
                     name: name.as_str().into(),
@@ -25911,6 +26022,7 @@ fn sync_properties_to_slint(
                     attribute_type: attr_type.as_str().into(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
             binding_state: binding_state.into(),
+            display_name: display_name.as_str().into(),
                 });
             }
         }
@@ -26049,6 +26161,7 @@ fn build_dataset_properties(
         is_attribute: false, attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
             binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
     };
     let rowf = |cat: &str, name: &str, value: &str| PropertyData {
         name: name.into(), value: value.into(), property_type: "string".into(),
@@ -26062,6 +26175,7 @@ fn build_dataset_properties(
         is_attribute: false, attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
             binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
     };
 
     let mut out: Vec<PropertyData> = Vec::new();
@@ -26147,6 +26261,7 @@ fn data_hdr(cat: &str, collapsed: &std::collections::HashSet<String>) -> Propert
         is_attribute: false, attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
             binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
     }
 }
 /// Value row for a data-class Properties panel.
@@ -26163,6 +26278,7 @@ fn data_row(cat: &str, name: &str, value: &str, collapsed: &std::collections::Ha
         is_attribute: false, attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
             binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
     }
 }
 
@@ -27233,6 +27349,7 @@ fn build_file_properties(ui: &StudioWindow, path: &std::path::Path) {
             attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
             binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
         }
     };
 
@@ -27333,6 +27450,7 @@ fn build_streaming_in_properties(ui: &StudioWindow, uuid: &str) {
         attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
             binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
     };
     props.push(mk("Status", "Streaming in…"));
     // Short uuid prefix so the user can confirm which row is loading.
@@ -27397,6 +27515,7 @@ fn build_service_properties(
             attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
             binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
         }
     };
 

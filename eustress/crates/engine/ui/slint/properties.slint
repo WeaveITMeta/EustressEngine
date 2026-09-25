@@ -73,6 +73,10 @@ export struct PropertyData {
     // "relay" (read in and forwarded), or "faulted" (the last read failed).
     // Drawn as a dot beside the type badge; the row's help text says more.
     binding-state: string,
+    // The label a row shows, when it differs from `name` (the key edits and
+    // callbacks use). A Parameter in a named domain shows only its key, under
+    // that domain's group row. Empty shows `name`.
+    display-name: string,
     // Range for `property-type == "slider"`, read from the schema's min/max.
     slider-min: float,
     slider-max: float,
@@ -568,6 +572,176 @@ component SliderRow inherits Rectangle {
     }
 }
 
+// A Parameter's binding state as a small dot: green while read from a source,
+// blue when published, red when the last read failed. Hovering shows the
+// binding's note (its source, how often it is read, and the last failure).
+component StateDot inherits Rectangle {
+    in property <string> state;
+    in property <string> note;
+
+    width: 12px;
+
+    // Below and to the left: the dot sits near the panel's right edge.
+    tip := PopupWindow {
+        x: -236px;
+        y: 16px;
+        width: 248px;
+        height: dot-tip-text.preferred-height + 12px;
+        Rectangle {
+            background: Theme.panel-background;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: root.state == "faulted" ? Theme.error-surface-border : Theme.border-color;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: Theme.shadow-float;
+            dot-tip-text := Text {
+                x: 8px;
+                y: 6px;
+                width: parent.width - 16px;
+                text: root.note;
+                color: Theme.text-primary;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+        }
+    }
+    dot-ta := TouchArea {
+        changed has-hover => {
+            if self.has-hover && root.note != "" {
+                tip.show();
+            }
+        }
+    }
+    VerticalLayout {
+        alignment: center;
+        HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: 7px;
+                height: 7px;
+                border-radius: 3.5px;
+                background: root.state == "faulted" ? Theme.text-error
+                    : root.state == "published" ? Theme.accent-blue
+                    : Theme.text-success;
+            }
+        }
+    }
+}
+
+// A value a Connector feeds: read-only, boxed like an editable value so values
+// line up, with the binding's state dot inside. Hovering anywhere on it shows
+// the binding's note.
+component BoundValue inherits Rectangle {
+    in property <string> value;
+    in property <string> state;
+    in property <string> note;
+
+    height: 22px;
+    background: Theme.background-tertiary;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: root.state == "faulted" ? Theme.error-surface-border : Theme.input-border;
+
+    tip := PopupWindow {
+        x: 0px;
+        y: root.height + 4px;
+        width: max(root.width, 220px);
+        height: bound-tip-text.preferred-height + 12px;
+        Rectangle {
+            background: Theme.panel-background;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: root.state == "faulted" ? Theme.error-surface-border : Theme.border-color;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: Theme.shadow-float;
+            bound-tip-text := Text {
+                x: 8px;
+                y: 6px;
+                width: parent.width - 16px;
+                text: root.note;
+                color: Theme.text-primary;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+        }
+    }
+    bound-ta := TouchArea {
+        changed has-hover => {
+            if self.has-hover && root.note != "" {
+                tip.show();
+            }
+        }
+    }
+    HorizontalLayout {
+        padding-left: 7px;
+        padding-right: 8px;
+        spacing: 6px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 7px;
+                height: 7px;
+                border-radius: 3.5px;
+                background: root.state == "faulted" ? Theme.text-error
+                    : root.state == "published" ? Theme.accent-blue
+                    : Theme.text-success;
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.value;
+            color: root.state == "faulted" ? Theme.text-secondary : Theme.text-primary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// A domain's group row inside Parameters: the domain's name and a rule. The
+// Parameters under it show only their keys.
+component ParamGroupRow inherits Rectangle {
+    in property <string> domain;
+    height: 24px;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 8px;
+        Text {
+            text: root.domain;
+            color: Theme.text-secondary;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            Rectangle {
+                height: 1px;
+                background: Theme.border-color;
+            }
+        }
+    }
+}
+
+// A muted line under an empty section, saying what the section is for and how
+// to add the first entry.
+component SectionHint inherits Rectangle {
+    in property <string> text;
+    height: section-hint-text.preferred-height + 12px;
+    section-hint-text := Text {
+        x: 12px;
+        y: 6px;
+        width: parent.width - 24px;
+        text: root.text;
+        color: Theme.text-disabled;
+        font-size: 10px;
+        wrap: word-wrap;
+    }
+}
+
 component PropRow inherits Rectangle {
     in property <string> label: "";
     in property <string> value: "";
@@ -583,6 +757,12 @@ component PropRow inherits Rectangle {
     // Parameter rows: "" / "local", "sourced", "published", "relay" or
     // "faulted". Anything but local draws a coloured dot before the badge.
     in property <string> binding-state: "";
+    // Shown instead of `label` when set (a Parameter's key under its domain's
+    // group row); callbacks still carry `label`.
+    in property <string> display-label: "";
+    // Extra left inset, for a row under a group row. The value column stays
+    // aligned because the label column narrows by the same amount.
+    in property <length> indent: 0px;
 
     // Expose focus state so parent can aggregate across all rows
     out property <bool> has-focus: input-edit.has-focus;
@@ -622,22 +802,24 @@ component PropRow inherits Rectangle {
     border-radius: 2px;
 
     HorizontalLayout {
-        padding-left: 8px;
+        padding-left: 8px + root.indent;
         padding-right: 10px;
         spacing: 4px;
 
-        // Help icon — only takes space when description is present
+        // Help icon: only takes space when description is present. Attribute
+        // and Parameter rows show their note on the state dot instead, so
+        // their labels stay in one column.
         HelpIcon {
             description: root.description;
             learn-url: root.learn-url;
-            show-help-icons: root.show-help-icons;
+            show-help-icons: root.show-help-icons && !root.is-attribute;
             open-learn-url(url) => { root.open-learn-url(url); }
         }
         
         // Label — fixed width for consistent alignment
         Text {
-            width: 110px;
-            text: root.label;
+            width: 110px - root.indent;
+            text: root.display-label != "" ? root.display-label : root.label;
             color: Theme.text-secondary;
             font-size: 11px;
             vertical-alignment: center;
@@ -648,10 +830,13 @@ component PropRow inherits Rectangle {
         Rectangle {
             horizontal-stretch: 1;
             height: 22px;
-            visible: root.editable;
-            background: Theme.input-background;
+            // A read-only Attribute or Parameter row keeps this slot for its
+            // bound value box (below), so read-only values line up with
+            // editable ones.
+            visible: root.editable || root.is-attribute;
+            background: root.editable ? Theme.input-background : transparent;
             border-radius: 3px;
-            border-width: 1px;
+            border-width: root.editable ? 1px : 0px;
             border-color: input-edit.has-focus ? Theme.accent-blue : Theme.input-border;
             
             input-edit := LineEdit {
@@ -660,6 +845,7 @@ component PropRow inherits Rectangle {
                 width: 100%;
                 height: 100%;
                 enabled: root.editable;
+                visible: root.editable;
                 text: root.value;
                 // Report focus only — do NOT commit per keystroke.
                 //
@@ -683,9 +869,18 @@ component PropRow inherits Rectangle {
                     focus_sink.focus();
                 }
             }
+
+            // A read-only Attribute or Parameter value: a Connector feeds it.
+            if !root.editable && root.is-attribute: BoundValue {
+                width: 100%;
+                height: 100%;
+                value: root.value;
+                state: root.binding-state;
+                note: root.description;
+            }
         }
 
-        if !root.editable: Text {
+        if !root.editable && !root.is-attribute: Text {
             horizontal-stretch: 1;
             text: root.value;
             color: Theme.text-primary;
@@ -698,18 +893,12 @@ component PropRow inherits Rectangle {
         if root.is-attribute: HorizontalLayout {
             spacing: 3px;
 
-            // Binding state (Parameters): green while read from a source,
-            // blue when published, red when the last read failed.
-            if root.binding-state != "" && root.binding-state != "local": VerticalLayout {
-                alignment: center;
-                Rectangle {
-                    width: 7px;
-                    height: 7px;
-                    border-radius: 3.5px;
-                    background: root.binding-state == "faulted" ? Theme.text-error
-                        : root.binding-state == "published" ? Theme.accent-blue
-                        : Theme.text-success;
-                }
+            // Binding state of an editable Parameter (published): a dot whose
+            // hover shows the note. A read-only one carries its dot inside
+            // its value box.
+            if root.editable && root.binding-state != "" && root.binding-state != "local": StateDot {
+                state: root.binding-state;
+                note: root.description;
             }
 
             // Type badge
@@ -3129,9 +3318,21 @@ export component PropertiesPanel inherits Rectangle {
                         open-learn-url(url) => { root.on-open-learn-url(url); }
                     }
 
+                    // A domain's group row inside Parameters.
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type == "parameter-group": ParamGroupRow {
+                        domain: prop.name;
+                    }
+
+                    // An empty section's hint (Attributes, Parameters).
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type == "hint": SectionHint {
+                        text: prop.value;
+                    }
+
                     // String / float / int / enum — generic row
-                    if !prop.is-header && !prop.section-collapsed && prop.property-type != "vec2" && prop.property-type != "vec3" && prop.property-type != "rotation" && prop.property-type != "color" && prop.property-type != "brickcolor" && prop.property-type != "bool" && prop.property-type != "material" && prop.property-type != "unit" && prop.property-type != "choice" && prop.property-type != "udim2" && prop.property-type != "slider": PropRow {
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type != "vec2" && prop.property-type != "vec3" && prop.property-type != "rotation" && prop.property-type != "color" && prop.property-type != "brickcolor" && prop.property-type != "bool" && prop.property-type != "material" && prop.property-type != "unit" && prop.property-type != "choice" && prop.property-type != "udim2" && prop.property-type != "slider" && prop.property-type != "parameter-group" && prop.property-type != "hint": PropRow {
                         label: prop.name;
+                        display-label: prop.display-name;
+                        indent: prop.display-name != "" ? 10px : 0px;
                         value: prop.value;
                         prop-type: prop.property-type;
                         editable: prop.editable;

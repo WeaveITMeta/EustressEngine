@@ -1,92 +1,153 @@
 // ============================================================================
 // Add / Edit Parameter Dialog: the Parameters twin of AddAttributeDialog.
 //
-// A Parameter places an instance in a domain and can take its value from a
-// Connector, so beside the name, type and value this dialog asks for the
-// domain and, once "Read the value from a Connector" is ticked, which
-// Connector, which field, and how often. Rust opens it (it fills the Domain and
-// Connector lists and, for an edit, the binding the row does not carry),
-// validates on confirm, and keeps it open with `error` set when something is
-// wrong, so a mistake is fixed in place rather than retyped.
+// A Parameter names a value on an instance, places it in a domain, and can
+// take the value from a Connector. The dialog reads top to bottom in that
+// order: the name (and its domain, beside it), the type as one click on a chip,
+// the value, then, when "Read the value from a Connector" is ticked, the
+// Connector, the field and how often to read it. A preview line shows the row
+// label the Parameter will have in Properties.
 //
-// Lists are inline and in-card, like AddAttributeDialog's type list: they
-// match the theme, never overflow the card, and capture their own scrolling.
+// Rust opens it (it fills the Domain and Connector lists and, for an edit, the
+// binding the row does not carry), validates on confirm, and keeps it open with
+// `error` set when something is wrong, so a mistake is fixed in place rather
+// than retyped. Enter confirms from any text field; Escape cancels.
+//
+// Lists are inline and in-card: they match the theme, never overflow the card,
+// and capture their own scrolling.
 // ============================================================================
 
-import { LineEdit, Button, ScrollView, CheckBox } from "std-widgets.slint";
+import { Button, ScrollView, CheckBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
-// One label + field row.
+// A label on the left and the row's controls on the right. The label sits
+// level with the controls' first line (`label-height` tall), so it stays put
+// beside controls that wrap onto a second line.
 component FieldRow inherits HorizontalLayout {
     in property <string> label;
-    spacing: 10px;
-    Text {
-        text: root.label;
-        width: 76px;
-        color: Theme.text-secondary;
-        font-size: 11px;
-        vertical-alignment: center;
-        horizontal-alignment: left;
+    in property <length> label-height: 30px;
+    spacing: 12px;
+    VerticalLayout {
+        alignment: start;
+        Text {
+            height: root.label-height;
+            width: 72px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+        }
     }
     @children
 }
 
-// An inline, scroll-captured list of choices. Kept in the tree and hidden
-// rather than created with `if`, so a row's click (which closes the list) never
-// destroys the element handling it (the Slint "Recursion detected" crash class).
-component ChoiceList inherits Rectangle {
-    in property <[string]> options;
-    in property <string> current;
-    in property <bool> open;
-    in property <string> empty-hint: "";
-    callback chosen(string);
+// A single-line text input with a placeholder. Enter fires `accepted`.
+component Field inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    out property <bool> has-focus: input.has-focus;
+    callback accepted();
+    public function focus-now() {
+        input.focus();
+    }
 
-    visible: root.open;
-    height: !root.open ? 0px
-        : root.options.length == 0 ? 34px
-        : min(26px * root.options.length + 4px, 132px);
+    height: 30px;
     background: Theme.input-background;
-    border-radius: 4px;
-    border-width: root.open ? 1px : 0px;
-    border-color: Theme.input-border;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent-blue : Theme.input-border;
 
-    if root.options.length == 0: Text {
+    Rectangle {
         x: 10px;
         width: parent.width - 20px;
         height: parent.height;
-        text: root.empty-hint;
-        color: Theme.text-secondary;
-        font-size: 11px;
-        vertical-alignment: center;
-        wrap: word-wrap;
-    }
-    ScrollView {
-        visible: root.options.length > 0;
-        VerticalLayout {
-            padding: 2px;
-            for option in root.options: Rectangle {
-                height: 26px;
-                border-radius: 3px;
-                background: option-ta.has-hover ? Theme.accent-blue.with-alpha(0.22)
-                          : (option == root.current ? Theme.accent-blue.with-alpha(0.12) : transparent);
-                Text {
-                    x: 10px;
-                    text: option;
-                    color: option == root.current ? Theme.accent-blue : Theme.text-primary;
-                    font-size: 11px;
-                    vertical-alignment: center;
-                }
-                option-ta := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => { root.chosen(option); }
-                }
-            }
+        clip: true;
+        if root.text == "": Text {
+            width: 100%;
+            height: 100%;
+            text: root.placeholder;
+            color: Theme.text-disabled;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        input := TextInput {
+            width: 100%;
+            height: 100%;
+            text <=> root.text;
+            single-line: true;
+            vertical-alignment: center;
+            color: Theme.text-primary;
+            font-size: 12px;
+            selection-background-color: Theme.selection-background;
+            accepted => { root.accepted(); }
         }
     }
 }
 
-// A field whose value comes from a list: the value, a chevron, and a click to
-// open or close the list.
+// A text input with a list button inside it: type a new value or pick one.
+component ComboField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    in property <bool> open;
+    callback toggle();
+    callback accepted();
+
+    height: 30px;
+    background: Theme.input-background;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: input.has-focus || root.open ? Theme.accent-blue : Theme.input-border;
+
+    Rectangle {
+        x: 10px;
+        width: parent.width - 40px;
+        height: parent.height;
+        clip: true;
+        if root.text == "": Text {
+            width: 100%;
+            height: 100%;
+            text: root.placeholder;
+            color: Theme.text-disabled;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        input := TextInput {
+            width: 100%;
+            height: 100%;
+            text <=> root.text;
+            single-line: true;
+            vertical-alignment: center;
+            color: Theme.text-primary;
+            font-size: 12px;
+            selection-background-color: Theme.selection-background;
+            accepted => { root.accepted(); }
+        }
+    }
+    Rectangle {
+        x: parent.width - 29px;
+        y: 1px;
+        width: 28px;
+        height: parent.height - 2px;
+        border-radius: 4px;
+        background: chevron-ta.has-hover ? Theme.button-hover : transparent;
+        Text {
+            text: root.open ? "▲" : "▼";
+            color: root.open ? Theme.accent-blue : Theme.text-secondary;
+            font-size: 8px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        chevron-ta := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.toggle(); }
+        }
+    }
+}
+
+// A field whose value comes only from a list.
 component PickField inherits Rectangle {
     in property <string> value;
     in property <string> placeholder;
@@ -94,52 +155,154 @@ component PickField inherits Rectangle {
     callback toggle();
 
     height: 30px;
-    background: Theme.input-background;
-    border-radius: 4px;
+    background: pick-ta.has-hover && !root.open ? Theme.button-hover : Theme.input-background;
+    border-radius: 5px;
     border-width: 1px;
     border-color: root.open ? Theme.accent-blue : Theme.input-border;
     HorizontalLayout {
         padding-left: 10px;
-        padding-right: 10px;
+        padding-right: 11px;
+        spacing: 8px;
         Text {
             text: root.value != "" ? root.value : root.placeholder;
-            color: root.value != "" ? Theme.text-primary : Theme.text-secondary;
-            font-size: 11px;
+            color: root.value != "" ? Theme.text-primary : Theme.text-disabled;
+            font-size: 12px;
             vertical-alignment: center;
             horizontal-stretch: 1;
             overflow: elide;
         }
         Text {
             text: root.open ? "▲" : "▼";
-            color: Theme.text-secondary;
+            color: root.open ? Theme.accent-blue : Theme.text-secondary;
             font-size: 8px;
             vertical-alignment: center;
         }
     }
-    TouchArea {
+    pick-ta := TouchArea {
         mouse-cursor: pointer;
         clicked => { root.toggle(); }
     }
 }
 
-// A themed text input.
-component TextField inherits Rectangle {
-    in-out property <string> text;
-    in property <string> placeholder;
-    height: 30px;
-    background: Theme.input-background;
-    border-radius: 4px;
+// An inline, scroll-captured list of choices under a field. Kept in the tree
+// and zero-height when closed rather than created with `if`, so a row's click
+// (which closes the list) never destroys the element handling it (the Slint
+// "Recursion detected" crash class). Its 4px gap from the field is inside its
+// own height, so a closed list adds no space to the form.
+component ChoiceList inherits Rectangle {
+    in property <[string]> options;
+    in property <string> current;
+    in property <bool> open;
+    in property <string> empty-hint: "";
+    callback chosen(string);
+
+    property <length> list-height: root.options.length == 0 ? 36px : min(28px * root.options.length + 6px, 146px);
+    visible: root.open;
+    height: root.open ? root.list-height + 4px : 0px;
+
+    Rectangle {
+        y: 4px;
+        height: root.list-height;
+        background: Theme.background-tertiary;
+        border-radius: 5px;
+        border-width: 1px;
+        border-color: Theme.input-border;
+        clip: true;
+
+        if root.options.length == 0: Text {
+            x: 10px;
+            width: parent.width - 20px;
+            height: parent.height;
+            text: root.empty-hint;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+        ScrollView {
+            visible: root.options.length > 0;
+            VerticalLayout {
+                padding: 3px;
+                for option in root.options: Rectangle {
+                    height: 28px;
+                    border-radius: 4px;
+                    background: option-ta.has-hover ? Theme.accent-blue.with-alpha(0.22)
+                              : (option == root.current ? Theme.accent-blue.with-alpha(0.12) : transparent);
+                    Text {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        height: parent.height;
+                        text: option;
+                        color: option == root.current ? Theme.accent-blue : Theme.text-primary;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    option-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.chosen(option); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// One choice among a few, shown as a button.
+component Chip inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked();
+
+    height: 26px;
+    border-radius: 5px;
+    background: root.selected ? Theme.accent-blue.with-alpha(0.16)
+              : chip-ta.has-hover ? Theme.button-hover : Theme.input-background;
     border-width: 1px;
-    border-color: edit.has-focus ? Theme.accent-blue : Theme.input-border;
-    edit := LineEdit {
-        x: 0px; y: 0px; width: 100%; height: 100%;
-        placeholder-text: root.placeholder;
-        text <=> root.text;
+    border-color: root.selected ? Theme.accent-blue : Theme.input-border;
+    Text {
+        x: 6px;
+        width: parent.width - 12px;
+        height: parent.height;
+        text: root.label;
+        color: root.selected ? Theme.accent-blue : Theme.text-primary;
+        font-size: 11px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    chip-ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Chips in rows of `columns`, every chip one width.
+component ChipGrid inherits Rectangle {
+    in property <[string]> options;
+    in property <string> current;
+    in property <int> columns: 4;
+    callback chosen(string);
+
+    property <length> gap: 6px;
+    property <length> chip-width: (root.width - (root.columns - 1) * root.gap) / root.columns;
+    height: root.options.length == 0 ? 0px
+        : Math.ceil(root.options.length / root.columns) * (26px + root.gap) - root.gap;
+
+    for option[i] in root.options: Chip {
+        x: Math.mod(i, root.columns) * (root.chip-width + root.gap);
+        y: Math.floor(i / root.columns) * (26px + root.gap);
+        width: root.chip-width;
+        label: option;
+        selected: option == root.current;
+        clicked => { root.chosen(option); }
     }
 }
 
 export component AddParameterDialog inherits Rectangle {
     in property <bool> is-edit: false;
+    // The instance the Parameter goes on, for the subtitle. Empty hides it.
+    in property <string> target: "";
     in-out property <string> domain: "instance";
     in-out property <string> param-name: "";
     in-out property <string> param-type: "String";
@@ -157,18 +320,43 @@ export component AddParameterDialog inherits Rectangle {
     callback on-cancel();
 
     property <bool> domain-open: false;
-    property <bool> type-open: false;
     property <bool> connector-open: false;
+    // The label the Parameter will carry in Properties.
+    property <string> label-preview: root.domain == "" || root.domain == "instance"
+        ? root.param-name : root.domain + "." + root.param-name;
+    // Enough to try: Rust still checks every field and says why in `error`.
+    property <bool> can-confirm: root.param-name != ""
+        && (!root.bound || (root.connector != "" && root.field != ""));
     property <string> value-hint:
         root.bound ? "Shown until the first read"
         : root.param-type == "Vector3" ? "x, y, z"
-        : root.param-type == "Color" ? "r, g, b, a (each from 0 to 1)"
-        : root.param-type == "Bool" ? "true or false"
+        : root.param-type == "Color" ? "r, g, b, a (each 0 to 1)"
         : root.param-type == "Int" ? "A whole number"
         : root.param-type == "Float" ? "A number"
         : root.param-type == "EntityRef" ? "An entity id, or blank for none"
         : root.param-type == "Json" ? "JSON text"
-        : "Value";
+        : "Text";
+    // The refresh presets, and which one `refresh` currently is. Any other
+    // number of seconds is Custom, which shows the seconds field.
+    property <[string]> refresh-options: ["Once", "5 s", "30 s", "1 min", "5 min", "Custom"];
+    property <bool> custom-refresh: false;
+    property <string> refresh-choice: root.custom-refresh ? "Custom"
+        : root.refresh == "" ? "Once"
+        : root.refresh == "5" ? "5 s"
+        : root.refresh == "30" ? "30 s"
+        : root.refresh == "60" ? "1 min"
+        : root.refresh == "300" ? "5 min"
+        : "Custom";
+
+    function confirm() {
+        if root.can-confirm {
+            root.on-confirm();
+        }
+    }
+
+    init => {
+        name-field.focus-now();
+    }
 
     width: 100%;
     height: 100%;
@@ -183,8 +371,8 @@ export component AddParameterDialog inherits Rectangle {
     card := Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 460px;
-        height: min(content.preferred-height, parent.height - 40px);
+        width: 480px;
+        height: min(title-bar.height + body.preferred-height + button-bar.height, parent.height - 40px);
         background: Theme.background-secondary;
         border-radius: 8px;
         border-width: 1px;
@@ -196,220 +384,339 @@ export component AddParameterDialog inherits Rectangle {
         // Absorb clicks and scroll anywhere over the card.
         TouchArea { scroll-event(event) => { return accept; } }
 
-        content := VerticalLayout {
-            padding: 0px;
-            spacing: 0px;
-
-            // ── Title bar ──
-            Rectangle {
-                height: 46px;
-                background: Theme.dialog-titlebar-background;
-                Text {
-                    width: parent.width;
-                    height: parent.height;
-                    text: root.is-edit ? "Edit Parameter" : "Add Parameter";
-                    color: Theme.text-primary;
-                    font-size: 13px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+        keys := FocusScope {
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.on-cancel();
+                    return accept;
                 }
-                Rectangle {
-                    x: parent.width - 36px;
-                    y: (parent.height - self.height) / 2;
-                    width: 28px; height: 28px;
-                    border-radius: 5px;
-                    background: close-ta.has-hover ? #3d1515 : transparent;  // theme-exempt: destructive-hover fill, no dark-red token
-                    Text {
-                        text: "×";
-                        color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
-                        font-size: 18px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                    close-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.on-cancel(); }
-                    }
-                }
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%; height: 1px;
-                    background: Theme.border-color;
-                }
+                return reject;
             }
 
-            // ── Body ──
             VerticalLayout {
-                padding-left: 18px;
-                padding-right: 18px;
-                padding-top: 16px;
-                padding-bottom: 14px;
-                spacing: 10px;
+                padding: 0px;
+                spacing: 0px;
 
-                FieldRow {
-                    label: "Domain";
-                    TextField {
-                        horizontal-stretch: 1;
-                        text <=> root.domain;
-                        placeholder: "instance";
+                // ── Title bar ──
+                title-bar := Rectangle {
+                    height: root.target != "" ? 54px : 46px;
+                    background: Theme.dialog-titlebar-background;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        Text {
+                            text: root.is-edit ? "Edit Parameter" : "Add Parameter";
+                            color: Theme.text-primary;
+                            font-size: 13px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                        }
+                        if root.target != "": Text {
+                            text: root.target;
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                            overflow: elide;
+                        }
                     }
                     Rectangle {
-                        width: 30px;
-                        height: 30px;
-                        border-radius: 4px;
-                        border-width: 1px;
-                        border-color: root.domain-open ? Theme.accent-blue : Theme.input-border;
-                        background: domain-ta.has-hover ? Theme.button-hover : Theme.input-background;
+                        x: parent.width - 36px;
+                        y: (parent.height - self.height) / 2;
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 5px;
+                        background: close-ta.has-hover ? Theme.error-surface-hover : transparent;
                         Text {
-                            text: root.domain-open ? "▲" : "▼";
-                            color: Theme.text-secondary;
-                            font-size: 8px;
+                            text: "×";
+                            color: close-ta.has-hover ? Theme.text-error : Theme.text-secondary;
+                            font-size: 18px;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
-                        domain-ta := TouchArea {
+                        close-ta := TouchArea {
                             mouse-cursor: pointer;
-                            clicked => { root.domain-open = !root.domain-open; }
+                            clicked => { root.on-cancel(); }
+                        }
+                    }
+                    Rectangle {
+                        y: parent.height - 1px;
+                        width: 100%;
+                        height: 1px;
+                        background: Theme.border-color;
+                    }
+                }
+
+                // ── Body ──
+                ScrollView {
+                    height: card.height - title-bar.height - button-bar.height;
+                    body := VerticalLayout {
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        padding-top: 18px;
+                        padding-bottom: 16px;
+                        spacing: 14px;
+
+                        // Name, in its domain.
+                        VerticalLayout {
+                            spacing: 0px;
+                            FieldRow {
+                                label: "Name";
+                                name-field := Field {
+                                    horizontal-stretch: 1;
+                                    text <=> root.param-name;
+                                    placeholder: "e.g. setpoint";
+                                    accepted => { root.confirm(); }
+                                }
+                                Text {
+                                    text: "in";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                ComboField {
+                                    width: 150px;
+                                    text <=> root.domain;
+                                    placeholder: "instance";
+                                    open: root.domain-open;
+                                    toggle => {
+                                        root.domain-open = !root.domain-open;
+                                        root.connector-open = false;
+                                    }
+                                    accepted => { root.confirm(); }
+                                }
+                            }
+                            ChoiceList {
+                                options: root.domain-options;
+                                current: root.domain;
+                                open: root.domain-open;
+                                chosen(d) => {
+                                    root.domain = d;
+                                    root.domain-open = false;
+                                }
+                            }
+                            // The label the row will show, domain included.
+                            HorizontalLayout {
+                                padding-top: 6px;
+                                padding-left: 84px;
+                                spacing: 4px;
+                                Text {
+                                    text: root.param-name == "" ? "A domain groups Parameters; the default is instance." : "Shows in Properties as";
+                                    color: Theme.text-disabled;
+                                    font-size: 10px;
+                                    vertical-alignment: center;
+                                }
+                                if root.param-name != "": Text {
+                                    text: root.label-preview;
+                                    color: Theme.text-secondary;
+                                    font-size: 10px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                        }
+
+                        FieldRow {
+                            label: "Type";
+                            label-height: 26px;
+                            ChipGrid {
+                                horizontal-stretch: 1;
+                                options: root.type-options;
+                                current: root.param-type;
+                                columns: 4;
+                                chosen(t) => { root.param-type = t; }
+                            }
+                        }
+
+                        FieldRow {
+                            label: root.bound ? "Initial value" : "Value";
+                            label-height: root.param-type == "Bool" ? 26px : 30px;
+                            if root.param-type == "Bool": ChipGrid {
+                                horizontal-stretch: 1;
+                                options: ["true", "false"];
+                                current: root.param-value;
+                                columns: 2;
+                                chosen(v) => { root.param-value = v; }
+                            }
+                            if root.param-type != "Bool": Field {
+                                horizontal-stretch: 1;
+                                text <=> root.param-value;
+                                placeholder: root.value-hint;
+                                accepted => { root.confirm(); }
+                            }
+                        }
+
+                        // ── Binding ──
+                        Rectangle { height: 1px; background: Theme.border-color; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            CheckBox {
+                                text: "Read the value from a Connector";
+                                checked <=> root.bound;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+
+                        if root.bound: Rectangle {
+                            background: Theme.background-tertiary;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Theme.border-color;
+
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 12px;
+
+                                VerticalLayout {
+                                    spacing: 0px;
+                                    FieldRow {
+                                        label: "Connector";
+                                        PickField {
+                                            horizontal-stretch: 1;
+                                            value: root.connector;
+                                            placeholder: "Choose a Connector";
+                                            open: root.connector-open;
+                                            toggle => {
+                                                root.connector-open = !root.connector-open;
+                                                root.domain-open = false;
+                                            }
+                                        }
+                                    }
+                                    ChoiceList {
+                                        options: root.connector-options;
+                                        current: root.connector;
+                                        open: root.connector-open;
+                                        empty-hint: "This Space has no Connectors yet. Add one from the Data menu, then come back.";
+                                        chosen(c) => {
+                                            root.connector = c;
+                                            root.connector-open = false;
+                                        }
+                                    }
+                                }
+                                FieldRow {
+                                    label: "Field";
+                                    Field {
+                                        horizontal-stretch: 1;
+                                        text <=> root.field;
+                                        placeholder: "The column to read, such as temp_c";
+                                        accepted => { root.confirm(); }
+                                    }
+                                }
+                                FieldRow {
+                                    label: "Read";
+                                    label-height: 26px;
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 6px;
+                                        ChipGrid {
+                                            options: root.refresh-options;
+                                            current: root.refresh-choice;
+                                            columns: 6;
+                                            chosen(c) => {
+                                                if c == "Custom" {
+                                                    root.custom-refresh = true;
+                                                } else {
+                                                    root.custom-refresh = false;
+                                                    root.refresh = c == "Once" ? ""
+                                                        : c == "5 s" ? "5"
+                                                        : c == "30 s" ? "30"
+                                                        : c == "1 min" ? "60"
+                                                        : "300";
+                                                }
+                                            }
+                                        }
+                                        if root.refresh-choice == "Custom": Field {
+                                            text <=> root.refresh;
+                                            placeholder: "Seconds between reads, 5 or more";
+                                            accepted => { root.confirm(); }
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: "The field's latest value is read while the Connector is enabled. The row is read-only and shows the last read, or why it failed.";
+                                    color: Theme.text-secondary;
+                                    font-size: 10px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        if root.error != "": Rectangle {
+                            background: Theme.error-surface;
+                            border-radius: 5px;
+                            border-width: 1px;
+                            border-color: Theme.error-surface-border;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                padding-top: 8px;
+                                padding-bottom: 8px;
+                                spacing: 8px;
+                                VerticalLayout {
+                                    alignment: start;
+                                    Rectangle {
+                                        width: 14px;
+                                        height: 14px;
+                                        border-radius: 7px;
+                                        background: Theme.text-error;
+                                        Text {
+                                            text: "!";
+                                            color: Theme.background-secondary;
+                                            font-size: 10px;
+                                            font-weight: 700;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: root.error;
+                                    color: Theme.text-error;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                    vertical-alignment: center;
+                                }
+                            }
                         }
                     }
                 }
-                ChoiceList {
-                    options: root.domain-options;
-                    current: root.domain;
-                    open: root.domain-open;
-                    chosen(d) => {
-                        root.domain = d;
-                        root.domain-open = false;
-                    }
-                }
 
-                FieldRow {
-                    label: "Name";
-                    TextField {
-                        horizontal-stretch: 1;
-                        text <=> root.param-name;
-                        placeholder: "Parameter name";
+                // ── Button bar ──
+                button-bar := Rectangle {
+                    height: 58px;
+                    Rectangle {
+                        y: 0px;
+                        width: 100%;
+                        height: 1px;
+                        background: Theme.border-color;
                     }
-                }
-
-                FieldRow {
-                    label: "Type";
-                    PickField {
-                        horizontal-stretch: 1;
-                        value: root.param-type;
-                        placeholder: "String";
-                        open: root.type-open;
-                        toggle => { root.type-open = !root.type-open; }
-                    }
-                }
-                ChoiceList {
-                    options: root.type-options;
-                    current: root.param-type;
-                    open: root.type-open;
-                    chosen(t) => {
-                        root.param-type = t;
-                        root.type-open = false;
-                    }
-                }
-
-                FieldRow {
-                    label: "Value";
-                    TextField {
-                        horizontal-stretch: 1;
-                        text <=> root.param-value;
-                        placeholder: root.value-hint;
-                    }
-                }
-
-                // ── Binding ──
-                Rectangle { height: 1px; background: Theme.border-color; }
-                HorizontalLayout {
-                    CheckBox {
-                        text: "Read the value from a Connector";
-                        checked <=> root.bound;
-                    }
-                }
-
-                if root.bound: VerticalLayout {
-                    spacing: 10px;
-                    FieldRow {
-                        label: "Connector";
-                        PickField {
-                            horizontal-stretch: 1;
-                            value: root.connector;
-                            placeholder: "Choose a Connector";
-                            open: root.connector-open;
-                            toggle => { root.connector-open = !root.connector-open; }
+                    HorizontalLayout {
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        padding-top: 13px;
+                        padding-bottom: 13px;
+                        spacing: 8px;
+                        Text {
+                            text: "Enter to " + (root.is-edit ? "save" : "add") + ", Esc to cancel";
+                            color: Theme.text-disabled;
+                            font-size: 10px;
+                            vertical-alignment: center;
                         }
-                    }
-                    ChoiceList {
-                        options: root.connector-options;
-                        current: root.connector;
-                        open: root.connector-open;
-                        empty-hint: "This Space has no Connectors yet. Add one from the Data menu, then come back.";
-                        chosen(c) => {
-                            root.connector = c;
-                            root.connector-open = false;
+                        Rectangle { horizontal-stretch: 1; }
+                        Button {
+                            text: "Cancel";
+                            width: 88px;
+                            clicked => { root.on-cancel(); }
                         }
-                    }
-                    FieldRow {
-                        label: "Field";
-                        TextField {
-                            horizontal-stretch: 1;
-                            text <=> root.field;
-                            placeholder: "The column to read, such as temp_c";
+                        Button {
+                            text: root.is-edit ? "Save" : "Add";
+                            primary: true;
+                            enabled: root.can-confirm;
+                            width: 88px;
+                            clicked => { root.confirm(); }
                         }
-                    }
-                    FieldRow {
-                        label: "Refresh";
-                        TextField {
-                            horizontal-stretch: 1;
-                            text <=> root.refresh;
-                            placeholder: "Seconds between reads (5 or more); blank reads once";
-                        }
-                    }
-                    Text {
-                        text: "The latest value of the field is read while the Connector is enabled. The row stays read-only and shows the last read, or why it failed.";
-                        color: Theme.text-secondary;
-                        font-size: 10px;
-                        wrap: word-wrap;
-                    }
-                }
-
-                if root.error != "": Text {
-                    text: root.error;
-                    color: Theme.text-error;
-                    font-size: 11px;
-                    wrap: word-wrap;
-                }
-            }
-
-            // ── Button bar ──
-            Rectangle {
-                height: 56px;
-                Rectangle {
-                    y: 0px;
-                    width: 100%; height: 1px;
-                    background: Theme.border-color;
-                }
-                HorizontalLayout {
-                    padding-left: 18px;
-                    padding-right: 18px;
-                    padding-top: 12px;
-                    padding-bottom: 12px;
-                    spacing: 8px;
-                    Rectangle { horizontal-stretch: 1; }
-                    Button {
-                        text: "Cancel";
-                        width: 88px;
-                        clicked => { root.on-cancel(); }
-                    }
-                    Button {
-                        text: root.is-edit ? "Save" : "Add";
-                        primary: true;
-                        width: 88px;
-                        clicked => { root.on-confirm(); }
                     }
                 }
             }
